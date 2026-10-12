@@ -243,7 +243,22 @@ fn render_turn_activity(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(DIM),
             ));
         }
-        if app.turn_activity.provider_events > 0 {
+        if let Some((name, chars)) = &app.turn_activity.composing_tool {
+            spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+            spans.push(Span::styled(
+                format!("writing {name} call · {} chars", human(*chars as u64)),
+                Style::default().fg(TOOLCYAN),
+            ));
+        } else if app.turn_activity.thinking_tokens > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+            spans.push(Span::styled(
+                format!(
+                    "thinking · ~{} tokens",
+                    human(app.turn_activity.thinking_tokens)
+                ),
+                Style::default().fg(DIM),
+            ));
+        } else if app.turn_activity.provider_events > 0 {
             spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
             spans.push(Span::styled(
                 format!("{} buffered events", app.turn_activity.provider_events),

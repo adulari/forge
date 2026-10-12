@@ -77,6 +77,7 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::ProviderRequest { .. } => {}
             // Content-free heartbeat used only by interactive progress surfaces.
             PresenterEvent::ProviderProgress => {}
+            PresenterEvent::ProviderToolInput { .. } | PresenterEvent::ProviderThinking { .. } => {}
             PresenterEvent::AssistantText(text) => {
                 self.end_reasoning();
                 println!("\n{text}");

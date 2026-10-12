@@ -29,6 +29,12 @@ pub(super) fn handle_stream_event(
     act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match ev {
         StreamEvent::ProviderActivity => presenter.emit(PresenterEvent::ProviderProgress),
+        StreamEvent::ProviderToolInput { name, chars } => {
+            presenter.emit(PresenterEvent::ProviderToolInput { name, chars })
+        }
+        StreamEvent::ProviderThinking { tokens } => {
+            presenter.emit(PresenterEvent::ProviderThinking { tokens })
+        }
         StreamEvent::Text(t) => {
             if !suppress_assistant_text {
                 presenter.emit(PresenterEvent::AssistantDelta(t));

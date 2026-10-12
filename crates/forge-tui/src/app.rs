@@ -195,6 +195,17 @@ struct TurnActivity {
     response_chars: usize,
     provider_events: usize,
     tool_calls: usize,
+    /// Tool call whose arguments are streaming right now: (display name, cumulative chars).
+    composing_tool: Option<(String, usize)>,
+    /// Estimated tokens of hidden model thinking (providers that stream no thinking text).
+    thinking_tokens: u64,
+}
+
+/// A bridge tool name as the user knows it: the `mcp__<server>__` namespace is plumbing.
+fn tool_display_name(name: &str) -> &str {
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map_or(name, |(_, tool)| tool)
 }
 
 /// What a remote `Answer` text did to the open form.
@@ -1119,6 +1130,8 @@ impl App {
             }
             PresenterEvent::ProviderRequest { model, step } => {
                 self.turn_activity.model = Some(model);
+                self.turn_activity.composing_tool = None;
+                self.turn_activity.thinking_tokens = 0;
                 self.set_turn_activity(
                     TurnPhase::ContactingModel,
                     format!(
@@ -1137,6 +1150,30 @@ impl App {
                         "provider stream active; {} buffered event(s) received",
                         self.turn_activity.provider_events
                     ),
+                );
+            }
+            PresenterEvent::ProviderToolInput { name, chars } => {
+                self.model_search = None;
+                self.turn_activity.provider_events =
+                    self.turn_activity.provider_events.saturating_add(1);
+                let name = tool_display_name(&name).to_string();
+                self.set_turn_activity(
+                    TurnPhase::ReceivingProvider,
+                    format!(
+                        "writing {name} call; {} chars of arguments",
+                        human(chars as u64)
+                    ),
+                );
+                self.turn_activity.composing_tool = Some((name, chars));
+            }
+            PresenterEvent::ProviderThinking { tokens } => {
+                self.model_search = None;
+                self.turn_activity.provider_events =
+                    self.turn_activity.provider_events.saturating_add(1);
+                self.turn_activity.thinking_tokens = tokens;
+                self.set_turn_activity(
+                    TurnPhase::ReceivingProvider,
+                    format!("thinking; ~{} tokens", human(tokens)),
                 );
             }
             PresenterEvent::AuxiliaryRequest { model, purpose } => {
@@ -1233,6 +1270,7 @@ impl App {
             PresenterEvent::Error(msg) => self.flush.push(error_line(&msg)),
             PresenterEvent::ToolStart { name, args } => {
                 self.model_search = None;
+                self.turn_activity.composing_tool = None;
                 self.turn_activity.tool_calls += 1;
                 self.set_turn_activity(TurnPhase::RunningTool, format!("executing {name}"));
                 let origin = LineOrigin::tool_call(&name);
@@ -6389,6 +6427,40 @@ mod tests {
             "provider heartbeat count: {text}"
         );
         assert!(text.contains("event now"), "stream is visibly live: {text}");
+    }
+
+    #[test]
+    fn streaming_tool_input_and_hidden_thinking_replace_the_buffered_event_count() {
+        let mut app = App::default();
+        app.on_turn_start();
+        app.busy = true;
+        app.apply(PresenterEvent::ProviderRequest {
+            model: "claude-cli::claude-opus-5-5".into(),
+            step: 0,
+        });
+        app.apply(PresenterEvent::ProviderThinking { tokens: 2_100 });
+        let text = screen_wh(&app, 150, LIVE_H);
+        assert!(text.contains("thinking · ~2.1k tokens"), "thinking: {text}");
+        assert!(!text.contains("buffered events"), "{text}");
+
+        app.apply(PresenterEvent::ProviderToolInput {
+            name: "mcp__forge__write_file".into(),
+            chars: 12_300,
+        });
+        let text = screen_wh(&app, 150, LIVE_H);
+        assert!(
+            text.contains("writing write_file call · 12.3k chars"),
+            "tool input: {text}"
+        );
+        assert!(!text.contains("mcp__forge__"), "{text}");
+        assert!(text.contains("event now"), "still live: {text}");
+
+        app.apply(PresenterEvent::ToolStart {
+            name: "mcp__forge__write_file".into(),
+            args: "{}".into(),
+        });
+        let text = screen_wh(&app, 150, LIVE_H);
+        assert!(!text.contains("writing write_file call"), "{text}");
     }
 
     #[test]

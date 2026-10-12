@@ -19,6 +19,7 @@ mod dsml_stream_guard;
 mod embedder;
 mod error;
 mod genai_provider;
+mod genai_tool_chunk_progress;
 pub mod headroom;
 mod mock;
 mod mock_long;
@@ -638,6 +639,12 @@ pub enum StreamEvent {
     /// this private heartbeat separate prevents the core idle watchdog from aborting healthy
     /// large tool calls without ever exposing or executing partial arguments.
     ProviderActivity,
+    /// A tool call's arguments are being streamed (content-free): tool name and cumulative
+    /// argument chars. Counts as provider liveness exactly like `ProviderActivity`.
+    ProviderToolInput { name: String, chars: usize },
+    /// Hidden model thinking is in progress: cumulative estimated tokens. Liveness like
+    /// `ProviderActivity`.
+    ProviderThinking { tokens: u64 },
     /// A delta of the assistant's answer text (accumulates into [`ModelResponse::content`]).
     Text(String),
     /// A delta of the model's reasoning/thinking — shown live but NOT part of the final answer.

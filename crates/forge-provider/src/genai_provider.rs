@@ -1402,6 +1402,7 @@ impl GenAiProvider {
         let mut stream = res.stream;
         let mut content = String::new();
         let mut dsml_guard = crate::dsml_stream_guard::DsmlStreamGuard::default();
+        let mut tool_chunks = crate::genai_tool_chunk_progress::ToolChunkProgress::new();
         let mut reasoning = String::new();
         let mut usage = Usage::default();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -1591,6 +1592,7 @@ impl GenAiProvider {
                 // complete JSON is decoded above. They still prove the connection is making
                 // progress; forward a content-free heartbeat so forge-core's independent idle
                 // watchdog does not mistake a long, healthy tool argument for a dead stream.
+                ChatStreamEvent::ToolCallChunk(c) => on_event(tool_chunks.observe(&c.tool_call)),
                 _ => on_event(StreamEvent::ProviderActivity),
             }
         }

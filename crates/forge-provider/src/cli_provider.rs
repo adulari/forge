@@ -1704,6 +1704,16 @@ fn clamp_to_chars(prompt: &str, max_chars: usize) -> String {
 #[derive(Debug, PartialEq)]
 enum Parsed {
     Activity,
+    /// A tool call's input JSON is being composed (claude `input_json_delta`s): tool name plus the
+    /// cumulative argument chars so far. Content-free; also proves liveness like `Activity`.
+    ToolInputProgress {
+        name: String,
+        chars: usize,
+    },
+    /// Hidden thinking (no text streamed): cumulative estimated tokens.
+    ThinkingProgress {
+        tokens: u64,
+    },
     Reasoning(String),
     Text(String),
     ToolStarted {
@@ -1786,6 +1796,11 @@ struct ClaudeStreamState {
     reasoning: std::collections::HashMap<usize, String>,
     tool_ids: std::collections::HashSet<String>,
     stream_message_active: bool,
+    /// Streaming tool_use blocks by content-block index: (display name, cumulative input chars).
+    tool_inputs: std::collections::HashMap<usize, (String, usize)>,
+    thinking_tokens: u64,
+    /// Throttle for progress items: when and at what size the last one was emitted.
+    last_progress: Option<(std::time::Instant, usize)>,
 }
 
 mod cli_stream;
@@ -2152,6 +2167,12 @@ impl CliProvider {
                         for item in parse_stream_line(self.kind, &line, &mut claude_stream) {
                             match item {
                                 Parsed::Activity => on_event(StreamEvent::ProviderActivity),
+                                Parsed::ToolInputProgress { name, chars } => {
+                                    on_event(StreamEvent::ProviderToolInput { name, chars })
+                                }
+                                Parsed::ThinkingProgress { tokens } => {
+                                    on_event(StreamEvent::ProviderThinking { tokens })
+                                }
                                 Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                                 Parsed::Text(t) => {
                                     if !is_cli_auth_instruction(&t) {
@@ -4746,6 +4767,75 @@ mod tests {
                 .get("toolAliases")
                 .is_none(),
             "capability-only probes do not alter tool resolution"
+        );
+    }
+
+    #[test]
+    fn claude_tool_input_deltas_report_name_and_growing_char_count() {
+        let mut stream = ClaudeStreamState::default();
+        stream
+            .parse_line(r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#);
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"mcp__forge__write_file","input":{}}}}"#;
+        assert_eq!(
+            stream.parse_line(start),
+            vec![Parsed::ToolInputProgress {
+                name: "mcp__forge__write_file".into(),
+                chars: 0
+            }]
+        );
+        let delta = |json: &str| {
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":1,"delta":{{"type":"input_json_delta","partial_json":{}}}}}}}"#,
+                serde_json::to_string(json).unwrap()
+            )
+        };
+        // Within the throttle window: plain liveness, but the count keeps accumulating.
+        assert_eq!(
+            stream.parse_line(&delta("{\"path\":")),
+            vec![Parsed::Activity]
+        );
+        // A big jump crosses the 2k-char threshold and reports the full cumulative size.
+        let big = "x".repeat(2_500);
+        assert_eq!(
+            stream.parse_line(&delta(&big)),
+            vec![Parsed::ToolInputProgress {
+                name: "mcp__forge__write_file".into(),
+                chars: 8 + 2_500
+            }]
+        );
+        // message_start resets tracking: a stale delta no longer reports anything.
+        stream
+            .parse_line(r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#);
+        assert_eq!(stream.parse_line(&delta("{}")), vec![Parsed::Activity]);
+    }
+
+    #[test]
+    fn claude_hidden_thinking_reports_cumulative_tokens_without_double_counting() {
+        let mut stream = ClaudeStreamState::default();
+        stream
+            .parse_line(r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#);
+        // Block start and the empty thinking delta (which carries its own estimate) are liveness.
+        assert_eq!(
+            stream.parse_line(r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}"#),
+            vec![Parsed::Activity]
+        );
+        assert_eq!(
+            stream.parse_line(r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":50}}}"#),
+            vec![Parsed::Activity]
+        );
+        assert_eq!(
+            stream.parse_line(r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":50,"estimated_tokens_delta":50}"#),
+            vec![Parsed::ThinkingProgress { tokens: 50 }]
+        );
+        // Next update inside the throttle window is liveness only; the next reported total is the
+        // cumulative figure, not a sum of deltas.
+        assert_eq!(
+            stream.parse_line(r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":100,"estimated_tokens_delta":50}"#),
+            vec![Parsed::Activity]
+        );
+        assert_eq!(
+            stream.parse_line(r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":3000,"estimated_tokens_delta":2900}"#),
+            vec![Parsed::ThinkingProgress { tokens: 3000 }]
         );
     }
 

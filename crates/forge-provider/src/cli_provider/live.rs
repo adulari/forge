@@ -419,6 +419,12 @@ impl LiveSession {
             for item in parse_stream_line(kind, &line, &mut claude_stream) {
                 match item {
                     Parsed::Activity => on_event(StreamEvent::ProviderActivity),
+                    Parsed::ToolInputProgress { name, chars } => {
+                        on_event(StreamEvent::ProviderToolInput { name, chars })
+                    }
+                    Parsed::ThinkingProgress { tokens } => {
+                        on_event(StreamEvent::ProviderThinking { tokens })
+                    }
                     Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                     Parsed::Text(t) => {
                         if !is_cli_auth_instruction(&t) {
