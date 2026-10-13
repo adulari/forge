@@ -555,3 +555,28 @@ Hard-denied command (cannot be allowed, shown even in bypass):
 - [ ] Secret-shaped args masked in TUI/transcript display.
 - [ ] Sandbox (C1) documented as the next safety milestone (not required to ship).
 ```
+
+## Batching (`commands`, concurrent read-only calls)
+
+A model doing multi-step shell work used to spend one round trip per command. Two ways to cut that:
+
+- **`commands: [...]`** (max 20) instead of `command`: the entries run in order in one call
+  (`crates/forge-tools/src/shell/batch.rs`), each with the plain path's semantics (own process
+  group, timeout, sandbox, RTK rewrite). `stop_on_error` (default true) stops at the first failure.
+  The result starts `shell: exit N in Xms (k/n ok[, stopped at #i])`, where N is the first failing
+  entry's exit code (124 for a timeout), so exit-status readers work unchanged, followed by one
+  `── [i] <command>` section per entry. The 64 KiB budget is split across entries, failed ones
+  getting twice a passing one's share. Not combinable with `background`, `pty` or poll mode.
+  Permissions see the entries joined by newlines (`forge_types::shell_command_text`), so each entry
+  is judged like a line of one command: one risky entry asks, one denied entry denies. A failed
+  batch gets at most one shell diagnosis, for the first failing entry and its own output
+  (`crates/forge-core/src/shell_batch.rs`). A `shell` call must carry `command` or `commands`
+  (checked in dispatch, since `required` cannot express the alternative).
+- **Concurrent read-only shell calls**: several `shell` calls in one response run through the
+  read-only batch path (`run_readonly_batch`, results in order) when every one provably only reads
+  (`permission::is_read_only_shell_call`: every command passes the Plan-mode allowlist, no
+  background/poll/pty), the broker allows it outright as a shell call (an ask must reach the
+  serial path's prompt) and the task scope permits shell. Anything else keeps the step serial.
+
+The tool description and `FORGE_SYSTEM` tell the model to use `commands` for ordered steps,
+parallel calls for independent read-only probes, and a script file for long or repeated procedures.

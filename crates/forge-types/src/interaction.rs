@@ -266,6 +266,8 @@ pub enum PresenterEvent {
     Recap {
         text: String,
     },
+    /// A harness-written progress line during a long tool-only stretch (silence guard).
+    Progress(String),
     SuggestionReady {
         text: String,
     },

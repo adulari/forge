@@ -139,9 +139,7 @@ pub(crate) fn completeness_repository_search_ran(messages: &[Message]) -> bool {
             if call.name != "shell" {
                 return false;
             }
-            call.args
-                .get("command")
-                .and_then(|command| command.as_str())
+            forge_types::shell_command_text(&call.args)
                 .map(|command| {
                     let command = command.to_ascii_lowercase();
                     command.contains("git grep")

@@ -79,10 +79,17 @@ possible follow-up, not planned work.
 - **Event:** `PresenterEvent::BtwAnswer { question, answer, model, cost_usd }`
   (`crates/forge-types/src/interaction.rs`) — a new variant alongside `ShellDiagnosis`/`Recap`,
   carrying enough for the card without ever being written anywhere.
-- **Rendering:** `App::apply` in `crates/forge-tui/src/app.rs` turns a `BtwAnswer` event into a
-  `◈ btw …` card via `btw_answer_lines` (same style family as `shell_diagnosis_lines`) — question,
-  answer body, then a dim `(model · $cost, not part of this session's history)` footer so it's
-  unambiguous the exchange won't be remembered.
+- **Rendering:** a dismissable overlay card, like Claude Code's side-question popup
+  (`crates/forge-tui/src/app_btw.rs`, drawn by `render_btw_overlay` in
+  `app/render/overlays.rs`). `/btw` opens it in a "thinking…" state; the `BtwAnswer` event fills
+  it with the answer and a dim `model · $cost · not part of the conversation` footer; a `/btw`
+  failure warning lands in the card instead of the chat. Esc, Enter or Space close it, ↑/↓ and
+  PgUp/PgDn scroll a long answer, and it takes keys before the turn-interrupt handling, so Esc
+  closes the card rather than stopping a running turn. Nothing is printed into the scrollback
+  (it used to be, which left side answers sitting between real turns for the rest of the
+  session). Remote clients get it as the `overlay:btw` overlay snapshot. Both the idle and the
+  busy path run the call on its own task (`start_btw` in `run/btw.rs`), so `/btw` no longer
+  takes over the turn spinner.
 - **TUI command registration:** parsed in `crates/forge-tui/src/commands/btw_args.rs` (a new
   submodule — `commands.rs` sits at its CI file-size ratchet ceiling, so new command logic lives
   in its own file and the `parse_command` match arm stays one line:

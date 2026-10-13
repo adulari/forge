@@ -58,7 +58,7 @@ pub fn auto_risk(
             if !is_shell_tool(tool_name) {
                 return AutoVerdict::Risky("runs an unrecognised command tool".into());
             }
-            match args.get("command").and_then(Value::as_str) {
+            match forge_types::shell_command_text(args).as_deref() {
                 Some(cmd) => shell_verdict(cmd, ws.as_deref()),
                 None => AutoVerdict::Risky("shell call without a command".into()),
             }

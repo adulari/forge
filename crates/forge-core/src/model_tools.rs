@@ -138,7 +138,7 @@ impl Session {
         // serial path below unchanged.
         let concurrent_batch = calls.len() >= 2
             && self.config.hooks.is_empty()
-            && calls.iter().all(|c| self.is_concurrent_readonly(&c.name));
+            && calls.iter().all(|c| self.is_concurrent_readonly(c));
         if concurrent_batch {
             // Feed the failure-loop guard the same way the serial path does, so a concurrent
             // batch that keeps failing the same way (different args each step) is caught instead
@@ -236,8 +236,8 @@ impl Session {
                 // one alternate recovery attempt, then tell the model once per turn to stop.
                 // Delivered via pending_hints so it lands right after the threshold result.
                 if self.config.mesh.env_fight_nudge && call.name == "shell" {
-                    if let Some(cmd) = call.args.get("command").and_then(|v| v.as_str()) {
-                        if is_env_setup_command(cmd)
+                    if let Some(cmd) = forge_types::shell_command_text(&call.args) {
+                        if is_env_setup_command(&cmd)
                             && self.env_fight.observe(shell_command_failed(&result))
                         {
                             self.presenter.emit(PresenterEvent::Warning(format!(

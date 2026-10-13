@@ -181,7 +181,8 @@ impl Session {
                     self.warn_auto_asks("unrecognised command (auto_classifier is off)");
                     return decision;
                 }
-                let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+                let command_text = forge_types::shell_command_text(args).unwrap_or_default();
+                let command = command_text.as_str();
                 let verdict = match self.auto_classifier_cache.get(command).cloned() {
                     Some(hit) => hit,
                     None => match self.ask_classifier(command).await {

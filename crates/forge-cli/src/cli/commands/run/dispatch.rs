@@ -192,7 +192,7 @@ pub(crate) async fn dispatch_command(
             // /voice only fills the input box on completion — it never touches the running turn
             // or the session, so (like /usage) it must work while a turn is busy.
             | CommandAction::Voice
-            // /btw runs beside a busy turn through the session's detached asker (`spawn_btw`).
+            // /btw runs beside a busy turn through the session's detached asker (`start_btw`).
             | CommandAction::Btw(_)
     );
     if busy && mutates {

@@ -524,3 +524,61 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         chunks[1],
     );
 }
+
+/// Render the `/btw` answer card over the live view (Claude Code's side-question popup). It sits
+/// on top until dismissed and is never written to the scrollback.
+pub fn render_btw_overlay(f: &mut Frame, app: &App) {
+    let Some(card) = &app.btw else {
+        return;
+    };
+    let mut lines = vec![
+        TextLine::from(Span::styled(
+            card.question.clone(),
+            Style::default().fg(TEXT).bold(),
+        )),
+        TextLine::default(),
+    ];
+    match &card.answer {
+        None => lines.push(TextLine::from(Span::styled(
+            "thinking…",
+            Style::default().fg(DIM),
+        ))),
+        Some(answer) => {
+            let tone = if card.failed { WARNYEL } else { TEXT };
+            lines.extend(
+                answer.lines().map(|l| {
+                    TextLine::from(Span::styled(l.to_string(), Style::default().fg(tone)))
+                }),
+            );
+        }
+    }
+    if !card.meta.is_empty() {
+        lines.push(TextLine::default());
+        lines.push(TextLine::from(Span::styled(
+            format!("{} · not part of the conversation", card.meta),
+            Style::default().fg(DIM),
+        )));
+    }
+    let area = f.area();
+    let wrap_width = area.width.saturating_sub(12).max(20) as usize;
+    let rows: usize = lines.iter().map(|l| (l.width() / wrap_width) + 1).sum();
+    let inspector = surface::inspector_area(area, rows.min(u16::MAX as usize) as u16);
+    let hint = if card.answer.is_some() {
+        "Esc · Enter · Space close   ↑↓ scroll"
+    } else {
+        "Esc close"
+    };
+    let inner = surface::render_panel(
+        f,
+        inspector,
+        surface::title("/btw", surface::SurfaceTone::Accent),
+        Some(surface::hint(hint)),
+        surface::SurfaceTone::Accent,
+    );
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((card.scroll, 0)),
+        inner,
+    );
+}

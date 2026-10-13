@@ -389,6 +389,8 @@ pub struct App {
     pub config_editor: crate::config_editor::ConfigEditor,
     /// The `/usage` overlay state.
     pub usage_overlay: UsageOverlay,
+    /// The `/btw` answer card (`app_btw.rs`); `None` when no side question is on screen.
+    pub btw: Option<crate::app_btw::BtwOverlay>,
     /// The `/mesh` routing-inspector overlay state.
     pub mesh_overlay: MeshOverlay,
     /// The `/voice` recording overlay (also opened by Ctrl+V), while open. The real system
@@ -1266,7 +1268,11 @@ impl App {
                 }
             }
             PresenterEvent::Steered(text) => self.echo_steered(&text),
-            PresenterEvent::Warning(msg) => self.flush.push(warning_line(&msg)),
+            PresenterEvent::Warning(msg) => {
+                if !self.apply_btw_failure(&msg) {
+                    self.flush.push(warning_line(&msg));
+                }
+            }
             PresenterEvent::Error(msg) => self.flush.push(error_line(&msg)),
             PresenterEvent::ToolStart { name, args } => {
                 self.model_search = None;
@@ -1349,16 +1355,7 @@ impl App {
                 answer,
                 model,
                 cost_usd,
-            } => {
-                self.set_turn_activity(TurnPhase::Finalizing, "side question answered");
-                self.flush.extend(btw_answer_lines(
-                    &question,
-                    &answer,
-                    &model,
-                    cost_usd,
-                    self.last_width.get(),
-                ));
-            }
+            } => self.apply_btw_answer(question, answer, model, cost_usd),
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
@@ -1604,6 +1601,12 @@ impl App {
                     Span::styled(text, Style::default().fg(TEXT)),
                 ]));
                 self.flush.push(TextLine::default());
+            }
+            PresenterEvent::Progress(text) => {
+                self.flush.push(TextLine::from(vec![
+                    Span::styled("  ⋯ ", Style::default().fg(ACCENT)),
+                    Span::styled(text, Style::default().fg(DIM)),
+                ]));
             }
             PresenterEvent::SuggestionReady { text } => {
                 // Silent — no scrollback line. It only ever shows as ghost text in the (by now
@@ -3630,40 +3633,6 @@ fn shell_diagnosis_lines(
             Style::default().fg(TOOLCYAN),
         )));
     }
-    lines
-}
-
-/// A `/btw` side-question answer, rendered as a distinct card — never as an assistant bubble,
-/// since it was never part of the conversation (docs/features/side-questions.md).
-fn btw_answer_lines(
-    question: &str,
-    answer: &str,
-    model: &str,
-    cost_usd: Option<f64>,
-    width: u16,
-) -> Vec<TextLine<'static>> {
-    let meta = match cost_usd {
-        Some(c) if c > 0.0 => format!("{model} · ${c:.4}"),
-        _ => model.to_string(),
-    };
-    let mut lines = vec![TextLine::from(vec![
-        Span::styled("  ◈ btw ", Style::default().fg(ACCENT).bold()),
-        Span::styled(
-            truncate(question, width_cap(width, 16, 72)),
-            Style::default().fg(TEXT),
-        ),
-    ])];
-    for line in answer.lines() {
-        lines.push(TextLine::from(Span::styled(
-            format!("    {line}"),
-            Style::default().fg(TEXT),
-        )));
-    }
-    lines.push(TextLine::from(Span::styled(
-        format!("    ({meta}, not part of this session's history)"),
-        Style::default().fg(DIM),
-    )));
-    lines.push(TextLine::default());
     lines
 }
 

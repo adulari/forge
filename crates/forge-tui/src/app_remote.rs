@@ -200,7 +200,7 @@ pub struct OverlayRowSnapshot {
 pub struct OverlaySnapshot {
     /// A stable discriminator: `"command_center"`, `"palette"`, `"picker:<kind>"`,
     /// `"picker:at_path"`, `"config"`, `"overlay:usage"`, `"overlay:mesh"`,
-    /// `"overlay:workflow"`.
+    /// `"overlay:workflow"`, `"overlay:btw"`.
     pub kind: String,
     pub title: String,
     pub rows: Vec<OverlayRowSnapshot>,
@@ -234,6 +234,17 @@ impl App {
         if self.usage_overlay.open {
             return Some(self.usage_overlay_snapshot());
         }
+        if let Some(card) = &self.btw {
+            return Some(OverlaySnapshot {
+                kind: "overlay:btw".to_string(),
+                title: "/btw".to_string(),
+                rows: Vec::new(),
+                selected: 0,
+                filter: None,
+                free_text: false,
+                body: Some(Self::btw_overlay_body(card)),
+            });
+        }
         if self.mesh_overlay.open {
             return Some(self.mesh_overlay_snapshot());
         }
@@ -257,6 +268,7 @@ impl App {
             || self.at_picker.open
             || self.config_editor.open
             || self.usage_overlay.open
+            || self.btw.is_some()
             || self.mesh_overlay.open
             || self.voice.is_some()
             || self.output_view.is_some()

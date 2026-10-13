@@ -172,6 +172,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     // Usage overlay renders last so it appears on top of everything.
     render_usage_overlay(frame, app);
     render_mesh_overlay(frame, app);
+    render_btw_overlay(frame, app);
     render_voice_overlay(frame, app);
     crate::config_editor::render_config_overlay(frame, &app.config_editor);
     render_command_center(frame, frame.area(), app);

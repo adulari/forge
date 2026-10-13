@@ -1530,6 +1530,7 @@ pub(crate) async fn run_chat_tui(
             // control reaches that modal's own handler further down instead.
             let any_modal_open = app.command_center.open
                 || app.palette.open
+                || app.btw_open()
                 || app.usage_overlay.open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -2059,20 +2060,8 @@ pub(crate) async fn run_chat_tui(
                                     global,
                                 ));
                             }
-                            DispatchOutcome::RunBtw { question } if busy => {
-                                spawn_busy_btw(question, &mut app);
-                            }
                             DispatchOutcome::RunBtw { question } => {
-                                turn_gen += 1;
-                                turn_handle = Some(spawn_btw(
-                                    question,
-                                    &session,
-                                    &done_tx,
-                                    turn_gen,
-                                    &mut app,
-                                    &mut busy,
-                                    &mut busy_since,
-                                ));
+                                start_btw(question, &session, &mut app, busy);
                             }
                             DispatchOutcome::RunSavedWorkflow { name, args } => {
                                 turn_gen += 1;
@@ -2225,6 +2214,15 @@ pub(crate) async fn run_chat_tui(
                         sync_palette_to_slash_token(&mut app);
                     }
                 }
+                continue;
+            }
+
+            // The /btw card captures all keys; Esc/Enter/Space close it, arrows scroll. Checked
+            // before the turn-interrupt handling so Esc dismisses the card instead of stopping a
+            // running turn.
+            if app.btw_open() {
+                app.btw_key(&key);
+                dirty = true;
                 continue;
             }
 
@@ -3078,16 +3076,7 @@ pub(crate) async fn run_chat_tui(
                         ));
                     }
                     DispatchOutcome::RunBtw { question } => {
-                        turn_gen += 1;
-                        turn_handle = Some(spawn_btw(
-                            question,
-                            &session,
-                            &done_tx,
-                            turn_gen,
-                            &mut app,
-                            &mut busy,
-                            &mut busy_since,
-                        ));
+                        start_btw(question, &session, &mut app, busy);
                     }
                     DispatchOutcome::Quit => {
                         abort_turn_before_quit(
@@ -3257,16 +3246,7 @@ pub(crate) async fn run_chat_tui(
                                     ));
                                 }
                                 DispatchOutcome::RunBtw { question } => {
-                                    turn_gen += 1;
-                                    turn_handle = Some(spawn_btw(
-                                        question,
-                                        &session,
-                                        &done_tx,
-                                        turn_gen,
-                                        &mut app,
-                                        &mut busy,
-                                        &mut busy_since,
-                                    ));
+                                    start_btw(question, &session, &mut app, busy);
                                 }
                                 DispatchOutcome::RunSavedWorkflow { name, args } => {
                                     turn_gen += 1;
@@ -3748,16 +3728,7 @@ pub(crate) async fn run_chat_tui(
                                     ));
                                 }
                                 DispatchOutcome::RunBtw { question } => {
-                                    turn_gen += 1;
-                                    turn_handle = Some(spawn_btw(
-                                        question,
-                                        &session,
-                                        &done_tx,
-                                        turn_gen,
-                                        &mut app,
-                                        &mut busy,
-                                        &mut busy_since,
-                                    ));
+                                    start_btw(question, &session, &mut app, busy);
                                 }
                                 DispatchOutcome::RunSavedWorkflow { name, args } => {
                                     turn_gen += 1;

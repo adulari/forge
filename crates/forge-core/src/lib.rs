@@ -31,6 +31,8 @@ pub mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;
+mod shell_batch;
+mod silence_guard;
 mod workspace_policy;
 pub use btw_policy::{busy_asker, BtwAsker};
 pub mod capsule;
@@ -255,6 +257,8 @@ verbose passing output merely for reassurance. Fix failures before reporting don
 
 Tools:
 - Prefer read_file / search / list_dir / glob over shelling out to cat / grep / ls / find.
+- During long multi-step work, include a one-sentence progress note for the user every several \
+tool calls, in the same response as the next tool calls (never instead of them).
 - When you need several independent reads or searches, request them together in one step.
 - edit_file replaces ONE exact, unique occurrence — include enough surrounding context in `old` to \
 match exactly once, and read the file first so whitespace matches. To change one file in several \
@@ -4935,6 +4939,15 @@ mod tests {
     #[path = "stall_guard.rs"]
     mod stall_guard_tests;
 
+    #[path = "silence_guard.rs"]
+    mod silence_guard_tests;
+
+    #[path = "shell_batching.rs"]
+    mod shell_batching_tests;
+
+    #[path = "live_cost.rs"]
+    mod live_cost_tests;
+
     #[path = "plan_shell.rs"]
     mod plan_shell_tests;
 
@@ -5769,9 +5782,7 @@ mod tests {
             });
         }
         // All three reads qualify for the concurrent fast path.
-        assert!(calls
-            .iter()
-            .all(|c| session.is_concurrent_readonly(&c.name)));
+        assert!(calls.iter().all(|c| session.is_concurrent_readonly(c)));
 
         let msg_id = session
             .store

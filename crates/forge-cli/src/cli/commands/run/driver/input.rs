@@ -164,6 +164,11 @@ impl DriverState {
             }
             return Ok(());
         }
+        // The /btw card: Esc/Enter/Space close it, arrows scroll.
+        if self.app.btw_open() {
+            self.app.btw_key(&key);
+            return Ok(());
+        }
         // Usage overlay: informational, Esc closes.
         if self.app.usage_overlay.open {
             if matches!(key, KeyKind::Esc) {

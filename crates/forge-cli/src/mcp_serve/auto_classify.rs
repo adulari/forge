@@ -39,7 +39,8 @@ impl AutoClassify {
         if !unknown || !config.permissions.auto_classifier {
             return decision;
         }
-        let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+        let command_text = forge_types::shell_command_text(args).unwrap_or_default();
+        let command = command_text.as_str();
         let provider = self
             .provider
             .get_or_init(|| async {

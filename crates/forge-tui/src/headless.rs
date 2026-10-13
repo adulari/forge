@@ -247,6 +247,9 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::Recap { text } => {
                 println!("  ※ recap  {text}");
             }
+            PresenterEvent::Progress(text) => {
+                println!("  ⋯ {text}");
+            }
             // Ghost-text input suggestions are a TUI-only affordance (dim placeholder + Tab
             // accept in an interactive input box); headless has no input box to show it in.
             PresenterEvent::SuggestionReady { .. } => {}
