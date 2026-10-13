@@ -133,12 +133,18 @@ impl Session {
         }
 
         // Fast path: when the model batched several independent side-effect-free calls (and no
-        // hooks are configured), run them CONCURRENTLY instead of one-at-a-time — a direct
-        // latency win on multi-file reads/searches. Mixed or hook-bearing batches take the
-        // serial path below unchanged.
-        let concurrent_batch = calls.len() >= 2
-            && self.config.hooks.is_empty()
-            && calls.iter().all(|c| self.is_concurrent_readonly(c));
+        // tool hooks are configured), run them CONCURRENTLY instead of one-at-a-time — a direct
+        // latency win on multi-file reads/searches. Mixed or tool-hook-bearing batches take the
+        // serial path below unchanged. Only Pre/PostToolUse hooks run per call; requiring NO hooks
+        // at all disabled this path for anyone with just a session-start or prompt hook.
+        let tool_hooks = self.config.hooks.iter().any(|h| {
+            matches!(
+                h.event,
+                forge_config::HookEvent::PreToolUse | forge_config::HookEvent::PostToolUse
+            )
+        });
+        let concurrent_batch =
+            calls.len() >= 2 && !tool_hooks && calls.iter().all(|c| self.is_concurrent_readonly(c));
         if concurrent_batch {
             // Feed the failure-loop guard the same way the serial path does, so a concurrent
             // batch that keeps failing the same way (different args each step) is caught instead

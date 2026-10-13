@@ -44,6 +44,23 @@ impl Provider for OneStep {
 
 /// The order of tool starts (`S`) and results (`R`) a one-step turn produced.
 async fn tool_event_order(commands: Vec<&'static str>) -> String {
+    tool_event_order_with_hooks(commands, Vec::new()).await
+}
+
+fn hook(event: forge_config::HookEvent) -> forge_config::HookConfig {
+    forge_config::HookConfig {
+        event,
+        matcher: None,
+        command: "true".into(),
+        timeout_secs: 5,
+        cc_compat: false,
+    }
+}
+
+async fn tool_event_order_with_hooks(
+    commands: Vec<&'static str>,
+    hooks: Vec<forge_config::HookConfig>,
+) -> String {
     let capture = CapturePresenter {
         attended: true,
         ..Default::default()
@@ -57,6 +74,7 @@ async fn tool_event_order(commands: Vec<&'static str>) -> String {
     config.suggest.enabled = false;
     config.mesh.auto_memory = false;
     config.mesh.verify_completeness = false;
+    config.hooks = hooks;
     let mut session = Session::start(
         Arc::new(Store::open_in_memory().unwrap()),
         Arc::new(OneStep {
@@ -88,6 +106,22 @@ async fn tool_event_order(commands: Vec<&'static str>) -> String {
 #[tokio::test]
 async fn read_only_shell_calls_in_one_response_run_as_a_concurrent_batch() {
     assert_eq!(tool_event_order(vec!["echo a", "ls"]).await, "SSRR");
+}
+
+/// A session-start or prompt hook never runs around a tool call, so it must not cost the
+/// concurrent path (it did: any configured hook disabled it). A tool hook still does.
+#[tokio::test]
+async fn only_tool_hooks_force_the_serial_path() {
+    let session_hook = vec![hook(forge_config::HookEvent::SessionStart)];
+    assert_eq!(
+        tool_event_order_with_hooks(vec!["echo a", "ls"], session_hook).await,
+        "SSRR"
+    );
+    let tool_hook = vec![hook(forge_config::HookEvent::PreToolUse)];
+    assert_eq!(
+        tool_event_order_with_hooks(vec!["echo a", "ls"], tool_hook).await,
+        "SRSR"
+    );
 }
 
 #[tokio::test]
