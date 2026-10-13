@@ -48,53 +48,6 @@ impl Session {
         (args, roots)
     }
 
-    /// The workspace containment check for one call: the root allowlist, plus the sibling-worktree
-    /// write refusal that holds even when the file tools are not confined to the workspace.
-    fn check_workspace(
-        &self,
-        tool: &str,
-        args: &serde_json::Value,
-        roots: &[std::path::PathBuf],
-    ) -> Result<(), CoreError> {
-        validate_workspace_args(args, &self.workspace, roots)?;
-        let read_only = self
-            .tools
-            .get(tool)
-            .is_some_and(|t| t.side_effect() == forge_types::SideEffect::ReadOnly);
-        if !read_only {
-            if let Some(target) = forge_tools::sibling_worktree_write(args, self.workspace.root()) {
-                return Err(CoreError::Workspace(format!(
-                    "{target} is inside another agent's worktree; write inside this session's \
-                     workspace ({}) instead",
-                    self.workspace.root().display()
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Whether a file-tool write leaves the workspace and every explicitly configured
-    /// `tools.extra_roots` entry. Auto-edit trusts edits to the project, not to the whole disk,
-    /// so such a write asks there instead of passing silently.
-    fn writes_beyond_workspace(&self, args: &serde_json::Value) -> bool {
-        let root = self.workspace.root();
-        let configured: Vec<std::path::PathBuf> = self
-            .config
-            .tools
-            .extra_roots
-            .iter()
-            .map(std::path::Path::new)
-            .filter(|path| path.is_absolute())
-            .map(normalize_workspace_target)
-            .collect();
-        let own = normalize_workspace_target(root);
-        forge_tools::path_arg_targets(args, root)
-            .iter()
-            .any(|target| {
-                !target.starts_with(&own) && !configured.iter().any(|r| target.starts_with(r))
-            })
-    }
-
     /// Run a single tool call, applying the permission policy, and return its result text.
     /// Whether `name` is a side-effect-free registry tool that's safe to run concurrently in a
     /// batch: not a core-owned virtual tool (those mutate session state / prompt the user), not an

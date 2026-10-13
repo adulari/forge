@@ -25,6 +25,7 @@ mod mock;
 mod mock_long;
 mod mock_soak;
 mod oauth_responses;
+mod output_cap;
 mod refresh_lock;
 mod system_placement;
 mod tool_recovery;

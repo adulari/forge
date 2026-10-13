@@ -1002,56 +1002,6 @@ fn should_send_prompt_cache_key(model: &str) -> bool {
     !matches!(model.split_once("::"), Some(("nvidia", _)))
 }
 
-/// The output cap Forge sends once a model has been seen stopping at a small server default.
-const RAISED_OUTPUT_TOKENS: u32 = 32_768;
-
-/// A reply that hit the output limit within this many tokens hit a server's DEFAULT cap, not the
-/// model's real limit: Refuseless ends every uncapped completion at 1,024 tokens, so with no
-/// configured cap each large `write_file`/`append_file` was cut mid-argument and failed. A real
-/// native limit (or vLLM's remaining-context default) sits far above this.
-const SMALL_DEFAULT_OUTPUT_LIMIT: u64 = 8_192;
-
-/// Models observed stopping at a small server-default output cap while Forge sent none. They get
-/// [`RAISED_OUTPUT_TOKENS`] from then on, for the life of the process. Learned only after such a
-/// cut, so an endpoint that rejects large `max_tokens` values is never sent one up front.
-static RAISED_OUTPUT_CAP: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(Default::default);
-
-fn learned_output_cap(model: &str) -> Option<u32> {
-    RAISED_OUTPUT_CAP
-        .lock()
-        .ok()
-        .filter(|set| set.contains(model))
-        .map(|_| RAISED_OUTPUT_TOKENS)
-}
-
-/// Records a small-default cut and reports whether the cap was raised just now, so the
-/// truncation message can tell the model to retry the same call instead of splitting it.
-fn learn_small_output_default(model: &str, sent_cap: Option<u32>, output_tokens: u64) -> bool {
-    if sent_cap.is_some() || output_tokens == 0 || output_tokens > SMALL_DEFAULT_OUTPUT_LIMIT {
-        return false;
-    }
-    RAISED_OUTPUT_CAP
-        .lock()
-        .is_ok_and(|mut set| set.insert(model.to_string()))
-}
-
-fn normalize_tool_arguments(
-    raw: serde_json::Value,
-    output_limit_reached: bool,
-    cap_raised: bool,
-) -> serde_json::Value {
-    if output_limit_reached && raw.is_string() {
-        let reason = if cap_raised {
-            "the endpoint's default output limit interrupted this tool call before its JSON arguments were complete; Forge has raised the output limit for this model, so retry the same call unchanged"
-        } else {
-            "the model's native output limit interrupted this tool call before its JSON arguments were complete; retry with a smaller payload (split a large file into coherent chunks)"
-        };
-        return serde_json::json!({ crate::TRUNCATED_TOOL_ARGS_KEY: reason });
-    }
-    crate::repair_malformed_args(raw)
-}
-
 /// The failure shape OpenCode Go returns when a model is sent to the wrong wire format: an
 /// immediate 5xx (`Unavailable`) or 401 (`Auth`) with no useful body. Rate limits, capability
 /// and access failures are real answers about the model and must not trigger endpoint learning.
@@ -1181,7 +1131,7 @@ impl GenAiProvider {
         // provider-wide mesh cap. With neither configured, preserve the provider's native limit.
         let sent_cap =
             crate::effective_output_token_cap(self.max_output_tokens, opts.max_output_tokens)
-                .or_else(|| learned_output_cap(model));
+                .or_else(|| crate::output_cap::learned_output_cap(model));
         if let Some(cap) = sent_cap {
             options = options.with_max_tokens(cap);
         }
@@ -1600,15 +1550,11 @@ impl GenAiProvider {
                         usage = normalize_usage(u);
                     }
                     let cap_raised = output_limit_reached
-                        && learn_small_output_default(model, sent_cap, usage.output_tokens);
-                    if cap_raised {
-                        tracing::warn!(
+                        && crate::output_cap::learn_small_output_default(
                             model,
-                            output_tokens = usage.output_tokens,
-                            "endpoint stopped at a small default output limit; sending \
-                             max_tokens={RAISED_OUTPUT_TOKENS} for this model from now on"
+                            sent_cap,
+                            usage.output_tokens,
                         );
-                    }
                     // Some providers deliver text only at the end (not chunked).
                     if content.is_empty() {
                         if let Some(text) = end.captured_first_text() {
@@ -1629,7 +1575,7 @@ impl GenAiProvider {
                                 // end-of-stream parse fails (a dropped/duplicated chunk); repair
                                 // it here so a malformed call can never be stored/replayed as-is
                                 // (see `repair_malformed_args` doc comment for why that matters).
-                                args: normalize_tool_arguments(
+                                args: crate::output_cap::normalize_tool_arguments(
                                     tc.fn_arguments,
                                     output_limit_reached,
                                     cap_raised,
@@ -2303,25 +2249,12 @@ mod tests {
     }
 
     #[test]
-    fn a_small_default_output_cut_raises_the_cap_for_that_model_only() {
-        let model = "refuseless-test::small-default";
-        assert_eq!(learned_output_cap(model), None);
-        assert!(
-            !learn_small_output_default(model, Some(1_024), 1_024),
-            "a configured cap is the user's choice"
+    fn a_raised_cap_tells_the_model_to_retry_the_same_call() {
+        let retry = crate::output_cap::normalize_tool_arguments(
+            serde_json::json!("{\"path\": \"a"),
+            true,
+            true,
         );
-        assert!(
-            !learn_small_output_default(model, None, 60_000),
-            "a long reply hit a real limit"
-        );
-        assert!(learn_small_output_default(model, None, 1_024));
-        assert!(
-            !learn_small_output_default(model, None, 1_024),
-            "reported as raised only once"
-        );
-        assert_eq!(learned_output_cap(model), Some(RAISED_OUTPUT_TOKENS));
-        assert_eq!(learned_output_cap("refuseless-test::other"), None);
-        let retry = normalize_tool_arguments(serde_json::json!("{\"path\": \"a"), true, true);
         assert!(retry[crate::TRUNCATED_TOOL_ARGS_KEY]
             .as_str()
             .is_some_and(|reason| reason.contains("retry the same call")));
@@ -2331,13 +2264,13 @@ mod tests {
     fn native_output_limit_never_executes_a_salvaged_tool_prefix() {
         let raw =
             serde_json::Value::String(r#"{"content":"<!DOCTYPE html>\n<html lang=\"en\""#.into());
-        let repaired = normalize_tool_arguments(raw.clone(), false, false);
+        let repaired = crate::output_cap::normalize_tool_arguments(raw.clone(), false, false);
         assert!(
             repaired.is_object(),
             "ordinary malformed calls use recovery"
         );
 
-        let blocked = normalize_tool_arguments(raw, true, false);
+        let blocked = crate::output_cap::normalize_tool_arguments(raw, true, false);
         assert!(
             blocked
                 .get(crate::TRUNCATED_TOOL_ARGS_KEY)

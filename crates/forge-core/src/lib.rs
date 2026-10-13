@@ -31,6 +31,7 @@ pub mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;
+mod workspace_policy;
 pub use btw_policy::{busy_asker, BtwAsker};
 pub mod capsule;
 pub(crate) mod clock;
