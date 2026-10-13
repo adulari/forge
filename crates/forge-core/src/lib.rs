@@ -9983,6 +9983,41 @@ mod tests {
         );
     }
 
+    /// A custom gateway serving a renamed model publishes no window and matches nothing elsewhere,
+    /// so without a configured override it fell to the 32k floor on a million-token model.
+    #[test]
+    fn a_configured_context_window_beats_the_conservative_floor() {
+        let (store, capture, _events) = restore_fixture();
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut config = Config::default();
+        config
+            .mesh
+            .context_windows
+            .insert("refuseless::glm-5.3-abliterated".into(), 1_000_000);
+        let session = Session::start(
+            Arc::clone(&store),
+            Arc::new(forge_provider::MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(workspace),
+            Box::new(capture),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+        store
+            .set_model_context("refuseless::glm-5.3-abliterated", 32_000)
+            .unwrap();
+
+        assert_eq!(
+            session.base_context_window("refuseless::glm-5.3-abliterated"),
+            1_000_000
+        );
+        assert_eq!(
+            session.base_context_window("refuseless::glm-5.3-flash-abliterated"),
+            forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW
+        );
+    }
+
     fn restore_fixture() -> (
         Arc<Store>,
         CapturePresenter,

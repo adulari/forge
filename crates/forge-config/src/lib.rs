@@ -1869,6 +1869,11 @@ pub struct MeshConfig {
     /// defaults so a price change needs no release (A-7). Keyed by model id.
     #[serde(default)]
     pub pricing: HashMap<String, PriceOverride>,
+    /// Per-model context-window overrides (tokens), keyed by full model id. Wins over every
+    /// fetched or inferred window, for endpoints whose model list publishes none (a custom
+    /// gateway serving a renamed model would otherwise fall to the 32k conservative floor).
+    #[serde(default)]
+    pub context_windows: HashMap<String, u32>,
     /// Per-model subscription plan-burn weight overrides (relative to the cheapest sibling of a
     /// family = 1.0), applied on top of the bundled defaults in
     /// `forge-mesh::capability::subscription_burn_weight`. Keyed by the BARE model name (no
@@ -2774,6 +2779,7 @@ impl Default for Config {
                 warn_threshold: default_warn_threshold(),
                 budget: BudgetBehavior::default(),
                 pricing: HashMap::new(),
+                context_windows: HashMap::new(),
                 burn_weights: HashMap::new(),
                 subagents: SubagentsConfig::default(),
                 workflows: WorkflowsConfig::default(),
