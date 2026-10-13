@@ -24,6 +24,13 @@ use super::{
 const SYNC_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_SYNC_RETRY_DELAY: Duration = Duration::from_secs(5 * 60);
 const BATCH_SIZE: usize = 10;
+/// How long one cycle may keep draining a single direction (uploads, downloads, staged applies)
+/// before yielding. One batch per cycle could not keep up: a host with an active session journals
+/// ~14 records a minute while a cycle (10 uploads + 100 sequential downloads) took about a minute,
+/// so its 9,000-entry backlog only grew, and a device joining late needed ~35 h to read the feed.
+const DRAIN_BUDGET: Duration = Duration::from_secs(20);
+/// Parallel object GETs per feed page. Staging still happens in feed order.
+const DOWNLOAD_CONCURRENCY: usize = 8;
 
 #[derive(Serialize)]
 struct StartUploadRequest<'a> {
@@ -159,25 +166,40 @@ async fn upload_batch() -> Result<()> {
         "device id",
     )?;
     let store = crate::open_store()?;
-    let entries = store.pending_sync_journal(BATCH_SIZE)?;
     let http = client()?;
-    for entry in entries {
-        upload_entry(
-            &store,
-            &state_store,
-            &http,
-            &service_url,
-            &access_token,
-            &entry,
-        )
-        .await?;
+    let started = std::time::Instant::now();
+    loop {
+        let entries = store.pending_sync_journal(BATCH_SIZE)?;
+        if entries.is_empty() {
+            break;
+        }
+        for entry in entries {
+            upload_entry(
+                &store,
+                &state_store,
+                &http,
+                &service_url,
+                &access_token,
+                &entry,
+            )
+            .await?;
+        }
+        if started.elapsed() >= DRAIN_BUDGET {
+            break;
+        }
     }
-    download_changes(&store, &state_store, &http, &service_url, &access_token).await?;
+    let started = std::time::Instant::now();
+    while download_changes(&store, &state_store, &http, &service_url, &access_token).await? {
+        if started.elapsed() >= DRAIN_BUDGET {
+            break;
+        }
+    }
     let mut conflicts = 0;
-    // A feed page may contain children before a parent from an earlier delayed upload. Retry a
-    // bounded number of local-only passes so newly satisfied dependencies materialize now, while
-    // genuinely missing parents remain durably staged for a future poll.
-    for _ in 0..4 {
+    // A feed page may contain children before a parent from an earlier delayed upload. Keep
+    // applying local-only passes while they make progress so newly satisfied dependencies
+    // materialize now, while genuinely missing parents remain durably staged for a future poll.
+    let started = std::time::Instant::now();
+    while started.elapsed() < DRAIN_BUDGET {
         let memory = store.apply_staged_memory_records(local_device_id, BATCH_SIZE)?;
         let history = store.apply_staged_history_records(local_device_id, BATCH_SIZE)?;
         let portable = store.apply_staged_portable_records(local_device_id, BATCH_SIZE)?;
@@ -197,13 +219,16 @@ async fn upload_batch() -> Result<()> {
     Ok(())
 }
 
+/// Reads and stages one feed page. Returns whether the page held any changes, so the caller can
+/// keep paging while the feed has more.
 async fn download_changes(
     store: &Store,
     state_store: &StateStore,
     http: &reqwest::Client,
     service_url: &str,
     access_token: &str,
-) -> Result<()> {
+) -> Result<bool> {
+    use futures::StreamExt as _;
     let cursor = store.sync_download_cursor()?;
     let feed: ChangeFeed = send_json(
         http.get(format!(
@@ -213,10 +238,18 @@ async fn download_changes(
     )
     .await
     .context("load encrypted sync changes")?;
+    let had_changes = !feed.changes.is_empty();
     let mut missing = 0usize;
-    for change in feed.changes {
-        if download_change(store, state_store, http, change).await? == Downloaded::Missing {
-            missing += 1;
+    let mut fetched = futures::stream::iter(feed.changes)
+        .map(|change| async move {
+            let object = fetch_object(http, &change).await;
+            (change, object)
+        })
+        .buffered(DOWNLOAD_CONCURRENCY);
+    while let Some((change, object)) = fetched.next().await {
+        match object? {
+            Some(bytes) => stage_change(store, state_store, change, &bytes)?,
+            None => missing += 1,
         }
     }
     if missing > 0 {
@@ -226,13 +259,7 @@ async fn download_changes(
         );
     }
     store.advance_sync_download_cursor(feed.next_cursor)?;
-    Ok(())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Downloaded {
-    Staged,
-    Missing,
+    Ok(had_changes)
 }
 
 /// A presigned GET that answers 404/410 names an object storage no longer holds, so no retry can
@@ -244,12 +271,8 @@ fn object_permanently_missing(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE
 }
 
-async fn download_change(
-    store: &Store,
-    state_store: &StateStore,
-    http: &reqwest::Client,
-    change: Change,
-) -> Result<Downloaded> {
+/// The change's encrypted object, or `None` when storage no longer holds it.
+async fn fetch_object(http: &reqwest::Client, change: &Change) -> Result<Option<Vec<u8>>> {
     if change.ciphertext_bytes > MAX_SYNC_UPLOAD_ENVELOPE_BYTES {
         bail!(
             "encrypted sync download exceeds {} MiB",
@@ -268,7 +291,7 @@ async fn download_change(
             revision = change.revision,
             "Anywhere sync object is missing from storage; skipping this change"
         );
-        return Ok(Downloaded::Missing);
+        return Ok(None);
     }
     let bytes = response
         .error_for_status()
@@ -276,15 +299,24 @@ async fn download_change(
         .bytes()
         .await
         .context("read encrypted sync object")?;
+    Ok(Some(bytes.to_vec()))
+}
+
+fn stage_change(
+    store: &Store,
+    state_store: &StateStore,
+    change: Change,
+    bytes: &[u8],
+) -> Result<()> {
     if bytes.len() as u64 != change.ciphertext_bytes {
         bail!("encrypted sync download length does not match change metadata");
     }
     let expected_ciphertext_hash =
         decode_base64_array::<32>(&change.ciphertext_sha256, "sync ciphertext hash")?;
-    if Sha256::digest(&bytes).as_slice() != expected_ciphertext_hash {
+    if Sha256::digest(bytes).as_slice() != expected_ciphertext_hash {
         bail!("encrypted sync download hash does not match change metadata");
     }
-    let envelope = Envelope::decode(&bytes)?;
+    let envelope = Envelope::decode(bytes)?;
     let state = state_store.load()?;
     let account_id = decode_hex_array::<16>(
         state
@@ -358,7 +390,7 @@ async fn download_change(
         content_hash: record.content_hash,
         payload: record.payload,
     })?;
-    Ok(Downloaded::Staged)
+    Ok(())
 }
 
 async fn upload_entry(
