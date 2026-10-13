@@ -78,6 +78,12 @@ All notable changes to Forge are documented here. The format follows
   restores its stored model pin unless `--model` is given.
 
 ### Fixed
+- **Forge Anywhere sync no longer wedges on a change whose encrypted object is gone.** A device that
+  joined later reads the change feed from the start, and one early entry whose R2 object no longer
+  exists answered 404 on every poll: the pass failed before advancing the cursor, so that device
+  never downloaded anything, and the failure backoff starved its uploads to ten entries per five
+  minutes (8,353 journal entries pending on one host). A 404/410 download is now skipped with a
+  warning and the feed moves on; other failures still retry.
 - **A headless `forge serve` could not see the `claude` CLI, and later runs warned about a valid pin.**
   A `systemd --user` unit on a server has an empty environment, so the daemon's `PATH` lacked
   `~/.local/bin`: the `claude` bridge counted as not installed, discovery cached a catalog with no

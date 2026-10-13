@@ -213,11 +213,35 @@ async fn download_changes(
     )
     .await
     .context("load encrypted sync changes")?;
+    let mut missing = 0usize;
     for change in feed.changes {
-        download_change(store, state_store, http, change).await?;
+        if download_change(store, state_store, http, change).await? == Downloaded::Missing {
+            missing += 1;
+        }
+    }
+    if missing > 0 {
+        eprintln!(
+            "⚠ Forge Anywhere skipped {missing} sync change(s) whose encrypted object no longer \
+             exists in storage"
+        );
     }
     store.advance_sync_download_cursor(feed.next_cursor)?;
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Downloaded {
+    Staged,
+    Missing,
+}
+
+/// A presigned GET that answers 404/410 names an object storage no longer holds, so no retry can
+/// ever fetch it. Failing the pass on it pinned the feed cursor there for good: a device that
+/// joined later (cursor 0) replayed into an early change whose object was gone and never got past
+/// it, and the failure backoff starved its own uploads to ten entries per five minutes. Other
+/// statuses (an expired signature, a 5xx) stay errors because a later poll can succeed.
+fn object_permanently_missing(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE
 }
 
 async fn download_change(
@@ -225,18 +249,28 @@ async fn download_change(
     state_store: &StateStore,
     http: &reqwest::Client,
     change: Change,
-) -> Result<()> {
+) -> Result<Downloaded> {
     if change.ciphertext_bytes > MAX_SYNC_UPLOAD_ENVELOPE_BYTES {
         bail!(
             "encrypted sync download exceeds {} MiB",
             MAX_SYNC_UPLOAD_ENVELOPE_BYTES / (1024 * 1024)
         );
     }
-    let bytes = http
+    let response = http
         .get(&change.download_url)
         .send()
         .await
-        .context("download encrypted sync object")?
+        .context("download encrypted sync object")?;
+    if object_permanently_missing(response.status()) {
+        tracing::warn!(
+            cursor = change.cursor,
+            record_kind = %change.record_kind,
+            revision = change.revision,
+            "Anywhere sync object is missing from storage; skipping this change"
+        );
+        return Ok(Downloaded::Missing);
+    }
+    let bytes = response
         .error_for_status()
         .context("R2 rejected encrypted sync download")?
         .bytes()
@@ -324,7 +358,7 @@ async fn download_change(
         content_hash: record.content_hash,
         payload: record.payload,
     })?;
-    Ok(())
+    Ok(Downloaded::Staged)
 }
 
 async fn upload_entry(
@@ -549,6 +583,18 @@ fn sync_idempotency_key(scope: &str, entry: &SyncJournalEntry) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_missing_object_is_skipped_rather_than_retried() {
+        use reqwest::StatusCode;
+        assert!(super::object_permanently_missing(StatusCode::NOT_FOUND));
+        assert!(super::object_permanently_missing(StatusCode::GONE));
+        assert!(!super::object_permanently_missing(StatusCode::FORBIDDEN));
+        assert!(!super::object_permanently_missing(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(!super::object_permanently_missing(StatusCode::OK));
+    }
+
     use super::*;
     use forge_store::SyncJournalOperation;
 
