@@ -150,6 +150,19 @@ impl Session {
             // batch that keeps failing the same way (different args each step) is caught instead
             // of burning the budget to the step cap.
             let classified = self.run_readonly_batch(msg_id, calls).await?;
+            // A read-only shell call that failed gets the same diagnosis as on the serial path;
+            // its hint is delivered with the batch's other hints below.
+            if self.config.shell.explain_errors {
+                for (call, (_, _, result)) in calls.iter().zip(&classified) {
+                    if call.name == "shell" && shell_command_failed(result) {
+                        if let Some((command, output)) =
+                            crate::shell_batch::failing_command(&call.args, result)
+                        {
+                            self.diagnose_shell_error(&command, &output).await;
+                        }
+                    }
+                }
+            }
             for (call, (name, kind, result)) in calls.iter().zip(classified) {
                 observations.push(crate::loop_progress::CallObservation::new(
                     crate::loop_progress::call_signature(call),

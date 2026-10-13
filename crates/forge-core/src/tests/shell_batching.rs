@@ -61,6 +61,14 @@ async fn tool_event_order_with_hooks(
     commands: Vec<&'static str>,
     hooks: Vec<forge_config::HookConfig>,
 ) -> String {
+    run_one_step(commands, hooks).await.0
+}
+
+/// Run a one-step turn; returns the tool event order and the final transcript.
+async fn run_one_step(
+    commands: Vec<&'static str>,
+    hooks: Vec<forge_config::HookConfig>,
+) -> (String, Vec<Message>) {
     let capture = CapturePresenter {
         attended: true,
         ..Default::default()
@@ -93,14 +101,31 @@ async fn tool_event_order_with_hooks(
     .unwrap();
     session.run_turn("check the tree").await.unwrap();
     let events = events.lock().unwrap();
-    events
+    let order = events
         .iter()
         .filter_map(|e| match e {
             PresenterEvent::ToolStart { name, .. } if name == "shell" => Some('S'),
             PresenterEvent::ToolResult { name, .. } if name == "shell" => Some('R'),
             _ => None,
         })
-        .collect()
+        .collect();
+    (order, session.transcript.clone())
+}
+
+#[tokio::test]
+async fn a_failed_read_only_call_in_a_concurrent_batch_is_still_diagnosed() {
+    let (order, transcript) = run_one_step(
+        vec!["ls forge-definitely-missing-dir", "echo a"],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(order, "SSRR");
+    assert!(
+        transcript
+            .iter()
+            .any(|m| m.role == Role::System && m.content.starts_with("[shell diagnosis]")),
+        "the failing ls got a diagnosis hint"
+    );
 }
 
 #[tokio::test]
