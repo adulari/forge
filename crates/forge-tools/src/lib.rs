@@ -43,7 +43,10 @@ pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,
     WebFetchTool, WebSearchTool,
 };
-pub use workspace::{read_only_roots, remap_origin_paths, worktree_git_dirs, worktree_origin};
+pub use workspace::{
+    path_arg_targets, read_only_roots, remap_origin_paths, sibling_worktree_write,
+    worktree_git_dirs, worktree_origin,
+};
 
 /// Run a shell command without a sandbox (for use by the autofix loop and other internal
 /// callers that don't need filesystem confinement). Never returns `Err`.

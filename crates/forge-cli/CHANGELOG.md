@@ -78,6 +78,30 @@ All notable changes to Forge are documented here. The format follows
   restores its stored model pin unless `--model` is given.
 
 ### Fixed
+- **`/btw` works while a turn is running and sees the conversation, like Claude Code's.** It took
+  the session lock the running turn holds, so a side question waited for the whole turn to end, and
+  it saw only the question itself. Each turn start now registers a detached asker built from the
+  session's shared parts; a `/btw` sent while busy runs beside the turn without touching it, and
+  every `/btw` carries a bounded excerpt of the session read from the store (recent messages, tool
+  names, shortened tool output, the compaction summary). Still never written to the transcript.
+- **The file tools no longer refuse paths outside the session workspace, so models stop writing
+  files through `shell`.** `write_file`, `apply_patch`, `read_file`, `list_dir` and the other
+  structured file tools rejected any path outside the workspace (plus `[tools] extra_roots`) in
+  every mode, Full included, while `shell` could reach the same path unconfined. A session asked
+  to write a doc into a sibling repo, read Claude Code's memory files, or list a parent directory
+  hit "path escapes session workspace" and fell back to `cat >` and heredocs. Outside paths now go
+  through the permission broker: Full allows, Ask/Auto/Auto-edit ask, Read-only denies, and the
+  secret denylist still applies in every mode. A write into another agent's Forge-managed worktree
+  stays refused, and main-checkout paths in a linked worktree are still redirected into it.
+  `[tools] confine_to_workspace = true` restores the old confinement.
+- **An endpoint's small default output cap no longer cuts large file writes off mid-call.** With
+  no `[mesh] max_output_tokens`, Forge sent no `max_tokens`, and some OpenAI-compatible endpoints
+  then default to 1,024 output tokens (Refuseless does), so every large `write_file`/`append_file`
+  ended with "the model's native output limit interrupted this tool call". When a reply stops at
+  the limit within 8,192 tokens and no cap was sent, Forge now sends `max_tokens = 32768` for that
+  model for the rest of the process and tells the model to retry the same call unchanged. It is
+  learned only after such a cut, so endpoints that reject large `max_tokens` values are never sent
+  one up front.
 - **Forge Anywhere sync keeps up with an active host and a late-joining device.** Each cycle
   uploaded one batch of ten journal entries and fetched one feed page of a hundred objects one at
   a time, about a minute in all, while a host with a busy session journals ~14 records a minute:

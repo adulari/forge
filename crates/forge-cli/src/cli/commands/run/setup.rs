@@ -81,10 +81,9 @@ pub(crate) fn sandboxed_shell_tool(
 pub(crate) fn resolve_extra_tool_roots(config: &forge_config::Config) -> Vec<std::path::PathBuf> {
     config
         .tools
-        .extra_roots
+        .effective_extra_roots()
         .iter()
         .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
         .map(|path| path.canonicalize().unwrap_or(path))
         .collect()
 }

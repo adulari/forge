@@ -80,6 +80,15 @@ impl Tool for WorkspaceTool {
             .clone();
         let (args, extra_roots) = self.scoped(args, &workspace, extra_roots);
         validate_workspace_args(&args, &workspace, &extra_roots)?;
+        if self.inner.side_effect() != SideEffect::ReadOnly {
+            if let Some(target) = sibling_worktree_write(&args, &workspace) {
+                return Err(ToolError::Failed(format!(
+                    "'{target}' is inside another agent's worktree; write inside this session's \
+                     workspace {} instead",
+                    workspace.display()
+                )));
+            }
+        }
         SESSION_EXTRA_ROOTS
             .scope(
                 extra_roots,
@@ -227,6 +236,40 @@ pub fn worktree_git_dirs(workspace: &std::path::Path) -> Vec<std::path::PathBuf>
     vec![origin.join(".git")]
 }
 
+/// Every path a file-tool call names (`path`, `cwd`, `paths[]`, `edits[].path`), resolved the way
+/// the tools resolve them. Relative entries are taken against `workspace`.
+pub fn path_arg_targets(args: &Value, workspace: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let resolve = |p: &str| {
+        let path = std::path::Path::new(p);
+        let absolute = if path.is_relative() {
+            workspace.join(path)
+        } else {
+            path.to_path_buf()
+        };
+        crate::core_tools::normalize_target(&absolute)
+    };
+    ["path", "cwd"]
+        .iter()
+        .filter_map(|key| args.get(*key).and_then(Value::as_str))
+        .chain(nested_paths(args))
+        .map(resolve)
+        .collect()
+}
+
+/// A write a linked-worktree session aims at ANOTHER Forge-managed worktree of the same repo
+/// (`<origin>/.forge/worktrees/<other>`), which is a sibling agent's isolated checkout. With file
+/// tools no longer hard-confined to the workspace, this is the one escape that stays refused in
+/// every mode: it would silently clobber work the merge-back of that agent then overwrites.
+pub fn sibling_worktree_write(args: &Value, workspace: &std::path::Path) -> Option<String> {
+    let origin = worktree_origin(workspace)?;
+    let managed = origin.join(".forge").join("worktrees");
+    let own = crate::core_tools::normalize_target(workspace);
+    path_arg_targets(args, workspace)
+        .into_iter()
+        .find(|target| target.starts_with(&managed) && !target.starts_with(&own))
+        .map(|target| target.display().to_string())
+}
+
 /// Directories read-only tools may read beyond the workspace: the main checkout of a linked
 /// worktree, where untracked files such as `node_modules` and build output exist only. The system
 /// temp dir stays closed on purpose — sibling temp workspaces must not see each other.
@@ -364,5 +407,31 @@ mod worktree_scope_tests {
         let sibling = origin.join(".forge/worktrees/other/a.rs");
         let args = json!({ "path": sibling });
         assert_eq!(remap_origin_paths(&args, &origin, &wt, false), args);
+    }
+
+    #[test]
+    fn only_a_write_into_another_agents_worktree_is_flagged() {
+        let (_dir, origin, wt) = linked_worktree();
+        let sibling = origin.join(".forge/worktrees/other/a.rs");
+        assert_eq!(
+            sibling_worktree_write(&json!({ "path": sibling }), &wt),
+            Some(sibling.display().to_string())
+        );
+        assert_eq!(
+            sibling_worktree_write(&json!({ "paths": ["/tmp/x.md", sibling] }), &wt),
+            Some(sibling.display().to_string())
+        );
+        for allowed in [
+            json!({ "path": wt.join("src/a.rs") }),
+            json!({ "path": "relative.rs" }),
+            json!({ "path": "/home/someone/other-repo/docs/notes.md" }),
+        ] {
+            assert_eq!(sibling_worktree_write(&allowed, &wt), None, "{allowed}");
+        }
+        assert_eq!(
+            sibling_worktree_write(&json!({ "path": sibling }), &origin),
+            None,
+            "an ordinary checkout has no sibling worktrees to protect"
+        );
     }
 }

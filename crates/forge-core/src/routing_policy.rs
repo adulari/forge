@@ -389,31 +389,13 @@ Rules:\n\
     /// model the session is not itself running on is never picked here: side calls are optional
     /// and must not spend a plan the user did not point this session at.
     pub(crate) fn auxiliary_model(&self, routed: &forge_mesh::RoutingDecision) -> String {
-        let session_pin = self
-            .pinned_model
-            .as_ref()
-            .and_then(|set| set.first().cloned());
-        if routed.pinned || session_pin.is_some() {
-            let own = session_pin.unwrap_or_else(|| routed.model.clone());
-            // A side call that already failed permanently (model_not_found, auth, 402) is benched
-            // in the shared store; without this filter the same doomed call repeated every turn.
-            let health = self.provider_readiness().health;
-            self.config
-                .candidates_for(TaskTier::Trivial)
-                .into_iter()
-                .filter(|m| !forge_mesh::catalog::is_subscription(m) || *m == own)
-                .filter(|m| {
-                    crate::auxiliary_candidates::usable_for_side_call(
-                        m,
-                        &health,
-                        self.catalog.as_ref(),
-                    )
-                })
-                .find(|m| forge_config::has_api_key(forge_config::provider_of(m)))
-                .unwrap_or(own)
-        } else {
-            routed.model.clone()
-        }
+        crate::btw_policy::side_call_model(
+            &self.config,
+            &self.provider_readiness().health,
+            self.pinned_model.as_ref(),
+            self.catalog.as_ref(),
+            routed,
+        )
     }
 
     /// Subscription CLI bridges start a full external agent process and MCP handshake. They are
@@ -440,7 +422,7 @@ Rules:\n\
             "recap" | "suggest" => Some(128),
             "auto-classify" => Some(64),
             "memory" | "shell-diagnose" => Some(256),
-            "btw" => Some(512),
+            "btw" => Some(2_048),
             _ => None,
         };
         CompletionOptions {

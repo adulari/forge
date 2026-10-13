@@ -45,6 +45,24 @@ obvious at a glance (the prior themed value-names hid which mode was which). `--
 **excluded** from the cycle: landing on "all guards off" by tapping a key is a footgun, so it is
 reachable only via `--mode full` / config. (Claude Code likewise never cycles into bypass.)
 
+### File tools outside the workspace
+
+The structured file tools (`read_file`, `write_file`, `edit_file`, `multi_edit`, `apply_patch`,
+`append_file`, `delete_file`, `list_dir`, `search`, `glob`, `notebook_edit`) accept paths outside
+the session workspace. Reads proceed in every mode. A write goes through the broker like any other
+side effect: **Full** allows it, **Ask** and **Auto** ask, **Auto-edit** asks too (it trusts edits
+to the project, not the whole disk; paths under `[tools] extra_roots` count as project), and
+**Read-only** denies it. The secret denylist (`.env*`, SSH keys, cloud credentials, ...) applies in
+every mode, Full included. One write is refused outright: a linked-worktree session writing into
+another Forge-managed worktree of the same repo (`<repo>/.forge/worktrees/<other>`), which would
+clobber a sibling agent's isolated work. Writes aimed at the main checkout of a linked worktree are
+still redirected into the worktree.
+
+`[tools] confine_to_workspace = true` restores the old hard confinement (workspace plus
+`extra_roots` only, refused in every mode). It was the default until the refusals proved to buy no
+safety, since `shell` was never confined, while pushing models to write files through `cat >` and
+heredocs instead of the reviewable file tools.
+
 ### Auto mode classification
 
 `auto` sorts every shell command three ways (`permission/auto.rs`, `permission/auto_safe.rs`):

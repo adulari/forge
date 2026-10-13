@@ -7,6 +7,19 @@
 
 use super::*;
 
+/// Answer `/btw` beside a running turn: the turn holds the session lock, so the question goes to
+/// the session's detached [`forge_core::BtwAsker`] and its answer card arrives through the
+/// presenter like any other event. The turn's handle, generation and busy state are untouched.
+pub(crate) fn spawn_busy_btw(question: String, app: &mut forge_tui::App) {
+    match forge_core::busy_asker(&app.session_id) {
+        Some(asker) => {
+            app.note("◈ btw — asking beside the running turn…");
+            tokio::spawn(async move { asker.ask_and_emit(&question).await });
+        }
+        None => app.note("⚠ /btw is not ready for this turn yet; try again in a moment"),
+    }
+}
+
 /// Spawn `/btw` as a background task: it makes one model call, so the turn-busy spinner should
 /// tick exactly like a real turn or `/compact`, even though the answer never joins the
 /// transcript.

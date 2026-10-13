@@ -31,6 +31,7 @@ pub mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;
+pub use btw_policy::{busy_asker, BtwAsker};
 pub mod capsule;
 pub(crate) mod clock;
 mod commit_policy;
@@ -1695,6 +1696,9 @@ pub struct Session {
     /// Canonicalized `config.tools.extra_roots`: extra roots (outside the workspace) the
     /// structured file tools may read and write. Empty by default (file tools stay confined).
     extra_tool_roots: Vec<std::path::PathBuf>,
+    /// The `/btw` asker refreshed at each turn start; held here so [`btw_policy::busy_asker`]'s
+    /// weak registry entry lives exactly as long as the session.
+    btw_asker: Option<Arc<btw_policy::BtwAsker>>,
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
@@ -2635,6 +2639,7 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        self.refresh_btw_asker();
         self.poll_lattice_background();
         // Anything still in the steer inbox belongs to a turn that already ended; the surface still
         // holds those prompts and is starting this turn with the first of them, so delivering them
@@ -9628,6 +9633,73 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Runs one `write_file` to a path outside a fresh workspace under `mode` (file tools not
+    /// confined) and returns whether the file was written plus the tool result the model saw.
+    async fn outside_write_under(mode: forge_types::PermissionMode) -> (bool, String) {
+        let root =
+            std::env::temp_dir().join(format!("forge-outside-write-{}", forge_types::new_id()));
+        let workspace = root.join("workspace");
+        let outside = root.join("elsewhere").join("notes.md");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = Config {
+            permission_mode: mode,
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(WriteFileProvider {
+                path: outside.to_string_lossy().to_string(),
+            }),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(&workspace),
+            Box::new(CapturePresenter::default()),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+        session.run_turn("write the notes").await.unwrap();
+        let written = outside.exists();
+        let result = session
+            .transcript
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .map(|message| message.content.clone())
+            .unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&root);
+        (written, result)
+    }
+
+    /// The file tools used to refuse any path outside the workspace in every mode, so a model
+    /// told to write a doc into a sibling repo fell back to `cat > file` through `shell`, which
+    /// was never confined. Outside paths now go through the permission broker instead.
+    #[tokio::test]
+    async fn full_mode_writes_outside_the_workspace_with_the_file_tools() {
+        let (written, result) = outside_write_under(forge_types::PermissionMode::Bypass).await;
+        assert!(
+            written,
+            "Full mode must let write_file reach an outside path: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_edit_asks_before_a_write_outside_the_workspace() {
+        let (written, result) = outside_write_under(forge_types::PermissionMode::AcceptEdits).await;
+        assert!(
+            !written,
+            "the capture presenter denies the prompt, so nothing is written"
+        );
+        assert!(
+            !result.contains("escapes session workspace"),
+            "the write must be asked about, not hard-refused: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_mode_still_denies_a_write_outside_the_workspace() {
+        let (written, _) = outside_write_under(forge_types::PermissionMode::Plan).await;
+        assert!(!written);
+    }
+
     #[tokio::test]
     async fn outside_workspace_write_is_a_recorded_tool_error_not_a_stalled_turn() {
         let root =
@@ -9636,10 +9708,11 @@ mod tests {
         let outside = root.join("outside.txt");
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let config = Config {
+        let mut config = Config {
             permission_mode: forge_types::PermissionMode::Bypass,
             ..Config::default()
         };
+        config.tools.confine_to_workspace = true;
         let mut session = Session::start(
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(WriteFileProvider {

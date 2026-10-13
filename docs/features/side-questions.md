@@ -14,6 +14,23 @@ every subsequent turn's context (and the eventual `/compact` summary) with off-t
 side-note card, and then forgets it completely. The main conversation — transcript, context,
 cost accounting via `store.add_message`/`record_side_call_usage` — never sees it.
 
+## Works while a turn is running, and sees the conversation
+
+Like Claude Code's `/btw`, the question can be asked while the session is busy, and it is
+answered with the conversation in view:
+
+- **Beside a busy turn.** A running turn holds the session lock for its whole length, so `/btw`
+  used to queue behind it. Each turn start now builds a `BtwAsker` (`btw_policy.rs`) from the
+  session's shared parts (provider, router, store, config, pin, a detached presenter sink) and
+  registers it by session id (weakly, so it is dropped with the session). While busy, the TUI
+  (`spawn_busy_btw` in `run/btw.rs`) looks it up with `forge_core::busy_asker` and runs it on its
+  own task; the turn's handle, generation and spinner are untouched, and the answer card arrives
+  through the presenter like any other event. Idle, `/btw` runs exactly as before.
+- **With context.** The call carries an excerpt of the session read from the store (which already
+  holds the running turn's steps): user and assistant text, the tools called, shortened tool
+  results, and the compaction summary when one exists. Newest material wins within 60,000
+  characters, and any single item is cut at 2,000. Answers may run to 2,048 tokens.
+
 ## What shipped
 
 - **`/btw <question>`** (alias **`/side`**) — routes one cheap trivial-tier model call through the

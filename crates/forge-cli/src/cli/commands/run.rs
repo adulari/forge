@@ -2059,6 +2059,9 @@ pub(crate) async fn run_chat_tui(
                                     global,
                                 ));
                             }
+                            DispatchOutcome::RunBtw { question } if busy => {
+                                spawn_busy_btw(question, &mut app);
+                            }
                             DispatchOutcome::RunBtw { question } => {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_btw(

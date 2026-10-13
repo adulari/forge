@@ -1097,6 +1097,30 @@ pub struct ToolsConfig {
     /// governs the Landlock write-sandbox) and does not affect `shell` (already unconfined).
     #[serde(default)]
     pub extra_roots: Vec<String>,
+    /// Hard-confine the structured file tools to the workspace plus `extra_roots`. Off by
+    /// default: a path outside the workspace goes through the permission broker like any other
+    /// side effect (Full allows, Ask/Auto/Auto-edit prompt, Read-only denies; the secret denylist
+    /// applies in every mode). Hard confinement never protected anything `shell` could not
+    /// already reach, and refusing the file tools pushed models into writing files via `shell`.
+    #[serde(default)]
+    pub confine_to_workspace: bool,
+}
+
+impl ToolsConfig {
+    /// The absolute roots the file tools may use beyond the workspace: the configured
+    /// `extra_roots`, or the filesystem root when the tools are not confined.
+    pub fn effective_extra_roots(&self) -> Vec<String> {
+        let mut roots: Vec<String> = self
+            .extra_roots
+            .iter()
+            .filter(|root| std::path::Path::new(root).is_absolute())
+            .cloned()
+            .collect();
+        if !self.confine_to_workspace {
+            roots.push("/".to_string());
+        }
+        roots
+    }
 }
 
 /// Next-prompt suggestion: predicts the user's likely next prompt after each completed turn.
