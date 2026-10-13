@@ -89,12 +89,29 @@ fn record_price(
     }
 }
 
+/// Writes `[mesh.context_windows]` overrides into the store so every reader of the persisted
+/// windows (statusline gauge, pickers, `forge serve`, the API) agrees with routing. Runs before
+/// the freshness check so an override takes effect without waiting for the next sweep.
+fn persist_configured_windows(store: &forge_store::Store) {
+    let Ok(config) = forge_config::load() else {
+        return;
+    };
+    for (model, window) in &config.mesh.context_windows {
+        if *window > 0 {
+            if let Err(e) = store.set_model_context(model, *window) {
+                tracing::warn!(model, "could not persist configured context window: {e}");
+            }
+        }
+    }
+}
+
 /// Fetch per-model context windows AND prices from all reachable provider APIs, persisting
 /// results into the DB. Best-effort and fail-soft — any error just leaves the conservative floor.
 pub async fn fetch_and_persist(models: &[String]) {
     let Ok(store) = crate::open_store() else {
         return;
     };
+    persist_configured_windows(&store);
     let stamp = SweepStamp::for_store(&store, models);
     if stamp.as_ref().is_some_and(SweepStamp::is_fresh) {
         tracing::debug!("context-window/price sweep is fresh — skipping the network round");
@@ -325,6 +342,7 @@ pub async fn fetch_and_persist(models: &[String]) {
     // Product-verified values win last over absent native fields and provisional cross-catalog
     // matches. This also repairs stale rows written by an earlier discovery run.
     persist_authoritative_contexts(models, &store);
+    persist_configured_windows(&store);
     if let Some(stamp) = stamp {
         stamp.touch();
     }

@@ -7,6 +7,12 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`[mesh.context_windows]` sets a model's context window in config.** A custom
+  OpenAI-compatible gateway whose `/models` lists no window, serving a renamed model
+  (`glm-5.3-abliterated`) that matches nothing published elsewhere, fell to the 32k conservative
+  floor, so a million-token model trimmed and compacted long turns for no reason. A configured
+  entry, keyed by full model id, now wins over every fetched or inferred window, and discovery
+  writes it into the store so the gauge and pickers agree with routing.
 - **`forge switch` moves one conversation between Claude Code and Forge, either way, as often as
   you like, with nothing duplicated or lost.** Leave either tool, run `forge switch` in the same
   directory, and the conversation reopens in the other (`claude --resume` or `forge chat --resume`

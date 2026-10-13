@@ -894,6 +894,10 @@ pressure, then candidate filtering and chain building.
   independent name (after `provider::`, after the last `/`, minus the `-free` tier suffix), and
   the LOWEST matching window wins, since a gateway may serve a smaller one. Truly unknown models
   fall back to `CONSERVATIVE_CONTEXT_WINDOW` = 32,000 only when the core must bound a request.
+  A `[mesh.context_windows]` entry (`"refuseless::glm-5.3-abliterated" = 1000000`, keyed by full
+  model id) beats all of the above, for an endpoint that publishes no window and serves a renamed
+  model nothing else matches; discovery also writes it into the store so the statusline gauge,
+  pickers and `forge serve` report the same figure.
 
 Then: the vision preference (§3.3) when the turn has images; a **stable** demotion of
 `Warning`-pressured subscriptions to the back of the list (`quota.is_pressured`, `lib.rs:837`) —

@@ -161,13 +161,20 @@ impl Session {
         })
     }
 
-    /// The context window (tokens) to assume for `model`: a narrow authoritative override first,
+    /// The context window (tokens) to assume for `model`: a configured `[mesh.context_windows]`
+    /// entry, then a narrow authoritative override,
     /// then a fetched per-model window (provider API, persisted in the store), the family heuristic,
     /// and finally a conservative floor. Always returns a usable number so a turn can be bounded
     /// even for a model we've never seen. The cap only shrinks what we SEND, not the model's actual
     /// limit.
     pub(crate) fn base_context_window(&self, model: &str) -> u32 {
-        forge_mesh::pricing::authoritative_context_limit(model)
+        self.config
+            .mesh
+            .context_windows
+            .get(model)
+            .copied()
+            .filter(|w| *w > 0)
+            .or_else(|| forge_mesh::pricing::authoritative_context_limit(model))
             .or_else(|| {
                 self.store
                     .model_context(model)
