@@ -157,10 +157,9 @@ impl Session {
         // default, so this is a no-op for existing configs.
         let extra_tool_roots: Vec<std::path::PathBuf> = config
             .tools
-            .extra_roots
+            .effective_extra_roots()
             .iter()
             .map(std::path::Path::new)
-            .filter(|path| path.is_absolute())
             .map(normalize_workspace_target)
             .collect();
         let _ = tools.bind_extra_roots(extra_tool_roots.clone());
@@ -238,6 +237,7 @@ impl Session {
             workspace_binding: Arc::new(std::sync::RwLock::new(workspace.root().to_path_buf())),
             workspace,
             extra_tool_roots,
+            btw_asker: None,
             pending_hints: vec![],
             steer: crate::steer::SteerInbox::default(),
             job_wake: crate::job_wake::JobWake::default(),

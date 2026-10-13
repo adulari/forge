@@ -893,6 +893,9 @@ impl DriverState {
                     global,
                 ));
             }
+            DispatchOutcome::RunBtw { question } if self.busy => {
+                spawn_busy_btw(question, &mut self.app);
+            }
             DispatchOutcome::RunBtw { question } => {
                 self.turn_gen += 1;
                 self.turn_handle = Some(spawn_btw(

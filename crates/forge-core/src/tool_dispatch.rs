@@ -307,9 +307,7 @@ impl Session {
         let (scoped_args, readable_roots) = self.scope_to_workspace(&call.name, effective_args);
         effective_args = scoped_args;
         let mut args_json = serde_json::to_string(&effective_args)?;
-        if let Err(error) =
-            validate_workspace_args(&effective_args, &self.workspace, &readable_roots)
-        {
+        if let Err(error) = self.check_workspace(&call.name, &effective_args, &readable_roots) {
             let result = format!("error: {error}");
             self.presenter.emit(PresenterEvent::ToolStart {
                 name: call.name.clone(),
@@ -437,7 +435,7 @@ impl Session {
                 effective_args = scoped_args;
                 args_json = serde_json::to_string(&effective_args).unwrap_or_default();
                 if let Err(error) =
-                    validate_workspace_args(&effective_args, &self.workspace, &readable_roots)
+                    self.check_workspace(&call.name, &effective_args, &readable_roots)
                 {
                     let result = format!("error: {error}");
                     self.presenter.emit(PresenterEvent::ToolResult {
@@ -515,6 +513,15 @@ impl Session {
         let decision = self
             .settle_auto(decision, auto_verdict, &effective_args)
             .await;
+        let decision = if decision == PermissionDecision::Allow
+            && self.mode == forge_types::PermissionMode::AcceptEdits
+            && side_effect == forge_types::SideEffect::Write
+            && self.writes_beyond_workspace(&effective_args)
+        {
+            PermissionDecision::Ask
+        } else {
+            decision
+        };
         // Notification lifecycle hook (Claude-Code parity): the agent needs the user's attention to
         // approve this tool. Fired just before the prompt is shown (inert when no hooks configured).
         // Inlined with field-level borrows (the hooks call needs only `config`, `id`, `presenter`).
