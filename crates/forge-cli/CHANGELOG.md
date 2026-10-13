@@ -78,6 +78,12 @@ All notable changes to Forge are documented here. The format follows
   restores its stored model pin unless `--model` is given.
 
 ### Fixed
+- **Forge Anywhere sync keeps up with an active host and a late-joining device.** Each cycle
+  uploaded one batch of ten journal entries and fetched one feed page of a hundred objects one at
+  a time, about a minute in all, while a host with a busy session journals ~14 records a minute:
+  its 9,000-entry backlog only grew, and a device reading the feed from the start needed ~35 hours
+  to catch up. Uploads, feed pages and staged applies now each drain for up to 20 seconds per
+  cycle, and a page's objects download eight at a time (still staged in feed order).
 - **Forge Anywhere sync no longer wedges on a change whose encrypted object is gone.** A device that
   joined later reads the change feed from the start, and one early entry whose R2 object no longer
   exists answered 404 on every poll: the pass failed before advancing the cursor, so that device
