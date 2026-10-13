@@ -143,3 +143,13 @@ Pure, unit-tested.
 - [ ] Token/gauge values update live on turn completion (driven by the existing `Cost`/`Usage` emit).
 - [ ] `cargo fmt` + `clippy -D warnings` clean; existing statusline tests still pass.
 - [ ] No change to cost math or the agent loop.
+
+### Live updates during a turn
+
+The statusline's spend, session token totals, per-turn token deltas, throughput and context gauge
+all come from `PresenterEvent::Cost`. It used to be emitted only on resume, after compaction or an
+overflow retry, and at turn end, so a long turn showed the previous turn's numbers until it
+finished. `Session::emit_cost_snapshot` (`compaction_policy.rs`) now runs after every model call,
+right after the usage row is recorded, with the store's totals and that call's real input size as
+the context fill (the transcript estimate on a CLI bridge, as before). It is two indexed store
+reads per model call. The turn-end event uses the same function.

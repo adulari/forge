@@ -128,6 +128,7 @@ impl Session {
         // Mid-intent nudges sent in the current stretch of idleness; see `followup_intent_nudge`.
         let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
+        let mut silence = crate::silence_guard::SilenceTracker::new(std::time::Instant::now());
         // Failure-loop guard (complements the identical-call doom-loop): counts tool failures by
         // (tool name, error kind) ACROSS the turn, so a model retrying the same KIND of error with
         // different args (edits that never match, reads of paths that don't exist) is caught even
@@ -308,6 +309,7 @@ impl Session {
                 &mut bridge_input_accum,
                 &mut empty_nudges,
             )?;
+            self.emit_cost_snapshot(context_tokens, &active_model)?;
 
             if resp.wants_tools() || bridge_tool_progress {
                 followup_intent_nudges = 0;
@@ -802,6 +804,12 @@ impl Session {
                 hit_step_cap = false;
                 break;
             }
+            self.observe_silence(
+                &mut silence,
+                verify_attempts == 0,
+                &resp,
+                &step_observations,
+            )?;
             // Tool results are in: the earliest point a queued prompt can join the conversation.
             self.inject_steers();
         }

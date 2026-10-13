@@ -323,13 +323,13 @@ impl Session {
         });
     }
 
-    /// Emit the terminal accounting snapshot followed by the result event. Terminal accounting
-    /// uses the complete provider-consumption ledger; the context gauge above intentionally keeps
-    /// using only active transcript messages.
-    pub(crate) fn emit_terminal_events(
+    /// Emit the session's accounting as it stands in the store: spend, token totals (from which the
+    /// TUI derives the per-turn deltas and throughput) and the live context fill. Called after
+    /// every model call, not only at turn end: the statusline used to freeze for the whole turn
+    /// because the only per-call write (`record_usage`) never told the presenter, so a long turn
+    /// showed the cost, tokens and context gauge of the previous turn until it finished.
+    pub(crate) fn emit_cost_snapshot(
         &mut self,
-        final_text: &str,
-        stop_reason: StopReason,
         context_tokens: u64,
         active_model: &str,
     ) -> Result<(), CoreError> {
@@ -342,6 +342,20 @@ impl Session {
             context_tokens,
             context_limit: Some(self.effective_context_window(active_model)),
         });
+        Ok(())
+    }
+
+    /// Emit the terminal accounting snapshot followed by the result event. Terminal accounting
+    /// uses the complete provider-consumption ledger; the context gauge above intentionally keeps
+    /// using only active transcript messages.
+    pub(crate) fn emit_terminal_events(
+        &mut self,
+        final_text: &str,
+        stop_reason: StopReason,
+        context_tokens: u64,
+        active_model: &str,
+    ) -> Result<(), CoreError> {
+        self.emit_cost_snapshot(context_tokens, active_model)?;
         self.presenter.emit(PresenterEvent::Done {
             final_text: final_text.to_string(),
             stop_reason,

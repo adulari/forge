@@ -133,17 +133,36 @@ impl Session {
         }
 
         // Fast path: when the model batched several independent side-effect-free calls (and no
-        // hooks are configured), run them CONCURRENTLY instead of one-at-a-time — a direct
-        // latency win on multi-file reads/searches. Mixed or hook-bearing batches take the
-        // serial path below unchanged.
-        let concurrent_batch = calls.len() >= 2
-            && self.config.hooks.is_empty()
-            && calls.iter().all(|c| self.is_concurrent_readonly(&c.name));
+        // tool hooks are configured), run them CONCURRENTLY instead of one-at-a-time — a direct
+        // latency win on multi-file reads/searches. Mixed or tool-hook-bearing batches take the
+        // serial path below unchanged. Only Pre/PostToolUse hooks run per call; requiring NO hooks
+        // at all disabled this path for anyone with just a session-start or prompt hook.
+        let tool_hooks = self.config.hooks.iter().any(|h| {
+            matches!(
+                h.event,
+                forge_config::HookEvent::PreToolUse | forge_config::HookEvent::PostToolUse
+            )
+        });
+        let concurrent_batch =
+            calls.len() >= 2 && !tool_hooks && calls.iter().all(|c| self.is_concurrent_readonly(c));
         if concurrent_batch {
             // Feed the failure-loop guard the same way the serial path does, so a concurrent
             // batch that keeps failing the same way (different args each step) is caught instead
             // of burning the budget to the step cap.
             let classified = self.run_readonly_batch(msg_id, calls).await?;
+            // A read-only shell call that failed gets the same diagnosis as on the serial path;
+            // its hint is delivered with the batch's other hints below.
+            if self.config.shell.explain_errors {
+                for (call, (_, _, result)) in calls.iter().zip(&classified) {
+                    if call.name == "shell" && shell_command_failed(result) {
+                        if let Some((command, output)) =
+                            crate::shell_batch::failing_command(&call.args, result)
+                        {
+                            self.diagnose_shell_error(&command, &output).await;
+                        }
+                    }
+                }
+            }
             for (call, (name, kind, result)) in calls.iter().zip(classified) {
                 observations.push(crate::loop_progress::CallObservation::new(
                     crate::loop_progress::call_signature(call),
@@ -236,8 +255,8 @@ impl Session {
                 // one alternate recovery attempt, then tell the model once per turn to stop.
                 // Delivered via pending_hints so it lands right after the threshold result.
                 if self.config.mesh.env_fight_nudge && call.name == "shell" {
-                    if let Some(cmd) = call.args.get("command").and_then(|v| v.as_str()) {
-                        if is_env_setup_command(cmd)
+                    if let Some(cmd) = forge_types::shell_command_text(&call.args) {
+                        if is_env_setup_command(&cmd)
                             && self.env_fight.observe(shell_command_failed(&result))
                         {
                             self.presenter.emit(PresenterEvent::Warning(format!(

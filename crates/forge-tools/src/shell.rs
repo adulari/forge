@@ -44,6 +44,7 @@ mod pty;
 mod rtk;
 pub use background::ShellJobTool;
 pub use rtk::RtkRewriter;
+mod batch;
 mod output;
 use output::{render_streams, stream_text, truncate_for_model};
 
@@ -126,7 +127,7 @@ impl Tool for ShellTool {
          tty-detecting programs see isatty=true — stdin is still closed so prompts get EOF. \
          Prefer read_file/search/glob/list_dir over cat/grep/find/ls, and edit_file/multi_edit/ \
          write_file over sed/awk/perl -i/heredoc redirects: they are cheaper, exact, and keep the \
-         change reviewable. Args: command (required), cwd \
+         change reviewable. Args: command (or commands), cwd \
          (default \".\"), timeout_secs (default 120, max 600), pty (default false). To WAIT for a \
          long external job (CI run / release build that takes minutes), set \
          poll_until_exit_zero:true — the call re-runs `command` every poll_interval_secs until it \
@@ -138,7 +139,10 @@ impl Tool for ShellTool {
          immediately and is then managed with the `shell_job` tool. \
          Keep verification status trustworthy: run checks separately or join them with `&&`; avoid \
          masking failures behind `;`, `||`, or a pipeline into head/tail/tee without explicit \
-         pipe-failure handling."
+         pipe-failure handling. Batch work to save round trips: several related commands that \
+         should run in order go in ONE call as `commands: [...]` (each keeps its own exit code); \
+         independent read-only probes go as parallel shell calls in one response; a long or \
+         repeated multi-step procedure goes in a script file you write once and then run."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Shell
@@ -147,15 +151,16 @@ impl Tool for ShellTool {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "POSIX sh -c command line." },
+                "command": { "type": "string", "description": "POSIX sh -c command line. Required unless `commands` is given." },
+                "commands": { "type": "array", "items": { "type": "string" }, "maxItems": 20, "description": "Several command lines to run IN ORDER in one call (instead of `command`), e.g. [\"cargo build\", \"cargo test -p x\", \"git status --short\"]. Each runs like a separate call (own exit code, own timeout) and the result has one section per command. Stops at the first failure unless stop_on_error is false. Not combinable with background, pty or poll mode." },
+                "stop_on_error": { "type": "boolean", "description": "With `commands`: stop at the first command that fails (default true)." },
                 "cwd": { "type": "string", "description": "Working directory; defaults to the project root." },
                 "timeout_secs": { "type": "integer", "minimum": 1, "description": "Default 120; clamped to 600. In poll mode this is the per-call budget, clamped to 100s." },
                 "pty": { "type": "boolean", "description": "Run under a pseudo-terminal so interactive/tty-detecting programs work (default false). Stdin is still closed (EOF) so prompts won't hang forever. Refused when the shell sandbox is enabled (the PTY path can't be confined by Landlock)." },
                 "poll_until_exit_zero": { "type": "boolean", "description": "Poll mode (default false): re-run command every poll_interval_secs until it exits 0 or the per-call budget elapses. On budget exhaustion returns a resumable 'call again to keep waiting' result (NOT a killed timeout). Use to wait for a long external job (CI/release build); call repeatedly until ready. Not supported with pty:true." },
                 "poll_interval_secs": { "type": "integer", "minimum": 1, "description": "Gap between poll attempts in poll mode (default 5, max 60)." },
                 "background": { "type": "boolean", "description": "Start the command as a long-lived background job (default false) and return immediately with its job id. The job runs in its own session with output on a log file, so it survives this call, later calls, and Forge itself — use it for anything that must keep running (emulator, dev server, tunnel, daemon). Manage it with the `shell_job` tool. Not supported with pty or poll mode." }
-            },
-            "required": ["command"]
+            }
         })
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
@@ -163,7 +168,6 @@ impl Tool for ShellTool {
     }
 
     async fn run_full(&self, args: &Value) -> Result<crate::ToolRun, ToolError> {
-        let command = str_arg(args, "command")?;
         let cwd = args
             .get("cwd")
             .and_then(Value::as_str)
@@ -196,6 +200,29 @@ impl Tool for ShellTool {
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .clamp(1, MAX_TIMEOUT_SECS);
         let use_pty = args.get("pty").and_then(Value::as_bool).unwrap_or(false);
+        if let Some(list) = args.get("commands") {
+            let single_only = ["background", "pty", "poll_until_exit_zero"]
+                .into_iter()
+                .find(|key| args.get(*key).and_then(Value::as_bool).unwrap_or(false));
+            if let Some(key) = single_only {
+                return Ok(crate::ToolRun::from(format!(
+                    "shell: {key}:true is not supported with `commands` — run that command on its \
+                     own call."
+                )));
+            }
+            let commands = match batch::batch_commands(list) {
+                Ok(commands) => commands,
+                Err(message) => return Ok(crate::ToolRun::from(message)),
+            };
+            let stop_on_error = args
+                .get("stop_on_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            return Ok(self
+                .run_batch(commands, &cwd, timeout_secs, stop_on_error)
+                .await);
+        }
+        let command = str_arg(args, "command")?;
         // The PTY path can't carry the Landlock sandbox (portable-pty owns the spawn). Refuse pty
         // when the sandbox is on, otherwise it's a trivial escape hatch (always pass pty:true).
         if use_pty && self.policy.enabled {

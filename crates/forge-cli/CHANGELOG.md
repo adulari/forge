@@ -78,6 +78,24 @@ All notable changes to Forge are documented here. The format follows
   restores its stored model pin unless `--model` is given.
 
 ### Fixed
+- **Long tool-only stretches now show progress.** A model could run hundreds of distinct shell
+  commands without a word, and no loop guard could fire (they key on repeated arguments, failures,
+  unseen output or repeated wording). A silence guard counts tool steps since the last visible text:
+  every 12 (or after 3 minutes) it asks the model for a one-line progress note alongside its next
+  tool calls and shows a harness-written `⋯ 12 steps since the last update: …` line, so progress is
+  visible even if the model ignores the ask. It never halts a turn.
+- **Shell work takes fewer round trips.** `shell` accepts `commands: [...]` (up to 20, run in order,
+  one section and exit code per entry, stop at the first failure unless `stop_on_error: false`), and
+  several provably read-only shell calls in one response now run concurrently instead of one by one.
+  Permissions judge every batch entry like a line of one command, and a failed batch gets one
+  diagnosis for its failing entry only.
+- **The statusline updates live during a turn.** Spend, token totals, per-turn token deltas,
+  throughput and the context gauge only refreshed when a turn ended; they now update after every
+  model call.
+- **`/btw` answers in an overlay card, like Claude Code.** The answer used to be printed into the
+  scrollback between real turns. It now opens in a card over the live view (Esc, Enter or Space
+  close it, arrows scroll), never enters the scrollback, reaches remote clients as an overlay, and
+  no longer takes over the turn spinner when asked while idle.
 - **`/btw` works while a turn is running and sees the conversation, like Claude Code's.** It took
   the session lock the running turn holds, so a side question waited for the whole turn to end, and
   it saw only the question itself. Each turn start now registers a detached asker built from the

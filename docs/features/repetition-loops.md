@@ -117,3 +117,18 @@ thing between a model and an unbounded loop.
 - `stall_guard::tests::the_interleaved_live_pattern_eventually_nudges_then_halts` and
   `tests::stall_guard::a_model_cycling_among_a_few_phrasings_is_nudged_then_stopped` (from the
   previous change) still pass: the backstop is intact.
+
+## 7. Silent tool stretches (silence guard)
+
+A different failure from repetition: hundreds of distinct, mostly successful tool calls (usually
+`shell`) with no text at all, so the user saw nothing readable for half an hour. Every guard above
+keys on repeated arguments, repeated failures, unseen output or repeated wording, and the narration
+check skips empty text, so none can fire. `crates/forge-core/src/silence_guard.rs` counts tool steps
+since the last user-visible text. Every 12 silent steps (or after 180 s once 4 have run) it adds a
+system message asking the model for a one- or two-sentence progress note in the same response as
+its next tool calls, and emits `PresenterEvent::Progress` with a harness-written summary
+(`⋯ 12 steps since the last update: 11 shell, 1 read_file; latest: …`), so the user sees progress
+even if the model ignores the ask. After 40 steps without a successful file write the ask also
+requests a findings summary and the decision being worked toward (once per stretch). It never
+halts. Direct path only: a CLI bridge runs all its tools inside one `complete()`.
+`FORGE_SYSTEM` also asks for a one-sentence progress note every several tool calls.

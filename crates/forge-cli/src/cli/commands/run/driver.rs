@@ -893,20 +893,8 @@ impl DriverState {
                     global,
                 ));
             }
-            DispatchOutcome::RunBtw { question } if self.busy => {
-                spawn_busy_btw(question, &mut self.app);
-            }
             DispatchOutcome::RunBtw { question } => {
-                self.turn_gen += 1;
-                self.turn_handle = Some(spawn_btw(
-                    question,
-                    &self.session,
-                    &self.done_tx,
-                    self.turn_gen,
-                    &mut self.app,
-                    &mut self.busy,
-                    &mut self.busy_since,
-                ));
+                start_btw(question, &self.session, &mut self.app, self.busy);
             }
             DispatchOutcome::RunSavedWorkflow { name, args } => {
                 self.turn_gen += 1;

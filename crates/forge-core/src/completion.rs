@@ -145,12 +145,7 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
 
     let command = serde_json::from_str::<serde_json::Value>(args)
         .ok()
-        .and_then(|value| {
-            value
-                .get("command")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
+        .and_then(|value| forge_types::shell_command_text(&value))
         .unwrap_or_else(|| args.to_owned())
         .to_ascii_lowercase();
     let family = if command.contains("tsc")

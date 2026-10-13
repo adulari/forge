@@ -164,9 +164,8 @@ fn decide_in_with(
         // Explicit deny rules were already honoured above.
         let read_only_shell = side_effect == SideEffect::Shell
             && is_shell_tool(tool_name)
-            && args
-                .get("command")
-                .and_then(Value::as_str)
+            && forge_types::shell_command_text(args)
+                .as_deref()
                 .is_some_and(readonly_shell::is_read_only_shell);
         return if read_only_shell { Allow } else { Deny };
     }
@@ -202,7 +201,8 @@ fn decide_shell_segments(
     rules: &[PermissionRule],
 ) -> Option<PermissionDecision> {
     use PermissionDecision::*;
-    let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+    let cmd_text = forge_types::shell_command_text(args);
+    let cmd = cmd_text.as_deref().unwrap_or("");
     let (segments, parsed_ok) = effective_commands(cmd);
     let mut all_allowed = parsed_ok && !segments.is_empty();
     let mut any_ask = false;
@@ -239,7 +239,8 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
     }
     // Shell tool: match against every effective command extracted from the command line.
     if is_shell_tool(tool_name) {
-        let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+        let cmd_text = forge_types::shell_command_text(args);
+        let cmd = cmd_text.as_deref().unwrap_or("");
         let (segments, parsed_ok) = effective_commands(cmd);
         let any_glob = segments
             .iter()
@@ -318,6 +319,19 @@ fn specificity(rule: &PermissionRule) -> usize {
 mod auto;
 mod auto_safe;
 mod readonly_shell;
+
+/// Whether a `shell` call provably only reads: every command passes the Plan-mode read-only
+/// check, and it uses none of the modes that outlive or re-run the call (background, poll, pty).
+/// Such calls may run concurrently with other read-only calls in one step.
+pub(crate) fn is_read_only_shell_call(args: &Value) -> bool {
+    let single_only = ["background", "poll_until_exit_zero", "pty"]
+        .iter()
+        .any(|key| args.get(*key).and_then(Value::as_bool).unwrap_or(false));
+    !single_only
+        && forge_types::shell_command_text(args)
+            .as_deref()
+            .is_some_and(readonly_shell::is_read_only_shell)
+}
 mod shell_commands;
 pub use auto::{auto_risk, AutoVerdict};
 pub(crate) use readonly_shell::{plan_shell_denial, PLAN_SHELL_NOTE};

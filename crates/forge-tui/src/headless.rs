@@ -21,6 +21,9 @@ pub struct HeadlessPresenter {
     styled: bool,
     /// A reasoning delta was the last thing written, so the answer needs a line break first.
     reasoning_open: bool,
+    /// The newest accounting line, printed once when the turn ends. `Cost` now arrives after
+    /// every model call (so the TUI statusline is live); a line per call would flood plain output.
+    pending_cost: Option<String>,
 }
 
 impl Default for HeadlessPresenter {
@@ -35,6 +38,7 @@ impl HeadlessPresenter {
             interactive,
             styled: std::io::stdout().is_terminal(),
             reasoning_open: false,
+            pending_cost: None,
         }
     }
 
@@ -138,9 +142,9 @@ impl Presenter for HeadlessPresenter {
                 session_out,
                 ..
             } => {
-                println!(
+                self.pending_cost = Some(format!(
                     "  $ session total: ${session_total_usd:.4} · ↑{session_in} ↓{session_out} tok"
-                );
+                ));
             }
             PresenterEvent::SubagentStart { agent, task, .. } => {
                 println!("  ⤷ spawn [{agent}]: {task}");
@@ -247,12 +251,19 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::Recap { text } => {
                 println!("  ※ recap  {text}");
             }
+            PresenterEvent::Progress(text) => {
+                println!("  ⋯ {text}");
+            }
             // Ghost-text input suggestions are a TUI-only affordance (dim placeholder + Tab
             // accept in an interactive input box); headless has no input box to show it in.
             PresenterEvent::SuggestionReady { .. } => {}
-            // The final answer was already streamed via AssistantText; Done is a
-            // lifecycle marker, so the headless renderer needs no extra output here.
-            PresenterEvent::Done { .. } => {}
+            // The final answer was already streamed via AssistantText; Done only flushes the
+            // turn's final accounting line.
+            PresenterEvent::Done { .. } => {
+                if let Some(line) = self.pending_cost.take() {
+                    println!("{line}");
+                }
+            }
             // Real-time quota updates/pace are for the TUI overlay/statusline; headless ignores them.
             PresenterEvent::QuotaUpdate { .. } => {}
             PresenterEvent::QuotaPace { .. } => {}

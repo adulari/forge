@@ -12,9 +12,10 @@ fn always_allow_patterns(tool: &str, args: &serde_json::Value) -> Vec<String> {
     if tool != "shell" {
         return Vec::new();
     }
-    let Some(cmd) = args.get("command").and_then(serde_json::Value::as_str) else {
+    let Some(cmd_text) = forge_types::shell_command_text(args) else {
         return Vec::new();
     };
+    let cmd = cmd_text.as_str();
     // The leading word only: `git status --short` grants `git *`, never `--short`.
     match cmd.split_whitespace().next() {
         Some(verb) if !verb.is_empty() && !verb.starts_with('-') => {
@@ -49,10 +50,34 @@ impl Session {
     }
 
     /// Run a single tool call, applying the permission policy, and return its result text.
-    /// Whether `name` is a side-effect-free registry tool that's safe to run concurrently in a
-    /// batch: not a core-owned virtual tool (those mutate session state / prompt the user), not an
-    /// external MCP tool, present in the registry, and ReadOnly.
-    pub(crate) fn is_concurrent_readonly(&self, name: &str) -> bool {
+    /// Whether `call` is side-effect-free and safe to run concurrently in a batch: not a core-owned
+    /// virtual tool (those mutate session state / prompt the user), not an external MCP tool,
+    /// present in the registry, and ReadOnly — or a `shell` call that provably only reads
+    /// ([`permission::is_read_only_shell_call`]), so independent probes stop running one by one.
+    pub(crate) fn is_concurrent_readonly(&self, call: &forge_types::ToolCall) -> bool {
+        let name = call.name.as_str();
+        // The batch path skips the per-call task-scope gate, so a tool the scope forbids must take
+        // the serial path, which refuses it properly.
+        if self
+            .task_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.permits_tool(name))
+        {
+            return false;
+        }
+        if name == "shell" {
+            // Only when the broker would allow it outright: the batch path never prompts, so a
+            // shell line that would ask must go through the serial path's confirmation instead.
+            return self.tools.get(name).is_some()
+                && permission::is_read_only_shell_call(&call.args)
+                && permission::decide(
+                    self.mode,
+                    forge_types::SideEffect::Shell,
+                    name,
+                    &call.args,
+                    &self.rules,
+                ) == PermissionDecision::Allow;
+        }
         if name == subagent::SPAWN_AGENTS_TOOL
             || name == workflow::RUN_WORKFLOW_TOOL
             || name == ASK_USER_TOOL
@@ -332,9 +357,8 @@ impl Session {
         if self.config.mesh.env_fight_nudge
             && self.env_fight.should_block()
             && call.name == "shell"
-            && effective_args
-                .get("command")
-                .and_then(|command| command.as_str())
+            && forge_types::shell_command_text(&effective_args)
+                .as_deref()
                 .is_some_and(is_env_setup_command)
         {
             let result = ENV_FIGHT_BLOCKED_RESULT.to_string();
@@ -462,7 +486,16 @@ impl Session {
         // call (missing a required field, or args that aren't an object) otherwise fails deep inside
         // the tool with an opaque message; instead return an actionable error naming what's missing
         // plus the required fields, so the model self-corrects on the next step instead of thrashing.
-        if let Err(reason) = validate_tool_args(&tool.schema(), &effective_args) {
+        let validation = validate_tool_args(&tool.schema(), &effective_args).and_then(|()| {
+            // `command` and `commands` are alternatives, which `required` cannot express without
+            // a schema combinator some providers reject; hold the line here instead.
+            if call.name == "shell" && forge_types::shell_command_text(&effective_args).is_none() {
+                Err("missing required field: command (or commands)".to_string())
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(reason) = validation {
             // Observed 2026-09-08: a session routed through a Headroom proxy (`[mesh] headroom`)
             // degraded into `{}` tool calls turn after turn — the proxy rewrites prior turns and
             // tool schemas, and the model lost the arguments. Name the likely cause once so the
@@ -704,10 +737,8 @@ impl Session {
             // commit-discipline tracker forgets whatever is no longer dirty.
             if self.config.git.commit_nudge
                 && call.name == "shell"
-                && call
-                    .args
-                    .get("command")
-                    .and_then(|v| v.as_str())
+                && forge_types::shell_command_text(&call.args)
+                    .as_deref()
                     .is_some_and(crate::git_hygiene::may_move_head)
             {
                 let root = self.workspace.root();
@@ -750,9 +781,10 @@ impl Session {
             && self.config.shell.explain_errors
             && shell_command_failed(&result)
         {
-            if let Some(command) = call.args.get("command").and_then(|v| v.as_str()) {
-                let command = command.to_string();
-                self.diagnose_shell_error(&command, &result).await;
+            if let Some((command, output)) =
+                crate::shell_batch::failing_command(&call.args, &result)
+            {
+                self.diagnose_shell_error(&command, &output).await;
             }
         }
 

@@ -14,7 +14,7 @@ pub(crate) use input::render_input;
 pub use input::{input_box_height, input_cursor_up};
 pub use live::render_live;
 pub(crate) use overlays::{cost_cell, mesh_pace_suffix};
-pub use overlays::{render_mesh_overlay, render_usage_overlay};
+pub use overlays::{render_btw_overlay, render_mesh_overlay, render_usage_overlay};
 pub(crate) use status_line::render_statusline;
 pub(crate) use status_widgets::{
     compact_band_height, context_gauge_spans, fmt_dur, format_tok, human, mesh_effort_chip,

@@ -886,6 +886,22 @@ pub const PATH_ARG_KEYS: &[&str] = &[
 /// Extract a tool call's target file path from any of the known [`PATH_ARG_KEYS`]. Returns the
 /// first present string value, or `None` if the args carry no recognizable path key (e.g. a shell
 /// call keyed on `command`, or a tool that takes no path).
+/// The command text of a `shell` call: `command`, or a `commands` batch joined with newlines.
+/// Permission rules, auto-mode risk and the other shell-aware checks read this, so every entry of
+/// a batch is judged exactly like the lines of one multi-line command.
+pub fn shell_command_text(args: &serde_json::Value) -> Option<String> {
+    if let Some(command) = args.get("command").and_then(serde_json::Value::as_str) {
+        return Some(command.to_string());
+    }
+    let entries: Vec<&str> = args
+        .get("commands")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    (!entries.is_empty()).then(|| entries.join("\n"))
+}
+
 pub fn extract_path_arg(args: &serde_json::Value) -> Option<&str> {
     PATH_ARG_KEYS
         .iter()

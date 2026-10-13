@@ -63,6 +63,11 @@ pub(crate) struct CallObservation {
 }
 
 impl CallObservation {
+    /// Whether this call was a file write that succeeded.
+    pub(crate) fn wrote(&self) -> bool {
+        self.ok && self.mutating
+    }
+
     pub(crate) fn new(signature: u64, ok: bool, mutating: bool, result: &str) -> Self {
         Self {
             signature,
