@@ -459,6 +459,16 @@ pub(crate) async fn dispatch_command(
                 app.note("● nothing to uncompact — this session was never compacted");
             }
         }
+        // `/reground`: the detection + notice are synchronous; the re-summary is a compaction with
+        // a one-shot directive, so it reuses the `/compact` background task on every surface.
+        CommandAction::Reground => {
+            let report = {
+                let mut s = session.lock().await;
+                s.prepare_reground().map_err(|e| anyhow::anyhow!("{e}"))?
+            };
+            app.note(&report);
+            return Ok(DispatchOutcome::RunCompact);
+        }
         // `/refine` — Continual Harness (docs/features/continual-harness.md). `status` and
         // `rollback` are pure store reads/writes handled inline, like `/memories`/`/uncompact`;
         // the actual refinement pass makes a model call, so it's handed to the render loop as a

@@ -3,6 +3,7 @@
 use super::*;
 
 mod apply;
+mod m0034_routing_index;
 mod m0035_dispatch;
 mod m0037_fk_indexes;
 mod m0038_provider_items;
@@ -11,9 +12,11 @@ mod m0040_cc_link;
 mod m0041_usage_prefix;
 mod m0042_usage_token_detail;
 mod m0043_bench_solve;
+mod m0044_session_host_state;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
+use m0034_routing_index::migration_0034;
 use m0035_dispatch::migration_0035;
 use m0037_fk_indexes::migration_0037;
 use m0038_provider_items::{migration_0036, migration_0038};
@@ -22,6 +25,7 @@ use m0040_cc_link::migration_0040;
 use m0041_usage_prefix::migration_0041;
 use m0042_usage_token_detail::migration_0042;
 use m0043_bench_solve::migration_0043;
+use m0044_session_host_state::migration_0044;
 mod usage;
 use usage::migration_0030;
 
@@ -713,6 +717,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0041,
     migration_0042,
     migration_0043,
+    migration_0044,
 ];
 
 /// Migration #33: whether a session has released its subagents from the active model pin.
@@ -787,16 +792,4 @@ pub(super) fn seed_singleton_rows(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Migration #34: index `routing_decision(message_id)`.
-///
-/// `session_models` and the fleet presence listing join `routing_decision` to `message` per
-/// session. With no index on the join column the planner walked `routing_decision` for every
-/// message row: resuming a 23k-message session spent 5.5 s in that one statement before the
-/// first frame (found with `FORGE_SQL_PROFILE`). Same shape as `idx_usage_message`.
-fn migration_0034(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_routing_decision_message ON routing_decision(message_id)",
-    )
 }

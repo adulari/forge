@@ -66,6 +66,7 @@ mod harness_profile;
 pub mod heartbeat;
 pub mod hooks;
 mod hooks_cc;
+pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
 pub mod job_wake;
 mod lean_context;
@@ -327,6 +328,9 @@ pub enum CoreError {
     SessionNotFound(String),
     #[error("invalid session workspace: {0}")]
     Workspace(String),
+    /// A tool aimed at a previous host's path after the session moved (host_move.rs).
+    #[error("{0}")]
+    StaleHostPath(String),
     /// Failover walked the whole routed/fallback chain (and any last-resort model) without finding
     /// anything usable. `verdict` is derived from every observed provider failure in the chain;
     /// `last_error` preserves the final provider detail for diagnosis.
@@ -1871,6 +1875,10 @@ pub struct Session {
     /// Completed turns since the last Continual Harness refinement (refinement.rs). Drives
     /// `harness.auto_refine = "turns"`; reset whenever [`Session::refine`] runs, manual or auto.
     turns_since_refine: u32,
+    /// Stale-path guard armed when the session moved hosts (host_move.rs).
+    host_guard: host_move::HostGuard,
+    /// One-shot extra instruction for the next compaction (`/reground`).
+    compact_directive: Option<String>,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
