@@ -35,11 +35,15 @@ in the name, as before but without overwriting.
 ## How tools know the session
 
 The direct path's dispatcher runs every registry tool inside
-`forge_tools::scope_session(session_id, …)`. A CLI bridge's `forge mcp-serve` child has no such
+`forge_tools::scope_session(session_id, workspace_root, …)`, so captures land under the same
+workspace root `/pr` reads from, never the daemon's cwd. A CLI bridge's `forge mcp-serve` child has no such
 scope; it reads the parent session id from `FORGE_CHECKPOINT_SESSION`, which the parent already
 sets on the child (`bridge_mcp_env`), and its workspace from the cwd it entered
 (`FORGE_BRIDGE_WORKSPACE`). The bridge records test proof through the same
 `forge_core::evidence_capture` function as the direct path.
+
+Subagent (`spawn_agents`) tool calls run outside this scope and are not recorded; their
+screenshots fall back to temp files.
 
 ## In `/pr`
 
@@ -57,7 +61,9 @@ Screenshots:
 …
 ```
 
-The section is omitted when the session captured nothing. It says "captured", never "verified":
+The section is omitted when the session captured nothing. A PR body is public, so the values of
+leading `NAME=value` env assignments in a recorded command are shown as `NAME=***` (the local
+manifest keeps the raw command). It says "captured", never "verified":
 nobody, the model included, has looked at the images. Images are referenced by local path; publishing
 them with the PR (an orphan branch) is planned work.
 

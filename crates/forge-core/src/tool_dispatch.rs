@@ -638,7 +638,11 @@ impl Session {
             let Some(tool) = self.tools.get(&call.name) else {
                 unreachable!("tool `{}` resolved above", call.name)
             };
-            let run = forge_tools::scope_session(self.id.clone(), tool.run_full(&effective_args));
+            let run = forge_tools::scope_session(
+                self.id.clone(),
+                self.workspace.root().to_path_buf(),
+                tool.run_full(&effective_args),
+            );
             let outcome = if call.name == "shell"
                 && effective_args
                     .get("background")

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 tokio::task_local! {
-    static SESSION_ID: String;
+    static SESSION_SCOPE: (String, PathBuf);
 }
 
 /// The parent session id a CLI bridge exports to its `forge mcp-serve` child. Mirrors
@@ -30,14 +30,19 @@ pub const MANIFEST: &str = "manifest.jsonl";
 /// Lines of command output kept as test proof.
 pub const TEST_TAIL_LINES: usize = 40;
 
-/// Run `fut` with `session` as the session evidence is recorded against.
-pub fn scope_session<F: Future>(session: String, fut: F) -> impl Future<Output = F::Output> {
-    SESSION_ID.scope(session, fut)
+/// Run `fut` with `session` as the session evidence is recorded against, rooted at `workspace`
+/// (the root `/pr` later reads the ledger from).
+pub fn scope_session<F: Future>(
+    session: String,
+    workspace: PathBuf,
+    fut: F,
+) -> impl Future<Output = F::Output> {
+    SESSION_SCOPE.scope((session, workspace), fut)
 }
 
 pub fn current_session() -> Option<String> {
-    SESSION_ID
-        .try_with(Clone::clone)
+    SESSION_SCOPE
+        .try_with(|(session, _)| session.clone())
         .ok()
         .or_else(|| std::env::var(SESSION_ENV).ok())
         .filter(|id| valid_session_id(id))
@@ -109,6 +114,9 @@ impl Ledger {
 
     /// The ledger of the session this tool call runs for, rooted at its workspace.
     pub fn current() -> Option<Self> {
+        if let Ok((session, workspace)) = SESSION_SCOPE.try_with(Clone::clone) {
+            return Self::new(&workspace, &session);
+        }
         let session = current_session()?;
         let workspace = crate::SESSION_WORKSPACE
             .try_with(Clone::clone)
@@ -344,7 +352,7 @@ pub fn pr_evidence_block(workspace: &Path, session: &str) -> Option<String> {
         for item in tests {
             block.push_str(&format!(
                 "- `{}` — exit {} at {} (`{rel_dir}/{}`, sha256 `{}`)\n",
-                item.command.as_deref().unwrap_or("?").replace('`', "'"),
+                display_command(item.command.as_deref().unwrap_or("?")),
                 item.exit_code.unwrap_or(0),
                 item.ts,
                 item.file,
@@ -368,6 +376,28 @@ pub fn pr_evidence_block(workspace: &Path, session: &str) -> Option<String> {
         }
     }
     Some(block)
+}
+
+/// The command as shown in a PR body, which is public: values of leading `NAME=value` env
+/// assignments (`API_KEY=… cargo test`) are masked, and backticks cannot break the code span.
+fn display_command(command: &str) -> String {
+    let mut words = command.split_whitespace().peekable();
+    let mut shown: Vec<String> = Vec::new();
+    while let Some(word) = words.peek() {
+        let Some((name, _)) = word.split_once('=') else {
+            break;
+        };
+        let is_name = !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !name.starts_with(|c: char| c.is_ascii_digit());
+        if !is_name {
+            break;
+        }
+        shown.push(format!("{name}=***"));
+        words.next();
+    }
+    shown.extend(words.map(str::to_string));
+    shown.join(" ").replace('`', "'")
 }
 
 fn short_hash(hash: &str) -> &str {
@@ -546,8 +576,8 @@ mod tests {
         let workspace = dir.path().to_path_buf();
         let message = crate::SESSION_WORKSPACE
             .scope(
-                workspace.clone(),
-                scope_session("scoped-1".to_string(), async {
+                std::env::temp_dir(),
+                scope_session("scoped-1".to_string(), workspace.clone(), async {
                     save_screenshot(
                         "browser",
                         "forge-browser",
@@ -567,6 +597,20 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].url.as_deref(), Some("http://x/"));
         assert_eq!(items[0].caption.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn pr_block_masks_env_assignment_values() {
+        let (dir, ledger) = ledger();
+        ledger
+            .record_test_output("API_KEY=hunter2 RUST_LOG=debug cargo test a=b", 0, "ok")
+            .unwrap();
+        let block = pr_evidence_block(dir.path(), "sess-1").unwrap();
+        assert!(!block.contains("hunter2"), "{block}");
+        assert!(
+            block.contains("`API_KEY=*** RUST_LOG=*** cargo test a=b`"),
+            "{block}"
+        );
     }
 
     #[test]

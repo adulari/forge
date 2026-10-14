@@ -42,9 +42,13 @@ async fn two_screenshots_in_one_session_both_land_in_the_ledger() {
     let registry = ToolRegistry::with_core_tools_in(workspace.path());
     let browser = registry.get("browser").expect("browser tool");
     let url = serve_page();
+    let root = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace");
 
     let run = |args: serde_json::Value| {
-        scope_session("live-evidence".to_string(), async move {
+        scope_session("live-evidence".to_string(), root.clone(), async move {
             browser.run(&args).await
         })
     };
@@ -61,10 +65,6 @@ async fn two_screenshots_in_one_session_both_land_in_the_ledger() {
         .await
         .expect("close");
 
-    let root = workspace
-        .path()
-        .canonicalize()
-        .expect("canonical workspace");
     let ledger = Ledger::new(&root, "live-evidence").expect("ledger");
     let items = ledger.items();
     assert_eq!(items.len(), 2, "{items:?}");
