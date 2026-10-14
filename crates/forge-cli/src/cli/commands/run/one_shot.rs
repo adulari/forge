@@ -14,6 +14,7 @@ pub(crate) async fn run(
     output_format: OutputFormat,
     publish_to_fleet: bool,
     no_publish_to_fleet: bool,
+    usage_json: Option<std::path::PathBuf>,
 ) -> Result<()> {
     if prompt.trim().is_empty() {
         anyhow::bail!("empty prompt — usage: forge run \"<your task>\"");
@@ -35,11 +36,13 @@ pub(crate) async fn run(
     // caller sees a successful run and no events — silently, and only on machines that happen to
     // have a daemon reachable. An explicit machine-readable format therefore opts out of the
     // fleet; `forge attach` is still how a human follows a run they started that way.
+    // `--usage-json` reports THIS process's session, so a run handed to the daemon would leave
+    // the caller with nothing to read.
     if let Some(session_id) = maybe_publish_run_to_fleet(
         &prompt,
         pin.as_deref(),
         publish_to_fleet,
-        no_publish_to_fleet,
+        no_publish_to_fleet || usage_json.is_some(),
         output_format,
     )
     .await
@@ -48,6 +51,16 @@ pub(crate) async fn run(
         println!("follow it with `forge attach {session_id}` or from the Anywhere apps");
         return Ok(());
     }
+
+    let started = std::time::Instant::now();
+    let write_usage = |session: &Session| -> Result<()> {
+        match &usage_json {
+            Some(path) => {
+                usage_json::write_usage_json(session, path, started.elapsed().as_secs_f64())
+            }
+            None => Ok(()),
+        }
+    };
 
     // stream-json: emit NDJSON events on stdout via the StreamJsonPresenter (no TUI, no heartbeat —
     // stdout stays a clean machine-readable event stream). Ctrl-C still returns partial output.
@@ -63,12 +76,15 @@ pub(crate) async fn run(
             // them as a baseline so `usage` reports this invocation, as `claude -p` does.
             session.emit_restored_totals();
         }
-        let turn = session.run_turn_with(&prompt, &guidance, tier);
-        tokio::pin!(turn);
-        let result = tokio::select! {
-            r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
-            _ = tokio::signal::ctrl_c() => Ok(()),
+        let result = {
+            let turn = session.run_turn_with(&prompt, &guidance, tier);
+            tokio::pin!(turn);
+            tokio::select! {
+                r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
+                _ = tokio::signal::ctrl_c() => Ok(()),
+            }
         };
+        write_usage(&session)?;
         result?;
         return Ok(());
     }
@@ -77,10 +93,12 @@ pub(crate) async fn run(
 
     // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.
     if tui {
-        session
+        let result = session
             .run_turn_with(&prompt, &guidance, tier)
             .await
-            .context("running agent turn")?;
+            .context("running agent turn");
+        write_usage(&session)?;
+        result?;
         // Hold the final frame until the user quits (Esc / Ctrl-C).
         let _ = session.read_line();
         return Ok(());
@@ -119,6 +137,7 @@ pub(crate) async fn run(
         eprint!("\r\x1b[K"); // clear the heartbeat line
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
+    write_usage(&session)?;
     result?;
     Ok(())
 }

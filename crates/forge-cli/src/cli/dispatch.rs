@@ -19,6 +19,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             output_format,
             publish_to_fleet,
             no_publish_to_fleet,
+            usage_json,
         } => {
             // Unified continuity with `chat`: --continue / --resume <id> / bare --resume (picker).
             // The picker needs the interactive TUI, so treat the headless run as "plain".
@@ -42,6 +43,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 output_format,
                 publish_to_fleet,
                 no_publish_to_fleet,
+                usage_json,
             )
             .await
         }
@@ -173,6 +175,33 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 dataset,
                 judge,
             } => bench::integrity_cmd(&predictions, &dataset, judge.as_deref()).await,
+            BenchCmd::Tasks {
+                suite,
+                out,
+                limit,
+                model,
+                agent,
+                mock,
+                attempts,
+                timeout_secs,
+            } => {
+                bench::run_tasks(bench::TasksOptions {
+                    suite,
+                    out,
+                    limit,
+                    model,
+                    agent,
+                    mock,
+                    attempts,
+                    timeout_secs,
+                })
+                .await
+            }
+            BenchCmd::Export {
+                metrics,
+                out,
+                integrity,
+            } => bench::export_cmd(&metrics, &out, integrity.as_deref()),
             BenchCmd::Passk { reports } => bench::passk(&reports),
             BenchCmd::Report {
                 runs,

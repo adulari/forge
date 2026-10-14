@@ -680,11 +680,15 @@ mod outcome;
 pub use outcome::AttemptOutcome;
 mod integrity;
 pub(crate) use integrity::integrity_cmd;
+mod export;
+pub(crate) use export::export_cmd;
 mod report;
 #[cfg(test)]
 use report::load_metrics;
 pub(crate) use report::{passk, report, ReportInputs};
 mod scoring;
+mod suite;
+pub(crate) use suite::{run_tasks, TasksOptions};
 
 /// Prepare one instance's repo, run a single headless turn in it, and return the diff plus the
 /// resources it took. Sets the process CWD to the repo (the caller restores it).
@@ -698,21 +702,55 @@ async fn prepare_and_run(
     let dir = prepare_repo(inst, workdir)?;
     std::env::set_current_dir(&dir).context("entering instance repo")?;
     let started = std::time::Instant::now();
-    let mut outcome = match agent {
+    let mut outcome = run_agent(&AgentRun {
+        agent,
+        prompt: &inst.problem_statement,
+        dir: &dir,
+        model,
+        timeout_secs,
+        mock: false,
+        // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
+        // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
+        // "implement it, don't describe it" push-back instead of scoring an empty patch.
+        expect_code_change: true,
+    })
+    .await?;
+    outcome.wall_secs = started.elapsed().as_secs_f64();
+    outcome.patch = extract_patch(&dir)?;
+    Ok(outcome)
+}
+
+/// What [`run_agent`] needs to run one headless agent turn in an already-prepared directory.
+struct AgentRun<'a> {
+    agent: Agent,
+    prompt: &'a str,
+    dir: &'a Path,
+    model: Option<String>,
+    timeout_secs: u64,
+    /// Offline deterministic provider (tests and suite smokes); Forge agent only.
+    mock: bool,
+    expect_code_change: bool,
+}
+
+/// Run one agent turn in `run.dir` (the caller has already made it the process CWD) and return
+/// the resources it took. The patch and wall time are left for the caller.
+async fn run_agent(run: &AgentRun<'_>) -> Result<RunOutcome> {
+    let outcome = match run.agent {
         Agent::Forge => {
             // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
             // edits the freshly-reset working tree; we read the diff back out afterwards.
-            let mut session = crate::build_session(false, Some(Mode::Bypass), false, None, model)
-                .await
-                .context("building session")?;
-            // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
-            // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
-            // "implement it, don't describe it" push-back instead of scoring an empty patch.
-            session.set_expect_code_change(true);
+            let mut session =
+                crate::build_session(run.mock, Some(Mode::Bypass), false, None, run.model.clone())
+                    .await
+                    .context("building session")?;
+            if run.expect_code_change {
+                session.set_expect_code_change(true);
+            }
             // Soft deadline 120s before the hard tokio timeout below: past it the session stops
             // launching model calls and spends ONE turn reverting unverified speculative changes,
             // so the hard kill no longer ships the riskiest mid-refactor state as the patch.
-            if let Some(budget) = forge_core::reconcile_deadline_budget_secs(timeout_secs, 120) {
+            if let Some(budget) = forge_core::reconcile_deadline_budget_secs(run.timeout_secs, 120)
+            {
                 session.set_turn_deadline(
                     std::time::Instant::now() + std::time::Duration::from_secs(budget),
                 );
@@ -723,24 +761,23 @@ async fn prepare_and_run(
             // to ~1 minute. On timeout we keep whatever edits + usage the turn produced and submit
             // the partial patch (a non-empty attempt still scores; an unsolved one was unsolved
             // anyway).
-            let turn = session.run_turn(&inst.problem_statement);
-            let timed_out = match tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                turn,
-            )
-            .await
-            {
-                Ok(res) => {
-                    res.context("running the agent turn")?;
-                    false
-                }
-                Err(_) => {
-                    eprintln!(
-                        "  forge turn hit the {timeout_secs}s timeout — submitting partial work"
-                    );
-                    true
-                }
-            };
+            let turn = session.run_turn(run.prompt);
+            let timed_out =
+                match tokio::time::timeout(std::time::Duration::from_secs(run.timeout_secs), turn)
+                    .await
+                {
+                    Ok(res) => {
+                        res.context("running the agent turn")?;
+                        false
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "  forge turn hit the {}s timeout — submitting partial work",
+                            run.timeout_secs
+                        );
+                        true
+                    }
+                };
             // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
             let (inp, out, cost) = session.session_usage_db();
             let detail = session.session_usage_detail();
@@ -766,32 +803,30 @@ async fn prepare_and_run(
             }
         }
         Agent::ClaudeCode | Agent::Codex => {
-            let run = run_external_agent(
-                agent,
-                &inst.problem_statement,
-                &dir,
-                model.as_deref(),
-                timeout_secs,
+            let ext = run_external_agent(
+                run.agent,
+                run.prompt,
+                run.dir,
+                run.model.as_deref(),
+                run.timeout_secs,
             )
             .await?;
             // An external CLI runs its OWN tools (not Forge's mcp-serve), so tools_unavailable
             // never applies.
             RunOutcome {
-                input_tokens: run.usage.input_tokens,
-                output_tokens: run.usage.output_tokens,
-                cost_usd: run.usage.cost_usd,
-                metrics_complete: run.usage.complete,
-                timed_out: run.timed_out,
-                cached_input_tokens: run.usage.cached_input_tokens,
-                cache_write_tokens: run.usage.cache_write_tokens,
-                notional_cost_usd: run.usage.notional_cost_usd,
-                final_text: run.final_text,
+                input_tokens: ext.usage.input_tokens,
+                output_tokens: ext.usage.output_tokens,
+                cost_usd: ext.usage.cost_usd,
+                metrics_complete: ext.usage.complete,
+                timed_out: ext.timed_out,
+                cached_input_tokens: ext.usage.cached_input_tokens,
+                cache_write_tokens: ext.usage.cache_write_tokens,
+                notional_cost_usd: ext.usage.notional_cost_usd,
+                final_text: ext.final_text,
                 ..RunOutcome::default()
             }
         }
     };
-    outcome.wall_secs = started.elapsed().as_secs_f64();
-    outcome.patch = extract_patch(&dir)?;
     Ok(outcome)
 }
 

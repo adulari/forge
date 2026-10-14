@@ -9,6 +9,7 @@ Everything Forge writes out of its session store is passed through
 | TUI `/export [path]` | always redacted |
 | `forge anywhere share` | always redacted (the share is published) |
 | `forge bench swe --judge` / `bench integrity --judge` | the diff sent to the judge model is redacted |
+| `forge bench export` | always redacted, then each field capped at 8 KB ([bench-tasks-and-export.md](bench-tasks-and-export.md)) |
 
 Each masked value becomes `[redacted]`. The store itself is never rewritten.
 

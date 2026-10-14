@@ -159,6 +159,10 @@ Newer sidecars also record `attempt` (1-based seed), `session_id` (Forge), `cach
 `outcome_detail`. Older sidecars without any of these, or without `runtime`, `timed_out` or
 `tools_unavailable`, still load with safe defaults. Field semantics are in
 [docs/features/bench-metrics.md](../features/bench-metrics.md).
+`forge bench export --metrics <sidecar> --out <dir>` writes one redacted trajectory per attempt
+from the Forge sessions the sidecar names; see
+[docs/features/bench-tasks-and-export.md](../features/bench-tasks-and-export.md), which also covers
+`forge bench tasks` for Terminal-Bench-style suites.
 
 Join each metrics file with **its own** eval report to get the headline table:
 
