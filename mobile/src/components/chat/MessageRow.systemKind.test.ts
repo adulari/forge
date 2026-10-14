@@ -13,7 +13,11 @@ describe("MessageRow system-row classification", () => {
     // The daemon projects every ui-visibility row as kind "system", and the accepted answer of a
     // turn is published as one, so kind must not route a row to SystemOutput.
     expect(normalizedSource).toMatch(
-      /const isSystem = row\.role === "system" \|\| row\.role === "tool" \|\| row\.kind === "tool";/,
+      /const isSystem = row\.role === "system" \|\| row\.role === "tool" \|\| row\.kind === "tool" \|\| jobNotice;/,
     );
+  });
+
+  it("routes a background-job notice (a user-role harness row) to SystemOutput", () => {
+    expect(normalizedSource).toMatch(/const jobNotice = /);
   });
 });
