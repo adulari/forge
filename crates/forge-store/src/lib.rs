@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 mod assay_store;
 mod automation_store;
 mod checkpoint_store;
+mod codemode_store;
 mod detached_child_store;
 mod dispatch_store;
 mod duel_store;
@@ -56,6 +57,7 @@ mod usage_prefix_store;
 mod usage_store;
 
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
+pub use codemode_store::{CodemodeStats, ToolCallRow};
 pub use detached_child_store::{DetachedChild, DetachedChildStatus};
 pub use dispatch_store::{
     dispatch_item_status, dispatch_status, DispatchItemRow, DispatchRow, NewDispatchItem,

@@ -134,11 +134,17 @@ impl Session {
         // bare "done" claim. Bridge turns return an empty `tool_calls` (their tools ran inside the
         // subprocess), so this adds nothing for them — no double counting. `update_tasks`/
         // `present_plan` are bookkeeping, not inspections (same rule as the stream sink).
+        let mut ledgers = crate::tool_outcome::TurnLedgers {
+            tools_ran,
+            inspect_ran,
+            mutations_ran,
+            verification_ledger,
+            failure_counts,
+            failure_nudged,
+            observations,
+        };
         for call in calls {
-            tools_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if !call.name.ends_with("update_tasks") && !call.name.ends_with("present_plan") {
-                inspect_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+            ledgers.count_started(&call.name);
         }
 
         // Fast path: when the model batched several independent side-effect-free calls (and no
@@ -173,24 +179,26 @@ impl Session {
                 }
             }
             for (call, (name, kind, result)) in calls.iter().zip(classified) {
-                observations.push(crate::loop_progress::CallObservation::new(
-                    crate::loop_progress::call_signature(call),
-                    kind.is_none(),
-                    false,
-                    &result,
-                ));
-                verification_ledger.lock().unwrap().observe(
+                ledgers
+                    .observations
+                    .push(crate::loop_progress::CallObservation::new(
+                        crate::loop_progress::call_signature(call),
+                        kind.is_none(),
+                        false,
+                        &result,
+                    ));
+                ledgers.verification_ledger.lock().unwrap().observe(
                     completion::classify_tool(&call.name, &call.args.to_string()),
                     kind.is_none(),
                 );
                 match kind {
-                    Some(k) => *failure_counts.entry((name, k)).or_insert(0) += 1,
+                    Some(k) => *ledgers.failure_counts.entry((name, k)).or_insert(0) += 1,
                     None => {
-                        failure_counts.retain(|(nm, _), _| nm != &name);
+                        ledgers.failure_counts.retain(|(nm, _), _| nm != &name);
                         // A genuine tool success = the model recovered; clear the one-shot
                         // failure-loop latch so a *later* distinct failure loop earns its own
                         // nudge-before-halt instead of an immediate halt off a stale latch.
-                        *failure_nudged = false;
+                        *ledgers.failure_nudged = false;
                     }
                 }
             }
@@ -208,75 +216,16 @@ impl Session {
         } else {
             // Execute each requested tool through the permission broker, serially.
             for call in calls {
-                let result = self.invoke_tool(msg_id, call).await?;
-                let failure = classify_tool_failure(&result);
-                verification_ledger.lock().unwrap().observe(
-                    completion::classify_tool(&call.name, &call.args.to_string()),
-                    failure.is_none(),
-                );
-                let mutating = self.tools.get(&call.name).is_some_and(|tool| {
-                    matches!(tool.side_effect(), forge_types::SideEffect::Write)
-                });
-                observations.push(crate::loop_progress::CallObservation::new(
-                    crate::loop_progress::call_signature(call),
-                    failure.is_none(),
-                    mutating,
-                    &result,
-                ));
-                // Count the mutation only once it SUCCEEDED. A denied or failing write changed
-                // nothing, so treating the attempt as evidence would let both the phantom-edit
-                // gate and the no-output turn classification accept a turn that mutated nothing.
-                if failure.is_none()
-                    && self.tools.get(&call.name).is_some_and(|tool| {
-                        matches!(
-                            tool.side_effect(),
-                            forge_types::SideEffect::Write | forge_types::SideEffect::Shell
-                        )
-                    })
+                let result = if call.name == crate::codemode::RUN_CODE_TOOL
+                    && self.config.codemode.enabled
                 {
-                    mutations_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                match failure {
-                    Some(kind) => {
-                        *failure_counts.entry((call.name.clone(), kind)).or_insert(0) += 1;
-                    }
-                    // A success on this tool means progress — clear its failure streaks so an
-                    // earlier rough patch doesn't later trip the guard after the model recovered.
-                    None => {
-                        // A successful write IS the change of approach the nudge asks for: an
-                        // edit → compile-error → edit cycle must not read as "failing the same
-                        // way" just because the failing `cargo test` text matched one category.
-                        if self.tools.get(&call.name).is_some_and(|tool| {
-                            tool.side_effect() == forge_types::SideEffect::Write
-                        }) {
-                            failure_counts.clear();
-                        }
-                        failure_counts.retain(|(nm, _), _| nm != &call.name);
-                        // Also clear the one-shot failure-loop latch: a genuine success means
-                        // the model recovered, so a *later* distinct failure loop in the same
-                        // turn should get its own nudge-before-halt, not an immediate halt.
-                        *failure_nudged = false;
-                    }
-                }
-                // Env-fight spend cap (quality guards wave 4, fix 4): shell commands that look
-                // like environment provisioning after a failure are venv archaeology — the
-                // SWE-bench turns that burned minutes on host-python/repo-era mismatches. Allow
-                // one alternate recovery attempt, then tell the model once per turn to stop.
-                // Delivered via pending_hints so it lands right after the threshold result.
-                if self.config.mesh.env_fight_nudge && call.name == "shell" {
-                    if let Some(cmd) = forge_types::shell_command_text(&call.args) {
-                        if is_env_setup_command(&cmd)
-                            && self.env_fight.observe(shell_command_failed(&result))
-                        {
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "environment setup/build spend cap reached after a failure \
-                             ({ENV_FIGHT_ATTEMPT_THRESHOLD} attempts) — blocking further \
-                             provisioning this turn"
-                            )));
-                            self.pending_hints.push(ENV_FIGHT_NUDGE.to_string());
-                        }
-                    }
-                }
+                    // Boxed: the script pump nests `invoke_tool` one level deeper, which pushed the
+                    // turn future past rustc's layout depth limit in the CLI's bench driver.
+                    Box::pin(self.run_code(msg_id, call, &mut ledgers)).await?
+                } else {
+                    self.invoke_tool(msg_id, call).await?
+                };
+                self.observe_tool_outcome(call, &result, &mut ledgers);
                 let seq = self.next_seq();
                 self.store.add_message_full(
                     &self.id,
@@ -307,14 +256,15 @@ impl Session {
         // if it persists. (BOTH the serial path and the concurrent read-only batch populate
         // `failure_counts`, so a batch failing the same way every step is caught here too.)
         const FAILURE_LOOP_THRESHOLD: usize = 3;
-        if let Some((tool, kind, n)) = failure_counts
+        if let Some((tool, kind, n)) = ledgers
+            .failure_counts
             .iter()
             .filter(|(_, &c)| c >= FAILURE_LOOP_THRESHOLD)
             .max_by_key(|(_, &c)| c)
             .map(|((nm, k), &c)| (nm.clone(), *k, c))
         {
-            if !*failure_nudged {
-                *failure_nudged = true;
+            if !*ledgers.failure_nudged {
+                *ledgers.failure_nudged = true;
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "`{tool}` failed {n}× the same way ({}) — nudging a change of approach",
                     kind.label()
@@ -334,7 +284,7 @@ impl Session {
                 self.transcript.push(Message::system(nudge));
                 // Fresh slate after the nudge: only halt if it loops AGAIN, and don't let a
                 // stale pre-nudge streak trip the halt when the model is now trying something new.
-                failure_counts.clear();
+                ledgers.failure_counts.clear();
             } else {
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "`{tool}` kept failing ({}) after a nudge — stopping to avoid a wasted loop",

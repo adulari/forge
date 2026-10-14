@@ -38,6 +38,7 @@ pub use btw_policy::{busy_asker, BtwAsker};
 mod cache_instrument;
 pub mod capsule;
 pub(crate) mod clock;
+pub mod codemode;
 mod commit_policy;
 mod compaction_headroom;
 mod compaction_policy;
@@ -101,6 +102,7 @@ pub mod steer;
 mod stop_hook;
 pub mod subagent;
 mod system_context;
+mod tool_outcome;
 mod working_tree;
 use working_tree::{working_tree_changed_since, working_tree_marker};
 pub(crate) mod task_staleness;
@@ -2374,6 +2376,16 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(ASK_USER_TOOL))
         {
             specs.push(ask_user_spec());
+        }
+        // Codemode (docs/features/codemode.md): direct path only. CLI bridges never receive this
+        // catalog (they serve Forge's tools through `forge mcp-serve`), so they never see it.
+        if self.config.codemode.enabled
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(codemode::RUN_CODE_TOOL))
+        {
+            specs.push(codemode::run_code_spec());
         }
         // The task-tracking tool — always advertised so the model can keep a live todo list.
         if self
@@ -4998,6 +5010,9 @@ mod tests {
 
     #[path = "worktree_scope.rs"]
     mod worktree_scope_tests;
+
+    #[path = "codemode.rs"]
+    mod codemode_tests;
 
     #[path = "auto_classifier.rs"]
     mod auto_classifier_tests;
