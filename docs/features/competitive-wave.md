@@ -42,9 +42,14 @@ sessions without making an eviction permanent: the existing 30-second to 10-minu
 still applies after a server exits unexpectedly or is OOM-killed, and a later successful handshake
 restores diagnostics.
 
+What the hint contains is a per-file delta by default: on first touch only errors and findings
+near the edit, afterwards only what is new since the model last saw the file, with introduced
+errors always shown and the rest capped (`lsp-diagnostics.md`).
+
 ```toml
 [lsp]
 enabled = true
+diagnostics = "delta"   # "delta" | "full" | "off"
 timeout_ms = 3000
 memory_limit_mb = 2048
 idle_timeout_secs = 120

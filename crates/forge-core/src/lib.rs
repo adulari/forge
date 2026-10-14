@@ -75,6 +75,7 @@ pub mod job_wake;
 mod lean_context;
 pub mod llm_router;
 pub(crate) mod loop_progress;
+mod lsp_delta;
 mod lsp_hints;
 mod mid_intent;
 pub(crate) mod model_failure_record;
@@ -1664,6 +1665,8 @@ pub struct Session {
     lattice_watch_enabled: bool,
     /// LSP registry for live diagnostics after writes. `None` when lsp.enabled = false.
     lsp: Option<Arc<forge_lsp::LspRegistry>>,
+    /// Per-file diagnostics snapshots, so a post-edit block carries only what changed.
+    lsp_baselines: lsp_delta::Baselines,
     /// The discovered command/skill catalog, so the model can find + load Forge's own skills via
     /// the `use_skill` virtual tool (command-skill-system.md). `None` → the tool is not advertised
     /// and the turn runs exactly as before.
