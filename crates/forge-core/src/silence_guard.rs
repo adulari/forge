@@ -186,10 +186,13 @@ impl Session {
     }
 
     /// Deliver a silence nudge: the progress line to the user, the ask to the model as a system
-    /// message after this step's tool results.
+    /// message after this step's tool results. A `minimal` harness profile keeps only the line.
     pub(crate) fn deliver_silence_nudge(&mut self, nudge: SilenceNudge) -> Result<(), CoreError> {
         self.presenter
             .emit(PresenterEvent::Progress(nudge.progress_line));
+        if !self.advisory_nudges_on() {
+            return Ok(());
+        }
         let seq = self.next_seq();
         self.store
             .add_message(&self.id, seq, Role::System, &nudge.model_hint, None)?;

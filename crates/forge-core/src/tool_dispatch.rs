@@ -669,8 +669,7 @@ impl Session {
                         // Commit discipline: every N successful edits since the last commit or
                         // reminder, remind the model (right after this result) that its work is
                         // uncommitted. `git status` runs only when the reminder is due.
-                        if self.config.git.commit_nudge
-                            && self.config.git.commit_policy.nudges()
+                        if self.commit_nudges_on()
                             && self.git_hygiene.record_edit(
                                 self.workspace.root(),
                                 path,

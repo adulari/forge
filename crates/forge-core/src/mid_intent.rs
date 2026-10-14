@@ -433,6 +433,7 @@ impl crate::Session {
         sent: &mut usize,
     ) -> bool {
         if *sent >= MAX_FOLLOWUP_INTENT_NUDGES
+            || !self.advisory_nudges_on()
             || !(ends_mid_intent(content) || (content.trim().is_empty() && bridge_tool_progress))
             || self.has_open_tasks()
         {

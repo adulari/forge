@@ -132,3 +132,5 @@ even if the model ignores the ask. After 40 steps without a successful file writ
 requests a findings summary and the decision being worked toward (once per stretch). It never
 halts. Direct path only: a CLI bridge runs all its tools inside one `complete()`.
 `FORGE_SYSTEM` also asks for a one-sentence progress note every several tool calls.
+Under the `minimal` harness profile (`harness-profile.md`) the model gets no progress ask and no
+stall or stagnation nudge, but the user still sees the progress line and the relapse halt still fires.
