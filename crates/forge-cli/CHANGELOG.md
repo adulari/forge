@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-10-14
+
+Sessions follow worktrees and host moves, `/goal` checks its own progress (also in a plain `forge run`), LSP diagnostics are sent as deltas, codemode gets used, and InferHub models run lean by default.
+
 ### Added
 - **Sessions can move into git worktrees and back with the new `worktree` tool.** `create`, `enter` (including worktrees outside the repo, subject to `confine_to_workspace`/`extra_roots`), `list`, `exit` (optionally removing the worktree) and `remove` move file tools, relative paths, the shell's cwd, Lattice, the branch and the stored session cwd together, on both the direct path and CLI bridges. Removal refuses dirty worktrees and unmerged branches unless forced, `/undo` snapshots survive removal, and entering a worktree is never mistaken for a host move (`crates/forge-core/src/session_worktree.rs`, docs/features/session-worktrees.md).
 - **Sessions moved to another host now re-ground themselves instead of chasing the old machine's paths.** Forge records each session's host fingerprint (machine, workspace, repo, git worktrees and remotes; store migration 44). On resume, import or handoff to a different machine or workspace it adds one persisted notice with the current layout and a path map matched by git remote, telling the model its tool outputs are real and only remembered old-host paths may be stale. File tools aimed at a vanished old-host path get an error naming the local equivalent, a missing workspace is relocated to the local checkout of the same repo, and `/reground` re-summarizes history without the stale host facts. Handoff capsules now also carry the compaction summary, which they used to drop (`crates/forge-core/src/host_move/`, docs/features/session-host-move.md).
@@ -20,12 +24,9 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 - **A shell batch (`commands: [...]`) now shows its first command in the TUI tool card headline** (`cargo build (+1 more)`) instead of an empty or cwd-only title (`crates/forge-tui/src/app/tool_cards.rs`).
-||||||| 11b54b42
 - **Workflow scripts that open with `export const meta = {...}` now run instead of failing with "unsupported keyword: export".** The header (also plain `const meta`) is parsed as a literal for a name/description/phases banner, the `export` keyword is dropped, and unsupported module syntax gets an error that spells out the accepted format. The `run_workflow` tool description now documents the header (`crates/forge-core/src/workflow_meta.rs`, docs/features/forge-workflow.md).
-||||||| 11b54b42
 - **The build spend cap now recognizes clang and the rest of the native toolchain.** `clang`, `clang++`, `c++`, `ld`/`lld`/`mold`, `zig cc`, versioned names (`clang-19`, `gcc-14`), cross triples (`aarch64-linux-gnu-g++`), absolute paths, env prefixes and `ccache`/`sccache`/`sudo`/`bash -c` wrappers all count as build commands now; before, only bare `gcc`, `g++`, `cc` and `clang` did, so failed clang builds never armed the cap (`crates/forge-core/src/build_command.rs`).
 - **Auto-memories follow a project across a workspace move.** Memories stay keyed by workspace path, but are now mirrored under a stable per-git-remote alias, so a workspace that changed path (host move, re-clone, linked worktree) recalls the memories of its old path. The old key keeps its memories (`crates/forge-core/src/memory_scope.rs`, docs/features/session-host-move.md).
-||||||| 11b54b42
 - **Esc no longer records a queued prompt twice.** When the running turn had already absorbed a queued prompt as a steer and you pressed Esc before it answered, the prompt was re-sent as a brand-new turn: it showed twice in the transcript and the phone snapshot, and the model and the stored session saw it twice. The re-driven turn now only continues from the absorbed prompt (`Session::run_turn_resuming`), on the local TUI, remote interrupts and the `forge serve` driver.
 - **A long session no longer stops after the first step of every turn.** The stagnation guard carried its pending nudge and stale-step window across user turns; in long sessions nearly every read repeats output seen earlier, so after one nudge each later turn halted after a single tool call and answered without tools. A new turn now gets a fresh nudge-then-halt budget, and a loop that continues is still caught within the turn (`crates/forge-core/src/loop_progress.rs`).
 - **Esc after queueing a prompt mid-turn now always sends it as the next turn, and prompts typed while Forge is busy show up in ↑ history right away.** Esc used to work only if the running turn had not yet picked the queued prompt up at a tool step; otherwise it stopped with the prompt unanswered. Busy prompts now reach history on submit and ↑/↓ recall works mid-turn. Closing a `/btw` card before its answer arrives no longer lets that answer reopen the card and swallow the next Esc. Applies to the TUI, `forge serve` sessions and `forge attach` (`crates/forge-cli/src/cli/commands/run/busy_queue.rs`, `crates/forge-tui/src/prompt_history.rs`).
@@ -121,7 +122,6 @@ Reason Agent 1.1-inspired release: cache-first context, honest bench numbers, co
   on leaves the generic alert. Needs a new native build (changes the OTA fingerprint); existing
   installs register their key on next open. On Android a fetched notice now raises a local
   notification (there is no remote push there). ADR-0012 gains an addendum.
-||||||| parent of 10cca831 (feat(fleet): list_sessions + message_session between sessions, terminals and hosts)
 - **`push_notification` tool: the agent can notify your phone and desktop.** Available on the direct
   path and the claude-cli/codex bridge (deferred behind `tool_search` on a lean bridge). Fans out to
   iOS native push, Forge Anywhere, web push and a desktop notification, reports which delivered,
@@ -4900,7 +4900,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.19.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.20.0...HEAD
+[2.20.0]: https://github.com/Adulari/forge/compare/v2.19.0...v2.20.0
 [2.19.0]: https://github.com/Adulari/forge/compare/v2.18.0...v2.19.0
 [2.18.0]: https://github.com/Adulari/forge/compare/v2.17.2...v2.18.0
 [2.17.2]: https://github.com/Adulari/forge/compare/v2.17.1...v2.17.2
