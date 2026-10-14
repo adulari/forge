@@ -24,9 +24,6 @@ pub(crate) fn callable_summarizers(
         .collect()
 }
 
-/// Above this share of the trigger after a compaction, headroom is forced by clipping tool output.
-const COMPACT_CLIP_ABOVE_PERCENT: u64 = 75;
-
 impl Session {
     /// Refresh what the CLI bridge says its context holds after a model call, and return the live
     /// context fill for the gauge.
@@ -53,10 +50,11 @@ impl Session {
 
     /// Guarantee an auto-compaction leaves real headroom. A summary only replaces the older part;
     /// when the verbatim tail (or a failed summarization) leaves the transcript above
-    /// [`COMPACT_CLIP_ABOVE_PERCENT`] of the trigger, the next tool result would trip another
+    /// the `mesh.compact_low_water` share of the trigger, the next tool result would trip another
     /// compaction at once, so the bulkiest tool results are clipped down to the target instead.
     pub(crate) fn enforce_post_compact_headroom(&mut self, trigger: u64) {
-        if self.estimated_transcript_tokens() <= trigger * COMPACT_CLIP_ABOVE_PERCENT / 100 {
+        let low_water = self.config.mesh.compact_low_water.clamp(0.1, 1.0);
+        if self.estimated_transcript_tokens() <= (trigger as f64 * low_water) as u64 {
             return;
         }
         let target = usize::try_from(compact_target_tokens(trigger)).unwrap_or(usize::MAX);

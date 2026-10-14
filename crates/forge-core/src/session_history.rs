@@ -334,6 +334,7 @@ impl Session {
         self.transcript.clear();
         self.seq = 0;
         self.tasks.clear();
+        self.forget_context_shape();
         self.project_prompt_injected = false;
         self.cached_agents_md = read_project_agents_md(self.workspace.root());
         self.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -370,6 +371,7 @@ impl Session {
             .collect();
         self.transition_workspace(workspace)?;
         self.id = session_id.to_string();
+        self.forget_context_shape();
         self.tasks = match self.store.tasks(session_id) {
             Ok(tasks) => tasks,
             Err(error) => {

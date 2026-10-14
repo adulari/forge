@@ -1,13 +1,13 @@
 //! Two-phase context pipeline: the ONE disciplined seam between the session transcript and a
 //! provider request (competitor-gap-analysis #9).
 //!
-//! Phase 1 — [`prune_and_inject`]: mutates the transcript in place (reclaim old tool output;
-//! the injection point where future context transforms belong). Runs at turn boundaries.
+//! Phase 1 — [`crate::context_floor::prune_below`]: mutates the transcript in place (reclaim old
+//! tool output), and only below the elision floor, which moves forward in blocks.
 //!
-//! Phase 2 — [`to_llm`]: pure view of the transcript for one provider call — strips
-//! [`Visibility::UiOnly`] messages (user-facing notes never spend prompt tokens), then fits the
-//! rest to the model's context window. Every main-loop request goes through this; a message the
-//! model shouldn't see needs only the `UiOnly` tag, no per-call-site filtering.
+//! Phase 2 — [`to_llm_floored`]: pure view of the transcript for one provider call — strips
+//! [`Visibility::UiOnly`] messages (user-facing notes never spend prompt tokens), shortens old
+//! output below the same floor, then fits the rest to the model's context window. Every main-loop
+//! request goes through this; a message the model shouldn't see needs only the `UiOnly` tag.
 
 use forge_store::HarnessEntry;
 use forge_types::{Message, Role};
@@ -61,53 +61,68 @@ const CHARS_PER_TOKEN: usize = 3;
 const MESSAGE_TRUNCATION_MARKER: &str =
     "[… earlier of this message truncated to fit the model's context …]\n";
 
-/// Phase 1: mutate the transcript at a turn boundary. Today that is zero-LLM context reclaim
-/// (truncating large old tool results); future injections/transforms that must SURVIVE in the
-/// transcript (rather than apply per-request) belong here, not scattered across call sites.
-/// Returns the number of chars reclaimed.
-pub(crate) fn prune_and_inject(
-    messages: &mut [Message],
-    keep_recent: usize,
-    keep_rounds: usize,
-) -> usize {
-    prune_tool_results(messages, keep_recent, keep_rounds)
-}
-
-/// messages, then elides bulky older tool results while retaining a balanced head and tail. The
-/// newest `keep_recent_tool_results` tool messages remain verbatim so an in-progress tool loop
-/// keeps all of the data it just produced. Pure — persistence and the in-memory transcript are
-/// untouched.
+/// [`to_llm_floored`] with the floor a transcript gets when Forge has none for it yet and no
+/// sticky trim — the stateless view the pipeline's own tests exercise.
+#[cfg(test)]
 pub(crate) fn to_llm(
     messages: &[Message],
     budget_tokens: usize,
     tool_result_token_budget: usize,
     keep_recent_tool_results: usize,
 ) -> Vec<Message> {
+    let floor = crate::context_floor::initial_floor(messages, keep_recent_tool_results);
+    to_llm_floored(
+        messages,
+        budget_tokens,
+        tool_result_token_budget,
+        floor,
+        &mut None,
+    )
+}
+
+/// The provider view of `messages`: UI-only notes stripped, system context normalised, tool calls
+/// paired, repeats collapsed and bulky tool results elided — the last two only below `floor` (a
+/// transcript index, see [`crate::context_floor`]) — then fitted to `budget_tokens`, reusing
+/// `trim` while it still fits. With `floor` and `trim` unchanged, the view of a transcript that
+/// only grew starts with the view of the transcript before it. Pure: persistence and the
+/// in-memory transcript are untouched.
+pub(crate) fn to_llm_floored(
+    messages: &[Message],
+    budget_tokens: usize,
+    tool_result_token_budget: usize,
+    floor: usize,
+    trim: &mut Option<usize>,
+) -> Vec<Message> {
+    let llm_floor = messages[..floor.min(messages.len())]
+        .iter()
+        .filter(|m| m.visibility.is_llm())
+        .count();
     let llm_only: Vec<Message> = messages
         .iter()
         .filter(|m| m.visibility.is_llm())
         .cloned()
         .collect();
-    let bounded_system_context = normalize_system_context(llm_only);
-    let mut normalized = normalize_tool_pairs(bounded_system_context);
+    let (bounded_system_context, floor) = normalize_system_context(llm_only, llm_floor);
+    let (mut normalized, floor) = normalize_tool_pairs_marked(bounded_system_context, floor);
     // Before elision, not after: a duplicate collapsed here frees budget that elision would
     // otherwise have spent shortening a result the model has a verbatim copy of anyway. Rewrites
     // content in place so `synthetic_tool_results` — a set of INDICES into these messages — stays
     // valid; removing the messages instead would silently shift every index in it.
-    dedupe_repeated_tool_results(&mut normalized.messages, keep_recent_tool_results);
+    dedupe_repeated_tool_results(&mut normalized.messages, floor);
     crate::narration_dedupe::collapse_repeated_narration(&mut normalized.messages);
     let elided = elide_old_tool_results(
         &normalized.messages,
         &normalized.synthetic_tool_results,
         tool_result_token_budget,
-        keep_recent_tool_results,
+        floor,
     );
     // Pair again AFTER fitting. Fitting keeps a suffix and can cut between a call and its
     // results; the walk below strips the leading orphans it knows about, but pairing is the
     // invariant the provider checks, so it is re-established here whatever the walk did. Moonshot
     // rejects the whole request for one unpaired result (`tool_call_id … is not found`), seen live
     // on 2026-09-16 the first time a 246K-token Kimi turn crossed its window budget.
-    normalize_tool_pairs(fit_messages_owned(elided, budget_tokens)).messages
+    let fitted = crate::context_floor::fit_sticky(elided, budget_tokens, trim);
+    normalize_tool_pairs(fitted).messages
 }
 
 const INTERRUPTED_TOOL_RESULT: &str = "error: tool call interrupted before a result was recorded";
@@ -140,6 +155,14 @@ fn unique_call_id(id: &str, seen: &std::collections::HashSet<String>) -> String 
 }
 
 fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
+    normalize_tool_pairs_marked(messages, 0).0
+}
+
+/// [`normalize_tool_pairs`], also returning how many output messages came from the first `mark`
+/// input messages. Exact when `mark` sits on a user or assistant message, which the floor does.
+fn normalize_tool_pairs_marked(messages: Vec<Message>, mark: usize) -> (NormalizedMessages, usize) {
+    let total = messages.len();
+    let mut marked_at: Option<usize> = None;
     let mut input: std::collections::VecDeque<Message> = messages.into();
     let mut out = Vec::with_capacity(input.len());
     let mut synthetic_tool_results = std::collections::HashSet::new();
@@ -148,7 +171,13 @@ fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
     // `shell:0` in turn 2 both passed and the request went out with two identical ids.
     let mut seen_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    while let Some(mut message) = input.pop_front() {
+    loop {
+        if marked_at.is_none() && total - input.len() >= mark {
+            marked_at = Some(out.len());
+        }
+        let Some(mut message) = input.pop_front() else {
+            break;
+        };
         if message.role == Role::Tool {
             continue;
         }
@@ -215,10 +244,14 @@ fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
         out.extend(deferred);
     }
 
-    NormalizedMessages {
-        messages: out,
-        synthetic_tool_results,
-    }
+    let marked_at = marked_at.unwrap_or(out.len());
+    (
+        NormalizedMessages {
+            messages: out,
+            synthetic_tool_results,
+        },
+        marked_at,
+    )
 }
 
 /// Replace every REPEAT of a tool result with a short marker, keeping the FIRST copy verbatim.
@@ -237,30 +270,18 @@ fn normalize_tool_pairs(messages: Vec<Message>) -> NormalizedMessages {
 /// (75-80% of the input tokens on the measured traffic were cache reads, so this is not a marginal
 /// consideration.)
 ///
-/// The newest tool results are exempt regardless, using the same `keep_recent_tool_results` window
-/// [`elide_old_tool_results`] protects: a tool loop that just produced data must get that data
-/// back, not a pointer to something further up.
+/// Only results below the elision floor (`protected_from`, the same boundary
+/// [`elide_old_tool_results`] uses) are collapsed: a tool loop that just produced data must get that
+/// data back, not a pointer to something further up — and counting the exemption from the tail
+/// instead let a result go out verbatim and then be collapsed a few results later, mid-turn.
 ///
 /// Identical text means the tool genuinely returned the same bytes, so nothing factual is lost —
 /// and the marker says "identical", which answers "has this changed since I last looked" outright.
 /// Request-view only: the persisted transcript and replay keep every copy.
 ///
 /// Returns the number of characters reclaimed.
-fn dedupe_repeated_tool_results(messages: &mut [Message], keep_recent: usize) -> usize {
+fn dedupe_repeated_tool_results(messages: &mut [Message], protected_from: usize) -> usize {
     let is_candidate = |m: &Message| m.role == Role::Tool && m.content.len() >= DEDUPE_MIN_CHARS;
-    // The newest `keep_recent` REAL tool results are off limits, matching what elision protects.
-    let protected_from = if keep_recent == 0 {
-        messages.len()
-    } else {
-        messages
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.role == Role::Tool)
-            .rev()
-            .nth(keep_recent - 1)
-            .map(|(index, _)| index)
-            .unwrap_or(0)
-    };
 
     let mut first_seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut collapse: Vec<usize> = Vec::new();
@@ -285,70 +306,22 @@ fn dedupe_repeated_tool_results(messages: &mut [Message], keep_recent: usize) ->
     reclaimed
 }
 
-/// The tail-relative boundary: everything from here on stays verbatim. Moves forward with every
-/// new tool result, which is precisely what used to rewrite already-sent messages.
-fn sliding_boundary(
-    messages: &[Message],
-    synthetic_tool_results: &std::collections::HashSet<usize>,
-    keep_recent: usize,
-) -> usize {
-    if keep_recent == 0 {
-        return messages.len();
-    }
-    messages
-        .iter()
-        .enumerate()
-        .filter(|(index, message)| {
-            message.role == Role::Tool && !synthetic_tool_results.contains(index)
-        })
-        .rev()
-        .nth(keep_recent - 1)
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-/// The boundary actually used: the sliding one, frozen at the current turn's start.
-pub(crate) fn elision_boundary(
-    messages: &[Message],
-    synthetic_tool_results: &std::collections::HashSet<usize>,
-    keep_recent: usize,
-) -> usize {
-    let sliding = sliding_boundary(messages, synthetic_tool_results, keep_recent);
-    let turn_start = messages
-        .iter()
-        .rposition(|message| message.role == Role::User)
-        .unwrap_or(sliding);
-    sliding.min(turn_start)
-}
-
 fn elide_old_tool_results(
     messages: &[Message],
     synthetic_tool_results: &std::collections::HashSet<usize>,
     token_budget: usize,
-    keep_recent_tool_results: usize,
+    protected_from: usize,
 ) -> Vec<Message> {
     if token_budget == 0 {
         return messages.to_vec();
     }
-    // Freeze the boundary for the duration of a turn.
-    //
-    // `sliding` alone is measured from the TAIL, so every new tool result pushed it forward and a
-    // result that was verbatim on the last request got elided on this one. Prompt caches key on a
-    // PREFIX, so rewriting a message in the middle invalidates every token after it — on a real
-    // 138k-token prompt whose boundary sat ~69k from the end, that discarded ~69k of cache on
-    // EVERY round-trip. Measured over 630 requests: 160 of them were under 50% cached and carried
-    // 19.9M fresh tokens, 87% of all fresh input, while the 453 well-cached ones carried 1.5M.
-    //
-    // Anchoring on the last user message makes the boundary constant for a whole turn: within the
-    // turn nothing already sent is ever rewritten, so the cache holds across all of its
-    // round-trips, and the boundary advances exactly once — at the next user message — for one
-    // invalidation instead of one per step.
-    //
-    // `min` because a lower index protects MORE: this can only ever keep more verbatim than the
-    // sliding window did, never less, so no turn loses data it used to have. The extra bulk that
-    // buys is bounded by auto-compaction, which fires mid-turn on the same transcript.
-    let protected_from =
-        elision_boundary(messages, synthetic_tool_results, keep_recent_tool_results);
+    // Only below the elision floor, which stands still between block advances. The boundary
+    // used to be measured from the tail, so every new tool result pushed it forward and a result
+    // that was verbatim on the last request got elided on this one — and prompt caches key on a
+    // prefix, so that rewrite discarded every cached token after it. On a real 138k-token prompt
+    // that was ~69k of cache on every round-trip: measured over 630 requests, 160 were under 50%
+    // cached and carried 87% of all fresh input. Freezing it per turn fixed the steps; the floor
+    // also stops it moving at every turn boundary.
     messages
         .iter()
         .enumerate()
@@ -494,7 +467,7 @@ pub(crate) fn fit_messages(messages: &[Message], budget_tokens: usize) -> Vec<Me
     fit_messages_owned(messages.to_vec(), budget_tokens)
 }
 
-fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Message> {
+pub(crate) fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Message> {
     // Count standing system context once, then walk ordinary history newest-first. Long sessions
     // normally overflow on a relatively small recent suffix; an eager total over the entire
     // transcript needlessly tokenized every old tool result before immediately discarding it.
@@ -612,6 +585,7 @@ fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -> Vec<Messa
 /// [`PRUNE_HEAD_KEEP`]-char head + a marker. Returns the number of chars reclaimed; idempotent (a
 /// result already ending with [`PRUNE_MARKER`] is skipped). The full text remains in the store for
 /// replay — only the model-facing transcript is trimmed.
+#[cfg(test)]
 pub(crate) fn prune_tool_results(
     messages: &mut [Message],
     keep_recent: usize,
@@ -644,7 +618,10 @@ fn prunable(m: &Message) -> bool {
 
 /// Cut one old tool result to its head. When the complete output was kept on disk the note says
 /// where, so the model reads that file instead of running the tool again.
-fn prune_one(m: &mut Message, kept_outputs: &std::collections::HashMap<String, String>) -> usize {
+pub(crate) fn prune_one(
+    m: &mut Message,
+    kept_outputs: &std::collections::HashMap<String, String>,
+) -> usize {
     if !prunable(m) {
         return 0;
     }
@@ -664,56 +641,6 @@ fn prune_one(m: &mut Message, kept_outputs: &std::collections::HashMap<String, S
     let after = kept.len();
     m.content = kept;
     before.saturating_sub(after)
-}
-
-/// Rounds the working set may grow by before older rounds are cut. Cutting rewrites the middle of
-/// the prompt, which throws away the provider's prefix cache from that point on, so it is done in
-/// batches rather than on every step.
-pub(crate) const AGE_BATCH_ROUNDS: usize = 4;
-
-/// Keep a long turn's working set bounded: once [`AGE_BATCH_ROUNDS`] tool rounds older than the
-/// last `keep_rounds` still carry full-size results, cut every result before those rounds to its
-/// head. Returns the chars reclaimed; zero while the batch has not filled.
-///
-/// Elision only touches earlier turns and the prune pass only fires at the compaction ceiling, so
-/// inside one turn every result was resent on every step until the ceiling was hit. Replaying a
-/// 30-request Kimi K3 turn, this halves the tool output sent (5.5M chars to 2.6M) while the newest
-/// rounds stay whole.
-pub(crate) fn age_tool_rounds(
-    messages: &mut [Message],
-    keep_rounds: usize,
-    kept_outputs: &std::collections::HashMap<String, String>,
-) -> usize {
-    let round_starts: Vec<usize> = messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == Role::Assistant && !m.tool_calls.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-    let Some(&boundary) = round_starts
-        .len()
-        .checked_sub(keep_rounds)
-        .and_then(|i| round_starts.get(i))
-    else {
-        return 0;
-    };
-    let full_rounds = round_starts
-        .iter()
-        .zip(
-            round_starts
-                .iter()
-                .skip(1)
-                .chain(std::iter::once(&boundary)),
-        )
-        .filter(|(start, end)| *start < &boundary && messages[**start..**end].iter().any(prunable))
-        .count();
-    if full_rounds < AGE_BATCH_ROUNDS {
-        return 0;
-    }
-    messages[..boundary]
-        .iter_mut()
-        .map(|m| prune_one(m, kept_outputs))
-        .sum()
 }
 
 /// Continual Harness (`/refine`): render up to `max_entries` learned prompt/skill/subagent
@@ -1277,24 +1204,32 @@ mod tests {
     }
 
     #[test]
-    fn to_llm_keeps_only_the_newest_turn_contract_without_mutating_audit_messages() {
+    fn to_llm_keeps_earlier_turn_contracts_in_place_without_mutating_audit_messages() {
         let messages = vec![
             Message::system("Turn contract: planning only."),
             Message::user("plan it"),
             Message::assistant("plan"),
-            Message::system("Turn contract: this request explicitly requires an implementation."),
+            Message::system(
+                "Turn contract: supersedes earlier turn contracts, which no longer apply — this \
+                 request explicitly requires an implementation.",
+            ),
             Message::user("build it"),
         ];
         let audit = serde_json::to_value(&messages).unwrap();
 
         let output = to_llm(&messages, 10_000, 4_096, 2);
 
+        // Dropping the older contract deleted it from the middle of an already-cached prompt;
+        // it stays, and the newer one says it supersedes it.
         let contracts: Vec<&Message> = output
             .iter()
             .filter(|message| message.content.starts_with("Turn contract:"))
             .collect();
-        assert_eq!(contracts.len(), 1);
-        assert!(contracts[0].content.contains("requires an implementation"));
+        assert_eq!(contracts.len(), 2);
+        assert!(contracts[1]
+            .content
+            .contains("supersedes earlier turn contracts"));
+        assert!(contracts[1].content.contains("requires an implementation"));
         assert_eq!(serde_json::to_value(&messages).unwrap(), audit);
     }
 
@@ -1305,8 +1240,8 @@ mod tests {
             Message::system(&guidance),
             Message::user("first"),
             Message::assistant("first answer"),
-            Message::system(&guidance),
             Message::user("second"),
+            Message::system(&guidance),
         ];
 
         let output = to_llm(&messages, 10_000, 4_096, 2);
@@ -1370,12 +1305,19 @@ mod tests {
             messages.push(Message::system("same standing guidance"));
         }
 
-        let output = to_llm(&messages, 100_000, 4_096, 2);
+        let in_place = to_llm_floored(&messages, 100_000, 4_096, 0, &mut None);
+        assert_eq!(
+            in_place.len(),
+            101,
+            "contracts above the floor stay in place"
+        );
+
+        let output = to_llm_floored(&messages, 100_000, 4_096, messages.len(), &mut None);
 
         assert_eq!(
             output.len(),
             2,
-            "one latest contract plus one guidance copy"
+            "below the floor: one latest contract plus one guidance copy"
         );
         assert!(output
             .iter()
@@ -1430,84 +1372,6 @@ mod tests {
         ];
         let out = to_llm(&msgs, 100_000, 0, 0);
         assert_eq!(out[1].content, result);
-    }
-
-    /// The waste this removes, in the shape it was measured: one real day of one real session
-    /// carried 280 redundant copies across 84 groups — 1.10M characters of byte-identical tool
-    /// output re-sent to the model, including an 84,521-char file carried five times.
-    /// The measurement behind this change, taken on the mechanism itself.
-    ///
-    /// Prompt caches key on a PREFIX, so the moment a request rewrites a message it has already
-    /// sent, every cached token after that point is discarded. The elision boundary WAS measured
-    /// from the tail, so each new tool result pushed it forward and elided a result that had been
-    /// verbatim a moment earlier — one such rewrite per round-trip, forever.
-    ///
-    /// On real traffic that cost 19.9M fresh tokens across 160 requests (87% of all fresh input),
-    /// while the 453 well-cached requests carried 1.5M between them.
-    ///
-    /// Frozen at the turn's start, the boundary does not move for the whole turn, so nothing
-    /// already sent is ever rewritten.
-    #[test]
-    fn the_elision_boundary_does_not_move_during_a_turn() {
-        let synthetic = std::collections::HashSet::new();
-        let mut transcript = vec![
-            Message::system("preamble"),
-            Message::user("go do the thing"),
-        ];
-
-        let mut frozen = Vec::new();
-        let mut sliding = Vec::new();
-        for i in 0..8 {
-            let id = format!("call{i}");
-            transcript.push(Message::assistant_tool_calls("", vec![tool_call(&id)]));
-            transcript.push(Message::tool_result(
-                &id,
-                format!("r{i}: {}", "x".repeat(40_000)),
-            ));
-            frozen.push(elision_boundary(&transcript, &synthetic, 2));
-            sliding.push(sliding_boundary(&transcript, &synthetic, 2));
-        }
-
-        assert!(
-            sliding.windows(2).any(|w| w[0] != w[1]),
-            "the tail-relative boundary must move, or there was never a problem: {sliding:?}"
-        );
-        // From the first step at which there are at least `keep_recent` results, the boundary is
-        // fixed for the rest of the turn. Step 0 is degenerate — fewer results than `keep_recent`,
-        // so the tail-relative value has nothing to count back from — and nothing is cached yet
-        // anyway, so there is nothing to invalidate.
-        assert!(
-            frozen[1..].windows(2).all(|w| w[0] == w[1]),
-            "the frozen boundary must not move once a turn is under way: {frozen:?}"
-        );
-        assert_eq!(
-            frozen[1], 1,
-            "it anchors on the user message that started the turn"
-        );
-        assert!(
-            sliding.last() > sliding.first(),
-            "the contrast is the point: {sliding:?} moved every step, {frozen:?} did not"
-        );
-    }
-
-    /// And it DOES move at a turn boundary — one invalidation per turn instead of one per step,
-    /// which is the whole trade.
-    #[test]
-    fn the_elision_boundary_advances_once_at_each_new_turn() {
-        let synthetic = std::collections::HashSet::new();
-        let mut transcript = vec![Message::user("first")];
-        for i in 0..3 {
-            let id = format!("a{i}");
-            transcript.push(Message::assistant_tool_calls("", vec![tool_call(&id)]));
-            transcript.push(Message::tool_result(&id, "y".repeat(40_000)));
-        }
-        let before = elision_boundary(&transcript, &synthetic, 2);
-        transcript.push(Message::user("second"));
-        let after = elision_boundary(&transcript, &synthetic, 2);
-        assert!(
-            after > before,
-            "a new turn must let the boundary advance ({before} → {after})"
-        );
     }
 
     /// The flip side: the freeze must not disable elision. An earlier turn's bulk still goes, or
@@ -1565,7 +1429,7 @@ mod tests {
         }
         let before: usize = messages.iter().map(|m| m.content.len()).sum();
 
-        let reclaimed = dedupe_repeated_tool_results(&mut messages, 0);
+        let reclaimed = dedupe_repeated_tool_results(&mut messages, usize::MAX);
 
         let verbatim: Vec<usize> = messages
             .iter()
@@ -1595,7 +1459,7 @@ mod tests {
             Message::new(Role::Assistant, "later still"),
             Message::new(Role::Tool, &body),
         ];
-        dedupe_repeated_tool_results(&mut messages, 0);
+        dedupe_repeated_tool_results(&mut messages, usize::MAX);
         assert_eq!(messages[0].content, body, "the earliest copy is untouched");
         assert_eq!(messages[2].content, DEDUPE_MARKER);
         assert_eq!(messages[4].content, DEDUPE_MARKER);
@@ -1612,7 +1476,7 @@ mod tests {
             Message::new(Role::Tool, &body),
             Message::new(Role::Tool, &body),
         ];
-        dedupe_repeated_tool_results(&mut messages, 2);
+        dedupe_repeated_tool_results(&mut messages, 1);
         assert_eq!(messages[0].content, body, "the first copy always survives");
         assert_eq!(
             messages[1].content, body,
@@ -1631,7 +1495,7 @@ mod tests {
             Message::new(Role::Tool, &body),
             Message::new(Role::Tool, &body),
         ];
-        dedupe_repeated_tool_results(&mut messages, 0);
+        dedupe_repeated_tool_results(&mut messages, usize::MAX);
         assert_eq!(messages[0].content, body, "the first copy survives");
         assert!(
             messages[1].content.contains("identical"),
@@ -1655,7 +1519,7 @@ mod tests {
             Message::new(Role::Tool, "ok"),
             Message::new(Role::Tool, "ok"),
         ];
-        let reclaimed = dedupe_repeated_tool_results(&mut messages, 0);
+        let reclaimed = dedupe_repeated_tool_results(&mut messages, usize::MAX);
         assert_eq!(reclaimed, 0);
         assert_eq!(messages[0].content, big_a);
         assert_eq!(messages[1].content, big_b);
@@ -1673,53 +1537,8 @@ mod tests {
             Message::new(Role::Assistant, &body),
             Message::new(Role::User, &body),
         ];
-        assert_eq!(dedupe_repeated_tool_results(&mut messages, 0), 0);
+        assert_eq!(dedupe_repeated_tool_results(&mut messages, usize::MAX), 0);
         assert!(messages.iter().all(|m| m.content == body));
-    }
-
-    fn rounds(n: usize, body: &str) -> Vec<Message> {
-        let mut msgs = vec![Message::user("go")];
-        for round in 0..n {
-            let id = format!("call-{round}");
-            msgs.push(Message::assistant_tool_calls(
-                "",
-                vec![forge_types::ToolCall {
-                    id: id.clone(),
-                    name: "read_file".into(),
-                    args: serde_json::json!({"path": format!("f{round}")}),
-                }],
-            ));
-            msgs.push(Message::tool_result(&id, body));
-        }
-        msgs
-    }
-
-    #[test]
-    fn aging_waits_for_a_full_batch_then_cuts_everything_before_the_working_set() {
-        let big = "x".repeat(PRUNE_TOOL_RESULT_MAX + 500);
-        let none = std::collections::HashMap::new();
-        // Three full rounds before the kept four: not a batch yet, so the prompt prefix is untouched.
-        let mut msgs = rounds(PRUNE_KEEP_ROUNDS + AGE_BATCH_ROUNDS - 1, &big);
-        assert_eq!(age_tool_rounds(&mut msgs, PRUNE_KEEP_ROUNDS, &none), 0);
-
-        let mut msgs = rounds(PRUNE_KEEP_ROUNDS + AGE_BATCH_ROUNDS, &big);
-        let kept: std::collections::HashMap<String, String> =
-            [("call-0".to_string(), "/tmp/call-0.log".to_string())].into();
-        assert!(age_tool_rounds(&mut msgs, PRUNE_KEEP_ROUNDS, &kept) > 0);
-        let cut: Vec<bool> = msgs
-            .iter()
-            .filter(|m| m.role == Role::Tool)
-            .map(|m| m.content.ends_with(PRUNE_MARKER))
-            .collect();
-        assert_eq!(cut, [true, true, true, true, false, false, false, false]);
-        let first = msgs.iter().find(|m| m.role == Role::Tool).unwrap();
-        assert!(
-            first.content.contains("/tmp/call-0.log"),
-            "{}",
-            first.content
-        );
-        // Idempotent until the next batch fills.
-        assert_eq!(age_tool_rounds(&mut msgs, PRUNE_KEEP_ROUNDS, &kept), 0);
     }
 
     #[test]
@@ -1749,18 +1568,6 @@ mod tests {
             [true, true, false, false, false, false],
             "{pruned:?}"
         );
-    }
-
-    #[test]
-    fn prune_and_inject_delegates_to_tool_result_reclaim() {
-        let mut msgs = vec![
-            Message::tool_result("c1", "y".repeat(10_000)),
-            Message::user("recent 1"),
-            Message::user("recent 2"),
-        ];
-        let reclaimed = prune_and_inject(&mut msgs, 2, 0);
-        assert!(reclaimed > 0);
-        assert!(msgs[0].content.ends_with(PRUNE_MARKER));
     }
 
     #[test]

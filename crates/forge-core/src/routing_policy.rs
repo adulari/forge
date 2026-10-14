@@ -215,32 +215,24 @@ impl Session {
         // Real-token budget: window minus the reply reservation, with 5% headroom for the small
         // magnitude difference between our o200k counter and the target model's own tokenizer.
         let budget_tokens = window.saturating_sub(reserve) * 95 / 100;
-        to_llm(
+        to_llm_floored(
             &self.transcript,
             budget_tokens.max(256),
             self.config.mesh.tool_result_context_token_budget,
-            self.config.mesh.tool_result_context_keep_recent,
+            self.elision_floor(),
+            &mut None,
         )
     }
 
     /// The base harness preamble prepended (fresh, never persisted) to every main-loop request:
-    /// the Forge coding-agent system prompt + a small live environment block (cwd / OS / git
-    /// branch). Recomputed each call so it's always current, and placed first so the provider's
-    /// cache breakpoint anchors on this stable prefix.
+    /// the Forge coding-agent system prompt + a small live environment block (cwd / OS). Placed
+    /// first so the provider's cache breakpoint anchors on this stable prefix — which is why the git
+    /// branch is not in it: a branch switch would rewrite the first message of every later request.
+    /// The branch goes into the transcript instead, only when it changes (turn_context.rs).
     pub(crate) fn system_preamble(&self) -> Vec<Message> {
         let cwd = self.workspace.display();
         let os = std::env::consts::OS;
-        // No blocking syscall here: this hot per-request helper is `&self` (sync), and making it
-        // `async` to read `.git/HEAD` would hold a `&Session` across an `.await` inside the spawned
-        // turn future — `Session` is not `Sync` (`Receiver`/`dyn Presenter`), so the future would
-        // stop being `Send` and could no longer be `tokio::spawn`ed. Instead the branch is read off
-        // the async path (eagerly at session construction, refreshed via `tokio::fs` at each turn
-        // start) and cached, so we just read the field.
-        let mut env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n");
-        if let Some(b) = &self.cached_git_branch {
-            env.push_str(&format!("git_branch: {b}\n"));
-        }
-        env.push_str("</env>");
+        let env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n</env>");
         let base = crate::commit_policy::apply(FORGE_SYSTEM, self.config.git.commit_policy);
         let mut msgs = vec![Message::system(base.as_ref()), Message::system(env)];
         // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
@@ -288,13 +280,17 @@ impl Session {
             .saturating_sub(tool_tokens)
             * 95
             / 100;
+        let floor = self.elision_floor();
+        let mut trim = self.sticky_trim(floor);
         let mut out = preamble;
-        out.extend(to_llm(
+        out.extend(to_llm_floored(
             &self.transcript,
             budget_tokens.max(256),
             self.config.mesh.tool_result_context_token_budget,
-            self.config.mesh.tool_result_context_keep_recent,
+            floor,
+            &mut trim,
         ));
+        self.store_trim(floor, trim);
         out
     }
 

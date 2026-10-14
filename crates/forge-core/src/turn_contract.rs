@@ -145,6 +145,42 @@ impl TurnContract {
     }
 }
 
+/// Opens a contract that replaces an earlier one still standing in the transcript.
+const SUPERSEDES: &str = "supersedes earlier turn contracts, which no longer apply — ";
+
+/// What a turn with no explicit contract says once an earlier turn left one behind.
+const NO_CONTRACT: &str = "this request sets no special contract.";
+
+/// The contract text after `Turn contract:` and any supersedes clause.
+fn contract_body(message: &str) -> &str {
+    let rest = message
+        .trim_start()
+        .trim_start_matches(crate::system_context::TURN_CONTRACT_PREFIX)
+        .trim_start();
+    rest.strip_prefix(SUPERSEDES).unwrap_or(rest)
+}
+
+/// The turn-contract message to append for this turn, given the newest contract message already in
+/// the transcript, or `None` when nothing needs saying.
+///
+/// Earlier contracts are never removed from the prompt — removing one rewrites the middle of an
+/// already-cached request — so a turn whose contract differs says outright that it supersedes them.
+/// That includes a turn with NO explicit contract after one that had one: without a message, a
+/// stale "explicitly read-only" contract would be the last word the model saw on the subject and
+/// it would refuse to edit. An unchanged contract is still in force, so it is not repeated.
+pub(crate) fn contract_message(guidance: Option<&str>, standing: Option<&str>) -> Option<String> {
+    let Some(standing) = standing else {
+        return guidance.map(str::to_string);
+    };
+    let body = guidance.map_or(NO_CONTRACT, contract_body);
+    (contract_body(standing) != body).then(|| {
+        format!(
+            "{} {SUPERSEDES}{body}",
+            crate::system_context::TURN_CONTRACT_PREFIX
+        )
+    })
+}
+
 impl Default for TurnContract {
     fn default() -> Self {
         Self::derive("", PermissionMode::Default, false)
@@ -277,6 +313,55 @@ pub(crate) fn explicitly_requests_change(prompt: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_first_contract_is_sent_as_is_and_an_unchanged_one_is_not_repeated() {
+        let read_only = TurnContract::derive(
+            "Explain this. Do not edit anything.",
+            PermissionMode::Default,
+            false,
+        );
+        let guidance = read_only.guidance();
+        assert_eq!(contract_message(guidance, None).as_deref(), guidance);
+        assert_eq!(contract_message(guidance, guidance), None);
+        assert_eq!(contract_message(None, None), None);
+    }
+
+    /// forge-prompt-triggers-write-ban: a read-only contract from an earlier turn must not stay
+    /// the last word once a later turn asks for changes — or asks for nothing special.
+    #[test]
+    fn a_stale_read_only_contract_is_explicitly_superseded() {
+        let read_only = TurnContract::derive(
+            "Explain this. Do not edit anything.",
+            PermissionMode::Default,
+            false,
+        )
+        .guidance()
+        .unwrap();
+        let change = TurnContract::derive(
+            "Implement the fix in src/lib.rs",
+            PermissionMode::Default,
+            true,
+        )
+        .guidance()
+        .unwrap();
+
+        let next = contract_message(Some(change), Some(read_only)).unwrap();
+        assert!(
+            next.starts_with("Turn contract: supersedes earlier turn contracts"),
+            "{next}"
+        );
+        assert!(next.contains("requires an implementation"), "{next}");
+        assert!(!next.contains("read-only"), "{next}");
+
+        let lifted = contract_message(None, Some(read_only)).unwrap();
+        assert!(lifted.contains("no longer apply"), "{lifted}");
+        assert!(lifted.contains("no special contract"), "{lifted}");
+        // Once lifted, a further plain turn says nothing more.
+        assert_eq!(contract_message(None, Some(&lifted)), None);
+        // And the superseding contract is itself recognised as standing.
+        assert_eq!(contract_message(Some(change), Some(&next)), None);
+    }
+
     use super::*;
 
     /// The defect: `spawn_session_driver` arms `expect_code_change` for the life of any

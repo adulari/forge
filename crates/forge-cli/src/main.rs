@@ -47,6 +47,7 @@ pub(crate) use cli::commands::schedule::schedule_cmd;
 pub(crate) use cli::commands::self_mcp::self_mcp_cmd;
 pub(crate) use cli::commands::service::service_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
+pub(crate) use cli::commands::stats::stats_cmd;
 pub(crate) use cli::commands::tour::tour_cmd;
 pub(crate) use cli::commands::voice::voice_cmd;
 

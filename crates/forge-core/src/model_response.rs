@@ -92,8 +92,7 @@ impl Session {
                 self.emit_quota_pace(hint);
             }
         }
-        self.store
-            .record_usage(&self.id, &msg_id, &resp.usage, Some(active_model))?;
+        self.record_main_usage(&msg_id, &resp.usage, active_model)?;
         self.turn_input_tokens = self
             .turn_input_tokens
             .saturating_add(resp.usage.input_tokens);
