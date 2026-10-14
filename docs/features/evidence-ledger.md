@@ -63,7 +63,9 @@ Screenshots:
 
 The section is omitted when the session captured nothing. A PR body is public, so the values of
 leading `NAME=value` env assignments in a recorded command are shown as `NAME=***` (the local
-manifest keeps the raw command). It says "captured", never "verified":
+manifest keeps the raw command), and the whole section then goes through the same secret redaction
+as `forge replay` and `/export` ([redaction.md](redaction.md)), so a key passed as a flag or a
+`user:pass@` URL becomes `[redacted]`. It says "captured", never "verified":
 nobody, the model included, has looked at the images. Images are referenced by local path; publishing
 them with the PR (an orphan branch) is planned work.
 

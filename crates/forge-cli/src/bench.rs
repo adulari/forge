@@ -486,6 +486,7 @@ async fn collect_runtime_metadata(
 
 /// One full sweep over `instances`, writing predictions to `out`. A failed instance records an empty
 /// patch (counts as unresolved) rather than aborting the sweep.
+#[allow(clippy::too_many_arguments)]
 async fn run_one_sweep(
     instances: &[SweInstance],
     model: Option<String>,

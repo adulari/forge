@@ -3965,6 +3965,40 @@ pub fn inject_provider_keys() {
 mod tests {
     use super::*;
 
+    /// Every wave-1 config addition (cache floor, cross-session cache key, harness profile,
+    /// privacy, preview) must deserialize, from a config file holding only the two required keys,
+    /// to the same value `Config::default()` ships.
+    #[test]
+    fn wave1_config_fields_default_from_an_empty_file() {
+        let parsed: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+"#,
+        )
+        .expect("a config naming none of them parses");
+        let shipped = Config::default();
+        assert_eq!(
+            parsed.mesh.context_floor_block_tokens,
+            shipped.mesh.context_floor_block_tokens
+        );
+        assert_eq!(
+            parsed.mesh.compact_low_water,
+            shipped.mesh.compact_low_water
+        );
+        assert!(parsed.mesh.cross_session_cache_key);
+        assert_eq!(
+            parsed.mesh.cross_session_cache_key,
+            shipped.mesh.cross_session_cache_key
+        );
+        assert_eq!(parsed.mesh.harness_profile, HarnessProfile::Guarded);
+        assert_eq!(parsed.mesh.harness_profile, shipped.mesh.harness_profile);
+        assert!(parsed.mesh.harness_profiles.is_empty());
+        assert_eq!(parsed.privacy, shipped.privacy);
+        assert_eq!(parsed.preview, shipped.preview);
+    }
+
     /// The shipped `[compact_cap]` table halves Kimi Code's per-step prompt; every other provider
     /// stays on the global ceiling, and a full model id overrides its provider's entry.
     #[test]

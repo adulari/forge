@@ -10,6 +10,16 @@ use std::path::Path;
 
 use crate::completion::{classify_tool, VerificationObservation};
 
+impl crate::Session {
+    /// Run a tool future inside this session's evidence scope, so captures land in its ledger.
+    pub(crate) fn evidence_scope<F: std::future::Future>(
+        &self,
+        fut: F,
+    ) -> impl std::future::Future<Output = F::Output> {
+        forge_tools::scope_session(self.id.clone(), self.workspace.root().to_path_buf(), fut)
+    }
+}
+
 /// Record a passing verification shell command as test proof. The exit status comes from
 /// `result` (the model's copy, whose first line is the shell header); the tail comes from `full`,
 /// the uncut output, when the model's copy was truncated.

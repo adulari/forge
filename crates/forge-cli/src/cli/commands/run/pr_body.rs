@@ -3,12 +3,16 @@
 
 use crate::cli::commands::replay::open_store;
 
-/// Evidence the session captured (when it captured any), then provenance.
+/// Evidence the session captured (when it captured any), then provenance. A PR body is public, so
+/// the evidence block (commands, URLs, captions) goes through the same redaction as replay/export.
 pub(super) fn pr_body_sections(session_id: &str, workspace: &std::path::Path) -> String {
-    join_sections(
-        forge_tools::evidence::pr_evidence_block(workspace, session_id),
-        &pr_provenance_block(session_id),
-    )
+    let evidence = forge_tools::evidence::pr_evidence_block(workspace, session_id)
+        .map(|block| redact_evidence(&forge_core::redact::Redactor::from_environment(), &block));
+    join_sections(evidence, &pr_provenance_block(session_id))
+}
+
+fn redact_evidence(redactor: &forge_core::redact::Redactor, block: &str) -> String {
+    redactor.redact(block).into_owned()
 }
 
 fn join_sections(evidence: Option<String>, provenance: &str) -> String {
@@ -73,5 +77,20 @@ mod tests {
         assert!(evidence_at < body.find("### Provenance").unwrap());
         assert!(body.contains("`cargo test` — exit 0"));
         assert!(body.ends_with(provenance));
+    }
+
+    #[test]
+    fn evidence_block_is_redacted_before_it_reaches_the_pr_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = forge_tools::evidence::Ledger::new(dir.path(), "sess-2").unwrap();
+        ledger
+            .record_test_output("pytest --token planted-secret-value-1234", 0, "ok")
+            .unwrap();
+        let block = forge_tools::evidence::pr_evidence_block(dir.path(), "sess-2").unwrap();
+        assert!(block.contains("planted-secret-value-1234"));
+        let redactor = forge_core::redact::Redactor::new(["planted-secret-value-1234".to_string()]);
+        let redacted = redact_evidence(&redactor, &block);
+        assert!(!redacted.contains("planted-secret-value-1234"));
+        assert!(redacted.contains(forge_core::redact::REDACTED));
     }
 }
