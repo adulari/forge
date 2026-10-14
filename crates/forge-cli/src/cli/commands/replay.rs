@@ -180,8 +180,19 @@ pub(crate) fn sessions() -> Result<()> {
 
 /// `forge replay <id>` reconstructs a session's transcript; `forge replay <a> <b>` diffs two;
 /// `forge replay <id> --html <path>` renders it to one self-contained HTML file.
-pub(crate) fn replay_cmd(ids: &[String], json: bool, html: Option<&Path>) -> Result<()> {
+pub(crate) fn replay_cmd(
+    ids: &[String],
+    json: bool,
+    html: Option<&Path>,
+    redact: bool,
+) -> Result<()> {
     let store = open_store()?;
+    let redactor = redact.then(forge_core::redact::Redactor::from_environment);
+    let scrub = |entries: &mut Vec<forge_store::ReplayEntry>| {
+        if let Some(r) = &redactor {
+            r.redact_replay(entries);
+        }
+    };
     let resolve = |prefix: &str| -> Result<String> {
         let mut matches = store
             .matching_session_ids(prefix)
@@ -195,7 +206,8 @@ pub(crate) fn replay_cmd(ids: &[String], json: bool, html: Option<&Path>) -> Res
     match ids {
         [one] => {
             let id = resolve(one)?;
-            let entries = store.load_replay(&id).context("loading replay")?;
+            let mut entries = store.load_replay(&id).context("loading replay")?;
+            scrub(&mut entries);
             if entries.is_empty() {
                 if let Some(path) = html {
                     let out = replay::render_html(&id[..id.len().min(8)], &entries);
@@ -242,8 +254,10 @@ pub(crate) fn replay_cmd(ids: &[String], json: bool, html: Option<&Path>) -> Res
                 anyhow::bail!("--html is only valid with a single session id");
             }
             let (ida, idb) = (resolve(a)?, resolve(b)?);
-            let ea = store.load_replay(&ida).context("loading replay a")?;
-            let eb = store.load_replay(&idb).context("loading replay b")?;
+            let mut ea = store.load_replay(&ida).context("loading replay a")?;
+            let mut eb = store.load_replay(&idb).context("loading replay b")?;
+            scrub(&mut ea);
+            scrub(&mut eb);
             let d = replay::diff(&ea, &eb);
             let fa8 = &ida[..ida.len().min(8)];
             let fb8 = &idb[..idb.len().min(8)];

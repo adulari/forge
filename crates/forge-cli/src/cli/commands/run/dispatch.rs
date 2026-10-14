@@ -618,31 +618,23 @@ and keep going."
             return gates::goal_outcome(session, app, objective, gates, max_tokens, max_minutes)
                 .await;
         }
-        // `/pr [title]` — turn this session's work into a branch + commit + PR whose body carries
-        // real provenance (session id, models used, spend) so a reviewer can trace every change
-        // back to the conversation (`forge replay <id>` / `forge blame`).
+        // `/pr [title]` — a one-liner over the deterministic `open_pr` tool, which pushes and
+        // opens the PR with generated evidence + provenance (docs/features/open-pr.md).
         CommandAction::Pr(title) => {
-            let title = title.trim().to_string();
-            let (sid, provenance) = {
-                let s = session.lock().await;
-                let sid = s.id().to_string();
-                (sid.clone(), pr_provenance_block(&sid))
-            };
+            let title = title.trim();
+            let sid = session.lock().await.id().to_string();
             let title_line = if title.is_empty() {
-                "Derive a concise conventional-commit style PR title from the work.".to_string()
+                "a concise conventional-commit title".to_string()
             } else {
-                format!("Use this PR title: {title}")
+                format!("the title \"{title}\"")
             };
             app.note(&format!("⇪ preparing a pull request from session {sid}"));
             return Ok(DispatchOutcome::RunTurn {
                 prompt: format!(
-                    "Turn this session's work into a pull request:\n\
-                     1. Run `git status` + `git diff` to see what changed. If nothing changed, say so and stop.\n\
-                     2. If on the default branch, create a descriptive feature branch first; otherwise stay on the current branch.\n\
-                     3. Stage the session's changes (specific paths — never `git add -A` blindly; never stage secrets or .env files), commit with a conventional-commit message describing WHAT and WHY.\n\
-                     4. Push and open the PR with `gh pr create`.\n\
-                     {title_line}\n\
-                     The PR body must end with this provenance section verbatim (fill in the diff stat):\n\n{provenance}"
+                    "Open a pull request for this session's work: commit it on a feature branch \
+                     (create one if on the default branch; stage specific paths, never secrets), \
+                     then call the `open_pr` tool (through tool_call if it is not listed) with \
+                     {title_line} and a short what/why body. Do not run `gh pr create` yourself."
                 ),
                 guidance: Vec::new(),
                 tier: Some(forge_types::TaskTier::Standard),
@@ -1303,36 +1295,4 @@ pub(crate) async fn dispatch_catalog(
             Ok(DispatchOutcome::Handled)
         }
     }
-}
-
-/// The provenance section `/pr` appends to a PR body: enough for a reviewer to trace every change
-/// back to the conversation that produced it. Best-effort — a store read failure just yields a
-/// shorter block (the PR must never be blocked on bookkeeping).
-fn pr_provenance_block(session_id: &str) -> String {
-    let mut block = String::from("---\n### Provenance\n");
-    block.push_str(&format!(
-        "- Session: `{session_id}` — inspect with `forge replay {short}`\n",
-        short = &session_id[..session_id.len().min(8)]
-    ));
-    if let Ok(store) = open_store() {
-        if let Ok(models) = store.session_models(session_id) {
-            let mut distinct: Vec<String> = Vec::new();
-            for m in models {
-                if !distinct.contains(&m) {
-                    distinct.push(m);
-                }
-            }
-            if !distinct.is_empty() {
-                block.push_str(&format!("- Models: {}\n", distinct.join(", ")));
-            }
-        }
-        if let Ok(cost) = store.session_cost(session_id) {
-            if let Ok((tin, tout)) = store.session_tokens(session_id) {
-                block.push_str(&format!("- Spend: ${cost:.4} (↑{tin} ↓{tout} tokens)\n"));
-            }
-        }
-    }
-    block.push_str("- Diff: <insert `git diff --stat` summary here>\n");
-    block.push_str("\n🔨 Created with Forge\n");
-    block
 }

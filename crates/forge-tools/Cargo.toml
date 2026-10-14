@@ -26,6 +26,9 @@ webpki-root-certs = "1"
 globset.workspace = true
 regex.workspace = true
 tracing.workspace = true
+serde.workspace = true
+sha2.workspace = true
+chrono.workspace = true
 
 portable-pty = "0.9"
 base64 = "0.23"

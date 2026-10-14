@@ -63,6 +63,7 @@ fn resp(content: &str, tool_calls: Vec<ToolCall>, input: u64, output: u64) -> Mo
             output_tokens: output,
             cached_input_tokens: None,
             cost_usd: 0.0,
+            ..Default::default()
         },
         quotas: Vec::new(),
     }

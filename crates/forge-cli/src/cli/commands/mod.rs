@@ -25,6 +25,8 @@ pub(crate) mod service;
 pub(crate) mod service_alert;
 pub(crate) mod service_report;
 pub(crate) mod skill;
+pub(crate) mod stats;
+mod stats_codemode;
 pub(crate) mod switch;
 #[cfg(test)]
 mod tests;

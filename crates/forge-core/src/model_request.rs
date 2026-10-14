@@ -150,6 +150,8 @@ pub(super) async fn request_provider_response(
         // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
         // smaller-window model still fits. The immutable borrow ends before the block below.
         let sent = session.transcript_with_preamble_and_tools(active_model, specs);
+        session.cache.stage(active_model, &sent, specs);
+        let cache_key = session.main_loop_cache_key(active_model, specs, &checkpoint_ctx.session);
         // Auto-routed completions reserve a model before dispatch so independent sessions
         // can distribute across the fallback chain. Explicit pins deliberately bypass this
         // scheduler: their existing pin outage/failover policy remains authoritative.
@@ -185,6 +187,15 @@ pub(super) async fn request_provider_response(
                 model: active_model.clone(),
                 step,
             });
+            // Mesh's chosen rung wins over the raw pin: it was selected from this model's MEASURED
+            // effort ladder with the pin already applied as a ceiling, so it is the pin refined by
+            // evidence rather than a value competing with it. The pin is the fallback for a model
+            // mesh has no ladder for, and `None` still sends nothing. Adaptive effort may then
+            // lower it for the step after a read-only round.
+            let effort = session.adaptive_effort_for(
+                active_model.as_str(),
+                decision.and_then(|d| d.effort).or(session.pinned_effort),
+            );
             let provider = &session.provider;
             let presenter = &mut session.presenter;
             // Bump on every stream event so the idle watchdog can distinguish a live
@@ -221,21 +232,18 @@ pub(super) async fn request_provider_response(
                 );
             };
             let completion_opts = CompletionOptions {
-                // Mesh's chosen rung wins over the raw pin: it was selected from this model's
-                // MEASURED effort ladder with the pin already applied as a ceiling, so it is the
-                // pin refined by evidence rather than a value competing with it. The pin is the
-                // fallback for a model mesh has no ladder for, and `None` still sends nothing.
-                effort: decision.and_then(|d| d.effort).or(session.pinned_effort),
+                effort,
                 temperature: Some(crate::repetition_temperature(session.repetition_pressure)),
                 frequency_penalty: crate::repetition_frequency_penalty(session.repetition_pressure),
                 presence_penalty: crate::repetition_presence_penalty(session.repetition_pressure),
                 checkpoint: Some(checkpoint_ctx.clone()),
-                prompt_cache_key: Some(checkpoint_ctx.session.clone()),
+                prompt_cache_key: Some(cache_key),
                 max_output_tokens: None,
                 reuse_response_chain,
                 response_chain_prefix_tokens: completion_prefix_tokens(&sent, specs),
                 response_format: None,
                 require_tool_call: std::mem::take(&mut session.require_tool_call),
+                deny_data_collection: false,
             };
             let fut =
                 provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);

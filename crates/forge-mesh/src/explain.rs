@@ -100,6 +100,37 @@ pub struct RoutingExplanation {
     pub classifier_label: String,
     /// The rung the routed `pick` will run at, mirroring `RoutingDecision::effort`.
     pub pick_effort: Option<EffortLevel>,
+    /// Candidates `[privacy] zero_retention` removed, with why. Empty when the mode is off.
+    pub privacy_drops: Vec<crate::privacy::PrivacyDrop>,
+}
+
+impl RoutingExplanation {
+    /// One line naming which candidates measured cost per solve moved, for surfaces with a single
+    /// rationale. `None` when no candidate has bench measurements.
+    pub fn solve_cost_note(&self) -> Option<String> {
+        crate::solve_cost::note(
+            self.candidates
+                .iter()
+                .map(|c| (c.row.model.as_str(), c.row.solve_cost)),
+        )
+    }
+
+    /// One line naming what zero-retention mode dropped, for surfaces with a single rationale.
+    pub fn privacy_note(&self) -> Option<String> {
+        if self.privacy_drops.is_empty() {
+            return None;
+        }
+        let models: Vec<&str> = self
+            .privacy_drops
+            .iter()
+            .map(|d| d.model.as_str())
+            .collect();
+        Some(format!(
+            "zero-retention mode dropped {} candidate(s): {}",
+            models.len(),
+            models.join(", ")
+        ))
+    }
 }
 
 impl HeuristicRouter {
@@ -323,6 +354,13 @@ impl HeuristicRouter {
         // Pacing is a property of the candidate set for the tier that actually routed, so it is
         // computed once here from the same list `decide()` filtered.
         let paced_candidates = self.candidates_for_tier(routed_tier, hints, quota, effort);
+        let privacy_drops = crate::privacy::drops(
+            &self.config,
+            paced_candidates
+                .iter()
+                .map(String::as_str)
+                .chain(candidates.iter().map(|c| c.row.model.as_str())),
+        );
         let holds = self.pacing_holds(&paced_candidates, quota);
         let quota_views = sub_providers
             .into_iter()
@@ -383,6 +421,7 @@ impl HeuristicRouter {
             fallbacks: decision.fallbacks,
             rationale: decision.rationale,
             classifier_label,
+            privacy_drops,
         }
     }
 }

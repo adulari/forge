@@ -26,6 +26,9 @@ use forge_types::{
 };
 use forge_types::{Presenter, PresenterEvent};
 
+mod adaptive_effort;
+mod local_evidence;
+pub use local_evidence::apply_local_evidence;
 pub mod assay;
 pub mod auto_classifier;
 mod auxiliary_candidates;
@@ -35,24 +38,31 @@ mod shell_batch;
 mod silence_guard;
 mod workspace_policy;
 pub use btw_policy::{busy_asker, BtwAsker};
+mod cache_instrument;
 pub mod capsule;
 pub(crate) mod clock;
+pub mod codemode;
 mod commit_policy;
 mod compaction_headroom;
 mod compaction_policy;
 mod compaction_shape;
 mod completeness;
 pub(crate) mod completion;
+mod context_floor;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
+pub mod deferred_tools;
 mod detached_subagents;
 pub mod dispatch;
 pub mod duel;
+mod empty_reply;
+pub mod evidence_capture;
 mod exact_effort;
 mod failure_verdict;
 mod final_answer;
 pub mod fleet;
 pub(crate) mod git_hygiene;
+mod harness_profile;
 pub mod heartbeat;
 pub mod hooks;
 mod hooks_cc;
@@ -74,10 +84,12 @@ mod narration_dedupe;
 mod nudge_policy;
 mod orchestration;
 pub mod permission;
+mod prefix_cache_key;
 pub mod project_context;
 pub mod push_notify;
 mod quality_gates;
 pub mod readiness;
+pub mod redact;
 mod refinement;
 mod replay;
 mod review_gate;
@@ -85,6 +97,7 @@ mod routing_policy;
 mod session_controls;
 mod session_history;
 mod session_lifecycle;
+mod session_usage_detail;
 mod session_virtual_tools;
 pub mod snapshot;
 pub(crate) mod stall_guard;
@@ -92,6 +105,7 @@ pub mod steer;
 mod stop_hook;
 pub mod subagent;
 mod system_context;
+mod tool_outcome;
 mod working_tree;
 use working_tree::{working_tree_changed_since, working_tree_marker};
 pub(crate) mod task_staleness;
@@ -102,6 +116,7 @@ mod tool_output;
 pub mod wakeup;
 pub(crate) use tool_output::tool_detail;
 mod spend_guard;
+mod turn_context;
 pub mod turn_contract;
 mod turn_guards;
 mod unapplied_edit;
@@ -109,9 +124,11 @@ pub mod workflow;
 mod workspace_context;
 pub mod worktree;
 pub mod worktree_reclaim;
+pub mod zero_retention;
 
 pub use llm_router::LlmRouter;
 use replay::messages_to_replay_items;
+pub use session_usage_detail::SessionUsageDetail;
 use session_virtual_tools::ASK_USER_TOOL;
 pub use session_virtual_tools::{remember_spec, REMEMBER_TOOL};
 use text_policy::{completed_tasks_recap, memory_scope_at, recap_line, sanitize_suggestion};
@@ -698,7 +715,7 @@ paths and verify that each injected failure leaves state unchanged.";
 /// existing-tests-are-spec guard keys on. Matches by basename (`test_*.py`, `*_test.py`,
 /// `*_tests.rs`, `*_test.rs`, `*.test.js/ts`, `*.spec.js/ts`, `test_*.rs`) or by living under a
 /// `tests/` / `test/` / `testing/` directory component. Paths use `/` (git porcelain output).
-pub(crate) fn is_test_path(path: &str) -> bool {
+pub fn is_test_path(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     let by_name = (base.starts_with("test_") && (base.ends_with(".py") || base.ends_with(".rs")))
         || base.ends_with("_test.py")
@@ -1479,9 +1496,9 @@ fn should_retry_same_model_transient(model: &str, error: &forge_provider::Provid
 
 // `message_tokens`, `fit_messages`, and `prune_tool_results` moved to [`context_pipeline`] — the
 // one seam between the transcript and a provider request (imported below for existing call sites).
-use context_pipeline::{age_tool_rounds, message_tokens, prune_and_inject, to_llm};
 #[cfg(test)]
 use context_pipeline::{fit_messages, prune_tool_results, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX};
+use context_pipeline::{message_tokens, to_llm_floored};
 
 /// Output of one execution of the shared model↔tool loop ([`Session::run_model_loop`]).
 /// Carries everything the caller needs; the caller holds `active_model` by value so it is
@@ -1584,6 +1601,9 @@ pub struct Session {
     id: String,
     pub store: Arc<Store>,
     provider: Arc<dyn Provider>,
+    /// The main loop's provider cache key, fixed at the session's first request
+    /// (`prefix_cache_key.rs`).
+    frozen_cache_key: Option<String>,
     router: Arc<dyn Router>,
     tools: ToolRegistry,
     presenter: Box<dyn Presenter>,
@@ -1647,6 +1667,7 @@ pub struct Session {
     /// In-session reasoning-effort pin (`/effort <level>`). When set, forwarded to the provider
     /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
     pinned_effort: Option<EffortLevel>,
+    adaptive_effort: adaptive_effort::AdaptiveEffort,
     /// In-session EXACT rung (`/effort exact <level>`). Where `pinned_effort` is a ceiling the mesh
     /// then optimises under — using measured benchmark data, which only covers the rungs someone
     /// rated — this is an instruction: the routed model runs at this rung, resolved against that
@@ -1718,6 +1739,16 @@ pub struct Session {
     /// Bumped whenever the transcript is rewritten from outside the model loop (rewind, uncompact,
     /// full reload) — see [`forge_provider::CheckpointContext::epoch`].
     history_epoch: u64,
+    /// Prompt-cache attribution: the previous request's wire fingerprint per model.
+    cache: cache_instrument::CacheInstrument,
+    /// Transcript index below which old tool output may be shortened; only moves forward within a
+    /// `history_epoch` (context_floor.rs). A `Cell` so the `&self` request builders can settle it.
+    context_floor: std::cell::Cell<context_floor::FloorState>,
+    /// The window trim later requests reuse while it still fits (context_floor.rs).
+    context_trim: std::cell::Cell<Option<context_floor::TrimState>>,
+    /// Tools were advertised at least once this session, so a later trivial turn keeps them even
+    /// after compaction folded away every tool message — dropping them is a full cache miss.
+    tools_advertised_once: bool,
     /// One-shot latch for the "invalid tool arguments while routed through Headroom" warning.
     headroom_args_warned: bool,
     /// `auto` temper: per-session verdicts of the unknown-command classifier.
@@ -1761,6 +1792,10 @@ pub struct Session {
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
     /// counters and defeat them.
     turn_hard_guard_abort: bool,
+    /// The harness profile of the model currently driving the turn (harness_profile.rs).
+    harness_profile: forge_config::HarnessProfile,
+    /// The empty-reply nudge is spent until the model makes tool progress again (empty_reply.rs).
+    empty_reply_nudged: bool,
     /// USD spend guards for the active turn and the session (`spend_guard.rs`).
     spend: spend_guard::SpendState,
     /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
@@ -2296,7 +2331,13 @@ impl Session {
         n
     }
 
+    /// The surface the model is shown: lean (core + `tool_search`/`tool_call`) unless switched off.
     fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.advertised_tool_specs(self.full_tool_specs())
+    }
+
+    /// Every tool this session can run, before the lean surface defers any of them.
+    fn full_tool_specs(&self) -> Vec<ToolSpec> {
         let scope = self.task_scope.as_ref();
         let mut specs: Vec<ToolSpec> = self
             .tools
@@ -2339,6 +2380,16 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(ASK_USER_TOOL))
         {
             specs.push(ask_user_spec());
+        }
+        // Codemode (docs/features/codemode.md): direct path only. CLI bridges never receive this
+        // catalog (they serve Forge's tools through `forge mcp-serve`), so they never see it.
+        if self.config.codemode.enabled
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(codemode::RUN_CODE_TOOL))
+        {
+            specs.push(codemode::run_code_spec());
         }
         // The task-tracking tool — always advertised so the model can keep a live todo list.
         if self
@@ -2646,6 +2697,7 @@ impl Session {
     ) -> Result<LoopOutcome, CoreError> {
         self.refresh_btw_asker();
         self.poll_lattice_background();
+        self.adaptive_effort.begin_turn();
         // Anything still in the steer inbox belongs to a turn that already ended; the surface still
         // holds those prompts and is starting this turn with the first of them, so delivering them
         // again here would duplicate them.
@@ -2662,12 +2714,9 @@ impl Session {
         // goes through the ordinary session queue (a persisted message + transcript push), not a
         // new presenter surface.
         self.deliver_pending_detached_results()?;
-        // A completed turn's bulky tool logs remain available in the store/replay and in the
-        // working tree they inspected, but repeatedly resending them on every later model step
-        // makes long sessions grow quadratically. Reclaim them at every user-turn boundary instead
-        // of waiting until the model is already near context exhaustion. The newest messages stay
-        // verbatim; current-turn tool results are added only after this boundary.
-        let _ = prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT, 0);
+        // No reclaim here: old tool output is shortened only when the elision floor advances
+        // (context_floor.rs), in blocks, so a short turn appends to the cached prompt instead of
+        // rewriting the previous turn's results.
         let recap_tasks_before = self.tasks.clone();
         let working_tree_baseline = working_tree_marker(Some(self.workspace.root()));
         self.last_context_pack = context_pack::ContextPack::default();
@@ -2859,6 +2908,9 @@ impl Session {
         if let Some(exact) = self.exact_effort {
             decision.effort = forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
         }
+        // After every pin backstop: a session pin the router never saw must not reach a retaining
+        // provider either.
+        forge_mesh::privacy::enforce_on_decision(&self.config, &mut decision);
         let decision = decision;
         if decision.unroutable {
             let has_credentials = forge_config::known_key_providers()
@@ -2880,6 +2932,7 @@ impl Session {
             return Ok(LoopOutcome::final_answer(msg));
         }
         let routed_model = decision.model.clone();
+        self.note_harness_model(&routed_model);
         let reuse_response_chain = should_reuse_response_chain(
             prompt,
             &routing_context,
@@ -3025,7 +3078,10 @@ impl Session {
 
             // Auto-orchestrate: inject the resource-routing framework once so the model surveys
             // all available tools on every turn without requiring the user to /orchestrate.
-            if self.config.mesh.auto_orchestrate && !lean_context::prompt_is_simple(prompt) {
+            if self.config.mesh.auto_orchestrate
+                && self.advisory_nudges_on()
+                && !lean_context::prompt_is_simple(prompt)
+            {
                 let guidance = forge_skills::orchestrate_system_guidance();
                 self.inject_context(
                     &mut context_pack,
@@ -3064,6 +3120,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_output_tokens = 0;
         self.turn_billable_input_tokens = 0;
         self.turn_hard_guard_abort = false;
+        self.empty_reply_nudged = false;
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
@@ -3108,14 +3165,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 FAULT_SEAM_GUIDANCE,
             )?;
         }
-        if let Some(guidance) = contract.guidance() {
-            self.inject_context(
-                &mut context_pack,
-                context_pack::ContextSource::TurnContract,
-                "explicit turn completion contract",
-                guidance,
-            )?;
-        }
+        self.inject_turn_contract(&mut context_pack, &contract)?;
         if self.config.mesh.verify_completeness && !forge_provider::is_cli_bridge(&routed_model) {
             if direct_completeness_is_identifier_migration(prompt) {
                 self.inject_context(
@@ -3199,17 +3249,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Injected here, per turn, rather than into the system preamble — that preamble is the
         // provider's prompt-cache anchor, and a per-second clock in it would break the cached
         // prefix on every request (clock.rs explains the trade-off).
-        self.inject_context(
-            &mut context_pack,
-            context_pack::ContextSource::Time,
-            "current date and time",
-            &clock::now_line(),
-        )?;
+        self.inject_turn_clock(&mut context_pack)?;
+        self.inject_git_branch_if_changed(&mut context_pack)?;
 
         // Commit discipline (git_hygiene.rs): while files this session edited are still
         // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask
         // the model to offer a push. `git status` is a process spawn, so it runs off the executor.
-        if self.config.git.commit_nudge && self.config.git.commit_policy.nudges() {
+        if self.commit_nudges_on() {
             let root = self.workspace.root().to_path_buf();
             let push_ahead = self.config.git.push_nudge_ahead;
             let mut tracker = std::mem::take(&mut self.git_hygiene);
@@ -3336,7 +3382,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // the hard-trim floor and lose recent context. Transparent — `compact` emits its own note.
         self.auto_compact_if_needed(&edit_model).await;
 
-        let specs = if self.mid_task() || Self::should_advertise_tools(decision.tier, prompt) {
+        let specs = if self.tools_advertised_once
+            || self.mid_task()
+            || Self::should_advertise_tools(decision.tier, prompt)
+        {
+            self.tools_advertised_once = true;
             self.tool_specs()
         } else {
             Vec::new()
@@ -4912,6 +4962,9 @@ mod tests {
     #[path = "failure_streak_reset.rs"]
     mod failure_streak_reset_tests;
 
+    #[path = "deferred_dispatch.rs"]
+    mod deferred_dispatch_tests;
+
     #[path = "completeness_gate.rs"]
     mod completeness_gate_tests;
 
@@ -4930,11 +4983,23 @@ mod tests {
     #[path = "stream_idle_hint.rs"]
     mod stream_idle_hint_tests;
 
+    #[path = "prefix_cache_key.rs"]
+    mod prefix_cache_key_tests;
+
+    #[path = "adaptive_effort.rs"]
+    mod adaptive_effort_tests;
+
+    #[path = "zero_retention.rs"]
+    mod zero_retention_tests;
+
     #[path = "steer_rewind.rs"]
     mod steer_rewind_tests;
 
     #[path = "commit_nudge.rs"]
     mod commit_nudge_tests;
+
+    #[path = "append_only_turns.rs"]
+    mod append_only_turns_tests;
 
     #[path = "stall_guard.rs"]
     mod stall_guard_tests;
@@ -4954,6 +5019,9 @@ mod tests {
     #[path = "worktree_scope.rs"]
     mod worktree_scope_tests;
 
+    #[path = "codemode.rs"]
+    mod codemode_tests;
+
     #[path = "auto_classifier.rs"]
     mod auto_classifier_tests;
 
@@ -4971,6 +5039,9 @@ mod tests {
 
     #[path = "spend_guard.rs"]
     mod spend_guard_tests;
+
+    #[path = "harness_profile.rs"]
+    mod harness_profile_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
@@ -6100,9 +6171,23 @@ mod tests {
         .unwrap();
         session.set_mcp(Some(mgr));
 
-        // tool_specs advertises the MCP meta-tools (search + call); server tools are reached
-        // through mcp_call, never advertised individually.
-        let names: Vec<String> = session.tool_specs().into_iter().map(|s| s.name).collect();
+        // The lean surface folds the MCP meta-tools into tool_search/tool_call (the mcp_* names stay
+        // callable as aliases, which the scripted model below uses); the full surface keeps them.
+        let lean = session.tool_specs();
+        let search = lean.iter().find(|s| s.name == "tool_search").unwrap();
+        assert!(
+            search.description.contains("server__tool"),
+            "{}",
+            search.description
+        );
+        assert!(lean
+            .iter()
+            .all(|s| s.name != "mcp_search_tools" && s.name != "mcp_call"));
+        let names: Vec<String> = session
+            .full_tool_specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         assert!(names.iter().any(|n| n == "mcp_search_tools"));
         assert!(
             names.iter().any(|n| n == "mcp_call"),
@@ -10129,6 +10214,7 @@ mod tests {
                     cached_input_tokens: Some(40),
                     output_tokens: 30,
                     cost_usd: 1.69308,
+                    ..Default::default()
                 },
                 Some("meta::muse-spark-1.3-contributor"),
             )
@@ -11089,6 +11175,7 @@ mod tests {
                     output_tokens,
                     cached_input_tokens: Some(cached_input_tokens),
                     cost_usd: 0.0,
+                    ..Default::default()
                 },
                 quotas: Vec::new(),
             })
@@ -11143,6 +11230,7 @@ mod tests {
                     cached_input_tokens: Some(40),
                     output_tokens: 30,
                     cost_usd: 1.69308,
+                    ..Default::default()
                 },
                 Some("meta::muse-spark-1.3-contributor"),
             )
@@ -11769,6 +11857,7 @@ mod tests {
                 output_tokens: 12,
                 cached_input_tokens: Some(0),
                 cost_usd: 0.0,
+                ..Default::default()
             };
             if is_subagent {
                 // Child: read a file once, then answer.
@@ -11929,6 +12018,7 @@ mod tests {
                 output_tokens: 12,
                 cached_input_tokens: Some(0),
                 cost_usd: 0.0,
+                ..Default::default()
             };
             let is_subagent = messages
                 .iter()
@@ -12123,6 +12213,7 @@ mod tests {
                 output_tokens: 2,
                 cached_input_tokens: Some(0),
                 cost_usd: 0.0,
+                ..Default::default()
             };
             if used_tool {
                 return Ok(ModelResponse {
@@ -15930,7 +16021,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dependent_turn_proactively_prunes_bulky_completed_tool_output() {
+    async fn a_dependent_turn_leaves_completed_tool_output_in_place_until_the_floor_advances() {
         let provider = Arc::new(FlakyProvider {
             bad: std::collections::HashSet::new(),
             err: rate_limited,
@@ -15966,13 +16057,16 @@ mod tests {
             .await
             .unwrap();
 
+        // Pruning it at the turn boundary rewrote a message the provider had already cached, so
+        // every new turn re-billed the prompt from there on. It stays until a block of verbatim
+        // context has built up and the elision floor advances (context_floor.rs).
         let retained = session
             .transcript
             .iter()
             .find(|message| message.tool_call_id.as_deref() == Some("old-shell"))
             .expect("old tool result remains represented");
-        assert!(retained.content.ends_with(PRUNE_MARKER));
-        assert!(retained.content.len() < full_result.len() / 5);
+        assert_eq!(retained.content, full_result);
+        assert!(!retained.content.ends_with(PRUNE_MARKER));
     }
 
     #[tokio::test]

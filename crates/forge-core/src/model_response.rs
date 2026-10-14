@@ -13,7 +13,6 @@ impl Session {
         tools_before: u64,
         tools_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
         bridge_input_accum: &mut u64,
-        empty_nudges: &mut usize,
     ) -> Result<(String, bool), CoreError> {
         let provisional_completion = !resp.wants_tools() && !resp.content.trim().is_empty();
         // Carry the reply's own thinking on the in-memory transcript. Thinking-mode APIs want it
@@ -92,8 +91,7 @@ impl Session {
                 self.emit_quota_pace(hint);
             }
         }
-        self.store
-            .record_usage(&self.id, &msg_id, &resp.usage, Some(active_model))?;
+        self.record_main_usage(&msg_id, &resp.usage, active_model)?;
         self.turn_input_tokens = self
             .turn_input_tokens
             .saturating_add(resp.usage.input_tokens);
@@ -121,10 +119,6 @@ impl Session {
 
         let bridge_tool_progress = forge_provider::is_cli_bridge(active_model)
             && tools_ran.load(std::sync::atomic::Ordering::Relaxed) > tools_before;
-
-        if resp.wants_tools() || bridge_tool_progress {
-            *empty_nudges = 0;
-        }
 
         Ok((msg_id, bridge_tool_progress))
     }

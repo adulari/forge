@@ -75,6 +75,13 @@ turn does — every message (`role`, `content`, `model`, tool calls, timestamp) 
 - This closes the gap named in `docs/architecture/prime-agent-comparison.md` (prime-agent's
   `/export` HTML / `/share` gist vs. Forge's `forge replay` TUI).
 
+## Redaction
+
+Every `forge replay` output (transcript, `--json`, `--html`, two-id diff), `/export` and
+`forge anywhere share` masks secrets as `[redacted]` before rendering: configured provider keys,
+secret-named env values, credential shapes and `password=…`-style values. `forge replay
+--no-redact` prints verbatim. See [redaction.md](redaction.md).
+
 ## Re-execution (`--rerun`)
 
 `forge replay <id> --rerun` re-issues the session's recorded **user** prompts (in turn order)

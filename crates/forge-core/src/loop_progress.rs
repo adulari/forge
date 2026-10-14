@@ -63,6 +63,10 @@ pub(crate) struct CallObservation {
 }
 
 impl CallObservation {
+    pub(crate) fn ok(&self) -> bool {
+        self.ok
+    }
+
     /// Whether this call was a file write that succeeded.
     pub(crate) fn wrote(&self) -> bool {
         self.ok && self.mutating
@@ -342,16 +346,26 @@ impl crate::Session {
                 STAGNATION_NUDGE,
             ),
             Verdict::Halt { stale_steps } => {
+                let after = if self.advisory_nudges_on() {
+                    " after a nudge"
+                } else {
+                    ""
+                };
                 self.presenter
                     .emit(forge_types::PresenterEvent::Warning(format!(
                         "{stale_steps} of the model's last {WINDOW_STEPS} steps found nothing new \
-                         and it kept going after a nudge — stopping to avoid a loop. Nothing is \
-                         lost: edits so far are kept. Reply with what you want next, or \
-                         `continue` to let it try again."
+                         and it kept going{after} — stopping to avoid a loop. Nothing is lost: \
+                         edits so far are kept. Reply with what you want next, or `continue` to \
+                         let it try again."
                     )));
                 return true;
             }
         };
+        // A `minimal` profile sends no nudge, but the tracker still counts the relapse window, so
+        // a model that keeps finding nothing new is halted on the same schedule.
+        if !self.advisory_nudges_on() {
+            return false;
+        }
         self.presenter
             .emit(forge_types::PresenterEvent::Warning(warning));
         let seq = self.next_seq();

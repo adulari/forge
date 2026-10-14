@@ -152,6 +152,7 @@ impl Session {
         seq: i64,
     ) -> Self {
         let mode = config.permission_mode;
+        let provider = crate::zero_retention::guard(provider, &config);
         // Opt-in allowlist (`tools.extra_roots`) of extra roots the structured file tools may
         // read and write, in addition to the workspace. Relative entries are ignored. Empty by
         // default, so this is a no-op for existing configs.
@@ -195,6 +196,7 @@ impl Session {
             id,
             store,
             provider,
+            frozen_cache_key: None,
             router,
             tools,
             presenter,
@@ -225,6 +227,7 @@ impl Session {
             pinned_model: None,
             pinned_effort: None,
             exact_effort: None,
+            adaptive_effort: Default::default(),
             subagent_pin_free: None,
             overflow_window_cap: None,
             require_tool_call: false,
@@ -244,6 +247,10 @@ impl Session {
             git_hygiene: crate::git_hygiene::Tracker::default(),
             stale_tasks: crate::task_staleness::Tracker::default(),
             history_epoch: 0,
+            cache: Default::default(),
+            context_floor: Default::default(),
+            context_trim: Default::default(),
+            tools_advertised_once: false,
             headroom_args_warned: false,
             auto_classifier_cache: Default::default(),
             always_compact_on_switch: false,
@@ -257,6 +264,8 @@ impl Session {
             turn_billable_input_tokens: 0,
             turn_output_tokens: 0,
             turn_hard_guard_abort: false,
+            harness_profile: forge_config::HarnessProfile::default(),
+            empty_reply_nudged: false,
             spend: Default::default(),
             turn_unfinished_tasks: Vec::new(),
             expect_code_change: false,

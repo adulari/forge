@@ -35,8 +35,12 @@ If genuinely ambiguous, ask one clarifying question. Otherwise proceed.
   description before choosing. Do NOT read the filesystem to find skills.
 - **Subagents** — the `spawn_agents` tool fans work out to mesh-routed child agents.
   Use it for long, parallel, or isolation-worthy subtasks.
-- **External tools (MCP)** — `mcp_search_tools` discovers tools on connected servers;
-  `mcp_call` invokes them. Use for anything needing an external system.
+- **Tools not listed up front** — `tool_search` finds Forge's on-demand tools (browser,
+  device, web_fetch, lattice, heartbeats, ...); `tool_call` runs one by exact name. Use for
+  anything needing an external system. Tools on connected MCP servers are named
+  `server__tool`: if `tool_search`'s description mentions them, search and run them the same
+  way; otherwise find them with `mcp_search_tools` and run them with `mcp_call` (reached
+  through `tool_call` when those two are not listed).
 - **Web** — `web_search` and `web_fetch` for live information and URLs.
 - **Code intelligence** — the Lattice graph already injects relevant code each turn;
   the `lattice` tool answers structural questions (impact, paths, provenance).
@@ -92,7 +96,7 @@ State what was completed and flag any gaps explicitly.
 |-----------|----------|
 | Guiding *how* to approach a task in this conversation | a **skill** (`use_skill`) |
 | A long, parallel, or isolation-worthy subtask | a **subagent** (`spawn_agents`) |
-| Data from / action in an external system | an **MCP tool** (`mcp_search_tools` → `mcp_call`) |
+| Data from / action in an external system | an **MCP tool** (`tool_search` → `tool_call`) |
 | Live information or a specific URL | `web_search` / `web_fetch` |
 | A structural question about this codebase | the `lattice` tool |
 

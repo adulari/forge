@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 use clap::Parser;
 
 use forge_core::Session;
-use forge_provider::{DispatchProvider, Provider};
+use forge_provider::DispatchProvider;
 use forge_store::Store;
 use forge_types::TaskTier;
 
@@ -47,6 +47,7 @@ pub(crate) use cli::commands::schedule::schedule_cmd;
 pub(crate) use cli::commands::self_mcp::self_mcp_cmd;
 pub(crate) use cli::commands::service::service_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
+pub(crate) use cli::commands::stats::stats_cmd;
 pub(crate) use cli::commands::tour::tour_cmd;
 pub(crate) use cli::commands::voice::voice_cmd;
 
@@ -81,6 +82,8 @@ mod log_filter;
 mod login_path;
 mod mcp_agent;
 mod mcp_serve;
+mod open_pr_hooks;
+mod preview;
 mod push;
 mod push_tool;
 mod remote;
@@ -181,8 +184,13 @@ async fn run_cli(login_path_added: Vec<String>) {
         );
         return;
     };
-    if let Ok(config) = forge_config::load() {
-        forge_tools::set_attach_endpoint(config.browser.endpoint());
+    {
+        let config = forge_config::load().ok();
+        if let Some(config) = &config {
+            forge_tools::set_attach_endpoint(config.browser.endpoint());
+            preview::install(config);
+        }
+        open_pr_hooks::install(config.as_ref());
     }
     push_tool::install_local_sink();
     let telemetry_run = telemetry::start(&command);

@@ -839,14 +839,8 @@ fn partial_prefill(seed: Option<&str>, opts: &CompletionOptions) -> Option<ChatM
 }
 
 fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMessage> {
-    // Providers replay the whole transcript on every call, and several enforce a hard cap
-    // (e.g. "At most 1 image(s) may be provided in one prompt") on the total images in a
-    // request. Images are only useful on the turn that introduced them, so only the most
-    // recent image-bearing user turn keeps its images; earlier ones fall back to text-only.
     let messages = crate::system_placement::place_system_messages(messages);
-    let last_image_turn = messages
-        .iter()
-        .rposition(|m| matches!(m.role, Role::User) && !m.images.is_empty());
+    let last_image_turn = crate::system_placement::last_image_turn(&messages);
     let mut out = Vec::with_capacity(messages.len());
     for (i, m) in messages.iter().enumerate() {
         match m.role {
@@ -988,18 +982,6 @@ fn qwencloud_thinking_budget(effort: Option<EffortLevel>) -> u32 {
         EffortLevel::High => 8_192,
         EffortLevel::XHigh | EffortLevel::WhiteHot => 16_384,
     }
-}
-
-/// Whether to attach OpenAI's optional cache-sharding hint to this request.
-///
-/// NVIDIA NIM enables prefix caching at the deployment/server layer and rejects
-/// `prompt_cache_key` as an unknown body field. Sending it there adds a guaranteed failed request
-/// before every useful completion (the hosted endpoint may take close to a minute to return that
-/// validation response). Other OpenAI-compatible endpoints remain optimistic and retain the
-/// narrow validation fallback below, which is required for custom endpoints whose capabilities
-/// cannot be known ahead of time.
-fn should_send_prompt_cache_key(model: &str) -> bool {
-    !matches!(model.split_once("::"), Some(("nvidia", _)))
 }
 
 /// The failure shape OpenCode Go returns when a model is sent to the wrong wire format: an
@@ -1154,7 +1136,7 @@ impl GenAiProvider {
         if let Some(cache_key) = opts
             .prompt_cache_key
             .as_deref()
-            .filter(|_| should_send_prompt_cache_key(&model_name))
+            .filter(|_| crate::prompt_cache::should_send_prompt_cache_key(&model_name))
         {
             options = options.with_prompt_cache_key(cache_key);
         }
@@ -1217,8 +1199,9 @@ impl GenAiProvider {
             }
         }
 
-        // Repetition penalties, only while the turn is repeating itself (see `wire_params`).
-        options = crate::wire_params::with_repetition_penalties(options, &model_name, opts);
+        // Repetition penalties and OpenRouter's data policy (see `wire_params`). Keyed on Forge's
+        // id: genai renames `openrouter` to `open_router`, which no provider list matches.
+        options = crate::wire_params::with_extra_body_fragments(options, model, opts);
 
         // Structured-output request (OpenAI `response_format`): map to the provider's JSON-mode /
         // JSON-schema knob so a caller asking for JSON actually gets JSON. Providers that don't
@@ -1642,16 +1625,17 @@ impl GenAiProvider {
 /// Providers that omit `prompt_tokens_details` entirely (groq among them) yield `None` rather than
 /// 0: they never told us how much was cached, which is not a claim that nothing was.
 fn normalize_usage(usage: &genai::chat::Usage) -> Usage {
-    let cached = usage
-        .prompt_tokens_details
-        .as_ref()
-        .and_then(|details| details.cached_tokens)
-        .map(|cached| cached.max(0) as u64);
+    let count = |n: Option<i32>| n.map(|n| n.max(0) as u64);
+    let prompt = usage.prompt_tokens_details.as_ref();
+    let completion = usage.completion_tokens_details.as_ref();
     Usage {
-        input_tokens: usage.prompt_tokens.unwrap_or(0).max(0) as u64,
-        output_tokens: usage.completion_tokens.unwrap_or(0).max(0) as u64,
-        cached_input_tokens: cached,
+        input_tokens: count(usage.prompt_tokens).unwrap_or(0),
+        output_tokens: count(usage.completion_tokens).unwrap_or(0),
+        cached_input_tokens: count(prompt.and_then(|d| d.cached_tokens)),
         cost_usd: 0.0, // priced by the mesh from token counts (FR-5)
+        // Anthropic/Bedrock cache creation and reasoning counts; genai turns a zero into None.
+        cache_write_tokens: count(prompt.and_then(|d| d.cache_creation_tokens)),
+        reasoning_tokens: count(completion.and_then(|d| d.reasoning_tokens)),
     }
 }
 
@@ -2067,8 +2051,31 @@ mod tests {
                 output_tokens: 35,
                 cached_input_tokens: Some(11_520),
                 cost_usd: 0.0,
+                ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn cache_write_and_reasoning_counts_reach_forge_usage() {
+        let provider_usage = genai::chat::Usage {
+            prompt_tokens: Some(10_000),
+            prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
+                cached_tokens: Some(6_000),
+                cache_creation_tokens: Some(1_500),
+                ..Default::default()
+            }),
+            completion_tokens: Some(400),
+            completion_tokens_details: Some(genai::chat::CompletionTokensDetails {
+                reasoning_tokens: Some(250),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let usage = normalize_usage(&provider_usage);
+        assert_eq!(usage.cache_write_tokens, Some(1_500));
+        assert_eq!(usage.reasoning_tokens, Some(250));
+        assert_eq!(usage.cached_input_tokens, Some(6_000));
     }
 
     /// Live reproduction (needs an OpenRouter key; run with `--ignored`). Proves both halves of the
@@ -2554,12 +2561,18 @@ mod tests {
 
     #[test]
     fn prompt_cache_key_is_capability_gated_for_nvidia_nim() {
-        assert!(!should_send_prompt_cache_key("nvidia::z-ai/glm-5.2"));
-        assert!(should_send_prompt_cache_key(
+        assert!(!crate::prompt_cache::should_send_prompt_cache_key(
+            "nvidia::z-ai/glm-5.2"
+        ));
+        assert!(crate::prompt_cache::should_send_prompt_cache_key(
             "qwencloud::qwen3.8-max-preview"
         ));
-        assert!(should_send_prompt_cache_key("openai::gpt-5.4"));
-        assert!(should_send_prompt_cache_key("custom::strict-gateway"));
+        assert!(crate::prompt_cache::should_send_prompt_cache_key(
+            "openai::gpt-5.4"
+        ));
+        assert!(crate::prompt_cache::should_send_prompt_cache_key(
+            "custom::strict-gateway"
+        ));
     }
 
     #[test]

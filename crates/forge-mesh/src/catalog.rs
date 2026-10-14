@@ -54,6 +54,10 @@ pub struct ModelCatalog {
     /// session, while the portable catalog remains static model metadata.
     #[serde(skip)]
     calibration: HashMap<String, RuntimeCalibration>,
+    /// Measured cost per solve from `forge bench report --record`, already turned into bounded
+    /// adjustments ([`crate::solve_cost`]). Local evidence like `calibration`, so never cached.
+    #[serde(skip)]
+    pub(crate) solve_cost: HashMap<String, crate::solve_cost::SolveCostSignal>,
     /// Human display names a provider published for its models (Kimi Code's `display_name`: `k3` →
     /// "K3", `kimi-for-coding` → "K2.8 Preview"), keyed by full id. Populated live at discovery and
     /// not serialized — it is a display convenience for `forge models`, never a routing input, so a
@@ -62,32 +66,10 @@ pub struct ModelCatalog {
     display_names: HashMap<String, String>,
 }
 
-/// Bounded, aggregate runtime evidence supplied by Forge's local outcome ledger.  Static
-/// benchmarks remain dominant; this only breaks close calls after a meaningful sample size.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RuntimeCalibration {
-    pub samples: u32,
-    pub success_rate: f64,
-    pub mean_latency_ms: f64,
-}
-
-const CALIBRATION_MIN_SAMPLES: u32 = 20;
-
-fn calibration_adjustment(calibration: Option<&RuntimeCalibration>) -> f64 {
-    let Some(c) = calibration.filter(|c| c.samples >= CALIBRATION_MIN_SAMPLES) else {
-        return 0.0;
-    };
-    // Failure-rate evidence carries most of the (still bounded) signal.  Latency only separates
-    // otherwise-close choices and is logarithmic so a slow long-context model cannot be punished
-    // into the wrong tier.  Result is capped at ±1.25 points against static benchmark scores.
-    let reliability = (c.success_rate.clamp(0.0, 1.0) - 0.90) * 5.0;
-    let latency = if c.mean_latency_ms.is_finite() && c.mean_latency_ms > 0.0 {
-        (4_000.0 / c.mean_latency_ms).ln().clamp(-0.25, 0.25)
-    } else {
-        0.0
-    };
-    (reliability + latency).clamp(-1.25, 1.25)
-}
+use crate::calibration::calibration_adjustment;
+pub use crate::calibration::RuntimeCalibration;
+#[cfg(test)]
+use crate::calibration::CALIBRATION_MIN_SAMPLES;
 
 /// The provider prefix of a `provider::model` id (`"groq"` from `"groq::llama-3.1-8b"`).
 /// Documented in docs/features/mesh-routing.md.
@@ -579,6 +561,8 @@ pub struct ScoreRow {
     pub bench_score: Option<f64>,
     pub cost: f64,
     pub speed: u8,
+    /// Measured cost per solve and what it added to `final_score` (`None` = never measured).
+    pub solve_cost: Option<crate::solve_cost::SolveCostSignal>,
 }
 
 /// The full, inspectable conservation decision for a prompt (the data the `/mesh` inspector and
@@ -870,6 +854,7 @@ impl ModelCatalog {
             effort_ladders: HashMap::new(),
             burn_weights: HashMap::new(),
             calibration: HashMap::new(),
+            solve_cost: HashMap::new(),
             display_names: HashMap::new(),
         }
     }
@@ -1064,6 +1049,7 @@ impl ModelCatalog {
                     superseded.contains(m),
                 );
                 score += calibration_adjustment(self.calibration.get(m));
+                score += self.solve_cost_adjustment(m);
                 let penalty = conservation_penalty(
                     m,
                     &self.models,
@@ -1204,7 +1190,8 @@ impl ModelCatalog {
                     &self.burn_weights,
                     &price_burn_weights,
                     superseded.contains(m),
-                ) + calibration_adjustment(self.calibration.get(m));
+                ) + calibration_adjustment(self.calibration.get(m))
+                    + self.solve_cost_adjustment(m);
                 let sub = is_subscription(m);
                 let penalty = conservation_penalty(
                     m,
@@ -1237,6 +1224,7 @@ impl ModelCatalog {
                     bench_score,
                     cost,
                     speed: crate::capability::speed_class(m),
+                    solve_cost: self.solve_cost.get(m).copied(),
                 }
             })
             .collect();

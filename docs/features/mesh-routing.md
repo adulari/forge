@@ -207,6 +207,12 @@ cannot serve a general chat turn: image/video/audio generation (`imagen`, `veo`,
 completion models (`babbage`, `davinci`). Excluded models stay visible in `forge models` and can
 still be pinned explicitly — the filter only guards the *general* routing pool.
 
+**Zero-retention mode.** With `[privacy] zero_retention = true`, `is_usable` also drops every
+model whose provider is not known to be zero-retention (`crates/forge-mesh/src/privacy.rs`), and
+`decide_with_pin` refuses a retaining pin with an `unroutable` decision instead of dispatching it.
+Unknown providers count as retaining. `forge mesh explain` lists each dropped candidate with its
+reason. See [zero-retention.md](zero-retention.md).
+
 ### 3.3 Vision
 
 `supports_vision` (`crates/forge-mesh/src/catalog.rs:163`) is a name-heuristic **allowlist** of
@@ -391,6 +397,31 @@ Still inside `route_score` (`catalog.rs:386-391`): a subscription whose provider
 (effectively last). Applied in the *score*, not as a post-sort, so non-subscription alternatives
 make it into any truncated shortlist.
 
+### 4.7a Measured cost per solve
+
+Added to the score after `route_score`, next to the outcome calibration (`catalog.rs`,
+`solve_cost_adjustment`; the math lives in `crates/forge-mesh/src/solve_cost.rs`). The data comes
+from `forge bench report --record` (bench-metrics.md), which stores each scored, model-pinned
+Forge run in the store's `bench_solve` table (migration 43). Every session start and `forge mesh`
+pools those runs per catalog id: attempts, solves, notional cost.
+
+- **Gate:** a model counts only with `MIN_SOLVE_ATTEMPTS` = 20 pass@1-eligible attempts, the same
+  floor the bench report uses for a Pareto claim. Below it the row shows the measurement and
+  `not applied (n … < 20)`.
+- **Relative, never absolute:** the reference is the median cost per solve of the models that
+  cleared the gate. With fewer than two such models nothing moves, because one measurement has
+  nothing to be compared against.
+- **Adjustment:** `−0.75 × log2(cost per solve / median)` points, capped at ±1.25 (the same bound
+  as the outcome calibration). Half the median's cost per solve earns +0.75; twice it costs −0.75.
+  A gated model that solved nothing takes −1.25; one that solved at zero notional cost takes +1.25.
+- **Where it bites:** at medium effort the adjusted score decides the order. At high effort the
+  integer AA band is compared first, so the signal only reorders within a band; at low effort the
+  order is cheapest-first by list price, so it only breaks ties there.
+- **Explained:** each `ScoreRow` carries `solve_cost` (measurement, reference, adjustment);
+  `RoutingExplanation::solve_cost_note()` names which candidates it moved. `forge mesh explain`
+  prints `· $/solve +0.75` on a moved row plus one line per measured candidate, its JSON carries a
+  `solve_cost` object per candidate, and the `/mesh` overlay appends the note to the rationale.
+
 ### 4.8 OAuth supersedes bridge: per-model preference and suppression
 
 Native OAuth (`codex-oauth::`) runs Forge's own harness against the provider directly; the CLI
@@ -481,9 +512,27 @@ cache rate it equals `cost_for`. This is what actual spend accounting uses. The 
 for native and custom OpenAI-compatible API-key providers forwards the stable Forge session as
 `prompt_cache_key` and preserves `prompt_tokens_details.cached_tokens` from streaming usage, so
 providers such as Qwen Cloud receive cache affinity and cache hits are accounted consistently.
+`reference_cost_for_usage` prices a usage at the LIST rate of the model behind an id (exact id,
+else the cheapest positive rate for the same bare model name). It only feeds the benchmark's
+notional cost for subscription and free calls and is never written back as spend
+([bench-metrics.md](bench-metrics.md)).
 
-**Prompt caching is automatic and capability-aware.** Every main agent turn uses its stable Forge
-session id as the cache namespace; Architect uses a stable session-specific planner namespace, and
+**Prompt caching is automatic and capability-aware.** Every main agent turn carries one cache key
+for the whole session, chosen at its first request. With `[mesh] cross_session_cache_key = true`
+(the default) and a first model whose provider treats the key purely as a cache-routing hint
+(`forge_provider::prompt_cache::shares_prompt_cache_key_across_sessions`: not NVIDIA NIM, which
+rejects the field, not Gemini, whose explicit `cachedContents` resource is derived from the key, and
+not the CLI bridges, which never send it), the key is `forge-prefix-` plus a SHA-256 digest of the
+model, the tool surface, the system preamble and the workspace root
+(`crates/forge-core/src/prefix_cache_key.rs`). A new session, or a dispatched worker, with the same
+fixed prefix then lands on the cache shard an earlier one warmed instead of paying for its ~15K-token
+prefix uncached. Otherwise the key is the session id. The key never changes inside a session, even
+when failover moves to a different model: a key that moved would route the next request to a cold
+shard. A resumed session recomputes it at its first request, which yields the same key while model,
+tools, preamble and workspace are unchanged. `/new` and `/resume` pick the key again for the session they switch
+to. Many concurrent sessions on one shared key can exceed a provider's per-key request rate (OpenAI
+documents roughly 15 requests a minute) and spill onto colder machines; set the flag to `false` if a
+large parallel fleet in one workspace shows lower cache hit rates. Architect uses a stable session-specific planner namespace, and
 `forge api` accepts the OpenAI `prompt_cache_key`/legacy `user` fields or derives a privacy-preserving
 SHA-256 key from the standing request prefix. The dispatch layer preserves that option across every
 API-key and OAuth backend:
@@ -1188,6 +1237,8 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `pin_outage_wait_secs` | 600 | Pinned transient-outage wait budget; 0 disables (§9) (`lib.rs:1301`) |
 | `subagents.inherit_pin` | `true` | When a pin is active, subagents inherit it strictly (§9) (`crates/forge-config/src/lib.rs` `SubagentsConfig`) |
 | `subagents.inherit_pin` (per session) | — | `/subagents free\|pinned` overrides the default for one session; persisted (§9.1) |
+| `adaptive_effort` | `true` | Low reasoning effort for the step after a successful read-only tool round (adaptive-effort.md) |
+| `adaptive_effort_providers` | `["openai", "codex-oauth", "gemini"]` | Providers `adaptive_effort` applies to: only those where an effort change keeps the prompt cache |
 
 Multi-key rotation: every key-based provider accepts multiple API keys (repeat
 `forge auth <provider>`, a comma-separated env value, or numbered `_2`… env siblings —

@@ -179,6 +179,7 @@ impl Tool for DeviceTool {
                 "key": {"type": "string", "description": "For key: back, home, enter, tab, delete, app_switch, or a KEYCODE_*."},
                 "all": {"type": "boolean", "description": "For ui: include every node, not just the actionable ones."},
                 "max_chars": {"type": "integer", "description": "Cap for ui/shell output. Default 20000."},
+                "caption": {"type": "string", "description": "For screenshot: what the shot shows, recorded with it as session evidence."},
                 "timeout_secs": {"type": "integer", "description": "For wait_for/emulator_start. Defaults 30 / 300."},
                 "command": {"type": "string", "description": "For shell: the command to run on the device."},
                 "local": {"type": "string", "description": "Host path, for push/pull."},
@@ -443,18 +444,13 @@ async fn screen(device: &Device, action: &str, args: &Value) -> Result<String, T
             // A base64 PNG in the transcript is tens of thousands of useless tokens; write it out
             // and hand back the path, exactly as the browser tool does.
             let bytes = device.screenshot().await.map_err(failed)?;
-            let path = std::env::temp_dir().join(format!(
-                "forge-device-{}-{}.png",
-                device.serial().replace(':', "-"),
-                std::process::id()
-            ));
-            std::fs::write(&path, &bytes)
-                .map_err(|error| ToolError::Failed(format!("write screenshot: {error}")))?;
-            Ok(format!(
-                "screenshot written to {} ({} bytes)",
-                path.display(),
-                bytes.len()
-            ))
+            crate::evidence::save_screenshot(
+                "device",
+                &format!("forge-device-{}", device.serial().replace(':', "-")),
+                &bytes,
+                args.get("caption").and_then(Value::as_str),
+                None,
+            )
         }
         "ui" => {
             let tree = device.dump_ui().await.map_err(failed)?;

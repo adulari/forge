@@ -1,7 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bench;
-
 #[derive(Parser)]
 #[command(
     name = "forge",
@@ -100,56 +98,9 @@ impl FailOnSeverity {
     }
 }
 
-#[derive(Subcommand)]
-pub(crate) enum BenchCmd {
-    /// Generate SWE-bench predictions: run Forge on each instance and write predictions.jsonl
-    /// (score it with the official `swebench` evaluator — see docs/benchmarks/swe-bench.md).
-    Swe {
-        /// SWE-bench dataset file (JSONL or a JSON array of instances).
-        #[arg(long)]
-        dataset: std::path::PathBuf,
-        /// Where to write predictions.jsonl.
-        #[arg(long, default_value = "predictions.jsonl")]
-        out: std::path::PathBuf,
-        /// Only run the first N instances (smoke runs).
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Pin a specific model. For --agent forge a Forge model id (provider::model); for
-        /// claude-code / codex the CLI's own model name (e.g. `opus`, `gpt-5-codex`).
-        #[arg(long)]
-        model: Option<String>,
-        /// Directory to clone/reuse instance repos under.
-        #[arg(long, default_value = ".forge/swe-bench")]
-        workdir: std::path::PathBuf,
-        /// Which agent solves each instance — compare Forge against another CLI's own harness.
-        #[arg(long, value_enum, default_value_t = bench::Agent::Forge)]
-        agent: bench::Agent,
-        /// Per-instance wall-clock budget for an external agent (seconds).
-        #[arg(long, default_value_t = 1200)]
-        timeout_secs: u64,
-        /// Run each instance this many times (separate seeds) for pass@k / best-of-k. >1 writes
-        /// one predictions file per seed (`<out>.seed1.jsonl`, …); aggregate with `bench passk`.
-        #[arg(long, default_value_t = 1)]
-        attempts: usize,
-    },
-    /// Aggregate pass@k from several swebench evaluation reports (one per seed).
-    Passk {
-        /// The `*.json` reports written by `run_evaluation`, one per seed.
-        #[arg(required = true)]
-        reports: Vec<std::path::PathBuf>,
-    },
-    /// Join per-instance metrics with the official eval report(s) and print resolve rate AND
-    /// tokens-per-success per agent — the headline efficiency comparison (e.g. Forge-bridging-X
-    /// vs X's own CLI).
-    Report {
-        /// One or more `<out>.metrics.jsonl` sidecars from `bench swe` (typically one per agent).
-        #[arg(long = "metrics", required = true)]
-        metrics: Vec<std::path::PathBuf>,
-        /// Official `run_evaluation` `*.json` report(s); omit to print token/patch stats only.
-        #[arg(long = "eval")]
-        evals: Vec<std::path::PathBuf>,
-    },
-}
+#[path = "args/bench.rs"]
+pub(crate) mod bench_args;
+pub(crate) use bench_args::BenchCmd;
 
 #[derive(Subcommand)]
 pub(crate) enum LocalCmd {
@@ -286,6 +237,9 @@ pub(crate) enum AssayCmd {
 #[path = "args/anywhere.rs"]
 pub(crate) mod anywhere;
 pub(crate) use anywhere::AnywhereCmd;
+#[path = "args/stats.rs"]
+pub(crate) mod stats;
+pub(crate) use stats::StatsCmd;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
@@ -346,6 +300,10 @@ pub(crate) enum Command {
         /// publish_local_runs` is on by default, so this is how a single run opts out.
         #[arg(long = "no-publish-to-fleet", conflicts_with = "publish_to_fleet")]
         no_publish_to_fleet: bool,
+        /// After the turn, write what the session consumed (tokens incl. cache splits, calls,
+        /// cost, notional cost, wall time) as one JSON object to this path. Implies a local run.
+        #[arg(long, value_name = "PATH", conflicts_with = "publish_to_fleet")]
+        usage_json: Option<std::path::PathBuf>,
     },
     /// Start an interactive multi-turn chat session.
     ///
@@ -549,6 +507,11 @@ pub(crate) enum Command {
         /// your normal permission mode, exactly as `forge run` would. Single id only.
         #[arg(long)]
         rerun: bool,
+        /// Print secrets verbatim. By default every output (transcript, --json, --html) masks
+        /// configured API keys, secret-named env values, credential shapes (sk-…, ghp_…, JWTs,
+        /// PEM keys, Bearer …) and `password=…`-style values as `[redacted]`.
+        #[arg(long)]
+        no_redact: bool,
     },
     /// The counterfactual: branch a past session BEFORE turn N — every earlier turn held
     /// verbatim as fixed context — and re-ask that one prompt, optionally on a different model.
@@ -843,6 +806,12 @@ pub(crate) enum Command {
     /// The model scoreboard for this repo: wins/losses and the resulting routing boost per
     /// model, learned from `/duel` arenas and `forge queue run --shadow` passes.
     Scoreboard,
+    /// Usage statistics from the local store. `forge stats cache [--session [ID]]`: prompt-cache
+    /// hit rate per model and the cause of each miss.
+    Stats {
+        #[command(subcommand)]
+        cmd: StatsCmd,
+    },
 
     /// A 2-minute guided tour of Forge — what it does and the commands to try, no API keys
     /// needed. `--demo` also runs a real offline turn (mock model) in a scratch directory so

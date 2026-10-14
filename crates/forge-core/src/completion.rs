@@ -119,6 +119,8 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
         "use_skill",
         "spawn_agents",
         "ask_user",
+        // Its inner calls are observed one by one; the wrapper itself is not evidence.
+        "run_code",
     ]
     .iter()
     .any(|suffix| name.ends_with(suffix))
@@ -129,6 +131,8 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
         "write_file",
         "append_file",
         "edit_file",
+        "multi_edit",
+        "notebook_edit",
         "apply_patch",
         "delete_file",
         "move_file",

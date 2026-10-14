@@ -359,6 +359,10 @@ cloudflared/ngrok is installed. If `tunnel_name` is set but only ngrok is on `PA
 message naming what's configured vs. what's actually installed, rather than silently falling
 back to a quick tunnel.
 
+The tunnel code itself lives in `crates/forge-tools/src/tunnel.rs`, shared with preview URLs
+(`shell_job` expose, see shell-tool.md). Previews ignore these fixed-hostname settings unless
+`[preview] use_fixed_hostname = true`.
+
 ## 3b. PWA lifetime
 
 The in-chat `/remote` server still mints a fresh port + token per session, so an installed

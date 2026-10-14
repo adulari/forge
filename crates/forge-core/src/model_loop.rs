@@ -99,10 +99,8 @@ impl Session {
         // Plan mode — the bridge advertises present_plan unconditionally, so the parent gates here.
         let mut proposed_plan: Option<forge_types::PlanProposal> = None;
         let in_plan_mode = self.mode == PermissionMode::Plan;
-        // Harness reliability guards. `empty_nudges`: bounded retries when the model returns nothing
-        // (narrate-then-stall / transient empty) before giving up. `last_tool_sig`/`repeat_count`:
-        // doom-loop detection — the same tool batch repeated DOOM_LOOP_THRESHOLD× halts the turn.
-        let mut empty_nudges = 0usize;
+        // `last_tool_sig`/`repeat_count`: doom-loop detection — the same tool batch repeated
+        // DOOM_LOOP_THRESHOLD× halts the turn.
         let mut last_tool_sig: Option<u64> = None;
         let mut repeat_count = 0usize;
         // `recent_sigs`: a short sliding window of recent tool-batch signatures. The consecutive
@@ -249,8 +247,7 @@ impl Session {
                     .push(Message::system(DEADLINE_RECONCILE_NUDGE));
             }
             // Every step, not only at nudge points: a 120K-ceiling Kimi turn once grew to 246K.
-            let keep = crate::context_pipeline::PRUNE_KEEP_ROUNDS;
-            age_tool_rounds(&mut self.transcript, keep, &self.kept_outputs);
+            self.advance_floor_if_due(&active_model, false);
             self.auto_compact_if_needed(&active_model).await;
             let (tools_before, mut resp) = crate::model_request::request_provider_response(
                 self,
@@ -293,6 +290,7 @@ impl Session {
             // Compute the real cost from token counts and the model's price (FR-5, A-7), pricing
             // cache-read tokens at the discounted rate so it tracks the provider's actual bill.
             resp.usage.cost_usd = self.pricing.cost_for_usage(&active_model, &resp.usage);
+            self.adaptive_effort.observe_response(&resp.usage);
             // The last call's input size is the live context fill (tui-token-counter.md) — except a
             // subscription CLI bridge reports cumulative internal usage, so [`context_fill_tokens`]
             // substitutes the transcript estimate there (else the gauge reads a bogus 337% and trips
@@ -307,12 +305,13 @@ impl Session {
                 tools_before,
                 &tools_ran,
                 &mut bridge_input_accum,
-                &mut empty_nudges,
             )?;
+            self.note_harness_model(&active_model);
             self.emit_cost_snapshot(context_tokens, &active_model)?;
 
             if resp.wants_tools() || bridge_tool_progress {
                 followup_intent_nudges = 0;
+                self.rearm_empty_reply_nudge();
             }
 
             if let Some(text) = self.hard_guard_after_call(resp.usage.cost_usd) {
@@ -324,8 +323,8 @@ impl Session {
             }
 
             if !resp.wants_tools() {
+                self.adaptive_effort.restore();
                 if !resp.content.trim().is_empty() {
-                    empty_nudges = 0;
                     final_text = resp.content.clone();
                     has_prior_final = true;
                 }
@@ -348,22 +347,7 @@ impl Session {
                         hit_step_cap = false;
                         break;
                     }
-                    const MAX_EMPTY_NUDGES: usize = 2;
-                    if empty_nudges < MAX_EMPTY_NUDGES {
-                        empty_nudges += 1;
-                        self.require_tool_call = !nudge_policy::open_titles(&self.tasks).is_empty();
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "model returned an empty response — nudging it to continue ({empty_nudges}/{MAX_EMPTY_NUDGES})"
-                        )));
-                        let nudge = "Your last response was empty. Continue with the task: call a \
-                                     tool to make progress, or state your final answer. Do not reply \
-                                     with an empty message.";
-                        let nseq = self.next_seq();
-                        // Provider chat APIs require a continuation request to end in a user
-                        // message. Appending this as System after the empty Assistant response made
-                        // the recovery request invalid (`last message role must be 'user'`).
-                        let _ = self.store.add_nudge_message(&self.id, nseq, nudge);
-                        self.transcript.push(Message::user(nudge));
+                    if self.nudge_empty_reply() {
                         continue;
                     }
                     // Nudges exhausted. An empty-responding model (e.g. some NIM models that stream
@@ -400,7 +384,6 @@ impl Session {
                             });
                             active_model = next;
                             transient_retries = 0;
-                            empty_nudges = 0;
                             continue;
                         }
                     }
@@ -659,7 +642,7 @@ impl Session {
                     // (bounded) so the work completes instead of ending the turn mid-task.
                     let open_titles = nudge_policy::open_titles(&self.tasks);
                     let unfinished = open_titles.len();
-                    if unfinished > 0 {
+                    if unfinished > 0 && self.advisory_nudges_on() {
                         // Work is still open — any earlier "all done" verification is stale.
                         verify_attempts = 0;
                         let progress_now = (
@@ -729,7 +712,7 @@ impl Session {
                         if self.nudge_unapplied_edit(&mut phantom_edit_nudges) {
                             continue;
                         }
-                    } else if !self.tasks.is_empty() {
+                    } else if unfinished == 0 && !self.tasks.is_empty() {
                         // Every tracked task reported Done — same completion authority as the bridge:
                         // accept fresh evidence newer than the last mutation, otherwise request a
                         // tool-grounded state check. A self-reported "done" without an inspection is
@@ -804,6 +787,7 @@ impl Session {
                 hit_step_cap = false;
                 break;
             }
+            self.observe_adaptive_round(&resp.tool_calls, &step_observations);
             self.observe_silence(
                 &mut silence,
                 verify_attempts == 0,

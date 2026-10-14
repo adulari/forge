@@ -614,6 +614,7 @@ pub(crate) async fn serve_cmd(
         println!("⚒ daemon token rotated — previously installed PWAs/links are now invalid");
     }
 
+    crate::preview::reap_at_daemon_start(&config);
     let store = Arc::new(crate::open_store()?);
     let registry = Arc::new(SessionRegistry::new());
     // Other machines for session messaging; answers nothing while Forge Anywhere is off.

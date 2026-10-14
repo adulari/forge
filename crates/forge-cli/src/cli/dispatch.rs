@@ -19,6 +19,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             output_format,
             publish_to_fleet,
             no_publish_to_fleet,
+            usage_json,
         } => {
             // Unified continuity with `chat`: --continue / --resume <id> / bare --resume (picker).
             // The picker needs the interactive TUI, so treat the headless run as "plain".
@@ -42,6 +43,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 output_format,
                 publish_to_fleet,
                 no_publish_to_fleet,
+                usage_json,
             )
             .await
         }
@@ -125,11 +127,12 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             json,
             html,
             rerun,
+            no_redact,
         } => {
             if rerun {
                 replay_rerun_cmd(&ids).await
             } else {
-                replay_cmd(&ids, json, html.as_deref())
+                replay_cmd(&ids, json, html.as_deref(), !no_redact)
             }
         }
         Command::Fork {
@@ -152,6 +155,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 agent,
                 timeout_secs,
                 attempts,
+                judge,
             } => {
                 bench::run_swe(
                     dataset,
@@ -162,11 +166,56 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                     agent,
                     timeout_secs,
                     attempts,
+                    judge,
                 )
                 .await
             }
+            BenchCmd::Integrity {
+                predictions,
+                dataset,
+                judge,
+            } => bench::integrity_cmd(&predictions, &dataset, judge.as_deref()).await,
+            BenchCmd::Tasks {
+                suite,
+                out,
+                limit,
+                model,
+                agent,
+                mock,
+                attempts,
+                timeout_secs,
+            } => {
+                bench::run_tasks(bench::TasksOptions {
+                    suite,
+                    out,
+                    limit,
+                    model,
+                    agent,
+                    mock,
+                    attempts,
+                    timeout_secs,
+                })
+                .await
+            }
+            BenchCmd::Export {
+                metrics,
+                out,
+                integrity,
+            } => bench::export_cmd(&metrics, &out, integrity.as_deref()),
             BenchCmd::Passk { reports } => bench::passk(&reports),
-            BenchCmd::Report { metrics, evals } => bench::report(&metrics, &evals),
+            BenchCmd::Report {
+                runs,
+                metrics,
+                evals,
+                shared_eval,
+                record,
+            } => bench::report(&bench::ReportInputs {
+                runs,
+                metrics,
+                evals,
+                shared_eval,
+                record,
+            }),
         },
         Command::Commands => commands_cmd(),
         Command::Models {
@@ -240,6 +289,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Service { cmd } => service_cmd(cmd),
         Command::Queue { cmd } => queue_cmd(cmd),
         Command::Scoreboard => scoreboard_cmd(),
+        Command::Stats { cmd } => stats_cmd(cmd),
         Command::Tour { demo } => tour_cmd(demo),
         Command::Voice { op } => voice_cmd(op).await,
     }

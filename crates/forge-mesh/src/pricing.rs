@@ -233,6 +233,37 @@ impl Pricing {
             .min_by(f64::total_cmp)
     }
 
+    /// What `usage` would cost at the LIST price of the model behind `model`: the same lookup as
+    /// [`reference_estimated_cost`](Self::reference_estimated_cost) (exact id first, then the
+    /// cheapest positive rate for the bare model name under any namespace), priced like
+    /// [`cost_for_usage`](Self::cost_for_usage).
+    ///
+    /// The bench uses it to put subscription and free calls, which record $0, on the same axis as
+    /// metered ones. The result is a NOTIONAL figure and must never be written back as spend.
+    /// `None` when no positive rate is tracked for the model.
+    pub fn reference_cost_for_usage(&self, model: &str, usage: &forge_types::Usage) -> Option<f64> {
+        let priced = |rate: &ModelRate| {
+            let cached = usage.cached_input_tokens_or_zero().min(usage.input_tokens);
+            let fresh = usage.input_tokens - cached;
+            let cache_rate = rate.cache_read_per_1k.unwrap_or(rate.input_per_1k);
+            (fresh as f64 / 1000.0) * rate.input_per_1k
+                + (cached as f64 / 1000.0) * cache_rate
+                + (usage.output_tokens as f64 / 1000.0) * rate.output_per_1k
+        };
+        let positive = |rate: &&ModelRate| rate.input_per_1k > 0.0 || rate.output_per_1k > 0.0;
+        if let Some(rate) = self.rates.get(model).filter(positive) {
+            return Some(priced(rate));
+        }
+        let bare = bare_model_name(model);
+        self.rates
+            .iter()
+            .filter(|(id, _)| bare_model_name(id).eq_ignore_ascii_case(bare))
+            .map(|(_, rate)| rate)
+            .filter(positive)
+            .map(priced)
+            .min_by(f64::total_cmp)
+    }
+
     /// Whether we hold a rate for `model` that is EXPLICITLY zero on both input and output.
     ///
     /// This is the difference between "we know it is free" and "we have no idea what it costs",
@@ -639,6 +670,7 @@ mod tests {
             output_tokens: 500,
             cached_input_tokens: Some(800),
             cost_usd: 0.0,
+            ..Default::default()
         };
         assert!((pricing.cost_for_usage("openrouter::m", &usage) - 1.28).abs() < 1e-9);
         // A provider that does not report caching earns no discount it never evidenced: the whole
@@ -657,6 +689,7 @@ mod tests {
             output_tokens: 500,
             cached_input_tokens: Some(800),
             cost_usd: 0.0,
+            ..Default::default()
         };
         assert!(
             (pricing2.cost_for_usage("openrouter::n", &u2)
@@ -680,5 +713,34 @@ mod tests {
         let pricing = Pricing::from_config(&config);
         // 1000 in * 1.0/1k + 1000 out * 2.0/1k = 1.0 + 2.0 = 3.0
         assert!((pricing.cost_for("openai::gpt-4o-mini", 1000, 1000) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reference_cost_prices_a_subscription_call_at_the_list_rate_of_the_same_model() {
+        use super::*;
+        let fetched = vec![(
+            "openrouter::moonshotai/kimi-k3".to_string(),
+            0.003,
+            0.015,
+            Some(0.0003),
+        )];
+        let pricing = Pricing::from_config_with_fetched(&forge_config::Config::default(), fetched);
+        let usage = forge_types::Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            cached_input_tokens: Some(8_000),
+            ..Default::default()
+        };
+        assert_eq!(pricing.cost_for_usage("kimi::kimi-k3", &usage), 0.0);
+        // 2000 fresh * 0.003/1k + 8000 cached * 0.0003/1k + 1000 out * 0.015/1k
+        let notional = pricing
+            .reference_cost_for_usage("kimi::kimi-k3", &usage)
+            .expect("bare-name fallback finds the openrouter rate");
+        assert!((notional - (0.006 + 0.0024 + 0.015)).abs() < 1e-9);
+        assert_eq!(
+            pricing.reference_cost_for_usage("ollama::qwen3", &usage),
+            None,
+            "an untracked model has no notional price, never a fabricated zero"
+        );
     }
 }

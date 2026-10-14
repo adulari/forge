@@ -495,8 +495,9 @@ mod tests {
     #[tokio::test]
     async fn direct_path_advertises_the_tool_records_the_call_and_denies_in_plan() {
         let mut s = test_session();
+        // Deferred on the lean surface: reachable through tool_search/tool_call.
         assert!(s
-            .tool_specs()
+            .full_tool_specs()
             .iter()
             .any(|t| t.name == PUSH_NOTIFICATION_TOOL));
         let msg_id = s

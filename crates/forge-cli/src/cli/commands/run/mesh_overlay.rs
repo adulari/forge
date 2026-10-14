@@ -92,7 +92,10 @@ pub(crate) fn build_mesh_overlay(
         candidates: candidates.clone(),
         pick: e.pick.clone(),
         fallbacks: e.fallbacks.clone(),
-        rationale: e.rationale.clone(),
+        rationale: [e.privacy_note(), e.solve_cost_note()]
+            .into_iter()
+            .flatten()
+            .fold(e.rationale.clone(), |acc, note| format!("{acc} — {note}")),
         anim_tick: 0,
         // Start the browsing cursor on the actual pick, not row 0 — that's the row the user is
         // most likely to want to look at first.

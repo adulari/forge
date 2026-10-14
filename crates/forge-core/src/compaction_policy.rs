@@ -204,30 +204,25 @@ impl Session {
     /// emits its own one-line note). No-op when it already fits or the transcript is too short to
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     pub(crate) async fn auto_compact_if_needed(&mut self, model: &str) {
-        let window = self.base_context_window(model) as u64;
-        // A `[compact_cap]` entry for this model or its provider is the ceiling; otherwise the
-        // global paid/free split below decides.
-        let cap = forge_config::compact_cap_for(model)
-            .unwrap_or_else(|| compaction_cap(self.router.model_is_free(model), &self.config.mesh));
-        let trigger = auto_compact_trigger_tokens(window, cap, AUTO_COMPACT_THRESHOLD);
+        let trigger = self.compaction_trigger(model);
         if needs_compaction(
             self.context_pressure_tokens(),
             trigger,
             self.transcript_fits(model),
         ) {
-            // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
-            // (no model call). Often reclaims enough that the LLM summarize below isn't needed.
-            if prune_and_inject(
-                &mut self.transcript,
-                COMPACT_KEEP_RECENT,
-                crate::context_pipeline::PRUNE_KEEP_ROUNDS,
-            ) > 0
-            {
+            // Cheap first: advance the elision floor to the working set and cut the bulky results
+            // it releases (no model call). Often reclaims enough that the summary isn't needed.
+            if self.advance_floor_if_due(model, true) > 0 {
                 self.emit_context_gauge(model);
             }
+            // Either step goes down to the low-water mark, not just under the trigger: stopping at
+            // the trigger means the next tool result trips it again, and every trip rewrites the
+            // prompt — a session at its ceiling re-trimmed on every single request.
+            let low_water =
+                (trigger as f64 * self.config.mesh.compact_low_water.clamp(0.1, 1.0)) as u64;
             if needs_compaction(
                 self.context_pressure_tokens(),
-                trigger,
+                low_water,
                 self.transcript_fits(model),
             ) {
                 let (before, after) = self.compact(true).await.unwrap_or_default();
@@ -681,6 +676,7 @@ impl Session {
         )
         .await;
         self.history_epoch += 1;
+        self.cache.note_compaction();
         // The bridge process is respawned from the compacted transcript, so what it last reported
         // describes a context that no longer exists.
         self.bridge_context_tokens = 0;

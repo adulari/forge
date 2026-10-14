@@ -12,18 +12,26 @@ use forge_types::{
 };
 use serde::{Deserialize, Serialize};
 
+mod adaptive_effort;
 pub mod agents;
 pub mod browser;
+pub mod codemode;
 mod commit_policy;
+mod harness_profile;
 pub mod mcp;
 pub mod notifications;
 pub mod oauth;
 mod paths;
+pub mod pr;
+pub mod preview;
+pub mod privacy;
 pub mod provider_oauth;
 pub mod quota_status;
 pub mod secret_store;
+pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
+pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
     write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
@@ -144,6 +152,15 @@ pub struct Config {
     /// Attach the browser tool to an existing logged-in browser (`[browser] attach`).
     #[serde(default)]
     pub browser: browser::BrowserConfig,
+    /// Public preview URLs for agent-started dev servers (`shell_job` expose).
+    #[serde(default)]
+    pub preview: preview::PreviewConfig,
+    /// The `run_code` tool on the direct path (`[codemode]`).
+    #[serde(default)]
+    pub codemode: codemode::CodemodeConfig,
+    /// How `open_pr` publishes pull requests (`[pr] publish_evidence_images`).
+    #[serde(default)]
+    pub pr: pr::PrConfig,
     /// User-configurable keybind map (action → key combo). Defaults to the built-in map.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -205,6 +222,9 @@ pub struct Config {
     /// Structured file-tool workspace confinement (`tools.extra_roots`).
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Zero-data-retention routing (`[privacy] zero_retention`, zero-retention.md).
+    #[serde(default)]
+    pub privacy: privacy::PrivacyConfig,
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
@@ -1870,6 +1890,14 @@ pub struct MeshConfig {
     /// `tool_search`/`tool_call` pair. `FORGE_BRIDGE_LEAN=0` also opts out. Default true.
     #[serde(default = "default_true")]
     pub bridge_lean: bool,
+    /// Lean direct-path tool surface (docs/features/deferred-tools.md): direct providers get the
+    /// core coding tools plus `tool_search`/`tool_call`; platform tools load on demand. The kill
+    /// switch: `false` here, or `FORGE_DIRECT_LEAN=0`. Default true.
+    #[serde(default = "default_true")]
+    pub direct_lean: bool,
+    /// Deferred tools to keep advertised on the lean direct surface (e.g. `["web_fetch"]`).
+    #[serde(default)]
+    pub lean_core_extra: Vec<String>,
     /// Connect external project MCP servers (dual-graph/token-counter/helm/…) inside the CLI
     /// bridge. Default true: servers connect concurrently in the background, each under the
     /// configured MCP connect/discovery timeout, so a slow or auth-gated server is skipped rather
@@ -2076,6 +2104,17 @@ pub struct MeshConfig {
     /// Number of newest tool results kept verbatim before older oversized results are elided.
     #[serde(default = "default_tool_result_context_keep_recent")]
     pub tool_result_context_keep_recent: usize,
+    /// Smallest stretch of verbatim context (tokens) the elision floor releases at once. Old tool
+    /// output is only shortened when the floor advances, and every advance rewrites the prompt
+    /// from that point on — so it moves in blocks of at least this many tokens (or 25% of the
+    /// compaction trigger, whichever is larger) instead of on every turn.
+    #[serde(default = "default_context_floor_block_tokens")]
+    pub context_floor_block_tokens: usize,
+    /// Fraction of the compaction trigger an auto-compaction must get the context down to. The
+    /// prune or summary that fires at the trigger goes this far in one step so the following
+    /// requests append to a stable prefix instead of re-trimming on every call.
+    #[serde(default = "default_compact_low_water")]
+    pub compact_low_water: f64,
     /// Per-turn cumulative input-token ceiling for a CLI bridge turn (wave 5). A bridge runs its
     /// own tool loop inside a subprocess, so the direct-path cost guards (which only see
     /// `resp.tool_calls`) never fire on it — an unbounded bridge turn is the dominant tail-cost
@@ -2167,9 +2206,46 @@ pub struct MeshConfig {
     /// no effort param (provider default). Overridable per session with `/effort`.
     #[serde(default)]
     pub default_effort: Option<String>,
+    /// Give a session's provider cache key a stable hash of (model, tools, system prompt,
+    /// workspace) instead of the session id, so a new session can reuse the fixed prefix an
+    /// earlier one warmed. Frozen at the session's first request (mesh-routing.md, prompt caching).
+    #[serde(default = "default_true")]
+    pub cross_session_cache_key: bool,
+    /// Advisory steering level (docs/features/harness-profile.md). `guarded` (default) keeps every
+    /// nudge; `minimal` drops the advisory ones (progress asks, stall/stagnation nudges, commit
+    /// reminders, auto-orchestrate, mid-intent and continue nudges) while the safety guards stay.
+    #[serde(default)]
+    pub harness_profile: HarnessProfile,
+    /// Per-model overrides of `harness_profile`, keyed by a model-id glob (`*` = any run of
+    /// characters): `[mesh.harness_profiles] "bedrock::*" = "minimal"`. The most specific match
+    /// wins.
+    #[serde(default)]
+    pub harness_profiles: std::collections::BTreeMap<String, HarnessProfile>,
+    /// Low reasoning effort for the step after a successful read-only tool round, restored after
+    /// a failure, a write or a user turn (docs/features/adaptive-effort.md).
+    #[serde(default = "default_true")]
+    pub adaptive_effort: bool,
+    /// Providers `adaptive_effort` applies to: by default only those where an effort change
+    /// leaves the prompt cache intact ([`CACHE_SAFE_EFFORT_PROVIDERS`]).
+    #[serde(default = "adaptive_effort::default_adaptive_effort_providers")]
+    pub adaptive_effort_providers: Vec<String>,
 }
 
 impl MeshConfig {
+    /// The harness profile for `model`, after per-model glob overrides.
+    pub fn harness_profile_for(&self, model: &str) -> HarnessProfile {
+        resolve_harness_profile(self.harness_profile, &self.harness_profiles, model)
+    }
+
+    /// Whether adaptive effort may lower `model`'s effort (switch on and provider listed).
+    pub fn adaptive_effort_for(&self, model: &str) -> bool {
+        self.adaptive_effort
+            && self
+                .adaptive_effort_providers
+                .iter()
+                .any(|p| p == provider_of(model))
+    }
+
     /// Effective per-completion output token cap. Credit conservation affects routing only; a
     /// response limit exists solely when the user explicitly configures this field above zero.
     pub fn effective_max_output_tokens(&self) -> u32 {
@@ -2254,6 +2330,14 @@ fn default_tool_result_context_token_budget() -> usize {
 
 fn default_tool_result_context_keep_recent() -> usize {
     2
+}
+
+fn default_context_floor_block_tokens() -> usize {
+    32_768
+}
+
+fn default_compact_low_water() -> f64 {
+    0.62
 }
 
 fn default_bridge_turn_token_cap() -> u64 {
@@ -2795,6 +2879,8 @@ impl Default for Config {
                 classifier_activity_focused: false,
                 bridge_mode: BridgeMode::default(),
                 bridge_lean: true,
+                direct_lean: true,
+                lean_core_extra: Vec::new(),
                 bridge_mcp_external: true,
                 min_tier: None,
                 daily_budget_usd: None,
@@ -2830,6 +2916,8 @@ impl Default for Config {
                 bridge_require_tools: default_bridge_require_tools(),
                 tool_result_context_token_budget: default_tool_result_context_token_budget(),
                 tool_result_context_keep_recent: default_tool_result_context_keep_recent(),
+                context_floor_block_tokens: default_context_floor_block_tokens(),
+                compact_low_water: default_compact_low_water(),
                 bridge_turn_token_cap: default_bridge_turn_token_cap(),
                 explicit_models: Vec::new(),
                 bridge_models: HashMap::new(),
@@ -2846,6 +2934,11 @@ impl Default for Config {
                 architect_model: None,
                 editor_model: None,
                 default_effort: None,
+                cross_session_cache_key: true,
+                harness_profile: HarnessProfile::Guarded,
+                harness_profiles: std::collections::BTreeMap::new(),
+                adaptive_effort: true,
+                adaptive_effort_providers: adaptive_effort::default_adaptive_effort_providers(),
             },
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),
@@ -2869,6 +2962,9 @@ impl Default for Config {
             statusline: StatuslineConfig::default(),
             notifications: notifications::NotificationsConfig::default(),
             browser: browser::BrowserConfig::default(),
+            preview: preview::PreviewConfig::default(),
+            codemode: codemode::CodemodeConfig::default(),
+            pr: pr::PrConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),
@@ -2880,6 +2976,7 @@ impl Default for Config {
             voice: VoiceConfig::default(),
             harness: HarnessConfig::default(),
             tools: ToolsConfig::default(),
+            privacy: privacy::PrivacyConfig::default(),
         }
     }
 }
@@ -3908,6 +4005,42 @@ pub fn inject_provider_keys() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every wave-1 config addition (cache floor, cross-session cache key, harness profile,
+    /// privacy, preview) must deserialize, from a config file holding only the two required keys,
+    /// to the same value `Config::default()` ships.
+    #[test]
+    fn wave1_config_fields_default_from_an_empty_file() {
+        let parsed: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+"#,
+        )
+        .expect("a config naming none of them parses");
+        let shipped = Config::default();
+        assert_eq!(
+            parsed.mesh.context_floor_block_tokens,
+            shipped.mesh.context_floor_block_tokens
+        );
+        assert_eq!(
+            parsed.mesh.compact_low_water,
+            shipped.mesh.compact_low_water
+        );
+        assert!(parsed.mesh.cross_session_cache_key);
+        assert_eq!(
+            parsed.mesh.cross_session_cache_key,
+            shipped.mesh.cross_session_cache_key
+        );
+        assert_eq!(parsed.mesh.harness_profile, HarnessProfile::Guarded);
+        assert_eq!(parsed.mesh.harness_profile, shipped.mesh.harness_profile);
+        assert!(parsed.mesh.harness_profiles.is_empty());
+        assert_eq!(parsed.privacy, shipped.privacy);
+        assert_eq!(parsed.preview, shipped.preview);
+        assert_eq!(parsed.codemode, shipped.codemode);
+        assert_eq!(parsed.pr, shipped.pr);
+    }
 
     /// The shipped `[compact_cap]` table halves Kimi Code's per-step prompt; every other provider
     /// stays on the global ceiling, and a full model id overrides its provider's entry.

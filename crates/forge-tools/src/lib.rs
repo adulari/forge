@@ -23,10 +23,13 @@ mod browser;
 mod core_tools;
 mod device;
 mod discovery_tools;
+pub mod evidence;
 mod lattice_tool;
+mod open_pr;
 mod proxy;
 mod sandbox;
 mod shell;
+pub mod tunnel;
 mod web;
 mod workspace;
 pub use browser::{set_attach_endpoint, BrowserNetworkTool, BrowserTool};
@@ -35,10 +38,19 @@ pub use core_tools::{
     ReadFileTool, WriteFileTool,
 };
 pub use device::{DeviceLogsTool, DeviceTool};
+pub use evidence::scope_session;
 pub use lattice_tool::LatticeTool;
+pub use open_pr::{
+    set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn, RepoFlagFn,
+    OPEN_PR_TOOL,
+};
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
-pub use shell::{scope_job_exit_sink, JobExit, JobExitSink, RtkRewriter, ShellJobTool, ShellTool};
+pub use shell::{
+    reap_orphan_tunnels, scope_job_exit_sink, set_preview_settings, JobExit, JobExitSink,
+    PreviewSettings, ReapReason, ReapReport, ReapedTunnel, RtkRewriter, ShellJobTool, ShellTool,
+    TunnelRecord,
+};
 pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,
     WebFetchTool, WebSearchTool,
@@ -194,6 +206,7 @@ impl ToolRegistry {
         r.register(Box::new(ProxyNetworkTool));
         r.register(Box::new(DeviceTool));
         r.register(Box::new(DeviceLogsTool));
+        r.register(Box::new(OpenPrTool::default()));
         r
     }
 

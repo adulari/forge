@@ -14,6 +14,7 @@ use classification::score_prompt;
 use classification::{is_code_heavy, is_multistep};
 
 pub mod bench;
+mod calibration;
 pub mod capability;
 pub mod catalog;
 mod classification;
@@ -25,6 +26,10 @@ mod live_catalog;
 pub use live_catalog::LiveCatalog;
 pub mod pacing_view;
 pub mod pricing;
+pub mod privacy;
+mod reorder;
+pub mod solve_cost;
+use reorder::{record_moved, record_reorder};
 pub mod rung_cost;
 mod subscription_cost;
 pub mod vision;
@@ -40,6 +45,7 @@ use context::COMPACTION_SUMMARY_PREFIX;
 pub use context::{RoutingContext, SessionAffinity};
 pub use explain::{display_provider, CandidateRow, ProviderQuotaView, RoutingExplanation};
 pub use pacing_view::{pacing_hold_note, pacing_summary, PacingHold};
+pub use solve_cost::{MeasuredSolveCost, SolveCostSignal, MIN_SOLVE_ATTEMPTS};
 pub use subscription_cost::{
     opencode_go_quota_multiplier, opencode_go_quota_note, opencode_go_weekly_quota,
     OPENCODE_GO_LARGEST_WEEKLY_QUOTA,
@@ -1190,29 +1196,6 @@ const AFFINITY_MIN_SUCCESS_RATE: f64 = 0.90;
 const AFFINITY_LATENCY_MARGIN_MS: f64 = 5_000.0;
 const INITIAL_ANCHOR_LATENCY_MARGIN_MS: f64 = 1_000.0;
 
-/// Record that a routing rule, not the catalog score, decided where `model` sits. The last rule
-/// to touch a model is the one that decided its final position, so a later rule overwrites.
-fn record_reorder(reasons: &mut Vec<(String, &'static str)>, model: &str, reason: &'static str) {
-    match reasons.iter_mut().find(|(m, _)| m == model) {
-        Some(entry) => entry.1 = reason,
-        None => reasons.push((model.to_string(), reason)),
-    }
-}
-
-/// Record every model a sort actually moved.
-fn record_moved(
-    reasons: &mut Vec<(String, &'static str)>,
-    before: &[String],
-    after: &[String],
-    reason: &'static str,
-) {
-    for (i, model) in after.iter().enumerate() {
-        if before.get(i) != Some(model) {
-            record_reorder(reasons, model, reason);
-        }
-    }
-}
-
 /// Scale the minimum required context window by the active effort level. HIGH effort inflates it
 /// by 1.5×, XHIGH by 2×. No adjustment for Low/Medium or when no minimum is set.
 fn effective_min_context(min_tokens: Option<u32>, effort: Option<EffortLevel>) -> Option<u32> {
@@ -1605,6 +1588,7 @@ impl HeuristicRouter {
         if !(self.model_available)(m)
             || forge_config::is_model_disabled(m, &self.config.mesh.disabled)
             || health.is_benched(m)
+            || !privacy::allows(&self.config, m)
         {
             return false;
         }
@@ -1620,7 +1604,9 @@ impl HeuristicRouter {
     /// dropped by the separate strict-credit-mode filter (a paid/metered model policy exclusion,
     /// not a quota problem) — checked before defaulting to "quota exhausted".
     fn unusable_reason(&self, model: &str, health: &ModelHealth) -> &'static str {
-        if !(self.model_available)(model) {
+        if !privacy::allows(&self.config, model) {
+            "excluded by zero-retention mode"
+        } else if !(self.model_available)(model) {
             "no usable key"
         } else if health.is_benched(model) {
             "model benched"
@@ -2539,6 +2525,7 @@ impl HeuristicRouter {
                 .rationale
                 .push_str(" — no catalog yet: built-in seed");
         }
+        privacy::enforce_on_decision(&self.config, &mut decision);
         decision
     }
 

@@ -26,6 +26,10 @@ deliberately small.
 | `headless` | open without a window. Default `false` |
 | `profile` | named persistent profile. Default `"default"` |
 | `max_chars` | cap for `html` output |
+| `caption` | for `screenshot`: what the shot shows, stored with it in the [evidence ledger](evidence-ledger.md) |
+
+Screenshots are written to the session's [evidence ledger](evidence-ledger.md) with the page URL (query
+string removed), not to a temp file the next shot overwrites.
 
 ### `browser_network`
 

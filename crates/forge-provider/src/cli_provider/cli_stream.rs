@@ -639,5 +639,9 @@ fn antigravity_usage_from(v: &Value) -> Usage {
         output_tokens: n("output_tokens"),
         cached_input_tokens: Some(n("cache_read_tokens")),
         cost_usd: 0.0,
+        // Antigravity's `thinking_tokens` can exceed `output_tokens`, so it is not the subset
+        // `reasoning_tokens` promises; leave the split unreported.
+        cache_write_tokens: None,
+        reasoning_tokens: None,
     }
 }

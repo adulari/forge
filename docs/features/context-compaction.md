@@ -56,8 +56,14 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   while they cost at most a quarter of the transcript (capped at 40K tokens). Observed 2026-09-16:
   with only 6 messages protected and the check running every step, a Kimi K3 session sitting at
   its 120K ceiling had each step's file reads cut to 1,500 chars before the next step, and read
-  the same files again for fifteen minutes. The turn-boundary prune still trims finished turns
-  down to the last 6 messages.
+  the same files again for fifteen minutes. There is no turn-boundary prune any more: finished
+  turns are only cut when the elision floor advances (context-pipeline.md).
+- **Down to a low-water mark in one go.** When the trigger fires, the prune (a forced elision-floor
+  advance) and, if that is not enough, the summary aim for `mesh.compact_low_water` (0.62) of the
+  trigger rather than just under it, and a summary that still leaves more than that clips the
+  bulkiest results down to half the trigger. Stopping just under the trigger meant the next tool
+  result tripped it again, and every trip rewrote the prompt, so a session at its ceiling paid a
+  cache miss on nearly every request.
 - **Checked every step.** `auto_compact_if_needed` runs before every model request in the tool
   loop, not only at nudge/guard points. Observed 2026-09-16: a single Kimi turn grew 62K → 246K
   tokens under a 120K ceiling because nothing mid-turn asked.
@@ -95,12 +101,13 @@ Then it runs in the background (spinner animates) and emits a "compacted N → M
 
 ## 3a. Zero-LLM prune pass (auto-compaction fast path)
 
-Before paying for an LLM summarize, auto-compaction first runs a **free** prune pass:
-`prune_tool_results()` (forge-core) truncates large **old** tool results in place — the file dumps,
-command logs, and search hits that dominate context but whose bulk has little value once the turn
-has moved on. It keeps a head (`PRUNE_HEAD_KEEP` chars) + a marker, protects the most recent
-`COMPACT_KEEP_RECENT` messages, only touches `Tool` results over `PRUNE_TOOL_RESULT_MAX`, and is
-idempotent. The full text stays in the store for replay — only the model-facing transcript is
+Before paying for an LLM summarize, auto-compaction first runs a **free** prune pass: it forces
+the elision floor (`context_floor.rs`) forward to the working set and `prune_below()` truncates the
+large tool results it released, in place — the file dumps, command logs, and search hits that
+dominate context but whose bulk has little value once the turn has moved on. It keeps a head
+(`PRUNE_HEAD_KEEP` chars) + a marker, protects the last `PRUNE_KEEP_ROUNDS` tool rounds, the newest
+`tool_result_context_keep_recent` results and the last `COMPACT_KEEP_RECENT` messages, only touches
+`Tool` results over `PRUNE_TOOL_RESULT_MAX`, and is idempotent. The full text stays in the store for replay — only the model-facing transcript is
 trimmed.
 
 `auto_compact_if_needed()` prunes first and re-checks `transcript_fits`; the expensive summarize
