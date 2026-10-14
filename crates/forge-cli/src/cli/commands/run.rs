@@ -172,10 +172,12 @@ pub(crate) use dispatch::*;
 pub(crate) mod driver;
 pub(crate) use driver::*;
 mod btw;
+mod busy_queue;
 mod effort;
 mod output_view;
 mod subagents;
 pub(crate) use btw::*;
+pub(crate) use busy_queue::SteerTracker;
 mod export;
 pub(crate) use export::*;
 
@@ -895,8 +897,8 @@ pub(crate) async fn run_chat_tui(
     let mut last_model_written = String::new();
     // ↑/↓ prompt history. Seeded from the store so it survives closing the session: this
     // session's own prompts, preceded by recent prompts from other sessions in this workspace.
-    // Anything typed from here on is appended in memory and persists as the turn's user message.
-    let mut prompt_history: Vec<String> = {
+    // Every prompt is recorded the moment it is submitted, idle or busy (`PromptHistory`).
+    let mut prompt_history = forge_tui::PromptHistory::new({
         let s = session.lock().await;
         s.store
             .recent_user_prompts(
@@ -905,9 +907,7 @@ pub(crate) async fn run_chat_tui(
                 PROMPT_HISTORY_LIMIT,
             )
             .unwrap_or_default()
-    };
-    let mut history_pos: Option<usize> = None;
-    let mut history_draft = String::new();
+    });
     // The prompt of the turn currently running (or last run), so `tier_up`/`tier_down` can abort
     // and re-run it at the shifted routing tier. Set whenever a plain user turn is spawned.
     let mut last_prompt: Option<String> = None;
@@ -915,6 +915,7 @@ pub(crate) async fn run_chat_tui(
     // (like Claude Code / aider). An interrupt cancels only the active response; queued user work
     // remains valid and starts immediately under a fresh generation.
     let mut queued_prompts: Vec<String> = Vec::new();
+    let mut steer_tracker = SteerTracker::default();
     // Rate-limits the idle session-heartbeat check — the render loop iterates far more often than
     // this needs to be re-checked (turn-end already checks it immediately).
     let mut last_heartbeat_check = std::time::Instant::now();
@@ -1091,7 +1092,6 @@ pub(crate) async fn run_chat_tui(
                     &session,
                     &mut queued_prompts,
                     &mut app,
-                    &mut prompt_history,
                     &mut last_prompt,
                     &done_tx,
                     &mut turn_gen,
@@ -2854,7 +2854,7 @@ pub(crate) async fn run_chat_tui(
                     // band doesn't freeze and later turns don't inherit `active`.
                     finish_interrupted_presenter(&mut app); // flush any partial reply
                     if let Some(next) =
-                        dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
+                        steer_tracker.interrupted(&mut queued_prompts, &steer, &mut app)
                     {
                         last_prompt = Some(next.clone());
                         turn_gen += 1;
@@ -2918,13 +2918,17 @@ pub(crate) async fn run_chat_tui(
             } else if busy {
                 // Mid-turn: let the user keep typing and QUEUE submitted prompts to run after the
                 // current turn finishes (Claude Code / aider style). Only plain text editing +
-                // Enter is honored here; palette, commands, history and temper-cycling wait until
-                // the turn is idle. A `/command` is held back (it needs the idle session).
-                let outcome = if app.try_delete_paste_block(key) {
-                    InputOutcome::Editing
-                } else {
-                    handle_key(&mut app.input, &mut app.input_cursor, key)
-                };
+                // Enter is honored here, plus ↑/↓ history recall (so a prompt queued a moment
+                // ago can be recalled); palette, commands and temper-cycling wait until the turn
+                // is idle. A `/command` is held back (it needs the idle session).
+                let outcome =
+                    if prompt_history.handle_key(&key, &mut app.input, &mut app.input_cursor)
+                        || app.try_delete_paste_block(key)
+                    {
+                        InputOutcome::Editing
+                    } else {
+                        handle_key(&mut app.input, &mut app.input_cursor, key)
+                    };
                 if let InputOutcome::Submit(raw_line) = outcome {
                     let (line, _imgs) = app.resolve_paste_blocks(raw_line);
                     let trimmed = line.trim();
@@ -2933,6 +2937,7 @@ pub(crate) async fn run_chat_tui(
                     } else if trimmed.starts_with('/') && !trimmed.starts_with("//") {
                         app.note("⏳ commands run when the turn is idle — finish or Esc first");
                     } else {
+                        prompt_history.record(&line);
                         queued_prompts.push(line.clone());
                         steer.push(line.clone());
                         app.set_queued(&queued_prompts);
@@ -3094,44 +3099,9 @@ pub(crate) async fn run_chat_tui(
                     }
                     _ => {}
                 }
-            } else if let (true, Some(up)) = (
-                matches!(key, KeyKind::Up),
-                forge_tui::input_cursor_up(&app.input, app.input_cursor),
-            ) {
-                // Multiline draft, cursor below the first row: move the cursor up a line instead of
-                // clobbering the draft with history recall (history only fires from the first row).
-                app.input_cursor = up;
-                dirty = true;
-            } else if matches!(key, KeyKind::Up) {
-                // Arrow-up on the first row (or single-line): browse the previous prompt history.
-                if history_pos.is_none() {
-                    history_draft = app.input.clone();
-                }
-                if let Some(p) = history_pos {
-                    if p > 0 {
-                        history_pos = Some(p - 1);
-                    }
-                } else if !prompt_history.is_empty() {
-                    history_pos = Some(prompt_history.len() - 1);
-                }
-                if let Some(p) = history_pos {
-                    app.input = prompt_history[p].clone();
-                    app.input_cursor = app.input.len();
-                }
-                dirty = true;
-            } else if matches!(key, KeyKind::Down) {
-                // Arrow-down: browse to the next entry, or restore the draft past the end.
-                if let Some(p) = history_pos {
-                    if p + 1 < prompt_history.len() {
-                        history_pos = Some(p + 1);
-                        app.input = prompt_history[p + 1].clone();
-                        app.input_cursor = app.input.len();
-                    } else {
-                        history_pos = None;
-                        app.input = history_draft.clone();
-                        app.input_cursor = app.input.len();
-                    }
-                }
+            } else if prompt_history.handle_key(&key, &mut app.input, &mut app.input_cursor) {
+                // ↑ on the first row (or ↓) browses prompt history; ↑ on a lower row of a
+                // multiline draft just moves the cursor.
                 dirty = true;
             } else {
                 let pre_edit_len = app.input.len();
@@ -3143,10 +3113,7 @@ pub(crate) async fn run_chat_tui(
                 match outcome {
                     InputOutcome::Submit(raw_line) => {
                         let (line, submit_images) = app.resolve_paste_blocks(raw_line);
-                        history_pos = None;
-                        if !line.trim().is_empty() && prompt_history.last() != Some(&line) {
-                            prompt_history.push(line.clone());
-                        }
+                        prompt_history.record(&line);
                         // `//foo` escapes to a literal prompt `/foo`; a bare `/cmd` typed without
                         // the palette still dispatches as a command; everything else is a prompt.
                         if let Some(rest) = line.strip_prefix("//") {
@@ -3446,7 +3413,7 @@ pub(crate) async fn run_chat_tui(
                     }
                     InputOutcome::Editing => {
                         if app.input.len() != pre_edit_len {
-                            history_pos = None;
+                            prompt_history.end_browse();
                         }
                         // `/command` anywhere on the line opens the palette; `@path` opens the
                         // file picker. They are mutually exclusive — slash wins at cursor.
@@ -3482,13 +3449,8 @@ pub(crate) async fn run_chat_tui(
             match msg {
                 UiMsg::Event(e) => {
                     // The running turn consumed a queued prompt: it must not run again as its own
-                    // turn once this one ends.
-                    if let forge_tui::PresenterEvent::Steered(text) = &e {
-                        if let Some(i) = queued_prompts.iter().position(|q| q == text) {
-                            queued_prompts.remove(i);
-                            app.set_queued(&queued_prompts);
-                        }
-                    }
+                    // turn once this one ends (and an interrupt must still send it, busy_queue.rs).
+                    steer_tracker.observe(&e, &mut queued_prompts, &mut app);
                     app.apply(e)
                 }
                 UiMsg::Permission {
@@ -3552,6 +3514,7 @@ pub(crate) async fn run_chat_tui(
                 // behaves exactly like a normal Prompt.
                 let input = match input {
                     remote::RemoteInput::Steer { text } if busy => {
+                        prompt_history.record(&text);
                         steer.push(text.clone());
                         forge_core::fleet::insert_into_queue(
                             &mut queued_prompts,
@@ -3629,6 +3592,7 @@ pub(crate) async fn run_chat_tui(
                                     "⏳ commands run when the turn is idle — finish or Esc first",
                                 );
                             } else {
+                                prompt_history.record(&text);
                                 queued_prompts.push(text.clone());
                                 steer.push(text.clone());
                                 app.set_queued(&queued_prompts);
@@ -3998,7 +3962,7 @@ pub(crate) async fn run_chat_tui(
                             // before a queued replacement turn starts.
                             finish_interrupted_presenter(&mut app);
                             if let Some(next) =
-                                dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
+                                steer_tracker.interrupted(&mut queued_prompts, &steer, &mut app)
                             {
                                 last_prompt = Some(next.clone());
                                 turn_gen += 1;
@@ -4100,6 +4064,7 @@ pub(crate) async fn run_chat_tui(
                 busy = false;
                 turn_handle = None;
                 dirty = true;
+                steer_tracker.turn_finished(&mut queued_prompts, &steer, &mut app);
                 // Persist the on-screen view (activity panel, viewer, scroll) as of this completed
                 // turn so a later resume restores it exactly. Skipped when there's nothing to save.
                 if let Some(json) = app.view_snapshot_json() {
@@ -4162,12 +4127,8 @@ pub(crate) async fn run_chat_tui(
                                 ));
                             }
                             LoopDecision::Retry => {
-                                let prompt = dequeue_prompt(
-                                    &mut queued_prompts,
-                                    &mut app,
-                                    &mut prompt_history,
-                                )
-                                .unwrap_or_else(|| "Continue toward completion.".to_string());
+                                let prompt = dequeue_prompt(&mut queued_prompts, &mut app)
+                                    .unwrap_or_else(|| "Continue toward completion.".to_string());
                                 last_prompt = Some(prompt.clone());
                                 turn_gen += 1;
                                 ls.iter += 1;
@@ -4195,9 +4156,8 @@ pub(crate) async fn run_chat_tui(
                 if let Some(mut gs) = goal_state.take() {
                     if gs.gen == g {
                         let next = advance_goal(&mut gs, &session, &mut app, &project_cwd).await;
-                        let steer = |app: &mut forge_tui::App| {
-                            dequeue_prompt(&mut queued_prompts, app, &mut prompt_history)
-                        };
+                        let steer =
+                            |app: &mut forge_tui::App| dequeue_prompt(&mut queued_prompts, app);
                         if let Some(step) = launch_goal_step(
                             next,
                             &mut gs,
@@ -4223,9 +4183,7 @@ pub(crate) async fn run_chat_tui(
                 // Drain a queued prompt (typed while this turn was running): run it as the next
                 // turn, ahead of auto-compaction (the queued turn auto-compacts itself if needed).
                 if turn_handle.is_none() {
-                    if let Some(next) =
-                        dequeue_prompt(&mut queued_prompts, &mut app, &mut prompt_history)
-                    {
+                    if let Some(next) = dequeue_prompt(&mut queued_prompts, &mut app) {
                         last_prompt = Some(next.clone());
                         turn_gen += 1;
                         turn_handle = Some(spawn_turn(
@@ -4247,7 +4205,6 @@ pub(crate) async fn run_chat_tui(
                             &session,
                             &mut queued_prompts,
                             &mut app,
-                            &mut prompt_history,
                             &mut last_prompt,
                             &done_tx,
                             &mut turn_gen,
@@ -5562,17 +5519,14 @@ mod tests {
     }
 
     #[test]
-    fn dequeue_prompt_drains_fifo_and_records_trimmed_history() {
+    fn dequeue_prompt_drains_fifo() {
         let mut queue = vec!["  first correction  ".to_string(), "second".to_string()];
         let mut app = forge_tui::App::default();
-        let mut history = vec!["older".to_string()];
-
         assert_eq!(
-            dequeue_prompt(&mut queue, &mut app, &mut history).as_deref(),
+            dequeue_prompt(&mut queue, &mut app).as_deref(),
             Some("  first correction  ")
         );
         assert_eq!(queue, vec!["second"]);
-        assert_eq!(history, vec!["older", "first correction"]);
     }
 
     #[test]

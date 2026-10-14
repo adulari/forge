@@ -31,6 +31,14 @@ static PTY_SERIAL: Mutex<()> = Mutex::new(());
 /// Launch `forge chat --mock` on a PTY in a throwaway cwd, answer DSR queries, then feed the
 /// `(keys, sleep_ms_after)` script. Returns `(clean_exit, plain_output)`.
 fn drive_pty(script: &[(&str, u64)]) -> (bool, String) {
+    drive_pty_env(script, &[])
+}
+
+/// A script step `"{WAIT_FOR}<marker>"` waits for `<marker>` to render instead of sending keys.
+const WAIT_FOR: &str = "\u{0}wait:";
+
+/// [`drive_pty`] with extra environment for the `forge` child (e.g. mock pacing).
+fn drive_pty_env(script: &[(&str, u64)], env: &[(&str, &str)]) -> (bool, String) {
     let _serial = PTY_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -76,6 +84,9 @@ fn drive_pty(script: &[(&str, u64)]) -> (bool, String) {
     // Isolate the store in the temp dir — the real store now lives in a per-user data dir, so
     // without this the e2e would read/write the developer's actual session+usage DB.
     cmd.env("FORGE_DB", dir.join("forge.db"));
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
 
     let mut child = pair.slave.spawn_command(cmd).expect("spawn forge");
     drop(pair.slave);
@@ -112,7 +123,20 @@ fn drive_pty(script: &[(&str, u64)]) -> (bool, String) {
     };
     thread::sleep(Duration::from_millis(1500)); // init + first DSR round-trip
     for (keys, after_ms) in script {
-        send(keys);
+        if let Some(marker) = keys.strip_prefix(WAIT_FOR) {
+            // Paced steps: block until the (ANSI-stripped) capture shows `marker`, so a test can
+            // key off what the TUI actually rendered instead of guessing how long it takes.
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while !strip_ansi(&captured.lock().unwrap()).contains(marker) {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for {marker:?}"
+                );
+                thread::sleep(Duration::from_millis(50));
+            }
+        } else {
+            send(keys);
+        }
         thread::sleep(Duration::from_millis(*after_ms));
     }
 
@@ -247,6 +271,46 @@ fn tui_loop_starts_and_stops_on_interrupt() {
     assert!(
         plain.contains("loop started"),
         "the /loop note was shown: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_esc_sends_a_queued_prompt_the_turn_already_absorbed() {
+    // Paced mock (500ms/word, 3s think pause before each reply). "hello" runs a read_file
+    // round-trip; the prompt queued meanwhile is absorbed (steered) at that tool boundary, and the
+    // mock then "thinks" for 3s before answering it. Esc lands inside that pause: the absorbed
+    // prompt was never answered, so the interrupt must send it as the next turn. Before the fix
+    // this printed "stopped responding" and the prompt was never answered.
+    let wait_steer = format!("{WAIT_FOR}steer");
+    let (clean, plain) = drive_pty_env(
+        &[
+            ("hello\r", 1000),
+            ("followup marker\r", 0),
+            (wait_steer.as_str(), 300),
+            ("\x1b", 1500),
+            ("\x1b", 600),
+            ("/quit\r", 600),
+        ],
+        &[("FORGE_MOCK_STREAM_DELAY_MS", "500")],
+    );
+    assert!(clean, "clean exit: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    assert!(
+        plain.contains("queued (1 pending)"),
+        "queued mid-turn: {plain}"
+    );
+    let first_esc = plain
+        .find("⏹ interrupted")
+        .expect("the first Esc interrupted the turn");
+    assert!(
+        plain[..first_esc].contains("steer"),
+        "the turn absorbed the prompt before Esc (the case that used to stop): {plain}"
+    );
+    assert!(
+        plain[first_esc..].starts_with("⏹ interrupted — continuing with the next queued prompt"),
+        "Esc must send the absorbed prompt, not stop: {}",
+        &plain[first_esc..]
     );
 }
 

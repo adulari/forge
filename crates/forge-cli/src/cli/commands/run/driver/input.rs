@@ -288,8 +288,12 @@ impl DriverState {
         // Esc: interrupt a running turn; idle Esc was already filtered at the drain.
         if matches!(key, KeyKind::Esc) {
             if self.busy {
-                self.interrupt_turn();
-                self.app.note("⏹ interrupted — stopped responding");
+                let note = if self.interrupt_turn() {
+                    "⏹ interrupted — continuing with the next queued prompt"
+                } else {
+                    "⏹ interrupted — stopped responding"
+                };
+                self.app.note(note);
             }
             return Ok(());
         }
@@ -321,8 +325,16 @@ impl DriverState {
                     self.app
                         .note("⏳ commands run when the turn is idle — finish or Stop first");
                 } else {
+                    // Same as a remote prompt mid-turn: recall it, and offer it to the running
+                    // turn at its next step.
+                    self.prompt_history.record(&line);
+                    self.steer.push(line.clone());
                     self.queued_prompts.push(line);
                     self.app.set_queued(&self.queued_prompts);
+                    self.app.note(&format!(
+                        "⏳ queued ({} pending) — sent at this turn's next step",
+                        self.queued_prompts.len()
+                    ));
                 }
             } else {
                 Box::pin(self.submit_line(line, None)).await?;
@@ -452,6 +464,8 @@ impl DriverState {
         }
         self.busy = false;
         self.turn_handle = None;
+        self.steer_tracker
+            .turn_finished(&mut self.queued_prompts, &self.steer, &mut self.app);
         crate::alloc_policy::release_free_memory();
         if let Some(json) = self.app.view_snapshot_json() {
             self.session.lock().await.save_view_snapshot(&json);
@@ -530,8 +544,8 @@ impl DriverState {
             if gs.gen == g {
                 let cwd = std::path::Path::new(&self.cwd);
                 let next = advance_goal(&mut gs, &self.session, &mut self.app, cwd).await;
-                let (queue, history) = (&mut self.queued_prompts, &mut self.prompt_history);
-                let steer = |app: &mut forge_tui::App| dequeue_prompt(queue, app, history);
+                let queue = &mut self.queued_prompts;
+                let steer = |app: &mut forge_tui::App| dequeue_prompt(queue, app);
                 if let Some(step) = launch_goal_step(
                     next,
                     &mut gs,
