@@ -1,5 +1,5 @@
 //! `[preview]`: public preview URLs for a dev server the agent started (`shell_job` action
-//! `expose`). See docs/features/shell-background-jobs.md.
+//! `expose`). See docs/features/shell-tool.md.
 
 use serde::{Deserialize, Serialize};
 

@@ -571,7 +571,10 @@ in `forge_tools::tunnel` (`crates/forge-tools/src/tunnel.rs`); forge-cli's `remo
 - **Always asks.** The permission broker returns Ask for this action in every mode that allows side
   effects — `default`, `accept-edits`, `auto` and `bypass` — and an allow rule (including one saved
   by answering "always") cannot skip it. Plan / read-only mode denies it like any other side
-  effect, and a deny rule still wins. A headless run has no one to ask, so it is denied there.
+  effect, and a deny rule still wins. A headless run has no one to ask, so it is denied there, and
+  so is a `forge mcp-agent` orchestrator in any mode. The prompt names the action, the port and
+  the job (`shell_job expose — PUBLIC unauthenticated URL for port 5173 (job 4242)`) instead of a
+  bare `shell_job`, and answering "always" counts as a one-time yes: no allow rule is saved.
   See `crates/forge-core/src/permission/expose.rs`.
 - **Kill switch.** `[preview] enabled = false` refuses the action outright. It defaults to `true`
   because every expose is already approval-gated.
@@ -580,14 +583,17 @@ in `forge_tools::tunnel` (`crates/forge-tools/src/tunnel.rs`); forge-cli's `remo
   survives the turn like the dev server does. Its pid, start time, port and URL are recorded under
   `"tunnel"` in the job's `<id>.json`. It is stopped when:
   - `shell_job stop` stops the job, or the job exits while the Forge that started it is running;
-  - the TTL runs out (`[preview] ttl_minutes`, default 120), timed by the process that opened it;
+  - the TTL runs out (`[preview] ttl_minutes`, default 120). Where `timeout` is on PATH (Linux,
+    or coreutils on macOS) the tunnel runs as `timeout -s TERM <ttl> cloudflared …`, so the TTL
+    holds even if Forge crashes; the process that opened it also keeps a timer;
   - the reaper finds it orphaned or expired. Every live tunnel is also listed in
     `<data dir>/preview-tunnels/<tunnel pid>.json`. `forge serve` sweeps that registry at startup,
     and `forge doctor` sweeps it and reports what it closed, so a tunnel left behind by a crashed
     Forge does not stay public. The reaper never signals a pid whose start time no longer matches
     the recorded one.
 - Exposing the same job and port twice returns the existing URL. A different port replaces the
-  job's tunnel.
+  job's tunnel. If the job exits while its tunnel is still starting, the tunnel is closed and the
+  expose fails rather than leaving a public URL in front of nothing.
 
 ```toml
 [preview]

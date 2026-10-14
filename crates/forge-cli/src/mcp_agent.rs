@@ -78,7 +78,12 @@ impl forge_tui::Presenter for AgentPresenter {
         }
     }
 
-    fn confirm(&mut self, _tool: &str, side_effect: SideEffect) -> forge_tui::ConfirmOutcome {
+    fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> forge_tui::ConfirmOutcome {
+        // Publishing a port needs a human yes, and an orchestrating agent is not one: no mode
+        // here may turn that prompt into an approval.
+        if tool.starts_with(forge_core::permission::EXPOSE_PROMPT_PREFIX) {
+            return forge_tui::ConfirmOutcome::Deny;
+        }
         match *lock_or_recover(&self.mode) {
             // Full auto: allow everything unconditionally.
             PermissionMode::Bypass => forge_tui::ConfirmOutcome::Allow,
@@ -727,5 +732,20 @@ mod tests {
             p.confirm("mcp_tool", SideEffect::External),
             ConfirmOutcome::Allow
         );
+    }
+
+    #[test]
+    fn no_mode_approves_publishing_a_port_without_a_human() {
+        let label = forge_core::permission::confirm_label(
+            "shell_job",
+            &serde_json::json!({"action": "expose", "id": 7, "port": 5173}),
+        )
+        .unwrap();
+        for mode in [PermissionMode::Bypass, PermissionMode::AcceptEdits] {
+            assert_eq!(
+                presenter(mode).confirm(&label, SideEffect::Shell),
+                ConfirmOutcome::Deny
+            );
+        }
     }
 }

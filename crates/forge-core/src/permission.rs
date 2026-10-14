@@ -170,7 +170,7 @@ fn decide_in_with(
                 .is_some_and(readonly_shell::is_read_only_shell);
         return if read_only_shell { Allow } else { Deny };
     }
-    if expose::always_asks(tool_name, args) {
+    if is_public_expose(tool_name, args) {
         return Ask;
     }
     // 4. Shell commands resolve allow/ask per segment: an `allow = "git *"` matching the first
@@ -323,6 +323,9 @@ fn specificity(rule: &PermissionRule) -> usize {
 mod auto;
 mod auto_safe;
 mod expose;
+pub use expose::{
+    always_asks as is_public_expose, confirm_call, confirm_label, EXPOSE_PROMPT_PREFIX,
+};
 mod readonly_shell;
 
 /// Whether a `shell` call provably only reads: every command passes the Plan-mode read-only
