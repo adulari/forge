@@ -153,7 +153,7 @@ fn goal_budget_check(state: &GoalState) -> Option<GoalDecision> {
 /// A completion (claimed or judged): the quality gates decide whether the run really ends.
 async fn finish_with_gates(state: &mut GoalState, reason: &str, cwd: &Path) -> GoalDecision {
     let fingerprint = workspace_fingerprint(cwd).await;
-    match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint).await {
+    match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint, cwd).await {
         GateOutcome::AllPassed => {
             state.eval.last_gate_failure = None;
             GoalDecision::Stop(reason.to_string())
@@ -283,7 +283,18 @@ pub(crate) async fn advance_goal(
         )
     };
     let tokens = std::mem::take(&mut gs.eval.pending_tokens);
-    match next_goal_decision(gs, said_complete, done, total, tokens, verdict, cwd).await {
+    // Gates check the checkout the session is working in, which a `worktree enter` moves away
+    // from the directory Forge was launched in.
+    let root = {
+        let s = session.lock().await;
+        let root = s.workspace_root();
+        if root.as_os_str().is_empty() {
+            cwd.to_path_buf()
+        } else {
+            root.to_path_buf()
+        }
+    };
+    match next_goal_decision(gs, said_complete, done, total, tokens, verdict, &root).await {
         GoalDecision::Stop(reason) => {
             if !is_goal_complete_reason(&reason) {
                 app.note(&reason);

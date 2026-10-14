@@ -90,6 +90,7 @@ pub(crate) async fn run_gates(
     states: &mut [GateState],
     cfg: &GateConfig,
     workspace_fingerprint: &str,
+    cwd: &std::path::Path,
 ) -> GateOutcome {
     for (gate_index, state) in states.iter_mut().enumerate() {
         let skip_rerun = !workspace_fingerprint.is_empty()
@@ -97,7 +98,7 @@ pub(crate) async fn run_gates(
         let (passed, bounded_output) = if skip_rerun {
             (false, state.last_bounded_output.clone())
         } else {
-            let (ok, output) = run_gate_command(&state.spec.cmd, cfg.timeout).await;
+            let (ok, output) = run_gate_command(&state.spec.cmd, cfg.timeout, cwd).await;
             let bounded = bound_output(&output, BOUNDED_OUTPUT_CHARS);
             if !ok {
                 state.last_failure_fingerprint = Some(workspace_fingerprint.to_string());
@@ -135,12 +136,13 @@ fn bound_output(s: &str, max_chars: usize) -> String {
 /// Execute `cmd` via the OS shell, capture combined stdout+stderr, and kill the whole process
 /// tree if it outruns `timeout`. gates.rs can't reuse forge-tools' shell runtime directly (it's a
 /// private tool-execution path in a different crate) so this mirrors its process-group kill idiom.
-async fn run_gate_command(cmd: &str, timeout: Duration) -> (bool, String) {
+async fn run_gate_command(cmd: &str, timeout: Duration, cwd: &std::path::Path) -> (bool, String) {
     let (shell, flag) = shell_invocation();
     let mut command = Command::new(shell);
     command
         .arg(flag)
         .arg(cmd)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -386,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn all_passing_gates_return_all_passed() {
         let mut states = vec![gate("true"), gate("true")];
-        let outcome = run_gates(&mut states, &cfg(3), "fp").await;
+        let outcome = run_gates(&mut states, &cfg(3), "fp", std::path::Path::new(".")).await;
         assert!(matches!(outcome, GateOutcome::AllPassed));
         assert_eq!(states[0].attempts, 0);
         assert_eq!(states[1].attempts, 0);
@@ -396,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn first_failing_gate_stops_before_the_next_runs() {
         let mut states = vec![gate("false"), gate("true")];
-        let outcome = run_gates(&mut states, &cfg(3), "fp").await;
+        let outcome = run_gates(&mut states, &cfg(3), "fp", std::path::Path::new(".")).await;
         match outcome {
             GateOutcome::Failed { gate_index, .. } => assert_eq!(gate_index, 0),
             _ => panic!("expected Failed"),
@@ -412,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn bounded_output_from_a_failing_gate_contains_its_stderr() {
         let mut states = vec![gate("sh -c 'echo boom >&2; exit 1'")];
-        let outcome = run_gates(&mut states, &cfg(3), "fp").await;
+        let outcome = run_gates(&mut states, &cfg(3), "fp", std::path::Path::new(".")).await;
         match outcome {
             GateOutcome::Failed { bounded_output, .. } => {
                 assert!(bounded_output.contains("boom"), "got: {bounded_output}");
@@ -426,10 +428,10 @@ mod tests {
     async fn exceeding_retries_reports_exhausted() {
         let mut states = vec![gate("false")];
         let c = cfg(1);
-        let first = run_gates(&mut states, &c, "fp1").await;
+        let first = run_gates(&mut states, &c, "fp1", std::path::Path::new(".")).await;
         assert!(matches!(first, GateOutcome::Failed { gate_index: 0, .. }));
         // A different fingerprint forces a rerun; the second failure exceeds retries=1.
-        let second = run_gates(&mut states, &c, "fp2").await;
+        let second = run_gates(&mut states, &c, "fp2", std::path::Path::new(".")).await;
         assert!(matches!(second, GateOutcome::Exhausted { gate_index: 0 }));
     }
 
@@ -444,8 +446,8 @@ mod tests {
         let cmd = format!("echo x >> {} ; exit 1", marker.display());
         let mut states = vec![gate(&cmd)];
         let c = cfg(5);
-        let _ = run_gates(&mut states, &c, "same-fp").await;
-        let _ = run_gates(&mut states, &c, "same-fp").await;
+        let _ = run_gates(&mut states, &c, "same-fp", std::path::Path::new(".")).await;
+        let _ = run_gates(&mut states, &c, "same-fp", std::path::Path::new(".")).await;
         let lines = std::fs::read_to_string(&marker).unwrap_or_default();
         assert_eq!(
             lines.lines().count(),
@@ -468,8 +470,8 @@ mod tests {
         let cmd = format!("echo x >> {} ; exit 1", marker.display());
         let mut states = vec![gate(&cmd)];
         let c = cfg(5);
-        let _ = run_gates(&mut states, &c, "fp-a").await;
-        let _ = run_gates(&mut states, &c, "fp-b").await;
+        let _ = run_gates(&mut states, &c, "fp-a", std::path::Path::new(".")).await;
+        let _ = run_gates(&mut states, &c, "fp-b", std::path::Path::new(".")).await;
         let lines = std::fs::read_to_string(&marker).unwrap_or_default();
         assert_eq!(
             lines.lines().count(),
@@ -488,8 +490,8 @@ mod tests {
         let cmd = format!("echo x >> {} ; exit 1", marker.display());
         let mut states = vec![gate(&cmd)];
         let c = cfg(5);
-        let _ = run_gates(&mut states, &c, "").await;
-        let _ = run_gates(&mut states, &c, "").await;
+        let _ = run_gates(&mut states, &c, "", std::path::Path::new(".")).await;
+        let _ = run_gates(&mut states, &c, "", std::path::Path::new(".")).await;
         let lines = std::fs::read_to_string(&marker).unwrap_or_default();
         assert_eq!(
             lines.lines().count(),
@@ -503,7 +505,12 @@ mod tests {
     #[tokio::test]
     async fn gate_command_times_out_and_is_killed() {
         let start = std::time::Instant::now();
-        let (ok, output) = run_gate_command("sleep 30", Duration::from_secs(1)).await;
+        let (ok, output) = run_gate_command(
+            "sleep 30",
+            Duration::from_secs(1),
+            std::path::Path::new("."),
+        )
+        .await;
         assert!(!ok);
         assert!(output.contains("timed out"), "got: {output}");
         assert!(
@@ -541,6 +548,21 @@ mod tests {
         let fp3 = workspace_fingerprint(&dir).await;
         assert_ne!(fp1, fp3, "changes must change the fingerprint");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_gate_runs_in_the_workspace_it_is_given() {
+        let dir = std::env::temp_dir().join(format!("forge-gate-cwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("only-here.txt"), "x").unwrap();
+        let (ok, _) =
+            run_gate_command("test -f only-here.txt", Duration::from_secs(10), &dir).await;
+        assert!(
+            ok,
+            "a worktree gate must run inside the worktree, not the launch directory"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

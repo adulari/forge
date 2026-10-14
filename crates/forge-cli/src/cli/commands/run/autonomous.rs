@@ -141,7 +141,7 @@ pub(crate) async fn next_loop_decision(
     match loop_stop_reason(last_assistant, state.iter) {
         Some(reason) if is_loop_complete_reason(reason) => {
             let fingerprint = workspace_fingerprint(cwd).await;
-            match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint).await {
+            match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint, cwd).await {
                 GateOutcome::AllPassed => LoopDecision::Stop(reason.to_string()),
                 GateOutcome::Failed {
                     gate_index,
