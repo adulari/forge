@@ -278,14 +278,20 @@ impl ProgressTracker {
         (strong, informative || strong)
     }
 
-    /// A new user turn. What the model has read stays read and the recent window stays put: the
-    /// user typing "you are stuck in a loop" starts a new turn but does not make the model any
-    /// less stuck (live, the same loop survived three such messages because every message reset
-    /// the guard). Only argument signatures are forgotten, so a deliberate redo of an earlier edit
-    /// still counts as a fresh mutation.
+    /// A new user turn. What the model has read stays read, but the turn gets a fresh
+    /// nudge-then-halt budget: carrying a pending nudge (or a window full of stale steps) across
+    /// turns halted every later turn after its first step in long sessions, where nearly every
+    /// read repeats something seen hours earlier. A loop that really survives the user's message
+    /// is still caught within this turn: the window refills, the nudge lands, the relapse halts.
+    /// Argument signatures are forgotten too, so a deliberate redo of an earlier edit still
+    /// counts as a fresh mutation.
     pub(crate) fn begin_turn(&mut self) {
         self.narration.begin_turn();
         self.seen_signatures.clear();
+        self.window.clear();
+        self.nudged = false;
+        self.steps_since_nudge = 0;
+        self.stale_since_nudge = 0;
     }
 
     /// The transcript was just compacted: the model no longer remembers what it read, so reading
@@ -646,21 +652,51 @@ mod tests {
     }
 
     #[test]
-    fn a_new_user_turn_does_not_reset_a_loop_in_progress() {
+    fn a_new_user_turn_gets_a_fresh_budget_but_a_loop_is_still_caught() {
         let mut t = ProgressTracker::default();
         for n in 20..24 {
             t.observe_step(REPEATED, &[creeping_read(n)]);
         }
         assert!(t.nudged);
         t.begin_turn();
-        let verdicts: Vec<Verdict> = (24..27)
+        assert_eq!(
+            t.observe_step(REPEATED, &[creeping_read(20)]),
+            Verdict::Fine,
+            "the first step of a new turn must never halt on the previous turn's evidence"
+        );
+        let verdicts: Vec<Verdict> = (24..40)
             .map(|n| t.observe_step(REPEATED, &[creeping_read(n)]))
             .collect();
         assert!(
             verdicts.iter().any(|v| matches!(v, Verdict::Halt { .. })),
-            "the user's complaint arrived as a new turn and must not buy the loop a fresh start: \
-             {verdicts:?}"
+            "a loop that continues through the new turn is still halted within it: {verdicts:?}"
         );
+    }
+
+    #[test]
+    fn rereading_old_output_in_a_new_turn_does_not_halt_it() {
+        let mut t = ProgressTracker::default();
+        for n in 0..WINDOW_STEPS + RELAPSE_STEPS + 2 {
+            t.observe_step(
+                "",
+                &[obs(n as u64, true, false, "the same old file contents")],
+            );
+        }
+        t.begin_turn();
+        for n in 0..STAGNANT_NUDGE_AT - 1 {
+            assert_eq!(
+                t.observe_step(
+                    "",
+                    &[obs(
+                        1000 + n as u64,
+                        true,
+                        false,
+                        "the same old file contents"
+                    )]
+                ),
+                Verdict::Fine
+            );
+        }
     }
 
     #[test]
