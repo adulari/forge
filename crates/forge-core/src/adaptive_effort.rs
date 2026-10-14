@@ -3,9 +3,12 @@
 //! file or re-running a search rarely needs deep reasoning. A failure, a write or a user turn
 //! restores the configured effort.
 //!
-//! Lowering only happens when the previous response reported reasoning tokens (the
+//! Lowering only happens once a response in this turn reported reasoning tokens (the
 //! `usage.reasoning_tokens` split): a model that reports none either does not reason or cannot
-//! show the saving, so there is nothing to cut and nothing to measure.
+//! show the saving, so there is nothing to cut and nothing to measure. The evidence holds for the
+//! rest of the turn, so a low-effort reply that happens to report zero does not flip the next
+//! request back up and down again (each flip is a request whose non-input fields changed, which
+//! on codex-oauth's WebSocket chain means a full resend).
 
 use forge_types::{EffortLevel, Usage};
 
@@ -13,13 +16,18 @@ use forge_types::{EffortLevel, Usage};
 pub(crate) struct AdaptiveEffort {
     /// The last tool round was all read-only and all succeeded.
     after_readonly_round: bool,
-    /// Reasoning tokens the last response reported (`None` = not reported).
-    last_reasoning_tokens: Option<u64>,
+    /// A response in this turn reported reasoning tokens.
+    reasoning_seen: bool,
 }
 
 impl AdaptiveEffort {
     pub(crate) fn observe_response(&mut self, usage: &Usage) {
-        self.last_reasoning_tokens = usage.reasoning_tokens;
+        self.reasoning_seen |= usage.reasoning_tokens.is_some_and(|n| n > 0);
+    }
+
+    /// A new user turn: the configured effort, and the reasoning evidence starts over.
+    pub(crate) fn begin_turn(&mut self) {
+        *self = Self::default();
     }
 
     /// Record one executed tool round. `readonly` = every call was provably side-effect free,
@@ -28,7 +36,7 @@ impl AdaptiveEffort {
         self.after_readonly_round = calls > 0 && readonly && ok;
     }
 
-    /// A user turn, a steer, a failure: back to the configured effort.
+    /// A steer or a step with no tool call: back to the configured effort.
     pub(crate) fn restore(&mut self) {
         self.after_readonly_round = false;
     }
@@ -44,7 +52,7 @@ impl AdaptiveEffort {
         let lower = enabled
             && !exact
             && self.after_readonly_round
-            && self.last_reasoning_tokens.is_some_and(|n| n > 0)
+            && self.reasoning_seen
             && configured != Some(EffortLevel::Low);
         if lower {
             Some(EffortLevel::Low)
@@ -123,6 +131,9 @@ mod tests {
         assert_eq!(s.effort_for(true, false, high), high, "failure");
         s.observe_round(1, true, true);
         s.restore();
+        assert_eq!(s.effort_for(true, false, high), high, "steer");
+        s.observe_round(1, true, true);
+        s.begin_turn();
         assert_eq!(s.effort_for(true, false, high), high, "user turn");
         s.observe_round(0, true, true);
         assert_eq!(s.effort_for(true, false, high), high, "no tools ran");
@@ -144,5 +155,25 @@ mod tests {
             s.observe_round(1, true, true);
             assert_eq!(s.effort_for(true, false, high), high, "{silent:?}");
         }
+    }
+
+    #[test]
+    fn reasoning_evidence_holds_for_the_turn_and_resets_with_it() {
+        let high = Some(EffortLevel::High);
+        let mut s = reasoned(Some(900));
+        s.observe_round(1, true, true);
+        s.observe_response(&Usage::default());
+        assert_eq!(
+            s.effort_for(true, false, high),
+            Some(EffortLevel::Low),
+            "a silent low-effort reply does not flip back up"
+        );
+        s.begin_turn();
+        s.observe_round(1, true, true);
+        assert_eq!(
+            s.effort_for(true, false, high),
+            high,
+            "a new turn needs new evidence"
+        );
     }
 }

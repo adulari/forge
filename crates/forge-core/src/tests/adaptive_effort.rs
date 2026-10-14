@@ -1,11 +1,21 @@
 //! Adaptive effort end to end: the request after a successful read-only round goes out at low
-//! effort, a write restores the configured effort, and a provider not opted in is never touched.
+//! effort, a write or a step with no tool call restores the configured effort, and a provider not
+//! opted in is never touched.
 
 use super::*;
 
-/// Reads twice, writes once, then answers; records the effort of every main-loop request.
+#[derive(Clone, Copy)]
+enum Step {
+    Read,
+    Write,
+    /// No text and no tool call: the loop nudges the model and asks again.
+    Empty,
+}
+
+/// Plays `script` one step per main-loop request, then answers; records the effort of each.
 #[derive(Default)]
 struct EffortRecorder {
+    script: Vec<Step>,
     calls: Mutex<usize>,
     efforts: Mutex<Vec<Option<forge_types::EffortLevel>>>,
 }
@@ -51,16 +61,17 @@ impl Provider for EffortRecorder {
             name: name.into(),
             args,
         };
-        let tool_calls = match n {
-            0 | 1 => vec![call("read_file", serde_json::json!({"path": "a.txt"}))],
-            2 => vec![call(
+        let step = self.script.get(n).copied();
+        let tool_calls = match step {
+            Some(Step::Read) => vec![call("read_file", serde_json::json!({"path": "a.txt"}))],
+            Some(Step::Write) => vec![call(
                 "write_file",
                 serde_json::json!({"path": "b.txt", "content": "x"}),
             )],
-            _ => Vec::new(),
+            Some(Step::Empty) | None => Vec::new(),
         };
         Ok(forge_provider::ModelResponse {
-            content: if tool_calls.is_empty() {
+            content: if step.is_none() {
                 "Done.".into()
             } else {
                 String::new()
@@ -75,7 +86,7 @@ impl Provider for EffortRecorder {
     }
 }
 
-async fn run(providers: &[&str]) -> Vec<Option<forge_types::EffortLevel>> {
+async fn run(providers: &[&str], script: Vec<Step>) -> Vec<Option<forge_types::EffortLevel>> {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
     let mut config = Config {
@@ -86,7 +97,10 @@ async fn run(providers: &[&str]) -> Vec<Option<forge_types::EffortLevel>> {
     config.suggest.enabled = false;
     config.mesh.auto_memory = false;
     config.mesh.adaptive_effort_providers = providers.iter().map(|p| p.to_string()).collect();
-    let provider = Arc::new(EffortRecorder::default());
+    let provider = Arc::new(EffortRecorder {
+        script,
+        ..EffortRecorder::default()
+    });
     let mut session = Session::start(
         Arc::new(Store::open_in_memory().unwrap()),
         Arc::clone(&provider) as Arc<dyn Provider>,
@@ -112,7 +126,7 @@ async fn run(providers: &[&str]) -> Vec<Option<forge_types::EffortLevel>> {
 #[tokio::test]
 async fn a_readonly_round_lowers_the_next_request_and_a_write_restores_it() {
     use forge_types::EffortLevel::{High, Low};
-    let efforts = run(&["ollama"]).await;
+    let efforts = run(&["ollama"], vec![Step::Read, Step::Read, Step::Write]).await;
     assert_eq!(
         efforts.get(..4),
         Some(&[Some(High), Some(Low), Some(Low), Some(High)][..]),
@@ -122,12 +136,23 @@ async fn a_readonly_round_lowers_the_next_request_and_a_write_restores_it() {
 
 #[tokio::test]
 async fn a_provider_not_opted_in_keeps_its_effort() {
-    let efforts = run(&["openai"]).await;
+    let efforts = run(&["openai"], vec![Step::Read, Step::Read, Step::Write]).await;
     assert!(!efforts.is_empty());
     assert!(
         efforts
             .iter()
             .all(|e| *e == Some(forge_types::EffortLevel::High)),
         "{efforts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_step_without_a_tool_call_restores_the_effort() {
+    use forge_types::EffortLevel::{High, Low};
+    let efforts = run(&["ollama"], vec![Step::Read, Step::Empty]).await;
+    assert_eq!(
+        efforts.get(..3),
+        Some(&[Some(High), Some(Low), Some(High)][..]),
+        "the request after the empty-reply nudge must not stay low: {efforts:?}"
     );
 }

@@ -2678,7 +2678,7 @@ impl Session {
     ) -> Result<LoopOutcome, CoreError> {
         self.refresh_btw_asker();
         self.poll_lattice_background();
-        self.adaptive_effort.restore();
+        self.adaptive_effort.begin_turn();
         // Anything still in the steer inbox belongs to a turn that already ended; the surface still
         // holds those prompts and is starting this turn with the first of them, so delivering them
         // again here would duplicate them.

@@ -16,8 +16,10 @@ read-side tools, and shell lines the broker would allow outright as read-only.
 ## When it does nothing
 
 - **The provider is not listed** in `[mesh] adaptive_effort_providers`.
-- **The previous response reported no reasoning tokens** (`usage.reasoning_tokens` absent or 0):
-  the model either does not reason or cannot show a saving, so there is nothing to cut or measure.
+- **No response in this turn has reported reasoning tokens** (`usage.reasoning_tokens` absent or
+  0): the model either does not reason or cannot show a saving, so there is nothing to cut or
+  measure. Once one has, the evidence holds until the turn ends, so a low-effort reply that reports
+  zero does not flip the next request back up.
 - **`/effort exact <level>`** is an instruction and is never lowered. A plain `/effort <level>`
   pin or the mesh's measured rung is the configured effort that gets lowered and restored.
 - **The configured effort is already `low`.**
@@ -30,12 +32,20 @@ default was checked against the adapter that builds the request:
 | Provider | Where the effort goes | Cache effect | Default |
 |---|---|---|---|
 | `openai` | top-level `reasoning_effort` (genai OpenAI adapter) | OpenAI caches the prompt prefix (messages, tools, images, schema); the field is outside it | on |
-| `codex-oauth` | `reasoning.effort` beside `input` (codex_oauth.rs) | same OpenAI cache | on |
+| `codex-oauth` | `reasoning.effort` beside `input` (codex_oauth.rs) | same OpenAI cache (see the WebSocket note below) | on |
 | `gemini` | `generationConfig.thinkingConfig` (genai Gemini adapter) | Gemini caches `contents`/`systemInstruction`/`tools`; explicit cachedContent holds only those | on |
 | `anthropic`, `bedrock` | `output_config.effort` or `thinking.budget_tokens` | Anthropic documents that a `thinking` or `effort` change invalidates the messages cache | off |
 | `openrouter` | `reasoning`, forwarded to the upstream | the upstream may be Anthropic | off |
 | open-weight hosts (`groq`, `cerebras`, `nvidia`, `together`, `fireworks`, `deepseek`, `ollama`, ...) | `reasoning_effort` or a thinking flag | the chat template renders the level into the prompt (gpt-oss harmony writes `Reasoning: <level>` into the system message), so the prefix changes from the first token | off |
 | CLI bridges | a process argument | the persistent claude bridge would have to restart | off |
+
+**codex-oauth WebSocket chain.** On the WebSocket models (`gpt-5.6-sol`/`-terra`/`-luna`) Forge
+sends only the new items through `previous_response_id`, and only while every field except `input`
+matches the previous request (`request_properties_match` in codex_websocket.rs). An effort change
+therefore turns that one request into a full resend of the transcript, with the encrypted reasoning
+items Forge replays, under the same `prompt_cache_key`; the chain resumes from it on the next
+request. Two such resends per read-only streak (down, then back up) is the price, and the reason
+the reasoning evidence is held for the whole turn instead of flipping on every reply.
 
 The critic's claim behind this feature, that the effort parameter sits outside the cached prefix
 on both OpenAI and Anthropic, holds for OpenAI and not for Anthropic.

@@ -323,6 +323,7 @@ impl Session {
             }
 
             if !resp.wants_tools() {
+                self.adaptive_effort.restore();
                 if !resp.content.trim().is_empty() {
                     final_text = resp.content.clone();
                     has_prior_final = true;

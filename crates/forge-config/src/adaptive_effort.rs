@@ -11,7 +11,10 @@
 /// - `openai`: genai's OpenAI adapter sends a top-level `reasoning_effort`; OpenAI caches the
 ///   prompt (messages, tools, images, schema) by exact prefix.
 /// - `codex-oauth`: the Responses body carries `reasoning.effort` beside `input`
-///   (codex_oauth.rs), same OpenAI cache.
+///   (codex_oauth.rs), same OpenAI cache. On the WebSocket models a changed effort makes that one
+///   request a full resend instead of a `previous_response_id` delta (codex_websocket.rs
+///   `request_properties_match`); the replayed encrypted reasoning and `prompt_cache_key` keep it
+///   on the cached prefix.
 /// - `gemini`: genai puts the level in `generationConfig.thinkingConfig`; Gemini caches
 ///   `contents`/`systemInstruction`/`tools`, and the explicit cachedContent holds only those.
 ///
