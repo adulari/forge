@@ -436,6 +436,44 @@ pub(crate) fn spawn_turn(
     })
 }
 
+pub(crate) type SpawnFn = fn(
+    &str,
+    &Arc<tokio::sync::Mutex<Session>>,
+    &std::sync::mpsc::Sender<u64>,
+    u64,
+    &mut forge_tui::App,
+    &mut bool,
+    &mut std::time::Instant,
+) -> tokio::task::JoinHandle<()>;
+
+/// Re-drive the model after an interrupt on prompts the aborted turn had already absorbed: they
+/// are in the transcript, the store and the scrollback, so nothing is echoed or persisted again.
+pub(crate) fn spawn_resume_turn(
+    prompt: &str,
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+) -> tokio::task::JoinHandle<()> {
+    app.on_turn_start();
+    app.done = false;
+    app.tick = 0;
+    *busy = true;
+    *busy_since = std::time::Instant::now();
+    let s = session.clone();
+    let dt = done_tx.clone();
+    let prompt = prompt.to_string();
+    tokio::spawn(async move {
+        let _done = DoneGuard(dt, gen);
+        let mut sess = s.lock().await;
+        if let Err(e) = sess.run_turn_resuming(&prompt).await {
+            sess.notify_error(&format!("turn failed: {e}"));
+        }
+    })
+}
+
 /// Like [`spawn_turn`] but runs an expanded command/skill: prepends `guidance` and biases routing
 /// with the `tier` hint. The displayed user line is the original `/command` (echoed by the
 /// dispatcher), so the model receives the expanded `prompt` while the transcript shows the turn.

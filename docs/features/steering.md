@@ -22,6 +22,13 @@ The session is locked by the turn task for the whole turn, which is why the inbo
 handle (`Session::steer_handle`) the driver takes once at startup rather than a method call.
 Bridges see steers naturally: the resume delta carries new user messages.
 
+## Esc after an absorbed steer
+
+An absorbed steer is already persisted, in the model transcript and echoed. If Esc kills the turn
+before it answers, the next turn is started with `Session::run_turn_resuming`: it routes on the
+absorbed text but does not persist, push or echo it again (`SteerTracker::interrupted` returns
+`InterruptNext::Resume`). A prompt that never reached the model is still an ordinary turn.
+
 ## Tests
 
 `forge-core/src/tests/steer_rewind.rs`: injected after a tool step, injected instead of ending the

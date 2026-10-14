@@ -417,3 +417,39 @@ async fn resumed_session_replays_persisted_reasoning_items() {
     assert_eq!(carried.source, "codex-oauth::gpt-5.6-sol");
     assert_eq!(carried.items.len(), 1);
 }
+
+#[tokio::test]
+async fn resuming_after_an_interrupt_does_not_persist_the_absorbed_steer_twice() {
+    let (mut session, _events, store, _calls) = steer_session(true, 0);
+    session.run_turn("tidy the module").await.unwrap();
+    let steer = "also rename the helper";
+    let count = |session: &Session| {
+        let persisted = store
+            .load_messages(&session.id)
+            .unwrap()
+            .iter()
+            .filter(|m| m.role == Role::User && m.content == steer)
+            .count();
+        let live = session
+            .transcript
+            .iter()
+            .filter(|m| m.role == Role::User && m.content == steer)
+            .count();
+        (persisted, live)
+    };
+    assert_eq!(count(&session), (1, 1));
+
+    session.run_turn_resuming(steer).await.unwrap();
+    assert_eq!(
+        count(&session),
+        (1, 1),
+        "the absorbed steer reaches the model and the store once"
+    );
+
+    session.run_turn(steer).await.unwrap();
+    assert_eq!(
+        count(&session),
+        (2, 2),
+        "an ordinary turn still records its prompt"
+    );
+}
