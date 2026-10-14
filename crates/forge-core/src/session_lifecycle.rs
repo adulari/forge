@@ -238,6 +238,7 @@ impl Session {
             pinned_tier: None,
             route_affinity: None,
             workspace_binding: Arc::new(std::sync::RwLock::new(workspace.root().to_path_buf())),
+            worktree_home: None,
             workspace,
             extra_tool_roots,
             btw_asker: None,

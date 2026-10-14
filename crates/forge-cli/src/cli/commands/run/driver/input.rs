@@ -407,7 +407,8 @@ impl DriverState {
             self.app.copy_candidates.clear();
         } else if kind == forge_tui::PickerKind::Duel {
             if let Some((report, guards)) = self.duel_state.take() {
-                let repo_root = std::path::PathBuf::from(&self.cwd);
+                let repo_root =
+                    forge_core::duel::repo_root_of(&guards, std::path::Path::new(&self.cwd));
                 let repo_key = repo_root.display().to_string();
                 let winner_branch = row.id.clone();
                 let merge_note = match forge_core::duel::merge_winner(&repo_root, &winner_branch) {

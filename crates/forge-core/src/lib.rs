@@ -99,6 +99,7 @@ mod session_history;
 mod session_lifecycle;
 mod session_usage_detail;
 mod session_virtual_tools;
+mod session_worktree;
 pub mod snapshot;
 pub(crate) mod stall_guard;
 pub mod steer;
@@ -123,6 +124,7 @@ mod unapplied_edit;
 pub mod workflow;
 mod workspace_context;
 pub mod worktree;
+pub mod worktree_ops;
 pub mod worktree_reclaim;
 pub mod zero_retention;
 
@@ -133,6 +135,7 @@ use session_virtual_tools::ASK_USER_TOOL;
 pub use session_virtual_tools::{remember_spec, REMEMBER_TOOL};
 use text_policy::{completed_tasks_recap, memory_scope_at, recap_line, sanitize_suggestion};
 pub use workspace_context::WorkspaceContext;
+pub use worktree_ops::WORKTREE_TOOL;
 
 pub const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
 
@@ -305,6 +308,8 @@ next one: stage the specific files you changed (never `git add -A`), write a foc
 conventional-commit message (feat/fix/refactor/docs/test/chore), and leave unrelated changes in \
 the tree alone. Do not end a long task with your edits uncommitted; if the work is not ready to \
 commit, say so.
+- To work in a git worktree, create, enter and leave it with the `worktree` tool: it moves your \
+file tools, relative paths and shell cwd there. Do not juggle `git worktree add` with `cd`.
 - Never push, force-push, or rewrite published history unless the user asked for it. When the \
 branch has commits its upstream lacks, ask the user (ask_user) whether to push.";
 
@@ -1160,6 +1165,7 @@ impl TaskScope {
                 | "run_workflow"
                 | "update_tasks"
                 | "remember"
+                | WORKTREE_TOOL
         )
     }
 
@@ -1719,6 +1725,9 @@ pub struct Session {
     /// use this instead of the daemon's process working directory.
     workspace: WorkspaceContext,
     workspace_binding: Arc<std::sync::RwLock<std::path::PathBuf>>,
+    /// The root this session worked in before the `worktree` tool first moved it, where `exit`
+    /// returns to (session_worktree.rs). `None` while it has not moved.
+    worktree_home: Option<std::path::PathBuf>,
     /// Canonicalized `config.tools.extra_roots`: extra roots (outside the workspace) the
     /// structured file tools may read and write. Empty by default (file tools stay confined).
     extra_tool_roots: Vec<std::path::PathBuf>,
@@ -1874,7 +1883,7 @@ fn parse_git_head(head: &str) -> Option<String> {
 /// Read + parse the current git branch synchronously. Used only at session construction (one-time
 /// setup, not on the async turn path); the hot path refreshes the cache via `tokio::fs`.
 fn current_git_branch(root: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(root.join(".git/HEAD"))
+    std::fs::read_to_string(session_worktree::git_head_file(root))
         .ok()
         .as_deref()
         .and_then(parse_git_head)
@@ -2422,6 +2431,13 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(push_notify::PUSH_NOTIFICATION_TOOL))
         {
             specs.push(push_notify::spec());
+        }
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(WORKTREE_TOOL))
+        {
+            specs.push(worktree_ops::worktree_spec());
         }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes
@@ -3229,11 +3245,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // message is persisted — so this await cannot reopen the abort-before-persist window the
         // synchronous-read invariant protects; `system_preamble` (called per model-loop step below)
         // then reads the cached field with no syscall and no `.await`, staying `Send`.
-        self.cached_git_branch = tokio::fs::read_to_string(self.workspace.root().join(".git/HEAD"))
-            .await
-            .ok()
-            .as_deref()
-            .and_then(parse_git_head);
+        self.cached_git_branch =
+            tokio::fs::read_to_string(session_worktree::git_head_file(self.workspace.root()))
+                .await
+                .ok()
+                .as_deref()
+                .and_then(parse_git_head);
 
         // Standing project instructions can appear or change WHILE a session runs, and the
         // construction-time read alone could never see that: the session that writes AGENTS.md (or
@@ -4997,6 +5014,9 @@ mod tests {
 
     #[path = "commit_nudge.rs"]
     mod commit_nudge_tests;
+
+    #[path = "session_worktree.rs"]
+    mod session_worktree_tests;
 
     #[path = "append_only_turns.rs"]
     mod append_only_turns_tests;

@@ -56,6 +56,15 @@ pub(super) struct LiveSession {
     /// Tokens the process sent with its most recent model request — the real fill of claude's own
     /// context window, which grows with every tool result it keeps and that Forge cannot see.
     pub(super) context_fill: Option<u64>,
+    /// [`CheckpointContext::workspace`] at spawn. The process, its `forge mcp-serve` child and
+    /// that child's tool registry all run in this root, so a session that moved to another root
+    /// (the `worktree` tool) must not reuse it.
+    pub(super) workspace: Option<String>,
+}
+
+/// Whether a process spawned in `spawned` may serve a turn whose checkpoint names `turn`.
+pub(super) fn same_workspace(spawned: Option<&str>, turn: Option<&CheckpointContext>) -> bool {
+    spawned == turn.map(|c| c.workspace.as_str())
 }
 
 /// The input size of one claude model request, read from an `assistant` stream line's

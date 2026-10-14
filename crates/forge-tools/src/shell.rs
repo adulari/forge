@@ -175,23 +175,26 @@ impl Tool for ShellTool {
     }
 
     async fn run_full(&self, args: &Value) -> Result<crate::ToolRun, ToolError> {
+        // The session's live binding wins over the root captured at construction: a session that
+        // moved into a worktree must run there, not be refused for leaving its starting root.
+        let workspace = background::bound_workspace().or_else(|| self.workspace.clone());
         let cwd = args
             .get("cwd")
             .and_then(Value::as_str)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                self.workspace
+                workspace
                     .clone()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
             });
         let cwd = if cwd.is_absolute() {
             cwd
-        } else if let Some(workspace) = &self.workspace {
+        } else if let Some(workspace) = &workspace {
             workspace.join(cwd)
         } else {
             cwd
         };
-        if let Some(workspace) = &self.workspace {
+        if let Some(workspace) = &workspace {
             let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
             if !canonical.starts_with(workspace) {
                 return Err(ToolError::Failed(format!(
@@ -251,7 +254,6 @@ impl Tool for ShellTool {
                         .to_string(),
                 ));
             }
-            let workspace = background::bound_workspace().or_else(|| self.workspace.clone());
             return Ok(crate::ToolRun::from(
                 background::start_background(command, &cwd, workspace.as_deref(), &self.policy)
                     .await,
@@ -883,6 +885,28 @@ mod tests {
             .contains("outside the session workspace"));
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(peer);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_workspace_shell_follows_the_session_into_another_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (start, moved) = (dir.path().join("main"), dir.path().join("wt"));
+        std::fs::create_dir_all(&start).unwrap();
+        std::fs::create_dir_all(&moved).unwrap();
+        let mut registry = crate::ToolRegistry::with_core_tools_in(&start);
+        registry.register(Box::new(ShellTool::in_workspace(&start)));
+        registry.rebind_workspace(&moved).unwrap();
+        let output = registry
+            .get("shell")
+            .unwrap()
+            .run(&serde_json::json!({ "command": "pwd" }))
+            .await
+            .unwrap();
+        assert!(
+            output.contains(moved.canonicalize().unwrap().to_string_lossy().as_ref()),
+            "{output}"
+        );
     }
 
     #[cfg(unix)]

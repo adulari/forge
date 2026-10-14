@@ -278,11 +278,17 @@ impl Session {
         Ok(())
     }
 
-    fn transition_workspace(&mut self, workspace: WorkspaceContext) -> Result<(), CoreError> {
+    pub(crate) fn transition_workspace(
+        &mut self,
+        workspace: WorkspaceContext,
+    ) -> Result<(), CoreError> {
         if self.tools.rebind_workspace(workspace.root()).is_err() {
             self.tools.bind_workspace(workspace.root());
         }
         self.workspace = workspace;
+        // Files the old root's tracker saw are not this root's; its cached repo top is wrong here.
+        self.git_hygiene = Default::default();
+        self.worktree_home = None;
         *self
             .workspace_binding
             .write()
