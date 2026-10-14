@@ -79,6 +79,7 @@ mod bridge_budget;
 mod deferred;
 mod heartbeats;
 mod push_notification;
+mod worktree;
 use bridge_budget::*;
 
 mod auto_classify;
@@ -375,6 +376,9 @@ impl ForgeMcp {
         }
         if name == forge_core::push_notify::PUSH_NOTIFICATION_TOOL {
             return Ok(self.handle_push_notification(&args).await);
+        }
+        if name == forge_core::WORKTREE_TOOL {
+            return Ok(self.handle_worktree(&args).await);
         }
         if name == forge_core::wakeup::SCHEDULE_WAKEUP_TOOL {
             return Ok(bridge_budget::wakeup_result(&self.tasks_store, &args));
@@ -697,6 +701,7 @@ impl ForgeMcp {
         // (like update_tasks/remember): the parent session id is resolved lazily at call time.
         tools.extend(bridge_budget::heartbeat_tools());
         tools.push(push_notification::tool());
+        tools.push(worktree::tool());
         // Advertise plan presentation so a bridge model can propose a plan in planning mode. The
         // bridge can't see the parent's runtime temper, so it's advertised unconditionally; the
         // parent honors the plan only when it is actually in Plan mode (gated in run_model_loop).

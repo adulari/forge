@@ -2549,7 +2549,8 @@ pub(crate) async fn run_chat_tui(
                                 // favors it, then drop every guard (removes every worktree+branch —
                                 // the winner's diff is already applied, so its branch isn't needed).
                                 if let Some((report, guards)) = duel_state.take() {
-                                    let repo_root = session_workspace.clone();
+                                    let repo_root =
+                                        forge_core::duel::repo_root_of(&guards, &session_workspace);
                                     let repo_key = repo_root.display().to_string();
                                     let winner_branch = row.id.clone();
                                     let merge_note = match forge_core::duel::merge_winner(

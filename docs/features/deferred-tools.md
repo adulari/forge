@@ -23,7 +23,7 @@ The direct path advertises the core tools plus two meta-tools:
 
 | Advertised | Deferred (reached through `tool_search` / `tool_call`) |
 |---|---|
-| shell, read_file, edit_file, multi_edit, apply_patch, write_file, append_file, delete_file, search, glob, list_dir, update_tasks, present_plan (Plan mode), use_skill (with a catalog), dispatch_sessions (coordinators), ask_user, spawn_agents, run_code (codemode), tool_search, tool_call | browser, browser_network, device, device_logs, proxy, proxy_network, web_fetch, web_search, notebook_edit, shell_job, lattice, remember, manage_heartbeats, schedule_wakeup, push_notification, message_session, list_sessions, send_to_agent, list_subagents, cancel_subagent, run_workflow, open_pr, mcp_list_resources, mcp_read_resource, mcp_get_prompt |
+| shell, read_file, edit_file, multi_edit, apply_patch, write_file, append_file, delete_file, search, glob, list_dir, update_tasks, present_plan (Plan mode), use_skill (with a catalog), dispatch_sessions (coordinators), worktree ([session-worktrees.md](session-worktrees.md)), ask_user, spawn_agents, run_code (codemode), tool_search, tool_call | browser, browser_network, device, device_logs, proxy, proxy_network, web_fetch, web_search, notebook_edit, shell_job, lattice, remember, manage_heartbeats, schedule_wakeup, push_notification, message_session, list_sessions, send_to_agent, list_subagents, cancel_subagent, run_workflow, open_pr, mcp_list_resources, mcp_read_resource, mcp_get_prompt |
 
 With subagents enabled and no skills, lattice or MCP, the surface goes from 32 tools / 42,356
 characters to 16 tools / 16,688 characters.

@@ -268,6 +268,9 @@ impl Session {
         if call.name == wakeup::SCHEDULE_WAKEUP_TOOL {
             return self.schedule_wakeup(msg_id, call);
         }
+        if call.name == WORKTREE_TOOL {
+            return self.worktree_tool(msg_id, call);
+        }
         if call.name == crate::deferred_tools::TOOL_SEARCH
             || call.name == crate::deferred_tools::TOOL_CALL
         {
@@ -541,11 +544,9 @@ impl Session {
                     // every later shell command in the session.
                     let patterns = always_allow_patterns(&call.name, &call.args);
                     // Persisted with the same scope; an unscopable shell call is allowed once.
-                    if let Err(e) = forge_config::append_allow_rule_in(
-                        self.workspace_root(),
-                        &call.name,
-                        &patterns,
-                    ) {
+                    if let Err(e) =
+                        forge_config::append_allow_rule_in(self.rules_root(), &call.name, &patterns)
+                    {
                         self.presenter.emit(PresenterEvent::Warning(format!(
                             "allow rule not saved: {e}"
                         )));

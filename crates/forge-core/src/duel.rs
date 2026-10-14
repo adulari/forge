@@ -298,6 +298,15 @@ pub async fn run(
 
 /// Apply the chosen candidate's branch back into the main tree — a thin wrapper over
 /// [`worktree::merge_worktree_back`] so callers only need `crate::duel`.
+/// The checkout a finished duel merges into: the one its worktrees were branched from. The
+/// surface's own idea of the workspace goes stale once the session moves (the `worktree` tool).
+pub fn repo_root_of(guards: &[worktree::WorktreeGuard], fallback: &Path) -> std::path::PathBuf {
+    guards
+        .first()
+        .map_or(fallback, worktree::WorktreeGuard::repo_root)
+        .to_path_buf()
+}
+
 pub fn merge_winner(repo_root: &Path, branch: &str) -> Result<worktree::MergeReport, CoreError> {
     worktree::merge_worktree_back(repo_root, branch)
         .map_err(|e| CoreError::Internal(format!("duel merge failed: {e}")))

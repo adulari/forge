@@ -2822,6 +2822,7 @@ impl CliProvider {
             turn_in_flight: false,
             parked_at: std::time::Instant::now(),
             context_fill: None,
+            workspace: checkpoint.map(|c| c.workspace.clone()),
         })
     }
 
@@ -2860,7 +2861,8 @@ impl CliProvider {
         // its in-process context is stale after a compaction/reset), is on the same history epoch,
         // and isn't mid-turn from a prior call that never finished (see `turn_in_flight`).
         let reuse = matches!(&guard.session, Some(s)
-            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight);
+            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight
+                && live::same_workspace(s.workspace.as_deref(), checkpoint));
         let mut resume_plan: Option<(String, usize)> = None;
         if !reuse {
             if let Some(old) = guard.session.take() {
@@ -4359,6 +4361,24 @@ mod tests {
                 "codex bridge dropped the session mode {mode:?}: {codex:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_parked_bridge_process_is_not_reused_after_the_session_changes_root() {
+        let ctx = |workspace: &str| CheckpointContext {
+            session: "s".to_string(),
+            seq: 1,
+            root: "/tmp/checkpoints".to_string(),
+            workspace: workspace.to_string(),
+            mode: "bypass".to_string(),
+            epoch: 0,
+        };
+        assert!(live::same_workspace(Some("/repo"), Some(&ctx("/repo"))));
+        assert!(!live::same_workspace(
+            Some("/repo"),
+            Some(&ctx("/repo/.forge/worktrees/feat"))
+        ));
+        assert!(live::same_workspace(None, None));
     }
 
     /// The persistent claude transport parks a live process between calls. Its served

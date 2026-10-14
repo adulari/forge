@@ -92,6 +92,15 @@ pub(crate) mod linux {
     ///
     /// The returned ruleset owns a CLOEXEC fd: it survives fork and is closed by `exec`, so the
     /// child can restrict itself with it and nothing leaks into the executed program.
+    const DEVICES: &[&str] = &[
+        "/dev/null",
+        "/dev/zero",
+        "/dev/full",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/tty",
+    ];
+
     pub fn prepare_landlock(writable: &[impl AsRef<Path>]) -> Result<RulesetCreated, String> {
         // Read-only access we grant on the whole filesystem so binaries/libs/configs resolve.
         let read_exec: landlock::BitFlags<AccessFs> =
@@ -113,8 +122,19 @@ pub(crate) mod linux {
             .add_rule(PathBeneath::new(root_fd, read_exec))
             .map_err(|e| e.to_string())?;
 
-        // Full read+write on each explicitly writable path.
+        // The sink/source devices every toolchain opens for writing: `git` opens `/dev/null`
+        // read-write at startup and dies without it, and `2>/dev/null` is in half of all shell
+        // lines. Files, so only file rights apply; writing to them changes nothing on disk.
         let mut ruleset = ruleset;
+        for device in DEVICES {
+            if let Ok(fd) = PathFd::new(device) {
+                ruleset = ruleset
+                    .add_rule(PathBeneath::new(fd, AccessFs::from_file(ABI::V5)))
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        // Full read+write on each explicitly writable path.
         for path in writable {
             let p = path.as_ref();
             if !p.exists() {
@@ -269,6 +289,27 @@ mod tests {
             let status = cmd.status().expect("spawn");
             assert!(status.success(), "write inside workspace must succeed");
             assert!(probe_inside.exists(), "file must exist after write");
+        }
+
+        // Test 3: the null device stays writable, or every `git` call and `2>/dev/null` fails.
+        {
+            let w = writable.clone();
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-c")
+                .arg("echo x > /dev/null && git --version > /dev/null 2>&1");
+            let mut prepared = Some(linux::prepare_landlock(&w).expect("prepare ruleset"));
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.pre_exec(move || match prepared.take() {
+                    Some(ruleset) => linux::restrict_current_thread(ruleset),
+                    None => Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                });
+            }
+            let status = cmd.status().expect("spawn");
+            assert!(
+                status.success(),
+                "/dev/null must stay writable under the sandbox"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&workspace);
