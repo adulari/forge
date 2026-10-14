@@ -455,6 +455,34 @@ mod tests {
     }
 
     #[test]
+    fn recorded_evidence_never_shows_in_git_status() {
+        let (dir, ledger) = ledger();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        if !git(&["init", "-q"]).status.success() {
+            return;
+        }
+        ledger
+            .record(
+                EvidenceKind::Screenshot,
+                "browser",
+                "png",
+                b"x",
+                Capture::default(),
+            )
+            .unwrap();
+        ledger.record_test_output("cargo test", 0, "ok").unwrap();
+        git(&["add", "-A"]);
+        let status = git(&["status", "--porcelain", "-uall"]);
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+    }
+
+    #[test]
     fn test_output_keeps_the_command_exit_and_last_lines() {
         let (_dir, ledger) = ledger();
         let output: String = (1..=100).map(|n| format!("line {n}\n")).collect();

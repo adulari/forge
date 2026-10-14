@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) use fingerprint::{remotes as repo_remotes, repo_root};
 pub use fingerprint::{HostFingerprint, RepoRef};
 pub(crate) use guard::HostGuard;
 pub use plan::StaleRoot;

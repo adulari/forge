@@ -189,6 +189,7 @@ prompt text, nothing else.";
                     }
                 }
             }
+            crate::memory_scope::align_memory_scopes(&store, workspace.root());
         }))
     }
 
