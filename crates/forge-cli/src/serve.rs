@@ -788,6 +788,10 @@ pub(crate) async fn serve_cmd(
         println!("  ⚠ anyone with the link can drive these sessions — the token is the only gate");
     }
 
+    // Keep the model catalog current while the daemon runs: config/key edits and new upstream
+    // models reach hosted sessions and the models endpoint without a restart.
+    crate::cli::commands::models::spawn_catalog_watch();
+
     // Serve until SIGINT/SIGTERM, then give active turns a bounded window to finish.
     let server = async {
         if local || anywhere {

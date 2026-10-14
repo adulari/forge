@@ -33,7 +33,7 @@ pub(crate) struct ProviderDiscoveryStatus {
 }
 
 /// Path to the on-disk catalog cache (`~/.local/share/forge/catalog.json`).
-fn catalog_cache_path() -> Option<std::path::PathBuf> {
+pub(super) fn catalog_cache_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("catalog.json"))
 }
 
@@ -118,7 +118,7 @@ pub(crate) fn try_begin_catalog_refresh() -> bool {
     !CATALOG_REFRESH_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
-fn end_catalog_refresh() {
+pub(super) fn end_catalog_refresh() {
     CATALOG_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -127,6 +127,35 @@ fn end_catalog_refresh() {
 pub(crate) fn live_catalog() -> forge_mesh::LiveCatalog {
     static LIVE: std::sync::OnceLock<forge_mesh::LiveCatalog> = std::sync::OnceLock::new();
     LIVE.get_or_init(forge_mesh::LiveCatalog::default).clone()
+}
+
+/// [`discover_until_keyed_providers_answer`] with the shared retry schedule.
+pub(super) async fn refresh_loop<D, Fut, P>(has_key: impl Fn(&str) -> bool, discover: D, publish: P)
+where
+    D: FnMut() -> Fut,
+    Fut: std::future::Future<Output = (ModelCatalog, Vec<ProviderDiscoveryStatus>)>,
+    P: FnMut(ModelCatalog, bool),
+{
+    discover_until_keyed_providers_answer(
+        &DISCOVERY_RETRY_BACKOFF,
+        DISCOVERY_RETRY_STEADY,
+        DISCOVERY_RETRY_STEADY_ROUNDS,
+        has_key,
+        discover,
+        publish,
+    )
+    .await;
+}
+
+/// Calibrate `catalog` with this host's outcome evidence, publish it to every router and session
+/// following [`live_catalog`], and wake their followers.
+pub(crate) fn publish_live(catalog: ModelCatalog) {
+    let catalog = match crate::open_store() {
+        Ok(store) => super::apply_outcome_calibration(catalog, &store),
+        Err(_) => catalog,
+    };
+    live_catalog().publish(catalog);
+    super::watch::announce_publish();
 }
 
 /// Rediscover the catalog off the turn's critical path and persist it. A refresh that lands
@@ -148,11 +177,7 @@ pub(crate) fn spawn_catalog_refresh(config: &forge_config::Config) {
             |catalog, late| {
                 save_catalog(&catalog);
                 if late {
-                    let catalog = match crate::open_store() {
-                        Ok(store) => super::apply_outcome_calibration(catalog, &store),
-                        Err(_) => catalog,
-                    };
-                    live_catalog().publish(catalog);
+                    publish_live(catalog);
                 }
             },
         )
@@ -180,6 +205,13 @@ pub(crate) fn save_catalog(catalog: &ModelCatalog) {
             return;
         }
     }
+    write_catalog(catalog);
+}
+
+/// Persist `catalog` without the clobber guard. For a refresh that KNOWS the provider set changed
+/// (a provider removed, a key deleted): a smaller catalog is then the right answer, not degraded
+/// discovery.
+pub(super) fn write_catalog(catalog: &ModelCatalog) {
     let Some(path) = catalog_cache_path() else {
         return;
     };

@@ -30,6 +30,7 @@ mod adaptive_effort;
 mod build_command;
 mod memory_scope;
 use build_command::is_env_setup_command;
+mod catalog_feed;
 mod local_evidence;
 pub use local_evidence::apply_local_evidence;
 pub mod assay;
@@ -1601,6 +1602,10 @@ pub struct Session {
     /// The discovered model catalog (auto-discovery mesh), kept so the TUI `/models` browser can
     /// classify + group what's available without re-running discovery. `None` for mock/offline.
     catalog: Option<ModelCatalog>,
+    /// Slot a background refresher publishes re-discovered catalogs into, and the last one this
+    /// session adopted (see `catalog_feed.rs`).
+    catalog_feed: Option<forge_mesh::LiveCatalog>,
+    catalog_feed_seen: Option<std::sync::Arc<ModelCatalog>>,
     /// The agent's task list (the `update_tasks` tool), rehydrated from the store on resume.
     tasks: Vec<forge_types::TodoItem>,
     /// A plan proposed this turn via `present_plan` (planning mode), awaiting interactive approval
@@ -4968,6 +4973,9 @@ mod tests {
 
     #[path = "failure_streak_reset.rs"]
     mod failure_streak_reset_tests;
+
+    #[path = "catalog_feed.rs"]
+    mod catalog_feed_tests;
 
     #[path = "deferred_dispatch.rs"]
     mod deferred_dispatch_tests;

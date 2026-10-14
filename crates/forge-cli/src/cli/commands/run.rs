@@ -561,6 +561,9 @@ pub(crate) async fn run_chat_tui(
     // well as into `queued_prompts`, so the running turn can pick them up at its next boundary.
     let steer = session.steer_handle();
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+    if !mock {
+        crate::cli::commands::models::follow_catalog(&session);
+    }
     if let Some(mut rx) = mcp_done_rx {
         let s = session.clone();
         let tx2 = tx_mcp;
@@ -1688,7 +1691,15 @@ pub(crate) async fn run_chat_tui(
                             let s = session.clone();
                             tokio::spawn(async move { s.lock().await.pin_tier(None) });
                         }
-                        app.note("✓ config reloaded (tier override cleared)");
+                        // Provider/key edits made since startup land in the picker and routing
+                        // without a restart; the session announces what changed when it adopts.
+                        let refreshing =
+                            !mock && crate::cli::commands::models::refresh_catalog_now();
+                        app.note(if refreshing {
+                            "✓ config reloaded (tier override cleared); refreshing the model catalog"
+                        } else {
+                            "✓ config reloaded (tier override cleared)"
+                        });
                     } else {
                         app.note("⚠ config reload failed");
                     }

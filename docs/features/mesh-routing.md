@@ -184,6 +184,34 @@ chain). When inactive (or the ranking comes back empty), the configured `[mesh.m
 are used verbatim (`Config::candidates_for`, `crates/forge-config/src/lib.rs:2008`; a tier with
 no entry falls back to the `standard` list).
 
+#### Staying current while a session runs
+
+A TUI or daemon-hosted session no longer needs a restart to see catalog changes. One background
+task per process (`crates/forge-cli/src/cli/commands/models/watch.rs`, started with the first
+session and by `forge serve`) does four `stat` calls every 30 seconds (about 12 microseconds in
+total; no network, keyring or parsing): user `config.toml`, the project `.forge/config.toml`, the
+secret-change stamp (`secrets.stamp` in the config dir, touched by every `forge auth` / secret
+write, because the keyring has no change signal) and `catalog.json`. Then:
+
+- config or key change: reload `[[providers.custom]]` / `[providers.azure]` (the provider
+  registries are swappable, not build-once), re-inject keys from the secret store (a removed key
+  clears the variable Forge itself injected, never one you exported), rediscover in the
+  background (single-flight with the startup refresh) and publish the result. A changed provider
+  set writes the new catalog past the clobber guard, since a smaller catalog is then correct;
+- `catalog.json` written by another process (`forge models`, the daemon): adopt it, no network;
+- nothing changed but the cache is an hour old: rediscover (at most once an hour), so models a
+  provider newly lists appear on the same cadence as the price/window sweep.
+
+Publishing goes to the shared `LiveCatalog` that routers already follow; sessions swap their
+picker/pin-check snapshot in `Session::sync_catalog_feed` through the session lock, so it lands
+at a turn boundary and never touches a pinned model, tier pin or turn in flight. It prints
+`catalog refreshed: +50 modelgateway` only when the model set changed. The `ReloadConfig`
+keybind (Ctrl-R) triggers the same refresh immediately. The context-window/price sweep stamp is
+keyed on the model set **and** the provider set (`provider_set_fingerprint`), so a new provider
+or key is swept at once instead of after the one-hour gate. Not hot-reloaded: other `config.toml`
+sections (session config is read at startup) and multi-key rotation pools for a provider added
+mid-session (single-key providers work).
+
 A tier a **config file** pins under `[mesh.models]` overrides auto-discovery for that tier: its
 models lead the candidate list, in the order written, and the routing rationale reads
 `configured [mesh.models].<tier>: <model>`. Only tiers present in a loaded `config.toml` count —

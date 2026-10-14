@@ -188,6 +188,7 @@ pub(crate) async fn build_session_with_self_mcp(
     let config_has_mcp = mcp_config.active_servers().next().is_some();
     let lattice_enabled = config.lattice.enabled;
     let config_lattice_watch = config.lattice.watch;
+    let config_auto_discover = config.mesh.auto_discover;
     let config_default_effort = config.mesh.default_effort.clone();
 
     // A resumed session that carries a stored model pin (`forge import claude-session`, daemon
@@ -469,7 +470,12 @@ pub(crate) async fn build_session_with_self_mcp(
     if let Some(update_rx) = lattice_update_rx {
         session.set_lattice_update(Some(update_rx));
     }
+    let follow_catalog = !mock && config_auto_discover;
     session.set_catalog(catalog);
+    if follow_catalog {
+        session.set_catalog_feed(crate::cli::commands::models::live_catalog());
+        crate::cli::commands::models::spawn_catalog_watch();
+    }
     // The router alone honoring the pin left the session itself unpinned: the statusline read
     // "mesh auto", and since nothing was stored, the next resume really did drop it.
     if let Some(pin) = session_pin {

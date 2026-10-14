@@ -217,6 +217,8 @@ impl Session {
             checkpoint_root_custom: false,
             current_turn_seq: -1,
             catalog: None,
+            catalog_feed: None,
+            catalog_feed_seen: None,
             tasks,
             pending_plan: None,
             task_scope: None,
