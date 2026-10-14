@@ -174,12 +174,12 @@ impl Session {
         let wrote = observations
             .iter()
             .any(crate::loop_progress::CallObservation::wrote);
-        match tracker.observe(
-            visible_text,
-            &resp.tool_calls,
-            wrote,
-            std::time::Instant::now(),
-        ) {
+        let calls: Vec<forge_types::ToolCall> = resp
+            .tool_calls
+            .iter()
+            .map(|call| self.resolve_deferred_call(call))
+            .collect();
+        match tracker.observe(visible_text, &calls, wrote, std::time::Instant::now()) {
             Some(nudge) => self.deliver_silence_nudge(nudge),
             None => Ok(()),
         }

@@ -117,7 +117,7 @@ struct ForgeMcp {
     /// default, matching the gate the interactive `/skill` path already applies.
     trust_project: bool,
     /// Lean tool surface (default; `FORGE_BRIDGE_LEAN=0` / `mesh.bridge_lean = false` opts out):
-    /// only [`deferred::CORE_TOOLS`] are advertised, the rest load through `tool_search`.
+    /// only [`forge_core::deferred_tools::CORE_TOOLS`] are advertised, the rest load through `tool_search`.
     lean: bool,
     /// `auto` temper: the classifier for Unknown shell commands (see `auto_classify.rs`).
     auto_classify: auto_classify::AutoClassify,
@@ -245,15 +245,13 @@ impl ForgeMcp {
             )]));
         }
         if name == deferred::TOOL_CALL {
-            let inner = args.get("name").and_then(Value::as_str).unwrap_or_default();
-            if inner.is_empty() || inner == deferred::TOOL_CALL || inner == deferred::TOOL_SEARCH {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "error: tool_call needs the exact name of a tool found with tool_search",
-                )]));
-            }
-            let mut forwarded = CallToolRequestParams::new(inner.to_string());
-            if let Some(Value::Object(arguments)) = args.get("arguments") {
-                forwarded = forwarded.with_arguments(arguments.clone());
+            let (inner, arguments) = match deferred::unwrap_call(args) {
+                Ok(call) => call,
+                Err(error) => return Ok(CallToolResult::error(vec![ContentBlock::text(error)])),
+            };
+            let mut forwarded = CallToolRequestParams::new(inner);
+            if let Some(arguments) = arguments {
+                forwarded = forwarded.with_arguments(arguments);
             }
             return Box::pin(self.call_tool_complete(forwarded, _ctx)).await;
         }

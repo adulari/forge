@@ -1880,6 +1880,14 @@ pub struct MeshConfig {
     /// `tool_search`/`tool_call` pair. `FORGE_BRIDGE_LEAN=0` also opts out. Default true.
     #[serde(default = "default_true")]
     pub bridge_lean: bool,
+    /// Lean direct-path tool surface (docs/features/deferred-tools.md): direct providers get the
+    /// core coding tools plus `tool_search`/`tool_call`; platform tools load on demand. The kill
+    /// switch: `false` here, or `FORGE_DIRECT_LEAN=0`. Default true.
+    #[serde(default = "default_true")]
+    pub direct_lean: bool,
+    /// Deferred tools to keep advertised on the lean direct surface (e.g. `["web_fetch"]`).
+    #[serde(default)]
+    pub lean_core_extra: Vec<String>,
     /// Connect external project MCP servers (dual-graph/token-counter/helm/…) inside the CLI
     /// bridge. Default true: servers connect concurrently in the background, each under the
     /// configured MCP connect/discovery timeout, so a slow or auth-gated server is skipped rather
@@ -2844,6 +2852,8 @@ impl Default for Config {
                 classifier_activity_focused: false,
                 bridge_mode: BridgeMode::default(),
                 bridge_lean: true,
+                direct_lean: true,
+                lean_core_extra: Vec::new(),
                 bridge_mcp_external: true,
                 min_tier: None,
                 daily_budget_usd: None,
