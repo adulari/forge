@@ -96,7 +96,7 @@ fn render(
     }
     out.push_str(
         "\nharness_rewrite = Forge rewrote context it had already sent (should be ~0); \
-         floor_advance/age_rounds/compaction = deliberate; provider_eviction = prefix intact \
+         floor_advance/age_rounds/compaction/history_rewrite = deliberate; provider_eviction = prefix intact \
          but the provider served it uncached.\n",
     );
     out

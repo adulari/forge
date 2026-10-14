@@ -84,8 +84,9 @@ the model see?" was answered in more places.
   system placement and the latest-image-turn rule — plus one hash of the tool list, and compared
   with the previous request to the same model. The usage row records `prefix_reused_msgs`,
   `prefix_total_msgs`, `tools_changed` and a `cache_label` (store migration 41): `append`,
-  `harness_rewrite@<idx>(<kind>)`, `floor_advance`, `age_rounds`, `compaction`, `tools_changed`,
-  `model_switch`, `cold`, `provider_eviction` (prefix intact, under half the input cached) or
+  `harness_rewrite@<idx>(<kind>)`, `floor_advance`, `age_rounds`, `compaction` (a summary, or the
+  post-compaction clip of bulky results), `history_rewrite` (a rewind or a full-history reload),
+  `tools_changed`, `model_switch`, `cold`, `provider_eviction` (prefix intact, under half the input cached) or
   `n/a` for CLI bridges, which report cumulative usage. Two `harness_rewrite` calls in a row raise
   a warning in the TUI. `forge stats cache [--session [ID]] [--days N]` shows the hit rate per
   model, the dollars the uncached input cost over cache-read pricing, and the misses by label.

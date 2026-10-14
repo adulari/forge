@@ -70,6 +70,7 @@ impl Session {
     /// removed turn were delivered into the next one, and `/undo` chained from a stale turn seq.
     fn after_history_rewrite(&mut self) {
         self.history_epoch += 1;
+        self.cache.note_history_rewrite();
         self.pending_hints.clear();
         self.pending_images.clear();
         self.steer.clear();
@@ -273,6 +274,7 @@ impl Session {
             })
             .collect();
         self.history_epoch += 1;
+        self.cache.note_history_rewrite();
         Ok(())
     }
 

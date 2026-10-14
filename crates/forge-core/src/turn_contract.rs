@@ -313,6 +313,8 @@ pub(crate) fn explicitly_requests_change(prompt: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn a_first_contract_is_sent_as_is_and_an_unchanged_one_is_not_repeated() {
         let read_only = TurnContract::derive(
@@ -361,8 +363,6 @@ mod tests {
         // And the superseding contract is itself recognised as standing.
         assert_eq!(contract_message(Some(change), Some(&next)), None);
     }
-
-    use super::*;
 
     /// The defect: `spawn_session_driver` arms `expect_code_change` for the life of any
     /// worktree-backed daemon session. An investigative turn in such a session ended with no

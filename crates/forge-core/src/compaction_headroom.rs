@@ -60,6 +60,7 @@ impl Session {
         let target = usize::try_from(compact_target_tokens(trigger)).unwrap_or(usize::MAX);
         let reclaimed = clip_tool_results_to_budget(&mut self.transcript, target);
         if reclaimed > 0 {
+            self.cache.note_compaction();
             self.presenter.emit(PresenterEvent::Warning(format!(
                 "compaction left the context near its ceiling; clipped bulky tool output \
                  (~{reclaimed} tokens) to leave headroom"

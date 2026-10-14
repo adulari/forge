@@ -9,7 +9,9 @@
 //! - `harness_rewrite@<idx>(<kind>)` — Forge rewrote an already-sent message with no deliberate
 //!   reason recorded. The regression this exists to catch; two in a row raise a warning.
 //! - `floor_advance` / `age_rounds` / `compaction` — a deliberate rewrite (the elision floor moved
-//!   past earlier turns / past rounds of the current turn, or a summary replaced history).
+//!   past earlier turns / past rounds of the current turn, or a summary or post-compaction clip
+//!   replaced history).
+//! - `history_rewrite` — the user rewound the session or reloaded its full uncompacted history.
 //! - `tools_changed` — the tool list differs from the previous request.
 //! - `model_switch` / `cold` — a different model than last time / the first request.
 //! - `provider_eviction` — the prefix was intact but most of the input was not served from cache.
@@ -38,6 +40,7 @@ enum RewriteReason {
     FloorAdvance,
     AgeRounds,
     Compaction,
+    HistoryRewrite,
 }
 
 impl RewriteReason {
@@ -46,6 +49,7 @@ impl RewriteReason {
             RewriteReason::FloorAdvance => "floor_advance",
             RewriteReason::AgeRounds => "age_rounds",
             RewriteReason::Compaction => "compaction",
+            RewriteReason::HistoryRewrite => "history_rewrite",
         }
     }
 }
@@ -73,13 +77,25 @@ impl CacheInstrument {
             FloorMove::Advance => RewriteReason::FloorAdvance,
             FloorMove::AgeRounds => RewriteReason::AgeRounds,
         };
-        if self.pending != Some(RewriteReason::Compaction) {
+        if !matches!(
+            self.pending,
+            Some(RewriteReason::Compaction | RewriteReason::HistoryRewrite)
+        ) {
             self.pending = Some(reason);
         }
     }
 
     pub(crate) fn note_compaction(&mut self) {
-        self.pending = Some(RewriteReason::Compaction);
+        if self.pending != Some(RewriteReason::HistoryRewrite) {
+            self.pending = Some(RewriteReason::Compaction);
+        }
+    }
+
+    /// A rewind or a full-history reload replaced the transcript from outside the loop. Without
+    /// this the next request read as an unexplained `harness_rewrite`, and two rewinds in a row
+    /// raised the regression warning for something the user did on purpose.
+    pub(crate) fn note_history_rewrite(&mut self) {
+        self.pending = Some(RewriteReason::HistoryRewrite);
     }
 
     /// Label the call `model` just answered. Returns the row's attribution and, on the second
@@ -260,6 +276,30 @@ mod tests {
         assert_eq!(request(&mut instrument, &messages, 0), "age_rounds");
         messages.push(Message::user("again"));
         assert_eq!(request(&mut instrument, &messages, 9_000), "append");
+    }
+
+    #[test]
+    fn a_rewind_is_labelled_and_never_counts_toward_the_rewrite_warning() {
+        let mut instrument = CacheInstrument::default();
+        let mut messages = vec![
+            Message::user("one"),
+            Message::assistant("a"),
+            Message::user("two"),
+            Message::assistant("b"),
+        ];
+        request(&mut instrument, &messages, 0);
+        for _ in 0..2 {
+            messages.truncate(messages.len() - 2);
+            messages.push(Message::user("again"));
+            instrument.note_history_rewrite();
+            instrument.note_floor_move(FloorMove::Advance);
+            instrument.stage("bedrock::kimi", &messages, &[]);
+            let (prefix, warning) = instrument.finish("bedrock::kimi", &usage(10_000, 0));
+            assert_eq!(prefix.unwrap().label, "history_rewrite");
+            assert!(warning.is_none());
+            messages.push(Message::assistant("c"));
+            assert_eq!(request(&mut instrument, &messages, 9_000), "append");
+        }
     }
 
     #[test]
