@@ -274,3 +274,85 @@ fn the_session_follows_a_root_the_bridge_recorded_in_the_store() {
         "the next bridge spawn starts in the worktree"
     );
 }
+
+fn host_notices(session: &Session) -> Vec<String> {
+    session
+        .transcript
+        .iter()
+        .filter(|m| m.role == Role::System && m.content.starts_with("[host]"))
+        .map(|m| m.content.clone())
+        .collect()
+}
+
+fn resume_in(store: Arc<Store>, id: &str) -> Session {
+    let config = Config {
+        permission_mode: PermissionMode::Bypass,
+        ..Config::default()
+    };
+    let cwd = store.session_cwd(id).unwrap().unwrap();
+    Session::resume(
+        store,
+        Arc::new(Script {
+            calls: Default::default(),
+            steps: Vec::new(),
+        }),
+        Arc::new(HeuristicRouter::new(config.clone())),
+        ToolRegistry::with_core_tools_in(std::path::Path::new(&cwd)),
+        Box::new(CapturePresenter::default()),
+        config,
+        id,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn resuming_inside_an_entered_worktree_is_not_a_host_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = repo(dir.path());
+    let sibling = dir.path().join("wt-topic");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "topic",
+            sibling.to_str().unwrap(),
+        ],
+    );
+    let sibling = sibling.canonicalize().unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut session = session_in(
+        &main,
+        Script {
+            calls: Default::default(),
+            steps: vec![vec![(
+                "worktree",
+                serde_json::json!({ "action": "enter", "branch": "topic" }),
+            )]],
+        },
+        Arc::clone(&store),
+    );
+    session.run_turn("go work on topic").await.unwrap();
+    assert_eq!(session.workspace_root(), sibling);
+    let id = session.id().to_string();
+    drop(session);
+
+    let resumed = resume_in(Arc::clone(&store), &id);
+    assert_eq!(
+        resumed.workspace_root(),
+        sibling,
+        "resume reopens the worktree"
+    );
+    assert!(
+        host_notices(&resumed).is_empty(),
+        "a worktree switch is not a host move: {:?}",
+        host_notices(&resumed)
+    );
+    assert!(resumed.host_guard.is_empty());
+    drop(resumed);
+
+    let again = resume_in(store, &id);
+    assert!(host_notices(&again).is_empty());
+}

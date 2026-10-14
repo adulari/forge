@@ -4,8 +4,9 @@
 //!
 //! What moves on a switch: the tool registry's workspace binding (file tools, relative paths, the
 //! shell's default cwd, evidence capture), the Lattice index and watcher, the project context and
-//! cached branch, the commit-discipline tracker, and the session's stored `cwd` (resume and a
-//! daemon restart reopen it where it now works). What deliberately stays: the checkpoint root, so
+//! cached branch, the commit-discipline tracker, the session's stored `cwd` (resume and a
+//! daemon restart reopen it where it now works), and the recorded host fingerprint (so a resume
+//! inside the worktree is not mistaken for a host move, docs/features/session-host-move.md). What deliberately stays: the checkpoint root, so
 //! `/undo` still has the snapshots after the worktree is deleted, the loaded config, and LSP
 //! (it keys servers by each file's own project root already).
 
@@ -121,6 +122,7 @@ impl Session {
         if let Err(error) = self.store.set_session_cwd(&self.id, &display) {
             tracing::warn!(session_id = %self.id, %error, "session cwd not persisted after switch");
         }
+        crate::host_move::record_workspace_switch(&self.store, &self.id, self.workspace.root());
         let branch = self
             .cached_git_branch
             .as_deref()

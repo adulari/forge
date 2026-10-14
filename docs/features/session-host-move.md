@@ -33,6 +33,7 @@ everything the session had compacted.
 | Moment | Effect |
 | --- | --- |
 | `Session::start` | records the fingerprint |
+| The `worktree` tool switches the session (`enter`, `create`, `exit`, in-process or through `forge mcp-serve`) | re-records the fingerprint at the new root, keeping the stale map, so resuming inside a worktree is not a host move ([session-worktrees](session-worktrees.md)) |
 | Resume (`forge chat --resume`, `forge run --resume`, daemon resume, a resumed handoff import) | compares the stored fingerprint with the current host |
 | Machine differs (machine-id, or hostname when either side lacks one) or the cwd moved | appends **one** system notice and arms the guard |
 | No fingerprint stored (a session from before this feature) and its history names **two or more** missing directories outside the workspace | same notice, which says the origin is unknown |

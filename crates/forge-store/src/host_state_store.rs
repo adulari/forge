@@ -36,16 +36,6 @@ impl Store {
         Ok(changed > 0)
     }
 
-    /// Point a session at a new workspace directory (a resumed session whose recorded cwd does not
-    /// exist on this host, relocated to the local checkout of the same repository).
-    pub fn set_session_cwd(&self, session_id: &str, cwd: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session SET cwd = ?2 WHERE id = ?1",
-            (session_id, cwd),
-        )?;
-        Ok(())
-    }
-
     /// Forget a recorded isolated worktree (used when it does not exist on this host).
     pub fn clear_session_worktree(&self, session_id: &str) -> Result<()> {
         self.lock()?.execute(

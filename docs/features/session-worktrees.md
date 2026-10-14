@@ -54,6 +54,7 @@ plus `cd`.
 | Lattice index and watcher, project context, `AGENTS.md` | rebuilt for the new root |
 | Commit-discipline tracker | reset (it cached the old repo top) |
 | `session.cwd` in the store | updated, so `--resume` and a daemon restart reopen the session in the worktree, and `forge worktree reclaim` sees it as live |
+| `session.host_state` (host fingerprint) | re-recorded at the new root, so a resume inside the worktree is not reported as a host move ([session-host-move](session-host-move.md)) |
 | TUI statusline | follows the session's workspace binding |
 | Checkpoint root (`/undo` snapshots) | **kept** at the starting root, so snapshots outlive a removed worktree |
 | Runtime "always allow" rules | persisted to the home checkout's `.forge/config.toml`, not the worktree's |

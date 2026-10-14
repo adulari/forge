@@ -58,7 +58,8 @@ impl Store {
     }
 
     /// Move a session to another workspace root (the `worktree` tool entering or leaving a git
-    /// worktree), so a resume or daemon restart reopens it where it now works.
+    /// worktree, or a host-move relocation onto the local checkout of the same repository), so a
+    /// resume or daemon restart reopens it where it now works.
     pub fn set_session_cwd(&self, id: &str, cwd: &str) -> Result<()> {
         self.lock()?
             .execute("UPDATE session SET cwd = ?2 WHERE id = ?1", (id, cwd))?;

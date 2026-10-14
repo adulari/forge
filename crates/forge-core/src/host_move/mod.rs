@@ -245,6 +245,20 @@ pub fn resolve_resume_cwd(store: &forge_store::Store, session_id: &str, recorded
     relocated
 }
 
+/// The session's workspace moved on purpose on this host (the `worktree` tool entering or leaving
+/// a worktree): re-record the fingerprint at the new root, keeping any stale-path map, so the next
+/// resume does not mistake the switch for a host move.
+pub fn record_workspace_switch(store: &forge_store::Store, session_id: &str, root: &Path) {
+    let raw = store.session_host_state(session_id).ok().flatten();
+    let state = HostState {
+        fingerprint: HostFingerprint::capture(root),
+        ..HostState::parse(raw.as_deref()).unwrap_or_default()
+    };
+    if let Ok(json) = serde_json::to_string(&state) {
+        let _ = store.swap_session_host_state(session_id, raw.as_deref(), &json);
+    }
+}
+
 impl Session {
     /// Record the host a fresh session starts on, so a later move is detected exactly.
     pub(crate) fn record_host_on_start(&mut self) {

@@ -103,6 +103,7 @@ impl ForgeMcp {
             self.tasks_store
                 .set_session_cwd(id, &root.display().to_string())
                 .map_err(|e| format!("recording the new root for the parent session: {e}"))?;
+            forge_core::host_move::record_workspace_switch(&self.tasks_store, id, root);
         }
         Ok(())
     }
