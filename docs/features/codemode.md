@@ -90,7 +90,8 @@ calls in parallel; writes are therefore always serialized.
 Hints an inner call queues (LSP diagnostics after a write, the shell-error diagnosis, hook context,
 loop-guard nudges) are appended to that call's value as `[hint] …`, so a program that edits and
 then tests sees its own compile errors. A hint the script did not return is delivered once after
-the outer result; one it returned is not repeated (LSP blocks can run to thousands of tokens).
+the outer result; one it returned is not repeated. LSP blocks are per-file deltas capped at about
+2,000 characters (`lsp-diagnostics.md`).
 
 Only the outer `run_code` result enters the transcript. It ends with a footer:
 `[run_code: 7 tool calls, 6 ok, 1 failed, 2.4s]`. When the script fails, the result lists the

@@ -19,6 +19,7 @@ pub mod codemode;
 mod commit_policy;
 pub mod goal;
 mod harness_profile;
+mod lsp_diagnostics;
 pub mod mcp;
 pub mod notifications;
 pub mod oauth;
@@ -33,6 +34,7 @@ pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
+pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
     write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
@@ -1358,6 +1360,9 @@ pub struct LspConfig {
     /// Stop an analyzer after this many idle seconds. A later edit starts it again on demand.
     #[serde(default = "default_lsp_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// How much of the post-edit report reaches the model: `delta` (default), `full` or `off`.
+    #[serde(default)]
+    pub diagnostics: LspDiagnosticsMode,
     /// Per-language server command, keyed by language id (`rust`, `typescript`, `python`, …).
     /// Empty = use the built-in defaults for languages whose server binary is found on PATH.
     #[serde(default)]
@@ -1379,6 +1384,7 @@ impl Default for LspConfig {
             timeout_ms: default_lsp_timeout_ms(),
             memory_limit_mb: default_lsp_memory_limit_mb(),
             idle_timeout_secs: default_lsp_idle_timeout_secs(),
+            diagnostics: LspDiagnosticsMode::default(),
             servers: std::collections::HashMap::new(),
         }
     }

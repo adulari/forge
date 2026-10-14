@@ -659,6 +659,8 @@ impl Session {
         )));
         compacted.extend(self.transcript.split_off(split));
         self.transcript = compacted;
+        // The summarised blocks are gone, so the next edit to a file reports from scratch.
+        self.lsp_baselines.clear();
 
         // Persist: soft-delete the summarised messages and store the summary so a resumed
         // session rehydrates the compacted view instead of the full uncompacted transcript.

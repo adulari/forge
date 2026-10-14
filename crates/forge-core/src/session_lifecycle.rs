@@ -227,6 +227,7 @@ impl Session {
             lattice_update: None,
             lattice_watch_enabled: false,
             lsp: None,
+            lsp_baselines: Default::default(),
             skills: None,
             fleet: None,
             dispatch: None,

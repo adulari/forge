@@ -597,6 +597,8 @@ impl Session {
             }
         }
 
+        let lsp_pre_edit = write_path.as_deref().and_then(|p| self.lsp_pre_edit(p));
+
         let (result, full, ok) = if allowed {
             // Re-borrowed here: the permission gate above needs `&mut self` (classifier side
             // call), which cannot overlap a registry borrow held since the top of the call.
@@ -653,19 +655,9 @@ impl Session {
                         if let Some(lat) = &self.lattice {
                             let _ = lat.reindex_path(path);
                         }
-                        // LSP diagnostics for the just-written file, queued as a hint so the
-                        // model self-corrects this turn. Best-effort: no server → silent.
-                        if self.config.lsp.enabled {
-                            if let Some(lsp) = &self.lsp {
-                                let timeout =
-                                    std::time::Duration::from_millis(self.config.lsp.timeout_ms);
-                                if let Some(hint) =
-                                    crate::lsp_hints::diagnostics_hint(lsp, path, timeout).await
-                                {
-                                    self.pending_hints.push(hint);
-                                }
-                            }
-                        }
+                        // LSP diagnostics for the just-written file (lsp_hints.rs), queued as a
+                        // hint so the model self-corrects this turn.
+                        self.queue_lsp_hint(path, lsp_pre_edit).await;
                     }
                     (out.model, out.full, true)
                 }
