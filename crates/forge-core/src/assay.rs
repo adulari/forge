@@ -585,6 +585,7 @@ mod tests {
                 output_tokens: 5,
                 cached_input_tokens: Some(0),
                 cost_usd: 0.0,
+                ..Default::default()
             };
             // Critic call: emit findings keyed by which lens (carried in the system prompt).
             if sys.contains(CRITIC_MARKER) {

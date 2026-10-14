@@ -98,7 +98,10 @@ CREATE TABLE IF NOT EXISTS usage (
     cached_input_tokens INTEGER,
     output_tokens INTEGER NOT NULL,
     cost_usd      REAL NOT NULL,
-    created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    -- Subsets of input_tokens / output_tokens; NULL = the provider did not report the split.
+    cache_write_tokens INTEGER,
+    reasoning_tokens   INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage(created_at);
 -- Speeds up spend-by-model JOINs: `JOIN message m ON m.id = u.message_id`.

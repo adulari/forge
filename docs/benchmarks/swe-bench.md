@@ -144,27 +144,46 @@ self-describing. Example:
 }
 ```
 
-Older sidecars without `runtime`, `timed_out`, or `tools_unavailable` still load with safe
-defaults.
+Newer sidecars also record `attempt` (1-based seed), `session_id` (Forge), `cached_input_tokens`,
+`cache_write_tokens`, `reasoning_tokens`, `model_calls`, `tool_calls`, `notional_cost_usd` and an
+`outcome` (`ok`, `refused`, `integrity_fail`, `tools_unavailable`, `timed_out`) with an optional
+`outcome_detail`. Older sidecars without any of these, or without `runtime`, `timed_out` or
+`tools_unavailable`, still load with safe defaults. Field semantics are in
+[docs/features/bench-metrics.md](../features/bench-metrics.md).
 
-Join the metrics with the official eval reports to get the headline table:
+Join each metrics file with **its own** eval report to get the headline table:
 
 ```bash
 forge bench report \
-  --metrics preds-forge.metrics.jsonl --metrics preds-claude.metrics.jsonl \
-  --eval forge.forge.json            --eval claude.claude.json
+  --run preds-forge.seed1.metrics.jsonl=forge.forge_s1.json \
+  --run preds-forge.seed2.metrics.jsonl=forge.forge_s2.json \
+  --run preds-claude.metrics.jsonl=claude.claude.json
 ```
 
+`--metrics a --metrics b --eval ra --eval rb` still works and pairs by position; a count mismatch
+is an error. `--shared-eval` restores the old behaviour of applying the union of every `--eval` to
+every run, which credits a run with solves from the others. Omit evals to print token/cost stats
+before you have scored.
+
 ```
-agent              n  patched  resolved   tok/success   mean cost    mean s
-forge             20       18  13 (65%)         48210     $0.0210      52.3
-claude-code       20       17  13 (65%)         71840     $0.0312      61.0
+agent        model                      k    n         pass@1  pass@k   tok/att  cache     $/att   $/solved  ntl$/att  ntl$/solv tok/success  mean s
+forge        claude-sonnet-5            2   20    62.5% ±3.5   70.0%     48210    91%   $0.0000    $0.0000   $0.0712    $0.1139       77136    52.3
+claude-code  claude-sonnet-5            1   20          60.0%   60.0%     71840    88%   $0.0312    $0.0520   $0.0312    $0.0520      119733    61.0
 ```
 
-`tok/success` = total tokens spent across the run ÷ resolved instances (lower is better). The
-**bridge-superiority claim** is proven when, for the *same underlying model*, `--agent forge
---model <bridge-id>` matches-or-beats `--agent claude-code`'s resolve rate at a **lower
-tok/success**. Omit `--eval` to print token/patch stats before you've scored.
+- Runs are grouped by agent plus `runtime.resolved_model`; `k` is the number of attempts.
+- `pass@1` is the mean over attempts (± sample stdev); each attempt is scored only by its own
+  report. `pass@k` is solved-by-any-attempt.
+- `tools_unavailable` attempts are left out of pass@1. Refusals score 0 and stay in.
+- `$/solved` = `$/att` ÷ mean pass@1. `ntl` columns are **notional**: zero-cost (subscription or
+  free) calls priced at list rates. They are a comparison axis, not spend.
+- A Pareto block (cost per attempt vs mean pass@1, notional when every group has it) is printed
+  only when every group has at least 20 instances per attempt.
+
+`tok/success` = total tokens ÷ solved attempts (lower is better), shown only when every row's token
+capture was complete. The **bridge-superiority claim** is proven when, for the *same underlying
+model*, `--agent forge --model <bridge-id>` matches-or-beats `--agent claude-code`'s pass@1 at a
+lower cost per solved task.
 
 ## Multiple seeds / pass@k (smoothing model variance)
 
@@ -184,6 +203,12 @@ done
 
 # pass@k = solved by ANY seed, plus each seed's own rate (variance visible)
 forge bench passk forge.forge_s1.json forge.forge_s2.json forge.forge_s3.json
+
+# or the full table: per-seed pass@1 ± stdev, pass@3 and cost per solved
+forge bench report \
+  --run preds-forge.seed1.metrics.jsonl=forge.forge_s1.json \
+  --run preds-forge.seed2.metrics.jsonl=forge.forge_s2.json \
+  --run preds-forge.seed3.metrics.jsonl=forge.forge_s3.json
 ```
 
 Compare the same `--attempts` budget across agents (same model) for a fair pass@k head-to-head.

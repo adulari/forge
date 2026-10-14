@@ -166,7 +166,17 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 .await
             }
             BenchCmd::Passk { reports } => bench::passk(&reports),
-            BenchCmd::Report { metrics, evals } => bench::report(&metrics, &evals),
+            BenchCmd::Report {
+                runs,
+                metrics,
+                evals,
+                shared_eval,
+            } => bench::report(&bench::ReportInputs {
+                runs,
+                metrics,
+                evals,
+                shared_eval,
+            }),
         },
         Command::Commands => commands_cmd(),
         Command::Models {

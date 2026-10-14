@@ -976,8 +976,8 @@ fn fill_subscription_usage(mut response: ModelResponse, body: &serde_json::Value
         response.usage = Usage {
             input_tokens: (request_chars as u64).div_ceil(4),
             output_tokens: response.usage.output_tokens,
-            cached_input_tokens: response.usage.cached_input_tokens,
             cost_usd: 0.0,
+            ..response.usage
         };
     }
     response
@@ -1894,6 +1894,7 @@ mod tests {
                 output_tokens: 45,
                 cached_input_tokens: Some(6),
                 cost_usd: 0.0,
+                ..Default::default()
             },
             ..Default::default()
         };

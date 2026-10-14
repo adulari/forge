@@ -142,12 +142,22 @@ pub(crate) enum BenchCmd {
     /// tokens-per-success per agent — the headline efficiency comparison (e.g. Forge-bridging-X
     /// vs X's own CLI).
     Report {
-        /// One or more `<out>.metrics.jsonl` sidecars from `bench swe` (typically one per agent).
-        #[arg(long = "metrics", required = true)]
+        /// A metrics sidecar and the eval report that scores it, as `<metrics.jsonl>=<eval.json>`.
+        /// Repeat once per agent and per seed; runs of the same agent + model are grouped.
+        #[arg(long = "run", required_unless_present = "metrics")]
+        runs: Vec<String>,
+        /// `<out>.metrics.jsonl` sidecars from `bench swe`. Paired with `--eval` by position when
+        /// the counts match.
+        #[arg(long = "metrics")]
         metrics: Vec<std::path::PathBuf>,
-        /// Official `run_evaluation` `*.json` report(s); omit to print token/patch stats only.
+        /// Official `run_evaluation` `*.json` report(s), one per `--metrics` in the same order;
+        /// omit to print token/cost stats only.
         #[arg(long = "eval")]
         evals: Vec<std::path::PathBuf>,
+        /// Apply the union of every `--eval` to every `--metrics` file (the old behaviour, for a
+        /// single combined report). Credits each run with solves from the others.
+        #[arg(long)]
+        shared_eval: bool,
     },
 }
 

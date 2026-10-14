@@ -485,8 +485,9 @@ impl Store {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
                 "INSERT INTO usage
-                 (id, message_id, provider, model, input_tokens, cached_input_tokens, output_tokens, cost_usd)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (id, message_id, provider, model, input_tokens, cached_input_tokens, output_tokens, cost_usd,
+                  cache_write_tokens, reasoning_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 (
                     &id,
                     message_id,
@@ -496,6 +497,8 @@ impl Store {
                     usage.cached_input_tokens.map(|c| c as i64),
                     usage.output_tokens as i64,
                     usage.cost_usd,
+                    usage.cache_write_tokens.map(|c| c as i64),
+                    usage.reasoning_tokens.map(|c| c as i64),
                 ),
             )?;
             tx.execute(
@@ -573,44 +576,6 @@ impl Store {
             [session_id],
             |row| row.get(0),
         )?)
-    }
-
-    /// Provider-consumed usage across the complete session ledger.
-    ///
-    /// Unlike [`Store::session_tokens`], this includes inactive synthetic side calls (recap,
-    /// suggestion, memory, compaction, diagnosis) and calls belonging to later-deactivated turns.
-    /// Those calls still consumed provider quota and remain part of honest billing/benchmark
-    /// accounting even though they no longer contribute to the active transcript.
-    pub fn session_token_usage(&self, session_id: &str) -> Result<Usage> {
-        let conn = self.lock()?;
-        // `COUNT(col)` skips NULLs, so `reporting == 0` means not one call in the session came
-        // from a provider that reports cache hits — the session total is unknown, not zero. When
-        // only some calls reported, the sum covers exactly those and the rest stay uncounted.
-        let (input, cached, reporting, output, cost): (i64, i64, i64, i64, f64) = conn.query_row(
-            "SELECT COALESCE(SUM(u.input_tokens), 0),
-                    COALESCE(SUM(u.cached_input_tokens), 0),
-                    COUNT(u.cached_input_tokens),
-                    COALESCE(SUM(u.output_tokens), 0),
-                    COALESCE(SUM(u.cost_usd), 0.0)
-             FROM usage u JOIN message m ON m.id = u.message_id
-             WHERE m.session_id = ?1",
-            [session_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
-        Ok(Usage {
-            input_tokens: input.max(0) as u64,
-            cached_input_tokens: (reporting > 0).then(|| cached.max(0) as u64),
-            output_tokens: output.max(0) as u64,
-            cost_usd: cost.max(0.0),
-        })
     }
 
     /// `(input_tokens, output_tokens)` summed across a session's `usage` rows — the live token

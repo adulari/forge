@@ -390,11 +390,17 @@ pub fn apply_sse_event(
                     .get("input_tokens_details")
                     .and_then(|d| d.get("cached_tokens"))
                     .and_then(|v| v.as_u64());
+                let reasoning_tokens = u
+                    .get("output_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .and_then(|v| v.as_u64());
                 acc.usage = Usage {
                     input_tokens,
                     output_tokens,
                     cached_input_tokens,
                     cost_usd: 0.0,
+                    cache_write_tokens: None,
+                    reasoning_tokens,
                 };
             }
             if acc.content.is_empty() {
