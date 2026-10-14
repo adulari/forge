@@ -345,8 +345,6 @@ pub(crate) fn statusline_hint(app: &App) -> &'static str {
         "↑↓ move · ⏎ run · esc close"
     } else if app.picker.open {
         "↑↓ move · ⏎ select · esc close"
-    } else if app.pending_shell_fix.is_some() {
-        "F apply fix · esc"
     } else if app.busy {
         "esc stop · Ctrl↑ escalate"
     } else if app.esc_hint_active() {

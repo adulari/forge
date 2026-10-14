@@ -359,9 +359,6 @@ pub struct App {
     pub(crate) tasks: Vec<forge_types::TodoItem>,
     /// File-path picker for `@path` inline completion. Opens when the input contains `@…` at cursor.
     pub at_picker: crate::commands::AtPathPicker,
-    /// A shell fix command from the last shell diagnosis. Pressing F (idle only) populates
-    /// the input with this command for the user to review before submitting.
-    pub pending_shell_fix: Option<String>,
     /// When true, the sticky activity panel has keyboard focus: ↑↓ move the selection, Enter opens
     /// the selected entry's full-screen transcript, Esc unfocuses. Toggled by Ctrl+O.
     pub activity_focused: bool,
@@ -1354,7 +1351,6 @@ impl App {
                     TurnPhase::ProcessingToolResult,
                     "shell diagnosis ready; sending the result back to the model",
                 );
-                self.pending_shell_fix = fix.clone();
                 self.flush.extend(shell_diagnosis_lines(
                     &command,
                     &diagnosis,
@@ -1858,7 +1854,6 @@ impl App {
         self.workflow = Default::default();
         self.activity_focused = false;
         self.activity_idx = 0;
-        self.pending_shell_fix = None;
         // Reset the per-turn timer + token counters and snapshot the session-token baseline so this
         // turn's in/out are measured as a delta from here.
         self.turn_elapsed_secs = 0;
@@ -3645,9 +3640,9 @@ fn shell_diagnosis_lines(
             Style::default().fg(DIM),
         )));
     }
-    if fix.is_some() {
+    if let Some(fix) = fix {
         lines.push(TextLine::from(Span::styled(
-            "    press F to populate fix command in input",
+            format!("    fix: {fix}"),
             Style::default().fg(TOOLCYAN),
         )));
     }
@@ -5762,16 +5757,14 @@ mod tests {
     }
 
     #[test]
-    fn statusline_hint_pending_shell_fix_shows_apply_fix() {
-        let app = App {
-            pending_shell_fix: Some("cargo fix".into()),
-            ..Default::default()
-        };
-        let hint = statusline_hint(&app);
-        assert!(
-            hint.contains("F apply fix"),
-            "pending_shell_fix hint: {hint}"
-        );
+    fn shell_diagnosis_card_shows_the_fix_without_a_key_hint() {
+        let text: String = shell_diagnosis_lines("cargo bild", "typo", Some("cargo build"), 100)
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("fix: cargo build"), "{text}");
+        assert!(!text.contains("press F"), "{text}");
     }
 
     #[test]
