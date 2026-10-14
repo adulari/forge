@@ -385,11 +385,24 @@ struct SweepStamp {
 
 impl SweepStamp {
     fn for_store(store: &forge_store::Store, models: &[String]) -> Option<Self> {
+        Self::for_store_with(store, models, &forge_config::provider_set_fingerprint())
+    }
+
+    /// The key covers the model set AND the provider set (endpoints, which keyed providers hold a
+    /// key). A provider added, removed or re-keyed therefore never inherits the previous set's
+    /// "already swept" verdict, even when its models happen to be the ones already listed (a
+    /// provider whose listing failed over to seeds, then recovered).
+    fn for_store_with(
+        store: &forge_store::Store,
+        models: &[String],
+        provider_set: &str,
+    ) -> Option<Self> {
         use std::hash::{Hash, Hasher};
         let mut sorted: Vec<&String> = models.iter().collect();
         sorted.sort();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         sorted.hash(&mut hasher);
+        provider_set.hash(&mut hasher);
         let path = store.db_path()?.with_extension("sweep-stamp");
         Some(Self {
             path,
@@ -526,6 +539,27 @@ mod tests {
         assert!(
             SweepStamp::for_store(&forge_store::Store::open_in_memory().unwrap(), &models)
                 .is_none()
+        );
+    }
+
+    /// The provider set is part of the stamp key: adding/removing a provider or key must trigger a
+    /// fresh sweep immediately instead of waiting out the hour.
+    #[test]
+    fn sweep_stamp_is_invalidated_by_a_provider_set_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = forge_store::Store::open(dir.path().join("a.db")).unwrap();
+        let models = vec!["groq::a".to_string()];
+        SweepStamp::for_store_with(&store, &models, "providers-v1")
+            .unwrap()
+            .touch();
+        assert!(SweepStamp::for_store_with(&store, &models, "providers-v1")
+            .unwrap()
+            .is_fresh());
+        assert!(
+            !SweepStamp::for_store_with(&store, &models, "providers-v2")
+                .unwrap()
+                .is_fresh(),
+            "a new provider set must not inherit the old verdict"
         );
     }
 

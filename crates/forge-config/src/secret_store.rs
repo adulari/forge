@@ -148,6 +148,15 @@ pub fn delete(key: &str) -> Result<bool, ConfigError> {
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
     refuse_if_test_binary();
     read_cache().invalidate(key);
+    let result = set_inner(key, value);
+    if result.is_ok() {
+        touch_change_stamp();
+    }
+    result
+}
+
+#[cfg(not(feature = "test-secrets"))]
+fn set_inner(key: &str, value: &str) -> Result<(), ConfigError> {
     if keyring_available() {
         let key = key.to_string();
         let value = value.to_string();
@@ -202,6 +211,35 @@ fn read_cache() -> std::sync::MutexGuard<'static, ReadCache> {
     CACHE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// File whose mtime moves whenever any Forge process stores or deletes a secret. The keyring has no
+/// change notification, and re-reading ~150 entries to notice a new key would be a D-Bus storm, so
+/// writers leave this one-stat signal for long-running sessions to poll.
+fn change_stamp_path() -> Option<std::path::PathBuf> {
+    crate::config_dir().map(|d| d.join("secrets.stamp"))
+}
+
+#[cfg(not(feature = "test-secrets"))]
+fn touch_change_stamp() {
+    if let Some(path) = change_stamp_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let _ = std::fs::write(path, nanos.to_string());
+    }
+}
+
+/// Modification time of the secret-change stamp: `None` until some process has written a secret.
+/// One `stat`; safe to poll.
+pub fn change_stamp() -> Option<std::time::SystemTime> {
+    std::fs::metadata(change_stamp_path()?)
+        .and_then(|m| m.modified())
+        .ok()
+}
+
 /// How long a secret read (hit or miss) is trusted before the backends are asked again. Long
 /// enough to cover one command's startup burst; short enough that a key added by `forge auth` in
 /// another process reaches a long-running `forge serve` on its next turn, not its next restart.
@@ -250,6 +288,15 @@ impl ReadCache {
 pub fn delete(key: &str) -> Result<bool, ConfigError> {
     refuse_if_test_binary();
     read_cache().invalidate(key);
+    let result = delete_inner(key);
+    if result.is_ok() {
+        touch_change_stamp();
+    }
+    result
+}
+
+#[cfg(not(feature = "test-secrets"))]
+fn delete_inner(key: &str) -> Result<bool, ConfigError> {
     let mut removed = false;
     if keyring_available() {
         let key = key.to_string();

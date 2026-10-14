@@ -8,6 +8,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 
+- **Running sessions pick up new providers, keys and models without a restart.** A `forge chat` TUI or daemon-hosted session now notices a `[[providers.custom]]` block added to config.toml, a key stored or removed with `forge auth`, a catalog another process refreshed, and (hourly) models a provider newly lists. A background task checks four file timestamps every 30 seconds (about 12 microseconds, no network), rediscovers only when something changed, and swaps the picker/pin-check catalog at a turn boundary without touching a pinned model. `Ctrl-R` triggers it immediately, and a one-line `catalog refreshed: +50 modelgateway` appears only when the model set changed. Custom/Azure provider registries are now swappable at runtime and secret writes leave a change stamp (`crates/forge-cli/src/cli/commands/models/watch.rs`, `crates/forge-core/src/catalog_feed.rs`, `crates/forge-config/src/provider_registry.rs`, docs/features/mesh-routing.md).
 - **ModelGateway works as a custom provider.** A `[[providers.custom]]` endpoint running new-api (ModelGateway, `https://www.modelgateway.co/v1`) is now priced live from its `<origin>/api/pricing` page at official price less the listed discount, which is what calibration calls were actually billed; `model_ratio` is ignored because it does not match the bill. `modelgateway::*` models get the same `minimal` harness profile as InferHub (`crates/forge-cli/src/context_windows/parsers.rs`, docs/features/mesh-routing.md).
 
 ### Fixed

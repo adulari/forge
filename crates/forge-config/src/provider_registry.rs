@@ -143,23 +143,34 @@ impl AzureConfig {
     }
 }
 
-/// The resolved Azure provider, cached process-wide (build-once, like the custom-provider registry).
-/// `None` when no valid `[providers.azure]` block is configured.
-static AZURE_REGISTRY: std::sync::OnceLock<Option<AzureProvider>> = std::sync::OnceLock::new();
+/// The resolved Azure provider. Initialized lazily from config, and replaceable by
+/// [`reload_provider_registries`] so a long-running session sees `[providers.azure]` edits. A
+/// replaced value is leaked (a handful of bytes, only when the block actually changed) so
+/// `azure_registry` can keep handing out `&'static` references.
+pub(crate) static AZURE_REGISTRY: std::sync::RwLock<Option<Option<&'static AzureProvider>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn load_azure_provider() -> Option<AzureProvider> {
+    let cfg = load().ok().and_then(|c| c.providers.azure)?;
+    match cfg.into_provider() {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!("ignoring invalid [providers.azure]: {e}");
+            None
+        }
+    }
+}
+
+pub(crate) fn leak_azure(p: Option<AzureProvider>) -> Option<&'static AzureProvider> {
+    p.map(|p| &*Box::leak(Box::new(p)))
+}
 
 pub(crate) fn azure_registry() -> Option<&'static AzureProvider> {
-    AZURE_REGISTRY
-        .get_or_init(|| {
-            let cfg = load().ok().and_then(|c| c.providers.azure)?;
-            match cfg.into_provider() {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    tracing::warn!("ignoring invalid [providers.azure]: {e}");
-                    None
-                }
-            }
-        })
-        .as_ref()
+    if let Some(cur) = *AZURE_REGISTRY.read().unwrap_or_else(|e| e.into_inner()) {
+        return cur;
+    }
+    let mut w = AZURE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    *w.get_or_insert_with(|| leak_azure(load_azure_provider()))
 }
 
 /// The configured Azure OpenAI provider, if `[providers.azure]` is present and valid. Used by the
@@ -335,24 +346,38 @@ pub struct RuntimeCustomProvider {
 }
 
 /// The merged custom-provider registry: built-in [`CUSTOM_OPENAI_PROVIDERS`] + any runtime
-/// `[[providers.custom]]` entries. Initialized once (lazily from config, or explicitly via
-/// [`register_custom_providers`]) and then immutable for the process — matching the build-once
-/// nature of the genai client and the const it replaces.
-static CUSTOM_PROVIDER_REGISTRY: std::sync::OnceLock<Vec<CustomProvider>> =
-    std::sync::OnceLock::new();
+/// `[[providers.custom]]` entries. Initialized lazily from config (or explicitly via
+/// [`register_custom_providers`]) and replaceable by [`reload_provider_registries`], so a provider
+/// added to config.toml mid-session becomes routable without a restart. Each published slice is
+/// leaked to stay `'static` for the accessors; that only happens when the set actually changed.
+pub(crate) static CUSTOM_PROVIDER_REGISTRY: std::sync::RwLock<Option<&'static [CustomProvider]>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn publish_custom_registry(providers: Vec<CustomProvider>) -> &'static [CustomProvider] {
+    Box::leak(providers.into_boxed_slice())
+}
 
 /// The active custom-provider registry. On first access, lazily merges the built-ins with the
-/// runtime `[[providers.custom]]` entries read from the loaded config (zero call-site wiring), unless
-/// [`register_custom_providers`] already seeded it. Process-lifetime `'static`.
+/// runtime `[[providers.custom]]` entries read from the loaded config (zero call-site wiring),
+/// unless [`register_custom_providers`] already seeded it.
 pub(crate) fn custom_provider_registry() -> &'static [CustomProvider] {
-    CUSTOM_PROVIDER_REGISTRY
-        .get_or_init(|| build_custom_registry(&load_runtime_custom_providers()))
-        .as_slice()
+    if let Some(cur) = *CUSTOM_PROVIDER_REGISTRY
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+    {
+        return cur;
+    }
+    let mut w = CUSTOM_PROVIDER_REGISTRY
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    w.get_or_insert_with(|| {
+        publish_custom_registry(build_custom_registry(&load_runtime_custom_providers()))
+    })
 }
 
 /// Read + validate the runtime `[[providers.custom]]` entries from the loaded config. Best-effort:
 /// a malformed entry is skipped (logged), never fatal.
-fn load_runtime_custom_providers() -> Vec<RuntimeCustomProvider> {
+pub(crate) fn load_runtime_custom_providers() -> Vec<RuntimeCustomProvider> {
     let custom = load().map(|c| c.providers.custom).unwrap_or_default();
     custom
         .into_iter()
@@ -372,7 +397,7 @@ fn load_runtime_custom_providers() -> Vec<RuntimeCustomProvider> {
 /// Merge built-in custom providers with `runtime` ones, leaking the owned runtime strings to
 /// `'static`. A runtime entry whose namespace collides with a built-in custom provider OR a native
 /// adapter is dropped — built-ins always win, so a config typo can't shadow a first-class provider.
-fn build_custom_registry(runtime: &[RuntimeCustomProvider]) -> Vec<CustomProvider> {
+pub(crate) fn build_custom_registry(runtime: &[RuntimeCustomProvider]) -> Vec<CustomProvider> {
     let mut out: Vec<CustomProvider> = CUSTOM_OPENAI_PROVIDERS.to_vec();
     for rp in runtime {
         let collides = out.iter().any(|p| p.namespace == rp.namespace)
@@ -429,7 +454,12 @@ fn leak_str(s: String) -> &'static str {
 /// initialized (lazily or by a prior call). Primarily for tests / explicit startup wiring; normal
 /// runs initialize lazily from config on first [`custom_provider`]/[`custom_providers`] access.
 pub fn register_custom_providers(runtime: &[RuntimeCustomProvider]) {
-    let _ = CUSTOM_PROVIDER_REGISTRY.set(build_custom_registry(runtime));
+    let mut w = CUSTOM_PROVIDER_REGISTRY
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if w.is_none() {
+        *w = Some(publish_custom_registry(build_custom_registry(runtime)));
+    }
 }
 
 /// The custom OpenAI-compatible provider registered under `namespace` (built-in or runtime), if any.

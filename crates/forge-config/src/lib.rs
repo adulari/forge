@@ -3590,11 +3590,13 @@ pub fn append_allow_rule_in(
 // ----------------------------------------------------------------------------------------------
 mod editor;
 mod provider_registry;
+mod provider_reload;
 pub use editor::*;
 pub use provider_registry::*;
 pub(crate) use provider_registry::{
     azure_registry, custom_provider_registry, PROVIDER_ENV_VARS, SEARCH_ENV_VARS,
 };
+pub use provider_reload::{provider_set_fingerprint, reload_provider_registries};
 
 #[cfg(test)]
 use editor::test_support::{
@@ -3985,6 +3987,18 @@ pub fn load_secret(key: &str) -> Option<String> {
 /// single key; the provider client rotates across the full list separately (see `api_keys`).
 /// Best-effort — providers without a stored key are simply left unset.
 pub fn inject_provider_keys() {
+    // Variables this function itself populated. Tracked so a re-run (a long-running session
+    // noticing `forge auth` in another terminal) can refresh or clear them, while a variable the
+    // user exported is never touched.
+    static INJECTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let injected = |var: &str| {
+        INJECTED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(var)
+    };
+    let user_set = |var: &str| env_set(var) && !injected(var);
     let native = PROVIDER_ENV_VARS.iter().copied();
     let custom = custom_provider_registry()
         .iter()
@@ -4000,7 +4014,7 @@ pub fn inject_provider_keys() {
         .iter()
         .filter(|(p, var)| {
             !var.is_empty()
-                && !env_set(var)
+                && !user_set(var)
                 && !env_aliases_for(p).any(|a| std::env::var(a).is_ok_and(|v| !v.is_empty()))
         })
         .map(|(p, _)| *p)
@@ -4017,22 +4031,29 @@ pub fn inject_provider_keys() {
     });
     for (provider, var) in all {
         // Keyless custom providers (local servers) carry an empty env_var — nothing to inject.
-        if var.is_empty() || env_set(var) {
+        if var.is_empty() || user_set(var) {
             continue;
         }
         // A conventional alias the user exported (e.g. OPENROUTER_API_KEY) → copy into the
         // canonical var genai's adapter actually reads (OPEN_ROUTER_API_KEY), so it authenticates.
-        if let Some(key) =
-            env_aliases_for(provider).find_map(|a| std::env::var(a).ok().filter(|s| !s.is_empty()))
-        {
-            std::env::set_var(var, key);
-            continue;
-        }
-        if let Some(key) = secret_store::get(provider) {
-            let primary = key.split('\n').next().unwrap_or(&key).trim();
-            if !primary.is_empty() {
-                std::env::set_var(var, primary);
+        let value = env_aliases_for(provider)
+            .find_map(|a| std::env::var(a).ok().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                secret_store::get(provider).and_then(|key| {
+                    let primary = key.split('\n').next().unwrap_or(&key).trim().to_string();
+                    (!primary.is_empty()).then_some(primary)
+                })
+            });
+        let mut set = INJECTED.lock().unwrap_or_else(|e| e.into_inner());
+        match value {
+            Some(value) => {
+                if std::env::var(var).ok().as_deref() != Some(value.as_str()) {
+                    std::env::set_var(var, value);
+                }
+                set.insert(var.to_string());
             }
+            None if set.remove(var) => std::env::remove_var(var),
+            None => {}
         }
     }
 }

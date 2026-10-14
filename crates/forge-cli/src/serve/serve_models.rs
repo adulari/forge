@@ -97,6 +97,8 @@ fn catalog_action(age_secs: Option<u64>, forced: bool) -> CatalogAction {
 /// Discover live, persist the result, and hand back whatever we ended up with. On a timeout or an
 /// empty discovery the on-disk catalog still answers — a slow provider must not blank the list.
 async fn discover_now() -> Option<(forge_mesh::ModelCatalog, i64)> {
+    // A provider added to config.toml since the daemon started must be listable (and routable) now.
+    let _ = tokio::task::spawn_blocking(crate::cli::commands::models::reload_providers).await;
     let config = forge_config::load().unwrap_or_default();
     let discovered = tokio::time::timeout(
         DISCOVERY_BUDGET,
@@ -107,6 +109,9 @@ async fn discover_now() -> Option<(forge_mesh::ModelCatalog, i64)> {
     .filter(|catalog| !catalog.is_empty());
     if let Some(catalog) = discovered {
         crate::cli::commands::models::save_catalog(&catalog);
+        // Daemon-hosted sessions follow the live slot: a phone-forced refresh reaches their pickers
+        // and routers too, not just this endpoint's response.
+        crate::cli::commands::models::publish_live(catalog);
     }
     crate::cli::commands::models::load_cached_catalog_aged()
         .map(|(catalog, refreshed_at, _)| (catalog, refreshed_at))

@@ -247,6 +247,9 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     }
 
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+    if !spec.mock {
+        crate::cli::commands::models::follow_catalog(&session);
+    }
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
         remote::SnapshotFrame::new(remote::Snapshot::default()),
     ));
