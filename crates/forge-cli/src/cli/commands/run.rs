@@ -33,6 +33,7 @@ pub(crate) use session::*;
 
 mod one_shot;
 pub(crate) use one_shot::*;
+mod usage_json;
 
 mod plain_chat;
 pub(crate) use plain_chat::*;

@@ -54,6 +54,50 @@ pub(crate) enum BenchCmd {
         #[arg(long)]
         judge: Option<String>,
     },
+    /// Run a Terminal-Bench-style task suite: each task directory holds `instruction.md`, an
+    /// optional `setup.sh` and `test.sh` (exit 0 = solved). Every attempt runs in a fresh temp
+    /// workspace. Writes `<out>` (one result per attempt), `<out>.metrics.jsonl` and
+    /// `<out>.eval.json`, which `bench report --run` and `bench export` read.
+    Tasks {
+        /// The suite directory (one subdirectory per task).
+        #[arg(long)]
+        suite: std::path::PathBuf,
+        /// Where to write the per-attempt results (sidecars are named after it).
+        #[arg(long, default_value = "tasks.jsonl")]
+        out: std::path::PathBuf,
+        /// Only run the first N tasks (in name order).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Pin a model (see `bench swe --model`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Which agent solves each task.
+        #[arg(long, value_enum, default_value_t = bench::Agent::Forge)]
+        agent: bench::Agent,
+        /// Use the offline deterministic mock provider (suite smoke tests; Forge agent only).
+        #[arg(long)]
+        mock: bool,
+        /// Run the suite this many times; >1 writes one set of files per seed (`<out>.seedK.jsonl`).
+        #[arg(long, default_value_t = 1)]
+        attempts: usize,
+        /// Per-task budget in seconds, applied to setup.sh, the agent turn and test.sh each.
+        #[arg(long, default_value_t = 1200)]
+        timeout_secs: u64,
+    },
+    /// Export one redacted trajectory JSONL per attempt (`<out>/<task>.attempt<k>.jsonl`): an
+    /// attempt header (outcome, integrity verdict, usage) then every transcript step, read from
+    /// the store the run used (`FORGE_DB`). Secrets are masked and fields capped at 8 KB.
+    Export {
+        /// `*.metrics.jsonl` sidecar(s) from `bench swe` or `bench tasks`.
+        #[arg(long = "metrics", required = true)]
+        metrics: Vec<std::path::PathBuf>,
+        /// Output directory.
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Integrity sidecar to attach; defaults to the `.integrity.jsonl` next to each metrics file.
+        #[arg(long)]
+        integrity: Option<std::path::PathBuf>,
+    },
     /// Aggregate pass@k from several swebench evaluation reports (one per seed).
     Passk {
         /// The `*.json` reports written by `run_evaluation`, one per seed.

@@ -9,6 +9,7 @@ Everything Forge writes out of its session store is passed through
 | TUI `/export [path]` | always redacted |
 | `forge anywhere share` | always redacted (the share is published) |
 | `forge bench swe --judge` / `bench integrity --judge` | the diff sent to the judge model is redacted |
+| `forge bench export` | always redacted, then each field capped at 8 KB ([bench-tasks-and-export.md](bench-tasks-and-export.md)) |
 
 Each masked value becomes `[redacted]`. The store itself is never rewritten.
 
@@ -29,7 +30,9 @@ Each masked value becomes `[redacted]`. The store itself is never rewritten.
    `access_key`, `private_key`, `client_secret`, optionally prefixed (`OPENAI_API_KEY=…`), followed
    by `:` or `=` and an optional quote (plain or JSON-escaped). Values that look like code or
    placeholders are kept: pure identifiers (`self.token`, `getpass`), pure numbers, and `$VAR` /
-   `%VAR%` references.
+   `%VAR%` references. In structured JSON (tool-call arguments), a string value under a key with
+   one of these names (`{"api_key": "…"}`, `{"DB_PASSWORD": "…"}`) is masked by the same rule,
+   since there the key and value never appear side by side in one string.
 
 Every shape and keyword rule is anchored on a prefix, so git SHAs, short SHAs, UUIDs and
 `sha256:` digests are never masked (unit-tested).
