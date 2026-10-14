@@ -290,6 +290,7 @@ impl Session {
             // Compute the real cost from token counts and the model's price (FR-5, A-7), pricing
             // cache-read tokens at the discounted rate so it tracks the provider's actual bill.
             resp.usage.cost_usd = self.pricing.cost_for_usage(&active_model, &resp.usage);
+            self.adaptive_effort.observe_response(&resp.usage);
             // The last call's input size is the live context fill (tui-token-counter.md) — except a
             // subscription CLI bridge reports cumulative internal usage, so [`context_fill_tokens`]
             // substitutes the transcript estimate there (else the gauge reads a bogus 337% and trips
@@ -785,6 +786,7 @@ impl Session {
                 hit_step_cap = false;
                 break;
             }
+            self.observe_adaptive_round(&resp.tool_calls, &step_observations);
             self.observe_silence(
                 &mut silence,
                 verify_attempts == 0,

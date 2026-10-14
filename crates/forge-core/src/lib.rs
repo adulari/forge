@@ -26,6 +26,9 @@ use forge_types::{
 };
 use forge_types::{Presenter, PresenterEvent};
 
+mod adaptive_effort;
+mod local_evidence;
+pub use local_evidence::apply_local_evidence;
 pub mod assay;
 pub mod auto_classifier;
 mod auxiliary_candidates;
@@ -1661,6 +1664,7 @@ pub struct Session {
     /// In-session reasoning-effort pin (`/effort <level>`). When set, forwarded to the provider
     /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
     pinned_effort: Option<EffortLevel>,
+    adaptive_effort: adaptive_effort::AdaptiveEffort,
     /// In-session EXACT rung (`/effort exact <level>`). Where `pinned_effort` is a ceiling the mesh
     /// then optimises under — using measured benchmark data, which only covers the rungs someone
     /// rated — this is an instruction: the routed model runs at this rung, resolved against that
@@ -2674,6 +2678,7 @@ impl Session {
     ) -> Result<LoopOutcome, CoreError> {
         self.refresh_btw_asker();
         self.poll_lattice_background();
+        self.adaptive_effort.restore();
         // Anything still in the steer inbox belongs to a turn that already ended; the surface still
         // holds those prompts and is starting this turn with the first of them, so delivering them
         // again here would duplicate them.
@@ -4958,6 +4963,9 @@ mod tests {
 
     #[path = "prefix_cache_key.rs"]
     mod prefix_cache_key_tests;
+
+    #[path = "adaptive_effort.rs"]
+    mod adaptive_effort_tests;
 
     #[path = "zero_retention.rs"]
     mod zero_retention_tests;

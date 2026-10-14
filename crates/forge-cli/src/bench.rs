@@ -684,6 +684,7 @@ mod report;
 #[cfg(test)]
 use report::load_metrics;
 pub(crate) use report::{passk, report, ReportInputs};
+mod routing_record;
 mod scoring;
 
 /// Prepare one instance's repo, run a single headless turn in it, and return the diff plus the

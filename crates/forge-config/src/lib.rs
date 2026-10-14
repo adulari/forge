@@ -12,6 +12,7 @@ use forge_types::{
 };
 use serde::{Deserialize, Serialize};
 
+mod adaptive_effort;
 pub mod agents;
 pub mod browser;
 mod commit_policy;
@@ -25,6 +26,7 @@ pub mod privacy;
 pub mod provider_oauth;
 pub mod quota_status;
 pub mod secret_store;
+pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
@@ -2203,12 +2205,29 @@ pub struct MeshConfig {
     /// wins.
     #[serde(default)]
     pub harness_profiles: std::collections::BTreeMap<String, HarnessProfile>,
+    /// Low reasoning effort for the step after a successful read-only tool round, restored after
+    /// a failure, a write or a user turn (docs/features/adaptive-effort.md).
+    #[serde(default = "default_true")]
+    pub adaptive_effort: bool,
+    /// Providers `adaptive_effort` applies to: by default only those where an effort change
+    /// leaves the prompt cache intact ([`CACHE_SAFE_EFFORT_PROVIDERS`]).
+    #[serde(default = "adaptive_effort::default_adaptive_effort_providers")]
+    pub adaptive_effort_providers: Vec<String>,
 }
 
 impl MeshConfig {
     /// The harness profile for `model`, after per-model glob overrides.
     pub fn harness_profile_for(&self, model: &str) -> HarnessProfile {
         resolve_harness_profile(self.harness_profile, &self.harness_profiles, model)
+    }
+
+    /// Whether adaptive effort may lower `model`'s effort (switch on and provider listed).
+    pub fn adaptive_effort_for(&self, model: &str) -> bool {
+        self.adaptive_effort
+            && self
+                .adaptive_effort_providers
+                .iter()
+                .any(|p| p == provider_of(model))
     }
 
     /// Effective per-completion output token cap. Credit conservation affects routing only; a
@@ -2900,6 +2919,8 @@ impl Default for Config {
                 cross_session_cache_key: true,
                 harness_profile: HarnessProfile::Guarded,
                 harness_profiles: std::collections::BTreeMap::new(),
+                adaptive_effort: true,
+                adaptive_effort_providers: adaptive_effort::default_adaptive_effort_providers(),
             },
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),

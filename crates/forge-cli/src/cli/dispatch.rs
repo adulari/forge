@@ -179,11 +179,13 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 metrics,
                 evals,
                 shared_eval,
+                record,
             } => bench::report(&bench::ReportInputs {
                 runs,
                 metrics,
                 evals,
                 shared_eval,
+                record,
             }),
         },
         Command::Commands => commands_cmd(),

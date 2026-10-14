@@ -105,6 +105,16 @@ pub struct RoutingExplanation {
 }
 
 impl RoutingExplanation {
+    /// One line naming which candidates measured cost per solve moved, for surfaces with a single
+    /// rationale. `None` when no candidate has bench measurements.
+    pub fn solve_cost_note(&self) -> Option<String> {
+        crate::solve_cost::note(
+            self.candidates
+                .iter()
+                .map(|c| (c.row.model.as_str(), c.row.solve_cost)),
+        )
+    }
+
     /// One line naming what zero-retention mode dropped, for surfaces with a single rationale.
     pub fn privacy_note(&self) -> Option<String> {
         if self.privacy_drops.is_empty() {

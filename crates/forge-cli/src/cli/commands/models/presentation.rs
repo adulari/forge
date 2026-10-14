@@ -447,7 +447,7 @@ pub(crate) fn print_mesh_explanation(
         }
         println!("\ncandidates (top {}):", shown.len());
         let mut any_reordered = false;
-        for c in shown {
+        for c in shown.iter().copied() {
             any_reordered |= c.reorder_reason.is_some();
             let marker = if c.selected { "*" } else { " " };
             let pen = if c.row.conserve_penalty > 0.0 {
@@ -468,7 +468,7 @@ pub(crate) fn print_mesh_explanation(
                 format!(" · ⟨{}⟩", forge_types::effort::wire_name(rung))
             });
             println!(
-                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}{}{}",
+                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}{}{}{}",
                 c.rank,
                 c.row.model,
                 c.row.final_score,
@@ -478,12 +478,17 @@ pub(crate) fn print_mesh_explanation(
                 rung,
                 if c.row.frontier { " · frontier" } else { "" },
                 quota_suffix(&c.row.model),
+                super::solve_cost_view::suffix(c.row.solve_cost.as_ref()),
                 reorder,
             );
         }
         if any_reordered {
             println!("  ranks marked ↕ were decided by routing rules; score is the catalog score");
         }
+        print!(
+            "{}",
+            super::solve_cost_view::block(e.solve_cost_note(), &shown)
+        );
     }
 
     match e.pick_effort {
@@ -534,6 +539,8 @@ pub(crate) fn mesh_explanation_json(
                 // against its provider surface. Null when the model has no measured effort ladder
                 // or no reasoning control at all.
                 "effort": c.effort.map(forge_types::effort::wire_name),
+                // Added: measured cost per solve and what it added to final_score, or null.
+                "solve_cost": super::solve_cost_view::json(c.row.solve_cost.as_ref()),
             })
         })
         .collect();

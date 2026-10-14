@@ -14,6 +14,7 @@ use classification::score_prompt;
 use classification::{is_code_heavy, is_multistep};
 
 pub mod bench;
+mod calibration;
 pub mod capability;
 pub mod catalog;
 mod classification;
@@ -27,6 +28,7 @@ pub mod pacing_view;
 pub mod pricing;
 pub mod privacy;
 mod reorder;
+pub mod solve_cost;
 use reorder::{record_moved, record_reorder};
 pub mod rung_cost;
 mod subscription_cost;
@@ -43,6 +45,7 @@ use context::COMPACTION_SUMMARY_PREFIX;
 pub use context::{RoutingContext, SessionAffinity};
 pub use explain::{display_provider, CandidateRow, ProviderQuotaView, RoutingExplanation};
 pub use pacing_view::{pacing_hold_note, pacing_summary, PacingHold};
+pub use solve_cost::{MeasuredSolveCost, SolveCostSignal, MIN_SOLVE_ATTEMPTS};
 pub use subscription_cost::{
     opencode_go_quota_multiplier, opencode_go_quota_note, opencode_go_weekly_quota,
     OPENCODE_GO_LARGEST_WEEKLY_QUOTA,

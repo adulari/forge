@@ -397,6 +397,31 @@ Still inside `route_score` (`catalog.rs:386-391`): a subscription whose provider
 (effectively last). Applied in the *score*, not as a post-sort, so non-subscription alternatives
 make it into any truncated shortlist.
 
+### 4.7a Measured cost per solve
+
+Added to the score after `route_score`, next to the outcome calibration (`catalog.rs`,
+`solve_cost_adjustment`; the math lives in `crates/forge-mesh/src/solve_cost.rs`). The data comes
+from `forge bench report --record` (bench-metrics.md), which stores each scored, model-pinned
+Forge run in the store's `bench_solve` table (migration 43). Every session start and `forge mesh`
+pools those runs per catalog id: attempts, solves, notional cost.
+
+- **Gate:** a model counts only with `MIN_SOLVE_ATTEMPTS` = 20 pass@1-eligible attempts, the same
+  floor the bench report uses for a Pareto claim. Below it the row shows the measurement and
+  `not applied (n … < 20)`.
+- **Relative, never absolute:** the reference is the median cost per solve of the models that
+  cleared the gate. With fewer than two such models nothing moves, because one measurement has
+  nothing to be compared against.
+- **Adjustment:** `−0.75 × log2(cost per solve / median)` points, capped at ±1.25 (the same bound
+  as the outcome calibration). Half the median's cost per solve earns +0.75; twice it costs −0.75.
+  A gated model that solved nothing takes −1.25; one that solved at zero notional cost takes +1.25.
+- **Where it bites:** at medium effort the adjusted score decides the order. At high effort the
+  integer AA band is compared first, so the signal only reorders within a band; at low effort the
+  order is cheapest-first by list price, so it only breaks ties there.
+- **Explained:** each `ScoreRow` carries `solve_cost` (measurement, reference, adjustment);
+  `RoutingExplanation::solve_cost_note()` names which candidates it moved. `forge mesh explain`
+  prints `· $/solve +0.75` on a moved row plus one line per measured candidate, its JSON carries a
+  `solve_cost` object per candidate, and the `/mesh` overlay appends the note to the rationale.
+
 ### 4.8 OAuth supersedes bridge: per-model preference and suppression
 
 Native OAuth (`codex-oauth::`) runs Forge's own harness against the provider directly; the CLI
@@ -1212,6 +1237,8 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `pin_outage_wait_secs` | 600 | Pinned transient-outage wait budget; 0 disables (§9) (`lib.rs:1301`) |
 | `subagents.inherit_pin` | `true` | When a pin is active, subagents inherit it strictly (§9) (`crates/forge-config/src/lib.rs` `SubagentsConfig`) |
 | `subagents.inherit_pin` (per session) | — | `/subagents free\|pinned` overrides the default for one session; persisted (§9.1) |
+| `adaptive_effort` | `true` | Low reasoning effort for the step after a successful read-only tool round (adaptive-effort.md) |
+| `adaptive_effort_providers` | `["openai", "codex-oauth", "gemini"]` | Providers `adaptive_effort` applies to: only those where an effort change keeps the prompt cache |
 
 Multi-key rotation: every key-based provider accepts multiple API keys (repeat
 `forge auth <provider>`, a comma-separated env value, or numbered `_2`… env siblings —

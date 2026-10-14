@@ -101,6 +101,8 @@ pub(crate) struct ReportInputs {
     pub evals: Vec<PathBuf>,
     /// Apply the union of every `--eval` to every `--metrics` file (one combined report).
     pub shared_eval: bool,
+    /// Store each qualifying run for the mesh's cost-per-solve signal.
+    pub record: bool,
 }
 
 /// One metrics sidecar and the evaluation report that scores it.
@@ -194,6 +196,10 @@ pub(crate) fn report(inputs: &ReportInputs) -> Result<()> {
             None => shared.clone(),
         };
         runs.push(Run { rows, resolved });
+    }
+    if inputs.record {
+        let paths = files.iter().map(|f| f.metrics.as_path());
+        super::routing_record::record(paths.zip(&runs), inputs.shared_eval)?;
     }
     let groups = scoring::summarize_groups(&runs);
     if groups.is_empty() {
@@ -387,6 +393,7 @@ mod tests {
             metrics: metrics.iter().map(PathBuf::from).collect(),
             evals: evals.iter().map(PathBuf::from).collect(),
             shared_eval: shared,
+            record: false,
         }
     }
 
@@ -509,6 +516,7 @@ mod tests {
             metrics: vec![],
             evals: vec![],
             shared_eval: false,
+            record: false,
         })
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);

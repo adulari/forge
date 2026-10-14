@@ -125,7 +125,7 @@ pub(super) fn sample_stdev(values: &[f64]) -> Option<f64> {
 /// pass@1 of one run: solved / eligible, where eligible rows exclude toolless attempts and solved
 /// rows are resolved by THIS run's evaluation and not scored 0 (refusals, integrity failures).
 /// Returns `(pass1, solved ids, eligible ids)`; `pass1` is `None` with no eligible rows.
-fn run_pass1(
+pub(super) fn run_pass1(
     rows: &[InstanceMetric],
     resolved: &BTreeSet<String>,
 ) -> (Option<f64>, BTreeSet<String>, BTreeSet<String>) {
