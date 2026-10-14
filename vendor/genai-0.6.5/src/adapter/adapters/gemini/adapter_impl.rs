@@ -583,6 +583,7 @@ impl GeminiAdapter {
 		};
 
 		Usage {
+			cost: None,
 			prompt_tokens,
 			// for now, None for Gemini
 			prompt_tokens_details,

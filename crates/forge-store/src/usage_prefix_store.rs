@@ -162,6 +162,7 @@ mod tests {
 
     fn usage(input: u64, cached: Option<u64>) -> Usage {
         Usage {
+            reported_cost_usd: None,
             input_tokens: input,
             output_tokens: 10,
             cached_input_tokens: cached,

@@ -57,6 +57,15 @@ impl Store {
         }
     }
 
+    /// Move a session to another workspace root (the `worktree` tool entering or leaving a git
+    /// worktree, or a host-move relocation onto the local checkout of the same repository), so a
+    /// resume or daemon restart reopens it where it now works.
+    pub fn set_session_cwd(&self, id: &str, cwd: &str) -> Result<()> {
+        self.lock()?
+            .execute("UPDATE session SET cwd = ?2 WHERE id = ?1", (id, cwd))?;
+        Ok(())
+    }
+
     /// Delete up to `max_sessions` sessions that have NEVER received a real (role='user') message —
     /// checked regardless of `active`, so a session whose sole user message was later soft-deleted
     /// by `/undo` or a checkpoint restore (which only flips `active`, it never removes the row) is

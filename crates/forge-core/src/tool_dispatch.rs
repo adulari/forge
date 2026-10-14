@@ -268,6 +268,9 @@ impl Session {
         if call.name == wakeup::SCHEDULE_WAKEUP_TOOL {
             return self.schedule_wakeup(msg_id, call);
         }
+        if call.name == WORKTREE_TOOL {
+            return self.worktree_tool(msg_id, call);
+        }
         if call.name == crate::deferred_tools::TOOL_SEARCH
             || call.name == crate::deferred_tools::TOOL_CALL
         {
@@ -297,7 +300,11 @@ impl Session {
             self.presenter.emit(PresenterEvent::ToolResult {
                 name: call.name.clone(),
                 ok: false,
-                summary: "path outside session workspace".to_string(),
+                summary: match error {
+                    CoreError::StaleHostPath(_) => "stale path from the previous host",
+                    _ => "path outside session workspace",
+                }
+                .to_string(),
                 detail: crate::tool_detail(&result),
             });
             self.store
@@ -541,11 +548,9 @@ impl Session {
                     // every later shell command in the session.
                     let patterns = always_allow_patterns(&call.name, &call.args);
                     // Persisted with the same scope; an unscopable shell call is allowed once.
-                    if let Err(e) = forge_config::append_allow_rule_in(
-                        self.workspace_root(),
-                        &call.name,
-                        &patterns,
-                    ) {
+                    if let Err(e) =
+                        forge_config::append_allow_rule_in(self.rules_root(), &call.name, &patterns)
+                    {
                         self.presenter.emit(PresenterEvent::Warning(format!(
                             "allow rule not saved: {e}"
                         )));
@@ -591,6 +596,8 @@ impl Session {
                 )));
             }
         }
+
+        let lsp_pre_edit = write_path.as_deref().and_then(|p| self.lsp_pre_edit(p));
 
         let (result, full, ok) = if allowed {
             // Re-borrowed here: the permission gate above needs `&mut self` (classifier side
@@ -648,19 +655,9 @@ impl Session {
                         if let Some(lat) = &self.lattice {
                             let _ = lat.reindex_path(path);
                         }
-                        // LSP diagnostics for the just-written file, queued as a hint so the
-                        // model self-corrects this turn. Best-effort: no server → silent.
-                        if self.config.lsp.enabled {
-                            if let Some(lsp) = &self.lsp {
-                                let timeout =
-                                    std::time::Duration::from_millis(self.config.lsp.timeout_ms);
-                                if let Some(hint) =
-                                    crate::lsp_hints::diagnostics_hint(lsp, path, timeout).await
-                                {
-                                    self.pending_hints.push(hint);
-                                }
-                            }
-                        }
+                        // LSP diagnostics for the just-written file (lsp_hints.rs), queued as a
+                        // hint so the model self-corrects this turn.
+                        self.queue_lsp_hint(path, lsp_pre_edit).await;
                     }
                     (out.model, out.full, true)
                 }

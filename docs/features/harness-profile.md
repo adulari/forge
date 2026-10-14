@@ -29,6 +29,11 @@ When more than one glob matches, the one with the most literal characters wins, 
 `bedrock::*kimi*` beats `bedrock::*`. `/config` shows `mesh.harness_profile` with both options.
 Globs can only be edited in `$EDITOR`.
 
+Built-in default: InferHub models (`inferhub::*`) run `minimal` unless a `[mesh.harness_profiles]`
+glob matches them. A 72-run ablation on `inferhub::glm-5.3-flash` (6 tasks × 3 attempts per setup)
+measured 14% fewer input tokens and 17% fewer model calls with no pass-rate change. Opt out with
+`"inferhub::*" = "guarded"`.
+
 The profile is resolved for the model that is actually driving the turn. It is set once from the
 routed model at turn start, which covers the turn-start injections, and again after every model
 response, so a failover onto a model with a different profile switches it for the rest of the

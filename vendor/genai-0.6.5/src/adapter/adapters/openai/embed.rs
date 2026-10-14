@@ -131,6 +131,7 @@ pub fn to_embed_response(
 
 	// Create usage information
 	let usage = Usage {
+		cost: None,
 		prompt_tokens: Some(openai_res.usage.prompt_tokens as i32),
 		completion_tokens: None, // Embeddings don't have output tokens
 		total_tokens: Some(openai_res.usage.total_tokens as i32),

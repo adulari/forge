@@ -97,6 +97,7 @@ fn parse_cached_catalog(bytes: &[u8], epoch: i64, age: u64) -> Option<(ModelCata
     let catalog = catalog.retaining(|model| {
         !forge_provider::bridge_credentials_known_absent(forge_config::provider_of(model))
     });
+    catalog.register_reasoning_levels();
     Some((catalog, epoch, age))
 }
 
@@ -332,8 +333,12 @@ pub(crate) async fn discover_catalog_with_status(
         let seeds = || {
             cp.seed_models
                 .iter()
-                .map(|m| (format!("{}::{}", cp.namespace, m), None))
-                .collect::<Vec<(String, Option<String>)>>()
+                .map(|m| forge_provider::CustomModel {
+                    id: format!("{}::{}", cp.namespace, m),
+                    display: None,
+                    reasoning_levels: Vec::new(),
+                })
+                .collect::<Vec<_>>()
         };
         match tokio::time::timeout(
             Duration::from_secs(8),
@@ -402,12 +407,21 @@ pub(crate) async fn discover_catalog_with_status(
     // catalog below. Ids stay the routing key; the display name is a `forge models` convenience.
     let mut display_names: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // Per-model effort ladders a gateway published (InferHub `reasoning_levels`).
+    let mut reasoning_levels: std::collections::HashMap<String, Vec<forge_types::EffortLevel>> =
+        std::collections::HashMap::new();
     for (list, status) in custom_lists {
-        for (id, display) in list {
-            if let Some(name) = display {
-                display_names.insert(id.clone(), name);
+        for model in list {
+            if let Some(name) = model.display {
+                display_names.insert(model.id.clone(), name);
             }
-            models.push(id);
+            let levels = forge_types::effort::levels_from_names(
+                model.reasoning_levels.iter().map(String::as_str),
+            );
+            if !levels.is_empty() {
+                reasoning_levels.insert(model.id.clone(), levels);
+            }
+            models.push(model.id);
         }
         statuses.push(status);
     }
@@ -536,7 +550,9 @@ pub(crate) async fn discover_catalog_with_status(
              (context windows, prices, balances, benchmarks)"
         );
         return (
-            forge_mesh::ModelCatalog::new(models).with_display_names(display_names),
+            forge_mesh::ModelCatalog::new(models)
+                .with_display_names(display_names)
+                .with_reasoning_levels(reasoning_levels),
             statuses,
         );
     }
@@ -564,7 +580,8 @@ pub(crate) async fn discover_catalog_with_status(
     (
         forge_mesh::ModelCatalog::new(models)
             .with_benchmarks(bench)
-            .with_display_names(display_names),
+            .with_display_names(display_names)
+            .with_reasoning_levels(reasoning_levels),
         statuses,
     )
 }

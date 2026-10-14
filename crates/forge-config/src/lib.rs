@@ -17,7 +17,9 @@ pub mod agents;
 pub mod browser;
 pub mod codemode;
 mod commit_policy;
+pub mod goal;
 mod harness_profile;
+mod lsp_diagnostics;
 pub mod mcp;
 pub mod notifications;
 pub mod oauth;
@@ -32,6 +34,7 @@ pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
+pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
     write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
@@ -225,6 +228,9 @@ pub struct Config {
     /// Zero-data-retention routing (`[privacy] zero_retention`, zero-retention.md).
     #[serde(default)]
     pub privacy: privacy::PrivacyConfig,
+    /// The `/goal` progress evaluator (`[goal] evaluator`, `[goal] evaluator_model`).
+    #[serde(default)]
+    pub goal: goal::GoalConfig,
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
@@ -609,6 +615,30 @@ pub struct CustomProviderConfig {
     /// Human label shown in `forge provider list`. Optional.
     #[serde(default)]
     pub label: Option<String>,
+    /// How to turn a marketplace price list into one rate, for an endpoint whose `/models`
+    /// publishes several asks per model (InferHub: `pricing.asks_in` / `asks_out`, plus the
+    /// vendor's `official_in` / `official_out`). Default `median`. Ignored by endpoints that
+    /// publish no such shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_stat: Option<PricingStat>,
+}
+
+/// Which statistic of a marketplace's asks prices a model (see
+/// [`CustomProviderConfig::pricing_stat`]).
+///
+/// `min` is what the cheapest seller asks, which UNDERSTATES what a routed request costs: the
+/// gateway may serve it from any seller. `median` is the default because it is robust to a single
+/// outlier ask on either side; `mean` follows a skewed list; `official` uses the vendor's list
+/// price. Every statistic falls back to the official price when a model has no asks, and actual
+/// spend comes from the response's reported cost whatever is chosen here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PricingStat {
+    #[default]
+    Median,
+    Min,
+    Mean,
+    Official,
 }
 
 /// When a hook fires.
@@ -1354,6 +1384,9 @@ pub struct LspConfig {
     /// Stop an analyzer after this many idle seconds. A later edit starts it again on demand.
     #[serde(default = "default_lsp_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+    /// How much of the post-edit report reaches the model: `delta` (default), `full` or `off`.
+    #[serde(default)]
+    pub diagnostics: LspDiagnosticsMode,
     /// Per-language server command, keyed by language id (`rust`, `typescript`, `python`, …).
     /// Empty = use the built-in defaults for languages whose server binary is found on PATH.
     #[serde(default)]
@@ -1375,6 +1408,7 @@ impl Default for LspConfig {
             timeout_ms: default_lsp_timeout_ms(),
             memory_limit_mb: default_lsp_memory_limit_mb(),
             idle_timeout_secs: default_lsp_idle_timeout_secs(),
+            diagnostics: LspDiagnosticsMode::default(),
             servers: std::collections::HashMap::new(),
         }
     }
@@ -2977,6 +3011,7 @@ impl Default for Config {
             harness: HarnessConfig::default(),
             tools: ToolsConfig::default(),
             privacy: privacy::PrivacyConfig::default(),
+            goal: goal::GoalConfig::default(),
         }
     }
 }
@@ -5361,6 +5396,7 @@ reason = "no privilege escalation"
     #[test]
     fn custom_provider_config_rejects_bad_namespace_and_url() {
         let bad_ns = CustomProviderConfig {
+            pricing_stat: None,
             namespace: "has space".into(),
             base_url: "http://x/v1".into(),
             api_key_env: None,
@@ -5370,6 +5406,7 @@ reason = "no privilege escalation"
         };
         assert!(bad_ns.into_runtime().is_err());
         let bad_url = CustomProviderConfig {
+            pricing_stat: None,
             namespace: "x".into(),
             base_url: "localhost:1234".into(),
             api_key_env: None,
@@ -5513,6 +5550,7 @@ reason = "no privilege escalation"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let p = CustomProviderConfig {
+            pricing_stat: None,
             namespace: "lmstudio".into(),
             base_url: "http://localhost:1234/v1".into(),
             api_key_env: Some("LMSTUDIO_API_KEY".into()),

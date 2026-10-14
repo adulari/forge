@@ -27,19 +27,29 @@ impl HarnessProfile {
     }
 }
 
+/// Built-in per-model profiles, applied when no `[mesh.harness_profiles]` glob matches. InferHub
+/// routes measured fewer steps and tokens with no pass-rate loss under `minimal` (72-run ablation,
+/// 2026-10-14). Opt out with `[mesh.harness_profiles] "inferhub::*" = "guarded"`.
+pub const BUILTIN_HARNESS_PROFILES: &[(&str, HarnessProfile)] =
+    &[("inferhub::*", HarnessProfile::Minimal)];
+
 /// The profile for `model`: the most specific matching `[mesh.harness_profiles]` glob wins (the
-/// pattern with the most literal characters, so `bedrock::*kimi*` beats `bedrock::*`), else the
-/// `[mesh] harness_profile` default.
+/// pattern with the most literal characters, so `bedrock::*kimi*` beats `bedrock::*`), then the
+/// built-in per-model profiles, else the `[mesh] harness_profile` default.
 pub fn resolve_harness_profile(
     default: HarnessProfile,
     overrides: &BTreeMap<String, HarnessProfile>,
     model: &str,
 ) -> HarnessProfile {
-    overrides
-        .iter()
-        .filter(|(pattern, _)| glob_matches(pattern, model))
-        .max_by_key(|(pattern, _)| pattern.chars().filter(|c| *c != '*').count())
-        .map_or(default, |(_, profile)| *profile)
+    let most_specific = |patterns: &mut dyn Iterator<Item = (&str, HarnessProfile)>| {
+        patterns
+            .filter(|(pattern, _)| glob_matches(pattern, model))
+            .max_by_key(|(pattern, _)| pattern.chars().filter(|c| *c != '*').count())
+            .map(|(_, profile)| profile)
+    };
+    most_specific(&mut overrides.iter().map(|(p, v)| (p.as_str(), *v)))
+        .or_else(|| most_specific(&mut BUILTIN_HARNESS_PROFILES.iter().copied()))
+        .unwrap_or(default)
 }
 
 /// `*` matches any run of characters (including `::`); everything else is literal.
@@ -66,6 +76,25 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
 mod tests {
     use super::*;
     use crate::{Config, MeshConfig};
+
+    #[test]
+    fn inferhub_defaults_to_minimal_unless_overridden() {
+        let none = BTreeMap::new();
+        assert_eq!(
+            resolve_harness_profile(HarnessProfile::Guarded, &none, "inferhub::glm-5.3-flash"),
+            HarnessProfile::Minimal
+        );
+        assert_eq!(
+            resolve_harness_profile(HarnessProfile::Guarded, &none, "bedrock::kimi"),
+            HarnessProfile::Guarded
+        );
+        let mut opt_out = BTreeMap::new();
+        opt_out.insert("inferhub::*".to_string(), HarnessProfile::Guarded);
+        assert_eq!(
+            resolve_harness_profile(HarnessProfile::Guarded, &opt_out, "inferhub::glm-5.3-flash"),
+            HarnessProfile::Guarded
+        );
+    }
 
     #[test]
     fn globs_match_whole_ids() {

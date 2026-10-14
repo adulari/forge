@@ -189,7 +189,18 @@ impl Pricing {
     /// input is priced fresh. That makes the result a conservative UPPER bound for such providers
     /// rather than a measurement — the one safe direction to err, since inventing a cache hit rate
     /// would under-bill a real budget.
+    ///
+    /// A cost the provider REPORTED for the call ([`forge_types::Usage::reported_cost_usd`]) wins
+    /// over the estimate for a metered model: a gateway that spreads one id across upstreams at
+    /// different prices bills whichever served the request, which no rate table can know. A
+    /// subscription model never takes it — a plan bills nothing per request, and recording the
+    /// notional figure would spend the user's real budget on a flat-rate turn.
     pub fn cost_for_usage(&self, model: &str, usage: &forge_types::Usage) -> f64 {
+        if let Some(reported) = usage.reported_cost_usd {
+            if !crate::catalog::is_subscription(model) {
+                return reported;
+            }
+        }
         let Some(rate) = self.rates.get(model) else {
             return 0.0;
         };
@@ -657,6 +668,44 @@ mod tests {
         assert!((pricing.cost_for("openrouter::vendor/a", 1000, 1000) - 18.0).abs() < 1e-9);
         // vendor/b: previously $0 (unpriced), now tracked from the fetched rate.
         assert!((pricing.cost_for("openrouter::vendor/b", 1000, 1000) - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_reported_cost_is_recorded_for_metered_models_but_never_for_a_subscription() {
+        // InferHub bills whichever upstream served the request and says so in `usage.cost`; the
+        // rate table only holds the median ask.
+        let fetched = vec![
+            ("inferhub::glm-5.3-flash".to_string(), 0.00003, 0.0001, None),
+            ("kimi::k3".to_string(), 0.003, 0.015, None),
+        ];
+        let pricing = Pricing::from_config_with_fetched(&forge_config::Config::default(), fetched);
+        let usage = forge_types::Usage {
+            input_tokens: 1000,
+            output_tokens: 1000,
+            reported_cost_usd: Some(0.00042),
+            ..Default::default()
+        };
+        assert_eq!(
+            pricing.cost_for_usage("inferhub::glm-5.3-flash", &usage),
+            0.00042
+        );
+        assert_eq!(
+            pricing.cost_for_usage("inferhub::never-priced", &usage),
+            0.00042,
+            "a reported charge is real spend even with no rate on file"
+        );
+        assert!(
+            (pricing.cost_for_usage("kimi::k3", &usage) - 0.018).abs() < 1e-12,
+            "a subscription ignores the reported figure and keeps its own table handling"
+        );
+        let unreported = forge_types::Usage {
+            reported_cost_usd: None,
+            ..usage
+        };
+        assert!(
+            (pricing.cost_for_usage("inferhub::glm-5.3-flash", &unreported) - 0.00013).abs()
+                < 1e-12
+        );
     }
 
     #[test]

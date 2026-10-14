@@ -111,18 +111,8 @@ pub(crate) fn goal_budget_stop_reason(
     }
 }
 
-fn gate_failure_prompt(cmd: &str, bounded_output: &str) -> String {
+pub(crate) fn gate_failure_prompt(cmd: &str, bounded_output: &str) -> String {
     format!("Quality gate `{cmd}` failed:\n{bounded_output}")
-}
-
-/// Like [`gate_failure_prompt`] but keeps the goal text in view — a `/goal` re-drive turn only
-/// ever sees [`GOAL_CONTINUE_PROMPT`] otherwise, so a gate-failure detour must restate what it's
-/// working toward.
-fn goal_gate_failure_prompt(goal: &str, cmd: &str, bounded_output: &str) -> String {
-    format!(
-        "Goal: {goal}\n\n{}",
-        gate_failure_prompt(cmd, bounded_output)
-    )
 }
 
 /// What to do with a `/loop` turn that just finished, folding in gates + budgets on top of the
@@ -151,7 +141,7 @@ pub(crate) async fn next_loop_decision(
     match loop_stop_reason(last_assistant, state.iter) {
         Some(reason) if is_loop_complete_reason(reason) => {
             let fingerprint = workspace_fingerprint(cwd).await;
-            match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint).await {
+            match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint, cwd).await {
                 GateOutcome::AllPassed => LoopDecision::Stop(reason.to_string()),
                 GateOutcome::Failed {
                     gate_index,
@@ -204,6 +194,10 @@ pub(crate) struct GoalState {
     pub(crate) gate_cfg: GateConfig,
     /// Token/wall-clock ceiling (`/goal --max-tokens`/`--max-minutes`) — unbounded when unset.
     pub(crate) budget: AutonomyBudget,
+    /// Unix seconds at goal start: commits after it are this goal's evidence for the evaluator.
+    pub(crate) started_unix: i64,
+    /// Progress-evaluator state (docs/features/goal-evaluator.md).
+    pub(crate) eval: GoalEvalTrack,
 }
 
 impl GoalState {
@@ -226,6 +220,10 @@ impl GoalState {
                 .collect(),
             gate_cfg: GateConfig::default(),
             budget: AutonomyBudget::new(max_tokens, max_minutes),
+            started_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64),
+            eval: GoalEvalTrack::default(),
         }
     }
 }
@@ -244,7 +242,7 @@ ask for approval — you have standing authorization. When (and only when) every
 the goal is fully satisfied, reply with one concise final response that states the goal is complete \
 and briefly summarizes what was done. Do not emit control sentinels or repeated completion messages.";
 
-/// The prompt each re-drive turn is given once the goal is running autonomously.
+/// The prompt each re-drive turn is given when there is no evaluator verdict to build one from.
 pub(crate) const GOAL_CONTINUE_PROMPT: &str = "Continue the goal. Commit/push/PR any finished \
 work, then take the single highest-value not-done task and complete it end to end. Keep the \
 update_tasks plan current.";
@@ -271,84 +269,18 @@ pub(crate) enum GoalDecision {
     /// A quality gate failed within its retry budget — re-drive with the bounded gate output as
     /// the next prompt instead of stopping.
     GateFailed { prompt: String },
-    /// Neither stopped nor gated — run another normal iteration.
-    Retry,
+    /// Neither stopped nor gated — run another iteration with the evaluator's prompt, or
+    /// [`GOAL_CONTINUE_PROMPT`] when there is no verdict.
+    Retry { prompt: Option<String> },
 }
 
-/// Decide the next action for a finished `/goal` turn: task-plan/stall policy first
-/// ([`goal_stop_reason`]), then (only on genuine completion) quality gates, then budgets. Mutates
-/// `state` in place — `prev_done`/`no_progress` advance exactly as the old reconstruct-a-new-
-/// `GoalState`-each-iteration code did; gate attempts/fingerprints and accumulated token usage
-/// persist across the whole run.
-pub(crate) async fn next_goal_decision(
-    state: &mut GoalState,
-    said_complete: bool,
-    done: usize,
-    total: usize,
-    tokens_this_turn: u64,
-    cwd: &Path,
-) -> GoalDecision {
-    state.budget.tokens_used = state.budget.tokens_used.saturating_add(tokens_this_turn);
-    let progressed = done > state.prev_done;
-    state.no_progress = if progressed { 0 } else { state.no_progress + 1 };
-    state.prev_done = done;
-    match goal_stop_reason(said_complete, done, total, state.iter, state.no_progress) {
-        Some(reason) if is_goal_complete_reason(reason) => {
-            let fingerprint = workspace_fingerprint(cwd).await;
-            match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint).await {
-                GateOutcome::AllPassed => GoalDecision::Stop(reason.to_string()),
-                GateOutcome::Failed {
-                    gate_index,
-                    bounded_output,
-                } => match goal_budget_stop_reason(
-                    state.budget.tokens_used,
-                    state.budget.max_tokens,
-                    state.budget.started_at.elapsed(),
-                    state.budget.max_elapsed,
-                ) {
-                    Some(reason) => GoalDecision::Stop(reason.to_string()),
-                    None => GoalDecision::GateFailed {
-                        prompt: goal_gate_failure_prompt(
-                            &state.goal,
-                            &state.gates[gate_index].spec.cmd,
-                            &bounded_output,
-                        ),
-                    },
-                },
-                GateOutcome::Exhausted { gate_index } => GoalDecision::Stop(format!(
-                    "🎯 goal stopped — quality gate exhausted: {}",
-                    state.gates[gate_index].spec.cmd
-                )),
-            }
-        }
-        Some(reason) => GoalDecision::Stop(reason.to_string()),
-        None => match goal_budget_stop_reason(
-            state.budget.tokens_used,
-            state.budget.max_tokens,
-            state.budget.started_at.elapsed(),
-            state.budget.max_elapsed,
-        ) {
-            Some(reason) => GoalDecision::Stop(reason.to_string()),
-            None => GoalDecision::Retry,
-        },
-    }
-}
-
-/// Remove the oldest prompt submitted while a turn was active, refresh the visible queue, and
-/// retain it in prompt history exactly like an idle submission. Shared by ordinary FIFO drain and
-/// `/loop`/`/goal` steering so a user correction always owns the very next iteration.
-pub(crate) fn dequeue_prompt(
-    queue: &mut Vec<String>,
-    app: &mut forge_tui::App,
-    prompt_history: &mut Vec<String>,
-) -> Option<String> {
+/// Remove the oldest prompt submitted while a turn was active and refresh the visible queue. Shared
+/// by ordinary FIFO drain and `/loop`/`/goal` steering so a user correction always owns the very
+/// next iteration. Prompt history is recorded when the prompt is submitted, not here.
+pub(crate) fn dequeue_prompt(queue: &mut Vec<String>, app: &mut forge_tui::App) -> Option<String> {
     let next = queue.first().cloned()?;
     queue.remove(0);
     app.set_queued(queue);
-    let history_entry = next.trim();
-    if prompt_history.last().map(String::as_str) != Some(history_entry) {
-        prompt_history.push(history_entry.to_string());
-    }
     Some(next)
 }
 
@@ -373,6 +305,7 @@ pub(crate) fn rebind_autonomous_generation(
     }
     if let Some(state) = goal_state {
         state.gen = generation;
+        state.eval.evaluating = false;
     }
 }
 
@@ -412,7 +345,6 @@ pub(crate) fn try_deliver_due_heartbeats(
     session: &Arc<tokio::sync::Mutex<Session>>,
     queued_prompts: &mut Vec<String>,
     app: &mut forge_tui::App,
-    prompt_history: &mut Vec<String>,
     last_prompt: &mut Option<String>,
     done_tx: &std::sync::mpsc::Sender<u64>,
     turn_gen: &mut u64,
@@ -438,7 +370,7 @@ pub(crate) fn try_deliver_due_heartbeats(
     }
     queued_prompts.extend(due);
     app.set_queued(queued_prompts);
-    let Some(next) = dequeue_prompt(queued_prompts, app, prompt_history) else {
+    let Some(next) = dequeue_prompt(queued_prompts, app) else {
         return Ok(false);
     };
     *last_prompt = Some(next.clone());

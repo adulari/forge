@@ -106,14 +106,27 @@ impl Store {
     /// Provider credentials, indexes, caches, schedules, and queue internals are never included.
     pub fn export_handoff_session(&self, session_id: &str) -> Result<HandoffSessionExport> {
         let conn = self.lock()?;
-        let (title, permission_mode) = conn
+        let (title, permission_mode, host_state) = conn
             .query_row(
-                "SELECT title, permission_mode FROM session WHERE id = ?1",
+                "SELECT title, permission_mode, host_state FROM session WHERE id = ?1",
                 [session_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StoreError::InvalidValue("handoff session does not exist".into()))?;
+        let compaction_summary = conn
+            .query_row(
+                "SELECT summary FROM session_compaction WHERE session_id = ?1",
+                [session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
         let messages = {
             let mut statement = conn.prepare(
                 "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility, active
@@ -160,6 +173,8 @@ impl Store {
             permission_mode,
             messages,
             checkpoints,
+            compaction_summary,
+            host_state,
         })
     }
 
@@ -209,16 +224,23 @@ impl Store {
         };
         transaction.execute(
             "INSERT INTO session
-                 (id, title, cwd, permission_mode, worktree_path, archived)
-             VALUES (?1, ?2, ?3, ?4, ?3, ?5)",
+                 (id, title, cwd, permission_mode, worktree_path, archived, host_state)
+             VALUES (?1, ?2, ?3, ?4, ?3, ?5, ?6)",
             (
                 &session_id,
                 &export.title,
                 worktree_path,
                 &export.permission_mode,
                 i64::from(provenance.is_some()),
+                &export.host_state,
             ),
         )?;
+        if let Some(summary) = export.compaction_summary.as_deref() {
+            transaction.execute(
+                "INSERT INTO session_compaction (session_id, summary) VALUES (?1, ?2)",
+                (&session_id, summary),
+            )?;
+        }
         for message in &export.messages {
             let id = forge_types::new_id();
             let tool_calls_json = if message.tool_calls.is_empty() {

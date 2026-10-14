@@ -196,6 +196,7 @@ pub(super) fn parse_usage(mut usage_value: Value) -> Usage {
 	};
 
 	Usage {
+		cost: None,
 		prompt_tokens: Some(input_tokens),
 		prompt_tokens_details,
 		completion_tokens: Some(output_tokens),

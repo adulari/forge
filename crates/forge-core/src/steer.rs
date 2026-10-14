@@ -15,7 +15,16 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default, Debug)]
 pub struct SteerInbox {
-    inner: Arc<Mutex<VecDeque<String>>>,
+    inner: Arc<Mutex<Inbox>>,
+}
+
+#[derive(Default, Debug)]
+struct Inbox {
+    pending: VecDeque<String>,
+    /// Texts the model loop took since the last [`SteerInbox::clear`] / [`SteerInbox::settle`].
+    /// Recorded under the same lock as the drain, so a surface settling the inbox sees every text
+    /// the turn absorbed even when the turn's `Steered` event is still in flight.
+    delivered: Vec<String>,
 }
 
 impl SteerInbox {
@@ -26,26 +35,48 @@ impl SteerInbox {
             return;
         }
         if let Ok(mut q) = self.inner.lock() {
-            q.push_back(text);
+            q.pending.push_back(text);
         }
     }
 
-    /// Take every queued text, oldest first.
+    /// Take every queued text, oldest first, recording each as delivered.
     pub fn drain(&self) -> Vec<String> {
         self.inner
             .lock()
-            .map(|mut q| q.drain(..).collect())
+            .map(|mut q| {
+                let texts: Vec<String> = q.pending.drain(..).collect();
+                q.delivered.extend(texts.iter().cloned());
+                texts
+            })
             .unwrap_or_default()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().map(|q| q.is_empty()).unwrap_or(true)
+        self.inner
+            .lock()
+            .map(|q| q.pending.is_empty())
+            .unwrap_or(true)
     }
 
     pub fn clear(&self) {
         if let Ok(mut q) = self.inner.lock() {
-            q.clear();
+            q.pending.clear();
+            q.delivered.clear();
         }
+    }
+
+    /// Close out a turn from the surface side: drop every text not yet delivered (the surface
+    /// still holds it in its queue) and return those the turn already absorbed. Atomic with
+    /// [`drain`](Self::drain), so a turn being aborted cannot absorb a text after this returns
+    /// without it showing up here.
+    pub fn settle(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|mut q| {
+                q.pending.clear();
+                std::mem::take(&mut q.delivered)
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -67,5 +98,26 @@ mod tests {
         );
         assert!(inbox.is_empty());
         assert!(inbox.drain().is_empty());
+    }
+
+    #[test]
+    fn settle_returns_delivered_and_drops_pending() {
+        let inbox = SteerInbox::default();
+        inbox.push("absorbed");
+        assert_eq!(inbox.drain(), vec!["absorbed".to_string()]);
+        inbox.push("still queued");
+        assert_eq!(inbox.settle(), vec!["absorbed".to_string()]);
+        assert!(
+            inbox.is_empty(),
+            "pending texts stay with the surface's queue"
+        );
+        assert!(inbox.settle().is_empty(), "delivered is taken once");
+        inbox.push("x");
+        inbox.drain();
+        inbox.clear();
+        assert!(
+            inbox.settle().is_empty(),
+            "a new turn forgets earlier deliveries"
+        );
     }
 }

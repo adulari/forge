@@ -111,6 +111,7 @@ pub(super) fn validated_custom_provider(
         return Err("base URL is too long or contains control characters".to_string());
     }
     let config = forge_config::CustomProviderConfig {
+        pricing_stat: None,
         namespace,
         base_url: request.base_url.trim().to_string(),
         api_key_env: validate_env_var(request.api_key_env)?,

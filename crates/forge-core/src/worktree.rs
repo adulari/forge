@@ -86,6 +86,10 @@ impl WorktreeGuard {
     pub fn branch(&self) -> &str {
         &self.branch
     }
+
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
 }
 
 impl Drop for WorktreeGuard {

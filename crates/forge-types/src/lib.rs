@@ -240,6 +240,13 @@ pub struct Usage {
     /// report the split.
     #[serde(default)]
     pub reasoning_tokens: Option<u64>,
+    /// What the provider itself says this call cost, in USD, when its response carries it
+    /// (`usage.cost`, an OpenAI-compatible extension InferHub and OpenRouter send). A gateway that
+    /// routes one id across several upstreams bills whichever served the request, so this beats
+    /// any rate-table estimate; the mesh's pricing prefers it for metered models. `None` when
+    /// the provider reports no cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_cost_usd: Option<f64>,
 }
 
 impl Usage {

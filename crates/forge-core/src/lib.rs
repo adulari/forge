@@ -34,10 +34,13 @@ pub mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;
+pub mod goal_evaluator;
+mod goal_evidence;
 mod shell_batch;
 mod silence_guard;
 mod workspace_policy;
 pub use btw_policy::{busy_asker, BtwAsker};
+pub use goal_evaluator::{GoalEvalRequest, GoalVerdict};
 mod cache_instrument;
 pub mod capsule;
 pub(crate) mod clock;
@@ -66,11 +69,13 @@ mod harness_profile;
 pub mod heartbeat;
 pub mod hooks;
 mod hooks_cc;
+pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
 pub mod job_wake;
 mod lean_context;
 pub mod llm_router;
 pub(crate) mod loop_progress;
+mod lsp_delta;
 mod lsp_hints;
 mod mid_intent;
 pub(crate) mod model_failure_record;
@@ -99,6 +104,7 @@ mod session_history;
 mod session_lifecycle;
 mod session_usage_detail;
 mod session_virtual_tools;
+mod session_worktree;
 pub mod snapshot;
 pub(crate) mod stall_guard;
 pub mod steer;
@@ -123,6 +129,7 @@ mod unapplied_edit;
 pub mod workflow;
 mod workspace_context;
 pub mod worktree;
+pub mod worktree_ops;
 pub mod worktree_reclaim;
 pub mod zero_retention;
 
@@ -133,6 +140,7 @@ use session_virtual_tools::ASK_USER_TOOL;
 pub use session_virtual_tools::{remember_spec, REMEMBER_TOOL};
 use text_policy::{completed_tasks_recap, memory_scope_at, recap_line, sanitize_suggestion};
 pub use workspace_context::WorkspaceContext;
+pub use worktree_ops::WORKTREE_TOOL;
 
 pub const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
 
@@ -305,6 +313,8 @@ next one: stage the specific files you changed (never `git add -A`), write a foc
 conventional-commit message (feat/fix/refactor/docs/test/chore), and leave unrelated changes in \
 the tree alone. Do not end a long task with your edits uncommitted; if the work is not ready to \
 commit, say so.
+- To work in a git worktree, create, enter and leave it with the `worktree` tool: it moves your \
+file tools, relative paths and shell cwd there. Do not juggle `git worktree add` with `cd`.
 - Never push, force-push, or rewrite published history unless the user asked for it. When the \
 branch has commits its upstream lacks, ask the user (ask_user) whether to push.";
 
@@ -322,6 +332,9 @@ pub enum CoreError {
     SessionNotFound(String),
     #[error("invalid session workspace: {0}")]
     Workspace(String),
+    /// A tool aimed at a previous host's path after the session moved (host_move.rs).
+    #[error("{0}")]
+    StaleHostPath(String),
     /// Failover walked the whole routed/fallback chain (and any last-resort model) without finding
     /// anything usable. `verdict` is derived from every observed provider failure in the chain;
     /// `last_error` preserves the final provider detail for diagnosis.
@@ -1160,6 +1173,7 @@ impl TaskScope {
                 | "run_workflow"
                 | "update_tasks"
                 | "remember"
+                | WORKTREE_TOOL
         )
     }
 
@@ -1651,6 +1665,8 @@ pub struct Session {
     lattice_watch_enabled: bool,
     /// LSP registry for live diagnostics after writes. `None` when lsp.enabled = false.
     lsp: Option<Arc<forge_lsp::LspRegistry>>,
+    /// Per-file diagnostics snapshots, so a post-edit block carries only what changed.
+    lsp_baselines: lsp_delta::Baselines,
     /// The discovered command/skill catalog, so the model can find + load Forge's own skills via
     /// the `use_skill` virtual tool (command-skill-system.md). `None` → the tool is not advertised
     /// and the turn runs exactly as before.
@@ -1719,6 +1735,9 @@ pub struct Session {
     /// use this instead of the daemon's process working directory.
     workspace: WorkspaceContext,
     workspace_binding: Arc<std::sync::RwLock<std::path::PathBuf>>,
+    /// The root this session worked in before the `worktree` tool first moved it, where `exit`
+    /// returns to (session_worktree.rs). `None` while it has not moved.
+    worktree_home: Option<std::path::PathBuf>,
     /// Canonicalized `config.tools.extra_roots`: extra roots (outside the workspace) the
     /// structured file tools may read and write. Empty by default (file tools stay confined).
     extra_tool_roots: Vec<std::path::PathBuf>,
@@ -1862,6 +1881,10 @@ pub struct Session {
     /// Completed turns since the last Continual Harness refinement (refinement.rs). Drives
     /// `harness.auto_refine = "turns"`; reset whenever [`Session::refine`] runs, manual or auto.
     turns_since_refine: u32,
+    /// Stale-path guard armed when the session moved hosts (host_move.rs).
+    host_guard: host_move::HostGuard,
+    /// One-shot extra instruction for the next compaction (`/reground`).
+    compact_directive: Option<String>,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -1874,7 +1897,7 @@ fn parse_git_head(head: &str) -> Option<String> {
 /// Read + parse the current git branch synchronously. Used only at session construction (one-time
 /// setup, not on the async turn path); the hot path refreshes the cache via `tokio::fs`.
 fn current_git_branch(root: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(root.join(".git/HEAD"))
+    std::fs::read_to_string(session_worktree::git_head_file(root))
         .ok()
         .as_deref()
         .and_then(parse_git_head)
@@ -2422,6 +2445,13 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(push_notify::PUSH_NOTIFICATION_TOOL))
         {
             specs.push(push_notify::spec());
+        }
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(WORKTREE_TOOL))
+        {
+            specs.push(worktree_ops::worktree_spec());
         }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes
@@ -3229,11 +3259,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // message is persisted — so this await cannot reopen the abort-before-persist window the
         // synchronous-read invariant protects; `system_preamble` (called per model-loop step below)
         // then reads the cached field with no syscall and no `.await`, staying `Send`.
-        self.cached_git_branch = tokio::fs::read_to_string(self.workspace.root().join(".git/HEAD"))
-            .await
-            .ok()
-            .as_deref()
-            .and_then(parse_git_head);
+        self.cached_git_branch =
+            tokio::fs::read_to_string(session_worktree::git_head_file(self.workspace.root()))
+                .await
+                .ok()
+                .as_deref()
+                .and_then(parse_git_head);
 
         // Standing project instructions can appear or change WHILE a session runs, and the
         // construction-time read alone could never see that: the session that writes AGENTS.md (or
@@ -4998,6 +5029,9 @@ mod tests {
     #[path = "commit_nudge.rs"]
     mod commit_nudge_tests;
 
+    #[path = "session_worktree.rs"]
+    mod session_worktree_tests;
+
     #[path = "append_only_turns.rs"]
     mod append_only_turns_tests;
 
@@ -5042,6 +5076,9 @@ mod tests {
 
     #[path = "harness_profile.rs"]
     mod harness_profile_tests;
+
+    #[path = "goal_evaluator.rs"]
+    mod goal_evaluator_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

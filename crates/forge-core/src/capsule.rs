@@ -317,7 +317,7 @@ fn strip_url_userinfo(origin: &str) -> String {
     format!("{scheme}://{host}{suffix}")
 }
 
-fn canonical_remote_identity(origin: &str) -> String {
+pub(crate) fn canonical_remote_identity(origin: &str) -> String {
     let stripped = strip_url_userinfo(origin.trim());
     let (authority, path) = if let Some((_, rest)) = stripped.split_once("://") {
         let slash = rest.find('/').unwrap_or(rest.len());

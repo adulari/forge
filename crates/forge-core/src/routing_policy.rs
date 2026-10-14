@@ -52,7 +52,9 @@ impl Session {
     /// auto-discovery routing isn't active (no catalog), since the candidate table would be empty.
     pub fn explain_routing(&self, prompt: &str) -> Option<forge_mesh::RoutingExplanation> {
         let catalog = self.catalog.clone()?;
-        let router = forge_mesh::HeuristicRouter::new(self.config.clone()).with_catalog(catalog);
+        let router = forge_mesh::HeuristicRouter::new(self.config.clone())
+            .with_pricing(self.pricing.clone())
+            .with_catalog(catalog);
         let readiness = self.provider_readiness();
         let health = readiness.health;
         let mut exp = router.explain(
@@ -87,7 +89,9 @@ impl Session {
         let health = readiness.health;
         Some(RoutingInspector {
             router: Arc::clone(&self.router),
-            selection_router: HeuristicRouter::new(self.config.clone()).with_catalog(catalog),
+            selection_router: HeuristicRouter::new(self.config.clone())
+                .with_pricing(self.pricing.clone())
+                .with_catalog(catalog),
             budget: self.budget_snapshot(),
             health,
             quota: readiness.quota,
@@ -270,6 +274,11 @@ impl Session {
         {
             preamble[0].content.clone_from(override_prompt);
         }
+        // Codemode guidance rides with the tool itself: present exactly when `run_code` is
+        // advertised (never on a bridge), static text so the cached prefix stays stable.
+        if crate::codemode::guidance_advertised(specs) {
+            preamble.insert(1, Message::system(crate::codemode::GUIDANCE));
+        }
         let window = self.effective_context_window(model) as usize;
         let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();
@@ -418,7 +427,7 @@ Rules:\n\
             "recap" | "suggest" => Some(128),
             "auto-classify" => Some(64),
             "memory" | "shell-diagnose" => Some(256),
-            "btw" => Some(2_048),
+            "btw" | crate::goal_evaluator::GOAL_EVALUATOR_PURPOSE => Some(2_048),
             _ => None,
         };
         CompletionOptions {

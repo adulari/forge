@@ -10,10 +10,13 @@
 //! spec, argument parsing, the JS wrapper and result rendering. The pump lives in `runner.rs`.
 
 mod catalog;
+mod guidance;
 mod prompt_clock;
 mod runner;
 
 use forge_provider::ToolSpec;
+
+pub(crate) use guidance::{advertised as guidance_advertised, Steer, GUIDANCE};
 
 /// The virtual tool name the model calls.
 pub const RUN_CODE_TOOL: &str = "run_code";
@@ -29,20 +32,22 @@ const MAX_LOG_LINES: usize = 200;
 pub fn run_code_spec() -> ToolSpec {
     ToolSpec {
         name: RUN_CODE_TOOL.to_string(),
-        description: "Run a short JavaScript program that calls your other tools and returns only \
-            what you need, in ONE step. Use it to chain several tool calls (search, then read the \
-            matches, then edit, then test) or to filter large output down to the lines that \
-            matter. Every tool you have is callable as `await tools.<name>({...same JSON \
-            arguments...})`; it resolves to the tool's output string and throws an Error when the \
-            call is denied or fails to run (a shell command that exits non-zero still resolves; \
-            check its `shell: exit N` first line). Tools not listed here are callable by name \
-            too; `await tools.$search(\"keywords\")` returns matching tools' names, descriptions \
-            and schemas. Calls run one at a time in the order they are made; permission prompts \
-            and /undo snapshots work as for normal calls. `console.log(...)` lines are kept. \
-            The code runs inside an async function: end it with `return <result>`. There is no \
-            fs, fetch, require or timer API; use the tools. Not callable from a script: \
-            run_code, run_workflow, spawn_agents, ask_user, present_plan, update_tasks and the \
-            other session-control tools."
+        description: "Batch several tool calls into ONE step. Write a short JavaScript program \
+            that calls your other tools and returns only what you need. Use it whenever you can \
+            already name the next 2+ calls (read several files, search then read the hits, edit \
+            then run the tests) or to cut large output down to the lines that matter. Call any \
+            tool as `await tools.<tool_name>({...same JSON arguments as a normal call...})`, e.g. \
+            `await tools.read_file({path: \"a.py\"})` or `await tools.shell({command: \"pytest \
+            -q\"})`; it resolves to the tool's output as one string (glob and search too: \
+            newline-separated text) and throws an Error when the call \
+            is denied or fails to run (a shell command that exits non-zero still resolves; check \
+            its `shell: exit N` first line). End with `return <result>`. Tools not listed here \
+            are callable by name too; `await tools.$search(\"keywords\")` returns matching \
+            tools' names, descriptions and schemas. Calls run one at a time in order; permission \
+            prompts and /undo snapshots work as for normal calls. `console.log(...)` lines are \
+            kept. No fs, fetch, require or timer API. Not callable from a script: run_code, \
+            run_workflow, spawn_agents, ask_user, present_plan, update_tasks and the other \
+            session-control tools."
             .to_string(),
         schema: serde_json::json!({
             "type": "object",
@@ -106,9 +111,15 @@ fn strip_fence(raw: &str) -> String {
 /// The program wrapped for the engine: an async IIFE (the engine evaluates the script to a
 /// function and calls it) whose first line is the whole prelude, so the model's code starts on
 /// line 2. The prelude defines `tools`, `console` and `log`, and the epilogue reports the value,
-/// the error and the captured logs as one object, so logs survive a thrown error.
+/// the error (with the model's own line, read from the stack) and the captured logs as one
+/// object, so logs survive a thrown error.
 pub(crate) fn wrap(code: &str) -> String {
-    format!("{}\n{code}\n{}", prelude(), EPILOGUE)
+    let last = code.lines().count().max(1) + 1;
+    format!(
+        "{}\n{code}\n{}",
+        prelude(),
+        EPILOGUE.replace("__LAST__", &last.to_string())
+    )
 }
 
 fn prelude() -> String {
@@ -119,11 +130,15 @@ fn prelude() -> String {
         &format!("const console = {{ log: (...a) => {{ if (__logs.length < {MAX_LOG_LINES}) __logs.push(a.map(__fmt).join(' ')); else __dropped++; }} }};"),
         "console.info = console.log; console.warn = console.log; console.error = console.log; console.debug = console.log;",
         "const log = console.log;",
+        // Tool results are newline-separated strings, but models habitually treat glob/search
+        // output as an array and call `.join("\n")` on it; on a string that is the identity.
+        "if (typeof String.prototype.join !== 'function') Object.defineProperty(String.prototype, 'join', { value: function () { return String(this); }, configurable: true });",
         // `then` must be undefined or `await tools` would treat the proxy as a thenable and call
         // a tool named "then"; Symbol keys (`String(symbol)` throws) and `toJSON` likewise.
         "const tools = new Proxy({}, { get(_t, name) { if (typeof name !== 'string' || name === 'then' || name === 'toJSON') return undefined;",
         &format!(" if (name === '{SEARCH_CALL}') return (query) => __tool('{SEARCH_CALL}', {{ query: __fmt(query === undefined ? '' : query) }});"),
-        " return (args) => __tool(name, args === undefined ? {} : args); } });",
+        // A rejected call names the call that failed, so the model can fix that one line.
+        " return (args) => { const a = args === undefined ? {} : args; return __tool(name, a).catch((e) => { let m = e && e.message !== undefined ? String(e.message) : __fmt(e); if (m.startsWith('error: ')) m = m.slice(7); let shown = __fmt(a); if (shown.length > 120) shown = shown.slice(0, 120) + '…'; throw new Error('tools.' + name + '(' + shown + ') failed: ' + m); }); }; } });",
         "try { const __value = await (async () => {",
     ]
     .concat()
@@ -133,7 +148,8 @@ const EPILOGUE: &str = "})();\n\
 return { ok: true, value: __value === undefined ? null : __value, logs: __logs, dropped: __dropped };\n\
 } catch (e) {\n\
 let message; try { message = e instanceof Error ? (e.name && e.name !== 'Error' ? e.name + ': ' : '') + e.message : __fmt(e); } catch (_) { message = 'unprintable error'; }\n\
-return { ok: false, error: message, logs: __logs, dropped: __dropped };\n\
+let at = ''; try { for (const m of String((e && e.stack) || '').matchAll(/eval_script:(\\d+)/g)) { const n = Number(m[1]); if (n >= 2 && n <= __LAST__) { at = 'line ' + (n - 1) + ': '; break; } } } catch (_) {}\n\
+return { ok: false, error: at + message, logs: __logs, dropped: __dropped };\n\
 }\n\
 })";
 
@@ -242,7 +258,9 @@ pub(crate) fn render(report: &ScriptReport, max_chars: usize) -> String {
         ScriptEnd::Returned(serde_json::Value::String(s)) => s.clone(),
         ScriptEnd::Returned(serde_json::Value::Null) => "(the script returned nothing)".to_string(),
         ScriptEnd::Returned(v) => serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()),
-        ScriptEnd::Threw(msg) | ScriptEnd::Failed(msg) => format!("error: {msg}"),
+        ScriptEnd::Threw(msg) | ScriptEnd::Failed(msg) => {
+            format!("error: {}", msg.strip_prefix("error: ").unwrap_or(msg))
+        }
         ScriptEnd::Expired => format!(
             "error: run_code deadline exceeded after {}s; the script was stopped",
             report.timeout_secs
@@ -316,6 +334,12 @@ fn failure_hint(report: &ScriptReport) -> String {
         ScriptEnd::Threw(m) | ScriptEnd::Failed(m) => m.as_str(),
         _ => "",
     };
+    if message.contains("not a function") || message.contains("undefined") {
+        hint.push_str(
+            "\nhint: every `await tools.<name>(...)` resolves to the tool's output as ONE string, \
+             not an array or object: use `.split(\"\\n\")` for lines, `.includes()` to test it.",
+        );
+    }
     if message.contains("is not defined") || message.contains("not a function") {
         hint.push_str(
             "\nhint: inside run_code the only globals are `tools` (`await tools.<name>({...})`, \

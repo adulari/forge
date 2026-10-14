@@ -161,6 +161,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/uncompact",
     },
     Command {
+        name: "reground",
+        desc: "re-detect the host layout and re-summarize history without stale host paths",
+        usage: "/reground",
+    },
+    Command {
         name: "refine",
         desc: "review the trajectory and persist learned harness state (prompt notes, skills, subagent specs)",
         usage: "/refine [instructions] | /refine --global [instructions] | /refine rollback <id> | /refine status",
@@ -350,6 +355,7 @@ pub enum CommandAction {
     Commit(String),
     /// Restore the full pre-compaction transcript after a `/compact` (`/uncompact`).
     Uncompact,
+    Reground,
     /// Continual Harness: review the trajectory and persist learned harness state (prompt notes,
     /// skills, subagent specs) — see docs/features/continual-harness.md.
     Refine(RefineAction),
@@ -673,6 +679,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "compact" => CommandAction::Compact,
         "commit" => CommandAction::Commit(arg.to_string()),
         "uncompact" => CommandAction::Uncompact,
+        "reground" => CommandAction::Reground,
         "refine" => crate::refine_args::refine_action(&arg),
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => goal_action(&arg),
@@ -1265,6 +1272,7 @@ mod tests {
         assert_eq!(parse_command("/rewind"), CommandAction::Undo);
         assert_eq!(parse_command("/compact"), CommandAction::Compact);
         assert_eq!(parse_command("/uncompact"), CommandAction::Uncompact);
+        assert_eq!(parse_command("/reground"), CommandAction::Reground);
         assert_eq!(
             parse_command("/checkpoints"),
             CommandAction::ListCheckpoints

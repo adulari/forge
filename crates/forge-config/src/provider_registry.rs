@@ -631,6 +631,15 @@ fn remove_custom_provider_at(path: &std::path::Path, namespace: &str) -> Result<
     Ok(removed)
 }
 
+/// The marketplace pricing statistic configured for a custom provider namespace (default median).
+pub fn custom_pricing_stat(namespace: &str) -> crate::PricingStat {
+    user_custom_providers()
+        .into_iter()
+        .find(|c| c.namespace.trim() == namespace)
+        .and_then(|c| c.pricing_stat)
+        .unwrap_or_default()
+}
+
 /// The user-declared `[[providers.custom]]` entries from config (for `forge provider list`). Empty if
 /// none / unreadable. Distinct from [`custom_providers`], which also includes the built-ins.
 pub fn user_custom_providers() -> Vec<CustomProviderConfig> {

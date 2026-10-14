@@ -257,6 +257,20 @@ pub async fn fetch_and_persist(models: &[String]) {
     for ((cp, _), (body, served_window)) in custom.iter().zip(custom_bodies) {
         let ns = cp.namespace;
         if let Some(body) = body {
+            // A marketplace gateway (InferHub) prices every model in its own listing. These are
+            // fetched rates, so a `[mesh.pricing]` entry still overrides them.
+            for (id, in_1k, out_1k, cache_1k) in
+                marketplace_pricing(&body, ns, forge_config::custom_pricing_stat(ns))
+            {
+                record_price(
+                    &store,
+                    &id,
+                    in_1k,
+                    out_1k,
+                    cache_1k,
+                    &mut price_write_failed,
+                );
+            }
             let native = openai_compatible_windows(&body, ns);
             let native_ids: std::collections::HashSet<&str> =
                 native.iter().map(|(id, _)| id.as_str()).collect();
@@ -397,8 +411,9 @@ use bridges::{derive_cli_bridge_windows, persist_authoritative_contexts};
 /// When multiple OR models share a basename the largest window wins (conservatively).
 mod parsers;
 use parsers::{
-    anthropic_windows, build_basename_index, gemini_windows, models_dev_pricing,
-    openai_compatible_windows, openrouter_native_cross_map, openrouter_pricing, openrouter_windows,
+    anthropic_windows, build_basename_index, gemini_windows, marketplace_pricing,
+    models_dev_pricing, openai_compatible_windows, openrouter_native_cross_map, openrouter_pricing,
+    openrouter_windows,
 };
 
 /// A llama.cpp server's ACTUAL context window, from its `/props` endpoint (`n_ctx`).

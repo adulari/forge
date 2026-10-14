@@ -134,6 +134,7 @@ impl Session {
         let mut failure_counts: std::collections::HashMap<(String, ErrorCategory), usize> =
             std::collections::HashMap::new();
         let mut failure_nudged = false;
+        let mut codemode_steer = crate::codemode::Steer::default();
         // `toolcall_repair_nudges`: bounded retries when a direct model writes a tool call as TEXT
         // (`<invoke>` / `default_api:` markup) that the provider couldn't decode AND the text
         // recovery pass missed — so nothing executed. Without this the narration is accepted as a
@@ -205,7 +206,7 @@ impl Session {
         // `forge mcp-serve` child snapshots edits into THIS turn's dir under the live temper — no
         // process-global env mutation. Computed once before the per-step borrows (the temper is
         // constant within a turn); non-bridge providers ignore it.
-        let checkpoint_ctx = self.checkpoint_context();
+        let mut checkpoint_ctx = self.checkpoint_context();
 
         let unattended = self.turn_is_unattended();
         let soft_cap = self.config.mesh.max_steps.max(1);
@@ -249,6 +250,8 @@ impl Session {
             // Every step, not only at nudge points: a 120K-ceiling Kimi turn once grew to 246K.
             self.advance_floor_if_due(&active_model, false);
             self.auto_compact_if_needed(&active_model).await;
+            let bridge_cwd =
+                forge_provider::is_cli_bridge(&active_model).then(|| self.stored_cwd());
             let (tools_before, mut resp) = crate::model_request::request_provider_response(
                 self,
                 &mut active_model,
@@ -287,6 +290,14 @@ impl Session {
                 step,
             )
             .await?;
+            // A bridge's `worktree` call moved the session inside `mcp-serve`; a direct one moved
+            // it in-process. Either way the next request (and bridge spawn) runs at the new root.
+            if let Some(before) = bridge_cwd {
+                self.adopt_bridge_workspace(before);
+            }
+            if checkpoint_ctx.workspace != self.workspace_root().to_string_lossy() {
+                checkpoint_ctx = self.checkpoint_context();
+            }
             // Compute the real cost from token counts and the model's price (FR-5, A-7), pricing
             // cache-read tokens at the discounted rate so it tracks the provider's actual bill.
             resp.usage.cost_usd = self.pricing.cost_for_usage(&active_model, &resp.usage);
@@ -788,6 +799,7 @@ impl Session {
                 break;
             }
             self.observe_adaptive_round(&resp.tool_calls, &step_observations);
+            self.steer_codemode(&mut codemode_steer, &active_model, &resp.tool_calls);
             self.observe_silence(
                 &mut silence,
                 verify_attempts == 0,

@@ -22,7 +22,10 @@
   time, and cost.
 - A picker shows every candidate (model + ok/fail badge, diffstat, test badge, duration, cost,
   one-line summary). Enter merges the picked branch back (`merge_worktree_back`, the same 3-way
-  patch machinery subagent worktree-isolation uses) and records every candidate's outcome. Esc
+  patch machinery subagent worktree-isolation uses) into the checkout the candidates were branched
+  from — not the surface's startup directory, which is stale once the session moved with the
+  `worktree` tool ([session-worktrees.md](session-worktrees.md)) — and records every candidate's
+  outcome. Esc
   discards everything — no merge, no routing-learning record.
 - The outcome (`forge_store::duel_outcome`) softly biases future routing **in this repo**:
   `Store::duel_boosts` aggregates wins-minus-losses per model into a bounded boost

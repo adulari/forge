@@ -339,7 +339,9 @@ struct DriverState {
     queued_prompts: Vec<String>,
     /// Mirror of `queued_prompts` the running turn drains at its next boundary (steering).
     steer: forge_core::steer::SteerInbox,
-    prompt_history: Vec<String>,
+    /// Reconciles `queued_prompts` with what the running turn absorbed (busy_queue.rs).
+    steer_tracker: SteerTracker,
+    prompt_history: forge_tui::PromptHistory,
     last_prompt: Option<String>,
     prompt_seq: u64,
     notes: Vec<String>,
@@ -481,7 +483,8 @@ async fn drive_session(
         assay_lenses: Vec::new(),
         assay_scope: forge_types::AssayScope::Repo,
         queued_prompts: Vec::new(),
-        prompt_history: Vec::new(),
+        steer_tracker: SteerTracker::default(),
+        prompt_history: forge_tui::PromptHistory::default(),
         last_prompt: None,
         prompt_seq: 0,
         notes: Vec::new(),
@@ -538,12 +541,8 @@ async fn drive_session(
             dirty = true;
             match msg {
                 UiMsg::Event(e) => {
-                    if let forge_tui::PresenterEvent::Steered(text) = &e {
-                        if let Some(i) = st.queued_prompts.iter().position(|q| q == text) {
-                            st.queued_prompts.remove(i);
-                            st.app.set_queued(&st.queued_prompts);
-                        }
-                    }
+                    st.steer_tracker
+                        .observe(&e, &mut st.queued_prompts, &mut st.app);
                     if let forge_tui::PresenterEvent::Error(m) = &e {
                         turn_error = Some(m.clone());
                         // A turn-ending error only reached `view.transcript` (scrollback) before
@@ -783,7 +782,8 @@ impl DriverState {
         ));
     }
 
-    fn interrupt_turn(&mut self) {
+    /// Abort the running turn; returns whether a queued prompt was started in its place.
+    fn interrupt_turn(&mut self) -> bool {
         if let Some(h) = self.turn_handle.take() {
             h.abort();
         }
@@ -803,19 +803,23 @@ impl DriverState {
         });
 
         // An interrupt cancels only the active turn. Prompts submitted while it was running are
-        // still valid work and must drain FIFO; start the head under the new generation so the
-        // aborted turn's DoneGuard signal remains harmlessly stale.
-        if let Some(next) = self.take_next_queued_prompt() {
-            self.start_turn(&next);
+        // still valid work and must drain FIFO, including one the turn absorbed but died before
+        // answering; start it under the new generation so the aborted turn's DoneGuard signal
+        // remains harmlessly stale.
+        let next =
+            self.steer_tracker
+                .interrupted(&mut self.queued_prompts, &self.steer, &mut self.app);
+        match next {
+            Some(next) => {
+                self.start_turn(&next);
+                true
+            }
+            None => false,
         }
     }
 
     fn take_next_queued_prompt(&mut self) -> Option<String> {
-        dequeue_prompt(
-            &mut self.queued_prompts,
-            &mut self.app,
-            &mut self.prompt_history,
-        )
+        dequeue_prompt(&mut self.queued_prompts, &mut self.app)
     }
 
     /// See [`try_deliver_due_heartbeats`] — the daemon-driver call site (turn-end + periodic tick).
@@ -825,7 +829,6 @@ impl DriverState {
                 &self.session,
                 &mut self.queued_prompts,
                 &mut self.app,
-                &mut self.prompt_history,
                 &mut self.last_prompt,
                 &self.done_tx,
                 &mut self.turn_gen,
@@ -1087,7 +1090,8 @@ mod tests {
             assay_lenses: Vec::new(),
             assay_scope: forge_types::AssayScope::Repo,
             queued_prompts: Vec::new(),
-            prompt_history: Vec::new(),
+            steer_tracker: SteerTracker::default(),
+            prompt_history: forge_tui::PromptHistory::default(),
             last_prompt: None,
             prompt_seq: 0,
             notes: Vec::new(),
@@ -1227,6 +1231,62 @@ mod tests {
         state.turn_handle.take().unwrap().abort();
     }
 
+    /// A prompt sent mid-turn is in prompt history at once, not only once it runs as a turn.
+    #[tokio::test]
+    async fn a_prompt_queued_while_busy_is_recorded_in_history_immediately() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "also cover the edge case".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(state.prompt_history.entries(), ["also cover the edge case"]);
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    /// The turn absorbed the queued prompt (steer) and was interrupted before answering it: the
+    /// interrupt must still send it as the next turn instead of "stopped responding".
+    #[tokio::test]
+    async fn interrupt_after_the_turn_absorbed_a_queued_prompt_still_sends_it() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "switch to the v2 endpoint".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        // The turn absorbs it at a step boundary and its echo reaches the driver loop.
+        let absorbed = state.steer.drain();
+        assert_eq!(absorbed, vec!["switch to the v2 endpoint"]);
+        let echo = forge_tui::PresenterEvent::Steered(absorbed[0].clone());
+        state
+            .steer_tracker
+            .observe(&echo, &mut state.queued_prompts, &mut state.app);
+        assert!(state.queued_prompts.is_empty(), "no longer shown as queued");
+
+        state
+            .handle_input(remote::RemoteInput::Interrupt)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.last_prompt.as_deref(),
+            Some("switch to the v2 endpoint")
+        );
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.busy, "the absorbed prompt runs as the next turn");
+        state.turn_handle.take().unwrap().abort();
+    }
+
     /// Fleet-messaging `RemoteInput::Steer` while a turn is BUSY jumps the queue (front, not
     /// back) instead of touching the running turn — it must never interrupt it.
     #[tokio::test]
@@ -1336,7 +1396,6 @@ mod tests {
 
         assert_eq!(state.last_prompt.as_deref(), Some("apply the correction"));
         assert_eq!(state.queued_prompts, vec!["then verify"]);
-        assert_eq!(state.prompt_history, vec!["apply the correction"]);
         assert!(matches!(
             state.loop_state,
             Some(LoopState {
@@ -1362,24 +1421,69 @@ mod tests {
         ));
         state.queued_prompts = vec!["prioritize the regression".into()];
 
+        // The finished goal turn is evaluated first; the queue waits for the next turn.
         state.on_turn_done(10).await;
+        assert!(matches!(
+            state.goal_state,
+            Some(GoalState {
+                gen: 11,
+                iter: 1,
+                ..
+            })
+        ));
+        assert_eq!(state.queued_prompts, vec!["prioritize the regression"]);
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.busy = true;
+
+        state.on_turn_done(11).await;
 
         assert_eq!(
             state.last_prompt.as_deref(),
             Some("prioritize the regression")
         );
         assert!(state.queued_prompts.is_empty());
-        assert_eq!(state.prompt_history, vec!["prioritize the regression"]);
         assert!(matches!(
             state.goal_state,
             Some(GoalState {
-                gen: 11,
+                gen: 12,
                 iter: 2,
-                no_progress: 1,
                 ..
             })
         ));
         assert!(state.busy);
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_goal_turn_is_redriven_from_the_evaluator_verdict() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.goal_state = Some(GoalState::new(
+            10,
+            "finish the goal".into(),
+            Vec::new(),
+            None,
+            None,
+        ));
+
+        state.on_turn_done(10).await;
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(11).await;
+
+        let prompt = state.last_prompt.clone().unwrap_or_default();
+        assert!(
+            prompt.contains("Still missing:\n- record a task plan with update_tasks"),
+            "the mock evaluator's verdict drives the next turn: {prompt}"
+        );
+        assert!(!prompt.contains(GOAL_CONTINUE_PROMPT));
+        assert!(matches!(
+            state.goal_state,
+            Some(GoalState {
+                gen: 12,
+                iter: 2,
+                ..
+            })
+        ));
         state.turn_handle.take().unwrap().abort();
     }
 
@@ -1424,11 +1528,5 @@ mod tests {
         assert!(state.queued_prompts.is_empty());
         assert!(state.turn_handle.is_none());
         assert!(!state.busy);
-        assert_eq!(state.prompt_history.len(), PROMPTS);
-        assert_eq!(state.prompt_history.first().unwrap(), "reprompt-000");
-        assert_eq!(
-            state.prompt_history.last().unwrap(),
-            &format!("reprompt-{:03}", PROMPTS - 1)
-        );
     }
 }

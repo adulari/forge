@@ -31,6 +31,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "present_plan",
     "use_skill",
     "dispatch_sessions",
+    crate::worktree_ops::WORKTREE_TOOL,
     TOOL_SEARCH,
     TOOL_CALL,
 ];

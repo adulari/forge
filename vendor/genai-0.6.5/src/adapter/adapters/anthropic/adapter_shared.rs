@@ -93,6 +93,7 @@ impl AnthropicAdapter {
 			};
 
 		Usage {
+			cost: None,
 			prompt_tokens: Some(prompt_tokens),
 			prompt_tokens_details,
 

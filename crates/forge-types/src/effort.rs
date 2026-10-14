@@ -68,10 +68,74 @@ const FULL_LADDER: &[EffortLevel] = &[
 /// rung Kimi does not define.
 const KIMI_LADDER: &[EffortLevel] = &[EffortLevel::Low, EffortLevel::High, EffortLevel::WhiteHot];
 
+/// Per-model ladders a provider PUBLISHED at discovery, keyed by full Forge id, as a bitmask over
+/// [`FULL_LADDER`]. A gateway such as InferHub lists `reasoning_levels` per model (`["low","high"]`
+/// for GLM, `["max"]` for Kimi K3), and those beat the family guess below: sending `medium` to a
+/// model that defines only low/high names a rung it does not have.
+static DISCOVERED: std::sync::RwLock<Option<std::collections::HashMap<String, u8>>> =
+    std::sync::RwLock::new(None);
+
+/// Every subset of [`FULL_LADDER`], indexed by bitmask, so a discovered ladder can be handed out
+/// as `&'static` like the built-in ones. 32 tiny slices, built once.
+fn ladder_for_mask(mask: u8) -> &'static [EffortLevel] {
+    static SUBSETS: std::sync::OnceLock<Vec<Vec<EffortLevel>>> = std::sync::OnceLock::new();
+    SUBSETS.get_or_init(|| {
+        (0u8..32)
+            .map(|m| {
+                FULL_LADDER
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| m & (1 << i) != 0)
+                    .map(|(_, l)| *l)
+                    .collect()
+            })
+            .collect()
+    })[usize::from(mask & 31)]
+    .as_slice()
+}
+
+/// A provider's published effort names → Forge rungs. `none`/`minimal` (reasoning off) have no
+/// Forge pin and are dropped; `max` is white-hot's wire spelling.
+pub fn levels_from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<EffortLevel> {
+    let mut out: Vec<EffortLevel> = names.into_iter().filter_map(EffortLevel::parse).collect();
+    out.sort_by_key(|l| FULL_LADDER.iter().position(|f| f == l));
+    out.dedup();
+    out
+}
+
+/// Record the ladders a provider published, replacing any earlier registration for those ids.
+/// An empty list is ignored (no evidence), never registered as "no control".
+pub fn register_discovered_ladders(entries: impl IntoIterator<Item = (String, Vec<EffortLevel>)>) {
+    let mut guard = DISCOVERED.write().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(Default::default);
+    for (id, levels) in entries {
+        let mask = levels.iter().fold(0u8, |m, l| {
+            m | FULL_LADDER
+                .iter()
+                .position(|f| f == l)
+                .map_or(0, |i| 1 << i)
+        });
+        if mask != 0 {
+            map.insert(id, mask);
+        }
+    }
+}
+
+fn discovered_ladder(provider: &str, model: &str) -> Option<&'static [EffortLevel]> {
+    let guard = DISCOVERED.read().unwrap_or_else(|e| e.into_inner());
+    let mask = *guard.as_ref()?.get(&format!("{provider}::{model}"))?;
+    Some(ladder_for_mask(mask))
+}
+
 /// The rungs a provider surface accepts, weakest first. Empty means the surface has no control.
 ///
-/// `provider` is the namespace of a Forge id (`codex-oauth::gpt-6-astra` → `codex-oauth`).
+/// `provider` is the namespace of a Forge id (`codex-oauth::gpt-6-astra` → `codex-oauth`). A
+/// ladder the provider published for this exact model ([`register_discovered_ladders`]) wins over
+/// every rule below.
 pub fn ladder(provider: &str, model: &str) -> &'static [EffortLevel] {
+    if let Some(published) = discovered_ladder(provider, model) {
+        return published;
+    }
     match provider {
         // `claude --effort <level>` documents exactly Forge's five rungs: "(low, medium, high,
         // xhigh, max)". White-hot maps onto `max`.
@@ -298,6 +362,39 @@ pub fn wire_name(level: EffortLevel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_published_per_model_ladder_overrides_the_family_guess() {
+        // InferHub's GLM-5.3 defines low/high only; the generic rule would offer low..xhigh.
+        let id = "inferhub-test::cb/glm-5.3";
+        let (provider, model) = split_id(id);
+        assert_eq!(ladder(provider, model), &FULL_LADDER[..4]);
+        register_discovered_ladders([(id.to_string(), levels_from_names(["high", "none", "low"]))]);
+        assert_eq!(
+            ladder(provider, model),
+            [EffortLevel::Low, EffortLevel::High]
+        );
+        let d = resolve_id(id, Some(EffortLevel::Medium));
+        assert_eq!(
+            d.sent,
+            Some(EffortLevel::Low),
+            "medium rounds DOWN to an offered rung"
+        );
+
+        // Kimi K3 there accepts only `max`: every pin sends max, the one rung it has.
+        let k3 = "inferhub-test::ocg/kimi-k3";
+        register_discovered_ladders([(k3.to_string(), levels_from_names(["max"]))]);
+        assert_eq!(
+            resolve_id(k3, Some(EffortLevel::Low)).sent,
+            Some(EffortLevel::WhiteHot)
+        );
+
+        // No published names is no evidence — the family rule stands.
+        let other = "inferhub-test::glm-5.3";
+        register_discovered_ladders([(other.to_string(), Vec::new())]);
+        let (p, m) = split_id(other);
+        assert_eq!(ladder(p, m), &FULL_LADDER[..4]);
+    }
 
     #[test]
     fn an_unpinned_session_sends_nothing_and_says_so() {

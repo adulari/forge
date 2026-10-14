@@ -152,6 +152,7 @@ pub(crate) fn build_provider_and_router(
     // Callers without a Session (mcp-serve's auto-classifier) use this provider directly.
     let provider = forge_core::zero_retention::guard(provider, config);
     let mut heuristic = HeuristicRouter::new(config.clone())
+        .with_pricing(pricing_with_fetched_rates(config))
         .with_live_catalog(live_catalog())
         .with_pin(pin)
         .with_context_windows(context_windows)
@@ -687,7 +688,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
             return Err(error);
         }
     };
-    let router = HeuristicRouter::new(config.clone()).with_catalog(cat.clone());
+    let router = HeuristicRouter::new(config.clone())
+        .with_pricing(pricing_with_fetched_rates(&config))
+        .with_catalog(cat.clone());
 
     if smoke {
         let rows = mesh_smoke_rows(&router, budget, &health, &quota).await;
@@ -716,7 +719,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
                     &config,
                 ),
                 classifier_candidates(&config, false),
-                HeuristicRouter::new(config.clone()).with_catalog(cat.clone()),
+                HeuristicRouter::new(config.clone())
+                    .with_pricing(pricing_with_fetched_rates(&config))
+                    .with_catalog(cat.clone()),
             ));
             let decision = classifier
                 .route(&prompt, false, budget, &health, &quota, None, &project)

@@ -324,6 +324,17 @@ pub(crate) async fn build_session_with_self_mcp(
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
     let ctx_windows = store.all_model_contexts().unwrap_or_default();
     clock.mark("calibration + context windows");
+    // A resumed session moved from another host may record a cwd that does not exist here.
+    let relocated = match (session_cwd, resume.as_deref()) {
+        (Some(cwd), Some(prefix)) if !std::path::Path::new(cwd).exists() => {
+            let full = resolve_session(&store, prefix)?;
+            Some(forge_core::host_move::resolve_resume_cwd(
+                &store, &full, cwd,
+            ))
+        }
+        _ => None,
+    };
+    let session_cwd = relocated.as_deref().or(session_cwd);
     let workspace_root = match session_cwd {
         Some(cwd) => std::path::PathBuf::from(cwd)
             .canonicalize()
@@ -334,6 +345,7 @@ pub(crate) async fn build_session_with_self_mcp(
             let cwd = store
                 .session_cwd(&full)?
                 .ok_or_else(|| anyhow::anyhow!("resumed session has no workspace"))?;
+            let cwd = forge_core::host_move::resolve_resume_cwd(&store, &full, &cwd);
             std::path::PathBuf::from(cwd)
                 .canonicalize()
                 .context("resumed session workspace is unavailable")?

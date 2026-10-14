@@ -85,7 +85,9 @@ to one-shot. Consequently a new user turn, a new checkpoint seq or a temper swit
 respawns anything: the same claude process, prompt cache and structured history serve every turn.
 
 **Respawn triggers.** Model change, effort change, history epoch change (`/rewind`, `/uncompact`),
-transcript shrink (compaction), a dead process, or the idle reaper. The reaper tears a parked
+transcript shrink (compaction), a workspace change (the session moved into or out of a git worktree,
+[session-worktrees.md](session-worktrees.md); the process and its `mcp-serve` child run in the root
+they were spawned in), a dead process, or the idle reaper. The reaper tears a parked
 process down after 20 minutes idle (`FORGE_BRIDGE_IDLE_TTL_SECS` overrides).
 
 **Respawn restores claude's own history.** claude's `session_id` is captured from the stream

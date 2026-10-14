@@ -431,6 +431,8 @@ impl Session {
     }
 
     pub async fn compact(&mut self, auto: bool) -> Result<(usize, usize), CoreError> {
+        // Taken first so a no-op compaction cannot leave it armed for an unrelated later one.
+        let directive = self.compact_directive.take();
         let before = self.transcript.len();
         if before <= COMPACT_KEEP_RECENT + COMPACT_MIN_OLDER {
             return Ok((before, before)); // not worth a model call yet
@@ -556,7 +558,10 @@ impl Session {
             // returned a context-overflow error and got benched for it, so a long session's
             // auto-compaction reliably failed AND degraded routing for the turns after it.
             let messages = [
-                Message::system(COMPACT_SYSTEM),
+                Message::system(match &directive {
+                    Some(directive) => format!("{COMPACT_SYSTEM}\n\n{directive}"),
+                    None => COMPACT_SYSTEM.to_string(),
+                }),
                 Message::user(fit_compaction_payload(
                     &entries,
                     self.compact_input_budget(&model),
@@ -654,6 +659,8 @@ impl Session {
         )));
         compacted.extend(self.transcript.split_off(split));
         self.transcript = compacted;
+        // The summarised blocks are gone, so the next edit to a file reports from scratch.
+        self.lsp_baselines.clear();
 
         // Persist: soft-delete the summarised messages and store the summary so a resumed
         // session rehydrates the compacted view instead of the full uncompacted transcript.

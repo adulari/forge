@@ -1796,6 +1796,7 @@ fn claude_usage_from(v: &Value) -> Usage {
     let cache_read = n("cache_read_input_tokens");
     let cache_write = n("cache_creation_input_tokens");
     Usage {
+        reported_cost_usd: None,
         input_tokens: n("input_tokens") + cache_read + cache_write,
         output_tokens: n("output_tokens"),
         cached_input_tokens: Some(cache_read),
@@ -1817,6 +1818,7 @@ fn claude_usage_from(v: &Value) -> Usage {
 fn codex_usage_from(v: &Value) -> Usage {
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     Usage {
+        reported_cost_usd: None,
         input_tokens: n("input_tokens"),
         output_tokens: n("output_tokens"),
         // Absent only on a truncated/older event — then the split is genuinely unknown, not zero.
@@ -2822,6 +2824,7 @@ impl CliProvider {
             turn_in_flight: false,
             parked_at: std::time::Instant::now(),
             context_fill: None,
+            workspace: checkpoint.map(|c| c.workspace.clone()),
         })
     }
 
@@ -2860,7 +2863,8 @@ impl CliProvider {
         // its in-process context is stale after a compaction/reset), is on the same history epoch,
         // and isn't mid-turn from a prior call that never finished (see `turn_in_flight`).
         let reuse = matches!(&guard.session, Some(s)
-            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight);
+            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight
+                && live::same_workspace(s.workspace.as_deref(), checkpoint));
         let mut resume_plan: Option<(String, usize)> = None;
         if !reuse {
             if let Some(old) = guard.session.take() {
@@ -4361,6 +4365,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_parked_bridge_process_is_not_reused_after_the_session_changes_root() {
+        let ctx = |workspace: &str| CheckpointContext {
+            session: "s".to_string(),
+            seq: 1,
+            root: "/tmp/checkpoints".to_string(),
+            workspace: workspace.to_string(),
+            mode: "bypass".to_string(),
+            epoch: 0,
+        };
+        assert!(live::same_workspace(Some("/repo"), Some(&ctx("/repo"))));
+        assert!(!live::same_workspace(
+            Some("/repo"),
+            Some(&ctx("/repo/.forge/worktrees/feat"))
+        ));
+        assert!(live::same_workspace(None, None));
+    }
+
     /// The persistent claude transport parks a live process between calls. Its served
     /// `forge mcp-serve` child has the temper baked into its env at spawn, so the reuse key must
     /// discriminate on mode: reusing across a Plan→Full switch would keep denying writes the user
@@ -5057,6 +5079,7 @@ mod tests {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"hello","total_cost_usd":0.125,"usage":{"input_tokens":16612,"output_tokens":4}}"#;
         let items = parse_claude_line(line);
         assert!(items.contains(&Parsed::Usage(Usage {
+            reported_cost_usd: None,
             input_tokens: 16612,
             output_tokens: 4,
             // Claude always emits the cache counters, so their absence here is a reported zero.
@@ -5415,6 +5438,7 @@ mod tests {
         assert_eq!(
             parsed,
             vec![Parsed::Usage(Usage {
+                reported_cost_usd: None,
                 input_tokens: 151_655,
                 output_tokens: 176,
                 cached_input_tokens: Some(151_296),

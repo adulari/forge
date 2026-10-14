@@ -5,6 +5,7 @@
 //! normalized: tools are advertised, the model's calls map back to Forge [`ToolCall`]s, and
 //! prior tool results are replayed as genai tool responses so multi-step loops round-trip.
 
+use crate::custom_models::CustomModel;
 use async_trait::async_trait;
 use forge_config::AzureProvider;
 use forge_types::{EffortLevel, Message, Role, ToolCall, Usage};
@@ -299,10 +300,9 @@ pub async fn list_models(namespace: &str) -> Result<Vec<String>, ProviderError> 
 /// pairs — the `display_name` is the provider's human label when it publishes one (`None`
 /// otherwise), so a provider whose ids are opaque plan slots (Kimi Code: `k3`, `kimi-for-coding`)
 /// can still be shown by the model it actually is. Clearly non-chat ids (embedding / reranking) are
-/// dropped — they can't serve chat completions and would only add dead weight and failover churn.
-pub async fn list_custom_models(
-    namespace: &str,
-) -> Result<Vec<(String, Option<String>)>, ProviderError> {
+/// dropped — they can't serve chat completions and would only add dead weight and failover churn —
+/// as is any model whose published `output_modality` has no text in it (InferHub's image models).
+pub async fn list_custom_models(namespace: &str) -> Result<Vec<CustomModel>, ProviderError> {
     let cp = forge_config::custom_provider(namespace)
         .ok_or_else(|| ProviderError::Request(format!("`{namespace}` is not a custom provider")))?;
     // A keyless local server (LM Studio / llama.cpp / vLLM with no auth) has no key — send a
@@ -322,7 +322,7 @@ async fn list_custom_models_at(
     namespace: &str,
     endpoint: &str,
     key: &str,
-) -> Result<Vec<(String, Option<String>)>, ProviderError> {
+) -> Result<Vec<CustomModel>, ProviderError> {
     let url = format!("{endpoint}models");
     // Bound the whole call so a hung load balancer can't stall catalog refresh / startup.
     with_discovery_timeout(&format!("{namespace} `/models` listing"), async move {
@@ -351,21 +351,7 @@ async fn list_custom_models_at(
         })?;
         Ok(data
             .iter()
-            .filter_map(|m| {
-                let id = format!("{namespace}::{}", m.get("id").and_then(|i| i.as_str())?);
-                if forge_config::is_non_chat_model(&id) {
-                    return None;
-                }
-                // The provider's human label (Kimi Code's `display_name`, "K3" / "K2.8 Preview")
-                // when it publishes one, so opaque plan-slot ids can be shown as the model they are.
-                let display = m
-                    .get("display_name")
-                    .and_then(|d| d.as_str())
-                    .map(str::trim)
-                    .filter(|d| !d.is_empty())
-                    .map(str::to_string);
-                Some((id, display))
-            })
+            .filter_map(|m| CustomModel::from_listing(namespace, m))
             .collect())
     })
     .await
@@ -1636,6 +1622,9 @@ fn normalize_usage(usage: &genai::chat::Usage) -> Usage {
         // Anthropic/Bedrock cache creation and reasoning counts; genai turns a zero into None.
         cache_write_tokens: count(prompt.and_then(|d| d.cache_creation_tokens)),
         reasoning_tokens: count(completion.and_then(|d| d.reasoning_tokens)),
+        // The provider's own charge (`usage.cost`), when it sends one; the mesh prefers it to its
+        // rate-table estimate for metered models.
+        reported_cost_usd: usage.cost,
     }
 }
 
@@ -2076,6 +2065,37 @@ mod tests {
         assert_eq!(usage.cache_write_tokens, Some(1_500));
         assert_eq!(usage.reasoning_tokens, Some(250));
         assert_eq!(usage.cached_input_tokens, Some(6_000));
+    }
+
+    /// A gateway's `usage.cost` survives the genai fork's usage parse and lands on Forge's usage as
+    /// the provider-reported charge; a malformed one is dropped without losing the token counts.
+    #[test]
+    fn a_reported_usage_cost_is_carried_and_a_malformed_one_does_not_break_usage() {
+        let parse = |v: serde_json::Value| {
+            normalize_usage(&serde_json::from_value::<genai::chat::Usage>(v).expect("usage"))
+        };
+        // InferHub-style usage object.
+        let usage = parse(json!({
+            "prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17, "cost": 0.000021
+        }));
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.reported_cost_usd, Some(0.000021));
+        let stringy = parse(json!({"prompt_tokens": 12, "completion_tokens": 5, "cost": "0.5"}));
+        assert_eq!(stringy.reported_cost_usd, Some(0.5));
+        for bad in [
+            json!("n/a"),
+            json!(-1.0),
+            json!({"total": 1}),
+            serde_json::Value::Null,
+        ] {
+            let usage = parse(json!({"prompt_tokens": 12, "completion_tokens": 5, "cost": bad}));
+            assert_eq!(usage.reported_cost_usd, None);
+            assert_eq!(
+                usage.output_tokens, 5,
+                "token counts must survive a bad cost"
+            );
+        }
+        assert_eq!(parse(json!({"prompt_tokens": 1})).reported_cost_usd, None);
     }
 
     /// Live reproduction (needs an OpenRouter key; run with `--ignored`). Proves both halves of the
@@ -2815,10 +2835,10 @@ mod tests {
 
         listing.assert();
         assert_eq!(
-            models,
-            vec![
-                ("qwencloud::qwen3.8-max-preview".to_string(), None),
-                ("qwencloud::deepseek-v4-pro".to_string(), None),
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            [
+                "qwencloud::qwen3.8-max-preview",
+                "qwencloud::deepseek-v4-pro"
             ]
         );
     }
@@ -2842,15 +2862,52 @@ mod tests {
             .await
             .expect("discovery should succeed");
         assert_eq!(
+            models
+                .iter()
+                .map(|m| (m.id.as_str(), m.display.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("kimi::k3", Some("K3")),
+                ("kimi::kimi-for-coding", Some("K2.8 Preview")),
+                ("kimi::bare", None),
+                ("kimi::plain", None),
+            ]
+        );
+    }
+
+    /// InferHub publishes per-model effort names and output modality; both must survive discovery.
+    /// Shapes verbatim from its `/models` (2026-10-14).
+    #[tokio::test]
+    async fn custom_discovery_keeps_reasoning_levels_and_drops_image_only_models() {
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/v1/models");
+            then.status(200).json_body(json!({
+                "data": [
+                    {"id": "cb/glm-5.3", "reasoning_levels": ["low", "high"], "modality": "text"},
+                    {"id": "cb/gemini-3.1-flash-image", "modality": "text,image",
+                     "output_modality": "image"},
+                    {"id": "deepseek-v4-flash"}
+                ]
+            }));
+        });
+        let endpoint = format!("{}/v1/", server.base_url());
+        let models = list_custom_models_at("inferhub", &endpoint, "k")
+            .await
+            .expect("discovery should succeed");
+        assert_eq!(
             models,
             vec![
-                ("kimi::k3".to_string(), Some("K3".to_string())),
-                (
-                    "kimi::kimi-for-coding".to_string(),
-                    Some("K2.8 Preview".to_string())
-                ),
-                ("kimi::bare".to_string(), None),
-                ("kimi::plain".to_string(), None),
+                CustomModel {
+                    id: "inferhub::cb/glm-5.3".into(),
+                    display: None,
+                    reasoning_levels: vec!["low".into(), "high".into()],
+                },
+                CustomModel {
+                    id: "inferhub::deepseek-v4-flash".into(),
+                    display: None,
+                    reasoning_levels: Vec::new(),
+                },
             ]
         );
     }

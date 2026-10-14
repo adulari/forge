@@ -288,8 +288,12 @@ impl DriverState {
         // Esc: interrupt a running turn; idle Esc was already filtered at the drain.
         if matches!(key, KeyKind::Esc) {
             if self.busy {
-                self.interrupt_turn();
-                self.app.note("⏹ interrupted — stopped responding");
+                let note = if self.interrupt_turn() {
+                    "⏹ interrupted — continuing with the next queued prompt"
+                } else {
+                    "⏹ interrupted — stopped responding"
+                };
+                self.app.note(note);
             }
             return Ok(());
         }
@@ -321,8 +325,16 @@ impl DriverState {
                     self.app
                         .note("⏳ commands run when the turn is idle — finish or Stop first");
                 } else {
+                    // Same as a remote prompt mid-turn: recall it, and offer it to the running
+                    // turn at its next step.
+                    self.prompt_history.record(&line);
+                    self.steer.push(line.clone());
                     self.queued_prompts.push(line);
                     self.app.set_queued(&self.queued_prompts);
+                    self.app.note(&format!(
+                        "⏳ queued ({} pending) — sent at this turn's next step",
+                        self.queued_prompts.len()
+                    ));
                 }
             } else {
                 Box::pin(self.submit_line(line, None)).await?;
@@ -407,7 +419,8 @@ impl DriverState {
             self.app.copy_candidates.clear();
         } else if kind == forge_tui::PickerKind::Duel {
             if let Some((report, guards)) = self.duel_state.take() {
-                let repo_root = std::path::PathBuf::from(&self.cwd);
+                let repo_root =
+                    forge_core::duel::repo_root_of(&guards, std::path::Path::new(&self.cwd));
                 let repo_key = repo_root.display().to_string();
                 let winner_branch = row.id.clone();
                 let merge_note = match forge_core::duel::merge_winner(&repo_root, &winner_branch) {
@@ -451,6 +464,8 @@ impl DriverState {
         }
         self.busy = false;
         self.turn_handle = None;
+        self.steer_tracker
+            .turn_finished(&mut self.queued_prompts, &self.steer, &mut self.app);
         crate::alloc_policy::release_free_memory();
         if let Some(json) = self.app.view_snapshot_json() {
             self.session.lock().await.save_view_snapshot(&json);
@@ -527,74 +542,27 @@ impl DriverState {
         }
         if let Some(mut gs) = self.goal_state.take() {
             if gs.gen == g {
-                let (done, total) = {
-                    let s = self.session.lock().await;
-                    let tasks = s.tasks();
-                    (
-                        tasks
-                            .iter()
-                            .filter(|t| t.status == forge_types::TodoStatus::Done)
-                            .count(),
-                        tasks.len(),
-                    )
-                };
-                let last = {
-                    self.session
-                        .lock()
-                        .await
-                        .last_assistant_text()
-                        .map(str::to_string)
-                };
-                let said_complete = is_goal_complete_marker(last.as_deref());
-                let tokens_this_turn = self.app.turn_in + self.app.turn_out;
                 let cwd = std::path::Path::new(&self.cwd);
-                match next_goal_decision(&mut gs, said_complete, done, total, tokens_this_turn, cwd)
-                    .await
-                {
-                    GoalDecision::Stop(reason) => {
-                        if !is_goal_complete_reason(&reason) {
-                            self.app.note(&reason);
-                        }
+                let next = advance_goal(&mut gs, &self.session, &mut self.app, cwd).await;
+                let queue = &mut self.queued_prompts;
+                let steer = |app: &mut forge_tui::App| dequeue_prompt(queue, app);
+                if let Some(step) = launch_goal_step(
+                    next,
+                    &mut gs,
+                    steer,
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen + 1,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                ) {
+                    self.turn_gen += 1;
+                    if step.prompt.is_some() {
+                        self.last_prompt = step.prompt;
                     }
-                    GoalDecision::GateFailed { prompt } => {
-                        self.last_prompt = Some(prompt.clone());
-                        self.turn_gen += 1;
-                        gs.iter += 1;
-                        gs.gen = self.turn_gen;
-                        self.goal_state = Some(gs);
-                        self.turn_handle = Some(spawn_turn_with(
-                            prompt,
-                            vec![GOAL_GUIDANCE.to_string()],
-                            Some(forge_types::TaskTier::Complex),
-                            &self.session,
-                            &self.done_tx,
-                            self.turn_gen,
-                            &mut self.app,
-                            &mut self.busy,
-                            &mut self.busy_since,
-                        ));
-                    }
-                    GoalDecision::Retry => {
-                        let prompt = self
-                            .take_next_queued_prompt()
-                            .unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string());
-                        self.last_prompt = Some(prompt.clone());
-                        self.turn_gen += 1;
-                        gs.iter += 1;
-                        gs.gen = self.turn_gen;
-                        self.goal_state = Some(gs);
-                        self.turn_handle = Some(spawn_turn_with(
-                            prompt,
-                            vec![GOAL_GUIDANCE.to_string()],
-                            Some(forge_types::TaskTier::Complex),
-                            &self.session,
-                            &self.done_tx,
-                            self.turn_gen,
-                            &mut self.app,
-                            &mut self.busy,
-                            &mut self.busy_since,
-                        ));
-                    }
+                    self.turn_handle = Some(step.handle);
+                    self.goal_state = Some(gs);
                 }
             } else {
                 self.goal_state = Some(gs);

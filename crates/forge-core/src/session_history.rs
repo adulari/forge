@@ -72,6 +72,7 @@ impl Session {
         self.history_epoch += 1;
         self.cache.note_history_rewrite();
         self.pending_hints.clear();
+        self.lsp_baselines.clear();
         self.pending_images.clear();
         self.steer.clear();
         let offset = self.seq - self.transcript.len() as i64;
@@ -278,11 +279,17 @@ impl Session {
         Ok(())
     }
 
-    fn transition_workspace(&mut self, workspace: WorkspaceContext) -> Result<(), CoreError> {
+    pub(crate) fn transition_workspace(
+        &mut self,
+        workspace: WorkspaceContext,
+    ) -> Result<(), CoreError> {
         if self.tools.rebind_workspace(workspace.root()).is_err() {
             self.tools.bind_workspace(workspace.root());
         }
         self.workspace = workspace;
+        // Files the old root's tracker saw are not this root's; its cached repo top is wrong here.
+        self.git_hygiene = Default::default();
+        self.worktree_home = None;
         *self
             .workspace_binding
             .write()

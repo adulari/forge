@@ -31,7 +31,7 @@ impl Session {
         let workspace = WorkspaceContext::new(cwd)?;
         let mode = config.permission_mode;
         let id = store.create_session(&workspace.display(), format!("{mode:?}").as_str())?;
-        Ok(Self::build(
+        let mut session = Self::build(
             id,
             store,
             provider,
@@ -42,7 +42,9 @@ impl Session {
             workspace,
             Vec::new(),
             0,
-        ))
+        );
+        session.record_host_on_start();
+        Ok(session)
     }
 
     /// Resume an existing session: rehydrate its transcript and continue the same row.
@@ -75,6 +77,8 @@ impl Session {
         let cwd = store
             .session_cwd(session_id)?
             .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
+        // A session moved to another host may record a cwd that does not exist here.
+        let cwd = crate::host_move::resolve_resume_cwd(&store, session_id, &cwd);
         let workspace = WorkspaceContext::new(cwd)?;
         let transcript = stored
             .into_iter()
@@ -135,6 +139,8 @@ impl Session {
         // Same reasoning for `/subagents free`: a resumed goal run that had released its children
         // from the pin would otherwise quietly drag every child back onto the parent's model.
         session.subagent_pin_free = subagent_pin_free;
+        // Last, so the notice lands after the restored transcript (append-only, cache-friendly).
+        session.reconcile_host_on_resume();
         Ok(session)
     }
 
@@ -221,6 +227,7 @@ impl Session {
             lattice_update: None,
             lattice_watch_enabled: false,
             lsp: None,
+            lsp_baselines: Default::default(),
             skills: None,
             fleet: None,
             dispatch: None,
@@ -238,6 +245,7 @@ impl Session {
             pinned_tier: None,
             route_affinity: None,
             workspace_binding: Arc::new(std::sync::RwLock::new(workspace.root().to_path_buf())),
+            worktree_home: None,
             workspace,
             extra_tool_roots,
             btw_asker: None,
@@ -284,6 +292,8 @@ impl Session {
             last_turn_contract: turn_contract::TurnContract::default(),
             detached_registry: crate::subagent::DetachedRegistry::new(),
             turns_since_refine: 0,
+            host_guard: Default::default(),
+            compact_directive: None,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });

@@ -108,7 +108,43 @@ pub(crate) fn resolve(name: &str, args: Value, dir: &impl ToolDirectory) -> Reso
             "error: `{name}` cannot be called from run_code; call it as a normal tool instead"
         ));
     }
+    let args = positional(&name, args, dir);
     Resolved::Call(name, args)
+}
+
+/// `tools.read_file("a.py")`: a script that passes a bare string instead of the argument object.
+/// A JSON object in the string is parsed; otherwise the string becomes the tool's first required
+/// parameter (`path`, `command`, `query`, ...), so the common shorthand runs instead of failing.
+fn positional(name: &str, args: Value, dir: &impl ToolDirectory) -> Value {
+    let Value::String(text) = args else {
+        return args;
+    };
+    if let Ok(object @ Value::Object(_)) = serde_json::from_str::<Value>(&text) {
+        return object;
+    }
+    let key = dir
+        .catalog()
+        .into_iter()
+        .find(|spec| spec.name == name)
+        .and_then(|spec| {
+            let schema = &spec.schema;
+            schema
+                .get("required")
+                .and_then(Value::as_array)
+                .and_then(|r| r.first())
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    let props = schema.get("properties")?.as_object()?;
+                    ["path", "command", "query", "pattern"]
+                        .into_iter()
+                        .find(|k| props.contains_key(*k))
+                })
+                .map(str::to_string)
+        });
+    match key {
+        Some(key) => serde_json::json!({ key: text }),
+        None => Value::String(text),
+    }
 }
 
 /// `tools.$search(query)`: the deferred registry's ranking (exact names first, comma or space
@@ -142,7 +178,11 @@ mod tests {
                 .map(|n| ToolSpec {
                     name: n.to_string(),
                     description: format!("the {n} tool"),
-                    schema: serde_json::json!({"type": "object"}),
+                    schema: match *n {
+                        "edit_file" => serde_json::json!({"type": "object", "required": ["path", "old", "new"]}),
+                        "shell" => serde_json::json!({"type": "object", "properties": {"commands": {}, "command": {}}}),
+                        _ => serde_json::json!({"type": "object"}),
+                    },
                 })
                 .collect()
         }
@@ -216,5 +256,28 @@ mod tests {
         let keyword = search(&catalog, "web");
         assert_eq!(keyword.as_array().unwrap().len(), 2);
         assert!(search(&catalog, "zzz").as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bare_string_argument_becomes_the_primary_parameter() {
+        let dir = Fixed(vec!["edit_file", "shell", "web_fetch"]);
+        assert_eq!(
+            resolve("shell", Value::String("ls".into()), &dir),
+            Resolved::Call("shell".into(), serde_json::json!({"command": "ls"}))
+        );
+        assert_eq!(
+            resolve("edit_file", Value::String("a.py".into()), &dir),
+            Resolved::Call("edit_file".into(), serde_json::json!({"path": "a.py"}))
+        );
+        assert_eq!(
+            resolve("shell", Value::String("{\"command\":\"ls\"}".into()), &dir),
+            Resolved::Call("shell".into(), serde_json::json!({"command": "ls"})),
+            "a JSON object in the string is parsed"
+        );
+        assert_eq!(
+            resolve("web_fetch", Value::String("u".into()), &dir),
+            Resolved::Call("web_fetch".into(), Value::String("u".into())),
+            "no known parameter: passed through for the broker to reject"
+        );
     }
 }
