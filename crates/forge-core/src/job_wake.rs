@@ -165,6 +165,25 @@ mod tests {
     }
 
     #[test]
+    fn rendered_notices_round_trip_through_the_shared_classifier() {
+        use forge_types::{parse_job_notices, JobNotice};
+        let wake = JobWake::default();
+        for i in 0..(MAX_PENDING + 2) {
+            wake.push(&exit(i as u32, (i % 2) as i64, "a\n\nb"));
+        }
+        let drained = wake.drain();
+        let joined = drained.join("\n\n");
+        let parsed = parse_job_notices(&joined).unwrap();
+        assert_eq!(parsed.len(), MAX_PENDING + 1);
+        assert_eq!(parsed[0], JobNotice::Dropped(2));
+        let JobNotice::Exit(e) = &parsed[1] else {
+            panic!()
+        };
+        assert_eq!((e.pid, e.command.as_str(), e.code), (2, "npm run dev", 0));
+        assert_eq!(e.tail, vec!["a", "", "b"]);
+    }
+
+    #[test]
     fn notice_names_job_command_code_and_tail() {
         let w = JobWake::default();
         w.push(&exit(42, 1, "boom"));

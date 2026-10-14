@@ -12,6 +12,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **Background-job exit notices no longer show up as something you typed.** When a `shell{background:true}` job exits, Forge still tells the model through a user-role message, but the TUI (live, mid-turn echo and resumed history), headless output, `forge attach`, the remote web app and the mobile app now show it as a harness notice (`⚙ job 3429249 ✓ exited 0 · <cmd>`, failures `✗`, the log tail dim underneath) instead of a "you" row. The remote history API tags such rows `kind: "job_notice"` and live rows carry the same kind, additively (`crates/forge-types/src/job_notice.rs`, `crates/forge-tui/src/app/job_notice.rs`, docs/features/shell-tool.md).
 - **Streamed tool calls whose `index` starts above 0 no longer add nameless "unknown tool" calls.** Gateways that relay an Anthropic upstream number tool calls by content block, so the first call arrives at index 1 or 2; the gap slots below it were emitted as empty calls the model then had to recover from. Never-named placeholders are now dropped at the end of the stream (`vendor/genai-0.6.5/src/adapter/adapters/openai/streamer.rs`).
 
 ## [2.20.0] - 2026-10-14

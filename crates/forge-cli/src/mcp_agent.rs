@@ -174,10 +174,24 @@ fn event_notification(
                 "summary": summary,
             }),
         ),
-        forge_tui::PresenterEvent::Steered(text) => (
-            LoggingLevel::Info,
-            serde_json::json!({ "event": "steered", "text": text }),
-        ),
+        forge_tui::PresenterEvent::Steered(text) => match forge_types::parse_job_notices(text) {
+            Some(items) => (
+                LoggingLevel::Info,
+                serde_json::json!({
+                    "event": "job_notice",
+                    "jobs": items.iter().filter_map(|i| match i {
+                        forge_types::JobNotice::Exit(e) => Some(serde_json::json!({
+                            "pid": e.pid, "command": e.command, "code": e.code, "tail": e.tail,
+                        })),
+                        forge_types::JobNotice::Dropped(_) => None,
+                    }).collect::<Vec<_>>(),
+                }),
+            ),
+            None => (
+                LoggingLevel::Info,
+                serde_json::json!({ "event": "steered", "text": text }),
+            ),
+        },
         forge_tui::PresenterEvent::Warning(msg) => (
             LoggingLevel::Warning,
             serde_json::json!({ "event": "warning", "msg": msg }),

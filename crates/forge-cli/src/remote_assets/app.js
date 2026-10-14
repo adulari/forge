@@ -426,7 +426,34 @@ function loadHistory() {
     .finally(() => { histLoading = false; $("histload").hidden = true; });
 }
 
+// A background-job completion notice is stored as a user-role message (the model needs that), but
+// the host tags it kind "job_notice": show a compact harness line per job, never a "you" row.
+function jobNoticeRow(r) {
+  const d = document.createElement("div");
+  d.className = "msg jobnotice";
+  let inTail = false;
+  String(r.content || "").split("\n").forEach(line => {
+    const m = /^\[background job (\d+) `(.*)` exited (-?\d+)\]$/.exec(line);
+    const e = document.createElement("div");
+    if (m) {
+      inTail = false;
+      const ok = m[3] === "0";
+      e.className = "jobhead " + (ok ? "ok" : "bad");
+      e.textContent = "\u2699 job " + m[1] + " " + (ok ? "\u2713" : "\u2717") + " exited " + m[3] + " \u00b7 " + m[2];
+    } else if (line === "last lines:") {
+      inTail = true; return;
+    } else if (inTail && line.trim()) {
+      e.className = "jobtail"; e.textContent = line;
+    } else if (/^\[\d+ earlier background-job/.test(line)) {
+      e.className = "jobtail"; e.textContent = "\u2699 earlier job notices were dropped";
+    } else return;
+    d.appendChild(e);
+  });
+  return d;
+}
+
 function histRow(r) {
+  if (r.kind === "job_notice") return jobNoticeRow(r);
   const d = document.createElement("div");
   const note = r.visibility === "ui";
   d.className = "msg " + (note ? "note" : (r.role === "user" ? "user" : "forge"));

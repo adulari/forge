@@ -105,6 +105,19 @@ this design — a shell tool that isn't safe is worse than no shell tool.
 - This feature does **not** persist shell state (cwd, env, shell variables) between separate
   `shell` calls. Each invocation is a fresh process unless it is a background job being polled.
 
+### Background-job exit notices
+
+When a background job exits, the model is told through a user-role message
+(`[background job <pid> `<cmd>` exited <code>]`, plus the log tail), because providers need the
+turn and the model must see it (`crates/forge-core/src/job_wake.rs`). That message is not the
+person's; every surface recognises it with `forge_types::parse_job_notices` and shows a harness
+notice instead of a "you" row: in the TUI (live, mid-turn, resume) one `⚙ job 3429249 ✓ exited 0 ·
+<cmd>` line per job (`✗` for a non-zero exit) with the last four log lines dim underneath; headless
+prints the same lines; the remote history API tags the row `kind: "job_notice"` (the stored role
+stays `user`) and live remote rows carry `kind: "job_notice"` with `meta` `ok`/`failed`/`tail`;
+the web app and mobile render it as dim system output. A prompt that merely mentions a notice
+stays a normal user row.
+
 ---
 
 ## 3. Acceptance criteria (Given/When/Then)

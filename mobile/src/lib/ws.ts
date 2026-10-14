@@ -31,7 +31,7 @@ export interface SnapshotTask {
  * but the live socket does not actually emit it today — a harness-injected continuation nudge
  * isn't echoed into the live scrollback, only persisted (see `/api/history`'s `kind`). Kept here
  * so `toHistoryRow` (transcriptFiller.ts) never has to narrow between the two. */
-export type TranscriptKind = "user" | "assistant" | "tool" | "system" | "nudge";
+export type TranscriptKind = "user" | "assistant" | "tool" | "system" | "nudge" | "job_notice";
 
 /** v9 additive: `Snapshot.transcript` with provenance — same lines, same order, one row per
  * entry. Empty from a pre-v9 host, which is why `transcript` remains the fallback. */

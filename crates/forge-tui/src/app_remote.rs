@@ -729,4 +729,7 @@ pub enum TranscriptKind {
     User,
     Assistant,
     Tool,
+    /// A background-job completion notice the harness injected as a user-role message. The row's
+    /// `meta` is `"ok"` / `"failed"` on a job's header line and `"tail"` on its log lines.
+    JobNotice,
 }

@@ -112,6 +112,11 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
 .mrole { color: var(--dim); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
 .msg.user .mrole { color: var(--acc); }
 .msg.note .mbody { color: #ffd9a8; }
+.msg.jobnotice { font-size: 12px; }
+.msg.jobnotice .jobhead { color: var(--dim); }
+.msg.jobnotice .jobhead.ok { color: #5cd07a; }
+.msg.jobnotice .jobhead.bad { color: #f35c5c; }
+.msg.jobnotice .jobtail { color: var(--dim); padding-left: 18px; white-space: pre-wrap; }
 .mbody { font-size: 14px; }
 .mbody p { margin: 4px 0; }
 .mbody h3, .mbody h4, .mbody h5, .mbody h6, .stream h3, .stream h4, .stream h5, .stream h6 {

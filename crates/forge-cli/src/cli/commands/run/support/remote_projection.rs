@@ -183,8 +183,12 @@ pub(crate) fn map_history_row(
     // answer "sys" in replay. A harness-injected continuation nudge (v10 additive `nudge`
     // column, see `migration_0036`) is checked first: it is stored `role='user'` for the model,
     // but it's Forge talking, not the person, and a client must not render it as "You".
+    // A background-job completion notice is stored `role='user'` for the same reason, and is
+    // recognised from its text (no column), so history written before this existed classifies too.
     let kind = if row.nudge {
         "nudge"
+    } else if role == "user" && forge_types::parse_job_notices(&row.content).is_some() {
+        "job_notice"
     } else if visibility == "ui" {
         match role.as_str() {
             "user" => "user",
@@ -291,5 +295,43 @@ pub(crate) fn map_overlay_snapshot(o: forge_tui::OverlaySnapshot) -> remote::Sna
         filter: o.filter,
         free_text: o.free_text,
         body: o.body,
+    }
+}
+
+#[cfg(test)]
+mod job_notice_tests {
+    use super::map_history_row;
+
+    fn user_row(content: &str) -> forge_store::HistoryRow {
+        forge_store::HistoryRow {
+            seq: 1,
+            role: forge_types::Role::User,
+            content: content.into(),
+            model: None,
+            created_at: 1_000,
+            visibility: forge_types::Visibility::Llm,
+            tool_name: None,
+            tool_phase: None,
+            nudge: false,
+        }
+    }
+
+    #[test]
+    fn a_background_job_notice_is_not_a_user_row_on_the_wire() {
+        let notice = map_history_row(
+            user_row("[background job 7 `make` exited 2]\nlast lines:\nboom"),
+            Some(1_000),
+        );
+        assert_eq!(notice.kind, "job_notice");
+        assert_eq!(
+            notice.role, "user",
+            "the model still needs the user-role turn"
+        );
+
+        let typed = map_history_row(
+            user_row("[background job 7 `make` exited 2] retry it"),
+            None,
+        );
+        assert_eq!(typed.kind, "user");
     }
 }
