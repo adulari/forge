@@ -28,6 +28,7 @@ is deliberately small. `device` controls, `device_logs` inspects.
 | `package`, `activity`, `apk`, `grant`, `reinstall` | app lifecycle |
 | `x`, `y`, `x2`, `y2`, `duration_ms` | coordinates, for `tap` / `long_press` / `swipe` |
 | `text`, `resource_id`, `content_desc`, `class`, `exact`, `clickable_only` | the selector |
+| `caption` | for `screenshot`: what the shot shows, stored with it in the [evidence ledger](evidence-ledger.md) |
 | `key` | `back`, `home`, `enter`, `app_switch`, … or a raw `KEYCODE_*` |
 | `command` | for `shell` |
 | `local`, `remote` | for `push` / `pull` |

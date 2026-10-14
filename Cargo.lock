@@ -2351,6 +2351,7 @@ version = "2.18.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "chrono",
  "forge-agent-browser",
  "forge-agent-device",
  "forge-agent-index",
@@ -2363,7 +2364,9 @@ dependencies = [
  "portable-pty",
  "regex",
  "reqwest",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

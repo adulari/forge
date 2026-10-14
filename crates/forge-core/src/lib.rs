@@ -48,6 +48,7 @@ pub(crate) mod context_pipeline;
 mod detached_subagents;
 pub mod dispatch;
 pub mod duel;
+pub mod evidence_capture;
 mod exact_effort;
 mod failure_verdict;
 mod final_answer;

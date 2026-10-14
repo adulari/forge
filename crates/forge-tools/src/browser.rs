@@ -134,6 +134,7 @@ impl Tool for BrowserTool {
                 "selector": {"type": "string", "description": "CSS selector, for click/type."},
                 "text": {"type": "string", "description": "Text to type, for type."},
                 "expression": {"type": "string", "description": "JavaScript, for eval."},
+                "caption": {"type": "string", "description": "For screenshot: what the shot shows, recorded with it as session evidence."},
                 "method": {"type": "string", "description": "HTTP method, for replay. Default GET."},
                 "headers": {
                     "type": "object",
@@ -223,17 +224,17 @@ impl Tool for BrowserTool {
             "screenshot" => {
                 let data = session.screenshot().await.map_err(message)?;
                 // A base64 PNG in the transcript is tens of thousands of useless tokens. Write it
-                // where the caller can look at it and hand back the path.
-                let path = std::env::temp_dir().join(format!(
-                    "forge-browser-{}-{}.png",
-                    profile,
-                    std::process::id()
-                ));
+                // into the session's evidence ledger and hand back the path.
                 let bytes = base64_decode(&data)
                     .ok_or_else(|| ToolError::Failed("screenshot was not valid base64".into()))?;
-                std::fs::write(&path, bytes)
-                    .map_err(|e| ToolError::Failed(format!("write screenshot: {e}")))?;
-                Ok(format!("screenshot written to {}", path.display()))
+                let url = session.current_url().await.ok();
+                crate::evidence::save_screenshot(
+                    "browser",
+                    &format!("forge-browser-{profile}"),
+                    &bytes,
+                    args.get("caption").and_then(Value::as_str),
+                    url.as_deref(),
+                )
             }
             "cookies" => {
                 let cookies = session.cookies().await.map_err(message)?;
