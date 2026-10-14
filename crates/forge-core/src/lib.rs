@@ -127,6 +127,7 @@ pub mod turn_contract;
 mod turn_guards;
 mod unapplied_edit;
 pub mod workflow;
+pub mod workflow_meta;
 mod workspace_context;
 pub mod worktree;
 pub mod worktree_ops;
