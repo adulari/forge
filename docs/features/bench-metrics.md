@@ -48,8 +48,10 @@ Eligibility and scoring rules (`crates/forge-cli/src/bench/scoring.rs`):
 
 A dominated group has another group with lower-or-equal cost per attempt and higher-or-equal mean
 pass@1, strictly better on one. The block uses notional cost when every group has it, else
-recorded cost, and says which. It is refused when any group has fewer than 20 instances per
-attempt, because cost per solved task on a handful of instances is noise.
+recorded cost, and says which. It is refused when any attempt of any group has fewer than 20
+pass@1-eligible instances (toolless attempts do not count), because cost per solved task on a
+handful of instances is noise. It is also refused when recorded cost is the basis and a group
+recorded $0, since that is a subscription or free route rather than a free solve.
 
 ## Per-instance fields
 
@@ -75,8 +77,9 @@ About a quarter of real usage rows record `cost_usd = 0` (subscription bridges, 
 recorded spend cannot compare those arms. `notional_cost_usd` is the recorded cost plus every
 zero-cost call priced at its model's list rate through `Pricing::reference_cost_for_usage`
 (exact id, else the cheapest positive rate for the same bare model name; cached input at the
-cache-read rate). It is `None` when a zero-cost call that used tokens has no tracked price, so the
-figure never understates. For Claude Code, `total_cost_usd` is already a list-price figure and is
+cache-read rate, cache writes at the plain input rate). It is `None` when a zero-cost call that used
+tokens has no tracked price, so an unpriced call is never counted as $0. Bridge aliases such as
+`claude-cli::sonnet` only get a price when some namespace tracks the same bare model name. For Claude Code, `total_cost_usd` is already a list-price figure and is
 used as-is; Codex reports no cost, so its notional cost is `None`. The report always labels these
 columns notional; they are never spend.
 

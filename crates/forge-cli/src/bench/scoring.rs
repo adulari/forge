@@ -27,6 +27,9 @@ pub(super) struct GroupSummary {
     pub attempts: usize,
     /// Largest per-attempt row count (the instance set size).
     pub instances: usize,
+    /// Fewest pass@1-eligible rows in any one attempt: what a Pareto claim actually rests on once
+    /// toolless attempts are dropped.
+    pub min_eligible: usize,
     pub rows: usize,
     pub patched: usize,
     /// Rows left out of pass@1 because Forge's tools never started.
@@ -179,6 +182,7 @@ fn summarize_group((agent, model): (String, String), runs: &[&Run]) -> GroupSumm
         model,
         attempts: runs.len(),
         instances: 0,
+        min_eligible: usize::MAX,
         rows: 0,
         patched: 0,
         excluded: 0,
@@ -200,6 +204,8 @@ fn summarize_group((agent, model): (String, String), runs: &[&Run]) -> GroupSumm
     let mut eligible_any: BTreeSet<String> = BTreeSet::new();
     for run in runs {
         s.instances = s.instances.max(run.rows.len());
+        let eligible_rows = run.rows.iter().filter(|r| !r.excluded_from_pass1()).count();
+        s.min_eligible = s.min_eligible.min(eligible_rows);
         for r in &run.rows {
             s.rows += 1;
             s.patched += usize::from(r.patched);
@@ -234,6 +240,9 @@ fn summarize_group((agent, model): (String, String), runs: &[&Run]) -> GroupSumm
     }
     if s.complete == 0 {
         s.total_notional = None;
+    }
+    if s.min_eligible == usize::MAX {
+        s.min_eligible = 0;
     }
     if all_scored && !eligible_any.is_empty() {
         s.pass_k = Some(solved_any.len() as f64 / eligible_any.len() as f64);
@@ -324,6 +333,7 @@ mod tests {
         let g = &summarize_groups(&runs)[0];
         assert_eq!(g.excluded, 1);
         assert_eq!(g.refused, 1);
+        assert_eq!((g.instances, g.min_eligible), (4, 3));
         // eligible = a, c, d; solved = a  →  1/3
         assert!((g.mean_pass1().unwrap() - 1.0 / 3.0).abs() < 1e-9);
     }

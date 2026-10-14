@@ -584,15 +584,15 @@ async fn run_one_sweep(
         out.display(),
         metrics_out.display(),
     );
-    // Wave 7: call out toolless-bridge ERRORS separately so a sweep degraded by mcp-serve startup
-    // failures isn't silently read as a low resolve rate (the ~7/15 hole this guard closes).
     let refused = metrics
         .iter()
         .filter(|m| m.outcome == AttemptOutcome::Refused)
         .count();
     if refused > 0 {
-        eprintln!("⚠ {refused} instance(s) classified REFUSED (heuristic) — they score 0");
+        eprintln!("⚠ {refused} instance(s) classified REFUSED (outcome_detail says which signal) — they score 0");
     }
+    // Wave 7: call out toolless-bridge ERRORS separately so a sweep degraded by mcp-serve startup
+    // failures isn't silently read as a low resolve rate (the ~7/15 hole this guard closes).
     let toolless = metrics.iter().filter(|m| m.tools_unavailable).count();
     if toolless > 0 {
         eprintln!(

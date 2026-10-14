@@ -321,11 +321,12 @@ fn render_pareto(groups: &[GroupSummary]) -> Option<String> {
         return None;
     }
     let mut out = String::from("\nPareto (cost per attempt vs mean pass@1)\n");
-    let smallest = groups.iter().map(|g| g.instances).min().unwrap_or(0);
+    // Toolless attempts leave the denominator, so the floor applies to what is left.
+    let smallest = groups.iter().map(|g| g.min_eligible).min().unwrap_or(0);
     if smallest < MIN_PARETO_INSTANCES {
         let _ = writeln!(
             out,
-            "  refused: {smallest} instance(s) per attempt; need at least {MIN_PARETO_INSTANCES} before claiming a Pareto frontier"
+            "  refused: {smallest} eligible instance(s) in the smallest attempt; need at least {MIN_PARETO_INSTANCES} before claiming a Pareto frontier"
         );
         return Some(out);
     }
@@ -519,6 +520,7 @@ mod tests {
             model: "m".into(),
             attempts: 1,
             instances,
+            min_eligible: instances,
             rows: instances,
             patched: instances,
             excluded: 0,
@@ -546,6 +548,15 @@ mod tests {
             !small.contains("dominated") && !small.contains("(real)"),
             "no groups are placed: {small}"
         );
+    }
+
+    #[test]
+    fn pareto_floor_counts_eligible_rows_not_rows_written() {
+        let mut toolless = group("forge", 20, 0.6, 0.10);
+        toolless.excluded = 5;
+        toolless.min_eligible = 15;
+        let block = render_pareto(&[toolless, group("codex", 20, 0.5, 0.20)]).unwrap();
+        assert!(block.contains("refused: 15 eligible"), "{block}");
     }
 
     #[test]
