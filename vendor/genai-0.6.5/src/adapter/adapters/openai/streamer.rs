@@ -147,6 +147,10 @@ impl OpenAIStreamer {
 	}
 }
 
+fn is_unnamed_placeholder(tool_call: &ToolCall) -> bool {
+	tool_call.fn_name.is_empty() && tool_call.fn_arguments.as_str().is_some_and(str::is_empty)
+}
+
 impl futures::Stream for OpenAIStreamer {
 	type Item = Result<InterStreamEvent>;
 
@@ -178,6 +182,11 @@ impl futures::Stream for OpenAIStreamer {
 						let captured_tool_calls = if let Some(tools_calls) = self.captured_data.tool_calls.take() {
 							let tools_calls: Vec<ToolCall> = tools_calls
 								.into_iter()
+								// Gateways that translate an Anthropic upstream (new-api / ModelGateway)
+								// number tool calls by content block, so the first call arrives at
+								// index 1 or 2. The gap slots below it are placeholders no delta ever
+								// named; emitting them yields nameless "unknown tool" calls.
+								.filter(|tool_call| !is_unnamed_placeholder(tool_call))
 								.map(|tool_call| {
 									// extrat
 									let ToolCall {
@@ -485,6 +494,21 @@ mod tests {
 
 	fn test_model() -> ModelIden {
 		ModelIden::new(AdapterKind::OpenAI, "test-model")
+	}
+
+	#[test]
+	fn test_gap_placeholders_are_unnamed_but_real_calls_are_not() {
+		// ModelGateway, verbatim (2026-10-14): two parallel calls streamed at index 1 and 2.
+		let call = |name: &str, args: &str| ToolCall {
+			call_id: String::new(),
+			fn_name: name.to_string(),
+			fn_arguments: Value::String(args.to_string()),
+			thought_signatures: None,
+		};
+		assert!(is_unnamed_placeholder(&call("", "")));
+		assert!(!is_unnamed_placeholder(&call("read_file", "{\"path\":\"a.txt\"}")));
+		// A nameless call that did receive arguments is kept so the loop can report it.
+		assert!(!is_unnamed_placeholder(&call("", "{}")));
 	}
 
 	#[test]

@@ -347,6 +347,56 @@ fn median(values: &[f64]) -> Option<f64> {
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────────────────────────
 
+/// True for a new-api gateway's `/models` body (ModelGateway): its entries carry
+/// `supported_endpoint_types`, and such a gateway publishes prices at `<origin>/api/pricing`
+/// rather than in the listing.
+pub(super) fn is_new_api_listing(body: &serde_json::Value) -> bool {
+    body["data"]
+        .as_array()
+        .is_some_and(|d| d.iter().any(|m| m["supported_endpoint_types"].is_array()))
+}
+
+/// Prices from a new-api `/api/pricing` body, as `(namespace::model, in_1k, out_1k, None)`.
+///
+/// The billed rate is the vendor's official per-1M price less `discount_percent`, for input and
+/// output alike: on ModelGateway (2026-10-14) a 20k-token glm-5.3-flash prompt, a 56k-token
+/// claude-sonnet-5 prompt and a 2.9k-token sonnet completion each billed exactly that. The
+/// `model_ratio` / `lowest_price` fields do not match the bill and are ignored. Per-request priced
+/// models (`quota_type` 1) and models without an official price are left unpriced, never $0.
+pub(super) fn new_api_pricing(
+    body: &serde_json::Value,
+    namespace: &str,
+) -> Vec<(String, f64, f64, Option<f64>)> {
+    let Some(data) = body["data"].as_array() else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter_map(|m| {
+            let id = m["model_name"].as_str()?;
+            if m["quota_type"].as_u64().unwrap_or(0) != 0 {
+                return None;
+            }
+            let official = |field: &str| m[field].as_f64().filter(|p| p.is_finite() && *p > 0.0);
+            let (input, output) = (
+                official("official_input_price")?,
+                official("official_output_price")?,
+            );
+            let keep = 1.0
+                - m["discount_percent"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 100.0)
+                    / 100.0;
+            Some((
+                format!("{namespace}::{id}"),
+                input * keep / 1000.0,
+                output * keep / 1000.0,
+                None,
+            ))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod marketplace_tests {
     use super::*;
@@ -428,5 +478,36 @@ mod marketplace_tests {
     fn a_plain_openai_listing_yields_nothing() {
         let body = serde_json::json!({"data": [{"id": "gpt-x"}, {"id": "y", "context_length": 8}]});
         assert!(marketplace_pricing(&body, "custom", PricingStat::Median).is_empty());
+    }
+
+    #[test]
+    fn new_api_pricing_bills_official_less_discount() {
+        // ModelGateway `/api/pricing` entries, trimmed (2026-10-14).
+        let body = serde_json::json!({"data": [
+            {"model_name": "glm-5.3-flash", "quota_type": 0, "model_ratio": 0.0049995,
+             "official_input_price": 0.15, "official_output_price": 0.5, "discount_percent": 98},
+            {"model_name": "claude-sonnet-5", "quota_type": 0, "model_ratio": 0.1,
+             "official_input_price": 2, "official_output_price": 10, "discount_percent": 98},
+            {"model_name": "per-request", "quota_type": 1, "official_input_price": 1,
+             "official_output_price": 1, "discount_percent": 0},
+            {"model_name": "unlisted", "quota_type": 0, "official_input_price": 0,
+             "official_output_price": 0, "discount_percent": 98}
+        ]});
+        let rows = new_api_pricing(&body, "modelgateway");
+        assert_eq!(rows.len(), 2);
+        let (id, i, o, cache) = &rows[1];
+        assert_eq!(id, "modelgateway::claude-sonnet-5");
+        assert!((i - 0.00004).abs() < 1e-12 && (o - 0.0002).abs() < 1e-12);
+        assert!(cache.is_none());
+        assert!((rows[0].1 - 0.000003).abs() < 1e-12);
+    }
+
+    #[test]
+    fn only_new_api_listings_are_detected() {
+        let gateway =
+            serde_json::json!({"data": [{"id": "glm-5", "supported_endpoint_types": ["openai"]}]});
+        let plain = serde_json::json!({"data": [{"id": "glm-5", "context_window": 1000}]});
+        assert!(is_new_api_listing(&gateway));
+        assert!(!is_new_api_listing(&plain));
     }
 }

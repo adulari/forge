@@ -168,7 +168,11 @@ pub async fn fetch_and_persist(models: &[String]) {
                 Some(_) => llama_cpp_served_window(cp.endpoint).await,
                 None => None,
             };
-            (body, served)
+            let prices = match &body {
+                Some(b) if is_new_api_listing(b) => new_api_prices(cp.endpoint, cp.namespace).await,
+                _ => Vec::new(),
+            };
+            (body, served, prices)
         })),
         async {
             let key = anthropic_key.as_deref()?;
@@ -254,8 +258,18 @@ pub async fn fetch_and_persist(models: &[String]) {
     // ── Custom OpenAI-compatible providers (NVIDIA NIM, Cerebras, SambaNova, …) ─────────────────
     // Fetched before the other native providers so the Anthropic/Gemini/Groq authoritative writes
     // happen last and win over any cross-provider basename matches.
-    for ((cp, _), (body, served_window)) in custom.iter().zip(custom_bodies) {
+    for ((cp, _), (body, served_window, new_api_rows)) in custom.iter().zip(custom_bodies) {
         let ns = cp.namespace;
+        for (id, in_1k, out_1k, cache_1k) in new_api_rows {
+            record_price(
+                &store,
+                &id,
+                in_1k,
+                out_1k,
+                cache_1k,
+                &mut price_write_failed,
+            );
+        }
         if let Some(body) = body {
             // A marketplace gateway (InferHub) prices every model in its own listing. These are
             // fetched rates, so a `[mesh.pricing]` entry still overrides them.
@@ -411,9 +425,9 @@ use bridges::{derive_cli_bridge_windows, persist_authoritative_contexts};
 /// When multiple OR models share a basename the largest window wins (conservatively).
 mod parsers;
 use parsers::{
-    anthropic_windows, build_basename_index, gemini_windows, marketplace_pricing,
-    models_dev_pricing, openai_compatible_windows, openrouter_native_cross_map, openrouter_pricing,
-    openrouter_windows,
+    anthropic_windows, build_basename_index, gemini_windows, is_new_api_listing,
+    marketplace_pricing, models_dev_pricing, new_api_pricing, openai_compatible_windows,
+    openrouter_native_cross_map, openrouter_pricing, openrouter_windows,
 };
 
 /// A llama.cpp server's ACTUAL context window, from its `/props` endpoint (`n_ctx`).
@@ -429,6 +443,17 @@ async fn llama_cpp_served_window(endpoint: &str) -> Option<u32> {
     let root = root.strip_suffix("/v1").unwrap_or(root);
     let body = get_json(&format!("{root}/props"), None).await?;
     props_window(&body)
+}
+
+/// A new-api gateway (ModelGateway) lists models at `<origin>/v1/models` and prices them at
+/// `<origin>/api/pricing`, beside it.
+async fn new_api_prices(endpoint: &str, namespace: &str) -> Vec<(String, f64, f64, Option<f64>)> {
+    let root = endpoint.trim_end_matches('/');
+    let root = root.strip_suffix("/v1").unwrap_or(root);
+    get_json(&format!("{root}/api/pricing"), None)
+        .await
+        .map(|body| new_api_pricing(&body, namespace))
+        .unwrap_or_default()
 }
 
 /// The parsing half of [`llama_cpp_served_window`], split out so it is testable without a server.

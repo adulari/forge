@@ -190,8 +190,9 @@ discovery (InferHub is the case in hand): per-model `reasoning_levels` become th
 Forge sends against, an `output_modality` without text drops the model from the catalog, and a
 marketplace `pricing` block (official price plus a list of seller asks) prices the model by the
 provider's `pricing_stat` (`median` default; `min` | `mean` | `official`). A `usage.cost` in the
-response is recorded as the call's spend for metered models. Details in
-[mesh-routing.md §5.1](mesh-routing.md).
+response is recorded as the call's spend for metered models. A new-api gateway (ModelGateway,
+`https://www.modelgateway.co/v1`) is detected by `supported_endpoint_types` in its listing and
+priced from its `/api/pricing` page instead. Details in [mesh-routing.md §5.1](mesh-routing.md).
 
 Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint: the API rejects
 `enable_thinking=false`. Forge therefore sends a separate native `thinking_budget` (4,096 tokens by
