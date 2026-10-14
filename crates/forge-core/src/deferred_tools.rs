@@ -68,10 +68,6 @@ pub fn partition_by(
     specs.into_iter().partition(|s| core(&s.name))
 }
 
-pub fn partition(specs: Vec<ToolSpec>) -> (Vec<ToolSpec>, Vec<ToolSpec>) {
-    partition_by(specs, is_core)
-}
-
 /// Longest gloss of a deferred tool in the catalog. Long enough to say what it drives, short enough
 /// that ~25 deferred tools stay well under the cost of one advertised schema.
 const GLOSS_CAP: usize = 64;

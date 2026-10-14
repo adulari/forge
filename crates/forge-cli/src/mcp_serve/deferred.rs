@@ -40,6 +40,27 @@ pub(super) fn meta_tools(deferred: &[Tool]) -> Option<[Tool; 2]> {
     shared::meta_specs(&specs, false).map(|pair| pair.map(to_tool))
 }
 
+/// The `(name, arguments)` a bridge `tool_call` forwards to, through the same unwrap as the direct
+/// path: arguments may arrive as an object, an escaped JSON string, or under `args`/`input`.
+pub(super) fn unwrap_call(args: Value) -> Result<(String, Option<JsonObject>), String> {
+    let wrapped = forge_types::ToolCall {
+        id: String::new(),
+        name: TOOL_CALL.to_string(),
+        args,
+    };
+    match shared::unwrap_tool_call(&wrapped) {
+        Some(Ok(inner)) => Ok((
+            inner.name,
+            match inner.args {
+                Value::Object(arguments) => Some(arguments),
+                _ => None,
+            },
+        )),
+        Some(Err(error)) => Err(error),
+        None => Err(format!("error: not a {TOOL_CALL}")),
+    }
+}
+
 /// Shorten every parameter description on `tool` to its first sentence (see [`shared::slim`]).
 pub(super) fn slim(mut tool: Tool) -> Tool {
     let slimmed = shared::slim(to_spec(&tool));
@@ -110,6 +131,19 @@ mod tests {
         assert_eq!(call.name, TOOL_CALL);
         let desc = search.description.unwrap();
         assert!(desc.contains("browser (b); device (d)"), "{desc}");
+    }
+
+    #[test]
+    fn unwrap_call_matches_the_direct_path() {
+        let (name, args) =
+            unwrap_call(json!({"name": "web_fetch", "arguments": "{\"url\":\"https://x\"}"}))
+                .unwrap();
+        assert_eq!(name, "web_fetch");
+        assert_eq!(args.unwrap()["url"], "https://x");
+        let (_, args) = unwrap_call(json!({"name": "device", "args": {"action": "ui"}})).unwrap();
+        assert_eq!(args.unwrap()["action"], "ui");
+        assert!(unwrap_call(json!({"name": TOOL_SEARCH})).is_err());
+        assert!(unwrap_call(json!({})).is_err());
     }
 
     #[test]

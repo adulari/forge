@@ -70,6 +70,8 @@ lean_core_extra = ["web_fetch"]  # deferred tools to keep advertised
   mode switch, but weak models may misfire it in Build mode; that waits for a bench run.
 - The bridge still lists its deferred tools through the shared catalog but does not fold
   external MCP tools into `tool_search`: there `mcp_search_tools`/`mcp_call` are deferred tools.
+  Its `tool_call` does use the shared unwrap, so string-encoded or `args`/`input` arguments
+  work the same on both paths.
 - `tool_search` does not run in the concurrent read-only batch; it is a local lookup.
 
 ## 5. Measuring it

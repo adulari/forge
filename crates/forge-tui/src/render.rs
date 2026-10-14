@@ -353,7 +353,7 @@ pub fn mcp_status_lines(servers: &[forge_types::McpServerLine]) -> Vec<Line<'sta
         out.push(Line::from(spans));
     }
     out.push(Line::from(Span::styled(
-        "    tools load on demand — find one with tool_search, then run it with tool_call."
+        "    tools load on demand — the model finds them with tool_search or mcp_search_tools."
             .to_string(),
         Style::default().fg(DIM),
     )));
