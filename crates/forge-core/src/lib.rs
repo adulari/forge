@@ -27,6 +27,9 @@ use forge_types::{
 use forge_types::{Presenter, PresenterEvent};
 
 mod adaptive_effort;
+mod build_command;
+mod memory_scope;
+use build_command::is_env_setup_command;
 mod local_evidence;
 pub use local_evidence::apply_local_evidence;
 pub mod assay;
@@ -592,49 +595,6 @@ fn bridge_tool_command(args: &str) -> String {
         }
     }
     args.to_string()
-}
-
-/// Whether a shell command looks like environment provisioning or a native build — the heuristic
-/// the env-fight cap keys on (pip/venv/virtualenv/ensurepip/apt/uv/conda…), extended in wave 5 with
-/// build archaeology (C-extension builds + native toolchains: `setup.py build_ext`, `make`, `gcc`,
-/// `cmake`, `pyenv`, `./configure`…) that were the bulk of astropy-12907's failing commands and
-/// matched nothing before. Phrase patterns use a substring match on the whitespace-normalized,
-/// lowercased command (so wrappers like `cd x && pip install …` still match); single-token compiler
-/// invocations are matched as WHOLE tokens so `make` doesn't fire on `cmake`/`makemigrations`.
-fn is_env_setup_command(cmd: &str) -> bool {
-    let c = cmd
-        .to_ascii_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    const PHRASES: &[&str] = &[
-        "pip install",
-        "pip3 install",
-        "-m pip",
-        "-m ensurepip",
-        "-m venv",
-        "virtualenv",
-        "uv venv",
-        "uv pip",
-        "apt-get install",
-        "apt install",
-        "conda install",
-        "conda create",
-        "yum install",
-        "apk add",
-        "setup.py build",
-        "python setup.py",
-        "./configure",
-        "cmake",
-        "pyenv",
-    ];
-    if PHRASES.iter().any(|p| c.contains(p)) {
-        return true;
-    }
-    // Single-token compiler/build invocations — matched as WHOLE tokens, not substrings, so
-    // `make` doesn't fire on `cmake`/`makemigrations` and `cc` doesn't fire on `gcc`/`accept`.
-    const TOOLS: &[&str] = &["make", "gcc", "g++", "cc", "clang", "meson", "ninja"];
-    c.split(' ').any(|tok| TOOLS.contains(&tok))
 }
 
 /// Per-turn setup-attempt tracker + latch for the environment spend cap. Only env-setup commands
@@ -3056,6 +3016,7 @@ impl Session {
             // dump-everything memory file: only the RELEVANT memories are injected, ranked by the
             // prompt then salience + recency. Once per session, like AGENTS.md.
             if self.config.mesh.auto_memory {
+                memory_scope::align_memory_scopes(&self.store, self.workspace.root());
                 let scope = memory_scope_at(self.workspace.root());
                 let recalled = match embed_one(&self.config.lattice.embeddings, prompt).await {
                     Some(qemb) => self.store.recall_semantic(&scope, &qemb, 6),

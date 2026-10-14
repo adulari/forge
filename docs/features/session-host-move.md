@@ -120,3 +120,7 @@ only the notice lands. Like `/compact`, it is refused while a turn is running.
   are not loaded. They are lost, not wrong, and are left untouched.
 - **Anywhere history sync**: a synced session row gets the receiving daemon's cwd and no
   fingerprint, so it relies on the history-based detection path above.
+
+## Memories
+
+Auto-memories are keyed by workspace path. Each recall and each memory write also mirrors them to a per-git-remote alias scope (`repo:<host/owner/repo>[#<subdir>]`) and copies back what the path scope lacks, so a relocated workspace finds the memories written under its old path. Old keys are never deleted; repos without a remote are not aliased.
