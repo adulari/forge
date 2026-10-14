@@ -64,7 +64,8 @@ commit_nudge_edits = 10    # mid-turn reminder cadence; 0 = turn-start reminder 
 push_nudge_ahead = 3       # commits ahead of upstream before "offer a push"; 0 = never
 ```
 
-The system-prompt guidance stays on regardless; it is part of what Forge is.
+The system-prompt guidance stays on regardless; it is part of what Forge is. A model on the
+`minimal` harness profile gets neither reminder (see `harness-profile.md`).
 
 ## 4. Behaviour at the seams
 

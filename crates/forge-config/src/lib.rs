@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod browser;
 mod commit_policy;
+mod harness_profile;
 pub mod mcp;
 pub mod notifications;
 pub mod oauth;
@@ -24,6 +25,7 @@ pub mod quota_status;
 pub mod secret_store;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
+pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
     write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
@@ -2167,9 +2169,24 @@ pub struct MeshConfig {
     /// no effort param (provider default). Overridable per session with `/effort`.
     #[serde(default)]
     pub default_effort: Option<String>,
+    /// Advisory steering level (docs/features/harness-profile.md). `guarded` (default) keeps every
+    /// nudge; `minimal` drops the advisory ones (progress asks, stall/stagnation nudges, commit
+    /// reminders, auto-orchestrate, mid-intent and continue nudges) while the safety guards stay.
+    #[serde(default)]
+    pub harness_profile: HarnessProfile,
+    /// Per-model overrides of `harness_profile`, keyed by a model-id glob (`*` = any run of
+    /// characters): `[mesh.harness_profiles] "bedrock::*" = "minimal"`. The most specific match
+    /// wins.
+    #[serde(default)]
+    pub harness_profiles: std::collections::BTreeMap<String, HarnessProfile>,
 }
 
 impl MeshConfig {
+    /// The harness profile for `model`, after per-model glob overrides.
+    pub fn harness_profile_for(&self, model: &str) -> HarnessProfile {
+        resolve_harness_profile(self.harness_profile, &self.harness_profiles, model)
+    }
+
     /// Effective per-completion output token cap. Credit conservation affects routing only; a
     /// response limit exists solely when the user explicitly configures this field above zero.
     pub fn effective_max_output_tokens(&self) -> u32 {
@@ -2846,6 +2863,8 @@ impl Default for Config {
                 architect_model: None,
                 editor_model: None,
                 default_effort: None,
+                harness_profile: HarnessProfile::Guarded,
+                harness_profiles: std::collections::BTreeMap::new(),
             },
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),

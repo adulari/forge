@@ -257,6 +257,8 @@ impl Session {
             turn_billable_input_tokens: 0,
             turn_output_tokens: 0,
             turn_hard_guard_abort: false,
+            harness_profile: forge_config::HarnessProfile::default(),
+            empty_reply_nudged: false,
             spend: Default::default(),
             turn_unfinished_tasks: Vec::new(),
             expect_code_change: false,

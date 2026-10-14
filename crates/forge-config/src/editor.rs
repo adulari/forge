@@ -181,6 +181,7 @@ pub fn setting_options(path: &str) -> Option<Vec<&'static str>> {
         "permission_mode" => vec!["default", "accept-edits", "bypass", "plan"],
         "mesh.credit_mode" => vec!["normal", "frugal", "strict"],
         "mesh.classifier" => vec!["heuristic", "llm"],
+        "mesh.harness_profile" => vec!["guarded", "minimal"],
         "mesh.default_effort" => vec!["low", "medium", "high", "xhigh", "max"],
         "lattice.embeddings.backend" => vec!["auto", "ollama", "openai", "gemini"],
         _ => return None,
@@ -460,6 +461,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "git.coauthor" => "Install a commit hook stamping Co-Authored-By: Forge and stripping CLI co-authors.",
         "lsp.enabled" => "Feed language-server diagnostics back into the turn after edits.",
         "mesh.auto_orchestrate" => "Inject the orchestration framework every session: skills first, highest-level tool, subagents/MCP/web/Lattice — no need to /orchestrate manually.",
+        "mesh.harness_profile" => "guarded keeps every advisory nudge; minimal drops them (progress asks, stall nudges, commit reminders, continue nudges) and keeps only the safety guards. Per-model globs go in [mesh.harness_profiles].",
         _ => return None,
     })
 }

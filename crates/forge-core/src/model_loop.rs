@@ -99,10 +99,8 @@ impl Session {
         // Plan mode — the bridge advertises present_plan unconditionally, so the parent gates here.
         let mut proposed_plan: Option<forge_types::PlanProposal> = None;
         let in_plan_mode = self.mode == PermissionMode::Plan;
-        // Harness reliability guards. `empty_nudges`: bounded retries when the model returns nothing
-        // (narrate-then-stall / transient empty) before giving up. `last_tool_sig`/`repeat_count`:
-        // doom-loop detection — the same tool batch repeated DOOM_LOOP_THRESHOLD× halts the turn.
-        let mut empty_nudges = 0usize;
+        // `last_tool_sig`/`repeat_count`: doom-loop detection — the same tool batch repeated
+        // DOOM_LOOP_THRESHOLD× halts the turn.
         let mut last_tool_sig: Option<u64> = None;
         let mut repeat_count = 0usize;
         // `recent_sigs`: a short sliding window of recent tool-batch signatures. The consecutive
@@ -307,8 +305,8 @@ impl Session {
                 tools_before,
                 &tools_ran,
                 &mut bridge_input_accum,
-                &mut empty_nudges,
             )?;
+            self.note_harness_model(&active_model);
             self.emit_cost_snapshot(context_tokens, &active_model)?;
 
             if resp.wants_tools() || bridge_tool_progress {
@@ -325,7 +323,6 @@ impl Session {
 
             if !resp.wants_tools() {
                 if !resp.content.trim().is_empty() {
-                    empty_nudges = 0;
                     final_text = resp.content.clone();
                     has_prior_final = true;
                 }
@@ -348,22 +345,7 @@ impl Session {
                         hit_step_cap = false;
                         break;
                     }
-                    const MAX_EMPTY_NUDGES: usize = 2;
-                    if empty_nudges < MAX_EMPTY_NUDGES {
-                        empty_nudges += 1;
-                        self.require_tool_call = !nudge_policy::open_titles(&self.tasks).is_empty();
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "model returned an empty response — nudging it to continue ({empty_nudges}/{MAX_EMPTY_NUDGES})"
-                        )));
-                        let nudge = "Your last response was empty. Continue with the task: call a \
-                                     tool to make progress, or state your final answer. Do not reply \
-                                     with an empty message.";
-                        let nseq = self.next_seq();
-                        // Provider chat APIs require a continuation request to end in a user
-                        // message. Appending this as System after the empty Assistant response made
-                        // the recovery request invalid (`last message role must be 'user'`).
-                        let _ = self.store.add_nudge_message(&self.id, nseq, nudge);
-                        self.transcript.push(Message::user(nudge));
+                    if self.nudge_empty_reply() {
                         continue;
                     }
                     // Nudges exhausted. An empty-responding model (e.g. some NIM models that stream
@@ -400,7 +382,6 @@ impl Session {
                             });
                             active_model = next;
                             transient_retries = 0;
-                            empty_nudges = 0;
                             continue;
                         }
                     }
@@ -659,7 +640,7 @@ impl Session {
                     // (bounded) so the work completes instead of ending the turn mid-task.
                     let open_titles = nudge_policy::open_titles(&self.tasks);
                     let unfinished = open_titles.len();
-                    if unfinished > 0 {
+                    if unfinished > 0 && self.advisory_nudges_on() {
                         // Work is still open — any earlier "all done" verification is stale.
                         verify_attempts = 0;
                         let progress_now = (
@@ -729,7 +710,7 @@ impl Session {
                         if self.nudge_unapplied_edit(&mut phantom_edit_nudges) {
                             continue;
                         }
-                    } else if !self.tasks.is_empty() {
+                    } else if unfinished == 0 && !self.tasks.is_empty() {
                         // Every tracked task reported Done — same completion authority as the bridge:
                         // accept fresh evidence newer than the last mutation, otherwise request a
                         // tool-grounded state check. A self-reported "done" without an inspection is

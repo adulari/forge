@@ -48,11 +48,13 @@ pub(crate) mod context_pipeline;
 mod detached_subagents;
 pub mod dispatch;
 pub mod duel;
+mod empty_reply;
 mod exact_effort;
 mod failure_verdict;
 mod final_answer;
 pub mod fleet;
 pub(crate) mod git_hygiene;
+mod harness_profile;
 pub mod heartbeat;
 pub mod hooks;
 mod hooks_cc;
@@ -1761,6 +1763,10 @@ pub struct Session {
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
     /// counters and defeat them.
     turn_hard_guard_abort: bool,
+    /// The harness profile of the model currently driving the turn (harness_profile.rs).
+    harness_profile: forge_config::HarnessProfile,
+    /// This turn already spent its one empty-reply nudge (empty_reply.rs).
+    empty_reply_nudged: bool,
     /// USD spend guards for the active turn and the session (`spend_guard.rs`).
     spend: spend_guard::SpendState,
     /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
@@ -2880,6 +2886,7 @@ impl Session {
             return Ok(LoopOutcome::final_answer(msg));
         }
         let routed_model = decision.model.clone();
+        self.note_harness_model(&routed_model);
         let reuse_response_chain = should_reuse_response_chain(
             prompt,
             &routing_context,
@@ -3025,7 +3032,10 @@ impl Session {
 
             // Auto-orchestrate: inject the resource-routing framework once so the model surveys
             // all available tools on every turn without requiring the user to /orchestrate.
-            if self.config.mesh.auto_orchestrate && !lean_context::prompt_is_simple(prompt) {
+            if self.config.mesh.auto_orchestrate
+                && self.advisory_nudges_on()
+                && !lean_context::prompt_is_simple(prompt)
+            {
                 let guidance = forge_skills::orchestrate_system_guidance();
                 self.inject_context(
                     &mut context_pack,
@@ -3064,6 +3074,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_output_tokens = 0;
         self.turn_billable_input_tokens = 0;
         self.turn_hard_guard_abort = false;
+        self.empty_reply_nudged = false;
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
@@ -3209,7 +3220,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Commit discipline (git_hygiene.rs): while files this session edited are still
         // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask
         // the model to offer a push. `git status` is a process spawn, so it runs off the executor.
-        if self.config.git.commit_nudge && self.config.git.commit_policy.nudges() {
+        if self.commit_nudges_on() {
             let root = self.workspace.root().to_path_buf();
             let push_ahead = self.config.git.push_nudge_ahead;
             let mut tracker = std::mem::take(&mut self.git_hygiene);
@@ -4971,6 +4982,9 @@ mod tests {
 
     #[path = "spend_guard.rs"]
     mod spend_guard_tests;
+
+    #[path = "harness_profile.rs"]
+    mod harness_profile_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
