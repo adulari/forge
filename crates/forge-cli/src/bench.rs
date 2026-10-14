@@ -668,7 +668,7 @@ async fn prepare_and_run(
                     };
                 // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
                 let (inp, out, cost) = session.session_usage_db();
-                trace = Some(integrity::session_trace(&session));
+                trace = integrity::session_trace(&session);
                 // Wave 7: did this turn run toolless because `mcp-serve` failed to start? Only the
                 // bridge/headless path can report it; the harness retries the instance once on it.
                 (inp, out, cost, true, timed_out, session.tools_unavailable())

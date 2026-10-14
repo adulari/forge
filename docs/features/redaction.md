@@ -38,7 +38,8 @@ Every shape and keyword rule is anchored on a prefix, so git SHAs, short SHAs, U
 
 Regex layers cannot be complete; only layer 1 is a guarantee, and it only knows secrets that are
 configured on the machine doing the export. A keyring-only MCP token is not enumerated (its shape
-or a keyword usually catches it). Review a trajectory before publishing it anywhere public.
+or a keyword usually catches it). Layer 3 keeps letters-only values to spare code, so a
+passphrase like `password=correcthorse` is masked only if it is a configured secret (layer 1). Review a trajectory before publishing it anywhere public.
 
 ## Code
 
