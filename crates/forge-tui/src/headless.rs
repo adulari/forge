@@ -105,6 +105,22 @@ impl Presenter for HeadlessPresenter {
                 println!();
             }
             PresenterEvent::Steered(text) => {
+                if let Some(items) = forge_types::parse_job_notices(&text) {
+                    for item in items {
+                        match item {
+                            forge_types::JobNotice::Dropped(n) => {
+                                println!("  ⚙ {n} earlier job notice(s) dropped");
+                            }
+                            forge_types::JobNotice::Exit(exit) => {
+                                println!("  ⚙ {}", exit.summary());
+                                for l in &exit.tail {
+                                    println!("      {l}");
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
                 println!("  ⚡ steer: {text}");
             }
             PresenterEvent::Warning(msg) => {

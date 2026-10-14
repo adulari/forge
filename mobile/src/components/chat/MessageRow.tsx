@@ -7,6 +7,7 @@ import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
 import { isHarnessNudge } from "../../lib/harnessNudge";
+import { formatJobNotice, isJobNotice } from "../../lib/jobNotice";
 import { parseReasoning } from "../../lib/reasoning";
 import { haptics } from "../../lib/haptics";
 import { useSessionStable } from "../../lib/sessionContext";
@@ -149,14 +150,17 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   // fallback for an older daemon. Treat it as NOT the user everywhere below (bubble style,
   // mention parsing, speaker label) so it never claims to be their words.
   const isNudge = isHarnessNudge(row.role, row.content, row.kind);
-  const isUser = row.role === "user" && !isNudge;
+  // A background-job completion notice is also a stored user turn, tagged `kind: "job_notice"`;
+  // it renders as dim system output (lib/jobNotice.ts), never as the person's words.
+  const jobNotice = isJobNotice(row.kind);
+  const isUser = row.role === "user" && !isNudge && !jobNotice;
   // A `kind: "tool"` row (only ever on an `include_tools` page) is machine output, not a turn —
   // the chat renders those through ToolCallRow, and this guard keeps any that slip through from
   // being formatted as assistant prose.
   // `kind: "system"` is NOT a system line here: the daemon projects every `ui`-visibility row as
   // "system", and the turn's accepted answer is published as exactly such a row
   // (`publish_terminal_answer`). Keying on it rendered every final reply as dim tool output.
-  const isSystem = row.role === "system" || row.role === "tool" || row.kind === "tool";
+  const isSystem = row.role === "system" || row.role === "tool" || row.kind === "tool" || jobNotice;
   // Hearth: no on-row chrome at all — message actions live behind long-press (native and
   // touch-web) and right-click (desktop/web). Hover buttons were tried and cut.
 
@@ -238,7 +242,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : null}
         {isSystem ? null : <SpeakerTag speaker={isNudge ? "nudge" : isUser ? "you" : "forge"} model={row.model} />}
         {isSystem ? (
-          <SystemOutput content={row.content} />
+          <SystemOutput content={jobNotice ? formatJobNotice(row.content) : row.content} />
         ) : parsed ? (
           <>
             {parsed.reasoning ? <ReasoningDisclosure reasoning={parsed.reasoning} /> : null}

@@ -580,6 +580,7 @@ impl TranscriptKind {
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::Tool => "tool",
+            Self::JobNotice => "job_notice",
         }
     }
 }
@@ -599,6 +600,14 @@ impl LineOrigin {
         Self {
             kind: TranscriptKind::User,
             ..Self::default()
+        }
+    }
+
+    fn job(meta: Option<&str>) -> Self {
+        Self {
+            kind: TranscriptKind::JobNotice,
+            tool: None,
+            meta: meta.map(str::to_string),
         }
     }
 
@@ -2378,6 +2387,9 @@ impl App {
         self.turn_diffs.clear();
         self.turn_diffs_skipped = 0;
         self.plan = None;
+        if self.echo_job_notices(line) {
+            return;
+        }
         let peer = crate::peer_message::parse(line);
         self.tag_flush(LineOrigin::user(), |s| {
             match &peer {
@@ -2487,6 +2499,9 @@ impl App {
     /// where it landed in the conversation. Deliberately does NOT reset the turn's diff/plan
     /// projections the way `submit_user` does — this is the same turn continuing.
     fn echo_steered(&mut self, text: &str) {
+        if self.echo_job_notices(text) {
+            return;
+        }
         self.tag_flush(LineOrigin::user(), |s| {
             s.flush.push(header_line("you ⚡ steer", USER));
             for l in text.lines() {
@@ -3862,6 +3877,7 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
     w.saturating_sub(reserve).max(min)
 }
 
+mod job_notice;
 mod output_view;
 mod render;
 #[cfg(test)]
@@ -5264,6 +5280,70 @@ mod tests {
         let text = flush_text(&mut app);
         assert!(text.contains("you"));
         assert!(text.contains("my own task"));
+    }
+
+    const NOTICE: &str =
+        "[background job 3429249 `/tmp/batch.sh > /tmp/batch_result.log 2>&1` exited 0]";
+
+    fn drain_text_lines(app: &mut App) -> String {
+        app.drain_flush()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn job_notice_renders_as_a_harness_notice_not_a_user_message() {
+        let mut app = App::default();
+        app.submit_user(NOTICE);
+        let text = drain_text_lines(&mut app);
+        assert!(!text.contains("you"), "{text}");
+        assert!(!text.contains("[background job"), "{text}");
+        assert_eq!(
+            text.trim_end(),
+            "  ⚙ job 3429249 ✓ exited 0 · /tmp/batch.sh > /tmp/batch_result.log 2>&1"
+        );
+    }
+
+    #[test]
+    fn failed_coalesced_job_notices_render_one_header_each_with_dim_tail() {
+        let mut app = App::default();
+        let prompt = format!(
+            "[2 earlier background-job notice(s) were dropped; check `shell_job` list]\n\n[background job 9 `make` exited 2]\nlast lines:\nerror: boom\n\n{NOTICE}"
+        );
+        app.apply(PresenterEvent::Steered(prompt));
+        let text = drain_text_lines(&mut app);
+        assert!(!text.contains("steer") && !text.contains("you"), "{text}");
+        assert!(text.contains("⚙ 2 earlier job notice(s) dropped"), "{text}");
+        assert!(
+            text.contains("⚙ job 9 ✗ exited 2 · make\n      error: boom"),
+            "{text}"
+        );
+        assert!(text.contains("⚙ job 3429249 ✓ exited 0"), "{text}");
+    }
+
+    #[test]
+    fn job_notice_rows_reach_the_remote_ring_as_job_notice_kind() {
+        let mut app = App::default();
+        app.submit_user("[background job 9 `make` exited 2]\nlast lines:\nerror: boom");
+        app.drain_flush_remote();
+        let rows: Vec<_> = app
+            .recent_transcript
+            .iter()
+            .map(|r| (r.kind.as_str(), r.meta.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("job_notice", Some("failed")), ("job_notice", Some("tail"))]
+        );
+        app.submit_user("[background job 9 `make` exited 2] but really, retry it");
+        assert!(drain_text_lines(&mut app).contains("you"));
     }
 
     #[test]

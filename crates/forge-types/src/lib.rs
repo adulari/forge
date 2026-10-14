@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod job_notice;
 mod provider_items;
 pub use provider_items::ProviderItems;
 pub mod effort;
@@ -13,6 +14,7 @@ pub mod interaction;
 mod permission_mode;
 mod subscription_pacing;
 mod turn_outcome;
+pub use job_notice::{parse_job_notices, JobExitNotice, JobNotice};
 pub use permission_mode::PermissionMode;
 
 pub use interaction::{
