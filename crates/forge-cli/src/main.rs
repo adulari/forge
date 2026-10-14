@@ -82,6 +82,7 @@ mod log_filter;
 mod login_path;
 mod mcp_agent;
 mod mcp_serve;
+mod preview;
 mod push;
 mod push_tool;
 mod remote;
@@ -184,6 +185,7 @@ async fn run_cli(login_path_added: Vec<String>) {
     };
     if let Ok(config) = forge_config::load() {
         forge_tools::set_attach_endpoint(config.browser.endpoint());
+        preview::install(&config);
     }
     push_tool::install_local_sink();
     let telemetry_run = telemetry::start(&command);

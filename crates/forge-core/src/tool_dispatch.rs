@@ -574,7 +574,12 @@ impl Session {
         let allowed = match decision {
             PermissionDecision::Allow => true,
             PermissionDecision::Deny => false,
-            PermissionDecision::Ask => match self.presenter.confirm(&call.name, side_effect) {
+            PermissionDecision::Ask => match permission::confirm_call(
+                self.presenter.as_mut(),
+                &call.name,
+                &effective_args,
+                side_effect,
+            ) {
                 forge_types::ConfirmOutcome::AlwaysAllow => {
                     // Scope to what the user SAW: an empty list matches every segment (see
                     // decide_shell_segments), so approving `git status` used to auto-approve

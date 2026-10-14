@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod notifications;
 pub mod oauth;
 mod paths;
+pub mod preview;
 pub mod privacy;
 pub mod provider_oauth;
 pub mod quota_status;
@@ -147,6 +148,9 @@ pub struct Config {
     /// Attach the browser tool to an existing logged-in browser (`[browser] attach`).
     #[serde(default)]
     pub browser: browser::BrowserConfig,
+    /// Public preview URLs for agent-started dev servers (`shell_job` expose).
+    #[serde(default)]
+    pub preview: preview::PreviewConfig,
     /// User-configurable keybind map (action → key combo). Defaults to the built-in map.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -2919,6 +2923,7 @@ impl Default for Config {
             statusline: StatuslineConfig::default(),
             notifications: notifications::NotificationsConfig::default(),
             browser: browser::BrowserConfig::default(),
+            preview: preview::PreviewConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),

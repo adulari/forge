@@ -323,8 +323,9 @@ Companion tool for background lifecycle (S1, as shipped):
 // shell_job — list, read, inspect, and stop background jobs
 { "type":"object",
   "properties": {
-    "action": { "type":"string", "enum":["list","log","status","stop"] },
+    "action": { "type":"string", "enum":["list","log","status","stop","expose"] },
     "id":     { "type":"integer", "description":"Job id (its pid)." },
+    "port":   { "type":"integer", "description":"For expose: the local port the job serves on." },
     "lines":  { "type":"integer", "description":"For log: trailing lines (default 40)." }
   },
   "required":["action"] }
@@ -555,6 +556,54 @@ Hard-denied command (cannot be allowed, shown even in bypass):
 - [ ] Secret-shaped args masked in TUI/transcript display.
 - [ ] Sandbox (C1) documented as the next safety milestone (not required to ship).
 ```
+
+## Preview URLs (`shell_job` expose)
+
+`shell_job {"action":"expose","id":<job>,"port":5173}` puts a running background job's local port
+on a public `https://` URL, so a dev server the agent started can be opened from a phone or shared
+for review. It reuses the cloudflared/ngrok machinery behind `/remote --anywhere`, which now lives
+in `forge_tools::tunnel` (`crates/forge-tools/src/tunnel.rs`); forge-cli's `remote.rs` only maps
+`[remote]` onto it.
+
+- **Quick tunnel by default.** A random `trycloudflare.com` (or ngrok) URL. The `[remote]`
+  `tunnel_name`/`tunnel_hostname` stable hostname is used only with `[preview] use_fixed_hostname =
+  true`, so app traffic never lands on the Forge Anywhere / `/remote` hostname by accident.
+- **Always asks.** The permission broker returns Ask for this action in every mode that allows side
+  effects — `default`, `accept-edits`, `auto` and `bypass` — and an allow rule (including one saved
+  by answering "always") cannot skip it. Plan / read-only mode denies it like any other side
+  effect, and a deny rule still wins. A headless run has no one to ask, so it is denied there, and
+  so is a `forge mcp-agent` orchestrator in any mode. The prompt names the action, the port and
+  the job (`shell_job expose — PUBLIC unauthenticated URL for port 5173 (job 4242)`) instead of a
+  bare `shell_job`, and answering "always" counts as a one-time yes: no allow rule is saved.
+  See `crates/forge-core/src/permission/expose.rs`.
+- **Kill switch.** `[preview] enabled = false` refuses the action outright. It defaults to `true`
+  because every expose is already approval-gated.
+- **The result warns.** The tool result says the URL is public and unauthenticated.
+- **Lifetime.** The tunnel is detached (own session, output on `.forge/jobs/<id>.tunnel.log`) so it
+  survives the turn like the dev server does. Its pid, start time, port and URL are recorded under
+  `"tunnel"` in the job's `<id>.json`. It is stopped when:
+  - `shell_job stop` stops the job, or the job exits while the Forge that started it is running;
+  - the TTL runs out (`[preview] ttl_minutes`, default 120). Where `timeout` is on PATH (Linux,
+    or coreutils on macOS) the tunnel runs as `timeout -s TERM <ttl> cloudflared …`, so the TTL
+    holds even if Forge crashes; the process that opened it also keeps a timer;
+  - the reaper finds it orphaned or expired. Every live tunnel is also listed in
+    `<data dir>/preview-tunnels/<tunnel pid>.json`. `forge serve` sweeps that registry at startup,
+    and `forge doctor` sweeps it and reports what it closed, so a tunnel left behind by a crashed
+    Forge does not stay public. The reaper never signals a pid whose start time no longer matches
+    the recorded one.
+- Exposing the same job and port twice returns the existing URL. A different port replaces the
+  job's tunnel. If the job exits while its tunnel is still starting, the tunnel is closed and the
+  expose fails rather than leaving a public URL in front of nothing.
+
+```toml
+[preview]
+enabled = true             # false = shell_job expose is refused
+use_fixed_hostname = false # true = reuse [remote] tunnel_name / tunnel_hostname
+ttl_minutes = 120          # the reaper closes older tunnels even if the job still runs
+```
+
+Not done yet: showing the preview link in the Snapshot / Forge Anywhere app (a mobile follow-up)
+and listing the URL in the `/pr` evidence block.
 
 ## Batching (`commands`, concurrent read-only calls)
 

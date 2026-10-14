@@ -40,6 +40,11 @@ use crate::sandbox::{self, SandboxPolicy};
 use crate::{str_arg, Tool, ToolError};
 mod background;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
+mod preview;
+pub use preview::{
+    reap_orphan_tunnels, set_preview_settings, PreviewSettings, ReapReason, ReapReport,
+    ReapedTunnel, TunnelRecord,
+};
 mod pty;
 mod rtk;
 pub use background::ShellJobTool;
