@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 use clap::Parser;
 
 use forge_core::Session;
-use forge_provider::{DispatchProvider, Provider};
+use forge_provider::DispatchProvider;
 use forge_store::Store;
 use forge_types::TaskTier;
 

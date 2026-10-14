@@ -143,3 +143,37 @@ fn the_first_request_decides_and_later_ones_inherit_it() {
         "a failover onto a key-sharing provider must not switch keys mid-session"
     );
 }
+
+#[tokio::test]
+async fn new_and_resume_pick_the_key_again_for_the_session_they_switch_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(KeyRecorder::default());
+    let mut config = Config::default();
+    config.mesh.cross_session_cache_key = false;
+    let mut s = session(dir.path(), Arc::clone(&provider), config);
+    s.run_turn("say hi").await.unwrap();
+    let first_id = s.id.clone();
+    s.reset_fresh(dir.path().to_str().unwrap()).unwrap();
+    s.run_turn("say hi").await.unwrap();
+    let fresh_id = s.id.clone();
+    s.reset_resumed(&first_id).unwrap();
+    s.run_turn("say hi again").await.unwrap();
+
+    let keys: Vec<Option<String>> = provider
+        .keys
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, k)| k.clone())
+        .collect();
+    assert_ne!(first_id, fresh_id);
+    assert_eq!(
+        keys.first().cloned().flatten().as_deref(),
+        Some(first_id.as_str())
+    );
+    assert!(keys.contains(&Some(fresh_id.clone())), "{keys:?}");
+    assert_eq!(
+        keys.last().cloned().flatten().as_deref(),
+        Some(first_id.as_str())
+    );
+}

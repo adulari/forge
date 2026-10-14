@@ -236,9 +236,12 @@ pub(crate) async fn assay_run_cmd(
 
     // --- Build provider (same as build_provider_and_router, no mock in CI) ---
     let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;
-    let provider: std::sync::Arc<dyn forge_provider::Provider> = std::sync::Arc::new(
-        forge_provider::DispatchProvider::new(harness)
-            .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
+    let provider: std::sync::Arc<dyn forge_provider::Provider> = forge_core::zero_retention::guard(
+        std::sync::Arc::new(
+            forge_provider::DispatchProvider::new(harness)
+                .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
+        ),
+        &config,
     );
 
     let cooldown = std::time::Duration::from_secs(config.mesh.failover_cooldown_secs);

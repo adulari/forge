@@ -25,7 +25,8 @@ pub const RETENTION_TABLE: &[RetentionEntry] = &[RetentionEntry {
     provider: "ollama",
     retains: false,
     evidence: "local Ollama server: Forge calls OLLAMA_HOST (default localhost:11434), so prompts \
-               stay on this machine; treated as retaining when OLLAMA_HOST points elsewhere",
+               stay on this machine; treated as retaining when OLLAMA_HOST points elsewhere or \
+               the model is an Ollama cloud model (`:cloud` / `-cloud` tag)",
 }];
 
 /// A candidate the mode removed, with the reason shown by `forge mesh explain`.
@@ -56,10 +57,25 @@ fn retention_block_with(config: &Config, model: &str, ollama_host: Option<&str>)
     if entry.retains {
         return Some(format!("{provider} retains prompts ({})", entry.evidence));
     }
-    if provider == "ollama" && !host_is_loopback(ollama_host.unwrap_or("localhost")) {
-        return Some("OLLAMA_HOST points off this machine".to_string());
+    if provider == "ollama" {
+        if !host_is_loopback(ollama_host.unwrap_or("localhost")) {
+            return Some("OLLAMA_HOST points off this machine".to_string());
+        }
+        if is_ollama_cloud_model(model) {
+            return Some(
+                "Ollama cloud model: the local server forwards it to ollama.com".to_string(),
+            );
+        }
     }
     None
+}
+
+/// Ollama's hosted models (`gpt-oss:120b-cloud`, `kimi-k2:1t-cloud`, `foo:cloud`) are called
+/// through the local server but run on ollama.com, so the prompt leaves this machine.
+fn is_ollama_cloud_model(model: &str) -> bool {
+    let name = model.split_once("::").map_or(model, |(_, name)| name);
+    let tag = name.rsplit_once(':').map_or("", |(_, tag)| tag);
+    tag == "cloud" || tag.ends_with("-cloud")
 }
 
 fn host_is_loopback(host: &str) -> bool {
@@ -175,6 +191,14 @@ mod tests {
         assert!(
             retention_block_with(&config, "ollama::llama3.2", Some("https://gpu.example.com"))
                 .is_some()
+        );
+        for cloud in ["ollama::gpt-oss:120b-cloud", "ollama::glm-4.6:cloud"] {
+            let reason = retention_block_with(&config, cloud, None).unwrap();
+            assert!(reason.contains("ollama.com"), "{reason}");
+        }
+        assert_eq!(
+            retention_block_with(&config, "ollama::qwen3-coder:30b", None),
+            None
         );
     }
 

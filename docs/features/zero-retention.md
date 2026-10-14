@@ -30,7 +30,7 @@ The built-in table currently has one entry:
 
 | Provider | Retains | Evidence |
 |---|---|---|
-| `ollama` | no | Forge calls `OLLAMA_HOST` (default `localhost:11434`), so prompts stay on this machine. Treated as retaining when `OLLAMA_HOST` points at a non-loopback host. |
+| `ollama` | no | Forge calls `OLLAMA_HOST` (default `localhost:11434`), so prompts stay on this machine. Treated as retaining when `OLLAMA_HOST` points at a non-loopback host, and for Ollama cloud models (a `:cloud` or `-cloud` tag), which the local server forwards to ollama.com. |
 
 Add an entry only with evidence from how Forge talks to the provider. Anything else belongs in the
 user's `[privacy.retains]`, not in the shipped table.
@@ -51,6 +51,11 @@ user's `[privacy.retains]`, not in the shipped table.
   the router: the architect planner, the failover last resort, and `forge api` exact-model
   requests. A refusal is a policy decision about this session, so it never benches the model in
   the shared health store.
+- **Calls outside a session.** The tier classifier (`[mesh] classifier = "llm"`/`"hybrid"`, which
+  sees every prompt), the CLI bridge's auto-mode command classifier in `mcp-serve`, `forge skill`
+  distillation (which sends a stored transcript) and `forge assay` (which sends source) all use a
+  guarded provider too. The classifier candidate list drops retaining models up front, so with
+  none left Forge classifies heuristically instead of sending the prompt to, say, Groq.
 - **OpenRouter.** Every request the guard lets through carries `deny_data_collection`. On
   OpenRouter that becomes `provider: {"data_collection": "deny"}` in the request body, which
   restricts routing to upstream endpoints that do not collect prompts. OpenRouter is only reached

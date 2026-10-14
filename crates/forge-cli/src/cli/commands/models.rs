@@ -46,6 +46,7 @@ fn classifier_candidates(config: &forge_config::Config, mock: bool) -> Vec<Strin
         .filter(|model| {
             !model.is_empty()
                 && (mock || forge_config::has_api_key(forge_config::provider_of(model)))
+                && forge_mesh::privacy::allows(config, model)
         })
         .fold(Vec::new(), |mut candidates, model| {
             if !candidates.iter().any(|candidate| candidate == model) {
@@ -162,6 +163,8 @@ pub(crate) fn build_provider_and_router(
                 .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
         )
     };
+    // Callers without a Session (mcp-serve's auto-classifier) use this provider directly.
+    let provider = forge_core::zero_retention::guard(provider, config);
     let mut heuristic = HeuristicRouter::new(config.clone())
         .with_live_catalog(live_catalog())
         .with_pin(pin)
@@ -189,6 +192,7 @@ pub(crate) fn build_provider_and_router(
                     .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
             )
         };
+        let classify_provider = forge_core::zero_retention::guard(classify_provider, config);
         Arc::new(LlmRouter::new(
             classify_provider,
             classifier_candidates(config, mock),
@@ -718,9 +722,12 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
             // `forge mesh <prompt>` must describe the same LLM classification that a real turn
             // uses, rather than rendering a heuristic preview that can disagree with routing.
             let classifier: Arc<dyn Router> = Arc::new(LlmRouter::new(
-                Arc::new(
-                    DispatchProvider::new(false)
-                        .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
+                forge_core::zero_retention::guard(
+                    Arc::new(
+                        DispatchProvider::new(false)
+                            .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
+                    ),
+                    &config,
                 ),
                 classifier_candidates(&config, false),
                 HeuristicRouter::new(config.clone()).with_catalog(cat.clone()),
@@ -932,6 +939,17 @@ mod bridge_harness_tests {
                 "cerebras::gpt-oss-120b",
             ]
         );
+    }
+
+    #[test]
+    fn zero_retention_never_sends_the_prompt_to_a_retaining_classifier() {
+        let mut config = forge_config::Config::default();
+        config.privacy.zero_retention = true;
+        assert!(classifier_candidates(&config, true).is_empty());
+        config.mesh.classifier_model = Some("ollama::qwen3:4b".into());
+        if std::env::var_os("OLLAMA_HOST").is_none() {
+            assert_eq!(classifier_candidates(&config, true), ["ollama::qwen3:4b"]);
+        }
     }
 
     #[test]

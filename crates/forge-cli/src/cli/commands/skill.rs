@@ -484,14 +484,20 @@ pub(crate) async fn skill_from_session(
         .ranked_for(forge_types::TaskTier::Trivial, &pricing, 5)
         .into_iter()
         .filter(|m| !benched.is_benched(m))
+        .filter(|m| forge_mesh::privacy::allows(&config, m))
         .collect();
     if trivial_models.is_empty() {
-        if let Some(m) = config.model_for(forge_types::TaskTier::Trivial) {
+        if let Some(m) = config
+            .model_for(forge_types::TaskTier::Trivial)
+            .filter(|m| forge_mesh::privacy::allows(&config, m))
+        {
             trivial_models.push(m.to_string());
         }
     }
     if trivial_models.is_empty() {
-        anyhow::bail!("every model is rate-limited/benched — try `forge models --probe`");
+        anyhow::bail!(
+            "every model is rate-limited/benched or excluded by zero-retention mode — try `forge models --probe`"
+        );
     }
     let model = trivial_models.remove(0);
 
@@ -511,7 +517,10 @@ pub(crate) async fn skill_from_session(
     );
 
     let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;
-    let provider = DispatchProvider::new(harness);
+    let provider = forge_core::zero_retention::guard(
+        std::sync::Arc::new(DispatchProvider::new(harness)),
+        &config,
+    );
     let mut sink = |_: forge_provider::StreamEvent| { /* discard; no TUI in headless mode */ };
     let response = provider
         .complete(&model, &messages_for_model, &[], &mut sink)

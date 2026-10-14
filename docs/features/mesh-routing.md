@@ -500,7 +500,10 @@ fixed prefix then lands on the cache shard an earlier one warmed instead of payi
 prefix uncached. Otherwise the key is the session id. The key never changes inside a session, even
 when failover moves to a different model: a key that moved would route the next request to a cold
 shard. A resumed session recomputes it at its first request, which yields the same key while model,
-tools, preamble and workspace are unchanged. Architect uses a stable session-specific planner namespace, and
+tools, preamble and workspace are unchanged. `/new` and `/resume` pick the key again for the session they switch
+to. Many concurrent sessions on one shared key can exceed a provider's per-key request rate (OpenAI
+documents roughly 15 requests a minute) and spill onto colder machines; set the flag to `false` if a
+large parallel fleet in one workspace shows lower cache hit rates. Architect uses a stable session-specific planner namespace, and
 `forge api` accepts the OpenAI `prompt_cache_key`/legacy `user` fields or derives a privacy-preserving
 SHA-256 key from the standing request prefix. The dispatch layer preserves that option across every
 API-key and OAuth backend:
