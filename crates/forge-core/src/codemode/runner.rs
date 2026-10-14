@@ -279,11 +279,11 @@ impl Session {
             Resolved::Call(name, args) => (name, args),
             Resolved::Denied(msg) => return Ok(Err(msg)),
         };
-        let inner = forge_types::ToolCall {
+        let inner = self.route_external_mcp(forge_types::ToolCall {
             id: format!("{}.{}", outer.id, run.calls.len() + 1),
             name,
             args,
-        };
+        });
         ledgers.count_started(&inner.name);
         let hints_before = self.pending_hints.len();
         let result = self.invoke_tool(msg_id, &inner).await?;

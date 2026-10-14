@@ -54,6 +54,12 @@ impl Session {
         let Some(Ok(inner)) = deferred_tools::unwrap_tool_call(call) else {
             return call.clone();
         };
+        self.route_external_mcp(inner)
+    }
+
+    /// `inner` unchanged unless it names an external `server__tool` the registry does not hold;
+    /// that becomes an `mcp_call`. Shared with `run_code`, whose scripts call tools by bare name.
+    pub(crate) fn route_external_mcp(&self, inner: forge_types::ToolCall) -> forge_types::ToolCall {
         let external = inner.name.contains("__")
             && self.tools.get(&inner.name).is_none()
             && self

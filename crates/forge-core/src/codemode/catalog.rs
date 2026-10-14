@@ -1,15 +1,15 @@
 //! Name resolution and `tools.$search` for `run_code`.
 //!
-//! [`ToolDirectory`] is the one seam between codemode and "which tools exist". Today the session
-//! implements it over its tool registry plus connected MCP tools, which is every tool a direct
-//! model can call. When the shared deferred-tool registry lands (Build-later item 1), point the
-//! `Session` impl at it: `catalog()` returns core plus deferred specs and `knows()` accepts a
-//! deferred name, and nothing else in codemode changes.
+//! [`ToolDirectory`] is the one seam between codemode and "which tools exist". The session
+//! implements it over its tool registry plus connected MCP tools. Deferred tools stay registered
+//! when the lean surface hides them, so a script reaches them by name. The `tool_call` unwrap and
+//! the search ranking are the shared deferred registry's ([`crate::deferred_tools`]), so a script
+//! and a plain `tool_search`/`tool_call` resolve the same names the same way.
 
 use forge_provider::ToolSpec;
 use serde_json::Value;
 
-use crate::Session;
+use crate::{deferred_tools, Session};
 
 /// Tools a script may not call: they drive the session itself (prompts, plans, tasks, child
 /// agents, scheduling) or would recurse. Everything else in the directory is callable.
@@ -31,7 +31,7 @@ const SCRIPT_DENY: &[&str] = &[
     crate::heartbeat::MANAGE_HEARTBEATS_TOOL,
     crate::wakeup::SCHEDULE_WAKEUP_TOOL,
     crate::push_notify::PUSH_NOTIFICATION_TOOL,
-    "tool_search",
+    deferred_tools::TOOL_SEARCH,
 ];
 
 /// Wrapper prefixes models copy from the bridge or SDK spellings.
@@ -85,22 +85,18 @@ pub(crate) enum Resolved {
     Denied(String),
 }
 
-/// Resolve a script's call: unwrap `tool_call{name, arguments}` (the deferred registry's call
-/// form), strip SDK prefixes when the bare name is a real tool, then apply the deny list.
+/// Resolve a script's call: unwrap `tool_call{name, arguments}` through the deferred registry's
+/// unwrap, strip SDK prefixes when the bare name is a real tool, then apply the deny list.
 pub(crate) fn resolve(name: &str, args: Value, dir: &impl ToolDirectory) -> Resolved {
-    let (name, args) = if name == "tool_call" {
-        let inner = args
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let inner_args = args
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(Default::default()));
-        (inner, inner_args)
-    } else {
-        (name.to_string(), args)
+    let wrapped = forge_types::ToolCall {
+        id: String::new(),
+        name: name.to_string(),
+        args,
+    };
+    let (name, args) = match deferred_tools::unwrap_tool_call(&wrapped) {
+        Some(Ok(inner)) => (inner.name, inner.args),
+        Some(Err(error)) => return Resolved::Denied(error),
+        None => (wrapped.name, wrapped.args),
     };
     let name = ALIAS_PREFIXES
         .iter()
@@ -115,31 +111,13 @@ pub(crate) fn resolve(name: &str, args: Value, dir: &impl ToolDirectory) -> Reso
     Resolved::Call(name, args)
 }
 
-/// `tools.$search(query)`: exact names first (comma or space separated), else keyword matches
-/// against name and description. Returns up to eight `{name, description, schema}` objects.
+/// `tools.$search(query)`: the deferred registry's ranking (exact names first, comma or space
+/// separated, else keyword matches) over the whole directory. Up to eight
+/// `{name, description, schema}` objects.
 pub(crate) fn search(catalog: &[ToolSpec], query: &str) -> Value {
-    let terms: Vec<String> = query
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .map(|t| t.trim().to_lowercase())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let exact: Vec<&ToolSpec> = catalog
-        .iter()
-        .filter(|t| terms.iter().any(|q| t.name.eq_ignore_ascii_case(q)))
-        .collect();
-    let hits: Vec<&ToolSpec> = if exact.is_empty() {
-        catalog
-            .iter()
-            .filter(|t| {
-                let hay = format!("{} {}", t.name, t.description).to_lowercase();
-                terms.iter().any(|q| hay.contains(q.as_str()))
-            })
-            .collect()
-    } else {
-        exact
-    };
     Value::Array(
-        hits.into_iter()
+        deferred_tools::matches(catalog, query)
+            .into_iter()
             .take(8)
             .map(|t| {
                 serde_json::json!({
@@ -193,6 +171,28 @@ mod tests {
             resolve("functions.nope", serde_json::json!({}), &dir),
             Resolved::Call("functions.nope".into(), serde_json::json!({}))
         );
+    }
+
+    #[test]
+    fn tool_call_uses_the_shared_unwrap() {
+        let dir = Fixed(vec!["web_fetch"]);
+        assert_eq!(
+            resolve(
+                "tool_call",
+                serde_json::json!({"name": "web_fetch", "arguments": "{\"url\":\"u\"}"}),
+                &dir
+            ),
+            Resolved::Call("web_fetch".into(), serde_json::json!({"url": "u"})),
+            "escaped-string arguments decode like a plain tool_call"
+        );
+        assert!(matches!(
+            resolve(
+                "tool_call",
+                serde_json::json!({"name": "tool_search"}),
+                &dir
+            ),
+            Resolved::Denied(_)
+        ));
     }
 
     #[test]

@@ -474,3 +474,6 @@ async fn the_wrapper_never_clears_the_failure_latch_or_counts_a_returned_test_fa
     assert_eq!(l.mutations_ran.load(Ordering::SeqCst), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[path = "codemode_deferred.rs"]
+mod deferred;

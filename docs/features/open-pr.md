@@ -123,8 +123,9 @@ deny = "*"
 ``` It is never part
 of a concurrent read-only batch. Because it lives in the core `ToolRegistry`, it is available on
 the direct path and through a CLI bridge's `forge mcp-serve`, where it sits in the deferred set
-behind `tool_search`/`tool_call`. The direct path has no deferred-tool registry yet, so there it is
-advertised like any other tool.
+behind `tool_search`/`tool_call`. The direct path's lean surface defers it the same way: it is
+listed in `tool_search`'s catalog, and `tool_call{"name":"open_pr"}` (or a `run_code` script) runs
+it through the normal permission gate.
 
 `git` and `gh` run with no TTY: `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`, ssh in batch mode
 (unless `GIT_SSH_COMMAND` is set), and a 180 s timeout per command.

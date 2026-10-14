@@ -105,10 +105,19 @@ the CLI's own loop.
 
 ## Deferred tools
 
-`tools.$search` and name resolution go through one seam, `codemode::catalog::ToolDirectory`.
-Today the session implements it over its tool registry plus connected MCP tools. When the shared
-deferred-tool registry lands on the direct path, that impl points at the registry and nothing else
-in codemode changes.
+`run_code` is part of the direct path's advertised core (`deferred_tools::DIRECT_CORE_EXTRA`), so
+the lean surface never hides it behind `tool_search`. The tools the lean surface does defer
+(`notebook_edit`, `web_fetch`, `open_pr`, ...) stay in the session's registry, so a script calls
+them by bare name or as `tools.tool_call({name, arguments})` without a `tool_search` round trip.
+
+`tools.$search` and name resolution go through `codemode::catalog::ToolDirectory` and reuse the
+shared deferred registry ([deferred-tools.md](deferred-tools.md)): the same `tool_call` unwrap
+(object, escaped-string, `args`/`input` arguments), the same exact-name-then-keyword ranking, and
+the same routing of an external `server__tool` name through `mcp_call`. The difference is scope:
+`$search` covers every tool a script may call, core included, while `tool_search` lists only the
+deferred ones. An inner call to a deferred tool meets the same gate as a plain call: in Plan mode
+a deferred write is denied and throws in the script, and only a write that succeeded counts toward
+the turn's mutations.
 
 ## Code
 

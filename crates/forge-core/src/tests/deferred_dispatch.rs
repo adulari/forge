@@ -302,3 +302,28 @@ async fn tool_call_reaches_external_mcp_tools_and_tool_search_finds_them() {
         "echo: hi"
     );
 }
+
+#[tokio::test]
+async fn open_pr_is_deferred_on_the_direct_path_and_tool_search_finds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _) = session_in(dir.path(), Config::default());
+    let specs = session.tool_specs();
+    assert!(!specs.iter().any(|s| s.name == forge_tools::OPEN_PR_TOOL));
+    let search = specs.iter().find(|s| s.name == TOOL_SEARCH).unwrap();
+    assert!(
+        search.description.contains(forge_tools::OPEN_PR_TOOL),
+        "{}",
+        search.description
+    );
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "open a pr", None)
+        .unwrap();
+    let call = forge_types::ToolCall {
+        id: "s1".into(),
+        name: TOOL_SEARCH.into(),
+        args: serde_json::json!({"query": forge_tools::OPEN_PR_TOOL}),
+    };
+    let out = session.invoke_tool(&msg_id, &call).await.unwrap();
+    assert!(out.starts_with("## open_pr"), "{out}");
+}
