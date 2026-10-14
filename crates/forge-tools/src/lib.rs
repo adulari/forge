@@ -27,6 +27,7 @@ mod lattice_tool;
 mod proxy;
 mod sandbox;
 mod shell;
+pub mod tunnel;
 mod web;
 mod workspace;
 pub use browser::{set_attach_endpoint, BrowserNetworkTool, BrowserTool};
@@ -38,7 +39,11 @@ pub use device::{DeviceLogsTool, DeviceTool};
 pub use lattice_tool::LatticeTool;
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
-pub use shell::{scope_job_exit_sink, JobExit, JobExitSink, RtkRewriter, ShellJobTool, ShellTool};
+pub use shell::{
+    reap_orphan_tunnels, scope_job_exit_sink, set_preview_settings, JobExit, JobExitSink,
+    PreviewSettings, ReapReason, ReapReport, ReapedTunnel, RtkRewriter, ShellJobTool, ShellTool,
+    TunnelRecord,
+};
 pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,
     WebFetchTool, WebSearchTool,

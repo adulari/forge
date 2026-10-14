@@ -88,6 +88,8 @@ pub struct Job {
     start_ticks: Option<u64>,
     /// Exit code, once observed. `None` while running, or if Forge was not alive to see it.
     exit: Option<i64>,
+    /// The public preview tunnel fronting this job (`shell_job` expose), while it is up.
+    pub tunnel: Option<super::preview::TunnelRecord>,
 }
 
 impl Job {
@@ -196,6 +198,7 @@ pub async fn start(
         started_at,
         start_ticks: proc_start_ticks(pid),
         exit: None,
+        tunnel: None,
     };
     write_record(&dir, &job)?;
 
@@ -212,6 +215,10 @@ pub async fn start(
             Err(_) => return,
         };
         let first = record_exit(&dir_for_task, pid, code);
+        let tunnel_dir = dir_for_task.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || super::preview::stop_job_tunnel(&tunnel_dir, pid))
+                .await;
         let stopped = take_stopping(pid);
         if let (Some(sink), true, false) = (sink, first, stopped) {
             let tail = tail(&log_for_task, 8).unwrap_or_default();
@@ -286,13 +293,16 @@ pub async fn stop(workspace: Option<&Path>, cwd: &str, id: u32) -> Result<String
     let Some(job) = get(workspace, cwd, id) else {
         return Err(format!("no background job {id} in this workspace"));
     };
+    let tunnel_dir = jobs_dir(workspace, cwd);
+    let _ =
+        tokio::task::spawn_blocking(move || super::preview::stop_job_tunnel(&tunnel_dir, id)).await;
     if !job.is_running() {
         return Ok(format!("job {id} was already {}", job.status()));
     }
     if let Ok(mut stopping) = STOPPING.lock() {
         stopping.push(id);
     }
-    signal_group(id, libc_sigterm());
+    signal_group(id, SIGTERM);
     let deadline = std::time::Instant::now() + STOP_GRACE;
     while std::time::Instant::now() < deadline {
         if !pid_alive(id) {
@@ -301,7 +311,7 @@ pub async fn stop(workspace: Option<&Path>, cwd: &str, id: u32) -> Result<String
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    signal_group(id, libc_sigkill());
+    signal_group(id, SIGKILL);
     record_exit(&jobs_dir(workspace, cwd), id, -1);
     Ok(format!(
         "job {id} killed (did not stop within {STOP_GRACE:?})"
@@ -379,7 +389,7 @@ pub fn survivor_note(survivors: &[(i32, String)]) -> String {
     )
 }
 
-fn write_record(dir: &Path, job: &Job) -> Result<(), String> {
+pub(super) fn write_record(dir: &Path, job: &Job) -> Result<(), String> {
     let record = json!({
         "pid": job.pid,
         "command": job.command,
@@ -388,13 +398,14 @@ fn write_record(dir: &Path, job: &Job) -> Result<(), String> {
         "started_at": job.started_at,
         "start_ticks": job.start_ticks,
         "exit": job.exit,
+        "tunnel": job.tunnel.as_ref().map(super::preview::TunnelRecord::to_json),
     });
     let path = dir.join(format!("{}.json", job.pid));
     std::fs::write(&path, format!("{record:#}\n"))
         .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-fn read_record(path: &Path) -> Option<Job> {
+pub(super) fn read_record(path: &Path) -> Option<Job> {
     let text = std::fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     Some(Job {
@@ -409,6 +420,9 @@ fn read_record(path: &Path) -> Option<Job> {
         started_at: value.get("started_at").and_then(Value::as_u64).unwrap_or(0),
         start_ticks: value.get("start_ticks").and_then(Value::as_u64),
         exit: value.get("exit").and_then(Value::as_i64),
+        tunnel: value
+            .get("tunnel")
+            .and_then(super::preview::TunnelRecord::from_json),
     })
 }
 
@@ -434,7 +448,7 @@ fn take_stopping(pid: u32) -> bool {
     })
 }
 
-fn now_secs() -> u64 {
+pub(super) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -453,7 +467,7 @@ fn first_line(command: &str) -> String {
 
 /// Put the child in a new session, which is what actually survives a process-group kill.
 #[cfg(unix)]
-fn detach_into_new_session(cmd: &mut Command) {
+pub(super) fn detach_into_new_session(cmd: &mut Command) {
     // SAFETY: setsid is async-signal-safe and touches only the calling (freshly forked) process.
     unsafe {
         cmd.pre_exec(|| {
@@ -466,47 +480,39 @@ fn detach_into_new_session(cmd: &mut Command) {
 }
 
 #[cfg(not(unix))]
-fn detach_into_new_session(_cmd: &mut Command) {}
+pub(super) fn detach_into_new_session(_cmd: &mut Command) {}
 
 #[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
+pub(super) fn pid_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 #[cfg(not(unix))]
-fn pid_alive(_pid: u32) -> bool {
+pub(super) fn pid_alive(_pid: u32) -> bool {
     false
 }
 
 #[cfg(unix)]
-fn signal_group(pid: u32, signal: i32) {
+pub(super) fn signal_group(pid: u32, signal: i32) {
     unsafe { libc::kill(-(pid as i32), signal) };
 }
 
 #[cfg(not(unix))]
-fn signal_group(_pid: u32, _signal: i32) {}
+pub(super) fn signal_group(_pid: u32, _signal: i32) {}
 
 #[cfg(unix)]
-fn libc_sigterm() -> i32 {
-    libc::SIGTERM
-}
+pub(super) const SIGTERM: i32 = libc::SIGTERM;
 #[cfg(not(unix))]
-fn libc_sigterm() -> i32 {
-    0
-}
+pub(super) const SIGTERM: i32 = 0;
 #[cfg(unix)]
-fn libc_sigkill() -> i32 {
-    libc::SIGKILL
-}
+pub(super) const SIGKILL: i32 = libc::SIGKILL;
 #[cfg(not(unix))]
-fn libc_sigkill() -> i32 {
-    0
-}
+pub(super) const SIGKILL: i32 = 0;
 
 /// Process start time in clock ticks since boot (`/proc/<pid>/stat` field 22). Two processes with
 /// the same pid but different start times are different processes.
 #[cfg(target_os = "linux")]
-fn proc_start_ticks(pid: u32) -> Option<u64> {
+pub(super) fn proc_start_ticks(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, rest) = stat.rsplit_once(')')?;
     // Field 22 overall; after `comm` the first entry is field 3, so index 19.
@@ -514,7 +520,7 @@ fn proc_start_ticks(pid: u32) -> Option<u64> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn proc_start_ticks(_pid: u32) -> Option<u64> {
+pub(super) fn proc_start_ticks(_pid: u32) -> Option<u64> {
     None
 }
 
@@ -563,8 +569,10 @@ impl Tool for ShellJobTool {
         "Inspect and control the long-lived jobs started by `shell` with background:true \
          (emulator, dev server, tunnel, daemon). Actions: list (every job and whether it is still \
          running), log (the tail of a job's output), status (one job), stop (SIGTERM then SIGKILL \
-         the job and its children). Jobs survive across tool calls, turns, and Forge restarts, so \
-         a job started earlier is still reachable here by its id."
+         the job and its children), expose (put a running job's local port on a PUBLIC, \
+         unauthenticated https preview URL via cloudflared/ngrok; always asks the user first, \
+         stops with the job). Jobs survive across tool calls, turns, and Forge restarts, so a \
+         job started earlier is still reachable here by its id."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Shell
@@ -573,8 +581,9 @@ impl Tool for ShellJobTool {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["list", "log", "status", "stop"], "description": "list, log, status, or stop." },
-                "id": { "type": "integer", "description": "Job id (its pid), from the shell background:true result or from list. Required for log/status/stop." },
+                "action": { "type": "string", "enum": ["list", "log", "status", "stop", "expose"], "description": "list, log, status, stop, or expose." },
+                "id": { "type": "integer", "description": "Job id (its pid), from the shell background:true result or from list. Required for log/status/stop/expose." },
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "For expose: the local port the job serves on (e.g. 5173)." },
                 "lines": { "type": "integer", "minimum": 1, "description": "For log: how many trailing lines to return (default 40)." }
             },
             "required": ["action"]
@@ -619,8 +628,12 @@ impl Tool for ShellJobTool {
                 let Some(job) = get(workspace, &cwd, id) else {
                     return Ok(format!("no background job {id} in this workspace"));
                 };
+                let preview = match &job.tunnel {
+                    Some(t) if t.is_alive() => format!("\n  preview: {} (port {})", t.url, t.port),
+                    _ => String::new(),
+                };
                 Ok(format!(
-                    "job {} is {}\n  command: {}\n  cwd: {}\n  log: {}",
+                    "job {} is {}\n  command: {}\n  cwd: {}\n  log: {}{preview}",
                     job.pid,
                     job.status(),
                     job.command,
@@ -655,8 +668,19 @@ impl Tool for ShellJobTool {
                 let id = id()?;
                 stop(workspace, &cwd, id).await.map_err(ToolError::Failed)
             }
+            "expose" => {
+                let id = id()?;
+                let port = args
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .and_then(|p| u16::try_from(p).ok())
+                    .ok_or_else(|| ToolError::Failed("expose needs a port (1-65535)".into()))?;
+                super::preview::expose(workspace, &cwd, id, port)
+                    .await
+                    .map_err(ToolError::Failed)
+            }
             other => Err(ToolError::Failed(format!(
-                "unknown action '{other}'. Use list, log, status, or stop."
+                "unknown action '{other}'. Use list, log, status, stop, or expose."
             ))),
         }
     }

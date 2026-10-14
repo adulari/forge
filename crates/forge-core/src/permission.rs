@@ -10,7 +10,8 @@
 //! 1. a `Builtin` deny match → Deny (safety floor — beats every mode incl. `bypass`)
 //! 2. any deny match → Deny
 //! 3. `plan` mode + a side effect → Deny (read-only contract; an allow rule cannot escape it),
-//!    except a shell line the strict allowlist proves read-only ([`readonly_shell`])
+//!    except a shell line the strict allowlist proves read-only ([`readonly_shell`]);
+//!    publishing a port (`shell_job` expose) asks from here on, whatever the mode or rules
 //! 4. shell commands: per-segment allow/ask — ask if any segment matches an ask rule, allow
 //!    only when *every* effective segment matches an allow rule ([`decide_shell_segments`])
 //! 5. other tools: the most-specific allow/ask match → that decision
@@ -169,6 +170,9 @@ fn decide_in_with(
                 .is_some_and(readonly_shell::is_read_only_shell);
         return if read_only_shell { Allow } else { Deny };
     }
+    if expose::always_asks(tool_name, args) {
+        return Ask;
+    }
     // 4. Shell commands resolve allow/ask per segment: an `allow = "git *"` matching the first
     //    segment must not smuggle `git status && <anything>` past the prompt — every effective
     //    segment needs its own allow for the command to auto-approve, while an ask on any one
@@ -318,6 +322,7 @@ fn specificity(rule: &PermissionRule) -> usize {
 
 mod auto;
 mod auto_safe;
+mod expose;
 mod readonly_shell;
 
 /// Whether a `shell` call provably only reads: every command passes the Plan-mode read-only

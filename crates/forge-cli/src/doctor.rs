@@ -134,6 +134,9 @@ pub async fn run() -> anyhow::Result<usize> {
     if let Some(worktrees) = crate::cli::commands::worktree::doctor_summary() {
         sections.push(("Worktree disk", vec![worktrees]));
     }
+    if let Ok(config) = forge_config::load() {
+        sections.push(("Preview URLs", vec![crate::preview::doctor_check(&config)]));
+    }
     sections.push((
         "Environment",
         crate::doctor_environment::environment_checks(),
