@@ -30,7 +30,8 @@ Each attempt of each task:
 3. commits the post-setup state as a git baseline (unless setup made its own repo), so the
    agent's changes can be read back as a diff (`patched` in the metrics);
 4. runs the agent (Bypass mode, no prompts) on `instruction.md` with the workspace as its cwd;
-5. runs `bash test.sh` in the workspace and records its exit code;
+5. runs `bash test.sh` in the workspace and records its exit code (a `test.sh` that cannot start
+   is recorded as the attempt's error; the agent's session and usage are kept either way);
 6. kills every process group the scripts started.
 
 `setup.sh` and `test.sh` are run from the task directory, never copied into the workspace, so the
@@ -114,7 +115,8 @@ After the turn (also after a failed or interrupted one), writes one JSON object:
 ```
 
 `null` means no call reported that split, never zero. The numbers come from the session's usage
-rows (`SessionUsageDetail`, the same source as the bench metrics). `--usage-json` keeps the run in
+rows (`SessionUsageDetail`, the same source as the bench metrics), counted from just before the
+turn, so a `--resume`d session reports this invocation only, not its earlier turns. `--usage-json` keeps the run in
 this process (it implies `--no-publish-to-fleet`), because a run handed to the daemon would leave
 nothing to report.
 

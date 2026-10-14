@@ -33,7 +33,8 @@ fn suite() -> PathBuf {
 fn bench_tasks_runs_the_example_suite_and_export_writes_redacted_trajectories() {
     let tmp = tempfile::tempdir().expect("temp workspace");
     let ws = tmp.path();
-    let out = ws.join("tasks.jsonl");
+    // A relative --out, like the default: the scripts run with the task workspace as CWD, so
+    // the log and result paths must not resolve against it.
     run_ok(forge(ws).args([
         "bench",
         "tasks",
@@ -43,7 +44,7 @@ fn bench_tasks_runs_the_example_suite_and_export_writes_redacted_trajectories() 
         "--timeout-secs",
         "120",
         "--out",
-        out.to_str().unwrap(),
+        "tasks.jsonl",
     ]));
 
     let eval: serde_json::Value =
@@ -65,6 +66,7 @@ fn bench_tasks_runs_the_example_suite_and_export_writes_redacted_trajectories() 
         assert!(m["model_calls"].as_u64().unwrap() >= 1, "{m}");
     }
     assert!(ws.join("tasks.logs/write-note.attempt1.setup.log").exists());
+    assert!(ws.join("tasks.logs/write-note.attempt1.test.log").exists());
 
     let traj = ws.join("traj");
     run_ok(forge(ws).args([

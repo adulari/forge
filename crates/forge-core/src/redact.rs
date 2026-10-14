@@ -77,6 +77,15 @@ static KEYWORD_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("keyword redaction regex compiles")
 });
 
+/// The keyword layer for structured JSON, where the key and the value are separate strings and
+/// the text regex above never sees them side by side: `{"api_key": "…"}` in tool-call arguments.
+static KEYWORD_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:[A-Za-z0-9]+[_\-])*(?i:password|passwd|secret|token|api[_\-]?key|access[_\-]?key|private[_\-]?key|client[_\-]?secret)$",
+    )
+    .expect("keyword key regex compiles")
+});
+
 /// `token: usize`, `password = getpass`, `secret: self.secret`, `api_key=${API_KEY}`: code and
 /// placeholders, not values. Real secrets carry a digit or a symbol, and every common credential
 /// format is caught by a shape anyway.
@@ -152,7 +161,21 @@ impl Redactor {
                 }
             }
             serde_json::Value::Array(items) => items.iter_mut().for_each(|v| self.redact_json(v)),
-            serde_json::Value::Object(map) => map.values_mut().for_each(|v| self.redact_json(v)),
+            serde_json::Value::Object(map) => {
+                for (key, v) in map.iter_mut() {
+                    match v {
+                        serde_json::Value::String(s)
+                            if KEYWORD_KEY.is_match(key)
+                                && s.chars().count() >= 6
+                                && s != REDACTED
+                                && !is_code_or_placeholder(s) =>
+                        {
+                            *s = REDACTED.to_string();
+                        }
+                        _ => self.redact_json(v),
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -391,6 +414,29 @@ mod tests {
         assert!(!dumped.contains("plantedSecretValue42"), "{dumped}");
         assert!(!entries[0].content.contains("plantedSecretValue42"));
         assert_eq!(entries[0].tool_calls[0].args["nested"][1], 3);
+    }
+
+    #[test]
+    fn json_values_under_secret_keys_are_masked() {
+        let red = Redactor::default();
+        let mut v = serde_json::json!({
+            "api_key": "q8Zp-unshaped-value-31",
+            "nested": {"DB_PASSWORD": "hunter2!x"},
+            "token": "$API_TOKEN",
+            "max_tokens": "4096",
+            "secret": "short",
+            "path": "q8Zp-unshaped-value-31",
+        });
+        red.redact_json(&mut v);
+        assert_eq!(v["api_key"], REDACTED);
+        assert_eq!(v["nested"]["DB_PASSWORD"], REDACTED);
+        assert_eq!(v["token"], "$API_TOKEN", "placeholders are not values");
+        assert_eq!(v["max_tokens"], "4096");
+        assert_eq!(v["secret"], "short");
+        assert_eq!(
+            v["path"], "q8Zp-unshaped-value-31",
+            "only the keyed value is a secret"
+        );
     }
 
     #[test]

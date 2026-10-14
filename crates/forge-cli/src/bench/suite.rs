@@ -137,6 +137,16 @@ struct ScriptRun {
 struct Groups(Vec<i32>);
 
 impl Groups {
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    fn forget_if_empty(&mut self, pg: i32) {
+        #[cfg(unix)]
+        if unsafe { libc::kill(-pg, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            self.0.retain(|&g| g != pg);
+        }
+    }
+
     fn kill_all(&mut self) {
         #[cfg(unix)]
         for pg in self.0.drain(..) {
@@ -182,14 +192,23 @@ async fn run_script(
     let mut child = command
         .spawn()
         .with_context(|| format!("starting {}", script.display()))?;
-    if let Some(pid) = child.id() {
-        groups.0.push(pid as i32);
+    let pgid = child.id().map(|pid| pid as i32);
+    if let Some(pg) = pgid {
+        groups.0.push(pg);
     }
     match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => Ok(ScriptRun {
-            exit: status?.code(),
-            timed_out: false,
-        }),
+        Ok(status) => {
+            let exit = status?.code();
+            // An empty group's id is free for the kernel to hand out again; forget it now so the
+            // end-of-attempt kill cannot hit an unrelated process group that reused it.
+            if let Some(pg) = pgid {
+                groups.forget_if_empty(pg);
+            }
+            Ok(ScriptRun {
+                exit,
+                timed_out: false,
+            })
+        }
         Err(_) => {
             groups.kill_all();
             let _ = child.wait().await;
@@ -229,6 +248,13 @@ pub(crate) async fn run_tasks(opts: TasksOptions) -> Result<()> {
     if opts.mock && opts.agent != Agent::Forge {
         anyhow::bail!("--mock only applies to --agent forge");
     }
+    // The scripts and the agent run with the task workspace as the process CWD, so a relative
+    // `--out` (the default `tasks.jsonl`) would resolve its log paths inside the workspace.
+    let opts = TasksOptions {
+        out: std::path::absolute(&opts.out)
+            .with_context(|| format!("resolving {}", opts.out.display()))?,
+        ..opts
+    };
     let mut tasks = discover(&opts.suite)?;
     if let Some(n) = opts.limit {
         tasks.truncate(n);
@@ -351,7 +377,9 @@ async fn run_task(
         .await
         .unwrap_or_else(|e| super::RunOutcome::failed(format!("{e:#}")));
         outcome.patch = super::extract_patch(&workspace).unwrap_or_default();
-        let t = run_script(
+        // A grader that cannot start is recorded on the attempt, but must not discard the agent
+        // turn's session id and usage, which already happened.
+        match run_script(
             &task.test,
             task,
             &workspace,
@@ -359,10 +387,19 @@ async fn run_task(
             timeout,
             &mut groups,
         )
-        .await?;
-        result.test_exit = t.exit;
-        result.test_timed_out = t.timed_out;
-        result.solved = !t.timed_out && t.exit == Some(0);
+        .await
+        {
+            Ok(t) => {
+                result.test_exit = t.exit;
+                result.test_timed_out = t.timed_out;
+                result.solved = !t.timed_out && t.exit == Some(0);
+            }
+            Err(e) => {
+                outcome
+                    .error
+                    .get_or_insert_with(|| format!("test.sh: {e:#}"));
+            }
+        }
         Ok::<_, anyhow::Error>(outcome)
     };
     let mut outcome = run

@@ -53,10 +53,10 @@ pub(crate) async fn run(
     }
 
     let started = std::time::Instant::now();
-    let write_usage = |session: &Session| -> Result<()> {
+    let write_usage = |session: &Session, before: &forge_core::SessionUsageDetail| -> Result<()> {
         match &usage_json {
             Some(path) => {
-                usage_json::write_usage_json(session, path, started.elapsed().as_secs_f64())
+                usage_json::write_usage_json(session, before, path, started.elapsed().as_secs_f64())
             }
             None => Ok(()),
         }
@@ -71,6 +71,7 @@ pub(crate) async fn run(
             Box::new(forge_tui::StreamJsonPresenter::new())
         };
         let mut session = build_session_with(presenter, mock, mode, resume, pin, true).await?;
+        let before = session.session_usage_detail();
         if output_format == OutputFormat::Json {
             // A resumed session's restored totals arrive before routing; the presenter keeps
             // them as a baseline so `usage` reports this invocation, as `claude -p` does.
@@ -84,12 +85,13 @@ pub(crate) async fn run(
                 _ = tokio::signal::ctrl_c() => Ok(()),
             }
         };
-        write_usage(&session)?;
+        let written = write_usage(&session, &before);
         result?;
-        return Ok(());
+        return written;
     }
 
     let mut session = build_session(mock, mode, tui, resume, pin).await?;
+    let before = session.session_usage_detail();
 
     // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.
     if tui {
@@ -97,8 +99,9 @@ pub(crate) async fn run(
             .run_turn_with(&prompt, &guidance, tier)
             .await
             .context("running agent turn");
-        write_usage(&session)?;
+        let written = write_usage(&session, &before);
         result?;
+        written?;
         // Hold the final frame until the user quits (Esc / Ctrl-C).
         let _ = session.read_line();
         return Ok(());
@@ -137,9 +140,9 @@ pub(crate) async fn run(
         eprint!("\r\x1b[K"); // clear the heartbeat line
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
-    write_usage(&session)?;
+    let written = write_usage(&session, &before);
     result?;
-    Ok(())
+    written
 }
 
 /// A headless one-shot run is unattended: a turn that stopped with tracked tasks still open has
