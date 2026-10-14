@@ -307,17 +307,12 @@ pub(crate) async fn goal_outcome(
     }
     {
         let mut s = session.lock().await;
-        s.prime_guidance(&[format!(
-            "Session goal: {text}\nKeep every step aligned to this goal until it is fully met."
-        )])
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        s.prime_guidance(&[super::goal_session_guidance(&text)])
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     app.note(&format!("🎯 goal set — {text}"));
     Ok(DispatchOutcome::StartGoal {
-        prompt: format!(
-            "Break this goal into a concrete, ordered plan and record it with the \
-             update_tasks tool, then start on the first step.\n\nGoal: {text}"
-        ),
+        prompt: super::goal_start_prompt(&text),
         goal: text,
         gates,
         max_tokens,
