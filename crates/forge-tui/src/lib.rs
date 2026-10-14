@@ -44,6 +44,8 @@ pub mod keybinds;
 mod overlays;
 mod peer_message;
 pub mod perf;
+mod prompt_history;
+pub use prompt_history::PromptHistory;
 mod refine_args;
 mod render;
 pub mod select;

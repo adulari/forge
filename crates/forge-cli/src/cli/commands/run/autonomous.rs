@@ -274,21 +274,13 @@ pub(crate) enum GoalDecision {
     Retry { prompt: Option<String> },
 }
 
-/// Remove the oldest prompt submitted while a turn was active, refresh the visible queue, and
-/// retain it in prompt history exactly like an idle submission. Shared by ordinary FIFO drain and
-/// `/loop`/`/goal` steering so a user correction always owns the very next iteration.
-pub(crate) fn dequeue_prompt(
-    queue: &mut Vec<String>,
-    app: &mut forge_tui::App,
-    prompt_history: &mut Vec<String>,
-) -> Option<String> {
+/// Remove the oldest prompt submitted while a turn was active and refresh the visible queue. Shared
+/// by ordinary FIFO drain and `/loop`/`/goal` steering so a user correction always owns the very
+/// next iteration. Prompt history is recorded when the prompt is submitted, not here.
+pub(crate) fn dequeue_prompt(queue: &mut Vec<String>, app: &mut forge_tui::App) -> Option<String> {
     let next = queue.first().cloned()?;
     queue.remove(0);
     app.set_queued(queue);
-    let history_entry = next.trim();
-    if prompt_history.last().map(String::as_str) != Some(history_entry) {
-        prompt_history.push(history_entry.to_string());
-    }
     Some(next)
 }
 
@@ -353,7 +345,6 @@ pub(crate) fn try_deliver_due_heartbeats(
     session: &Arc<tokio::sync::Mutex<Session>>,
     queued_prompts: &mut Vec<String>,
     app: &mut forge_tui::App,
-    prompt_history: &mut Vec<String>,
     last_prompt: &mut Option<String>,
     done_tx: &std::sync::mpsc::Sender<u64>,
     turn_gen: &mut u64,
@@ -379,7 +370,7 @@ pub(crate) fn try_deliver_due_heartbeats(
     }
     queued_prompts.extend(due);
     app.set_queued(queued_prompts);
-    let Some(next) = dequeue_prompt(queued_prompts, app, prompt_history) else {
+    let Some(next) = dequeue_prompt(queued_prompts, app) else {
         return Ok(false);
     };
     *last_prompt = Some(next.clone());

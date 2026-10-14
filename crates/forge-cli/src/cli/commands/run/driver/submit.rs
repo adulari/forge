@@ -55,6 +55,7 @@ impl DriverState {
                         self.app
                             .note("⏳ commands run when the turn is idle — finish or Stop first");
                     } else {
+                        self.prompt_history.record(&text);
                         self.queued_prompts.push(text.clone());
                         self.steer.push(text.clone());
                         self.app.set_queued(&self.queued_prompts);
@@ -111,8 +112,12 @@ impl DriverState {
             }
             remote::RemoteInput::Interrupt => {
                 if self.busy {
-                    self.interrupt_turn();
-                    self.app.note("⏹ remote interrupted — stopped responding");
+                    let note = if self.interrupt_turn() {
+                        "⏹ remote interrupted — continuing with the next queued prompt"
+                    } else {
+                        "⏹ remote interrupted — stopped responding"
+                    };
+                    self.app.note(note);
                 }
             }
             remote::RemoteInput::Dequeue { index, text } => {
@@ -213,9 +218,7 @@ impl DriverState {
         if trimmed.is_empty() {
             return Ok(());
         }
-        if !trimmed.is_empty() && self.prompt_history.last().map(String::as_str) != Some(trimmed) {
-            self.prompt_history.push(trimmed.to_string());
-        }
+        self.prompt_history.record(trimmed);
         if let Some(rest) = line.strip_prefix("//") {
             let (hooks, hook_workspace) = {
                 let s = self.session.lock().await;

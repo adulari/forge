@@ -18,6 +18,7 @@ pub struct BtwOverlay {
 impl App {
     /// Show the card for `question` in its waiting state.
     pub fn open_btw(&mut self, question: &str) {
+        self.btw_dismissed = None;
         self.btw = Some(BtwOverlay {
             question: question.trim().to_string(),
             ..BtwOverlay::default()
@@ -41,6 +42,10 @@ impl App {
             Some(c) if c > 0.0 => format!("{model} · ${c:.4}"),
             _ => model,
         };
+        if self.btw_dismissed.as_deref() == Some(question.as_str()) {
+            self.btw_dismissed = None;
+            return;
+        }
         let same = self.btw.as_ref().is_some_and(|o| o.question == question);
         if !same {
             self.open_btw(&question);
@@ -56,6 +61,10 @@ impl App {
     /// Show a `/btw` failure in the waiting card. Returns false when no card was waiting, so the
     /// caller prints the warning normally.
     pub(crate) fn apply_btw_failure(&mut self, message: &str) -> bool {
+        if self.btw_dismissed.is_some() && message.contains("/btw") {
+            self.btw_dismissed = None;
+            return true;
+        }
         match &mut self.btw {
             Some(card) if card.answer.is_none() && message.contains("/btw") => {
                 card.answer = Some(message.to_string());
@@ -67,11 +76,18 @@ impl App {
     }
 
     /// Route a key to the open card. Esc, Enter and Space close it; ↑/↓ and PgUp/PgDn scroll a
-    /// long answer. Every key is consumed while the card is open.
+    /// long answer. Every key is consumed while the card is open. Closing a card that is still
+    /// waiting remembers its question so the late answer stays closed: one Esc closes the card,
+    /// the next Esc reaches the turn interrupt.
     pub fn btw_key(&mut self, key: &KeyKind) {
         let Some(card) = &mut self.btw else { return };
         match key {
-            KeyKind::Esc | KeyKind::Enter | KeyKind::Char(' ') => self.btw = None,
+            KeyKind::Esc | KeyKind::Enter | KeyKind::Char(' ') => {
+                if card.answer.is_none() {
+                    self.btw_dismissed = Some(card.question.clone());
+                }
+                self.btw = None;
+            }
             KeyKind::Up => card.scroll = card.scroll.saturating_sub(1),
             KeyKind::Down => card.scroll = card.scroll.saturating_add(1),
             KeyKind::PageUp => card.scroll = card.scroll.saturating_sub(10),
@@ -153,5 +169,40 @@ mod tests {
         app.apply(PresenterEvent::Warning("disk almost full".into()));
         assert!(app.btw.as_ref().unwrap().answer.is_none());
         assert!(!app.drain_flush().is_empty());
+    }
+
+    #[test]
+    fn a_card_dismissed_while_waiting_stays_closed_when_the_answer_lands() {
+        let mut app = App::default();
+        app.open_btw("why?");
+        app.btw_key(&KeyKind::Esc);
+        assert!(!app.btw_open());
+        app.apply(PresenterEvent::BtwAnswer {
+            question: "why?".into(),
+            answer: "because".into(),
+            model: "m".into(),
+            cost_usd: None,
+        });
+        assert!(
+            !app.btw_open(),
+            "a late answer must not reopen the card and steal the next Esc"
+        );
+        app.apply(PresenterEvent::BtwAnswer {
+            question: "other".into(),
+            answer: "a remote side question still opens".into(),
+            model: "m".into(),
+            cost_usd: None,
+        });
+        assert!(app.btw_open());
+    }
+
+    #[test]
+    fn a_late_failure_for_a_dismissed_card_is_swallowed() {
+        let mut app = App::default();
+        app.open_btw("q");
+        app.btw_key(&KeyKind::Esc);
+        app.apply(PresenterEvent::Warning("/btw failed: timeout".into()));
+        assert!(!app.btw_open());
+        assert!(app.drain_flush().is_empty());
     }
 }

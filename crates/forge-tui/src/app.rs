@@ -391,6 +391,9 @@ pub struct App {
     pub usage_overlay: UsageOverlay,
     /// The `/btw` answer card (`app_btw.rs`); `None` when no side question is on screen.
     pub btw: Option<crate::app_btw::BtwOverlay>,
+    /// Question of a `/btw` card dismissed before its answer came back; that late answer is
+    /// dropped instead of reopening a card that would swallow the next Esc.
+    pub(crate) btw_dismissed: Option<String>,
     /// The `/mesh` routing-inspector overlay state.
     pub mesh_overlay: MeshOverlay,
     /// The `/voice` recording overlay (also opened by Ctrl+V), while open. The real system
