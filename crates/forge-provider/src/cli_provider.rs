@@ -1794,12 +1794,15 @@ use quota::{codex_quota_from_rollout, find_codex_rollout, normalize_window, quot
 fn claude_usage_from(v: &Value) -> Usage {
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     let cache_read = n("cache_read_input_tokens");
+    let cache_write = n("cache_creation_input_tokens");
     Usage {
-        input_tokens: n("input_tokens") + cache_read + n("cache_creation_input_tokens"),
+        input_tokens: n("input_tokens") + cache_read + cache_write,
         output_tokens: n("output_tokens"),
         cached_input_tokens: Some(cache_read),
         // Subscription-billed via the user's own CLI — $0 against Forge's USD budget (FR-5).
         cost_usd: 0.0,
+        cache_write_tokens: Some(cache_write),
+        reasoning_tokens: None,
     }
 }
 
@@ -1819,6 +1822,8 @@ fn codex_usage_from(v: &Value) -> Usage {
         // Absent only on a truncated/older event — then the split is genuinely unknown, not zero.
         cached_input_tokens: v.get("cached_input_tokens").and_then(Value::as_u64),
         cost_usd: 0.0,
+        cache_write_tokens: v.get("cache_write_input_tokens").and_then(Value::as_u64),
+        reasoning_tokens: v.get("reasoning_output_tokens").and_then(Value::as_u64),
     }
 }
 
@@ -4254,6 +4259,7 @@ mod tests {
                     output_tokens: 3,
                     cached_input_tokens: Some(5),
                     cost_usd: 0.0,
+                    ..Default::default()
                 }),
                 Parsed::Final("hello".to_string()),
             ]
@@ -5055,7 +5061,9 @@ mod tests {
             output_tokens: 4,
             // Claude always emits the cache counters, so their absence here is a reported zero.
             cached_input_tokens: Some(0),
-            cost_usd: 0.0
+            cost_usd: 0.0,
+            cache_write_tokens: Some(0),
+            reasoning_tokens: None,
         })));
         assert!(items.contains(&Parsed::Final("hello".into())));
     }
@@ -5410,7 +5418,9 @@ mod tests {
                 input_tokens: 151_655,
                 output_tokens: 176,
                 cached_input_tokens: Some(151_296),
-                cost_usd: 0.0
+                cost_usd: 0.0,
+                cache_write_tokens: Some(0),
+                reasoning_tokens: Some(58),
             })]
         );
         let Parsed::Usage(usage) = &parsed[0] else {
@@ -5435,7 +5445,8 @@ mod tests {
                 input_tokens: 16927,
                 output_tokens: 23,
                 cached_input_tokens: None,
-                cost_usd: 0.0
+                cost_usd: 0.0,
+                ..Default::default()
             })]
         );
     }

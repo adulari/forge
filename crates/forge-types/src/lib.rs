@@ -231,6 +231,15 @@ pub struct Usage {
     #[serde(default)]
     pub cached_input_tokens: Option<u64>,
     pub cost_usd: f64,
+    /// Of `input_tokens`, how many were written INTO the prompt cache on this call (billed at a
+    /// premium by Anthropic/Bedrock). A subset of `input_tokens` like the cached reads. `None`
+    /// when the provider does not report it.
+    #[serde(default)]
+    pub cache_write_tokens: Option<u64>,
+    /// Of `output_tokens`, how many were hidden reasoning. `None` when the provider does not
+    /// report the split.
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl Usage {
@@ -1334,6 +1343,7 @@ mod tests {
             output_tokens: 5,
             cached_input_tokens: Some(4),
             cost_usd: 0.01,
+            ..Default::default()
         };
         assert_eq!(u.total_tokens(), 15, "cached is a subset, never an addend");
         assert_eq!(u.fresh_input_tokens(), Some(6));
@@ -1350,6 +1360,7 @@ mod tests {
             output_tokens: 5,
             cached_input_tokens: None,
             cost_usd: 0.0,
+            ..Default::default()
         };
         assert_eq!(unknown.fresh_input_tokens(), None);
         // Only the explicitly-bounded accessor flattens it, and it says so in its name.
@@ -1373,6 +1384,7 @@ mod tests {
                 output_tokens: 5,
                 cached_input_tokens: cached,
                 cost_usd: 0.01,
+                ..Default::default()
             };
             let json = serde_json::to_string(&u).unwrap();
             assert_eq!(serde_json::from_str::<Usage>(&json).unwrap(), u);

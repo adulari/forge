@@ -87,6 +87,7 @@ mod routing_policy;
 mod session_controls;
 mod session_history;
 mod session_lifecycle;
+mod session_usage_detail;
 mod session_virtual_tools;
 pub mod snapshot;
 pub(crate) mod stall_guard;
@@ -115,6 +116,7 @@ pub mod worktree_reclaim;
 
 pub use llm_router::LlmRouter;
 use replay::messages_to_replay_items;
+pub use session_usage_detail::SessionUsageDetail;
 use session_virtual_tools::ASK_USER_TOOL;
 pub use session_virtual_tools::{remember_spec, REMEMBER_TOOL};
 use text_policy::{completed_tasks_recap, memory_scope_at, recap_line, sanitize_suggestion};
@@ -10135,6 +10137,7 @@ mod tests {
                     cached_input_tokens: Some(40),
                     output_tokens: 30,
                     cost_usd: 1.69308,
+                    ..Default::default()
                 },
                 Some("meta::muse-spark-1.3-contributor"),
             )
@@ -11095,6 +11098,7 @@ mod tests {
                     output_tokens,
                     cached_input_tokens: Some(cached_input_tokens),
                     cost_usd: 0.0,
+                    ..Default::default()
                 },
                 quotas: Vec::new(),
             })
@@ -11149,6 +11153,7 @@ mod tests {
                     cached_input_tokens: Some(40),
                     output_tokens: 30,
                     cost_usd: 1.69308,
+                    ..Default::default()
                 },
                 Some("meta::muse-spark-1.3-contributor"),
             )
@@ -11775,6 +11780,7 @@ mod tests {
                 output_tokens: 12,
                 cached_input_tokens: Some(0),
                 cost_usd: 0.0,
+                ..Default::default()
             };
             if is_subagent {
                 // Child: read a file once, then answer.
@@ -11935,6 +11941,7 @@ mod tests {
                 output_tokens: 12,
                 cached_input_tokens: Some(0),
                 cost_usd: 0.0,
+                ..Default::default()
             };
             let is_subagent = messages
                 .iter()
@@ -12129,6 +12136,7 @@ mod tests {
                 output_tokens: 2,
                 cached_input_tokens: Some(0),
                 cost_usd: 0.0,
+                ..Default::default()
             };
             if used_tool {
                 return Ok(ModelResponse {

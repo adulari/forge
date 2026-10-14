@@ -481,6 +481,10 @@ cache rate it equals `cost_for`. This is what actual spend accounting uses. The 
 for native and custom OpenAI-compatible API-key providers forwards the stable Forge session as
 `prompt_cache_key` and preserves `prompt_tokens_details.cached_tokens` from streaming usage, so
 providers such as Qwen Cloud receive cache affinity and cache hits are accounted consistently.
+`reference_cost_for_usage` prices a usage at the LIST rate of the model behind an id (exact id,
+else the cheapest positive rate for the same bare model name). It only feeds the benchmark's
+notional cost for subscription and free calls and is never written back as spend
+([bench-metrics.md](bench-metrics.md)).
 
 **Prompt caching is automatic and capability-aware.** Every main agent turn uses its stable Forge
 session id as the cache namespace; Architect uses a stable session-specific planner namespace, and

@@ -57,8 +57,9 @@ impl Store {
             tx.execute(
                 "INSERT INTO usage
                  (id, message_id, provider, model, input_tokens, cached_input_tokens, output_tokens,
-                  cost_usd, prefix_reused_msgs, prefix_total_msgs, tools_changed, cache_label)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  cost_usd, prefix_reused_msgs, prefix_total_msgs, tools_changed, cache_label,
+                  cache_write_tokens, reasoning_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 (
                     &id,
                     message_id,
@@ -72,6 +73,8 @@ impl Store {
                     prefix.and_then(|p| p.total_msgs).map(i64::from),
                     prefix.and_then(|p| p.tools_changed),
                     prefix.map(|p| p.label.as_str()),
+                    usage.cache_write_tokens.map(|c| c as i64),
+                    usage.reasoning_tokens.map(|c| c as i64),
                 ),
             )?;
             tx.execute(
@@ -163,6 +166,8 @@ mod tests {
             output_tokens: 10,
             cached_input_tokens: cached,
             cost_usd: 0.0,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
         }
     }
 

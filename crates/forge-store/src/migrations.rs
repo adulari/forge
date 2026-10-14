@@ -9,6 +9,7 @@ mod m0038_provider_items;
 mod m0039_apns_e2e;
 mod m0040_cc_link;
 mod m0041_usage_prefix;
+mod m0042_usage_token_detail;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
@@ -18,6 +19,7 @@ use m0038_provider_items::{migration_0036, migration_0038};
 pub(super) use m0039_apns_e2e::migration_0039;
 use m0040_cc_link::migration_0040;
 use m0041_usage_prefix::migration_0041;
+use m0042_usage_token_detail::migration_0042;
 mod usage;
 use usage::migration_0030;
 
@@ -707,6 +709,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0039,
     migration_0040,
     migration_0041,
+    migration_0042,
 ];
 
 /// Migration #33: whether a session has released its subagents from the active model pin.

@@ -223,6 +223,7 @@ mod tests {
             output_tokens: 1,
             cached_input_tokens: Some(cached),
             cost_usd: 0.0,
+            ..Default::default()
         }
     }
 

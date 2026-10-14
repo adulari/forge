@@ -1636,16 +1636,17 @@ impl GenAiProvider {
 /// Providers that omit `prompt_tokens_details` entirely (groq among them) yield `None` rather than
 /// 0: they never told us how much was cached, which is not a claim that nothing was.
 fn normalize_usage(usage: &genai::chat::Usage) -> Usage {
-    let cached = usage
-        .prompt_tokens_details
-        .as_ref()
-        .and_then(|details| details.cached_tokens)
-        .map(|cached| cached.max(0) as u64);
+    let count = |n: Option<i32>| n.map(|n| n.max(0) as u64);
+    let prompt = usage.prompt_tokens_details.as_ref();
+    let completion = usage.completion_tokens_details.as_ref();
     Usage {
-        input_tokens: usage.prompt_tokens.unwrap_or(0).max(0) as u64,
-        output_tokens: usage.completion_tokens.unwrap_or(0).max(0) as u64,
-        cached_input_tokens: cached,
+        input_tokens: count(usage.prompt_tokens).unwrap_or(0),
+        output_tokens: count(usage.completion_tokens).unwrap_or(0),
+        cached_input_tokens: count(prompt.and_then(|d| d.cached_tokens)),
         cost_usd: 0.0, // priced by the mesh from token counts (FR-5)
+        // Anthropic/Bedrock cache creation and reasoning counts; genai turns a zero into None.
+        cache_write_tokens: count(prompt.and_then(|d| d.cache_creation_tokens)),
+        reasoning_tokens: count(completion.and_then(|d| d.reasoning_tokens)),
     }
 }
 
@@ -2061,8 +2062,31 @@ mod tests {
                 output_tokens: 35,
                 cached_input_tokens: Some(11_520),
                 cost_usd: 0.0,
+                ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn cache_write_and_reasoning_counts_reach_forge_usage() {
+        let provider_usage = genai::chat::Usage {
+            prompt_tokens: Some(10_000),
+            prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
+                cached_tokens: Some(6_000),
+                cache_creation_tokens: Some(1_500),
+                ..Default::default()
+            }),
+            completion_tokens: Some(400),
+            completion_tokens_details: Some(genai::chat::CompletionTokensDetails {
+                reasoning_tokens: Some(250),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let usage = normalize_usage(&provider_usage);
+        assert_eq!(usage.cache_write_tokens, Some(1_500));
+        assert_eq!(usage.reasoning_tokens, Some(250));
+        assert_eq!(usage.cached_input_tokens, Some(6_000));
     }
 
     /// Live reproduction (needs an OpenRouter key; run with `--ignored`). Proves both halves of the

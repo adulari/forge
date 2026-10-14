@@ -2,7 +2,113 @@
 
 use super::*;
 
+/// One session's provider calls summed per model, split by whether the call recorded real spend.
+/// The bench reads this to price subscription/free calls at list rates ("notional" cost) without
+/// touching the calls that were really billed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModelUsageRow {
+    pub model: Option<String>,
+    /// The calls in this row recorded `cost_usd = 0` (subscription, free route or unpriced model).
+    pub zero_cost: bool,
+    pub calls: u64,
+    pub usage: Usage,
+}
+
 impl Store {
+    /// Provider-consumed usage across the complete session ledger.
+    ///
+    /// Unlike [`Store::session_tokens`], this includes inactive synthetic side calls (recap,
+    /// suggestion, memory, compaction, diagnosis) and calls belonging to later-deactivated turns.
+    /// Those calls still consumed provider quota and remain part of honest billing/benchmark
+    /// accounting even though they no longer contribute to the active transcript.
+    pub fn session_token_usage(&self, session_id: &str) -> Result<Usage> {
+        let conn = self.lock()?;
+        // `COUNT(col)` skips NULLs, so `reporting == 0` means not one call in the session came
+        // from a provider that reports cache hits — the session total is unknown, not zero. When
+        // only some calls reported, the sum covers exactly those and the rest stay uncounted.
+        type Sums = (
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+            f64,
+        );
+        let (input, cached, cache_write, reasoning, output, cost): Sums = conn.query_row(
+            "SELECT SUM(u.input_tokens), SUM(u.cached_input_tokens), SUM(u.cache_write_tokens),
+                    SUM(u.reasoning_tokens), SUM(u.output_tokens), COALESCE(SUM(u.cost_usd), 0.0)
+             FROM usage u JOIN message m ON m.id = u.message_id
+             WHERE m.session_id = ?1",
+            [session_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
+        // SQL `SUM` over only-NULL values is NULL, so an optional total stays "not reported" unless
+        // at least one call in the session reported it.
+        let count = |v: Option<i64>| v.map(|n| n.max(0) as u64);
+        Ok(Usage {
+            input_tokens: count(input).unwrap_or(0),
+            cached_input_tokens: count(cached),
+            output_tokens: count(output).unwrap_or(0),
+            cost_usd: cost.max(0.0),
+            cache_write_tokens: count(cache_write),
+            reasoning_tokens: count(reasoning),
+        })
+    }
+
+    /// Every provider call in a session (side calls and deactivated turns included, as in
+    /// [`Store::session_token_usage`]) grouped by model and by zero/non-zero recorded cost.
+    pub fn session_usage_by_model(&self, session_id: &str) -> Result<Vec<ModelUsageRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(u.model, m.model) AS mdl, u.cost_usd = 0 AS zero, COUNT(*),
+                    SUM(u.input_tokens), SUM(u.cached_input_tokens), SUM(u.cache_write_tokens),
+                    SUM(u.reasoning_tokens), SUM(u.output_tokens), COALESCE(SUM(u.cost_usd), 0.0)
+             FROM usage u JOIN message m ON m.id = u.message_id
+             WHERE m.session_id = ?1
+             GROUP BY mdl, zero
+             ORDER BY mdl, zero",
+        )?;
+        let count = |v: Option<i64>| v.map(|n| n.max(0) as u64);
+        let rows = stmt
+            .query_map([session_id], |r| {
+                Ok(ModelUsageRow {
+                    model: r.get(0)?,
+                    zero_cost: r.get(1)?,
+                    calls: r.get::<_, i64>(2)?.max(0) as u64,
+                    usage: Usage {
+                        input_tokens: count(r.get(3)?).unwrap_or(0),
+                        cached_input_tokens: count(r.get(4)?),
+                        cache_write_tokens: count(r.get(5)?),
+                        reasoning_tokens: count(r.get(6)?),
+                        output_tokens: count(r.get(7)?).unwrap_or(0),
+                        cost_usd: r.get::<_, f64>(8)?.max(0.0),
+                    },
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Number of tool calls recorded in a session, across every turn.
+    pub fn session_tool_call_count(&self, session_id: &str) -> Result<u64> {
+        let n: i64 = self.lock()?.query_row(
+            "SELECT COUNT(*) FROM tool_call t JOIN message m ON m.id = t.message_id
+             WHERE m.session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
     /// Record usage for a side call (compact, diagnose) that has no corresponding agent message.
     /// Inserts a synthetic inactive system message as the FK anchor, then the usage row, and
     /// bumps the session total so daily/monthly budget queries (which read `usage`) stay accurate.
@@ -58,8 +164,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO usage \
                  (id, message_id, provider, model, input_tokens, cached_input_tokens, \
-                  output_tokens, cost_usd) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  output_tokens, cost_usd, cache_write_tokens, reasoning_tokens) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 (
                     &usage_id,
                     msg_id.as_str(),
@@ -69,6 +175,8 @@ impl Store {
                     usage.cached_input_tokens.map(|c| c as i64),
                     usage.output_tokens as i64,
                     usage.cost_usd,
+                    usage.cache_write_tokens.map(|c| c as i64),
+                    usage.reasoning_tokens.map(|c| c as i64),
                 ),
             )?;
             tx.execute(
@@ -116,5 +224,121 @@ impl Store {
             tx.commit()?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_detail_columns_round_trip_and_group_by_model_and_zero_cost() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        let billed = store
+            .add_message(&sid, 0, Role::Assistant, "a", Some("bedrock::kimi-k3"))
+            .unwrap();
+        store
+            .record_usage(
+                &sid,
+                &billed,
+                &Usage {
+                    input_tokens: 1_000,
+                    output_tokens: 100,
+                    cached_input_tokens: Some(600),
+                    cost_usd: 0.25,
+                    cache_write_tokens: Some(300),
+                    reasoning_tokens: Some(40),
+                },
+                Some("bedrock::kimi-k3"),
+            )
+            .unwrap();
+        for seq in 1..=2 {
+            let free = store
+                .add_message(&sid, seq, Role::Assistant, "b", Some("claude-cli::sonnet"))
+                .unwrap();
+            store
+                .record_usage(
+                    &sid,
+                    &free,
+                    &Usage {
+                        input_tokens: 500,
+                        output_tokens: 50,
+                        ..Default::default()
+                    },
+                    Some("claude-cli::sonnet"),
+                )
+                .unwrap();
+            store
+                .record_tool_call(&free, "read_file", "{}", "ok", "allowed", "ok")
+                .unwrap();
+        }
+
+        let rows = store.session_usage_by_model(&sid).unwrap();
+        assert_eq!(rows.len(), 2);
+        let bedrock = rows
+            .iter()
+            .find(|r| r.model.as_deref() == Some("bedrock::kimi-k3"))
+            .unwrap();
+        assert!(!bedrock.zero_cost);
+        assert_eq!(bedrock.calls, 1);
+        assert_eq!(bedrock.usage.cache_write_tokens, Some(300));
+        assert_eq!(bedrock.usage.reasoning_tokens, Some(40));
+        let bridge = rows
+            .iter()
+            .find(|r| r.model.as_deref() == Some("claude-cli::sonnet"))
+            .unwrap();
+        assert!(bridge.zero_cost);
+        assert_eq!((bridge.calls, bridge.usage.input_tokens), (2, 1_000));
+        assert_eq!(
+            bridge.usage.cache_write_tokens, None,
+            "never reported → unknown"
+        );
+        assert_eq!(store.session_tool_call_count(&sid).unwrap(), 2);
+
+        let total = store.session_token_usage(&sid).unwrap();
+        assert_eq!(total.cache_write_tokens, Some(300));
+        assert_eq!(total.reasoning_tokens, Some(40));
+        assert_eq!(total.input_tokens, 2_000);
+    }
+
+    #[test]
+    fn migration_42_adds_nullable_token_detail_columns_to_an_existing_store() {
+        let path = std::env::temp_dir().join(format!("forge-m42-{}.db", forge_types::new_id()));
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(schema::SCHEMA).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE usage DROP COLUMN cache_write_tokens;
+                 ALTER TABLE usage DROP COLUMN reasoning_tokens;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 40i64).unwrap();
+        }
+        for pass in ["first open (migrates)", "second open (idempotent)"] {
+            let store = Store::open(&path).unwrap_or_else(|e| panic!("{pass}: {e:?}"));
+            let conn = store.lock().unwrap();
+            let columns: Vec<(String, i64)> = conn
+                .prepare(
+                    "SELECT name, \"notnull\" FROM pragma_table_info('usage')
+                     WHERE name IN ('cache_write_tokens', 'reasoning_tokens') ORDER BY name",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(
+                columns,
+                vec![
+                    ("cache_write_tokens".to_string(), 0),
+                    ("reasoning_tokens".to_string(), 0)
+                ],
+                "{pass}"
+            );
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 }

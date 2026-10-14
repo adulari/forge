@@ -29,6 +29,7 @@ impl Provider for CachedAnswer {
                 output_tokens: 5,
                 cached_input_tokens: Some(9_500),
                 cost_usd: 0.0,
+                ..Default::default()
             },
             quotas: Vec::new(),
         })

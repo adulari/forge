@@ -72,7 +72,7 @@ pub struct Prediction {
 /// `parse_external_usage`), so the two are apples-to-apples. Capture is reliable for the in-process
 /// Forge agent (its own usage DB records bridge usage); for an external CLI it is best-effort (parsed
 /// from claude `--output-format json`), else 0 and flagged `metrics_complete = false` rather than lie.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct InstanceMetric {
     pub instance_id: String,
     pub agent: String,
@@ -101,6 +101,49 @@ pub struct InstanceMetric {
     /// absent in older sidecars. Collected once before the measured sweep and cloned per instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<BenchmarkRuntimeMetadata>,
+    /// 1-based seed this row belongs to; 0 in sidecars written before attempts were recorded.
+    #[serde(default)]
+    pub attempt: usize,
+    /// The Forge session that ran the attempt (Forge agent only), for joining back to the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Subsets of `input_tokens` / `output_tokens`. `None` = not reported (or an older sidecar).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_calls: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<u64>,
+    /// `cost_usd` with zero-cost (subscription/free) calls priced at list rates. A comparison
+    /// axis, never spend; `None` when some call could not be priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notional_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub outcome: AttemptOutcome,
+    /// Why the outcome is not `ok`, e.g. which refusal phrase matched (refusal detection is a
+    /// heuristic: stop reasons do not reach `ModelResponse`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_detail: Option<String>,
+}
+
+impl InstanceMetric {
+    /// Tools never worked for this attempt, so it is an infrastructure error, not a fair miss.
+    /// Older sidecars carry only the boolean, so both are honoured.
+    pub fn excluded_from_pass1(&self) -> bool {
+        self.tools_unavailable || self.outcome == AttemptOutcome::ToolsUnavailable
+    }
+
+    /// Scored 0 even when the evaluator resolved it, and never excluded from the denominator.
+    pub fn scores_zero(&self) -> bool {
+        matches!(
+            self.outcome,
+            AttemptOutcome::Refused | AttemptOutcome::IntegrityFail
+        )
+    }
 }
 
 /// Reproducibility metadata for one benchmark arm. Capability fields are authoritative only for
@@ -127,6 +170,7 @@ pub struct BenchmarkRuntimeMetadata {
 }
 
 /// Outcome of running one instance: the patch plus the resources it took.
+#[derive(Default)]
 struct RunOutcome {
     patch: String,
     input_tokens: u64,
@@ -138,21 +182,26 @@ struct RunOutcome {
     /// The bridge turn ran with no working Forge tools (`mcp-serve` failed to start, wave 7). Drives
     /// the once-only fresh-process retry in [`run_one_sweep`]; only the Forge/bridge path sets it.
     tools_unavailable: bool,
+    session_id: Option<String>,
+    cached_input_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    model_calls: Option<u64>,
+    tool_calls: Option<u64>,
+    notional_cost_usd: Option<f64>,
+    /// The agent's last answer, read only for refusal detection.
+    final_text: Option<String>,
+    /// Why the instance could not run or the turn failed.
+    error: Option<String>,
 }
 
 impl RunOutcome {
     /// An instance that could not be run (prepare/clone error): no patch, no resources, not a
     /// toolless-bridge case (that only applies to a turn that actually ran).
-    fn empty() -> Self {
+    fn failed(error: String) -> Self {
         RunOutcome {
-            patch: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            cost_usd: 0.0,
-            wall_secs: 0.0,
-            metrics_complete: false,
-            timed_out: false,
-            tools_unavailable: false,
+            error: Some(error),
+            ..RunOutcome::default()
         }
     }
 }
@@ -327,6 +376,7 @@ pub async fn run_swe(
             agent,
             timeout_secs,
             &seed_out,
+            seed,
         )
         .await?;
     }
@@ -428,6 +478,7 @@ async fn run_one_sweep(
     agent: Agent,
     timeout_secs: u64,
     out: &Path,
+    attempt: usize,
 ) -> Result<()> {
     eprintln!(
         "SWE-bench [{}]: {} instance(s) → {}; repos under {}",
@@ -482,6 +533,13 @@ async fn run_one_sweep(
                     .then_some(!outcome.tools_unavailable);
             }
         }
+        let (attempt_outcome, outcome_detail) = outcome::classify(&outcome::AttemptSignals {
+            tools_unavailable: outcome.tools_unavailable,
+            timed_out: outcome.timed_out,
+            patched,
+            final_text: outcome.final_text.as_deref(),
+            error: outcome.error.as_deref(),
+        });
         metrics.push(InstanceMetric {
             instance_id: inst.instance_id.clone(),
             agent: agent.label().to_string(),
@@ -495,6 +553,16 @@ async fn run_one_sweep(
             timed_out: outcome.timed_out,
             tools_unavailable: outcome.tools_unavailable,
             runtime: instance_runtime,
+            attempt,
+            session_id: outcome.session_id.take(),
+            cached_input_tokens: outcome.cached_input_tokens,
+            cache_write_tokens: outcome.cache_write_tokens,
+            reasoning_tokens: outcome.reasoning_tokens,
+            model_calls: outcome.model_calls,
+            tool_calls: outcome.tool_calls,
+            notional_cost_usd: outcome.notional_cost_usd,
+            outcome: attempt_outcome,
+            outcome_detail,
         });
         preds.push(Prediction {
             instance_id: inst.instance_id.clone(),
@@ -516,6 +584,13 @@ async fn run_one_sweep(
         out.display(),
         metrics_out.display(),
     );
+    let refused = metrics
+        .iter()
+        .filter(|m| m.outcome == AttemptOutcome::Refused)
+        .count();
+    if refused > 0 {
+        eprintln!("⚠ {refused} instance(s) classified REFUSED (outcome_detail says which signal) — they score 0");
+    }
     // Wave 7: call out toolless-bridge ERRORS separately so a sweep degraded by mcp-serve startup
     // failures isn't silently read as a low resolve rate (the ~7/15 hole this guard closes).
     let toolless = metrics.iter().filter(|m| m.tools_unavailable).count();
@@ -558,7 +633,7 @@ async fn run_one_instance(
         }
         Err(e) => {
             eprintln!("  ✗ skipped: {e:#}");
-            RunOutcome::empty()
+            RunOutcome::failed(format!("{e:#}"))
         }
     }
 }
@@ -566,10 +641,13 @@ async fn run_one_instance(
 mod external_agent;
 use external_agent::run_external_agent;
 
+mod outcome;
+pub use outcome::AttemptOutcome;
 mod report;
 #[cfg(test)]
 use report::load_metrics;
-pub(crate) use report::{passk, report};
+pub(crate) use report::{passk, report, ReportInputs};
+mod scoring;
 
 /// Prepare one instance's repo, run a single headless turn in it, and return the diff plus the
 /// resources it took. Sets the process CWD to the repo (the caller restores it).
@@ -583,81 +661,100 @@ async fn prepare_and_run(
     let dir = prepare_repo(inst, workdir)?;
     std::env::set_current_dir(&dir).context("entering instance repo")?;
     let started = std::time::Instant::now();
-    let (input_tokens, output_tokens, cost_usd, metrics_complete, timed_out, tools_unavailable) =
-        match agent {
-            Agent::Forge => {
-                // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
-                // edits the freshly-reset working tree; we read the diff back out afterwards.
-                let mut session =
-                    crate::build_session(false, Some(Mode::Bypass), false, None, model)
-                        .await
-                        .context("building session")?;
-                // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
-                // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
-                // "implement it, don't describe it" push-back instead of scoring an empty patch.
-                session.set_expect_code_change(true);
-                // Soft deadline 120s before the hard tokio timeout below: past it the session stops
-                // launching model calls and spends ONE turn reverting unverified speculative changes,
-                // so the hard kill no longer ships the riskiest mid-refactor state as the patch.
-                if let Some(budget) = forge_core::reconcile_deadline_budget_secs(timeout_secs, 120)
-                {
-                    session.set_turn_deadline(
-                        std::time::Instant::now() + std::time::Duration::from_secs(budget),
-                    );
+    let mut outcome = match agent {
+        Agent::Forge => {
+            // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
+            // edits the freshly-reset working tree; we read the diff back out afterwards.
+            let mut session = crate::build_session(false, Some(Mode::Bypass), false, None, model)
+                .await
+                .context("building session")?;
+            // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
+            // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
+            // "implement it, don't describe it" push-back instead of scoring an empty patch.
+            session.set_expect_code_change(true);
+            // Soft deadline 120s before the hard tokio timeout below: past it the session stops
+            // launching model calls and spends ONE turn reverting unverified speculative changes,
+            // so the hard kill no longer ships the riskiest mid-refactor state as the patch.
+            if let Some(budget) = forge_core::reconcile_deadline_budget_secs(timeout_secs, 120) {
+                session.set_turn_deadline(
+                    std::time::Instant::now() + std::time::Duration::from_secs(budget),
+                );
+            }
+            // Bound the in-process Forge turn the SAME way the external CLIs are bounded. Without
+            // this the Forge path was unbounded: a non-converging run on a hard instance was observed
+            // making 500+ tool calls over 22 minutes while claude-cli's own internal limits kept it
+            // to ~1 minute. On timeout we keep whatever edits + usage the turn produced and submit
+            // the partial patch (a non-empty attempt still scores; an unsolved one was unsolved
+            // anyway).
+            let turn = session.run_turn(&inst.problem_statement);
+            let timed_out = match tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                turn,
+            )
+            .await
+            {
+                Ok(res) => {
+                    res.context("running the agent turn")?;
+                    false
                 }
-                // Bound the in-process Forge turn the SAME way the external CLIs are bounded. Without
-                // this the Forge path was unbounded: a non-converging run on a hard instance was observed
-                // making 500+ tool calls over 22 minutes while claude-cli's own internal limits kept it
-                // to ~1 minute. On timeout we keep whatever edits + usage the turn produced and submit
-                // the partial patch (a non-empty attempt still scores; an unsolved one was unsolved
-                // anyway).
-                let turn = session.run_turn(&inst.problem_statement);
-                let timed_out =
-                    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), turn)
-                        .await
-                    {
-                        Ok(res) => {
-                            res.context("running the agent turn")?;
-                            false
-                        }
-                        Err(_) => {
-                            eprintln!(
+                Err(_) => {
+                    eprintln!(
                         "  forge turn hit the {timeout_secs}s timeout — submitting partial work"
                     );
-                            true
-                        }
-                    };
-                // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
-                let (inp, out, cost) = session.session_usage_db();
+                    true
+                }
+            };
+            // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
+            let (inp, out, cost) = session.session_usage_db();
+            let detail = session.session_usage_detail();
+            RunOutcome {
+                input_tokens: inp,
+                output_tokens: out,
+                cost_usd: cost,
+                metrics_complete: true,
+                timed_out,
                 // Wave 7: did this turn run toolless because `mcp-serve` failed to start? Only the
                 // bridge/headless path can report it; the harness retries the instance once on it.
-                (inp, out, cost, true, timed_out, session.tools_unavailable())
+                tools_unavailable: session.tools_unavailable(),
+                session_id: Some(session.session_id().to_string()),
+                cached_input_tokens: detail.cached_input_tokens,
+                cache_write_tokens: detail.cache_write_tokens,
+                reasoning_tokens: detail.reasoning_tokens,
+                model_calls: Some(detail.model_calls),
+                tool_calls: Some(detail.tool_calls),
+                notional_cost_usd: detail.notional_cost_usd,
+                final_text: session.last_assistant_text().map(str::to_string),
+                ..RunOutcome::default()
             }
-            Agent::ClaudeCode | Agent::Codex => {
-                let (inp, out, cost, complete, timed_out) = run_external_agent(
-                    agent,
-                    &inst.problem_statement,
-                    &dir,
-                    model.as_deref(),
-                    timeout_secs,
-                )
-                .await?;
-                // An external CLI runs its OWN tools (not Forge's mcp-serve), so this never applies.
-                (inp, out, cost, complete, timed_out, false)
+        }
+        Agent::ClaudeCode | Agent::Codex => {
+            let run = run_external_agent(
+                agent,
+                &inst.problem_statement,
+                &dir,
+                model.as_deref(),
+                timeout_secs,
+            )
+            .await?;
+            // An external CLI runs its OWN tools (not Forge's mcp-serve), so tools_unavailable
+            // never applies.
+            RunOutcome {
+                input_tokens: run.usage.input_tokens,
+                output_tokens: run.usage.output_tokens,
+                cost_usd: run.usage.cost_usd,
+                metrics_complete: run.usage.complete,
+                timed_out: run.timed_out,
+                cached_input_tokens: run.usage.cached_input_tokens,
+                cache_write_tokens: run.usage.cache_write_tokens,
+                notional_cost_usd: run.usage.notional_cost_usd,
+                final_text: run.final_text,
+                ..RunOutcome::default()
             }
-        };
-    let wall_secs = started.elapsed().as_secs_f64();
-    let patch = extract_patch(&dir)?;
-    Ok(RunOutcome {
-        patch,
-        input_tokens,
-        output_tokens,
-        cost_usd,
-        wall_secs,
-        metrics_complete,
-        timed_out,
-        tools_unavailable,
-    })
+        }
+    };
+    outcome.wall_secs = started.elapsed().as_secs_f64();
+    outcome.patch = extract_patch(&dir)?;
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -742,6 +839,14 @@ mod tests {
                     mcp_required: true,
                     mcp_connected: Some(true),
                 }),
+                attempt: 2,
+                session_id: Some("sess-1".into()),
+                cached_input_tokens: Some(800),
+                cache_write_tokens: Some(50),
+                model_calls: Some(4),
+                tool_calls: Some(9),
+                notional_cost_usd: Some(0.02),
+                ..Default::default()
             },
             InstanceMetric {
                 instance_id: "a-2".into(),
@@ -756,6 +861,8 @@ mod tests {
                 timed_out: true,
                 tools_unavailable: true,
                 runtime: None,
+                outcome: AttemptOutcome::ToolsUnavailable,
+                ..Default::default()
             },
         ];
         let jsonl = metrics_to_jsonl(&m);

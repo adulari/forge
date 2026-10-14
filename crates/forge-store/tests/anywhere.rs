@@ -839,6 +839,7 @@ fn core_store_writes_enqueue_complete_sync_snapshots() {
                 output_tokens: 5,
                 cached_input_tokens: Some(2),
                 cost_usd: 0.01,
+                ..Default::default()
             },
             Some("anthropic::claude-opus-5"),
         )
