@@ -146,9 +146,10 @@ impl Session {
             None,
         );
         // Each hint was already appended to its own call's value; deliver it once more after the
-        // outer result, because the script may not have returned it.
+        // outer result only when the script did not return it (LSP blocks run to thousands of
+        // tokens, so a returned hint must not enter the transcript twice).
         for hint in run.hints {
-            if !self.pending_hints.contains(&hint) {
+            if !result.contains(hint.as_str()) && !self.pending_hints.contains(&hint) {
                 self.pending_hints.push(hint);
             }
         }

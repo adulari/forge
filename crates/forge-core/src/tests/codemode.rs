@@ -306,6 +306,41 @@ async fn hook_context_from_an_inner_call_is_visible_to_the_script_and_delivered_
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hint_the_script_returned_is_not_delivered_a_second_time() {
+    let dir = workspace("hint-returned");
+    let config = Config {
+        hooks: vec![forge_config::HookConfig {
+            event: forge_config::HookEvent::PostToolUse,
+            matcher: Some("write_file".into()),
+            command: r#"echo '{"action":"inject","context":"HOOK-CONTEXT-8"}'"#.into(),
+            timeout_secs: 10,
+            cc_compat: false,
+        }],
+        ..Config::default()
+    };
+    let mut session = session_with_config(
+        &dir,
+        PermissionMode::AcceptEdits,
+        Approver::default(),
+        config,
+    );
+    let code = format!(
+        "return await tools.write_file({{path: {p:?}, content: 'x'}});",
+        p = dir.join("h.txt").to_str().unwrap()
+    );
+    let (_, result) = step(&mut session, &Ledgers::new(), run_code_call(&code, None)).await;
+    assert!(result.contains("[hint] HOOK-CONTEXT-8"), "{result}");
+    let delivered = session
+        .transcript
+        .iter()
+        .filter(|m| m.role == Role::System && m.content.contains("HOOK-CONTEXT-8"))
+        .count();
+    assert_eq!(delivered, 0, "the returned value already carries the hint");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn search_then_call_a_tool_by_name_in_one_step() {
     let dir = workspace("search");
@@ -340,7 +375,8 @@ async fn the_deadline_never_cancels_an_in_flight_call_and_refuses_the_next() {
     );
     let (msg_id, result) = step(&mut session, &Ledgers::new(), run_code_call(&code, Some(1))).await;
     assert!(
-        result.starts_with("second refused: run_code deadline exceeded"),
+        result.starts_with("second refused: tools.list_dir(")
+            && result.contains(") failed: run_code deadline exceeded"),
         "{result}"
     );
     let rows = audit(&session, &msg_id);
