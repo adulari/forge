@@ -585,6 +585,34 @@ mod tests {
     }
 
     #[test]
+    fn redacted_replay_renders_no_planted_secret_in_json_or_html() {
+        let planted = "plantedProviderKey0042";
+        let mut e = entry(
+            1,
+            Role::Assistant,
+            "export GITHUB_TOKEN=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+            None,
+            None,
+        );
+        e.tool_calls.push(ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            args: serde_json::json!({ "command": format!("curl -H 'x-key: {planted}' api") }),
+        });
+        let mut entries = vec![e];
+        forge_core::redact::Redactor::new([planted.to_string()]).redact_replay(&mut entries);
+        for out in [
+            render_json("id", &entries),
+            render_html("id", &entries),
+            render_transcript("id", &entries),
+        ] {
+            assert!(!out.contains(planted), "{out}");
+            assert!(!out.contains("ghp_AbCd"), "{out}");
+            assert!(out.contains("[redacted]"));
+        }
+    }
+
+    #[test]
     fn render_html_escapes_a_script_tag_inert() {
         let entries = vec![entry(
             0,

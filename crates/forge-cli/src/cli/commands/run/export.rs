@@ -2,7 +2,7 @@
 //! (docs/features/session-replay.md, "Shipped (follow-up 3)"). Shares its renderer with
 //! `forge replay <id> --html <path>` (`crate::replay::render_html`). Lives in its own file
 //! because `run/dispatch.rs` sits at its CI file-size ratchet ceiling — the dispatch arm just
-//! forwards here.
+//! forwards here. The export is always secret-redacted (`forge_core::redact`).
 
 use super::*;
 
@@ -17,7 +17,7 @@ pub(crate) async fn export_cmd(
     path_arg: Option<String>,
     app: &mut forge_tui::App,
 ) -> Result<DispatchOutcome> {
-    let (id, entries) = {
+    let (id, mut entries) = {
         let s = session.lock().await;
         let id = s.session_id().to_string();
         let entries = s.load_replay(&id).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -27,6 +27,7 @@ pub(crate) async fn export_cmd(
         app.note("● nothing to export yet — this session has no messages");
         return Ok(DispatchOutcome::Handled);
     }
+    forge_core::redact::Redactor::from_environment().redact_replay(&mut entries);
     let short = &id[..id.len().min(8)];
     let path = path_arg.unwrap_or_else(|| default_export_path(&id));
     let html = crate::replay::render_html(short, &entries);

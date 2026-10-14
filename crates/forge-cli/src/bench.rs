@@ -49,6 +49,13 @@ pub struct SweInstance {
     pub repo: String,
     pub base_commit: String,
     pub problem_statement: String,
+    /// The graded test ids; only the integrity check reads them (special-casing rule).
+    #[serde(
+        default,
+        rename = "FAIL_TO_PASS",
+        deserialize_with = "integrity::string_or_list"
+    )]
+    pub fail_to_pass: Vec<String>,
 }
 
 /// A prediction row in the schema the official `swebench` evaluator consumes.
@@ -193,6 +200,8 @@ struct RunOutcome {
     final_text: Option<String>,
     /// Why the instance could not run or the turn failed.
     error: Option<String>,
+    /// The in-process Forge session's tool calls, for the integrity check. External CLIs: `None`.
+    trace: Option<Vec<integrity::TraceCall>>,
 }
 
 impl RunOutcome {
@@ -351,8 +360,13 @@ pub async fn run_swe(
     agent: Agent,
     timeout_secs: u64,
     attempts: usize,
+    judge: Option<String>,
 ) -> Result<()> {
     let mut instances = load_instances(&dataset)?;
+    let integrity_opts = integrity::SweepOptions {
+        grader_paths: integrity::grader_paths_for(&dataset),
+        judge,
+    };
     if let Some(n) = limit {
         instances.truncate(n);
     }
@@ -377,6 +391,7 @@ pub async fn run_swe(
             timeout_secs,
             &seed_out,
             seed,
+            &integrity_opts,
         )
         .await?;
     }
@@ -479,6 +494,7 @@ async fn run_one_sweep(
     timeout_secs: u64,
     out: &Path,
     attempt: usize,
+    integrity_opts: &integrity::SweepOptions,
 ) -> Result<()> {
     eprintln!(
         "SWE-bench [{}]: {} instance(s) → {}; repos under {}",
@@ -494,6 +510,7 @@ async fn run_one_sweep(
     let orig_cwd = std::env::current_dir().context("reading current dir")?;
     let mut preds = Vec::with_capacity(instances.len());
     let mut metrics = Vec::with_capacity(instances.len());
+    let mut integrity_reports = Vec::with_capacity(instances.len());
     let total = instances.len();
     for (i, inst) in instances.iter().enumerate() {
         eprintln!("[{}/{}] {} ({})", i + 1, total, inst.instance_id, inst.repo);
@@ -524,6 +541,16 @@ async fn run_one_sweep(
         }
         // Always restore CWD so the next instance (and the final write) resolve correctly.
         let _ = std::env::set_current_dir(&orig_cwd);
+        integrity_reports.push(
+            integrity::assess(
+                inst,
+                workdir,
+                &outcome.patch,
+                outcome.trace.as_deref(),
+                integrity_opts,
+            )
+            .await,
+        );
         let patched = !outcome.patch.is_empty();
         let mut instance_runtime = runtime.clone();
         if let Some(runtime) = &mut instance_runtime {
@@ -600,6 +627,13 @@ async fn run_one_sweep(
              after one retry) — these are ERRORS, exclude them from resolve-rate denominators"
         );
     }
+    let integrity_out = integrity::integrity_path(out);
+    std::fs::write(
+        &integrity_out,
+        integrity::reports_to_jsonl(&integrity_reports),
+    )
+    .with_context(|| format!("writing {}", integrity_out.display()))?;
+    integrity::print_summary(&integrity_reports, &integrity_out);
     eprintln!("score with the official evaluator — see docs/benchmarks/swe-bench.md");
     Ok(())
 }
@@ -643,6 +677,8 @@ use external_agent::run_external_agent;
 
 mod outcome;
 pub use outcome::AttemptOutcome;
+mod integrity;
+pub(crate) use integrity::integrity_cmd;
 mod report;
 #[cfg(test)]
 use report::load_metrics;
@@ -724,6 +760,7 @@ async fn prepare_and_run(
                 tool_calls: Some(detail.tool_calls),
                 notional_cost_usd: detail.notional_cost_usd,
                 final_text: session.last_assistant_text().map(str::to_string),
+                trace: integrity::session_trace(&session),
                 ..RunOutcome::default()
             }
         }

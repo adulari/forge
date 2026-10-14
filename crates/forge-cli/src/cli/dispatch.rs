@@ -125,11 +125,12 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             json,
             html,
             rerun,
+            no_redact,
         } => {
             if rerun {
                 replay_rerun_cmd(&ids).await
             } else {
-                replay_cmd(&ids, json, html.as_deref())
+                replay_cmd(&ids, json, html.as_deref(), !no_redact)
             }
         }
         Command::Fork {
@@ -152,6 +153,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 agent,
                 timeout_secs,
                 attempts,
+                judge,
             } => {
                 bench::run_swe(
                     dataset,
@@ -162,9 +164,15 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                     agent,
                     timeout_secs,
                     attempts,
+                    judge,
                 )
                 .await
             }
+            BenchCmd::Integrity {
+                predictions,
+                dataset,
+                judge,
+            } => bench::integrity_cmd(&predictions, &dataset, judge.as_deref()).await,
             BenchCmd::Passk { reports } => bench::passk(&reports),
             BenchCmd::Report {
                 runs,
