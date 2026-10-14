@@ -491,6 +491,7 @@ Rules:\n\
             response_chain_prefix_tokens: 0,
             response_format: None,
             require_tool_call: false,
+            deny_data_collection: false,
         };
 
         let mut chain = fallbacks.into_iter();

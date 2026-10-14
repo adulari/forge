@@ -333,6 +333,7 @@ impl Session {
             .create_session(&workspace.display(), format!("{:?}", self.mode).as_str())?;
         self.transition_workspace(workspace)?;
         self.id = id.clone();
+        self.frozen_cache_key = None;
         self.transcript.clear();
         self.seq = 0;
         self.tasks.clear();
@@ -374,6 +375,7 @@ impl Session {
         self.transition_workspace(workspace)?;
         self.id = session_id.to_string();
         self.forget_context_shape();
+        self.frozen_cache_key = None;
         self.tasks = match self.store.tasks(session_id) {
             Ok(tasks) => tasks,
             Err(error) => {

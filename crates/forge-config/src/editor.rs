@@ -213,6 +213,8 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "mesh.architect_model" => Some(("Mesh & Cost", "Architect model")),
         "mesh.editor_model" => Some(("Mesh & Cost", "Editor model")),
         "mesh.self_review" => Some(("Mesh & Cost", "Self-review writes")),
+        "mesh.cross_session_cache_key" => Some(("Mesh & Cost", "Cross-session prompt cache key")),
+        "privacy.zero_retention" => Some(("Safety", "Zero-data-retention routing")),
         "mesh.default_effort" => Some(("Mesh & Cost", "Default reasoning effort")),
         "local.autostart" => Some(("Local LLM", "Auto-start on launch")),
         "local.model" => Some(("Local LLM", "Model (Ollama tag)")),
@@ -435,6 +437,8 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "mesh.max_output_tokens" => {
             "Explicit cap on tokens a model may generate per call (0 = provider/model maximum)."
         }
+        "mesh.cross_session_cache_key" => "Share the provider prompt-cache key across sessions with the same model, tools, system prompt and workspace, so a new session reuses the warmed fixed prefix. Frozen per session.",
+        "privacy.zero_retention" => "Route only to providers known not to retain prompts; unknown providers count as retaining. Vouch for one with [privacy.retains] <provider> = false.",
         "mesh.architect_mode" => "Use a stronger 'architect' model to plan, a cheaper one to edit.",
         "mesh.architect_model" => "Model used for the architect/planning pass when architect_mode is on.",
         "mesh.editor_model" => "Model used to apply edits when architect_mode is on.",

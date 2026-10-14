@@ -26,6 +26,8 @@ mod mock_long;
 mod mock_soak;
 mod oauth_responses;
 mod output_cap;
+pub mod prompt_cache;
+pub(crate) use prompt_cache::prompt_cache_key_unsupported;
 mod refresh_lock;
 mod system_placement;
 mod tool_recovery;
@@ -402,32 +404,6 @@ mod plan_cache_tests {
     }
 }
 
-/// True only when a provider rejected the optional OpenAI `prompt_cache_key` request field.
-///
-/// OpenAI-compatible gateways vary: some implement the field, some silently ignore it, and strict
-/// ones return a validation error. Callers use this narrow classifier to retry once without the
-/// hint, retaining the provider's automatic prefix cache (when it has one) without turning a cache
-/// optimization into a failed completion. It deliberately requires the field name plus a clear
-/// validation signal so unrelated request failures are never retried under a different payload.
-pub(crate) fn prompt_cache_key_unsupported(error: &ProviderError) -> bool {
-    let text = error.to_string().to_ascii_lowercase();
-    text.contains("prompt_cache_key")
-        && [
-            "unsupported",
-            "not supported",
-            "unknown",
-            "unrecognized",
-            "not permitted",
-            "not allowed",
-            "extra inputs",
-            "extra_forbidden",
-            "invalid parameter",
-            "unexpected",
-        ]
-        .iter()
-        .any(|marker| text.contains(marker))
-}
-
 /// True only for request validation failures that explicitly identify a message/cache-point hint.
 pub(crate) fn cache_control_unsupported(error: &ProviderError) -> bool {
     let text = error.to_string().to_ascii_lowercase();
@@ -778,6 +754,10 @@ pub struct CompletionOptions {
     /// [`CheckpointContext::session`]; Forge's auxiliary calls use a purpose-scoped derivative so
     /// compaction/recap/diagnosis prefixes cache automatically without colliding with the main loop.
     pub prompt_cache_key: Option<String>,
+    /// Ask the provider not to retain or train on this request, where it has a request-level
+    /// control for that (OpenRouter `provider.data_collection = "deny"`). Set under
+    /// `[privacy] zero_retention`; providers without such a control ignore it.
+    pub deny_data_collection: bool,
     /// Per-call output ceiling. This is intentionally narrower than the provider-wide
     /// `mesh.max_output_tokens` setting: tiny auxiliary calls such as recap and suggestion can
     /// bound a misbehaving model without constraining the main coding turn. Providers that reject

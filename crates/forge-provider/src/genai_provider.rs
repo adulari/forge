@@ -984,18 +984,6 @@ fn qwencloud_thinking_budget(effort: Option<EffortLevel>) -> u32 {
     }
 }
 
-/// Whether to attach OpenAI's optional cache-sharding hint to this request.
-///
-/// NVIDIA NIM enables prefix caching at the deployment/server layer and rejects
-/// `prompt_cache_key` as an unknown body field. Sending it there adds a guaranteed failed request
-/// before every useful completion (the hosted endpoint may take close to a minute to return that
-/// validation response). Other OpenAI-compatible endpoints remain optimistic and retain the
-/// narrow validation fallback below, which is required for custom endpoints whose capabilities
-/// cannot be known ahead of time.
-fn should_send_prompt_cache_key(model: &str) -> bool {
-    !matches!(model.split_once("::"), Some(("nvidia", _)))
-}
-
 /// The failure shape OpenCode Go returns when a model is sent to the wrong wire format: an
 /// immediate 5xx (`Unavailable`) or 401 (`Auth`) with no useful body. Rate limits, capability
 /// and access failures are real answers about the model and must not trigger endpoint learning.
@@ -1148,7 +1136,7 @@ impl GenAiProvider {
         if let Some(cache_key) = opts
             .prompt_cache_key
             .as_deref()
-            .filter(|_| should_send_prompt_cache_key(&model_name))
+            .filter(|_| crate::prompt_cache::should_send_prompt_cache_key(&model_name))
         {
             options = options.with_prompt_cache_key(cache_key);
         }
@@ -1211,8 +1199,9 @@ impl GenAiProvider {
             }
         }
 
-        // Repetition penalties, only while the turn is repeating itself (see `wire_params`).
-        options = crate::wire_params::with_repetition_penalties(options, &model_name, opts);
+        // Repetition penalties and OpenRouter's data policy (see `wire_params`). Keyed on Forge's
+        // id: genai renames `openrouter` to `open_router`, which no provider list matches.
+        options = crate::wire_params::with_extra_body_fragments(options, model, opts);
 
         // Structured-output request (OpenAI `response_format`): map to the provider's JSON-mode /
         // JSON-schema knob so a caller asking for JSON actually gets JSON. Providers that don't
@@ -2572,12 +2561,18 @@ mod tests {
 
     #[test]
     fn prompt_cache_key_is_capability_gated_for_nvidia_nim() {
-        assert!(!should_send_prompt_cache_key("nvidia::z-ai/glm-5.2"));
-        assert!(should_send_prompt_cache_key(
+        assert!(!crate::prompt_cache::should_send_prompt_cache_key(
+            "nvidia::z-ai/glm-5.2"
+        ));
+        assert!(crate::prompt_cache::should_send_prompt_cache_key(
             "qwencloud::qwen3.8-max-preview"
         ));
-        assert!(should_send_prompt_cache_key("openai::gpt-5.4"));
-        assert!(should_send_prompt_cache_key("custom::strict-gateway"));
+        assert!(crate::prompt_cache::should_send_prompt_cache_key(
+            "openai::gpt-5.4"
+        ));
+        assert!(crate::prompt_cache::should_send_prompt_cache_key(
+            "custom::strict-gateway"
+        ));
     }
 
     #[test]

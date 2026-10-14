@@ -70,17 +70,46 @@ pub(crate) fn repetition_penalty_body(
     (!body.is_empty()).then_some(serde_json::Value::Object(body))
 }
 
-/// Attach the penalties to a genai request when the caller reports repetition pressure and the
-/// provider takes them. genai has no typed field for either, so they ride in `extra_body`, which
-/// OpenAI-compatible endpoints merge into the request body.
-pub(crate) fn with_repetition_penalties(
-    options: genai::chat::ChatOptions,
+/// OpenRouter's per-request data policy: `provider.data_collection = "deny"` restricts routing to
+/// upstream endpoints that do not collect or train on prompts. Sent only when the caller asks
+/// (`[privacy] zero_retention`); no other provider has an equivalent body field Forge knows of.
+pub(crate) fn data_collection_body(model: &str, deny: bool) -> Option<serde_json::Value> {
+    (deny && forge_config::provider_of(model) == "openrouter")
+        .then(|| serde_json::json!({"provider": {"data_collection": "deny"}}))
+}
+
+/// Attach every optional `extra_body` fragment this request needs: repetition penalties while a
+/// turn repeats itself, and OpenRouter's data policy under zero-retention mode. genai has no
+/// typed field for either; OpenAI-compatible endpoints merge `extra_body` into the request body.
+/// Fragments merge into whatever `extra_body` the caller already set instead of replacing it.
+pub(crate) fn with_extra_body_fragments(
+    mut options: genai::chat::ChatOptions,
     model: &str,
     opts: &crate::CompletionOptions,
 ) -> genai::chat::ChatOptions {
-    match repetition_penalty_body(model, opts.frequency_penalty, opts.presence_penalty) {
-        Some(body) => options.with_extra_body(body),
-        None => options,
+    let fragments = [
+        repetition_penalty_body(model, opts.frequency_penalty, opts.presence_penalty),
+        data_collection_body(model, opts.deny_data_collection),
+    ];
+    for fragment in fragments.into_iter().flatten() {
+        let mut body = options
+            .extra_body
+            .take()
+            .unwrap_or_else(|| serde_json::json!({}));
+        merge_json(&mut body, fragment);
+        options = options.with_extra_body(body);
+    }
+    options
+}
+
+fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
+    match (base, patch) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                merge_json(base.entry(key).or_insert(serde_json::Value::Null), value);
+            }
+        }
+        (base, patch) => *base = patch,
     }
 }
 
@@ -207,4 +236,38 @@ mod repetition_penalty_tests {
 /// act on it and would nudge. Whitespace-only text counts as empty.
 pub(crate) fn is_empty_agent_reply(resp: &ModelResponse, tools_offered: bool) -> bool {
     tools_offered && resp.tool_calls.is_empty() && resp.content.trim().is_empty()
+}
+
+#[cfg(test)]
+mod extra_body_tests {
+    use super::*;
+
+    #[test]
+    fn data_policy_is_openrouter_only_and_opt_in() {
+        assert_eq!(
+            data_collection_body("openrouter::a/b:free", true),
+            Some(serde_json::json!({"provider": {"data_collection": "deny"}}))
+        );
+        assert_eq!(data_collection_body("openrouter::a/b", false), None);
+        assert_eq!(data_collection_body("openai::gpt-5.4", true), None);
+    }
+
+    #[test]
+    fn fragments_merge_into_an_existing_extra_body() {
+        let options = genai::chat::ChatOptions::default()
+            .with_extra_body(serde_json::json!({"provider": {"order": ["x"]}}));
+        let opts = crate::CompletionOptions {
+            deny_data_collection: true,
+            presence_penalty: Some(0.5),
+            ..Default::default()
+        };
+        let merged = with_extra_body_fragments(options, "openrouter::a/b", &opts);
+        assert_eq!(
+            merged.extra_body,
+            Some(serde_json::json!({
+                "provider": {"order": ["x"], "data_collection": "deny"},
+                "presence_penalty": 0.5,
+            }))
+        );
+    }
 }

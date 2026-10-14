@@ -207,6 +207,12 @@ cannot serve a general chat turn: image/video/audio generation (`imagen`, `veo`,
 completion models (`babbage`, `davinci`). Excluded models stay visible in `forge models` and can
 still be pinned explicitly — the filter only guards the *general* routing pool.
 
+**Zero-retention mode.** With `[privacy] zero_retention = true`, `is_usable` also drops every
+model whose provider is not known to be zero-retention (`crates/forge-mesh/src/privacy.rs`), and
+`decide_with_pin` refuses a retaining pin with an `unroutable` decision instead of dispatching it.
+Unknown providers count as retaining. `forge mesh explain` lists each dropped candidate with its
+reason. See [zero-retention.md](zero-retention.md).
+
 ### 3.3 Vision
 
 `supports_vision` (`crates/forge-mesh/src/catalog.rs:163`) is a name-heuristic **allowlist** of
@@ -486,8 +492,22 @@ else the cheapest positive rate for the same bare model name). It only feeds the
 notional cost for subscription and free calls and is never written back as spend
 ([bench-metrics.md](bench-metrics.md)).
 
-**Prompt caching is automatic and capability-aware.** Every main agent turn uses its stable Forge
-session id as the cache namespace; Architect uses a stable session-specific planner namespace, and
+**Prompt caching is automatic and capability-aware.** Every main agent turn carries one cache key
+for the whole session, chosen at its first request. With `[mesh] cross_session_cache_key = true`
+(the default) and a first model whose provider treats the key purely as a cache-routing hint
+(`forge_provider::prompt_cache::shares_prompt_cache_key_across_sessions`: not NVIDIA NIM, which
+rejects the field, not Gemini, whose explicit `cachedContents` resource is derived from the key, and
+not the CLI bridges, which never send it), the key is `forge-prefix-` plus a SHA-256 digest of the
+model, the tool surface, the system preamble and the workspace root
+(`crates/forge-core/src/prefix_cache_key.rs`). A new session, or a dispatched worker, with the same
+fixed prefix then lands on the cache shard an earlier one warmed instead of paying for its ~15K-token
+prefix uncached. Otherwise the key is the session id. The key never changes inside a session, even
+when failover moves to a different model: a key that moved would route the next request to a cold
+shard. A resumed session recomputes it at its first request, which yields the same key while model,
+tools, preamble and workspace are unchanged. `/new` and `/resume` pick the key again for the session they switch
+to. Many concurrent sessions on one shared key can exceed a provider's per-key request rate (OpenAI
+documents roughly 15 requests a minute) and spill onto colder machines; set the flag to `false` if a
+large parallel fleet in one workspace shows lower cache hit rates. Architect uses a stable session-specific planner namespace, and
 `forge api` accepts the OpenAI `prompt_cache_key`/legacy `user` fields or derives a privacy-preserving
 SHA-256 key from the standing request prefix. The dispatch layer preserves that option across every
 API-key and OAuth backend:
