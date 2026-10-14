@@ -6,6 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **ModelGateway works as a custom provider.** A `[[providers.custom]]` endpoint running new-api (ModelGateway, `https://www.modelgateway.co/v1`) is now priced live from its `<origin>/api/pricing` page at official price less the listed discount, which is what calibration calls were actually billed; `model_ratio` is ignored because it does not match the bill. `modelgateway::*` models get the same `minimal` harness profile as InferHub (`crates/forge-cli/src/context_windows/parsers.rs`, docs/features/mesh-routing.md).
+
+### Fixed
+
+- **Streamed tool calls whose `index` starts above 0 no longer add nameless "unknown tool" calls.** Gateways that relay an Anthropic upstream number tool calls by content block, so the first call arrives at index 1 or 2; the gap slots below it were emitted as empty calls the model then had to recover from. Never-named placeholders are now dropped at the end of the stream (`vendor/genai-0.6.5/src/adapter/adapters/openai/streamer.rs`).
+
 ## [2.20.0] - 2026-10-14
 
 Sessions follow worktrees and host moves, `/goal` checks its own progress (also in a plain `forge run`), LSP diagnostics are sent as deltas, codemode gets used, and InferHub models run lean by default.

@@ -29,9 +29,13 @@ impl HarnessProfile {
 
 /// Built-in per-model profiles, applied when no `[mesh.harness_profiles]` glob matches. InferHub
 /// routes measured fewer steps and tokens with no pass-rate loss under `minimal` (72-run ablation,
-/// 2026-10-14). Opt out with `[mesh.harness_profiles] "inferhub::*" = "guarded"`.
-pub const BUILTIN_HARNESS_PROFILES: &[(&str, HarnessProfile)] =
-    &[("inferhub::*", HarnessProfile::Minimal)];
+/// 2026-10-14). ModelGateway resells the same model families through the same kind of
+/// marketplace, so it gets the same default. Opt out with
+/// `[mesh.harness_profiles] "inferhub::*" = "guarded"`.
+pub const BUILTIN_HARNESS_PROFILES: &[(&str, HarnessProfile)] = &[
+    ("inferhub::*", HarnessProfile::Minimal),
+    ("modelgateway::*", HarnessProfile::Minimal),
+];
 
 /// The profile for `model`: the most specific matching `[mesh.harness_profiles]` glob wins (the
 /// pattern with the most literal characters, so `bedrock::*kimi*` beats `bedrock::*`), then the
@@ -82,6 +86,14 @@ mod tests {
         let none = BTreeMap::new();
         assert_eq!(
             resolve_harness_profile(HarnessProfile::Guarded, &none, "inferhub::glm-5.3-flash"),
+            HarnessProfile::Minimal
+        );
+        assert_eq!(
+            resolve_harness_profile(
+                HarnessProfile::Guarded,
+                &none,
+                "modelgateway::glm-5.3-flash"
+            ),
             HarnessProfile::Minimal
         );
         assert_eq!(

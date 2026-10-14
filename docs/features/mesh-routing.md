@@ -519,6 +519,26 @@ api_key_env = "INFERHUB_API_KEY"
 pricing_stat = "median"   # median | min | mean | official
 ```
 
+**new-api gateways (ModelGateway).** A custom provider whose `/models` entries carry
+`supported_endpoint_types` is a new-api gateway; it lists no prices there but publishes them at
+`<origin>/api/pricing`, which the sweep fetches alongside the listing (`new_api_pricing`,
+`crates/forge-cli/src/context_windows/parsers.rs`). A model is priced at its
+`official_input_price` / `official_output_price` (USD per 1M) less `discount_percent`, the rate
+three calibration calls on ModelGateway were actually billed (2026-10-14); `model_ratio` and
+`lowest_price` do not match the bill and are ignored. Per-request priced models and models with
+no official price stay unpriced. ModelGateway sends no `usage.cost`, so spend is the rate-table
+estimate. It streams tool-call `index` values from 1 or 2 (the upstream Anthropic content-block
+number); the genai fork drops the never-named gap slots below them instead of emitting nameless
+calls.
+
+```toml
+[[providers.custom]]
+namespace = "modelgateway"
+label = "ModelGateway"
+base_url = "https://www.modelgateway.co/v1"
+api_key_env = "MODELGATEWAY_API_KEY"   # or `forge auth modelgateway`
+```
+
 **Reported cost wins.** When a response's usage carries `cost` (an OpenAI-compatible extension
 InferHub and OpenRouter send), the genai fork keeps it (`genai::chat::Usage::cost`), the provider
 copies it to `Usage::reported_cost_usd`, and `cost_for_usage` records that figure instead of the
