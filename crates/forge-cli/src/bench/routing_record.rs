@@ -73,13 +73,21 @@ fn solve_run(source: String, run: &Run) -> Result<BenchSolveRun, String> {
         .resolved
         .as_ref()
         .ok_or("not scored (pair it with its eval report)")?;
-    let model = first
-        .runtime
-        .as_ref()
-        .and_then(|rt| rt.requested_model.as_deref())
-        .map(|m| forge_provider::normalize_model_id(m).into_owned())
-        .filter(|m| m.contains("::"))
+    let pinned = |row: &super::InstanceMetric| {
+        row.runtime
+            .as_ref()
+            .and_then(|rt| rt.requested_model.as_deref())
+            .map(|m| forge_provider::normalize_model_id(m).into_owned())
+            .filter(|m| m.contains("::"))
+    };
+    let model = pinned(first)
         .ok_or("no pinned provider::model (a mesh-routed run measures several models)")?;
+    if let Some(other) = run.rows.iter().find(|r| pinned(r).as_ref() != Some(&model)) {
+        return Err(format!(
+            "rows pin different models ({model} and {}); one run must measure one model",
+            pinned(other).unwrap_or_else(|| "none".into())
+        ));
+    }
     let eligible: Vec<_> = run
         .rows
         .iter()
@@ -188,6 +196,13 @@ mod tests {
             ),
             (scored(vec![row("a", None)], &[]), "mesh-routed"),
             (scored(vec![unpriced], &[]), "no price"),
+            (
+                scored(
+                    vec![row("a", Some("openai::gpt-5.5")), row("b", Some("groq::x"))],
+                    &[],
+                ),
+                "different models",
+            ),
         ];
         for (run, why) in &cases {
             let (rec, skipped) = solve_runs(std::iter::once((Path::new("m.jsonl"), run)));
