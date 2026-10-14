@@ -839,14 +839,8 @@ fn partial_prefill(seed: Option<&str>, opts: &CompletionOptions) -> Option<ChatM
 }
 
 fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMessage> {
-    // Providers replay the whole transcript on every call, and several enforce a hard cap
-    // (e.g. "At most 1 image(s) may be provided in one prompt") on the total images in a
-    // request. Images are only useful on the turn that introduced them, so only the most
-    // recent image-bearing user turn keeps its images; earlier ones fall back to text-only.
     let messages = crate::system_placement::place_system_messages(messages);
-    let last_image_turn = messages
-        .iter()
-        .rposition(|m| matches!(m.role, Role::User) && !m.images.is_empty());
+    let last_image_turn = crate::system_placement::last_image_turn(&messages);
     let mut out = Vec::with_capacity(messages.len());
     for (i, m) in messages.iter().enumerate() {
         match m.role {

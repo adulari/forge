@@ -240,6 +240,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Service { cmd } => service_cmd(cmd),
         Command::Queue { cmd } => queue_cmd(cmd),
         Command::Scoreboard => scoreboard_cmd(),
+        Command::Stats { cmd } => stats_cmd(cmd),
         Command::Tour { demo } => tour_cmd(demo),
         Command::Voice { op } => voice_cmd(op).await,
     }

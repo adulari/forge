@@ -52,6 +52,7 @@ mod sync_journal;
 mod sync_store;
 mod task_store;
 mod transcript_read_store;
+mod usage_prefix_store;
 mod usage_store;
 
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
@@ -68,11 +69,12 @@ pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRe
 pub use maintenance::MaintenanceReport;
 pub use memory::Memory;
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
+pub use usage_prefix_store::{CacheModelStats, UsagePrefix};
 
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 40;
+const SCHEMA_VERSION: i64 = 41;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);

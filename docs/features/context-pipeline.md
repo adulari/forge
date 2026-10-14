@@ -1,10 +1,10 @@
 # Feature: two-phase context pipeline — one seam between transcript and provider
 
 > **Status (shipped):** `forge_core::context_pipeline` (gap-analysis #9). Phase 1
-> `prune_and_inject(&mut [Message], keep_recent)` mutates the transcript at turn boundaries
-> (today: zero-LLM reclaim of old tool output; the designated home for future injections).
-> Phase 2 `to_llm(&[Message], budget_tokens)` is the pure per-request view: strip
-> `Visibility::UiOnly` messages, then window-fit what remains. `Message.visibility`
+> `context_floor::prune_below` mutates the transcript in place, only below the elision floor
+> (zero-LLM reclaim of old tool output). Phase 2 `to_llm_floored(&[Message], budget, …, floor,
+> &mut trim)` is the pure per-request view: strip `Visibility::UiOnly` messages, shorten old output
+> below the same floor, then window-fit what remains. `Message.visibility`
 > (`Llm` default | `UiOnly`) is persisted in the store (`message.visibility`, migration 0007,
 > schema v7) and carried across resume, forks (`fork_session` copies the tag), and the
 > subagent transcript rebuild.
@@ -23,12 +23,12 @@ the model see?" was answered in more places.
 - **`Visibility { Llm, UiOnly }` on `Message`** (forge-types), serde-default `Llm` so every
   existing constructor and stored row is unchanged. `Message::ui_only()` opts a message out of
   the model's view; `Store::add_ui_note` persists it with `visibility='ui'`.
-- **Phase 1 — `prune_and_inject`**: the mutating transform, run where the transcript itself must
-  change (auto-compaction's cheap pre-pass). Anything that should *survive* in the transcript
-  belongs here, not scattered across call sites.
-- **Phase 2 — `to_llm`**: called by `transcript_for` / `transcript_with_preamble`, i.e. every
-  main-loop provider request. Pure: filter `UiOnly`, then `fit_messages` (system messages always
-  kept, newest-first fill, orphan-tool-result demotion) — which moved into the module wholesale.
+- **Phase 1 — `prune_below`**: the mutating transform, run only when the elision floor advances
+  (see "One floor that only moves forward" below).
+- **Phase 2 — `to_llm_floored`**: called by `transcript_for` / `transcript_with_preamble_and_tools`,
+  i.e. every main-loop provider request. Pure: filter `UiOnly`, normalise system context, pair tool
+  calls, collapse repeats and elide bulky results below the floor, then `fit_sticky` (system
+  messages and the newest user message always kept).
 - **Pairing is re-established after fitting.** `fit_messages` keeps the newest suffix that fits
   and strips the orphan tool results at its head; the anchor (the newest user message, kept
   regardless) sorts before that suffix and used to stop the strip early. `to_llm` now also runs
@@ -41,12 +41,55 @@ the model see?" was answered in more places.
   viewer opens), so the model can `sed -n` the part it needs. Tool-specific caps existed but none
   bounded the whole — `search` returned 272K chars, `read_file` 262K — and elision spares the
   current turn, so each was resent on every step until the turn ended.
-- **A bounded working set inside a turn.** Before each request, `age_tool_rounds` cuts every
-  tool result older than the last `PRUNE_KEEP_ROUNDS` (4) rounds to a 1,500-char head — but only
-  once `AGE_BATCH_ROUNDS` (4) such rounds have piled up, so the prompt prefix (and the provider's
-  cache of it) changes once every four rounds, not every step. A cut result names the spooled
-  complete output when one exists, so the model reads that file instead of running the tool again.
-  Replaying a 30-request Kimi K3 turn: 5.5M chars of tool output sent before, 2.6M after.
+- **One floor that only moves forward** (`context_floor.rs`). Provider prompt caches key on a
+  prefix, so rewriting an already-sent message re-bills everything after it. Old tool output used
+  to be shortened from four places on four schedules — a prune at every user turn, an elision
+  boundary that jumped to each new turn, a dedupe window counted from the tail (which collapsed a
+  result a few results after sending it verbatim, mid-turn) and an every-step aging pass that cut
+  rounds every ~4 steps. Now there is one `Session.elision_floor`, a transcript index: in-place
+  pruning, request-view elision and dedupe all act only below it, and old turn contracts are only
+  dropped below it. While it stands still every request is a pure append to the last one — a
+  randomized test (`an_unchanged_floor_makes_the_view_append_only`) checks that `to_llm(T)` is an
+  element-wise prefix of `to_llm(T + E)` for any transcript and extension.
+  - It advances before each request, in blocks: only when more than
+    `max(mesh.context_floor_block_tokens (32768), 25% of the compaction trigger)` tokens sit
+    verbatim above it AND the move releases at least half a block (the hysteresis — otherwise a
+    working set larger than a block would move it one round per step). It moves to just before the
+    working set: the last `PRUNE_KEEP_ROUNDS` (4) rounds, the newest
+    `tool_result_context_keep_recent` results and the last 6 messages, snapped back to a user or
+    assistant message. Under context pressure auto-compaction forces the move.
+  - It never moves backward within a transcript epoch; a compaction, rewind or reload starts a new
+    epoch, where it is recomputed as "before the current turn" (the old elision boundary).
+  - A released result is cut to a 1,500-char head that names the spooled complete output when one
+    exists, so the model reads that file instead of running the tool again.
+- **A sticky window trim.** When the view no longer fits the window, `fit_sticky` drops the oldest
+  messages down to 85% of the budget once and keeps that cut while the result still fits, instead
+  of re-deriving a newest-first fill (a new prefix) on every call. A smaller window after failover
+  fails the fit check and re-fits.
+- **System context depends only on what came before.** `normalize_system_context` keeps the first
+  copy of repeated guidance plus any repeat directly after an assistant reply (a harness reaction);
+  it no longer looks at whether a user prompt follows. Turn contracts stay where they were
+  injected: a turn whose contract differs appends `Turn contract: supersedes earlier turn
+  contracts, which no longer apply — …`, including a turn with no explicit contract after one that
+  had one ("this request sets no special contract"), so a stale "explicitly read-only" contract is
+  never the last word. An unchanged contract is not repeated.
+- **Per-turn context says only what changed.** The git branch moved out of the `<env>` preamble
+  (where a switch rewrote the first message of every request) into an `[env] git_branch: …` system
+  message appended when it differs from the last one in the transcript. The full clock instruction
+  goes out on the first turn only; later turns get `[time] <timestamp>`. A session that has
+  advertised tools once keeps advertising them on trivial turns even after compaction folded away
+  every tool message (`tools_advertised_once`).
+- **Cache instrument** (`cache_instrument.rs`, `forge_provider::wire_fingerprint`). Every
+  main-loop request is hashed per message (SHA-256, truncated) after the provider-side transforms —
+  system placement and the latest-image-turn rule — plus one hash of the tool list, and compared
+  with the previous request to the same model. The usage row records `prefix_reused_msgs`,
+  `prefix_total_msgs`, `tools_changed` and a `cache_label` (store migration 41): `append`,
+  `harness_rewrite@<idx>(<kind>)`, `floor_advance`, `age_rounds`, `compaction` (a summary, or the
+  post-compaction clip of bulky results), `history_rewrite` (a rewind or a full-history reload),
+  `tools_changed`, `model_switch`, `cold`, `provider_eviction` (prefix intact, under half the input cached) or
+  `n/a` for CLI bridges, which report cumulative usage. Two `harness_rewrite` calls in a row raise
+  a warning in the TUI. `forge stats cache [--session [ID]] [--days N]` shows the hit rate per
+  model, the dollars the uncached input cost over cache-read pricing, and the misses by label.
 - **Search shows every file.** In a directory walk each file contributes at most
   `SEARCH_PER_FILE_CAP` (25) lines plus a count of the rest; a single noisy log no longer fills the
   64 KB budget and hides the file the model was looking for.
@@ -83,7 +126,13 @@ transcript; `fork_session` copies it so a UI note in a fork's prefix stays UI-on
 | Layer | Change |
 |---|---|
 | `forge-types` | `Visibility` enum + `Message.visibility` + `Message::ui_only()` |
-| `forge-core/src/context_pipeline.rs` | new module: `prune_and_inject`, `to_llm`, moved `fit_messages`/`prune_tool_results`/`message_tokens` + tests |
+| `forge-core/src/context_pipeline.rs` | `to_llm_floored`, moved `fit_messages`/`prune_tool_results`/`message_tokens` + tests |
+| `forge-core/src/context_floor.rs` | the elision floor, block advance, `prune_below`, `fit_sticky` |
+| `forge-core/src/cache_instrument.rs` | per-request prefix comparison, miss labels, rewrite-streak warning |
+| `forge-core/src/turn_context.rs` | turn contract / clock / git branch appended only when changed |
+| `forge-provider/src/wire_fingerprint.rs` | per-message wire hashes after system placement + image stripping |
+| `forge-store` | migration 41: `usage.prefix_reused_msgs`, `prefix_total_msgs`, `tools_changed`, `cache_label`; `cache_stats` |
+| `forge-cli` | `forge stats cache` |
 | `forge-core/src/lib.rs` | call sites rewired; gauge/compaction skip UiOnly; error notes persisted via `add_ui_note` + tagged `ui_only()` |
 | `forge-core/src/subagent.rs` | transcript rebuild preserves visibility |
 | `forge-store` | schema v7, `migration_0007`, `StoredMessage.visibility`, `add_ui_note`, fork copy |

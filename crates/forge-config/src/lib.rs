@@ -2076,6 +2076,17 @@ pub struct MeshConfig {
     /// Number of newest tool results kept verbatim before older oversized results are elided.
     #[serde(default = "default_tool_result_context_keep_recent")]
     pub tool_result_context_keep_recent: usize,
+    /// Smallest stretch of verbatim context (tokens) the elision floor releases at once. Old tool
+    /// output is only shortened when the floor advances, and every advance rewrites the prompt
+    /// from that point on — so it moves in blocks of at least this many tokens (or 25% of the
+    /// compaction trigger, whichever is larger) instead of on every turn.
+    #[serde(default = "default_context_floor_block_tokens")]
+    pub context_floor_block_tokens: usize,
+    /// Fraction of the compaction trigger an auto-compaction must get the context down to. The
+    /// prune or summary that fires at the trigger goes this far in one step so the following
+    /// requests append to a stable prefix instead of re-trimming on every call.
+    #[serde(default = "default_compact_low_water")]
+    pub compact_low_water: f64,
     /// Per-turn cumulative input-token ceiling for a CLI bridge turn (wave 5). A bridge runs its
     /// own tool loop inside a subprocess, so the direct-path cost guards (which only see
     /// `resp.tool_calls`) never fire on it — an unbounded bridge turn is the dominant tail-cost
@@ -2254,6 +2265,14 @@ fn default_tool_result_context_token_budget() -> usize {
 
 fn default_tool_result_context_keep_recent() -> usize {
     2
+}
+
+fn default_context_floor_block_tokens() -> usize {
+    32_768
+}
+
+fn default_compact_low_water() -> f64 {
+    0.62
 }
 
 fn default_bridge_turn_token_cap() -> u64 {
@@ -2830,6 +2849,8 @@ impl Default for Config {
                 bridge_require_tools: default_bridge_require_tools(),
                 tool_result_context_token_budget: default_tool_result_context_token_budget(),
                 tool_result_context_keep_recent: default_tool_result_context_keep_recent(),
+                context_floor_block_tokens: default_context_floor_block_tokens(),
+                compact_low_water: default_compact_low_water(),
                 bridge_turn_token_cap: default_bridge_turn_token_cap(),
                 explicit_models: Vec::new(),
                 bridge_models: HashMap::new(),

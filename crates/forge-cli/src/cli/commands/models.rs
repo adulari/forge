@@ -103,6 +103,7 @@ pub(crate) async fn refresh_polled_quotas(store: &forge_store::Store) {
 }
 
 mod discovery;
+pub(crate) use discovery::pricing_with_fetched_rates;
 pub(crate) use discovery::{
     discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, live_catalog,
     load_cached_catalog, load_cached_catalog_aged, read_cached_catalog, save_catalog,

@@ -2,59 +2,69 @@
 
 use forge_types::{Message, Role};
 
-const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
+pub(crate) const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
 
-/// Derive the provider's system-context view without rewriting the persisted transcript. A turn
-/// contract is scoped to one turn, so only the newest contract may remain authoritative.
+/// Derive the provider's system-context view without rewriting the persisted transcript.
+///
+/// Every decision depends only on the message itself and the ones BEFORE it, so a transcript that
+/// grows never changes what the provider was already sent — prompt caches key on a prefix, and a
+/// rule that looks ahead rewrites the middle of the prompt the moment a later message arrives.
 ///
 /// Exact repeated system guidance is standing context, not cumulative evidence, so only one full
-/// copy is sent — but WHICH copy matters more than it looks. Prompt caches key on a PREFIX, so
-/// keeping the newest copy deletes the previously-kept one from the middle of the prompt and
-/// discards every cached token after it. One live session showed 344 exact-duplicate system
-/// messages, mostly re-emitted `[lsp diagnostics]` blocks: 344 invalidations of a ~50k-token
-/// prompt, each to save ~380 chars. Keeping the FIRST copy is just as bounded and costs nothing,
-/// because whether a message is dropped then depends only on the messages before it — so a
-/// transcript that grows never rewrites what the provider has already cached.
+/// copy is sent, and it is the FIRST copy: keeping the newest deleted the previously-kept one from
+/// the middle of the prompt. One live session showed 344 exact-duplicate system messages, mostly
+/// re-emitted `[lsp diagnostics]` blocks: 344 invalidations of a ~50k-token prompt, each to save
+/// ~380 chars.
 ///
-/// A system message that directly follows an assistant message and is answered by the model (the
-/// next message is not a user prompt) is NOT standing context: it is the harness reacting to what
+/// A repeat that directly follows an assistant message is kept: it is the harness reacting to what
 /// the model just said (the end-of-turn review, the "prove it" completion gate, a stalled-step
 /// nudge). Its text is identical every turn, so deduplicating it deleted the reaction from the
 /// request entirely — the model was re-driven with nothing new to act on, and a persistent CLI
-/// bridge answered "nothing new is requested" as the turn's final reply. Guidance that sits
-/// between turns, in front of the next user prompt, remains standing context.
-pub(crate) fn normalize_system_context(messages: Vec<Message>) -> Vec<Message> {
-    let newest_contract = messages.iter().rposition(|message| {
+/// bridge answered "nothing new is requested" as the turn's final reply. (This used to also check
+/// that the NEXT message was not a user prompt, which made the view depend on later messages.)
+///
+/// Turn contracts stay where they were injected — a newer one says it supersedes the earlier ones
+/// (`turn_contract::contract_message`). Only below `floor` (an index into `messages`, see
+/// `context_floor`) is a contract that a later contract, also below the floor, superseded dropped:
+/// that region is only rewritten when the floor advances, which is a deliberate cache break anyway.
+///
+/// Returns the view and how many of its messages came from `messages[..floor]`.
+pub(crate) fn normalize_system_context(
+    messages: Vec<Message>,
+    floor: usize,
+) -> (Vec<Message>, usize) {
+    let is_contract = |message: &Message| {
         message.role == Role::System
             && message
                 .content
                 .trim_start()
                 .starts_with(TURN_CONTRACT_PREFIX)
-    });
+    };
+    let newest_contract_below_floor = messages[..floor.min(messages.len())]
+        .iter()
+        .rposition(is_contract);
 
     let roles: Vec<Role> = messages.iter().map(|message| message.role).collect();
     let mut seen = std::collections::HashSet::<String>::new();
-    messages
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, message)| {
+    let mut kept_below_floor = 0;
+    let mut out = Vec::with_capacity(messages.len());
+    for (index, message) in messages.into_iter().enumerate() {
+        let keep = if message.role != Role::System {
+            true
+        } else if is_contract(&message) {
+            index >= floor || Some(index) == newest_contract_below_floor
+        } else {
             let follows_assistant = index > 0 && roles[index - 1] == Role::Assistant;
-            let precedes_user = roles.get(index + 1) == Some(&Role::User);
-            let reaction = follows_assistant && !precedes_user;
-            if message.role != Role::System {
-                return Some(message);
+            seen.insert(message.content.clone()) || follows_assistant
+        };
+        if keep {
+            if index < floor {
+                kept_below_floor += 1;
             }
-            if message
-                .content
-                .trim_start()
-                .starts_with(TURN_CONTRACT_PREFIX)
-            {
-                return (Some(index) == newest_contract).then_some(message);
-            }
-            let first_copy = seen.insert(message.content.clone());
-            (first_copy || reaction).then_some(message)
-        })
-        .collect()
+            out.push(message);
+        }
+    }
+    (out, kept_below_floor)
 }
 
 #[cfg(test)]
@@ -78,7 +88,7 @@ mod tests {
             Message::system(review),
         ];
 
-        let view = normalize_system_context(messages);
+        let view = normalize_system_context(messages, 0).0;
 
         assert_eq!(
             contents(&view).iter().filter(|c| **c == review).count(),
@@ -89,25 +99,54 @@ mod tests {
         assert_eq!(view.last().unwrap().content, review);
     }
 
+    /// The rule may not look at what comes next. A repeat right after a reply used to be kept or
+    /// dropped depending on whether a user prompt followed it, so appending that prompt rewrote a
+    /// message the provider had already cached. Now the repeat after a reply is kept either way.
     #[test]
-    fn guidance_between_turns_is_still_deduplicated() {
+    fn a_repeat_after_a_reply_is_kept_whatever_follows_it() {
         let guidance = "standing workflow guidance";
-        let messages = vec![
+        let mut messages = vec![
             Message::user("one"),
             Message::assistant("answer"),
             Message::system(guidance),
             Message::user("two"),
             Message::assistant("answer two"),
             Message::system(guidance),
-            Message::user("three"),
         ];
-
-        let view = normalize_system_context(messages);
+        let before = normalize_system_context(messages.clone(), 0).0;
+        messages.push(Message::user("three"));
+        let after = normalize_system_context(messages, 0).0;
 
         assert_eq!(
-            contents(&view).iter().filter(|c| **c == guidance).count(),
-            1
+            contents(&after).iter().filter(|c| **c == guidance).count(),
+            2
         );
+        assert_eq!(contents(&before), contents(&after[..before.len()]));
+    }
+
+    #[test]
+    fn a_superseded_contract_is_only_dropped_below_the_floor() {
+        let messages = vec![
+            Message::system("Turn contract: this request is explicitly read-only."),
+            Message::user("look"),
+            Message::assistant("looked"),
+            Message::system("Turn contract: supersedes earlier turn contracts — build it."),
+            Message::user("build"),
+        ];
+        let (in_place, below) = normalize_system_context(messages.clone(), 0);
+        assert_eq!(in_place.len(), 5);
+        assert_eq!(below, 0);
+
+        // Both contracts below the floor: only the newest survives there.
+        let (pruned, below) = normalize_system_context(messages.clone(), 4);
+        assert_eq!(pruned.len(), 4);
+        assert_eq!(below, 3);
+        assert!(!contents(&pruned).iter().any(|c| c.contains("read-only")));
+
+        // The newer contract above the floor cannot reach back and drop the older one.
+        let (split, below) = normalize_system_context(messages, 3);
+        assert_eq!(split.len(), 5);
+        assert_eq!(below, 3);
     }
 
     #[test]
@@ -121,7 +160,7 @@ mod tests {
             Message::user("three"),
         ];
 
-        let view = normalize_system_context(messages);
+        let view = normalize_system_context(messages, 0).0;
 
         assert_eq!(
             contents(&view).iter().filter(|c| **c == guidance).count(),
@@ -137,12 +176,12 @@ mod tests {
             Message::assistant("b"),
             Message::system(nudge),
         ];
-        let before = normalize_system_context(messages.clone());
+        let before = normalize_system_context(messages.clone(), 0).0;
 
         messages.push(Message::assistant("c"));
         messages.push(Message::system(nudge));
         messages.push(Message::user("d"));
-        let after = normalize_system_context(messages);
+        let after = normalize_system_context(messages, 0).0;
 
         for (index, sent) in before.iter().enumerate() {
             assert_eq!(sent.content, after[index].content);

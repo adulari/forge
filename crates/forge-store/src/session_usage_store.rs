@@ -477,45 +477,7 @@ impl Store {
         usage: &Usage,
         model: Option<&str>,
     ) -> Result<()> {
-        let id = forge_types::new_id();
-        let model = model.map(str::trim).filter(|m| !m.is_empty());
-        let provider = model.and_then(|m| m.split_once("::")).map(|(ns, _)| ns);
-        with_busy_retry(|| {
-            let mut conn = self.lock()?;
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute(
-                "INSERT INTO usage
-                 (id, message_id, provider, model, input_tokens, cached_input_tokens, output_tokens, cost_usd)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                (
-                    &id,
-                    message_id,
-                    provider,
-                    model,
-                    usage.input_tokens as i64,
-                    usage.cached_input_tokens.map(|c| c as i64),
-                    usage.output_tokens as i64,
-                    usage.cost_usd,
-                ),
-            )?;
-            tx.execute(
-                "UPDATE session SET total_cost_usd = total_cost_usd + ?1,
-                 updated_at = strftime('%s','now') WHERE id = ?2",
-                (usage.cost_usd, session_id),
-            )?;
-            let payload = sync_json(serde_json::json!({
-                "id": id,
-                "message_id": message_id,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "cached_input_tokens": usage.cached_input_tokens,
-                "cost_usd": usage.cost_usd,
-            }))?;
-            append_sync_revision(&tx, "usage", &id, SyncJournalOperation::Upsert, &payload)?;
-            append_session_snapshot(&tx, session_id)?;
-            tx.commit()?;
-            Ok(())
-        })
+        self.record_usage_with_prefix(session_id, message_id, usage, model, None)
     }
 
     /// Record a tool call and its permission outcome.

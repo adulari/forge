@@ -35,6 +35,7 @@ mod shell_batch;
 mod silence_guard;
 mod workspace_policy;
 pub use btw_policy::{busy_asker, BtwAsker};
+mod cache_instrument;
 pub mod capsule;
 pub(crate) mod clock;
 mod commit_policy;
@@ -43,6 +44,7 @@ mod compaction_policy;
 mod compaction_shape;
 mod completeness;
 pub(crate) mod completion;
+mod context_floor;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
 mod detached_subagents;
@@ -102,6 +104,7 @@ mod tool_output;
 pub mod wakeup;
 pub(crate) use tool_output::tool_detail;
 mod spend_guard;
+mod turn_context;
 pub mod turn_contract;
 mod turn_guards;
 mod unapplied_edit;
@@ -1479,9 +1482,9 @@ fn should_retry_same_model_transient(model: &str, error: &forge_provider::Provid
 
 // `message_tokens`, `fit_messages`, and `prune_tool_results` moved to [`context_pipeline`] — the
 // one seam between the transcript and a provider request (imported below for existing call sites).
-use context_pipeline::{age_tool_rounds, message_tokens, prune_and_inject, to_llm};
 #[cfg(test)]
 use context_pipeline::{fit_messages, prune_tool_results, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX};
+use context_pipeline::{message_tokens, to_llm_floored};
 
 /// Output of one execution of the shared model↔tool loop ([`Session::run_model_loop`]).
 /// Carries everything the caller needs; the caller holds `active_model` by value so it is
@@ -1718,6 +1721,16 @@ pub struct Session {
     /// Bumped whenever the transcript is rewritten from outside the model loop (rewind, uncompact,
     /// full reload) — see [`forge_provider::CheckpointContext::epoch`].
     history_epoch: u64,
+    /// Prompt-cache attribution: the previous request's wire fingerprint per model.
+    cache: cache_instrument::CacheInstrument,
+    /// Transcript index below which old tool output may be shortened; only moves forward within a
+    /// `history_epoch` (context_floor.rs). A `Cell` so the `&self` request builders can settle it.
+    context_floor: std::cell::Cell<context_floor::FloorState>,
+    /// The window trim later requests reuse while it still fits (context_floor.rs).
+    context_trim: std::cell::Cell<Option<context_floor::TrimState>>,
+    /// Tools were advertised at least once this session, so a later trivial turn keeps them even
+    /// after compaction folded away every tool message — dropping them is a full cache miss.
+    tools_advertised_once: bool,
     /// One-shot latch for the "invalid tool arguments while routed through Headroom" warning.
     headroom_args_warned: bool,
     /// `auto` temper: per-session verdicts of the unknown-command classifier.
@@ -2662,12 +2675,9 @@ impl Session {
         // goes through the ordinary session queue (a persisted message + transcript push), not a
         // new presenter surface.
         self.deliver_pending_detached_results()?;
-        // A completed turn's bulky tool logs remain available in the store/replay and in the
-        // working tree they inspected, but repeatedly resending them on every later model step
-        // makes long sessions grow quadratically. Reclaim them at every user-turn boundary instead
-        // of waiting until the model is already near context exhaustion. The newest messages stay
-        // verbatim; current-turn tool results are added only after this boundary.
-        let _ = prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT, 0);
+        // No reclaim here: old tool output is shortened only when the elision floor advances
+        // (context_floor.rs), in blocks, so a short turn appends to the cached prompt instead of
+        // rewriting the previous turn's results.
         let recap_tasks_before = self.tasks.clone();
         let working_tree_baseline = working_tree_marker(Some(self.workspace.root()));
         self.last_context_pack = context_pack::ContextPack::default();
@@ -3108,14 +3118,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 FAULT_SEAM_GUIDANCE,
             )?;
         }
-        if let Some(guidance) = contract.guidance() {
-            self.inject_context(
-                &mut context_pack,
-                context_pack::ContextSource::TurnContract,
-                "explicit turn completion contract",
-                guidance,
-            )?;
-        }
+        self.inject_turn_contract(&mut context_pack, &contract)?;
         if self.config.mesh.verify_completeness && !forge_provider::is_cli_bridge(&routed_model) {
             if direct_completeness_is_identifier_migration(prompt) {
                 self.inject_context(
@@ -3199,12 +3202,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Injected here, per turn, rather than into the system preamble — that preamble is the
         // provider's prompt-cache anchor, and a per-second clock in it would break the cached
         // prefix on every request (clock.rs explains the trade-off).
-        self.inject_context(
-            &mut context_pack,
-            context_pack::ContextSource::Time,
-            "current date and time",
-            &clock::now_line(),
-        )?;
+        self.inject_turn_clock(&mut context_pack)?;
+        self.inject_git_branch_if_changed(&mut context_pack)?;
 
         // Commit discipline (git_hygiene.rs): while files this session edited are still
         // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask
@@ -3336,7 +3335,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // the hard-trim floor and lose recent context. Transparent — `compact` emits its own note.
         self.auto_compact_if_needed(&edit_model).await;
 
-        let specs = if self.mid_task() || Self::should_advertise_tools(decision.tier, prompt) {
+        let specs = if self.tools_advertised_once
+            || self.mid_task()
+            || Self::should_advertise_tools(decision.tier, prompt)
+        {
+            self.tools_advertised_once = true;
             self.tool_specs()
         } else {
             Vec::new()
@@ -4935,6 +4938,9 @@ mod tests {
 
     #[path = "commit_nudge.rs"]
     mod commit_nudge_tests;
+
+    #[path = "append_only_turns.rs"]
+    mod append_only_turns_tests;
 
     #[path = "stall_guard.rs"]
     mod stall_guard_tests;
@@ -15930,7 +15936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dependent_turn_proactively_prunes_bulky_completed_tool_output() {
+    async fn a_dependent_turn_leaves_completed_tool_output_in_place_until_the_floor_advances() {
         let provider = Arc::new(FlakyProvider {
             bad: std::collections::HashSet::new(),
             err: rate_limited,
@@ -15966,13 +15972,16 @@ mod tests {
             .await
             .unwrap();
 
+        // Pruning it at the turn boundary rewrote a message the provider had already cached, so
+        // every new turn re-billed the prompt from there on. It stays until a block of verbatim
+        // context has built up and the elision floor advances (context_floor.rs).
         let retained = session
             .transcript
             .iter()
             .find(|message| message.tool_call_id.as_deref() == Some("old-shell"))
             .expect("old tool result remains represented");
-        assert!(retained.content.ends_with(PRUNE_MARKER));
-        assert!(retained.content.len() < full_result.len() / 5);
+        assert_eq!(retained.content, full_result);
+        assert!(!retained.content.ends_with(PRUNE_MARKER));
     }
 
     #[tokio::test]

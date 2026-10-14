@@ -20,14 +20,33 @@ pub(crate) fn now_line() -> String {
     line_for(chrono::Local::now())
 }
 
+/// The clock line for a session that has already been told the full instruction: just the time.
+/// The ~280 chars of "treat this as the present moment" are the same every turn, and the first
+/// copy is still in the transcript.
+pub(crate) fn short_line() -> String {
+    short_line_for(chrono::Local::now())
+}
+
+/// Whether `content` is the full clock instruction (as opposed to the short per-turn line).
+pub(crate) fn is_full_line(content: &str) -> bool {
+    content.starts_with(FULL_LINE_PREFIX)
+}
+
+const FULL_LINE_PREFIX: &str = "[time] Current date and time: ";
+const TIMESTAMP_FORMAT: &str = "%A %Y-%m-%d %H:%M:%S %:z";
+
+fn short_line_for(now: chrono::DateTime<chrono::Local>) -> String {
+    format!("[time] {}", now.format(TIMESTAMP_FORMAT))
+}
+
 /// Pure formatter, so the wording and shape are testable without depending on the wall clock.
 fn line_for(now: chrono::DateTime<chrono::Local>) -> String {
     format!(
-        "[time] Current date and time: {}. Treat this as the present moment — your training \
+        "{FULL_LINE_PREFIX}{}. Treat this as the present moment — your training \
          cutoff is NOT today. Use it for anything dated: changelog and release entries, how old a \
          commit, file or dependency version is, and what \"today\", \"now\", \"recent\" or \
          \"latest\" mean. Do not guess the date, and do not assume a year from your training data.",
-        now.format("%A %Y-%m-%d %H:%M:%S %:z")
+        now.format(TIMESTAMP_FORMAT)
     )
 }
 
@@ -59,6 +78,22 @@ mod tests {
         let line = line_for(at);
         assert!(line.contains("present moment"), "{line}");
         assert!(line.contains("training"), "{line}");
+    }
+
+    #[test]
+    fn the_short_line_carries_the_same_timestamp_without_the_instruction() {
+        let at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 14, 1, 20, 33)
+            .single()
+            .expect("unambiguous local time");
+        let short = short_line_for(at);
+        assert!(
+            short.starts_with("[time] Monday 2026-09-14 01:20:33"),
+            "{short}"
+        );
+        assert!(!is_full_line(&short));
+        assert!(is_full_line(&line_for(at)));
+        assert!(short.len() * 3 < line_for(at).len());
     }
 
     #[test]

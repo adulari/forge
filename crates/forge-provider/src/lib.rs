@@ -29,6 +29,7 @@ mod output_cap;
 mod refresh_lock;
 mod system_placement;
 mod tool_recovery;
+pub mod wire_fingerprint;
 pub mod wire_params;
 mod xai_oauth;
 

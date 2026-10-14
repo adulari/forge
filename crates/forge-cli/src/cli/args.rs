@@ -286,6 +286,9 @@ pub(crate) enum AssayCmd {
 #[path = "args/anywhere.rs"]
 pub(crate) mod anywhere;
 pub(crate) use anywhere::AnywhereCmd;
+#[path = "args/stats.rs"]
+pub(crate) mod stats;
+pub(crate) use stats::StatsCmd;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
@@ -843,6 +846,12 @@ pub(crate) enum Command {
     /// The model scoreboard for this repo: wins/losses and the resulting routing boost per
     /// model, learned from `/duel` arenas and `forge queue run --shadow` passes.
     Scoreboard,
+    /// Usage statistics from the local store. `forge stats cache [--session [ID]]`: prompt-cache
+    /// hit rate per model and the cause of each miss.
+    Stats {
+        #[command(subcommand)]
+        cmd: StatsCmd,
+    },
 
     /// A 2-minute guided tour of Forge — what it does and the commands to try, no API keys
     /// needed. `--demo` also runs a real offline turn (mock model) in a scratch directory so
