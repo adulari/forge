@@ -192,6 +192,66 @@ async fn strict_openai_gateway_retries_without_prompt_cache_key() {
     assert_eq!(accepted.calls(), 1);
 }
 
+#[tokio::test]
+async fn zero_retention_openrouter_requests_deny_data_collection() {
+    let server = MockServer::start_async().await;
+    let denied = server.mock(|when, then| {
+        when.method(POST)
+            .path("/chat/completions")
+            .json_body_includes(r#"{"provider":{"data_collection":"deny"}}"#);
+        then.status(200).header("content-type", SSE_CT).body(concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+    });
+    let plain = server.mock(|when, then| {
+        when.method(POST)
+            .path("/chat/completions")
+            .body_excludes("data_collection");
+        then.status(200).header("content-type", SSE_CT).body(concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"plain\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+    });
+    let provider = GenAiProvider::with_client(client_pointed_at(server.base_url()));
+    let call = |model: &'static str, deny: bool| {
+        let provider = &provider;
+        async move {
+            provider
+                .complete_with(
+                    model,
+                    &[Message::user("hi")],
+                    &[],
+                    &CompletionOptions {
+                        deny_data_collection: deny,
+                        frequency_penalty: Some(0.3),
+                        ..Default::default()
+                    },
+                    &mut |_| {},
+                )
+                .await
+                .expect("mock answers")
+                .content
+        }
+    };
+
+    assert_eq!(call("openrouter::vendor/model", true).await, "ok");
+    assert_eq!(
+        denied.calls(),
+        1,
+        "the data policy rides in the body beside the penalties"
+    );
+    assert_eq!(call("openrouter::vendor/model", false).await, "plain");
+    assert_eq!(call("openai::gpt-4o-mini", true).await, "plain");
+    assert_eq!(
+        plain.calls(),
+        2,
+        "only OpenRouter has the field, and only when asked"
+    );
+}
+
 /// A loopback server that answers the Nth request with the Nth scripted SSE body (the last one
 /// repeats) and records every request body — what `httpmock` cannot do, since identical retries
 /// match the same mock.

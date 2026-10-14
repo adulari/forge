@@ -19,6 +19,7 @@ pub mod mcp;
 pub mod notifications;
 pub mod oauth;
 mod paths;
+pub mod privacy;
 pub mod provider_oauth;
 pub mod quota_status;
 pub mod secret_store;
@@ -205,6 +206,9 @@ pub struct Config {
     /// Structured file-tool workspace confinement (`tools.extra_roots`).
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Zero-data-retention routing (`[privacy] zero_retention`, zero-retention.md).
+    #[serde(default)]
+    pub privacy: privacy::PrivacyConfig,
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
@@ -2167,6 +2171,11 @@ pub struct MeshConfig {
     /// no effort param (provider default). Overridable per session with `/effort`.
     #[serde(default)]
     pub default_effort: Option<String>,
+    /// Give a session's provider cache key a stable hash of (model, tools, system prompt,
+    /// workspace) instead of the session id, so a new session can reuse the fixed prefix an
+    /// earlier one warmed. Frozen at the session's first request (mesh-routing.md, prompt caching).
+    #[serde(default = "default_true")]
+    pub cross_session_cache_key: bool,
 }
 
 impl MeshConfig {
@@ -2846,6 +2855,7 @@ impl Default for Config {
                 architect_model: None,
                 editor_model: None,
                 default_effort: None,
+                cross_session_cache_key: true,
             },
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),
@@ -2880,6 +2890,7 @@ impl Default for Config {
             voice: VoiceConfig::default(),
             harness: HarnessConfig::default(),
             tools: ToolsConfig::default(),
+            privacy: privacy::PrivacyConfig::default(),
         }
     }
 }

@@ -498,6 +498,12 @@ pub(crate) fn print_mesh_explanation(
         println!("fallbacks: {}", e.fallbacks.join(", "));
     }
     println!("why: {}", e.rationale);
+    if !e.privacy_drops.is_empty() {
+        println!("\nzero-retention mode dropped:");
+        for drop in &e.privacy_drops {
+            println!("  {:<40} {}", drop.model, drop.reason);
+        }
+    }
 }
 
 /// JSON form of the explanation (stable shape for scripting / tests).
@@ -569,6 +575,12 @@ pub(crate) fn mesh_explanation_json(
         "pick_effort": e.pick_effort.map(forge_types::effort::wire_name),
         "fallbacks": e.fallbacks,
         "rationale": e.rationale,
+        // Added: candidates `[privacy] zero_retention` removed. Always present, empty when off.
+        "privacy_drops": e
+            .privacy_drops
+            .iter()
+            .map(|d| serde_json::json!({"model": d.model, "reason": d.reason}))
+            .collect::<Vec<_>>(),
     }))
     .unwrap_or_else(|_| "{}".into())
 }
@@ -635,7 +647,27 @@ mod tests {
             fallbacks: vec![],
             rationale: "test".into(),
             classifier_label: "heuristic fallback".into(),
+            privacy_drops: vec![],
         }
+    }
+
+    #[test]
+    fn explanation_json_lists_zero_retention_drops() {
+        let mut e = explanation();
+        let empty: serde_json::Value =
+            serde_json::from_str(&mesh_explanation_json(&e, &[])).unwrap();
+        assert_eq!(empty["privacy_drops"], serde_json::json!([]));
+        e.privacy_drops.push(forge_mesh::privacy::PrivacyDrop {
+            model: "groq::llama".into(),
+            reason: "no zero-retention evidence for groq".into(),
+        });
+        let value: serde_json::Value =
+            serde_json::from_str(&mesh_explanation_json(&e, &[])).unwrap();
+        assert_eq!(value["privacy_drops"][0]["model"], "groq::llama");
+        assert_eq!(
+            e.privacy_note().as_deref(),
+            Some("zero-retention mode dropped 1 candidate(s): groq::llama")
+        );
     }
 
     #[test]

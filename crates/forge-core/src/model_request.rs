@@ -150,6 +150,7 @@ pub(super) async fn request_provider_response(
         // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
         // smaller-window model still fits. The immutable borrow ends before the block below.
         let sent = session.transcript_with_preamble_and_tools(active_model, specs);
+        let cache_key = session.main_loop_cache_key(active_model, specs, &checkpoint_ctx.session);
         // Auto-routed completions reserve a model before dispatch so independent sessions
         // can distribute across the fallback chain. Explicit pins deliberately bypass this
         // scheduler: their existing pin outage/failover policy remains authoritative.
@@ -230,12 +231,13 @@ pub(super) async fn request_provider_response(
                 frequency_penalty: crate::repetition_frequency_penalty(session.repetition_pressure),
                 presence_penalty: crate::repetition_presence_penalty(session.repetition_pressure),
                 checkpoint: Some(checkpoint_ctx.clone()),
-                prompt_cache_key: Some(checkpoint_ctx.session.clone()),
+                prompt_cache_key: Some(cache_key),
                 max_output_tokens: None,
                 reuse_response_chain,
                 response_chain_prefix_tokens: completion_prefix_tokens(&sent, specs),
                 response_format: None,
                 require_tool_call: std::mem::take(&mut session.require_tool_call),
+                deny_data_collection: false,
             };
             let fut =
                 provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);

@@ -74,6 +74,7 @@ mod narration_dedupe;
 mod nudge_policy;
 mod orchestration;
 pub mod permission;
+mod prefix_cache_key;
 pub mod project_context;
 pub mod push_notify;
 mod quality_gates;
@@ -109,6 +110,7 @@ pub mod workflow;
 mod workspace_context;
 pub mod worktree;
 pub mod worktree_reclaim;
+pub mod zero_retention;
 
 pub use llm_router::LlmRouter;
 use replay::messages_to_replay_items;
@@ -1584,6 +1586,9 @@ pub struct Session {
     id: String,
     pub store: Arc<Store>,
     provider: Arc<dyn Provider>,
+    /// The main loop's provider cache key, fixed at the session's first request
+    /// (`prefix_cache_key.rs`).
+    frozen_cache_key: Option<String>,
     router: Arc<dyn Router>,
     tools: ToolRegistry,
     presenter: Box<dyn Presenter>,
@@ -2859,6 +2864,9 @@ impl Session {
         if let Some(exact) = self.exact_effort {
             decision.effort = forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
         }
+        // After every pin backstop: a session pin the router never saw must not reach a retaining
+        // provider either.
+        forge_mesh::privacy::enforce_on_decision(&self.config, &mut decision);
         let decision = decision;
         if decision.unroutable {
             let has_credentials = forge_config::known_key_providers()
@@ -4929,6 +4937,12 @@ mod tests {
 
     #[path = "stream_idle_hint.rs"]
     mod stream_idle_hint_tests;
+
+    #[path = "prefix_cache_key.rs"]
+    mod prefix_cache_key_tests;
+
+    #[path = "zero_retention.rs"]
+    mod zero_retention_tests;
 
     #[path = "steer_rewind.rs"]
     mod steer_rewind_tests;

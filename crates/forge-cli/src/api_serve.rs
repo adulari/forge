@@ -122,7 +122,7 @@ pub(crate) async fn api_serve_cmd(
 
     let models = advertised_models(&config, catalog.as_ref());
     let state = Arc::new(ApiState {
-        provider,
+        provider: forge_core::zero_retention::guard(provider, &config),
         router,
         pricing: forge_mesh::pricing::Pricing::from_config(&config),
         readiness_store,
@@ -318,6 +318,7 @@ async fn chat_completions(
         response_chain_prefix_tokens: 0,
         response_format: parse_response_format(&req.response_format),
         require_tool_call: false,
+        deny_data_collection: false,
     };
 
     // Decide the ordered model chain to try.

@@ -234,6 +234,7 @@ pub(crate) fn side_call_model(
         .into_iter()
         .filter(|m| !forge_mesh::catalog::is_subscription(m) || *m == own)
         .filter(|m| crate::auxiliary_candidates::usable_for_side_call(m, health, catalog))
+        .filter(|m| forge_mesh::privacy::allows(config, m))
         .find(|m| forge_config::has_api_key(forge_config::provider_of(m)))
         .unwrap_or(own)
 }

@@ -152,6 +152,7 @@ impl Session {
         seq: i64,
     ) -> Self {
         let mode = config.permission_mode;
+        let provider = crate::zero_retention::guard(provider, &config);
         // Opt-in allowlist (`tools.extra_roots`) of extra roots the structured file tools may
         // read and write, in addition to the workspace. Relative entries are ignored. Empty by
         // default, so this is a no-op for existing configs.
@@ -195,6 +196,7 @@ impl Session {
             id,
             store,
             provider,
+            frozen_cache_key: None,
             router,
             tools,
             presenter,
