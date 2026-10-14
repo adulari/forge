@@ -28,6 +28,7 @@ use forge_provider::{StreamEvent, ToolSpec};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 
 use crate::subagent::{self, AgentCtx};
+use crate::workflow_meta::{self, WorkflowMeta};
 
 /// The virtual tool name the parent model calls to run a workflow script.
 pub const RUN_WORKFLOW_TOOL: &str = "run_workflow";
@@ -65,7 +66,9 @@ pub fn run_workflow_spec() -> ToolSpec {
             index)`; `await phase(title)` labels every subsequent agent() call until the next \
             phase() call; `await log(message)` writes a note into the transcript; `await \
             workflow(name, args?)` runs a saved script from `.forge/workflows/<name>.js`. Write \
-            the script as a sequence of statements (it runs inside an async function) using real \
+            the script as a sequence of statements (it runs inside an async function; no \
+            import/export/require). Optionally open with `export const meta = { name, \
+            description, phases: [{ title }] };` — a pure literal, used only for display. Use real \
             control flow — loops, conditionals, accumulation across rounds — for genuinely \
             dynamic multi-step work; use `agent()` directly for a single subtask, `spawn_agents` \
             for simple one-shot fan-out. ALWAYS end the script with `return <final result>` — \
@@ -457,12 +460,13 @@ fn workflow_host_fn(state: Arc<WorkflowState>) -> forge_workflow::HostFunction {
 /// [args]`. A top-level `run_workflow` script (authored fresh by the model each turn) has no such
 /// concept and never goes through this.
 fn inject_args(script_body: &str, args: &serde_json::Value) -> String {
+    let (body, _) = workflow_meta::prepare(script_body);
+    format!("{}{body}", args_prefix(args))
+}
+
+fn args_prefix(args: &serde_json::Value) -> String {
     let json = serde_json::to_string(args).unwrap_or_else(|_| "null".to_string());
-    // Strip any leading `export const meta = {…}` doc/library block first: the engine has no
-    // module system and rejects `export`, but saved scripts carry meta so `forge serve`'s
-    // `/api/workflows` can populate the app's workflow library from the same file that runs.
-    let body = strip_meta_export(script_body);
-    format!("const args = {json};\n{body}")
+    format!("const args = {json};\n")
 }
 
 fn build_host_functions(state: Arc<WorkflowState>) -> Vec<forge_workflow::HostFunction> {
@@ -478,72 +482,6 @@ fn wrap_with_prelude(script_body: &str) -> String {
     format!("{PRELUDE}\n(async () => {{\n{script_body}\n}})")
 }
 
-/// Remove a leading `export const meta = {…};` declaration from a saved workflow script before
-/// execution. The `meta` block is a documentation/library convention (name/description/
-/// whenToUse/phases, read by `forge serve`'s `/api/workflows` for the app's workflow library),
-/// but the workflow engine has no module system and rejects the `export` keyword. Stripping it
-/// keeps one source of truth: the same file both self-documents and runs. The extractor is
-/// brace-balanced and quote-aware so a `{`/`}` or `;` inside a string literal in the meta block
-/// doesn't truncate it. Anything other than a leading `export const meta` is left untouched.
-fn strip_meta_export(script: &str) -> String {
-    let trimmed_start = script.trim_start();
-    let leading_ws = &script[..script.len() - trimmed_start.len()];
-    if !trimmed_start.starts_with("export") {
-        return script.to_string();
-    }
-    // Confirm it's `export const meta` (allowing arbitrary inner whitespace), not some other
-    // `export` we shouldn't silently eat.
-    let after_export = trimmed_start["export".len()..].trim_start();
-    let Some(after_const) = after_export.strip_prefix("const") else {
-        return script.to_string();
-    };
-    if !after_const.trim_start().starts_with("meta") {
-        return script.to_string();
-    }
-    let Some(open_rel) = trimmed_start.find('{') else {
-        return script.to_string();
-    };
-    let mut depth = 0usize;
-    let mut in_str: Option<char> = None;
-    let mut prev_backslash = false;
-    let bytes_from_open = &trimmed_start[open_rel..];
-    for (i, c) in bytes_from_open.char_indices() {
-        if let Some(q) = in_str {
-            if prev_backslash {
-                prev_backslash = false;
-            } else if c == '\\' {
-                prev_backslash = true;
-            } else if c == q {
-                in_str = None;
-            }
-            continue;
-        }
-        match c {
-            '\'' | '"' | '`' => in_str = Some(c),
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    // Consume a trailing `;` and any inline whitespace after the closing brace.
-                    let mut end = open_rel + i + c.len_utf8();
-                    let rest = &trimmed_start[end..];
-                    let rest_trimmed = rest.trim_start_matches([' ', '\t']);
-                    if let Some(after_semi) = rest_trimmed.strip_prefix(';') {
-                        end = trimmed_start.len() - after_semi.len();
-                    }
-                    // Preserve original leading whitespace + everything after the meta block so
-                    // line numbers past the block barely shift and `const args = …;` injection
-                    // (which prepends) still lands before the body.
-                    return format!("{leading_ws}{}", &trimmed_start[end..]);
-                }
-            }
-            _ => {}
-        }
-    }
-    // Unbalanced — leave the script as-is; the engine will surface a real parse error.
-    script.to_string()
-}
-
 /// Runs a workflow script end to end: builds the shared concurrency/event state, registers the
 /// host functions, and executes the (prelude-wrapped) script. Returns the script's own return
 /// value (JSON) and whether every `agent()` call it made succeeded.
@@ -557,6 +495,35 @@ pub async fn run(
     max_total_agents: usize,
     workflows_dir: PathBuf,
     script_body: &str,
+    on_event: impl FnMut(WorkflowEvent) + Send,
+) -> Result<(serde_json::Value, bool), String> {
+    let (body, meta) = workflow_meta::prepare(script_body);
+    run_prepared(
+        ctx,
+        parent_id,
+        budget,
+        max_concurrency,
+        max_per_provider,
+        max_total_agents,
+        workflows_dir,
+        &body,
+        meta,
+        on_event,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_prepared(
+    ctx: AgentCtx,
+    parent_id: String,
+    budget: BudgetState,
+    max_concurrency: usize,
+    max_per_provider: usize,
+    max_total_agents: usize,
+    workflows_dir: PathBuf,
+    script_body: &str,
+    meta: Option<WorkflowMeta>,
     mut on_event: impl FnMut(WorkflowEvent) + Send,
 ) -> Result<(serde_json::Value, bool), String> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkflowEvent>();
@@ -570,6 +537,9 @@ pub async fn run(
         workflows_dir,
         tx,
     ));
+    if let Some(banner) = meta.and_then(|m| m.banner()) {
+        let _ = state.tx.send(WorkflowEvent::Log(banner));
+    }
     let host_fns = build_host_functions(state);
     let script = wrap_with_prelude(script_body);
 
@@ -623,6 +593,10 @@ pub async fn run(
         Ok(value) => Ok((value, all_ok)),
         Err(e) => {
             let mut msg = format!("error: {e}");
+            if workflow_meta::is_module_syntax_error(&e) {
+                msg.push('\n');
+                msg.push_str(workflow_meta::SYNTAX_HINT);
+            }
             // Seen live: a model authored a script calling `glob(...)` — a host function that
             // doesn't exist — and got a bare "glob is not defined". Spell out the real surface
             // so the model's retry uses it instead of guessing another phantom function.
@@ -699,8 +673,9 @@ pub async fn run_saved(
     let script = tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| format!("saved workflow '{name}' not found: {e}"))?;
-    let script = inject_args(&script, &args);
-    run(
+    let (body, meta) = workflow_meta::prepare(&script);
+    let script = format!("{}{body}", args_prefix(&args));
+    run_prepared(
         ctx,
         parent_id,
         budget,
@@ -709,6 +684,7 @@ pub async fn run_saved(
         max_total_agents,
         workflows_dir,
         &script,
+        meta,
         on_event,
     )
     .await
@@ -783,47 +759,15 @@ mod tests {
     }
 
     #[test]
-    fn strip_meta_export_removes_leading_meta_block() {
-        let script = "export const meta = {\n  name: 'demo',\n  description: 'a; b {c}',\n  phases: [{ title: 'Scan' }],\n};\nphase('Scan');\nreturn 1;";
-        let out = strip_meta_export(script);
-        assert!(!out.contains("export"), "export not stripped: {out}");
-        assert!(!out.contains("description"), "meta body leaked: {out}");
-        assert!(
-            out.trim_start().starts_with("phase('Scan')"),
-            "body lost: {out}"
-        );
-    }
-
-    #[test]
-    fn strip_meta_export_is_quote_and_brace_aware() {
-        // A `}` and `;` inside a string must not end the block early.
-        let script = "export const meta = { description: 'has } and ; inside' };\nreturn 2;";
-        let out = strip_meta_export(script);
-        assert_eq!(
-            out.trim(),
-            "return 2;",
-            "quote-aware balancing failed: {out}"
-        );
-    }
-
-    #[test]
-    fn strip_meta_export_leaves_non_meta_scripts_untouched() {
-        let script = "const x = 1;\nreturn x;";
-        assert_eq!(strip_meta_export(script), script);
-        // A different `export` is not silently eaten.
-        let other = "export const helper = 3;\nreturn helper;";
-        assert_eq!(strip_meta_export(other), other);
-    }
-
-    #[test]
-    fn inject_args_strips_meta_before_prepending_args() {
+    fn inject_args_drops_export_and_prepends_args() {
         let script = "export const meta = { name: 'x' };\nreturn args;";
         let out = inject_args(script, &serde_json::json!({"v": 1}));
         assert!(
             out.starts_with("const args = {\"v\":1};"),
             "args not first: {out}"
         );
-        assert!(!out.contains("export"), "meta survived inject: {out}");
+        assert!(!out.contains("export"), "export survived inject: {out}");
+        assert!(out.contains("const meta"), "meta binding kept: {out}");
     }
 
     /// Always answers with a fixed reply, regardless of prompt/model.
@@ -1083,6 +1027,66 @@ mod tests {
             value,
             serde_json::Value::String("child done|child done".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn export_const_meta_runs_end_to_end_with_phases_and_banner() {
+        let (value, ok, evs) = run_test_workflow(
+            Arc::new(EchoProvider),
+            "openai::gpt-test",
+            r#"export const meta = {
+                name: 'audit',
+                description: 'scan then report',
+                phases: [{ title: 'Scan' }, { title: 'Report' }],
+            };
+            await phase('Scan');
+            const out = await agent('look');
+            return meta.name + ':' + out;"#,
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(value, serde_json::json!("audit:child done"));
+        assert!(
+            evs.iter().any(|e| matches!(e, WorkflowEvent::Log(m)
+                if m == "audit — scan then report · phases: Scan → Report")),
+            "meta banner logged: {evs:?}"
+        );
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::AgentStart { phase, .. } if phase.as_deref() == Some("Scan"))));
+    }
+
+    #[tokio::test]
+    async fn plain_const_meta_and_no_meta_both_run() {
+        let (value, ok, _) = run_test_workflow(
+            Arc::new(EchoProvider),
+            "openai::gpt-test",
+            "const meta = { name: 'p', phases: ['A'] };\nreturn await agent('x');",
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(value, serde_json::json!("child done"));
+        let (value, ok, _) = run_test_workflow(
+            Arc::new(EchoProvider),
+            "openai::gpt-test",
+            "return await agent('x');",
+        )
+        .await;
+        assert!(ok);
+        assert_eq!(value, serde_json::json!("child done"));
+    }
+
+    #[tokio::test]
+    async fn unsupported_export_error_points_at_the_supported_format() {
+        let (value, ok, _) = run_test_workflow(
+            Arc::new(EchoProvider),
+            "openai::gpt-test",
+            "export default async function main() { return 1; }",
+        )
+        .await;
+        assert!(!ok);
+        let msg = value.as_str().unwrap();
+        assert!(msg.contains("export const meta"), "hint present: {msg}");
     }
 
     #[tokio::test]
