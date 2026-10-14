@@ -156,10 +156,31 @@ pub fn best_value_rung(
     if let Some(rung) = configured_rung(model, forge_config::model_effort_for(model).as_deref()) {
         return Some(rung);
     }
-    let ladder = catalog.effort_ladder_for(model);
+    let ladder = offered_rungs(model, catalog.effort_ladder_for(model));
     let selected = select_rung_by_value(model, &ladder, ceiling, code_heavy, VALUE_LAMBDA)
         .or_else(|| crate::bench::select_rung(&ladder, ceiling, code_heavy))?;
     forge_types::effort::resolve_id(model, Some(selected)).sent
+}
+
+/// The measured rungs this provider can actually be asked for.
+///
+/// Choosing among rungs the route cannot send scored a model on one rung and ran it on another:
+/// InferHub's GLM-5.3 accepts low/high, the feed rates low/max, so the rule picked `max` on max's
+/// quality and the resolver then sent `high` — a rung with no measurement at all, ranked as if it
+/// were the best one. Filtering first makes the choice, the score and the wire agree. When no rated
+/// rung is offered the ladder is empty, and callers fall back to the model's single score.
+fn offered_rungs(
+    model: &str,
+    ladder: Vec<(BenchEffort, crate::bench::BenchScore)>,
+) -> Vec<(BenchEffort, crate::bench::BenchScore)> {
+    ladder
+        .into_iter()
+        .filter(|(rung, _)| {
+            rung.to_level().is_some_and(|level| {
+                forge_types::effort::resolve_id(model, Some(level)).sent == Some(level)
+            })
+        })
+        .collect()
 }
 
 /// One rung of a model, described for a human choosing between them.
@@ -386,6 +407,28 @@ mod tests {
         assert!(choices.iter().all(|c| c.cost_ratio.is_some()));
         let cheapest = choices.iter().find(|c| c.rung == BenchEffort::Low).unwrap();
         assert!((cheapest.cost_ratio.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_chosen_rung_is_one_the_route_can_send_so_choice_score_and_wire_agree() {
+        // Real shapes: the feed rates GLM-5.3 at low (34.3) and max (44.8); InferHub's
+        // `cb/glm-5.3` publishes reasoning_levels ["low","high"]. Picking `max` on max's quality
+        // and then sending the clamped `high` scored the model on a rung it never ran.
+        use crate::catalog::ModelCatalog;
+        let id = "inferhub-rungtest::cb/glm-5.3";
+        forge_types::effort::register_discovered_ladders([(
+            id.to_string(),
+            vec![EffortLevel::Low, EffortLevel::High],
+        )]);
+        let mut b = crate::bench::BenchmarkScores::new();
+        b.insert("GLM-5.3 (Low)", 34.3, 60.0);
+        b.insert("GLM-5.3 (Max)", 44.8, 74.8);
+        let catalog = ModelCatalog::new(vec![id.to_string()]).with_benchmarks(Some(b));
+        assert_eq!(
+            best_value_rung(&catalog, id, None, false),
+            Some(EffortLevel::Low),
+            "max is not sendable here; low is the only measured rung the route offers"
+        );
     }
 
     #[test]

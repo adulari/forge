@@ -117,6 +117,7 @@ mod tests {
                 false,
                 2,
                 Usage {
+                    reported_cost_usd: None,
                     input_tokens: 1_000,
                     output_tokens: 100,
                     cached_input_tokens: Some(500),

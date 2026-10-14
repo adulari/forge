@@ -55,6 +55,7 @@ impl Store {
         // at least one call in the session reported it.
         let count = |v: Option<i64>| v.map(|n| n.max(0) as u64);
         Ok(Usage {
+            reported_cost_usd: None,
             input_tokens: count(input).unwrap_or(0),
             cached_input_tokens: count(cached),
             output_tokens: count(output).unwrap_or(0),
@@ -85,6 +86,7 @@ impl Store {
                     zero_cost: r.get(1)?,
                     calls: r.get::<_, i64>(2)?.max(0) as u64,
                     usage: Usage {
+                        reported_cost_usd: None,
                         input_tokens: count(r.get(3)?).unwrap_or(0),
                         cached_input_tokens: count(r.get(4)?),
                         cache_write_tokens: count(r.get(5)?),
@@ -243,6 +245,7 @@ mod tests {
                 &sid,
                 &billed,
                 &Usage {
+                    reported_cost_usd: None,
                     input_tokens: 1_000,
                     output_tokens: 100,
                     cached_input_tokens: Some(600),

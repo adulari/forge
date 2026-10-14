@@ -635,6 +635,7 @@ fn parse_antigravity_json(v: &Value) -> Vec<Parsed> {
 fn antigravity_usage_from(v: &Value) -> Usage {
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     Usage {
+        reported_cost_usd: None,
         input_tokens: n("input_tokens"),
         output_tokens: n("output_tokens"),
         cached_input_tokens: Some(n("cache_read_tokens")),

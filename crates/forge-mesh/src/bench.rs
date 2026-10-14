@@ -15,6 +15,9 @@ use std::collections::HashMap;
 use forge_types::EffortLevel;
 use serde::{Deserialize, Serialize};
 
+mod model_id;
+use model_id::{is_family_word, is_num, ModelId, Shape, SERVING_WORDS, TIER_WORDS};
+
 /// One model's measured performance — Artificial Analysis indices, each roughly 0–70 today.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct BenchScore {
@@ -134,6 +137,8 @@ impl BenchEffort {
         // Segmented form: one segment is "<rung> Effort", and a "Non-reasoning" segment anywhere
         // outranks it.
         let mut rung = None;
+        let mut bare = None;
+        let mut only_config_beside_bare = true;
         for segment in group.split(',') {
             let segment = segment.trim();
             if Self::parse_exact(segment) == Some(BenchEffort::NonReasoning) {
@@ -144,9 +149,23 @@ impl BenchEffort {
                 .or_else(|| segment.strip_suffix(" effort"))
             {
                 rung = rung.or_else(|| Self::parse_exact(word));
+            } else if let Some(effort) = Self::parse_exact(segment) {
+                bare = bare.or(Some(effort));
+            } else if !Self::is_config_segment(segment) {
+                only_config_beside_bare = false;
             }
         }
-        rung
+        // The feed's current Anthropic spelling drops the "Effort" word: "Claude Opus 5.5 (Max,
+        // Default Fallback)". A bare rung is accepted ONLY beside configuration segments (a
+        // fallback note, "Adaptive Reasoning"), never beside a "Based on …" lineage note, so the
+        // derived-model guard ("Quasar 438B (Max, Based on GLM-5.2)") still holds.
+        rung.or(bare.filter(|_| only_config_beside_bare))
+    }
+
+    /// A parenthetical segment that describes how a rung was run rather than which model ran it.
+    fn is_config_segment(segment: &str) -> bool {
+        let s = segment.trim().to_lowercase();
+        s.ends_with(" fallback") || s == "adaptive reasoning" || s == "reasoning"
     }
 
     fn parse_exact(text: &str) -> Option<Self> {
@@ -249,11 +268,12 @@ impl BenchmarkScores {
     /// For precisely-named ids (e.g. local Ollama tags `ollama::qwen2.5-coder:14b`) this avoids the
     /// fallback cross-matching different sizes/families that merely share a word like "coder".
     pub fn exact_score_for(&self, id: &str) -> Option<BenchScore> {
-        let want = id_tokens(id);
-        if want.is_empty() {
+        let want = ModelId::parse(id);
+        if want.tokens.is_empty() {
             return None;
         }
-        self.by_canon.get(&canon(&want)).copied()
+        let key = canon(&want.tokens);
+        self.rung_or_row(&key, want.rung)
     }
 
     /// The effective score for a Forge `provider::model` id, including explicitly approved
@@ -263,18 +283,17 @@ impl BenchmarkScores {
     /// excludes inheritance so the benchmark cache can keep checking for the new model's own row.
     /// Documented in docs/features/mesh-routing.md.
     pub fn score_for(&self, id: &str) -> Option<BenchScore> {
-        if let Some(predecessor) = Self::predecessor_canon(id) {
-            return self
-                .exact_score_for(id)
-                .or_else(|| self.by_canon.get(&predecessor).copied());
-        }
-        self.source_score_for(id)
+        let want = ModelId::parse(id);
+        self.resolve_key(id)
+            .and_then(|key| self.rung_or_row(&key, want.rung))
     }
 
     /// The score matched directly from a benchmark-source row, without predecessor inheritance.
     /// Cache refresh logic uses this to distinguish measured data from a temporary routing prior.
     pub fn source_score_for(&self, id: &str) -> Option<BenchScore> {
-        self.resolve(id).map(|(_, score)| score)
+        let want = ModelId::parse(id);
+        self.resolve(&want)
+            .and_then(|key| self.rung_or_row(&key, want.rung))
     }
 
     /// Every measured effort rung for a Forge id, weakest first.
@@ -283,7 +302,14 @@ impl BenchmarkScores {
     /// ladder to choose from and callers must fall back to [`Self::score_for`]. Resolution follows
     /// [`Self::score_for`] exactly, predecessor inheritance included, so a model routed on an
     /// inherited score reads its rungs from the same row it was scored by.
+    ///
+    /// Also empty for an id that NAMES its rung (`agy-cli::gemini-3.8-flash-low`,
+    /// `inferhub::ag/gemini-3.8-flash-high`): that model is always run at the rung in its name, so
+    /// there is no ladder to route along — [`Self::score_for`] already returns that rung's score.
     pub fn efforts_for(&self, id: &str) -> Vec<(BenchEffort, BenchScore)> {
+        if ModelId::parse(id).rung.is_some() {
+            return Vec::new();
+        }
         self.resolve_key(id)
             .and_then(|key| self.by_effort.get(&key))
             .cloned()
@@ -300,126 +326,159 @@ impl BenchmarkScores {
             .map(|(_, score)| score)
     }
 
-    /// The canonical key of the row that represents `id` under [`Self::score_for`] semantics.
-    fn resolve_key(&self, id: &str) -> Option<String> {
-        if let Some(predecessor) = Self::predecessor_canon(id) {
-            let want = id_tokens(id);
-            if want.is_empty() {
-                return None;
-            }
-            let own = canon(&want);
-            if self.by_canon.contains_key(&own) {
-                return Some(own);
-            }
-            return self
-                .by_canon
-                .contains_key(&predecessor)
-                .then_some(predecessor);
-        }
-        self.resolve(id).map(|(key, _)| key)
+    /// The row's score, or — for an id that names its rung — that rung's measured score when the
+    /// source rated it. An unrated named rung falls back to the row rather than to a neighbour.
+    fn rung_or_row(&self, key: &str, rung: Option<BenchEffort>) -> Option<BenchScore> {
+        let named = rung.and_then(|rung| {
+            self.by_effort
+                .get(key)?
+                .iter()
+                .find(|(r, _)| *r == rung)
+                .map(|(_, s)| *s)
+        });
+        named.or_else(|| self.by_canon.get(key).copied())
     }
 
-    /// Match a Forge id to a source row, returning that row's canonical key alongside its score.
-    /// The key is what ties a model to its effort ladder, which is stored under the same key.
-    fn resolve(&self, id: &str) -> Option<(String, BenchScore)> {
-        if Self::predecessor_canon(id).is_some() {
-            let want = id_tokens(id);
-            if want.is_empty() {
-                return None;
-            }
-            let key = canon(&want);
-            return self.by_canon.get(&key).map(|score| (key, *score));
-        }
-        if self.entries.is_empty() {
+    /// The canonical key of the row that represents `id` under [`Self::score_for`] semantics: the
+    /// model's own row (exact or matched), else a reviewed predecessor's row.
+    fn resolve_key(&self, id: &str) -> Option<String> {
+        let want = ModelId::parse(id);
+        self.resolve(&want).or_else(|| {
+            let predecessor = Self::predecessor_canon(&want)?;
+            self.by_canon
+                .contains_key(&predecessor)
+                .then_some(predecessor)
+        })
+    }
+
+    /// Match a normalised Forge id to a source row, returning that row's canonical key. The key
+    /// is what ties a model to its effort ladder, which is stored under the same key.
+    ///
+    /// An identical token set wins outright. Otherwise a row is a candidate only when it names the
+    /// SAME model, which is decided word by word and number by number rather than by overlap:
+    ///
+    /// - The id's family (its first word) must be in the row, and they must share a family word
+    ///   that is not a role word ("coder", "chat", …), so `deepseek-coder-v2` never takes
+    ///   Qwen-Coder's row and `seedance-1.0-pro` never takes "Gemini 1.0 Pro".
+    /// - Every other word of the id must be in the row, unless it is a serving tag
+    ///   ([`SERVING_WORDS`]) — so `gemini-omni-flash` is not Gemini Flash and `gpt-5.4-pro` is not
+    ///   GPT-5.4, while `deepseek-v4.1-flash-fast` still is DeepSeek V4.1 Flash.
+    /// - A row word the id lacks is fine unless it is a tier word ([`TIER_WORDS`]): "Kimi K2.7
+    ///   Code" may stand for `kimi-k2.7`, but "Qwen3.8-Flash-Next" never stands for `qwen3.8-flash`.
+    /// - Version numbers must be EQUAL when the id has any. Comparing them positionally let a
+    ///   shorter id inherit a point release: `kiro-opus-5` ([5]) zipped against "Opus 5.5" ([5, 5])
+    ///   found no conflict and took 5.5's score. Release dates and parameter sizes are not
+    ///   versions: a date only has to agree when both carry one, a size whenever the row has one.
+    /// - A version-less id (`claude-cli::opus`) is an alias for the family's best row.
+    fn resolve(&self, want: &ModelId) -> Option<String> {
+        if want.tokens.is_empty() || self.entries.is_empty() {
             return None;
         }
-        let want = id_tokens(id);
-        if want.is_empty() {
-            return None;
+        let key = canon(&want.tokens);
+        if self.by_canon.contains_key(&key) {
+            return Some(key);
         }
-        // Fast path: identical token set.
-        let key = canon(&want);
-        if let Some(s) = self.by_canon.get(&key) {
-            return Some((key, *s));
-        }
-        // Fallback: the row sharing the most tokens, requiring a shared *family* word (an
-        // alphabetic token ≥3 chars) so we never match purely on a stray version number.
-        // Role words (coder, chat, instruct, vision…) are explicitly excluded from "family
-        // word" status — they describe a task capability that many unrelated model families
-        // share, not a model-family identifier. Without this exclusion, "coder" would let
-        // deepseek-coder-v2 pick up Qwen2.5-Coder's bench score and vice-versa.
-        const ROLE_WORDS: &[&str] = &["coder", "chat", "code", "instruct", "vision", "embed"];
-        // Numeric tokens (version numbers) in `want` — used below to refuse a cross-VERSION
-        // match. Without this, a brand-new release (`claude-sonnet-5`, no AA row yet) fuzzy-
-        // matches an OLDER sibling row purely on the shared "claude"+"sonnet" family words
-        // (neither token set's numbers overlap) and silently inherits its stale score — which
-        // also defeats `benchmarks::ensure`'s "no score yet → refetch" trigger, so the real
-        // Sonnet 5 row never gets picked up once AA publishes it. A bare alias with NO version
-        // number at all (`claude-cli::opus`) is unaffected — it's still meant to map to the
-        // current best Claude-Opus row.
-        let want_nums: Vec<&str> = want
-            .iter()
-            .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
-            .map(String::as_str)
-            .collect();
-        // (overlap, intelligence, canonical key, score)
-        let mut best: Option<(usize, f64, String, BenchScore)> = None;
+        let full = Shape::of(&want.tokens);
+        // A leading vendor word (`Meta-Llama-3.3-70B`) is not part of the model's name in the
+        // feed. It is dropped only on a second pass and only when the next word can itself be a
+        // family, so `seedance-1.0-pro` never becomes a bare "pro".
+        let tail = (full.words.len() > 1
+            && want.tokens[0] == full.words[0]
+            && is_family_word(&full.words[1])
+            && want.tokens.get(1).is_some_and(|t| !is_num(t)))
+        .then(|| Shape::of(&want.tokens[1..]));
+        std::iter::once(full)
+            .chain(tail)
+            .find_map(|w| self.best_row(&w))
+    }
+
+    /// The best row for an id shape under the rules described on [`Self::resolve`].
+    fn best_row(&self, w: &Shape) -> Option<String> {
+        let family = w.words.first()?;
+        // (row words the id did not name, intelligence, canonical key)
+        let mut best: Option<(Vec<String>, f64, String)> = None;
+        let mut ambiguous = false;
         for (toks, score) in &self.entries {
-            let shared = overlap(&want, toks);
-            let family = want.iter().any(|t| {
-                t.len() >= 3
-                    && t.chars().all(|c| c.is_alphabetic())
-                    && !ROLE_WORDS.contains(&t.as_str())
-                    && toks.contains(t)
-            });
-            let cand_nums: Vec<&str> = toks
-                .iter()
-                .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
-                .map(String::as_str)
-                .collect();
-            // Compare version numbers POSITIONALLY. Membership ("does any wanted number
-            // appear anywhere in the candidate?") lets a shared MAJOR digit wave a different
-            // minor through: `muse-spark-1.3` tokenises to [1, 3] and "Muse Spark 1.2" to
-            // [1, 2], they share "1", and 1.3 silently inherited 1.2's measured score. A
-            // shorter candidate (`deepseek-v4-flash-0731` vs "DeepSeek V4 Flash") still
-            // matches — only a differing number at the same position is a conflict.
-            let version_conflict = want_nums.iter().zip(cand_nums.iter()).any(|(w, c)| w != c);
-            if !family || shared < 2 || version_conflict {
+            let c = Shape::of(toks);
+            if !c.words.contains(family) {
                 continue;
             }
-            // Prefer more shared tokens; break ties toward the higher-intelligence row (a bare
-            // bridge alias like `claude-cli::opus` should map to the latest/best Claude-Opus).
+            let shares_family_word = w
+                .words
+                .iter()
+                .any(|t| is_family_word(t) && c.words.contains(t));
+            if !shares_family_word {
+                continue;
+            }
+            if w.words
+                .iter()
+                .any(|t| !c.words.contains(t) && !SERVING_WORDS.contains(&t.as_str()))
+            {
+                continue;
+            }
+            if c.words
+                .iter()
+                .any(|t| !w.words.contains(t) && TIER_WORDS.contains(&t.as_str()))
+            {
+                continue;
+            }
+            if !c.version_fits(w) {
+                continue;
+            }
+            if !c.sizes.is_empty() && w.sizes != c.sizes {
+                continue;
+            }
+            if !w.dates.is_empty() && !c.dates.is_empty() && w.dates != c.dates {
+                continue;
+            }
+            let extra: Vec<String> = c
+                .words
+                .into_iter()
+                .filter(|t| !w.words.contains(t))
+                .collect();
+            let rival =
+                matches!(&best, Some((be, _, _)) if be.len() == extra.len() && *be != extra);
             let better = match &best {
                 None => true,
-                Some((bo, bi, _, _)) => shared > *bo || (shared == *bo && score.intelligence > *bi),
+                Some((be, bi, _)) => {
+                    extra.len() < be.len() || (extra.len() == be.len() && score.intelligence > *bi)
+                }
             };
             if better {
-                best = Some((shared, score.intelligence, canon(toks), *score));
+                best = Some((extra, score.intelligence, canon(toks)));
+                ambiguous = rival;
+            } else if rival {
+                ambiguous = true;
             }
         }
-        best.map(|(_, _, key, score)| (key, score))
+        // `kiro-gpt-5.6` fits "GPT-5.6 Sol", "Terra" and "Luna" equally — each adds a different
+        // word the id never named. Picking the best-scored sibling would be a guess dressed up as
+        // a measurement, so an id that only matches by borrowing different words matches nothing.
+        match best {
+            Some((extra, _, key)) if extra.is_empty() || !ambiguous => Some(key),
+            _ => None,
+        }
     }
 
     /// Resolve narrowly scoped, product-reviewed benchmark inheritance to the predecessor's exact
-    /// canonical key. Generic cross-version fuzzy matching is deliberately bypassed for these
-    /// successors so a preview cannot select whichever older sibling has the highest score.
-    fn predecessor_canon(id: &str) -> Option<String> {
+    /// canonical key. Consulted only when the successor has no row of its own — exact or matched
+    /// — so a published row always wins, and the version rule in [`Self::resolve`] keeps a
+    /// successor from matching an older sibling on its own.
+    fn predecessor_canon(want: &ModelId) -> Option<String> {
         const PREDECESSORS: &[(&str, &str)] = &[
             ("qwen3.8-max-preview", "qwen3.7-max"),
-            // Muse Spark 1.3 shipped 2026-09-02 and is free on OpenCode Zen. Artificial
-            // Analysis's site publishes it (Intelligence Index 62, above 1.2's 56.8) but the
-            // v2 data API feed carries no row for it yet, and the positional version guard
-            // above (correctly) refuses to fuzzy-match it onto 1.2. Inheriting 1.2's measured
-            // 56.8/72.2 is the conservative prior: same family, same vendor, lower published
-            // intelligence than 1.3's own site number.
+            // Muse Spark 1.3 shipped 2026-09-02 and is free on OpenCode Zen. It sat in the
+            // feed with no row for weeks while Artificial Analysis's site already published it;
+            // inheriting 1.2's measured score was the conservative prior. Kept for feeds (and
+            // caches) that predate the 1.3 row — the row wins wherever it exists.
             ("muse-spark-1.3", "muse-spark-1.2"),
             ("muse-spark-1.3-contributor", "muse-spark-1.2"),
             ("muse-spark-1.3-contributor-free", "muse-spark-1.2"),
         ];
 
-        let want = canon(&id_tokens(id));
+        let key = canon(&want.tokens);
         PREDECESSORS.iter().find_map(|(successor, predecessor)| {
-            (want == canon(&tokens(successor))).then(|| canon(&tokens(predecessor)))
+            (key == canon(&tokens(successor))).then(|| canon(&tokens(predecessor)))
         })
     }
 }
@@ -484,39 +543,6 @@ pub fn select_rung(
         .and_then(|(rung, _)| rung.to_level())
 }
 
-/// Tokens for a Forge id: provider-derived family words (so the bare CLI bridges match) plus the
-/// model part's own tokens.
-fn id_tokens(id: &str) -> Vec<String> {
-    let (provider, model) = id.split_once("::").unwrap_or(("", id));
-    if provider == "kimi" {
-        return tokens(kimi_code_benchmark_name(model));
-    }
-    let mut toks = match provider {
-        "claude-cli" | "anthropic" => vec!["claude".to_string()],
-        "codex-cli" => vec!["gpt".to_string()],
-        "agy-cli" => vec!["gemini".to_string()],
-        _ => Vec::new(),
-    };
-    toks.extend(tokens(model));
-    toks
-}
-
-/// The benchmark row a Kimi Code subscription id is measured by.
-///
-/// The endpoint names its models by plan slot, not by model: `k3` alone tokenises to a one-letter
-/// family that the fuzzy matcher (correctly) refuses, so without this the whole provider read as
-/// unscored and routed on heuristics. The mapping follows each id's own `/models` `display_name`
-/// (read 2026-09-14). `kimi-for-coding` is "K2.8 Preview", which has no published row, so it takes
-/// its predecessor's K2.7 Code score as the conservative prior — the same rule
-/// [`BenchmarkScores::predecessor_canon`] applies to other unrated successors.
-fn kimi_code_benchmark_name(model: &str) -> &str {
-    match model {
-        "k3" | "k3-256k" => "kimi-k3",
-        "kimi-for-coding" | "kimi-for-coding-highspeed" => "kimi-k2.7-code",
-        other => other,
-    }
-}
-
 /// Lowercased alphanumeric tokens, split on separators AND letter↔digit boundaries, so
 /// "claude-opus-4-8", "Claude 4.8 Opus" and "llama3.2" all tokenise comparably. A leading
 /// gateway path (`anthropic/claude-...`) is dropped to its last segment first, and any
@@ -569,15 +595,32 @@ pub fn tokens(s: &str) -> Vec<String> {
 
 /// Remove parenthetical segments (and any trailing dangling open paren) from a source name.
 /// Documented in docs/features/mesh-routing.md.
+///
+/// A group that is nothing but a snapshot number is KEPT: "Qwen3.8 Max (0902)" is a different
+/// model from "Qwen3.8 Max", and dropping the "(0902)" merged the two rows — the plain Max then
+/// scored as the 0902 snapshot (45.4 instead of its own 40.2).
 fn strip_parens(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut depth = 0u32;
+    let mut group = String::new();
     for c in s.chars() {
         match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = depth.saturating_sub(1),
+            '(' | '[' => {
+                depth += 1;
+                group.clear();
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                let snapshot = group.trim();
+                if depth == 0 && snapshot.len() >= 3 && snapshot.chars().all(|c| c.is_ascii_digit())
+                {
+                    out.push(' ');
+                    out.push_str(snapshot);
+                }
+                group.clear();
+            }
             _ if depth == 0 => out.push(c),
-            _ => {}
+            _ => group.push(c),
         }
     }
     out
@@ -601,13 +644,8 @@ fn canon(toks: &[String]) -> String {
     format!("{}#{}", words.join("-"), nums.join("."))
 }
 
-/// Count of distinct `want` tokens also present in `have`.
-fn overlap(want: &[String], have: &[String]) -> usize {
-    let mut seen = std::collections::HashSet::new();
-    want.iter()
-        .filter(|t| have.contains(t) && seen.insert(t.as_str()))
-        .count()
-}
+#[cfg(test)]
+mod gateway_tests;
 
 #[cfg(test)]
 mod tests {

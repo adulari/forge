@@ -52,7 +52,9 @@ impl Session {
     /// auto-discovery routing isn't active (no catalog), since the candidate table would be empty.
     pub fn explain_routing(&self, prompt: &str) -> Option<forge_mesh::RoutingExplanation> {
         let catalog = self.catalog.clone()?;
-        let router = forge_mesh::HeuristicRouter::new(self.config.clone()).with_catalog(catalog);
+        let router = forge_mesh::HeuristicRouter::new(self.config.clone())
+            .with_pricing(self.pricing.clone())
+            .with_catalog(catalog);
         let readiness = self.provider_readiness();
         let health = readiness.health;
         let mut exp = router.explain(
@@ -87,7 +89,9 @@ impl Session {
         let health = readiness.health;
         Some(RoutingInspector {
             router: Arc::clone(&self.router),
-            selection_router: HeuristicRouter::new(self.config.clone()).with_catalog(catalog),
+            selection_router: HeuristicRouter::new(self.config.clone())
+                .with_pricing(self.pricing.clone())
+                .with_catalog(catalog),
             budget: self.budget_snapshot(),
             health,
             quota: readiness.quota,

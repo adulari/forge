@@ -1252,6 +1252,17 @@ impl HeuristicRouter {
         self
     }
 
+    /// Route on `pricing` instead of the bundled + config rates [`Self::new`] starts from.
+    ///
+    /// Callers pass [`pricing::Pricing::from_config_with_fetched`] so prices discovery fetched
+    /// (OpenRouter, models.dev, a marketplace gateway's `/models`) rank and gate models exactly as
+    /// they bill them. Without it a gateway model with no `[mesh.pricing]` entry ranked as $0 —
+    /// the cheapest model in the fleet — however much it really cost.
+    pub fn with_pricing(mut self, pricing: pricing::Pricing) -> Self {
+        self.pricing = pricing;
+        self
+    }
+
     /// Attach a discovered model catalog for auto-discovery routing (no-op when empty).
     /// Documented in docs/features/mesh-routing.md.
     pub fn with_catalog(mut self, catalog: ModelCatalog) -> Self {
@@ -3768,6 +3779,56 @@ mod tests {
         assert!(
             normal_chain.iter().any(|m| m == "gemini::gemini-2.5-pro"),
             "normal mode keeps paid models routable"
+        );
+    }
+
+    #[test]
+    fn strict_credit_mode_keeps_discovery_priced_gateway_models_out_of_auto_routing() {
+        // InferHub models now carry a fetched (median-ask) price instead of a static config row.
+        // A price is evidence of COST, not of being free: strict must drop the priced model, the
+        // unpriced one (unknown is paid), and even one whose listing priced it at exactly 0 —
+        // a metered gateway has no standing free tier. Normal mode routes the priced one on its
+        // real price instead of reading it as $0.
+        let fetched = vec![
+            ("inferhub::cc/claude-opus-5".to_string(), 0.002, 0.010, None),
+            ("inferhub::zero/listed".to_string(), 0.0, 0.0, None),
+        ];
+        let catalog = || {
+            ModelCatalog::new(vec![
+                "inferhub::cc/claude-opus-5".into(),
+                "inferhub::zero/listed".into(),
+                "inferhub::kling-3.0".into(),
+                "ollama::llama3.2".into(),
+            ])
+        };
+        let chain_for = |mode| {
+            let mut c = Config::default();
+            c.mesh.credit_mode = mode;
+            let pricing = pricing::Pricing::from_config_with_fetched(&c, fetched.clone());
+            HeuristicRouter::new(c)
+                .with_pricing(pricing)
+                .with_availability(|_| true)
+                .with_catalog(catalog())
+                .build_chain(
+                    TaskTier::Standard,
+                    &ModelHealth::default(),
+                    RouteHints::default(),
+                    &SubscriptionQuota::default(),
+                    None,
+                    None,
+                    false,
+                )
+        };
+        let strict = chain_for(forge_types::CreditMode::Strict);
+        assert!(
+            !strict.iter().any(|m| m.starts_with("inferhub::")),
+            "strict routes no metered gateway model, priced or not: {strict:?}"
+        );
+        assert!(strict.iter().any(|m| m == "ollama::llama3.2"));
+        let normal = chain_for(forge_types::CreditMode::Normal);
+        assert!(
+            normal.iter().any(|m| m == "inferhub::cc/claude-opus-5"),
+            "normal mode keeps the priced gateway model: {normal:?}"
         );
     }
 

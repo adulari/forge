@@ -15,6 +15,7 @@ mod claude_bridge_home;
 mod cli_provider;
 mod codex_oauth;
 mod codex_websocket;
+mod custom_models;
 mod dsml_stream_guard;
 mod embedder;
 mod error;
@@ -51,6 +52,7 @@ pub use codex_oauth::{
     list_models as list_codex_oauth_models, probe_entitlement as probe_codex_entitlement,
     probe_quota as probe_codex_quota, CodexOauthProvider, CODEX_OAUTH_NAMESPACE,
 };
+pub use custom_models::CustomModel;
 pub use embedder::{select_embedder, GenaiEmbedder};
 pub use error::ProviderError;
 pub use genai_provider::{

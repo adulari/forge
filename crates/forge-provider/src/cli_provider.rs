@@ -1796,6 +1796,7 @@ fn claude_usage_from(v: &Value) -> Usage {
     let cache_read = n("cache_read_input_tokens");
     let cache_write = n("cache_creation_input_tokens");
     Usage {
+        reported_cost_usd: None,
         input_tokens: n("input_tokens") + cache_read + cache_write,
         output_tokens: n("output_tokens"),
         cached_input_tokens: Some(cache_read),
@@ -1817,6 +1818,7 @@ fn claude_usage_from(v: &Value) -> Usage {
 fn codex_usage_from(v: &Value) -> Usage {
     let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
     Usage {
+        reported_cost_usd: None,
         input_tokens: n("input_tokens"),
         output_tokens: n("output_tokens"),
         // Absent only on a truncated/older event — then the split is genuinely unknown, not zero.
@@ -5077,6 +5079,7 @@ mod tests {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"hello","total_cost_usd":0.125,"usage":{"input_tokens":16612,"output_tokens":4}}"#;
         let items = parse_claude_line(line);
         assert!(items.contains(&Parsed::Usage(Usage {
+            reported_cost_usd: None,
             input_tokens: 16612,
             output_tokens: 4,
             // Claude always emits the cache counters, so their absence here is a reported zero.
@@ -5435,6 +5438,7 @@ mod tests {
         assert_eq!(
             parsed,
             vec![Parsed::Usage(Usage {
+                reported_cost_usd: None,
                 input_tokens: 151_655,
                 output_tokens: 176,
                 cached_input_tokens: Some(151_296),
