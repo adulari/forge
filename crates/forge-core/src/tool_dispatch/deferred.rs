@@ -152,6 +152,10 @@ impl Session {
     /// ([`permission::is_read_only_shell_call`]), so independent probes stop running one by one.
     pub(crate) fn is_concurrent_readonly(&self, call: &forge_types::ToolCall) -> bool {
         let name = call.name.as_str();
+        // ...and the stale-host-path guard, which the serial path's workspace check applies.
+        if self.stale_host_path(&call.args).is_some() {
+            return false;
+        }
         // The batch path skips the per-call task-scope gate, so a tool the scope forbids must take
         // the serial path, which refuses it properly.
         if self

@@ -297,7 +297,11 @@ impl Session {
             self.presenter.emit(PresenterEvent::ToolResult {
                 name: call.name.clone(),
                 ok: false,
-                summary: "path outside session workspace".to_string(),
+                summary: match error {
+                    CoreError::StaleHostPath(_) => "stale path from the previous host",
+                    _ => "path outside session workspace",
+                }
+                .to_string(),
                 detail: crate::tool_detail(&result),
             });
             self.store

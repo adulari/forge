@@ -27,6 +27,14 @@ pub struct HandoffSessionExport {
     pub permission_mode: String,
     pub messages: Vec<HandoffMessage>,
     pub checkpoints: Vec<HandoffCheckpoint>,
+    /// The persisted compaction summary. Without it the destination resumed only the active tail
+    /// and silently lost everything the session had compacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_summary: Option<String>,
+    /// The source host fingerprint (opaque `forge_core::host_move` JSON), so the destination can
+    /// tell the model the session moved and map the source's paths onto its own layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,7 +3,7 @@ pub fn command_category(name: &str) -> &'static str {
     match name {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
         "sessions" | "resume" | "replay" | "rewind" | "undo" | "checkpoint" | "checkpoints"
-        | "compact" | "uncompact" | "refine" | "clear" | "btw" | "export" => "Session",
+        | "compact" | "uncompact" | "reground" | "refine" | "clear" | "btw" | "export" => "Session",
         "model" | "models" | "mode" | "effort" | "subagents" | "thinking" | "mesh" | "usage" => {
             "Model & usage"
         }

@@ -14,6 +14,9 @@ impl Session {
         roots: &[std::path::PathBuf],
     ) -> Result<(), CoreError> {
         validate_workspace_args(args, &self.workspace, roots)?;
+        if let Some(stale) = self.stale_host_path(args) {
+            return Err(CoreError::StaleHostPath(stale));
+        }
         let read_only = self
             .tools
             .get(tool)
