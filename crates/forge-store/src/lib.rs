@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 mod assay_store;
 mod automation_store;
+mod bench_solve_store;
 mod checkpoint_store;
 mod codemode_store;
 mod detached_child_store;
@@ -56,6 +57,7 @@ mod transcript_read_store;
 mod usage_prefix_store;
 mod usage_store;
 
+pub use bench_solve_store::{BenchSolveRun, BenchSolveTotals};
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
 pub use codemode_store::{CodemodeStats, ToolCallRow};
 pub use detached_child_store::{DetachedChild, DetachedChildStatus};
@@ -77,7 +79,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 42;
+const SCHEMA_VERSION: i64 = 43;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);

@@ -1095,6 +1095,7 @@ credit_mode = "strict"        # route to free + subscription only
 max_output_tokens = 0         # provider/model native output maximum (positive = explicit cap)
 auto_orchestrate = true       # apply the orchestration framework on every turn
 harness_profile = "guarded"   # "minimal" drops advisory nudges, keeps safety guards
+adaptive_effort = true        # low effort after a read-only tool round (docs/features/adaptive-effort.md)
 
 [mesh.harness_profiles]       # per-model overrides by glob (docs/features/harness-profile.md)
 "bedrock::*" = "minimal"

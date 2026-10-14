@@ -187,6 +187,15 @@ pub(super) async fn request_provider_response(
                 model: active_model.clone(),
                 step,
             });
+            // Mesh's chosen rung wins over the raw pin: it was selected from this model's MEASURED
+            // effort ladder with the pin already applied as a ceiling, so it is the pin refined by
+            // evidence rather than a value competing with it. The pin is the fallback for a model
+            // mesh has no ladder for, and `None` still sends nothing. Adaptive effort may then
+            // lower it for the step after a read-only round.
+            let effort = session.adaptive_effort_for(
+                active_model.as_str(),
+                decision.and_then(|d| d.effort).or(session.pinned_effort),
+            );
             let provider = &session.provider;
             let presenter = &mut session.presenter;
             // Bump on every stream event so the idle watchdog can distinguish a live
@@ -223,11 +232,7 @@ pub(super) async fn request_provider_response(
                 );
             };
             let completion_opts = CompletionOptions {
-                // Mesh's chosen rung wins over the raw pin: it was selected from this model's
-                // MEASURED effort ladder with the pin already applied as a ceiling, so it is the
-                // pin refined by evidence rather than a value competing with it. The pin is the
-                // fallback for a model mesh has no ladder for, and `None` still sends nothing.
-                effort: decision.and_then(|d| d.effort).or(session.pinned_effort),
+                effort,
                 temperature: Some(crate::repetition_temperature(session.repetition_pressure)),
                 frequency_penalty: crate::repetition_frequency_penalty(session.repetition_pressure),
                 presence_penalty: crate::repetition_presence_penalty(session.repetition_pressure),

@@ -145,23 +145,7 @@ impl Session {
 
     /// Attach the discovered catalog so the `/models` browser can read it (composition root).
     pub fn set_catalog(&mut self, catalog: Option<ModelCatalog>) {
-        let calibration = self
-            .store
-            .model_outcome_calibration()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| {
-                (
-                    row.model,
-                    forge_mesh::RuntimeCalibration {
-                        samples: row.samples,
-                        success_rate: row.success_rate,
-                        mean_latency_ms: row.mean_latency_ms,
-                    },
-                )
-            })
-            .collect();
-        self.catalog = catalog.map(|catalog| catalog.with_runtime_calibration(calibration));
+        self.catalog = catalog.map(|catalog| crate::apply_local_evidence(catalog, &self.store));
     }
 
     /// Pin (or clear) the in-session model override. When `Some`, subsequent turns use this model
@@ -787,6 +771,7 @@ impl Session {
         if texts.is_empty() {
             return false;
         }
+        self.adaptive_effort.restore();
         for text in texts {
             let seq = self.next_seq();
             let _ = self

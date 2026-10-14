@@ -59,24 +59,9 @@ fn classifier_candidates(config: &forge_config::Config, mock: bool) -> Vec<Strin
 /// Apply the local, privacy-preserving outcome ledger to a freshly discovered catalog.  The Mesh
 /// itself enforces the sample gate and score bound; keeping this transformation at composition
 /// roots makes interactive runs, `forge mesh`, API requests and daemon sessions share one score.
+/// Recorded bench runs (measured cost per solve) ride along for the same reason.
 pub(crate) fn apply_outcome_calibration(catalog: ModelCatalog, store: &Store) -> ModelCatalog {
-    catalog.with_runtime_calibration(
-        store
-            .model_outcome_calibration()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| {
-                (
-                    row.model,
-                    forge_mesh::RuntimeCalibration {
-                        samples: row.samples,
-                        success_rate: row.success_rate,
-                        mean_latency_ms: row.mean_latency_ms,
-                    },
-                )
-            })
-            .collect(),
-    )
+    forge_core::apply_local_evidence(catalog, store)
 }
 
 /// Maximum age of a cached catalog before it is considered stale and re-discovered.
@@ -809,6 +794,7 @@ mod health;
 pub(crate) use health::retire_verified_provider_exclusions;
 
 mod presentation;
+mod solve_cost_view;
 pub(crate) use presentation::{
     mesh_explanation_json, mesh_overview, mesh_overview_json, print_mesh_explanation,
 };

@@ -63,6 +63,10 @@ pub(crate) struct CallObservation {
 }
 
 impl CallObservation {
+    pub(crate) fn ok(&self) -> bool {
+        self.ok
+    }
+
     /// Whether this call was a file write that succeeded.
     pub(crate) fn wrote(&self) -> bool {
         self.ok && self.mutating

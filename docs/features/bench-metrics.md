@@ -18,6 +18,22 @@ A *run* is one metrics sidecar (one agent, one seed). Each run is scored only by
 Before this change the report always unioned every eval, so an instance only Forge solved was
 also counted as solved for Codex, and every seed's pass@1 was really pass@k.
 
+## Recording runs for routing (`--record`)
+
+`forge bench report --run m.jsonl=e.json --record` stores each run in the store's `bench_solve`
+table so the mesh can rank on measured cost per solve (mesh-routing.md §4.7a). A run qualifies only
+when it measures one model inside Forge's harness:
+
+- every row's agent is `forge` (Codex and Claude Code run their own loops);
+- it was scored by its own eval (`--shared-eval` is refused);
+- it was pinned to a `provider::model` (`runtime.requested_model`; a mesh-routed run spreads over
+  several models);
+- every pass@1-eligible attempt captured its cost, priced notionally when the route recorded $0.
+
+Each qualifying run stores its eligible attempts, solves and notional cost, keyed by the metrics
+file, so recording the same report again replaces the row instead of counting it twice. Skipped runs
+are printed with the reason. Recording never changes the report itself.
+
 ## Groups and metrics
 
 Runs are grouped by `agent` plus `runtime.resolved_model` (else the requested model). Per group:

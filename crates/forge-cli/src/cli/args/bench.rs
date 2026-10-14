@@ -124,5 +124,9 @@ pub(crate) enum BenchCmd {
         /// single combined report). Credits each run with solves from the others.
         #[arg(long)]
         shared_eval: bool,
+        /// Store each scored, model-pinned Forge run so the mesh ranks on measured cost per solve
+        /// once a model has 20 scored attempts (docs/features/mesh-routing.md).
+        #[arg(long)]
+        record: bool,
     },
 }
