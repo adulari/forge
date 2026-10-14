@@ -591,6 +591,9 @@ in `forge_tools::tunnel` (`crates/forge-tools/src/tunnel.rs`); forge-cli's `remo
     and `forge doctor` sweeps it and reports what it closed, so a tunnel left behind by a crashed
     Forge does not stay public. The reaper never signals a pid whose start time no longer matches
     the recorded one.
+- **Recorded as evidence.** Each new tunnel URL is appended to the session's
+  [evidence ledger](evidence-ledger.md) (kind `preview`), and [`open_pr`](open-pr.md) lists the
+  ones still up in the PR's Evidence section.
 - Exposing the same job and port twice returns the existing URL. A different port replaces the
   job's tunnel. If the job exits while its tunnel is still starting, the tunnel is closed and the
   expose fails rather than leaving a public URL in front of nothing.
@@ -602,8 +605,7 @@ use_fixed_hostname = false # true = reuse [remote] tunnel_name / tunnel_hostname
 ttl_minutes = 120          # the reaper closes older tunnels even if the job still runs
 ```
 
-Not done yet: showing the preview link in the Snapshot / Forge Anywhere app (a mobile follow-up)
-and listing the URL in the `/pr` evidence block.
+Not done yet: showing the preview link in the Snapshot / Forge Anywhere app (a mobile follow-up).
 
 ## Batching (`commands`, concurrent read-only calls)
 

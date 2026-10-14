@@ -25,6 +25,7 @@ mod device;
 mod discovery_tools;
 pub mod evidence;
 mod lattice_tool;
+mod open_pr;
 mod proxy;
 mod sandbox;
 mod shell;
@@ -39,6 +40,10 @@ pub use core_tools::{
 pub use device::{DeviceLogsTool, DeviceTool};
 pub use evidence::scope_session;
 pub use lattice_tool::LatticeTool;
+pub use open_pr::{
+    set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn, RepoFlagFn,
+    OPEN_PR_TOOL,
+};
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
 pub use shell::{
@@ -201,6 +206,7 @@ impl ToolRegistry {
         r.register(Box::new(ProxyNetworkTool));
         r.register(Box::new(DeviceTool));
         r.register(Box::new(DeviceLogsTool));
+        r.register(Box::new(OpenPrTool::default()));
         r
     }
 

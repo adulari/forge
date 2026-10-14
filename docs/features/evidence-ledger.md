@@ -18,6 +18,9 @@ Everything lands in `<workspace>/.forge/evidence/<session-id>/`:
   output when the model's copy was truncated). Failing checks, non-check commands and commands whose
   status could be masked (`;`, `||`, background `&`) are never recorded.
 
+- **Preview URLs.** Each new `shell_job` expose records its public URL as `NNNN-preview.txt`
+  (kind `preview`, caption `job <id> port <port>`), see [shell-tool.md](shell-tool.md).
+
 Each capture appends one line to `manifest.jsonl`:
 
 ```json
@@ -45,9 +48,10 @@ sets on the child (`bridge_mcp_env`), and its workspace from the cwd it entered
 Subagent (`spawn_agents`) tool calls run outside this scope and are not recorded; their
 screenshots fall back to temp files.
 
-## In `/pr`
+## In pull requests
 
-`/pr` appends two deterministic sections and tells the model to paste them verbatim:
+The [`open_pr`](open-pr.md) tool (and `/pr`, which calls it) appends a deterministic section built
+from the manifest:
 
 ```markdown
 ---
@@ -56,6 +60,9 @@ Checks that passed during the session:
 - `cargo test -p shop` — exit 0 at 2026-10-14T10:01:00Z (`.forge/evidence/<id>/0002-shell.txt`, sha256 `fedcba987654`)
 Screenshots:
 - `.forge/evidence/<id>/0001-browser.png` (browser, http://localhost:3000/cart, sha256 `0123456789ab`) — empty cart
+  ![empty cart](https://github.com/<owner>/<repo>/blob/<commit>/<id>/0001-browser.png?raw=true)
+Preview URLs (temporary public tunnels; they close with the dev server or after their TTL):
+- https://x.trycloudflare.com (job 4242 port 5173, opened 2026-10-14T10:02:00Z)
 
 ### Provenance
 …
@@ -63,14 +70,16 @@ Screenshots:
 
 The section is omitted when the session captured nothing. A PR body is public, so the values of
 leading `NAME=value` env assignments in a recorded command are shown as `NAME=***` (the local
-manifest keeps the raw command), and the whole section then goes through the same secret redaction
+manifest keeps the raw command), and the whole body then goes through the same secret redaction
 as `forge replay` and `/export` ([redaction.md](redaction.md)), so a key passed as a flag or a
 `user:pass@` URL becomes `[redacted]`. It says "captured", never "verified":
-nobody, the model included, has looked at the images. Images are referenced by local path; publishing
-them with the PR (an orphan branch) is planned work.
+nobody, the model included, has looked at the images. Intact screenshots are published to the orphan
+`forge-evidence` branch and shown inline; when publishing is off or fails they are named by local
+path. Preview URLs whose tunnel has closed are counted, not linked.
 
 ## Code
 
-- `crates/forge-tools/src/evidence.rs`: the ledger, the screenshot sink and `pr_evidence_block`.
+- `crates/forge-tools/src/evidence.rs`: the ledger and the screenshot sink.
+- `crates/forge-tools/src/evidence/pr_block.rs`: the PR section (`Ledger::pr_block`; `pr_evidence_block` in `evidence.rs` wraps it).
 - `crates/forge-core/src/evidence_capture.rs`: test proof from verification shell calls.
-- `crates/forge-cli/src/cli/commands/run/pr_body.rs`: the `/pr` body sections.
+- `crates/forge-tools/src/open_pr.rs`: the PR body and the publish ([open-pr.md](open-pr.md)).
