@@ -37,7 +37,28 @@ impl Session {
         result: &str,
         ledgers: &mut TurnLedgers<'_>,
     ) {
-        let failure = classify_tool_failure(result);
+        // The `run_code` wrapper is not a tool outcome of its own: its inner calls were observed
+        // one by one. It fails only when the script did (its result then starts `error:`), not
+        // when it returns a failing test's output, and its success is not the "model recovered"
+        // signal that clears the failure-loop latch; otherwise a script re-running the same
+        // failing test each step would earn a fresh nudge forever instead of the halt.
+        let wrapper = call.name == crate::codemode::RUN_CODE_TOOL;
+        let failure = if wrapper {
+            result
+                .trim_start()
+                .starts_with("error:")
+                .then(|| classify_tool_failure(result))
+                .flatten()
+        } else {
+            classify_tool_failure(result)
+        };
+        // The footer's elapsed time differs on every run, so it would make every script look
+        // like new information to the stagnation judge.
+        let observed = if wrapper {
+            crate::codemode::without_footer(result)
+        } else {
+            result
+        };
         ledgers.verification_ledger.lock().unwrap().observe(
             completion::classify_tool(&call.name, &call.args.to_string()),
             failure.is_none(),
@@ -50,7 +71,7 @@ impl Session {
                 crate::loop_progress::call_signature(call),
                 failure.is_none(),
                 writes,
-                result,
+                observed,
             ));
         // Count the mutation only once it SUCCEEDED. A denied or failing write changed nothing,
         // so treating the attempt as evidence would let both the phantom-edit gate and the
@@ -84,7 +105,9 @@ impl Session {
                     .retain(|(name, _), _| name != &call.name);
                 // A genuine success means the model recovered, so a *later* distinct failure
                 // loop in the same turn gets its own nudge-before-halt, not an immediate halt.
-                *ledgers.failure_nudged = false;
+                if !wrapper {
+                    *ledgers.failure_nudged = false;
+                }
             }
         }
         // Env-fight spend cap: shell commands that look like environment provisioning after a

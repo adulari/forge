@@ -278,6 +278,15 @@ pub(crate) fn render(report: &ScriptReport, max_chars: usize) -> String {
     format!("{body}\n\n{footer}")
 }
 
+/// A rendered result without its trailing footer line, for loop-progress fingerprints.
+pub(crate) fn without_footer(result: &str) -> &str {
+    match result.trim_end().rsplit_once('\n') {
+        Some((body, last)) if last.starts_with("[run_code: ") => body.trim_end(),
+        None if result.trim_start().starts_with("[run_code: ") => "",
+        _ => result,
+    }
+}
+
 fn footer(report: &ScriptReport) -> String {
     let ok = report.calls.iter().filter(|c| c.ok).count();
     format!(

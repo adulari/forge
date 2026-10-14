@@ -431,3 +431,46 @@ async fn the_kill_switch_hides_the_tool_and_refuses_the_call() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn the_wrapper_never_clears_the_failure_latch_or_counts_a_returned_test_failure() {
+    let dir = workspace("latch");
+    let mut session = session_in(&dir, PermissionMode::AcceptEdits, Approver::default());
+    let l = Ledgers::new();
+    let mut failure_counts = std::collections::HashMap::new();
+    let mut failure_nudged = true;
+    let mut observations = Vec::new();
+    let mut ledgers = crate::tool_outcome::TurnLedgers {
+        tools_ran: &l.tools_ran,
+        inspect_ran: &l.inspect_ran,
+        mutations_ran: &l.mutations_ran,
+        verification_ledger: &l.verification,
+        failure_counts: &mut failure_counts,
+        failure_nudged: &mut failure_nudged,
+        observations: &mut observations,
+    };
+    // The script returned a failing test's output: the inner shell call already counted that.
+    let call = run_code_call("return 1;", None);
+    session.observe_tool_outcome(
+        &call,
+        "shell: exit 101\ntest foo ... FAILED\n\n[run_code: 1 tool call, 0 ok, 1 failed, 3.1s]",
+        &mut ledgers,
+    );
+    assert!(
+        *ledgers.failure_nudged,
+        "a script returning is not recovery"
+    );
+    assert!(ledgers.failure_counts.is_empty());
+    session.observe_tool_outcome(
+        &call,
+        "error: ReferenceError: x is not defined\n\n[run_code: 0 tool calls, 0 ok, 0 failed, 0.0s]",
+        &mut ledgers,
+    );
+    assert_eq!(
+        ledgers.failure_counts.len(),
+        1,
+        "a thrown script is a run_code failure"
+    );
+    assert_eq!(l.mutations_ran.load(Ordering::SeqCst), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

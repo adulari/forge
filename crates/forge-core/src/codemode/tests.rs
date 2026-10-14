@@ -169,6 +169,22 @@ fn render_keeps_the_footer_and_caps_the_body() {
 }
 
 #[test]
+fn the_footer_is_stripped_for_progress_fingerprints() {
+    let mut r = report(
+        ScriptEnd::Returned(serde_json::Value::String("same answer".into())),
+        vec![("read_file", true)],
+    );
+    r.logs.clear();
+    let first = render(&r, 16_000);
+    r.elapsed = std::time::Duration::from_millis(900);
+    let second = render(&r, 16_000);
+    assert_ne!(first, second);
+    assert_eq!(without_footer(&first), "same answer");
+    assert_eq!(without_footer(&first), without_footer(&second));
+    assert_eq!(without_footer("no footer here"), "no footer here");
+}
+
+#[test]
 fn a_failed_script_names_the_calls_that_already_ran() {
     let r = report(
         ScriptEnd::Threw("ReferenceError: fs is not defined".into()),
