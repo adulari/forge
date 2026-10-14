@@ -418,7 +418,7 @@ Rules:\n\
             "recap" | "suggest" => Some(128),
             "auto-classify" => Some(64),
             "memory" | "shell-diagnose" => Some(256),
-            "btw" => Some(2_048),
+            "btw" | crate::goal_evaluator::GOAL_EVALUATOR_PURPOSE => Some(2_048),
             _ => None,
         };
         CompletionOptions {

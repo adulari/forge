@@ -1362,7 +1362,21 @@ mod tests {
         ));
         state.queued_prompts = vec!["prioritize the regression".into()];
 
+        // The finished goal turn is evaluated first; the queue waits for the next turn.
         state.on_turn_done(10).await;
+        assert!(matches!(
+            state.goal_state,
+            Some(GoalState {
+                gen: 11,
+                iter: 1,
+                ..
+            })
+        ));
+        assert_eq!(state.queued_prompts, vec!["prioritize the regression"]);
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.busy = true;
+
+        state.on_turn_done(11).await;
 
         assert_eq!(
             state.last_prompt.as_deref(),
@@ -1373,13 +1387,45 @@ mod tests {
         assert!(matches!(
             state.goal_state,
             Some(GoalState {
-                gen: 11,
+                gen: 12,
                 iter: 2,
-                no_progress: 1,
                 ..
             })
         ));
         assert!(state.busy);
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_goal_turn_is_redriven_from_the_evaluator_verdict() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.goal_state = Some(GoalState::new(
+            10,
+            "finish the goal".into(),
+            Vec::new(),
+            None,
+            None,
+        ));
+
+        state.on_turn_done(10).await;
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(11).await;
+
+        let prompt = state.last_prompt.clone().unwrap_or_default();
+        assert!(
+            prompt.contains("Still missing:\n- record a task plan with update_tasks"),
+            "the mock evaluator's verdict drives the next turn: {prompt}"
+        );
+        assert!(!prompt.contains(GOAL_CONTINUE_PROMPT));
+        assert!(matches!(
+            state.goal_state,
+            Some(GoalState {
+                gen: 12,
+                iter: 2,
+                ..
+            })
+        ));
         state.turn_handle.take().unwrap().abort();
     }
 

@@ -14,9 +14,10 @@
 
 **Gates**
 - `--gate "<cmd>"` is repeatable: each is a shell command that must exit 0. Gates only run when
-  the model claims the task/goal is genuinely complete (the `LOOP_COMPLETE` sentinel for `/loop`,
-  or all tasks done / an explicit `GOAL COMPLETE` for `/goal`) — never on a safety-cap stop
-  (iteration ceiling, stall detection).
+  the task/goal is judged genuinely complete — the `LOOP_COMPLETE` sentinel for `/loop`; for
+  `/goal`, an "achieved" verdict from the [goal evaluator](goal-evaluator.md), or (when there is
+  no verdict) all tasks done / an explicit `GOAL COMPLETE` — never on a safety-cap stop (iteration
+  ceiling, stall or wedge detection, an evaluator disagreement).
 - Gates run in order; the first failure's bounded output (last ~4000 chars of combined
   stdout+stderr) is fed back to the model as the next iteration's prompt, prefixed
   `` Quality gate `<cmd>` failed: `` — the run keeps going instead of stopping.
@@ -63,13 +64,15 @@ The bare form (no flags) is untouched byte-for-byte for backward compatibility.
   `GateConfig`, `run_gates` (async — spawns real shell commands), `workspace_fingerprint` (async
   — shells out to `git`), and the pure `bound_output` truncation helper.
 - `crates/forge-cli/src/cli/commands/run/autonomous.rs` — `AutonomyBudget`, the pure
-  `loop_budget_stop_reason`/`goal_budget_stop_reason` checks, and `next_loop_decision`/
-  `next_goal_decision`: the async orchestration that folds gates + budgets into the existing
-  `loop_stop_reason`/`goal_stop_reason` policy, mutating `LoopState`/`GoalState` in place so gate
-  attempts/fingerprints and accumulated token usage persist across iterations of one run.
+  `loop_budget_stop_reason`/`goal_budget_stop_reason` checks, and `next_loop_decision`: the async
+  orchestration that folds gates + budgets into the existing `loop_stop_reason` policy, mutating
+  `LoopState` in place so gate attempts/fingerprints and accumulated token usage persist across
+  iterations of one run.
+- `crates/forge-cli/src/cli/commands/run/goal_progress.rs` — `next_goal_decision`, the `/goal`
+  equivalent, which also folds in the goal evaluator's verdict (goal-evaluator.md).
 - `crates/forge-tui/src/commands.rs` — `parse_autonomy_options` parses the shared flags out of the
   raw `/loop`/`/goal` arg string.
 - Wired at both turn-completion sites that drive `/loop`/`/goal`: the interactive TUI loop
   (`run.rs`) and the headless `forge serve` driver (`run/driver/input.rs`) — both call the same
-  `next_loop_decision`/`next_goal_decision` so the behavior is identical on a phone-driven session
-  and a local terminal.
+  `next_loop_decision` and `advance_goal` (which calls `next_goal_decision`) so the behavior is
+  identical on a phone-driven session and a local terminal.

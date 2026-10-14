@@ -528,74 +528,27 @@ impl DriverState {
         }
         if let Some(mut gs) = self.goal_state.take() {
             if gs.gen == g {
-                let (done, total) = {
-                    let s = self.session.lock().await;
-                    let tasks = s.tasks();
-                    (
-                        tasks
-                            .iter()
-                            .filter(|t| t.status == forge_types::TodoStatus::Done)
-                            .count(),
-                        tasks.len(),
-                    )
-                };
-                let last = {
-                    self.session
-                        .lock()
-                        .await
-                        .last_assistant_text()
-                        .map(str::to_string)
-                };
-                let said_complete = is_goal_complete_marker(last.as_deref());
-                let tokens_this_turn = self.app.turn_in + self.app.turn_out;
                 let cwd = std::path::Path::new(&self.cwd);
-                match next_goal_decision(&mut gs, said_complete, done, total, tokens_this_turn, cwd)
-                    .await
-                {
-                    GoalDecision::Stop(reason) => {
-                        if !is_goal_complete_reason(&reason) {
-                            self.app.note(&reason);
-                        }
+                let next = advance_goal(&mut gs, &self.session, &mut self.app, cwd).await;
+                let (queue, history) = (&mut self.queued_prompts, &mut self.prompt_history);
+                let steer = |app: &mut forge_tui::App| dequeue_prompt(queue, app, history);
+                if let Some(step) = launch_goal_step(
+                    next,
+                    &mut gs,
+                    steer,
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen + 1,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                ) {
+                    self.turn_gen += 1;
+                    if step.prompt.is_some() {
+                        self.last_prompt = step.prompt;
                     }
-                    GoalDecision::GateFailed { prompt } => {
-                        self.last_prompt = Some(prompt.clone());
-                        self.turn_gen += 1;
-                        gs.iter += 1;
-                        gs.gen = self.turn_gen;
-                        self.goal_state = Some(gs);
-                        self.turn_handle = Some(spawn_turn_with(
-                            prompt,
-                            vec![GOAL_GUIDANCE.to_string()],
-                            Some(forge_types::TaskTier::Complex),
-                            &self.session,
-                            &self.done_tx,
-                            self.turn_gen,
-                            &mut self.app,
-                            &mut self.busy,
-                            &mut self.busy_since,
-                        ));
-                    }
-                    GoalDecision::Retry => {
-                        let prompt = self
-                            .take_next_queued_prompt()
-                            .unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string());
-                        self.last_prompt = Some(prompt.clone());
-                        self.turn_gen += 1;
-                        gs.iter += 1;
-                        gs.gen = self.turn_gen;
-                        self.goal_state = Some(gs);
-                        self.turn_handle = Some(spawn_turn_with(
-                            prompt,
-                            vec![GOAL_GUIDANCE.to_string()],
-                            Some(forge_types::TaskTier::Complex),
-                            &self.session,
-                            &self.done_tx,
-                            self.turn_gen,
-                            &mut self.app,
-                            &mut self.busy,
-                            &mut self.busy_since,
-                        ));
-                    }
+                    self.turn_handle = Some(step.handle);
+                    self.goal_state = Some(gs);
                 }
             } else {
                 self.goal_state = Some(gs);

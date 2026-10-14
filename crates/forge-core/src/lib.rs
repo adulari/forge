@@ -34,10 +34,13 @@ pub mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
 mod btw_policy;
+pub mod goal_evaluator;
+mod goal_evidence;
 mod shell_batch;
 mod silence_guard;
 mod workspace_policy;
 pub use btw_policy::{busy_asker, BtwAsker};
+pub use goal_evaluator::{GoalEvalRequest, GoalVerdict};
 mod cache_instrument;
 pub mod capsule;
 pub(crate) mod clock;
@@ -5070,6 +5073,9 @@ mod tests {
 
     #[path = "harness_profile.rs"]
     mod harness_profile_tests;
+
+    #[path = "goal_evaluator.rs"]
+    mod goal_evaluator_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

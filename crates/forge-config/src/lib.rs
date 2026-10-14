@@ -17,6 +17,7 @@ pub mod agents;
 pub mod browser;
 pub mod codemode;
 mod commit_policy;
+pub mod goal;
 mod harness_profile;
 pub mod mcp;
 pub mod notifications;
@@ -225,6 +226,9 @@ pub struct Config {
     /// Zero-data-retention routing (`[privacy] zero_retention`, zero-retention.md).
     #[serde(default)]
     pub privacy: privacy::PrivacyConfig,
+    /// The `/goal` progress evaluator (`[goal] evaluator`, `[goal] evaluator_model`).
+    #[serde(default)]
+    pub goal: goal::GoalConfig,
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
@@ -2977,6 +2981,7 @@ impl Default for Config {
             harness: HarnessConfig::default(),
             tools: ToolsConfig::default(),
             privacy: privacy::PrivacyConfig::default(),
+            goal: goal::GoalConfig::default(),
         }
     }
 }
