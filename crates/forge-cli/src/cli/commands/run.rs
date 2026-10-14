@@ -23,6 +23,8 @@ pub(crate) use autonomous::*;
 
 mod gates;
 pub(crate) use gates::*;
+mod goal_headless;
+pub(crate) use goal_headless::*;
 mod goal_progress;
 pub(crate) use goal_progress::*;
 
@@ -177,7 +179,7 @@ mod effort;
 mod output_view;
 mod subagents;
 pub(crate) use btw::*;
-pub(crate) use busy_queue::SteerTracker;
+pub(crate) use busy_queue::{InterruptNext, SteerTracker};
 mod export;
 pub(crate) use export::*;
 
@@ -2856,10 +2858,14 @@ pub(crate) async fn run_chat_tui(
                     if let Some(next) =
                         steer_tracker.interrupted(&mut queued_prompts, &steer, &mut app)
                     {
-                        last_prompt = Some(next.clone());
                         turn_gen += 1;
-                        turn_handle = Some(spawn_turn(
-                            &next,
+                        let (text, spawn): (String, SpawnFn) = match next {
+                            InterruptNext::Fresh(t) => (t, spawn_turn),
+                            InterruptNext::Resume(t) => (t, spawn_resume_turn),
+                        };
+                        last_prompt = Some(text.clone());
+                        turn_handle = Some(spawn(
+                            &text,
                             &session,
                             &done_tx,
                             turn_gen,
@@ -3964,10 +3970,14 @@ pub(crate) async fn run_chat_tui(
                             if let Some(next) =
                                 steer_tracker.interrupted(&mut queued_prompts, &steer, &mut app)
                             {
-                                last_prompt = Some(next.clone());
+                                let (text, spawn): (String, SpawnFn) = match next {
+                                    InterruptNext::Fresh(t) => (t, spawn_turn),
+                                    InterruptNext::Resume(t) => (t, spawn_resume_turn),
+                                };
+                                last_prompt = Some(text.clone());
                                 turn_gen += 1;
-                                turn_handle = Some(spawn_turn(
-                                    &next,
+                                turn_handle = Some(spawn(
+                                    &text,
                                     &session,
                                     &done_tx,
                                     turn_gen,

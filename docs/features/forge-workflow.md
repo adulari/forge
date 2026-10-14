@@ -103,6 +103,10 @@ await phase("fix");
 const fixes = await pipeline(findings, ...);
 ```
 
+### Optional `meta` header
+
+A script may open with `export const meta = { name, description, phases: [{ title }] };` (the Claude Code workflow convention; plain `const meta = {...}` works too). It must be a pure literal. Forge drops the `export` keyword (the `meta` binding stays readable), logs one banner line with the name, description and planned phases, and runs the rest. Phases are still labelled by `phase()` calls. Other module syntax (`import`, `export default`, `require`) is rejected with an error that restates the supported format.
+
 ### `await log(message)`
 
 Writes a note into the workflow view's narration feed (and a one-line trimmed copy into the

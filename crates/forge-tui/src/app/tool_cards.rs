@@ -248,7 +248,14 @@ pub(crate) fn headline(name: &str, args: &str) -> String {
     let cwd = get("cwd");
     let show_path = |p: String| display_path(&p, cwd.as_deref());
     let first = match name {
-        "shell" => get("command"),
+        "shell" => get("command").or_else(|| {
+            let list = value.get("commands")?.as_array()?;
+            let first = list.first()?.as_str()?;
+            Some(match list.len() {
+                1 => first.to_string(),
+                n => format!("{first} (+{} more)", n - 1),
+            })
+        }),
         "read_file" | "write_file" | "edit_file" | "list_dir" => get("path").map(show_path),
         "apply_patch" => get("path").map(show_path).or_else(|| get("cwd")),
         "search" | "grep" => get("pattern").or_else(|| get("query")),
@@ -441,6 +448,12 @@ pub(crate) fn size_label(lines: usize, bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_batch_headline_names_the_first_command_and_the_rest() {
+        let args = r#"{"commands":["cargo build","cargo test"],"cwd":"/w"}"#;
+        assert_eq!(headline("shell", args), "cargo build (+1 more)");
+    }
 
     fn text(lines: &[TextLine<'_>]) -> Vec<String> {
         lines

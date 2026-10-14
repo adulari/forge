@@ -27,6 +27,9 @@ use forge_types::{
 use forge_types::{Presenter, PresenterEvent};
 
 mod adaptive_effort;
+mod build_command;
+mod memory_scope;
+use build_command::is_env_setup_command;
 mod local_evidence;
 pub use local_evidence::apply_local_evidence;
 pub mod assay;
@@ -127,6 +130,7 @@ pub mod turn_contract;
 mod turn_guards;
 mod unapplied_edit;
 pub mod workflow;
+pub mod workflow_meta;
 mod workspace_context;
 pub mod worktree;
 pub mod worktree_ops;
@@ -591,49 +595,6 @@ fn bridge_tool_command(args: &str) -> String {
         }
     }
     args.to_string()
-}
-
-/// Whether a shell command looks like environment provisioning or a native build — the heuristic
-/// the env-fight cap keys on (pip/venv/virtualenv/ensurepip/apt/uv/conda…), extended in wave 5 with
-/// build archaeology (C-extension builds + native toolchains: `setup.py build_ext`, `make`, `gcc`,
-/// `cmake`, `pyenv`, `./configure`…) that were the bulk of astropy-12907's failing commands and
-/// matched nothing before. Phrase patterns use a substring match on the whitespace-normalized,
-/// lowercased command (so wrappers like `cd x && pip install …` still match); single-token compiler
-/// invocations are matched as WHOLE tokens so `make` doesn't fire on `cmake`/`makemigrations`.
-fn is_env_setup_command(cmd: &str) -> bool {
-    let c = cmd
-        .to_ascii_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    const PHRASES: &[&str] = &[
-        "pip install",
-        "pip3 install",
-        "-m pip",
-        "-m ensurepip",
-        "-m venv",
-        "virtualenv",
-        "uv venv",
-        "uv pip",
-        "apt-get install",
-        "apt install",
-        "conda install",
-        "conda create",
-        "yum install",
-        "apk add",
-        "setup.py build",
-        "python setup.py",
-        "./configure",
-        "cmake",
-        "pyenv",
-    ];
-    if PHRASES.iter().any(|p| c.contains(p)) {
-        return true;
-    }
-    // Single-token compiler/build invocations — matched as WHOLE tokens, not substrings, so
-    // `make` doesn't fire on `cmake`/`makemigrations` and `cc` doesn't fire on `gcc`/`accept`.
-    const TOOLS: &[&str] = &["make", "gcc", "g++", "cc", "clang", "meson", "ninja"];
-    c.split(' ').any(|tok| TOOLS.contains(&tok))
 }
 
 /// Per-turn setup-attempt tracker + latch for the environment spend cap. Only env-setup commands
@@ -1749,6 +1710,9 @@ pub struct Session {
     pending_hints: Vec<String>,
     /// Prompts queued by the surface while a turn runs; drained by the model loop (`steer.rs`).
     steer: steer::SteerInbox,
+    /// Set by [`Session::run_turn_resuming`]: the next turn's prompt is already in the transcript
+    /// and store (a steer the interrupted turn absorbed), so it must not be persisted again.
+    resume_absorbed: bool,
     job_wake: job_wake::JobWake,
     /// Commit discipline: which files this session wrote and whether they are still uncommitted.
     git_hygiene: git_hygiene::Tracker,
@@ -2714,6 +2678,14 @@ impl Session {
         decision
     }
 
+    /// Re-drive a turn whose prompt is already the tail of the conversation: the steer(s) an
+    /// interrupted turn absorbed (persisted and pushed by `inject_steers`) but never answered.
+    /// `prompt` only feeds routing; it is not persisted or pushed a second time.
+    pub async fn run_turn_resuming(&mut self, prompt: &str) -> Result<LoopOutcome, CoreError> {
+        self.resume_absorbed = true;
+        self.run_turn_with(prompt, &[], None).await
+    }
+
     /// Like [`Session::run_turn`], but first prepends `guidance` (an invoked command's or
     /// skill's methodology) as persisted system messages, and biases routing with an optional
     /// `tier_override` (the command/skill `tier:` hint). `run_turn(p)` is exactly
@@ -2725,6 +2697,7 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        let resume_absorbed = std::mem::take(&mut self.resume_absorbed);
         self.refresh_btw_asker();
         self.poll_lattice_background();
         self.adaptive_effort.begin_turn();
@@ -3055,6 +3028,7 @@ impl Session {
             // dump-everything memory file: only the RELEVANT memories are injected, ranked by the
             // prompt then salience + recency. Once per session, like AGENTS.md.
             if self.config.mesh.auto_memory {
+                memory_scope::align_memory_scopes(&self.store, self.workspace.root());
                 let scope = memory_scope_at(self.workspace.root());
                 let recalled = match embed_one(&self.config.lattice.embeddings, prompt).await {
                     Some(qemb) => self.store.recall_semantic(&scope, &qemb, 6),
@@ -3232,22 +3206,24 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             self.id.clone(),
             seq as u64,
         ));
-        self.store
-            .add_message(&self.id, seq, Role::User, prompt, None)?;
-        // Attach any images queued for this turn (vision). They ride on the in-memory transcript
-        // for the provider call; the persisted row stays text-only (images are transient input).
-        let images = std::mem::take(&mut self.pending_images);
-        if images.is_empty() {
-            self.transcript.push(Message::user(prompt));
-        } else {
-            self.transcript
-                .push(Message::user_with_images(prompt, images));
+        if !resume_absorbed {
+            self.store
+                .add_message(&self.id, seq, Role::User, prompt, None)?;
+            // Attach any images queued for this turn (vision). They ride on the in-memory transcript
+            // for the provider call; the persisted row stays text-only (images are transient input).
+            let images = std::mem::take(&mut self.pending_images);
+            if images.is_empty() {
+                self.transcript.push(Message::user(prompt));
+            } else {
+                self.transcript
+                    .push(Message::user_with_images(prompt, images));
+            }
+            // Auto-checkpoint at the turn boundary, labeled with the prompt preview, so `/undo` can
+            // offer a list of past messages to rewind to (no manual /checkpoint needed).
+            let _ = self
+                .store
+                .add_checkpoint(&self.id, Some(&checkpoint_preview(prompt)), seq);
         }
-        // Auto-checkpoint at the turn boundary, labeled with the prompt preview, so `/undo` can
-        // offer a list of past messages to rewind to (no manual /checkpoint needed).
-        let _ = self
-            .store
-            .add_checkpoint(&self.id, Some(&checkpoint_preview(prompt)), seq);
         // This turn's snapshot context (so a CLI-bridge model's file edits, which run in
         // `forge mcp-serve`, a separate process, get snapshotted into THIS turn's dir and are
         // restorable by `/undo`) is built lazily by `checkpoint_context()` and handed to each bridge

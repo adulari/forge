@@ -236,6 +236,56 @@ impl Store {
         })
     }
 
+    /// Copy the memories of `from` that `to` lacks (near-duplicates count as present, and are
+    /// left untouched rather than bumped) into `to`, keeping kind, salience and embedding.
+    /// `from` is not modified. Returns how many were copied.
+    pub fn copy_missing_memories(&self, from: &str, to: &str) -> Result<usize> {
+        if from == to {
+            return Ok(0);
+        }
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let rows = {
+                let mut statement = tx.prepare(
+                    "SELECT kind, text, source_session, salience, embedding FROM memory \
+                     WHERE scope = ?1 ORDER BY salience DESC, updated_at DESC",
+                )?;
+                let rows = statement
+                    .query_map([from], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, f64>(3)?,
+                            r.get::<_, Option<Vec<u8>>>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            let mut copied = 0;
+            for (kind, text, source_session, salience, embedding) in rows {
+                if find_duplicate_memory_on(&tx, to, &text)?.is_some() {
+                    continue;
+                }
+                let id = forge_types::new_id();
+                tx.execute(
+                    "INSERT INTO memory (id, scope, kind, text, source_session, salience, embedding) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![&id, to, kind, text, source_session, salience, embedding],
+                )?;
+                append_memory_snapshot(&tx, &id)?;
+                copied += 1;
+            }
+            if copied > 0 {
+                evict_memories_over_cap_on(&tx, to)?;
+            }
+            tx.commit()?;
+            Ok(copied)
+        })
+    }
+
     /// Number of memories stored in a scope.
     pub fn count_memories(&self, scope: &str) -> Result<i64> {
         Ok(self.lock()?.query_row(

@@ -272,6 +272,7 @@ impl Session {
                     let _ = self.store.add_memory(&scope, &kind_cat, &text, &self.id);
                 }
             }
+            crate::memory_scope::align_memory_scopes(&self.store, self.workspace.root());
             self.presenter
                 .emit(PresenterEvent::Warning(format!("◈ memory · {kind_cat}")));
             (format!("memory saved: [{kind_cat}] {text}"), true)
