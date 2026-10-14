@@ -20,6 +20,11 @@ sandbox_writable = ["/home/me/.cargo"]   # extra writable dirs beyond cwd + temp
 - The sandbox is applied via `pre_exec` on the spawned shell process: in the forked child, just
   before `exec`, Forge installs the Landlock ruleset (read+execute on `/`, read+write on the
   writable set) with `CompatLevel::BestEffort` so partial-ABI kernels still get partial protection.
+- The sink and source devices (`/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`,
+  `/dev/urandom`, `/dev/tty`) get file read+write rights. Without them every `git` command died at
+  startup (`could not open '/dev/null' for reading and writing`) and every `2>/dev/null` failed.
+- A linked worktree's shared `.git` (in the main checkout) is writable, so `git add`/`commit`
+  work in a worktree ([session-worktrees.md](session-worktrees.md)).
 - Kernel support is probed **once in the parent** before spawning. If Landlock is unavailable
   (old kernel, non-Linux), Forge logs a one-time warning and runs the command **unconfined** —
   the sandbox never hard-fails or blocks a command.
