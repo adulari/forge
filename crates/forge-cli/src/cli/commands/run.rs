@@ -164,7 +164,6 @@ pub(crate) use pickers::*;
 mod dispatch;
 mod heartbeat_cmd;
 mod mesh_overlay;
-mod pr_body;
 mod refine_cmd;
 pub(crate) use dispatch::*;
 pub(crate) mod driver;

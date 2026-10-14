@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+mod pr_block;
+pub use pr_block::{render as render_pr_evidence_block, PrBlockOptions};
+
 tokio::task_local! {
     static SESSION_SCOPE: (String, PathBuf);
 }
@@ -63,6 +66,8 @@ fn valid_session_id(id: &str) -> bool {
 pub enum EvidenceKind {
     Screenshot,
     TestOutput,
+    /// A public preview URL a `shell_job` expose opened for a dev server.
+    Preview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +195,29 @@ impl Ledger {
             Capture {
                 command: Some(command),
                 exit_code: Some(exit_code),
+                ..Capture::default()
+            },
+        )
+    }
+
+    /// Record a preview URL `shell_job` expose opened for background job `job` on `port`. The URL
+    /// is kept whole: a tunnel URL has no query string, and its host is the whole point.
+    pub fn record_preview(
+        &self,
+        url: &str,
+        job: u32,
+        port: u16,
+    ) -> std::io::Result<(PathBuf, EvidenceItem)> {
+        let body = format!("{url}\njob {job} port {port}\n");
+        let caption = format!("job {job} port {port}");
+        self.record(
+            EvidenceKind::Preview,
+            "preview",
+            "txt",
+            body.as_bytes(),
+            Capture {
+                caption: Some(&caption),
+                url: Some(url),
                 ..Capture::default()
             },
         )
@@ -332,76 +360,7 @@ pub(crate) fn save_screenshot(
 /// Deterministic: built from the manifest alone, in capture order. Labelled "captured" because
 /// nobody — the model included — has looked at the images.
 pub fn pr_evidence_block(workspace: &Path, session: &str) -> Option<String> {
-    let ledger = Ledger::new(workspace, session)?;
-    let items = ledger.items();
-    if items.is_empty() {
-        return None;
-    }
-    let rel_dir = format!(".forge/evidence/{session}");
-    let mut block = String::from("### Evidence (captured, not reviewed)\n");
-    let tests: Vec<&EvidenceItem> = items
-        .iter()
-        .filter(|item| item.kind == EvidenceKind::TestOutput)
-        .collect();
-    let shots: Vec<&EvidenceItem> = items
-        .iter()
-        .filter(|item| item.kind == EvidenceKind::Screenshot)
-        .collect();
-    if !tests.is_empty() {
-        block.push_str("Checks that passed during the session:\n");
-        for item in tests {
-            block.push_str(&format!(
-                "- `{}` — exit {} at {} (`{rel_dir}/{}`, sha256 `{}`)\n",
-                display_command(item.command.as_deref().unwrap_or("?")),
-                item.exit_code.unwrap_or(0),
-                item.ts,
-                item.file,
-                short_hash(&item.sha256),
-            ));
-        }
-    }
-    if !shots.is_empty() {
-        block.push_str("Screenshots:\n");
-        for item in shots {
-            let mut line = format!("- `{rel_dir}/{}` ({}", item.file, item.source);
-            if let Some(url) = &item.url {
-                line.push_str(&format!(", {url}"));
-            }
-            line.push_str(&format!(", sha256 `{}`)", short_hash(&item.sha256)));
-            if let Some(caption) = &item.caption {
-                line.push_str(&format!(" — {caption}"));
-            }
-            block.push_str(&line);
-            block.push('\n');
-        }
-    }
-    Some(block)
-}
-
-/// The command as shown in a PR body, which is public: values of leading `NAME=value` env
-/// assignments (`API_KEY=… cargo test`) are masked, and backticks cannot break the code span.
-fn display_command(command: &str) -> String {
-    let mut words = command.split_whitespace().peekable();
-    let mut shown: Vec<String> = Vec::new();
-    while let Some(word) = words.peek() {
-        let Some((name, _)) = word.split_once('=') else {
-            break;
-        };
-        let is_name = !name.is_empty()
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && !name.starts_with(|c: char| c.is_ascii_digit());
-        if !is_name {
-            break;
-        }
-        shown.push(format!("{name}=***"));
-        words.next();
-    }
-    shown.extend(words.map(str::to_string));
-    shown.join(" ").replace('`', "'")
-}
-
-fn short_hash(hash: &str) -> &str {
-    &hash[..hash.len().min(12)]
+    pr_block::render(workspace, session, &PrBlockOptions::default())
 }
 
 #[cfg(test)]

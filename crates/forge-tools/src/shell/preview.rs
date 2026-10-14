@@ -190,6 +190,7 @@ pub(super) async fn expose(
         register(registry, &dir.join(format!("{id}.json")), id, &record);
     }
     schedule_ttl(dir, settings.clone(), id, record.clone());
+    super::preview_links::record_evidence(id, &record);
     Ok(exposed_text(id, &record, settings.ttl, false))
 }
 

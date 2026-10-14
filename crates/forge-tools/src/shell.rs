@@ -45,6 +45,8 @@ pub use preview::{
     reap_orphan_tunnels, set_preview_settings, PreviewSettings, ReapReason, ReapReport,
     ReapedTunnel, TunnelRecord,
 };
+mod preview_links;
+pub use preview_links::live_preview_urls;
 mod pty;
 mod rtk;
 pub use background::ShellJobTool;

@@ -187,6 +187,13 @@ mod tests {
     }
 
     #[test]
+    fn open_pr_is_reachable_on_the_bridge_but_deferred() {
+        let registry = forge_tools::ToolRegistry::with_core_tools();
+        assert!(registry.get(forge_tools::OPEN_PR_TOOL).is_some());
+        assert!(!is_core(forge_tools::OPEN_PR_TOOL));
+    }
+
+    #[test]
     fn slim_cuts_parameter_descriptions_to_the_first_sentence() {
         let long = "Run it in the background. The job runs in its own session with a very long \
                     explanation that keeps going and going and going well past the cap.";

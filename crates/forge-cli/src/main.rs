@@ -82,6 +82,7 @@ mod log_filter;
 mod login_path;
 mod mcp_agent;
 mod mcp_serve;
+mod open_pr_hooks;
 mod preview;
 mod push;
 mod push_tool;
@@ -183,9 +184,13 @@ async fn run_cli(login_path_added: Vec<String>) {
         );
         return;
     };
-    if let Ok(config) = forge_config::load() {
-        forge_tools::set_attach_endpoint(config.browser.endpoint());
-        preview::install(&config);
+    {
+        let config = forge_config::load().ok();
+        if let Some(config) = &config {
+            forge_tools::set_attach_endpoint(config.browser.endpoint());
+            preview::install(config);
+        }
+        open_pr_hooks::install(config.as_ref());
     }
     push_tool::install_local_sink();
     let telemetry_run = telemetry::start(&command);

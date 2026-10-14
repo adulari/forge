@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod notifications;
 pub mod oauth;
 mod paths;
+pub mod pr;
 pub mod preview;
 pub mod privacy;
 pub mod provider_oauth;
@@ -151,6 +152,9 @@ pub struct Config {
     /// Public preview URLs for agent-started dev servers (`shell_job` expose).
     #[serde(default)]
     pub preview: preview::PreviewConfig,
+    /// How `open_pr` publishes pull requests (`[pr] publish_evidence_images`).
+    #[serde(default)]
+    pub pr: pr::PrConfig,
     /// User-configurable keybind map (action → key combo). Defaults to the built-in map.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -2924,6 +2928,7 @@ impl Default for Config {
             notifications: notifications::NotificationsConfig::default(),
             browser: browser::BrowserConfig::default(),
             preview: preview::PreviewConfig::default(),
+            pr: pr::PrConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),
@@ -3997,6 +4002,7 @@ models = {}
         assert!(parsed.mesh.harness_profiles.is_empty());
         assert_eq!(parsed.privacy, shipped.privacy);
         assert_eq!(parsed.preview, shipped.preview);
+        assert_eq!(parsed.pr, shipped.pr);
     }
 
     /// The shipped `[compact_cap]` table halves Kimi Code's per-step prompt; every other provider
