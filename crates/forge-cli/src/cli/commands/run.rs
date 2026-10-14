@@ -23,6 +23,8 @@ pub(crate) use autonomous::*;
 
 mod gates;
 pub(crate) use gates::*;
+mod goal_progress;
+pub(crate) use goal_progress::*;
 
 mod setup;
 pub(crate) use setup::*;
@@ -4187,87 +4189,31 @@ pub(crate) async fn run_chat_tui(
                         loop_state = Some(ls); // a different turn finished; keep waiting
                     }
                 }
-                // `/goal`: if this was a goal turn, decide whether to run another iteration off
-                // the tracked task plan (a session is either looping or goaling, never both).
+                // `/goal`: a finished goal turn is evaluated, and a finished evaluation decides
+                // the next turn (goal_progress.rs; a session is either looping or goaling).
                 if let Some(mut gs) = goal_state.take() {
                     if gs.gen == g {
-                        let (done, total) = {
-                            let s = session.lock().await;
-                            let tasks = s.tasks();
-                            (
-                                tasks
-                                    .iter()
-                                    .filter(|t| t.status == forge_types::TodoStatus::Done)
-                                    .count(),
-                                tasks.len(),
-                            )
+                        let next = advance_goal(&mut gs, &session, &mut app, &project_cwd).await;
+                        let steer = |app: &mut forge_tui::App| {
+                            dequeue_prompt(&mut queued_prompts, app, &mut prompt_history)
                         };
-                        let last = {
-                            session
-                                .lock()
-                                .await
-                                .last_assistant_text()
-                                .map(str::to_string)
-                        };
-                        let said_complete = is_goal_complete_marker(last.as_deref());
-                        let tokens_this_turn = app.turn_in + app.turn_out;
-                        match next_goal_decision(
+                        if let Some(step) = launch_goal_step(
+                            next,
                             &mut gs,
-                            said_complete,
-                            done,
-                            total,
-                            tokens_this_turn,
-                            &project_cwd,
-                        )
-                        .await
-                        {
-                            GoalDecision::Stop(reason) => {
-                                if !is_goal_complete_reason(&reason) {
-                                    app.note(&reason);
-                                }
+                            steer,
+                            &session,
+                            &done_tx,
+                            turn_gen + 1,
+                            &mut app,
+                            &mut busy,
+                            &mut busy_since,
+                        ) {
+                            turn_gen += 1;
+                            if step.prompt.is_some() {
+                                last_prompt = step.prompt;
                             }
-                            GoalDecision::GateFailed { prompt } => {
-                                last_prompt = Some(prompt.clone());
-                                turn_gen += 1;
-                                gs.iter += 1;
-                                gs.gen = turn_gen;
-                                goal_state = Some(gs);
-                                turn_handle = Some(spawn_turn_with(
-                                    prompt,
-                                    vec![GOAL_GUIDANCE.to_string()],
-                                    Some(forge_types::TaskTier::Complex),
-                                    &session,
-                                    &done_tx,
-                                    turn_gen,
-                                    &mut app,
-                                    &mut busy,
-                                    &mut busy_since,
-                                ));
-                            }
-                            GoalDecision::Retry => {
-                                let prompt = dequeue_prompt(
-                                    &mut queued_prompts,
-                                    &mut app,
-                                    &mut prompt_history,
-                                )
-                                .unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string());
-                                last_prompt = Some(prompt.clone());
-                                turn_gen += 1;
-                                gs.iter += 1;
-                                gs.gen = turn_gen;
-                                goal_state = Some(gs);
-                                turn_handle = Some(spawn_turn_with(
-                                    prompt,
-                                    vec![GOAL_GUIDANCE.to_string()],
-                                    Some(forge_types::TaskTier::Complex),
-                                    &session,
-                                    &done_tx,
-                                    turn_gen,
-                                    &mut app,
-                                    &mut busy,
-                                    &mut busy_since,
-                                ));
-                            }
+                            turn_handle = Some(step.handle);
+                            goal_state = Some(gs);
                         }
                     } else {
                         goal_state = Some(gs); // a different turn finished; keep waiting
