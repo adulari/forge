@@ -134,6 +134,7 @@ impl Session {
         let mut failure_counts: std::collections::HashMap<(String, ErrorCategory), usize> =
             std::collections::HashMap::new();
         let mut failure_nudged = false;
+        let mut codemode_steer = crate::codemode::Steer::default();
         // `toolcall_repair_nudges`: bounded retries when a direct model writes a tool call as TEXT
         // (`<invoke>` / `default_api:` markup) that the provider couldn't decode AND the text
         // recovery pass missed — so nothing executed. Without this the narration is accepted as a
@@ -788,6 +789,7 @@ impl Session {
                 break;
             }
             self.observe_adaptive_round(&resp.tool_calls, &step_observations);
+            self.steer_codemode(&mut codemode_steer, &active_model, &resp.tool_calls);
             self.observe_silence(
                 &mut silence,
                 verify_attempts == 0,

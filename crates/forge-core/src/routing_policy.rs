@@ -270,6 +270,11 @@ impl Session {
         {
             preamble[0].content.clone_from(override_prompt);
         }
+        // Codemode guidance rides with the tool itself: present exactly when `run_code` is
+        // advertised (never on a bridge), static text so the cached prefix stays stable.
+        if crate::codemode::guidance_advertised(specs) {
+            preamble.insert(1, Message::system(crate::codemode::GUIDANCE));
+        }
         let window = self.effective_context_window(model) as usize;
         let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();

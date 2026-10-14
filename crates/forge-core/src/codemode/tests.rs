@@ -69,11 +69,14 @@ async fn logs_survive_a_thrown_error_and_a_rejected_call_is_catchable() {
     .await;
     let (end, logs, _) = parse_script_value(value);
     assert!(
-        matches!(&end, ScriptEnd::Threw(m) if m == "TypeError: bad"),
+        matches!(&end, ScriptEnd::Threw(m) if m == "line 5: TypeError: bad"),
         "{end:?}"
     );
     assert_eq!(logs[0], "start {\"n\":1}");
-    assert!(logs[1].contains("error: boom failed"), "{logs:?}");
+    assert!(
+        logs[1].contains("tools.boom({}) failed: boom failed"),
+        "a rejection names the call: {logs:?}"
+    );
 }
 
 #[tokio::test]
@@ -209,4 +212,26 @@ fn the_spec_is_static_and_requires_code() {
     let b = run_code_spec();
     assert_eq!(a.description, b.description);
     assert_eq!(a.schema["required"], serde_json::json!(["code"]));
+}
+
+#[tokio::test]
+async fn a_rejected_tool_call_names_the_call_and_drops_the_double_error_prefix() {
+    let (value, _) = run("const a = 1;\nconst b = await tools.boom();\nreturn b;").await;
+    let (end, _, _) = parse_script_value(value);
+    let ScriptEnd::Threw(m) = end else {
+        panic!("expected a throw, got {end:?}")
+    };
+    assert_eq!(m, "tools.boom({}) failed: boom failed");
+}
+
+#[tokio::test]
+async fn join_on_a_tool_result_string_returns_it_unchanged() {
+    let (value, _) = run("const files = await tools.glob({pattern: '*'});\n\
+         return [files.join('\\n'), 'a\\nb'.split('\\n').join('+')];")
+    .await;
+    let (end, _, _) = parse_script_value(value);
+    let ScriptEnd::Returned(v) = end else {
+        panic!("expected a return, got {end:?}")
+    };
+    assert_eq!(v, serde_json::json!(["glob:{\"pattern\":\"*\"}", "a+b"]));
 }

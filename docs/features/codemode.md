@@ -12,10 +12,40 @@ const out = await tools.shell({ command: "cargo check -p forge-agent-config" });
 return out.split("\n").slice(0, 20).join("\n");
 ```
 
+## When the model reaches for it
+
+Advertising the tool was not enough: before the guidance below, `inferhub::glm-5.3-flash` made zero
+`run_code` calls in 108 benchmark runs and spent one model step per read, search or shell probe.
+Three things steer it now, all direct-path only:
+
+- **The tool description** leads with the job ("batch several tool calls into ONE step"), the rule
+  (use it when you can already name the next 2+ calls) and the exact call shape with examples.
+- **A guidance block** (`codemode::guidance::GUIDANCE`) is sent as its own system message right
+  after the base prompt whenever `run_code` is in the request's tool list. It splits the work:
+  independent reads and searches go out as parallel calls (already one step), while a dependent
+  chain the model can already plan (edit then test, search then read the hits, run the tests and
+  keep only the failures) goes into one `run_code` call. It states the
+  `await tools.<tool_name>({...})` shape, that every result is one string (glob and search too),
+  to return only what is needed, and a three-line edit-then-test example. It is constant text
+  placed before the transcript, so the cached prefix stays byte-stable; CLI bridges never get it
+  because their tool list never contains `run_code`.
+- **A one-time hint**: after three consecutive steps that each made a single exploration call
+  (`read_file`, `search`, `glob`, `list_dir`, `shell`, ...), the loop appends one system hint after
+  that step's tool results: plan the next few calls, send independent ones in parallel and a
+  dependent chain through `run_code`. At most once per turn;
+  a multi-call step, an edit or a `run_code` call resets the streak. It is an advisory nudge, so
+  the `minimal` harness profile turns it off, and it never fires on a CLI bridge, with codemode
+  disabled, or when the task scope excludes `run_code`.
+
 ## The script API
 
 - `await tools.<name>({...})` calls any tool the model has, with the same JSON arguments as a
-  normal call. It resolves to the tool's output string.
+  normal call. It resolves to the tool's output string. A bare string is accepted as shorthand:
+  `tools.read_file("a.py")` becomes `{path: "a.py"}` (the tool's first required parameter, else
+  `path`/`command`/`query`/`pattern`), and a string holding a JSON object is parsed.
+- Every result is a string, including glob and search output (newline-separated). Models
+  habitually treat that output as an array, so inside the sandbox `String.prototype.join` exists
+  and returns the string unchanged: `files.join("\n")` works instead of throwing.
 - It throws an `Error` when the call did not run: denied, blocked by a hook, refused by the task
   scope or a loop guard, unknown tool, or invalid arguments. A shell command that ran and exited
   non-zero resolves, so a script can read failing test output without a `try`/`catch`; check the
@@ -59,12 +89,39 @@ calls in parallel; writes are therefore always serialized.
 
 Hints an inner call queues (LSP diagnostics after a write, the shell-error diagnosis, hook context,
 loop-guard nudges) are appended to that call's value as `[hint] …`, so a program that edits and
-then tests sees its own compile errors. They are also delivered once after the outer result.
+then tests sees its own compile errors. A hint the script did not return is delivered once after
+the outer result; one it returned is not repeated (LSP blocks can run to thousands of tokens).
 
 Only the outer `run_code` result enters the transcript. It ends with a footer:
 `[run_code: 7 tool calls, 6 ok, 1 failed, 2.4s]`. When the script fails, the result lists the
-calls that already ran (their effects stay, and writes are snapshotted for /undo). Engine errors
-use the model's own line numbers.
+calls that already ran (their effects stay, and writes are snapshotted for /undo). A rejected
+inner call names itself: `tools.read_file({"path":"x.py"}) failed: io error: ...`. Engine errors
+use the model's own line numbers, and a thrown error (including a rejected tool call) is prefixed
+with the line of the model's code it surfaced on (`error: line 3: TypeError: ...`), read from the
+error's stack.
+
+## Measured adoption
+
+Six small Python tasks (fix a bug, add a CLI flag, rename a method, answer a question, add a
+feature with tests), `forge run --mode bypass`, v2.19.0 against this change, three reps per task
+per model, interleaved, all on InferHub. Means per run:
+
+| model | build | pass | runs using run_code | run_code steps / tool steps | input tokens | output tokens | model calls | wall s |
+|---|---|---|---|---|---|---|---|---|
+| glm-5.3-flash | v2.19.0 | 18/18 | 0/18 | 0/113 | 112,645 | 979 | 8.9 | 62.0 |
+| glm-5.3-flash | guided | 18/18 | 4/18 | 5/110 | 108,791 | 1,229 | 8.5 | 69.0 |
+| kimi-k3 | v2.19.0 | 18/18 | 0/18 | 0/113 | 108,940 | 2,222 | 9.1 | 124.0 |
+| kimi-k3 | guided | 18/18 | 6/18 | 8/109 | 105,208 | 2,019 | 8.5 | 109.1 |
+
+What the numbers say: both models now use `run_code`, mostly as intended (edit then run the
+tests, final diff plus a grep sweep), with zero script errors in the final round. On tasks this
+short the effect on cost is small and inside run-to-run noise: per-task input varies by up to
+±50% between identical runs, driven mostly by how many edits trigger an LSP diagnostics block.
+Both models already send independent reads as parallel calls, which is why the guidance steers
+`run_code` toward dependent chains instead of re-wrapping parallel batches (an earlier wording
+that said "2+ calls" got more adoption, 6/18 glm runs, but mostly serialized calls the model would
+have sent in parallel anyway, and its first version hit `TypeError: not a function` on
+`glob(...).join` in 5 of 15 scripts).
 
 ## Limits
 
@@ -126,6 +183,7 @@ the turn's mutations.
 | `forge-core/src/codemode/mod.rs` | spec, argument parsing, the JS wrapper, result rendering |
 | `forge-core/src/codemode/runner.rs` | the pump: script future, request channel, deadline, inner dispatch |
 | `forge-core/src/codemode/catalog.rs` | `ToolDirectory`, name resolution, deny list, `$search` |
+| `forge-core/src/codemode/guidance.rs` | the guidance block, the exploration-streak hint |
 | `forge-core/src/codemode/prompt_clock.rs` | presenter wrapper that pauses the deadline during prompts |
 | `forge-core/src/tool_outcome.rs` | `observe_tool_outcome`, shared with the serial tool path |
 | `forge-store/src/codemode_store.rs` | `codemode_stats`, `tool_call_rows` |
