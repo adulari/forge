@@ -44,11 +44,12 @@ fix.
   and monthly budget queries stay accurate. `compact()`'s summarise call is also recorded the
   same way.
 
-## Shipped (one-key fix populate)
+## Fix command
 
-- Diagnosis prompt now outputs structured `cause` + optional `FIX: <cmd>` line.
-- When a fix command is present, "press F to populate fix command" appears in scrollback.
-- Pressing F (idle) inserts the fix command into the input for review before submitting.
+- Diagnosis prompt outputs structured `cause` + optional `FIX: <cmd>` line, shown in the diagnosis
+  card and sent to the model with the failed result.
+- There is no key to copy the fix into the input. An earlier `F` shortcut did that, but it fired on
+  any `f` typed while idle with a fix pending, replacing the prompt being written (removed).
 
 ## Deferred
 
