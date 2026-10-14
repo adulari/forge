@@ -28,8 +28,12 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-/// `permission` is what `gh repo view` reports; `existing_pr` makes `gh pr list` return one.
-fn fixture(permission: &str, existing_pr: bool) -> Fixture {
+const NO_PRS: &str = "[]";
+const OPEN_PR: &str =
+    r#"[{"url":"https://github.com/acme/shop/pull/3","isCrossRepository":false}]"#;
+
+/// `permission` is what `gh repo view` reports; `pr_list` is what `gh pr list` prints.
+fn fixture(permission: &str, pr_list: &str) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let remote = root.join("remote.git");
@@ -73,11 +77,6 @@ fn fixture(permission: &str, existing_pr: bool) -> Fixture {
     let gh_log = root.join("gh.log");
     let body_file = root.join("body.md");
     let gh = root.join("gh");
-    let pr_list = if existing_pr {
-        r#"[{"url":"https://github.com/acme/shop/pull/3"}]"#
-    } else {
-        "[]"
-    };
     let script = format!(
         r#"#!/bin/sh
 echo "$*" >> '{log}'
@@ -141,7 +140,7 @@ fn gh_calls(fx: &Fixture) -> String {
 
 #[tokio::test]
 async fn opens_a_pr_with_published_evidence_and_leaves_the_tree_alone() {
-    let fx = fixture("WRITE", false);
+    let fx = fixture("WRITE", NO_PRS);
     let ledger = Ledger::new(&fx.work, "sess-ok").unwrap();
     ledger
         .record(
@@ -249,7 +248,7 @@ async fn opens_a_pr_with_published_evidence_and_leaves_the_tree_alone() {
 
 #[tokio::test]
 async fn a_second_session_adds_to_the_evidence_branch() {
-    let fx = fixture("ADMIN", false);
+    let fx = fixture("ADMIN", NO_PRS);
     let repo = github::parse_remote_url("https://github.com/acme/shop").unwrap();
     let shot = fx.work.join(".forge-shot.png");
     std::fs::write(&shot, b"one").unwrap();
@@ -286,7 +285,7 @@ async fn a_second_session_adds_to_the_evidence_branch() {
 
 #[tokio::test]
 async fn dirty_or_untracked_trees_are_refused_before_anything_is_pushed() {
-    let fx = fixture("WRITE", false);
+    let fx = fixture("WRITE", NO_PRS);
     std::fs::write(fx.work.join("cart.rs"), "fn cart() { todo!() }\n").unwrap();
     let error = open_pr(
         &ctx(&fx, None, OpenPrSettings::default()),
@@ -328,7 +327,7 @@ async fn dirty_or_untracked_trees_are_refused_before_anything_is_pushed() {
 
 #[tokio::test]
 async fn no_write_permission_means_no_push() {
-    let fx = fixture("READ", false);
+    let fx = fixture("READ", NO_PRS);
     let error = open_pr(
         &ctx(&fx, None, OpenPrSettings::default()),
         &fx.work,
@@ -346,7 +345,7 @@ async fn no_write_permission_means_no_push() {
 
 #[tokio::test]
 async fn the_base_branch_itself_is_refused() {
-    let fx = fixture("WRITE", false);
+    let fx = fixture("WRITE", NO_PRS);
     git(&fx.work, &["switch", "-q", "main"]);
     let error = open_pr(
         &ctx(&fx, None, OpenPrSettings::default()),
@@ -363,7 +362,7 @@ async fn the_base_branch_itself_is_refused() {
 
 #[tokio::test]
 async fn an_open_pr_for_the_branch_gets_the_push_not_a_duplicate() {
-    let fx = fixture("WRITE", true);
+    let fx = fixture("WRITE", OPEN_PR);
     let text = open_pr(
         &ctx(&fx, None, OpenPrSettings::default()),
         &fx.work,
@@ -377,6 +376,108 @@ async fn an_open_pr_for_the_branch_gets_the_push_not_a_duplicate() {
     );
     assert!(remote_has(&fx, "refs/heads/feat/cart"));
     assert!(!gh_calls(&fx).contains("pr create"));
+}
+
+fn screenshot(fx: &Fixture, session: &str) -> Ledger {
+    let ledger = Ledger::new(&fx.work, session).unwrap();
+    ledger
+        .record(
+            EvidenceKind::Screenshot,
+            "browser",
+            "png",
+            b"\x89PNG fake",
+            evidence::Capture::default(),
+        )
+        .unwrap();
+    ledger
+}
+
+#[tokio::test]
+async fn a_forks_pr_from_a_same_named_branch_is_not_taken_for_ours() {
+    let fx = fixture(
+        "WRITE",
+        r#"[{"url":"https://github.com/acme/shop/pull/4","isCrossRepository":true}]"#,
+    );
+    let text = open_pr(
+        &ctx(&fx, None, OpenPrSettings::default()),
+        &fx.work,
+        &args("t"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        text.starts_with("opened PR https://github.com/acme/shop/pull/9"),
+        "{text}"
+    );
+    let calls = gh_calls(&fx);
+    assert!(calls.contains("--json url,isCrossRepository"), "{calls}");
+    assert!(calls.contains("pr create"), "{calls}");
+}
+
+#[tokio::test]
+async fn a_repo_config_that_turns_publishing_off_keeps_screenshots_local() {
+    let fx = fixture("WRITE", NO_PRS);
+    screenshot(&fx, "sess-off");
+    let work = fx.work.clone();
+    let settings = OpenPrSettings {
+        repo_publish_images: Some(Arc::new(move |dir: &Path| (dir == work).then_some(false))),
+        ..OpenPrSettings::default()
+    };
+    let text = open_pr(&ctx(&fx, Some("sess-off"), settings), &fx.work, &args("t"))
+        .await
+        .unwrap();
+    assert!(text.contains("screenshots were not published"), "{text}");
+    assert!(remote_has(&fx, "refs/heads/feat/cart"));
+    assert!(!remote_has(&fx, "refs/heads/forge-evidence"));
+    let body = std::fs::read_to_string(&fx.body_file).unwrap();
+    assert!(
+        body.contains("0001-browser.png") && !body.contains("!["),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_manifest_entry_naming_a_file_outside_the_ledger_is_never_pushed() {
+    let fx = fixture("WRITE", NO_PRS);
+    let ledger = screenshot(&fx, "sess-esc");
+    std::fs::write(fx.work.join("../secret.png"), b"secret").unwrap();
+    let line = r#"{"ts":"t","kind":"screenshot","file":"../../../../secret.png","sha256":"x","source":"browser"}"#;
+    let manifest = ledger.dir().join(evidence::MANIFEST);
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(line);
+    text.push('\n');
+    std::fs::write(&manifest, text).unwrap();
+
+    let out = open_pr(
+        &ctx(&fx, Some("sess-esc"), OpenPrSettings::default()),
+        &fx.work,
+        &args("t"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        out.contains("not published (not an intact capture"),
+        "{out}"
+    );
+    let published = git(
+        &fx.remote,
+        &["ls-tree", "-r", "--name-only", "forge-evidence"],
+    );
+    assert_eq!(published, "sess-esc/0001-browser.png");
+}
+
+#[tokio::test]
+async fn a_shorthand_remote_resolves_through_insteadof() {
+    let fx = fixture("WRITE", NO_PRS);
+    git(&fx.work, &["config", "remote.origin.url", "gh:acme/shop"]);
+    git(
+        &fx.work,
+        &["config", "url.https://github.com/.insteadOf", "gh:"],
+    );
+    let repo = github_repo(Path::new("git"), &fx.work, "origin")
+        .await
+        .unwrap();
+    assert_eq!(repo.slug(), "acme/shop");
 }
 
 #[test]

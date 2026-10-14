@@ -25,6 +25,7 @@ mod command;
 mod evidence_branch;
 mod github;
 mod repo_state;
+mod screenshots;
 
 use command::{run, run_raw, run_with_stdin};
 use github::Repo;
@@ -36,6 +37,8 @@ pub const OPEN_PR_TOOL: &str = "open_pr";
 pub type ProvenanceFn = Arc<dyn Fn(&str, Option<&str>) -> String + Send + Sync>;
 /// Masks secrets in text bound for a public PR.
 pub type RedactFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
+/// A directory's own `[pr] publish_evidence_images` (its `.forge/config.toml`), if it sets one.
+pub type RepoFlagFn = Arc<dyn Fn(&Path) -> Option<bool> + Send + Sync>;
 
 /// What the binary installs at startup: `[pr]` config plus the two pieces that need the store and
 /// the secret list, which this crate cannot reach.
@@ -43,6 +46,9 @@ pub type RedactFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
 pub struct OpenPrSettings {
     /// `[pr] publish_evidence_images`: push screenshots to the `forge-evidence` branch.
     pub publish_images: bool,
+    /// Read at call time, because a daemon serves many repositories and loaded its config from
+    /// none of them: `false` in the workspace's or repository's `.forge/config.toml` wins.
+    pub repo_publish_images: Option<RepoFlagFn>,
     pub provenance: Option<ProvenanceFn>,
     pub redact: Option<RedactFn>,
 }
@@ -51,6 +57,7 @@ impl Default for OpenPrSettings {
     fn default() -> Self {
         Self {
             publish_images: true,
+            repo_publish_images: None,
             provenance: None,
             redact: None,
         }
@@ -194,10 +201,7 @@ async fn open_pr(ctx: &Ctx, workspace: &Path, args: &Args) -> Result<String, Str
         .await
         .map_err(|_| "HEAD is detached; check out a feature branch first".to_string())?;
     let remote = push_remote(git, &top, &branch).await?;
-    let remote_url = remote_url(git, &top, &remote).await?;
-    let repo = github::parse_remote_url(&remote_url).ok_or_else(|| {
-        format!("remote `{remote}` ({remote_url}) is not a GitHub repository URL")
-    })?;
+    let repo = github_repo(git, &top, &remote).await?;
     let slug = repo.slug();
     let info = github::parse_repo_view(
         &run(
@@ -272,8 +276,18 @@ async fn open_pr(ctx: &Ctx, workspace: &Path, args: &Args) -> Result<String, Str
         &run(
             &ctx.gh,
             &[
-                "pr", "list", "--repo", &slug, "--head", &branch, "--state", "open", "--json",
-                "url", "--limit", "1",
+                "pr",
+                "list",
+                "--repo",
+                &slug,
+                "--head",
+                &branch,
+                "--state",
+                "open",
+                "--json",
+                "url,isCrossRepository",
+                "--limit",
+                "20",
             ],
             &top,
             &[],
@@ -302,7 +316,7 @@ async fn open_pr(ctx: &Ctx, workspace: &Path, args: &Args) -> Result<String, Str
     }
 
     let mut notes: Vec<String> = Vec::new();
-    let images = publish_images(ctx, args, &top, &remote, &repo, &mut notes).await;
+    let images = publish_images(ctx, args, workspace, &top, &remote, &repo, &mut notes).await;
     let live = crate::shell::live_preview_urls(workspace);
     let diff_stat = if has_base_ref {
         run(
@@ -397,6 +411,21 @@ fn list(paths: &[String]) -> String {
     text
 }
 
+/// The GitHub repository behind `remote`: its configured URL, else the URL git resolves it to
+/// (`insteadOf` applied) when the configured one is a shorthand such as `gh:owner/repo`, whose
+/// dotless "host" is an alias rather than a GitHub host.
+async fn github_repo(git: &Path, top: &Path, remote: &str) -> Result<Repo, String> {
+    let configured = remote_url(git, top, remote).await?;
+    if let Some(repo) = github::parse_remote_url(&configured).filter(|r| r.host.contains('.')) {
+        return Ok(repo);
+    }
+    run(git, &["remote", "get-url", "--push", remote], top, &[])
+        .await
+        .ok()
+        .and_then(|resolved| github::parse_remote_url(&resolved))
+        .ok_or_else(|| format!("remote `{remote}` ({configured}) is not a GitHub repository URL"))
+}
+
 /// The remote's URL as configured (`pushurl`, else `url`), before `insteadOf` rewriting: that is
 /// the name the user gave the repository, which is what `gh` needs.
 async fn remote_url(git: &Path, top: &Path, remote: &str) -> Result<String, String> {
@@ -448,6 +477,7 @@ async fn push_remote(git: &Path, top: &Path, branch: &str) -> Result<String, Str
 async fn publish_images(
     ctx: &Ctx,
     args: &Args,
+    workspace: &Path,
     top: &Path,
     remote: &str,
     repo: &Repo,
@@ -456,20 +486,28 @@ async fn publish_images(
     let (Some(session), Some(ledger)) = (&ctx.session, &ctx.ledger) else {
         return None;
     };
-    let files: Vec<(String, PathBuf)> = ledger
-        .items()
-        .into_iter()
-        .filter(|item| item.kind == EvidenceKind::Screenshot)
-        .map(|item| {
-            let path = ledger.dir().join(&item.file);
-            (item.file, path)
-        })
-        .filter(|(_, path)| path.is_file())
-        .collect();
+    let screenshots::Selection { files, refused } = screenshots::publishable(ledger);
+    if !refused.is_empty() {
+        notes.push(format!(
+            "not published (not an intact capture inside the evidence directory): {}",
+            list(&refused)
+        ));
+    }
     if files.is_empty() {
         return None;
     }
-    if !ctx.settings.publish_images || !args.publish_images {
+    let repo_allows = |dir: &Path| {
+        ctx.settings
+            .repo_publish_images
+            .as_ref()
+            .and_then(|flag| flag(dir))
+            .unwrap_or(true)
+    };
+    let allowed = ctx.settings.publish_images
+        && args.publish_images
+        && repo_allows(workspace)
+        && repo_allows(top);
+    if !allowed {
         notes.push("screenshots were not published; the PR names them by local path".into());
         return None;
     }

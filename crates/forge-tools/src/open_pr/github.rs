@@ -101,15 +101,16 @@ pub(super) fn can_push(permission: &str) -> bool {
     matches!(permission, "ADMIN" | "MAINTAIN" | "WRITE")
 }
 
-/// The URL of the first PR in a `gh pr list --json url` array.
+/// The first same-repository PR in a `gh pr list --json url,isCrossRepository` array. `--head`
+/// matches the branch name only, so a fork's PR from a same-named branch is listed too, and the
+/// push never reaches it.
 pub(super) fn first_pr_url(json: &str) -> Option<String> {
     let value: Value = serde_json::from_str(json).ok()?;
     value
         .as_array()?
-        .first()?
-        .get("url")?
-        .as_str()
-        .map(str::to_string)
+        .iter()
+        .filter(|pr| pr.get("isCrossRepository").and_then(Value::as_bool) != Some(true))
+        .find_map(|pr| pr.get("url")?.as_str().map(str::to_string))
 }
 
 /// The PR URL `gh pr create` prints as its last line.
@@ -195,6 +196,18 @@ mod tests {
             Some("https://github.com/a/b/pull/7")
         );
         assert_eq!(first_pr_url("[]"), None);
+        assert_eq!(
+            first_pr_url(
+                r#"[{"url":"https://github.com/a/b/pull/5","isCrossRepository":true},
+                    {"url":"https://github.com/a/b/pull/7","isCrossRepository":false}]"#
+            )
+            .as_deref(),
+            Some("https://github.com/a/b/pull/7")
+        );
+        assert_eq!(
+            first_pr_url(r#"[{"url":"https://github.com/a/b/pull/5","isCrossRepository":true}]"#),
+            None
+        );
         assert_eq!(
             created_pr_url("Creating pull request…\nhttps://github.com/a/b/pull/8\n").as_deref(),
             Some("https://github.com/a/b/pull/8")

@@ -3,7 +3,7 @@
 //! Screenshots from `browser`/`device` and the output of passing verification commands land in
 //! `<workspace>/.forge/evidence/<session>/` with monotonic names, and every capture appends one
 //! line to `manifest.jsonl` there (timestamp, kind, file, caption, page URL without its query
-//! string, sha256 of the file). `/pr` renders the manifest into the PR body, so the proof a
+//! string, sha256 of the file). `open_pr` renders the manifest into the PR body, so the proof a
 //! reviewer sees is what was recorded, never what the model says it did.
 //!
 //! The session id reaches tools as a task-local scoped by the direct path's dispatcher; a CLI
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 mod pr_block;
-pub use pr_block::{render as render_pr_evidence_block, PrBlockOptions};
+pub use pr_block::PrBlockOptions;
 
 tokio::task_local! {
     static SESSION_SCOPE: (String, PathBuf);
@@ -34,7 +34,7 @@ pub const MANIFEST: &str = "manifest.jsonl";
 pub const TEST_TAIL_LINES: usize = 40;
 
 /// Run `fut` with `session` as the session evidence is recorded against, rooted at `workspace`
-/// (the root `/pr` later reads the ledger from).
+/// (the root `open_pr` later reads the ledger from).
 pub fn scope_session<F: Future>(
     session: String,
     workspace: PathBuf,
@@ -301,7 +301,7 @@ pub fn url_sans_query(url: &str) -> String {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))

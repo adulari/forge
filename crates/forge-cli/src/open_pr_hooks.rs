@@ -9,6 +9,7 @@ use crate::cli::commands::replay::open_store;
 pub(crate) fn install(config: Option<&forge_config::Config>) {
     forge_tools::set_open_pr_settings(forge_tools::OpenPrSettings {
         publish_images: config.is_none_or(|c| c.pr.publish_evidence_images),
+        repo_publish_images: Some(Arc::new(forge_config::pr::repo_publish_evidence_images)),
         provenance: Some(Arc::new(pr_provenance_block)),
         redact: Some(Arc::new(|text: &str| {
             redact_with(&forge_core::redact::Redactor::from_environment(), text)

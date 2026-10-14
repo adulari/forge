@@ -41,7 +41,8 @@ pub use device::{DeviceLogsTool, DeviceTool};
 pub use evidence::scope_session;
 pub use lattice_tool::LatticeTool;
 pub use open_pr::{
-    set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn, OPEN_PR_TOOL,
+    set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn, RepoFlagFn,
+    OPEN_PR_TOOL,
 };
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};

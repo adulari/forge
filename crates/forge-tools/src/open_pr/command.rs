@@ -50,12 +50,16 @@ pub(super) async fn run_raw(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not run {shown}: {e}"))?;
-    if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(text.as_bytes())
-            .await
-            .map_err(|e| format!("{shown}: writing stdin: {e}"))?;
-    }
-    let output = tokio::time::timeout(TIMEOUT, child.wait_with_output())
+    let pipe = child.stdin.take();
+    // The write sits under the timeout too, and a failed write (the child exited without reading)
+    // is left to the exit status, whose stderr says why.
+    let finished = async move {
+        if let (Some(text), Some(mut pipe)) = (stdin, pipe) {
+            let _ = pipe.write_all(text.as_bytes()).await;
+        }
+        child.wait_with_output().await
+    };
+    let output = tokio::time::timeout(TIMEOUT, finished)
         .await
         .map_err(|_| format!("{shown} {} timed out", args.join(" ")))?
         .map_err(|e| format!("{shown}: {e}"))?;

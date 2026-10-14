@@ -6,7 +6,7 @@ use std::path::Path;
 use super::{EvidenceItem, EvidenceKind, Ledger};
 
 /// What the renderer knows beyond the manifest. The default renders the manifest alone, which is
-/// what `/pr`'s preview of the block shows; `open_pr` fills both fields in.
+/// what [`pr_evidence_block`](super::pr_evidence_block) returns; `open_pr` fills both fields in.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PrBlockOptions<'a> {
     /// Published image URL per screenshot file name (the `forge-evidence` branch), so the image

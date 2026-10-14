@@ -73,13 +73,13 @@ leading `NAME=value` env assignments in a recorded command are shown as `NAME=**
 manifest keeps the raw command), and the whole body then goes through the same secret redaction
 as `forge replay` and `/export` ([redaction.md](redaction.md)), so a key passed as a flag or a
 `user:pass@` URL becomes `[redacted]`. It says "captured", never "verified":
-nobody, the model included, has looked at the images. Screenshots are published to the orphan
+nobody, the model included, has looked at the images. Intact screenshots are published to the orphan
 `forge-evidence` branch and shown inline; when publishing is off or fails they are named by local
 path. Preview URLs whose tunnel has closed are counted, not linked.
 
 ## Code
 
 - `crates/forge-tools/src/evidence.rs`: the ledger and the screenshot sink.
-- `crates/forge-tools/src/evidence/pr_block.rs`: the PR section (`pr_evidence_block`).
+- `crates/forge-tools/src/evidence/pr_block.rs`: the PR section (`Ledger::pr_block`; `pr_evidence_block` in `evidence.rs` wraps it).
 - `crates/forge-core/src/evidence_capture.rs`: test proof from verification shell calls.
 - `crates/forge-tools/src/open_pr.rs`: the PR body and the publish ([open-pr.md](open-pr.md)).
