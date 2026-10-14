@@ -1,12 +1,16 @@
 //! `forge stats cache` — prompt-cache hit rate per model and why the misses happened.
-//! docs/features/context-pipeline.md ("Cache instrument").
+//! docs/features/context-pipeline.md ("Cache instrument"). `forge stats codemode` renders in
+//! stats_codemode.rs.
 
 use crate::cli::args::StatsCmd;
 use crate::*;
 use anyhow::{Context, Result};
 
 pub(crate) fn stats_cmd(cmd: StatsCmd) -> Result<()> {
-    let StatsCmd::Cache { session, days } = cmd;
+    let (session, days, codemode) = match cmd {
+        StatsCmd::Cache { session, days } => (session, days, false),
+        StatsCmd::Codemode { session, days } => (session, days, true),
+    };
     let store = open_store()?;
     let session = match session.as_deref() {
         None => None,
@@ -23,6 +27,16 @@ pub(crate) fn stats_cmd(cmd: StatsCmd) -> Result<()> {
     } else {
         chrono::Utc::now().timestamp() - i64::from(days) * 86_400
     };
+    if codemode {
+        let stats = store
+            .codemode_stats(session.as_deref(), since)
+            .context("reading the tool-call audit")?;
+        print!(
+            "{}",
+            super::stats_codemode::render(&stats, session.as_deref(), days)
+        );
+        return Ok(());
+    }
     let stats = store
         .cache_stats(session.as_deref(), since)
         .context("reading usage")?;

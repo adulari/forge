@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agents;
 pub mod browser;
+pub mod codemode;
 mod commit_policy;
 mod harness_profile;
 pub mod mcp;
@@ -151,6 +152,9 @@ pub struct Config {
     /// Public preview URLs for agent-started dev servers (`shell_job` expose).
     #[serde(default)]
     pub preview: preview::PreviewConfig,
+    /// The `run_code` tool on the direct path (`[codemode]`).
+    #[serde(default)]
+    pub codemode: codemode::CodemodeConfig,
     /// User-configurable keybind map (action → key combo). Defaults to the built-in map.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -2924,6 +2928,7 @@ impl Default for Config {
             notifications: notifications::NotificationsConfig::default(),
             browser: browser::BrowserConfig::default(),
             preview: preview::PreviewConfig::default(),
+            codemode: codemode::CodemodeConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),
@@ -3997,6 +4002,7 @@ models = {}
         assert!(parsed.mesh.harness_profiles.is_empty());
         assert_eq!(parsed.privacy, shipped.privacy);
         assert_eq!(parsed.preview, shipped.preview);
+        assert_eq!(parsed.codemode, shipped.codemode);
     }
 
     /// The shipped `[compact_cap]` table halves Kimi Code's per-step prompt; every other provider
