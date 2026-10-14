@@ -810,8 +810,22 @@ impl DriverState {
             self.steer_tracker
                 .interrupted(&mut self.queued_prompts, &self.steer, &mut self.app);
         match next {
-            Some(next) => {
+            Some(InterruptNext::Fresh(next)) => {
                 self.start_turn(&next);
+                true
+            }
+            Some(InterruptNext::Resume(next)) => {
+                self.last_prompt = Some(next.clone());
+                self.turn_gen += 1;
+                self.turn_handle = Some(spawn_resume_turn(
+                    &next,
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                ));
                 true
             }
             None => false,
@@ -1271,6 +1285,7 @@ mod tests {
         state
             .steer_tracker
             .observe(&echo, &mut state.queued_prompts, &mut state.app);
+        state.app.apply(echo);
         assert!(state.queued_prompts.is_empty(), "no longer shown as queued");
 
         state
@@ -1282,6 +1297,13 @@ mod tests {
             state.last_prompt.as_deref(),
             Some("switch to the v2 endpoint")
         );
+        let shown = state
+            .app
+            .drain_flush()
+            .iter()
+            .filter(|l| l.to_string().contains("switch to the v2 endpoint"))
+            .count();
+        assert_eq!(shown, 1, "the absorbed prompt is shown once, not re-echoed");
         assert!(state.queued_prompts.is_empty());
         assert!(state.busy, "the absorbed prompt runs as the next turn");
         state.turn_handle.take().unwrap().abort();

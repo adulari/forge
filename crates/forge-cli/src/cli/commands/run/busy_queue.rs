@@ -22,6 +22,16 @@ use forge_tui::{App, PresenterEvent};
 
 use super::dequeue_prompt;
 
+/// What an interrupt starts next.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InterruptNext {
+    /// A prompt that never reached the model: an ordinary turn (echo, persist).
+    Fresh(String),
+    /// Prompts the aborted turn already absorbed (persisted, echoed as steers) but never answered:
+    /// the next turn only re-drives the model, it must not echo or persist them again.
+    Resume(String),
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SteerTracker {
     /// Absorbed prompts the user has seen echoed but the model has not started answering.
@@ -76,21 +86,21 @@ impl SteerTracker {
         self.settle(queue, steer, app);
     }
 
-    /// The turn was interrupted. Returns the prompt for the next turn: every absorbed prompt the
-    /// model never started answering (re-sent, joined, because the aborted turn died before it
-    /// could reply), otherwise the head of the queue.
+    /// The turn was interrupted. Returns the next turn: every absorbed prompt the model never
+    /// started answering (resumed, joined, because the aborted turn died before it could reply),
+    /// otherwise the head of the queue.
     pub(crate) fn interrupted(
         &mut self,
         queue: &mut Vec<String>,
         steer: &SteerInbox,
         app: &mut App,
-    ) -> Option<String> {
+    ) -> Option<InterruptNext> {
         let mut resend = std::mem::take(&mut self.unanswered);
         resend.extend(self.settle(queue, steer, app));
         if resend.is_empty() {
-            dequeue_prompt(queue, app)
+            dequeue_prompt(queue, app).map(InterruptNext::Fresh)
         } else {
-            Some(resend.join("\n\n"))
+            Some(InterruptNext::Resume(resend.join("\n\n")))
         }
     }
 
@@ -139,8 +149,8 @@ mod tests {
         let mut queue = Vec::new();
         queue_while_busy("fix the test", &mut queue, &steer);
         assert_eq!(
-            t.interrupted(&mut queue, &steer, &mut app).as_deref(),
-            Some("fix the test")
+            t.interrupted(&mut queue, &steer, &mut app),
+            Some(InterruptNext::Fresh("fix the test".into()))
         );
         assert!(queue.is_empty());
         assert!(steer.is_empty(), "the aborted turn can no longer absorb it");
@@ -166,8 +176,8 @@ mod tests {
             "the echo dropped it from the visible queue"
         );
         assert_eq!(
-            t.interrupted(&mut queue, &steer, &mut app).as_deref(),
-            Some("use the other API"),
+            t.interrupted(&mut queue, &steer, &mut app),
+            Some(InterruptNext::Resume("use the other API".into())),
             "Esc must still send it: the turn died before answering"
         );
     }
@@ -184,8 +194,8 @@ mod tests {
         steer.drain(); // absorbed; `Steered` not yet received
         queue.push("same text".into()); // a follow-up that never went to the inbox
         assert_eq!(
-            t.interrupted(&mut queue, &steer, &mut app).as_deref(),
-            Some("same text")
+            t.interrupted(&mut queue, &steer, &mut app),
+            Some(InterruptNext::Resume("same text".into()))
         );
         assert_eq!(
             queue,
@@ -226,8 +236,8 @@ mod tests {
         );
         queue_while_busy("second", &mut queue, &steer);
         assert_eq!(
-            t.interrupted(&mut queue, &steer, &mut app).as_deref(),
-            Some("second")
+            t.interrupted(&mut queue, &steer, &mut app),
+            Some(InterruptNext::Fresh("second".into()))
         );
     }
 
@@ -255,8 +265,8 @@ mod tests {
         );
         assert_eq!(queue, vec!["not yet"]);
         assert_eq!(
-            t.interrupted(&mut queue, &steer, &mut app).as_deref(),
-            Some("not yet")
+            t.interrupted(&mut queue, &steer, &mut app),
+            Some(InterruptNext::Fresh("not yet".into()))
         );
     }
 }

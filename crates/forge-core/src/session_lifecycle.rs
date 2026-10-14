@@ -251,6 +251,7 @@ impl Session {
             btw_asker: None,
             pending_hints: vec![],
             steer: crate::steer::SteerInbox::default(),
+            resume_absorbed: false,
             job_wake: crate::job_wake::JobWake::default(),
             git_hygiene: crate::git_hygiene::Tracker::default(),
             stale_tasks: crate::task_staleness::Tracker::default(),

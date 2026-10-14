@@ -1749,6 +1749,9 @@ pub struct Session {
     pending_hints: Vec<String>,
     /// Prompts queued by the surface while a turn runs; drained by the model loop (`steer.rs`).
     steer: steer::SteerInbox,
+    /// Set by [`Session::run_turn_resuming`]: the next turn's prompt is already in the transcript
+    /// and store (a steer the interrupted turn absorbed), so it must not be persisted again.
+    resume_absorbed: bool,
     job_wake: job_wake::JobWake,
     /// Commit discipline: which files this session wrote and whether they are still uncommitted.
     git_hygiene: git_hygiene::Tracker,
@@ -2714,6 +2717,14 @@ impl Session {
         decision
     }
 
+    /// Re-drive a turn whose prompt is already the tail of the conversation: the steer(s) an
+    /// interrupted turn absorbed (persisted and pushed by `inject_steers`) but never answered.
+    /// `prompt` only feeds routing; it is not persisted or pushed a second time.
+    pub async fn run_turn_resuming(&mut self, prompt: &str) -> Result<LoopOutcome, CoreError> {
+        self.resume_absorbed = true;
+        self.run_turn_with(prompt, &[], None).await
+    }
+
     /// Like [`Session::run_turn`], but first prepends `guidance` (an invoked command's or
     /// skill's methodology) as persisted system messages, and biases routing with an optional
     /// `tier_override` (the command/skill `tier:` hint). `run_turn(p)` is exactly
@@ -2725,6 +2736,7 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        let resume_absorbed = std::mem::take(&mut self.resume_absorbed);
         self.refresh_btw_asker();
         self.poll_lattice_background();
         self.adaptive_effort.begin_turn();
@@ -3232,22 +3244,24 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             self.id.clone(),
             seq as u64,
         ));
-        self.store
-            .add_message(&self.id, seq, Role::User, prompt, None)?;
-        // Attach any images queued for this turn (vision). They ride on the in-memory transcript
-        // for the provider call; the persisted row stays text-only (images are transient input).
-        let images = std::mem::take(&mut self.pending_images);
-        if images.is_empty() {
-            self.transcript.push(Message::user(prompt));
-        } else {
-            self.transcript
-                .push(Message::user_with_images(prompt, images));
+        if !resume_absorbed {
+            self.store
+                .add_message(&self.id, seq, Role::User, prompt, None)?;
+            // Attach any images queued for this turn (vision). They ride on the in-memory transcript
+            // for the provider call; the persisted row stays text-only (images are transient input).
+            let images = std::mem::take(&mut self.pending_images);
+            if images.is_empty() {
+                self.transcript.push(Message::user(prompt));
+            } else {
+                self.transcript
+                    .push(Message::user_with_images(prompt, images));
+            }
+            // Auto-checkpoint at the turn boundary, labeled with the prompt preview, so `/undo` can
+            // offer a list of past messages to rewind to (no manual /checkpoint needed).
+            let _ = self
+                .store
+                .add_checkpoint(&self.id, Some(&checkpoint_preview(prompt)), seq);
         }
-        // Auto-checkpoint at the turn boundary, labeled with the prompt preview, so `/undo` can
-        // offer a list of past messages to rewind to (no manual /checkpoint needed).
-        let _ = self
-            .store
-            .add_checkpoint(&self.id, Some(&checkpoint_preview(prompt)), seq);
         // This turn's snapshot context (so a CLI-bridge model's file edits, which run in
         // `forge mcp-serve`, a separate process, get snapshotted into THIS turn's dir and are
         // restorable by `/undo`) is built lazily by `checkpoint_context()` and handed to each bridge
