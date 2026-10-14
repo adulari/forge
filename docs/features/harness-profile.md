@@ -2,7 +2,7 @@
 
 > Status: **SHIPPED** (2026-10-14). Code: `crates/forge-config/src/harness_profile.rs` (config +
 > glob resolution), `crates/forge-core/src/harness_profile.rs` (the per-step switch),
-> `crates/forge-core/src/empty_reply.rs` (the once-per-turn empty-reply nudge). Tests:
+> `crates/forge-core/src/empty_reply.rs` (the once-per-streak empty-reply nudge). Tests:
 > `crates/forge-core/src/tests/harness_profile.rs`.
 
 ## 1. Problem
@@ -62,14 +62,19 @@ nudge is off and each of these guards still fires under `minimal`.
 - **Stalled tasks** (`task_staleness.rs`) stay on: they keep the task list honest for the
   completion gate, which is kept.
 
-## 3. Empty-reply nudge: once per turn
+## 3. Empty-reply nudge: once per empty streak
 
 Measured over 60 days, only 11 of 59 calls that followed "Your last response was empty" made
-progress (19%), and each one re-sent the full context. A turn now gets at most **one** such
-nudge, across every model loop and failover in that turn. Before this it got two per loop, and
-the count reset on every failover and every non-empty reply. After the one nudge, the next empty
-reply goes straight to the honest-failure path that already existed: the model is benched, the
-turn fails over to the next model in the chain, and on a pinned turn it stops with the pin named.
+progress (19%), and each one re-sent the full context. The model now gets **one** such nudge per
+streak of empty replies, shared across every model loop and failover in the turn. Before this it
+got two per loop, and the count also reset on every failover. If the model answers the nudge with
+another empty reply, the turn goes straight to the honest-failure path that already existed: the
+model is benched, the turn fails over to the next model in the chain, and on a pinned turn it stops
+with the pin named.
+
+The nudge re-arms only when the model makes tool progress again. A strict once-per-turn cap would
+bench a model, or stop a pinned turn outright, over one transient empty reply a hundred steps after
+an unrelated one. A model that fails over gets no fresh nudge: its first empty reply benches it.
 This applies to every profile.
 
 ## 4. How to evaluate

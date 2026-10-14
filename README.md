@@ -1094,6 +1094,10 @@ monthly_cap_usd = 50.0
 credit_mode = "strict"        # route to free + subscription only
 max_output_tokens = 0         # provider/model native output maximum (positive = explicit cap)
 auto_orchestrate = true       # apply the orchestration framework on every turn
+harness_profile = "guarded"   # "minimal" drops advisory nudges, keeps safety guards
+
+[mesh.harness_profiles]       # per-model overrides by glob (docs/features/harness-profile.md)
+"bedrock::*" = "minimal"
 ```
 
 ---

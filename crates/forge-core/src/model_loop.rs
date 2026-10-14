@@ -311,6 +311,7 @@ impl Session {
 
             if resp.wants_tools() || bridge_tool_progress {
                 followup_intent_nudges = 0;
+                self.rearm_empty_reply_nudge();
             }
 
             if let Some(text) = self.hard_guard_after_call(resp.usage.cost_usd) {

@@ -513,7 +513,7 @@ async fn the_profile_is_resolved_again_after_a_failover() {
 }
 
 #[tokio::test]
-async fn the_empty_reply_nudge_is_spent_once_per_turn() {
+async fn the_empty_reply_nudge_re_arms_on_the_next_turn() {
     let mut run = Run::new(
         Arc::new(Script::new(vec![say("")])),
         config(HarnessProfile::Guarded),
@@ -534,4 +534,44 @@ async fn the_empty_reply_nudge_is_spent_once_per_turn() {
         .filter(|m| m.content == crate::empty_reply::EMPTY_REPLY_NUDGE)
         .count();
     assert_eq!(nudges, 2);
+}
+
+#[tokio::test]
+async fn tool_progress_re_arms_the_empty_reply_nudge() {
+    let mut run = Run::new(
+        Arc::new(Script::new(vec![
+            say(""),
+            (
+                String::new(),
+                vec![call("list_dir", serde_json::json!({"path": "."}))],
+            ),
+            say(""),
+            say("Done."),
+        ])),
+        config(HarnessProfile::Guarded),
+        test_workspace(),
+    );
+    let outcome = run.session.run_turn("do the task").await.unwrap();
+    assert_eq!(outcome.text, "Done.");
+    assert_eq!(
+        run.warnings("model returned an empty response"),
+        2,
+        "a transient empty reply after real work gets its own nudge instead of a bench"
+    );
+    assert_eq!(run.warnings("pinned"), 0);
+}
+
+#[tokio::test]
+async fn an_empty_reply_right_after_the_nudge_goes_to_the_honest_failure_path() {
+    let mut run = Run::new(
+        Arc::new(Script::new(vec![say(""), say(""), say("Late answer.")])),
+        config(HarnessProfile::Guarded),
+        test_workspace(),
+    );
+    let outcome = run.session.run_turn("do the task").await.unwrap();
+    assert_eq!(run.warnings("model returned an empty response"), 1);
+    assert_ne!(
+        outcome.text, "Late answer.",
+        "the second empty reply in a row stops the pinned-equivalent turn"
+    );
 }

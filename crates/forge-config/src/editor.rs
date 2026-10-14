@@ -236,6 +236,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "git.coauthor" => Some(("Git", "Co-author commits")),
         "lsp.enabled" => Some(("Code Intelligence", "LSP diagnostics")),
         "mesh.auto_orchestrate" => Some(("Behaviour", "Auto-orchestrate")),
+        "mesh.harness_profile" => Some(("Behaviour", "Harness profile")),
         _ => None,
     };
     if let Some((g, l)) = curated {

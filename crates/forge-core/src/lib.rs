@@ -1765,7 +1765,7 @@ pub struct Session {
     turn_hard_guard_abort: bool,
     /// The harness profile of the model currently driving the turn (harness_profile.rs).
     harness_profile: forge_config::HarnessProfile,
-    /// This turn already spent its one empty-reply nudge (empty_reply.rs).
+    /// The empty-reply nudge is spent until the model makes tool progress again (empty_reply.rs).
     empty_reply_nudged: bool,
     /// USD spend guards for the active turn and the session (`spend_guard.rs`).
     spend: spend_guard::SpendState,
