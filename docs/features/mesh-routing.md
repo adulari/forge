@@ -492,9 +492,39 @@ defaults are `DEFAULT_RATES` (`pricing.rs:37`), USD per 1k tokens:
 | `deepseek::deepseek-chat` | 0.00027 | 0.0011 |
 | `xai::grok-4` | 0.003 | 0.015 |
 
-Precedence: bundled defaults **<** prices fetched live from a provider's model API (e.g.
-OpenRouter) **<** explicit `[mesh.pricing]` config overrides
-(`from_config_with_fetched`, `pricing.rs:121`).
+Precedence: bundled defaults **<** prices fetched live from a provider's model API (OpenRouter,
+models.dev, a marketplace gateway's `/models`) **<** explicit `[mesh.pricing]` config overrides
+(`from_config_with_fetched`). The router routes on the same merged table
+(`HeuristicRouter::with_pricing`, wired in `build_provider_and_router`, `forge mesh`, and the
+session's `/mesh` inspector); before that it saw only bundled + config rates, so a gateway model
+without a `[mesh.pricing]` row ranked as $0.
+
+**Marketplace gateways (InferHub).** A custom provider whose `/models` entries carry
+`pricing: {official_in, official_out, asks_in: [...], asks_out: [...]}` (USD per 1M) is priced from
+that listing at every discovery sweep (`marketplace_pricing`,
+`crates/forge-cli/src/context_windows/parsers.rs`). The statistic over the positive asks is the
+provider's `pricing_stat` (`median` default, `min`, `mean`, `official`); a model with no asks
+falls back to its official price. The cheapest ask (`min`) understates cost — the gateway may
+route a request to any seller. An unprefixed alias with no pricing of its own (`claude-opus-5.5`)
+pools the asks of every routed entry with the same last path segment (`cc/claude-opus-5-5`,
+`kiro/claude-opus-5.5`; `.`/`-` and case ignored). A model with no evidence stays unpriced and
+is never written as $0. InferHub publishes no cache-read price and documents no cache discount,
+so no cache rate is set.
+
+```toml
+[[providers.custom]]
+namespace = "inferhub"
+base_url = "https://api.inferhub.dev/v1"
+api_key_env = "INFERHUB_API_KEY"
+pricing_stat = "median"   # median | min | mean | official
+```
+
+**Reported cost wins.** When a response's usage carries `cost` (an OpenAI-compatible extension
+InferHub and OpenRouter send), the genai fork keeps it (`genai::chat::Usage::cost`), the provider
+copies it to `Usage::reported_cost_usd`, and `cost_for_usage` records that figure instead of the
+rate-table estimate — for metered models only; a subscription id (`is_subscription`) keeps its
+own handling so a flat-rate turn never spends the real budget. Rates still drive routing; the
+reported cost drives spend, the budget cap and `/usage`.
 
 The `anthropic::` rows carry their weight alone: the fetched layer only ever produces
 `openrouter::…` ids (`openrouter_pricing`, `crates/forge-cli/src/context_windows.rs:426`) and
@@ -875,6 +905,16 @@ score-broken-out twin behind the inspector):
 > rated only at low and max, so no pin can reach its `high`. A `[model_effort]` entry (keyed by full
 > id or provider namespace, id winning) bypasses the benchmark rule entirely and is sent verbatim,
 > resolved against `effort::ladder` so it can still only name a rung the provider actually offers.
+>
+> The measured ladder is first narrowed to the rungs the route can SEND (`offered_rungs`), so the
+> rung chosen, the score it is ranked on and the rung on the wire are the same rung. `effort::ladder`
+> prefers a ladder the provider PUBLISHED for the exact model: InferHub lists `reasoning_levels`
+> per model (`["low","high"]` for GLM-5.3, `["max"]` for Kimi K3, none for most aliases), which
+> discovery stores on the catalog (`ModelCatalog::with_reasoning_levels`, cached) and registers
+> with `effort::register_discovered_ladders`. `none`/`minimal` have no Forge pin and are dropped;
+> a model that publishes nothing keeps the family rule. Example: the feed rates GLM-5.3 at low and
+> max, InferHub's `cb/glm-5.3` takes low/high — so it is ranked and run at `low`, not ranked on
+> `max` and then sent `high`, a rung with no measurement at all.
 
 - **High / XHigh / WhiteHot:** integer bench-score **band** first (`bench_band`,
   `catalog.rs:20` — `floor(score)`; unbenched models band to `i64::MIN`, below every benched
@@ -1114,23 +1154,50 @@ binary fetches + caches them; `BenchmarkScores` is pure data + matching.
 - `insert` (`bench.rs:53`) collapses effort variants of one model ("GPT-5.5 (low)"/"(xhigh)")
   to a single canonical row keeping the highest-intelligence one — a model is represented by
   its best effort.
-- `score_for` (`bench.rs:96`) tries an exact sorted-token-set match first (`canon`,
-  `bench.rs:277`), then a fuzzy fallback: the row sharing the most tokens (`overlap`,
-  `bench.rs:285`), **required** to share a *family word* (an alphabetic token ≥ 3 chars that is
-  not a `ROLE_WORDS` member — "coder"/"chat"/"instruct"/"vision"/… describe capabilities many
-  families share, and let deepseek-coder inherit Qwen-Coder's score before the exclusion) with
-  ≥ 2 shared tokens, and **refused** on a version conflict (both sides carry numeric tokens
-  with zero overlap): a brand-new `claude-sonnet-5` must not silently inherit Sonnet 4.6's
-  stale score — which would also defeat the "no score yet → refetch" trigger. A versionless
-  bridge alias (`claude-cli::opus`) is unaffected and maps to the best matching family row.
-- Product-reviewed successor rules (`predecessor_canon`, `bench.rs:178`) bypass generic fuzzy
-  matching for a successor the version-conflict guard above would otherwise leave unscored. Until
-  Artificial Analysis publishes their own rows, `qwen3.8-max-preview` inherits the exact Qwen3.7
-  Max score and Muse Spark 1.3 inherits 1.2's; a published row for the successor always wins
-  afterward. `source_score_for` excludes inheritance,
-  so cache refresh and negative-cache bookkeeping continue to distinguish measured data from the
-  temporary prior. Bare bridge aliases carry no version token and so never inherit —
-  `claude-cli::opus` keeps mapping to the best-scoring Claude-Opus row.
+- `score_for` tries an exact sorted-token-set match first (`canon`), then a rule-based match
+  (`BenchmarkScores::resolve`, `crates/forge-mesh/src/bench.rs`) that decides whether a row names
+  the SAME model word by word and number by number rather than by token overlap:
+  - the id's family (its first word) must be in the row, and the two must share a *family word*
+    (alphabetic, ≥ 3 chars, not a `ROLE_WORDS` or `TIER_WORDS` member) — so deepseek-coder never
+    takes Qwen-Coder's row and `seedance-1.0-pro` never takes "Gemini 1.0 Pro" on a shared "pro";
+  - every other word of the id must be in the row unless it is a serving tag (`SERVING_WORDS`:
+    fast, highspeed, backup, thinking, build, free, contributor, latest, …) — so
+    `gemini-omni-flash` is not Gemini Flash and `gpt-5.4-pro` is not GPT-5.4, while
+    `deepseek-v4.1-flash-fast` still is DeepSeek V4.1 Flash;
+  - a row word the id lacks is allowed unless it is a tier word (mini/nano/lite/next/omni/pro/
+    max/plus/flash/flashx/turbo/…): "Kimi K2.7 Code" may stand for `kimi-k2.7`, but
+    "Qwen3.8-Flash-Next" never stands for `qwen3.8-flash`;
+  - version numbers must be **equal** whenever the id carries any (`3.0` = `3`; a row with no
+    version is the family's first release). The old positional comparison let a shorter id
+    inherit a point release: `kiro-opus-5` ([5]) zipped against "Opus 5.5" ([5, 5]) found no
+    conflict and took 5.5's score. Release dates (`0731`, `2604`) only have to agree when both
+    sides carry one; parameter sizes (`70b`, `a3b`, `e2b`, `270m`) must agree whenever the row
+    has one;
+  - a version-less id (`claude-cli::opus`, `gemini::gemini-flash-latest`) is an alias for the
+    family's best row — unless the only candidates each add a DIFFERENT word the id never named
+    (`kiro-gpt-5.6` vs GPT-5.6 Sol / Terra / Luna), which is ambiguous and matches nothing;
+  - a leading vendor word (`Meta-Llama-3.3-70B`) is retried without it.
+- `ModelId::parse` (`crates/forge-mesh/src/bench/model_id.rs`) normalises a Forge id before any
+  of that: last `/` path segment only (gateway routes such as `ag/`, `cc/`, `cmc/meta/`,
+  `cp/cline-pass/` need no list); Bedrock's dotted `global.moonshotai.` route; a dash route tag
+  (`ROUTE_WORDS`: `kiro-opus-5`); a context-size variant (`-1m`, `-256k`); "claude" supplied for a
+  bare Anthropic tier name; Kimi Code plan slots (`k3`, `kimi-for-coding`) mapped to their rows
+  whatever gateway resells them; and a trailing effort suffix (`-low`/`-medium`/`-high`/`-xhigh`,
+  never `-max`, which is a tier in `qwen3.8-max`). An id that names its rung
+  (`agy-cli::gemini-3.8-flash-low`, `inferhub::ag/gemini-3.8-flash-high`) scores at that rung
+  and has no ladder (`efforts_for` is empty) — it always runs there.
+- A parenthetical that is only a snapshot number is kept: "Qwen3.8 Max (0902)" is a different
+  row from "Qwen3.8 Max" (merging them scored the plain Max as the 0902 snapshot).
+- The effort parser reads the feed's current Anthropic spelling, a bare rung beside a fallback
+  note — "Claude Opus 5.5 (Max, Default Fallback)" — so the Claude 5.5 ladders exist. A bare rung
+  beside a lineage note ("Quasar 438B (Max, Based on GLM-5.2)") is still not a rung.
+- Product-reviewed successor rules (`predecessor_canon`) apply only when the successor has no
+  row of its own, exact or matched. Until Artificial Analysis publishes their own rows,
+  `qwen3.8-max-preview` inherits the exact Qwen3.7 Max score and Muse Spark 1.3 inherits 1.2's;
+  the published row wins as soon as it exists (the 2026-10 feed carries "Muse Spark 1.3", so
+  `muse-spark-1.3-contributor` now scores on it). `source_score_for` excludes inheritance, so
+  cache refresh and negative-cache bookkeeping continue to distinguish measured data from the
+  temporary prior.
 - The canonical key (`canon`) sorts and dedupes the words but keeps version numbers in order and
   with repeats, so Opus 5.5 and Opus 5, or GPT-5.4 and GPT-4.5, never share a key or an effort
   ladder.
@@ -1139,8 +1206,9 @@ binary fetches + caches them; `BenchmarkScores` is pure data + matching.
   rated rows closest in intelligence, capped at the best measured coding index
   (`estimate_coding`, `crates/forge-cli/src/benchmarks.rs`). A cache holding such rows is
   re-fetched daily.
-- `id_tokens` (`bench.rs:198`) injects a family token per bridge (`claude-cli`/`anthropic` →
-  "claude", `codex-cli` → "gpt", `agy-cli` → "gemini") so bare aliases match at all.
+- A bridge whose alias names only a tier gets its provider's family word (`claude-cli`/`anthropic`
+  → "claude", `codex-cli` → "gpt", `agy-cli` → "gemini"); an alias naming its own family
+  (`agy-cli::claude-opus-5-5-high`) does not, because the bridge serves other vendors too.
 - `exact_score_for` (`bench.rs:82`) is the no-fuzzy variant for precisely-named local tags
   (`ollama::qwen2.5-coder:14b`), where the fallback would cross-match sizes.
 

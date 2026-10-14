@@ -185,6 +185,14 @@ before relying on this table, which has fallen behind as providers were added):
 | *(more custom OpenAI-compatible gateways: NVIDIA, SambaNova, Mistral, Together, Fireworks, Perplexity, …)* | OpenAI (compatible) | per-provider | see `CUSTOM_OPENAI_PROVIDERS` |
 | *(no prefix)* | genai name-inference (back-compat) | default | best-effort |
 
+A user `[[providers.custom]]` endpoint whose `/models` publishes more than ids is read for it at
+discovery (InferHub is the case in hand): per-model `reasoning_levels` become the effort ladder
+Forge sends against, an `output_modality` without text drops the model from the catalog, and a
+marketplace `pricing` block (official price plus a list of seller asks) prices the model by the
+provider's `pricing_stat` (`median` default; `min` | `mean` | `official`). A `usage.cost` in the
+response is recorded as the call's spend for metered models. Details in
+[mesh-routing.md §5.1](mesh-routing.md).
+
 Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint: the API rejects
 `enable_thinking=false`. Forge therefore sends a separate native `thinking_budget` (4,096 tokens by
 default, adjusted by `/effort`) to bound pre-tool deliberation without setting `max_tokens` or

@@ -395,6 +395,7 @@ pub fn apply_sse_event(
                     .and_then(|d| d.get("reasoning_tokens"))
                     .and_then(|v| v.as_u64());
                 acc.usage = Usage {
+                    reported_cost_usd: None,
                     input_tokens,
                     output_tokens,
                     cached_input_tokens,

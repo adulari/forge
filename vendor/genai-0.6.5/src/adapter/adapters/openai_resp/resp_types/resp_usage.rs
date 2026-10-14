@@ -114,6 +114,7 @@ impl From<OutputTokensDetails> for CompletionTokensDetails {
 impl From<RespUsage> for Usage {
 	fn from(value: RespUsage) -> Self {
 		Usage {
+			cost: None,
 			prompt_tokens: value.input_tokens,
 			prompt_tokens_details: value.input_tokens_details.map(Into::into),
 			completion_tokens: value.output_tokens,

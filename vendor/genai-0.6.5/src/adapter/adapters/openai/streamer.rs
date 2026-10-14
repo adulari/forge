@@ -61,7 +61,15 @@ fn capture_usage_tail(
 		return;
 	}
 
-	if captured_usage.as_ref().is_some_and(usage_has_token_counts) {
+	if let Some(captured) = captured_usage.as_mut().filter(|u| usage_has_token_counts(u)) {
+		// Forge fork: some gateways (InferHub) put token counts on the finish chunk and the
+		// charge (`usage.cost`) on a trailing `choices: []` chunk. Keep the counts already
+		// captured, but take the charge, or it is lost.
+		if captured.cost.is_none()
+			&& let Ok(value) = message_data.x_take::<Value>("usage")
+		{
+			captured.cost = OpenAIAdapter::into_usage(adapter_kind, value).cost;
+		}
 		return;
 	}
 
@@ -554,6 +562,23 @@ mod tests {
 		assert_eq!(usage.prompt_tokens, Some(259));
 		assert_eq!(usage.completion_tokens, Some(16));
 		assert_eq!(usage.total_tokens, Some(275));
+	}
+
+	#[test]
+	fn test_capture_usage_tail_takes_a_trailing_cost_without_replacing_counts() {
+		// InferHub, verbatim shape (2026-10-14): counts on the finish chunk, cost on the tail.
+		let mut captured_usage = Some(OpenAIAdapter::into_usage(
+			AdapterKind::OpenAI,
+			serde_json::json!({"prompt_tokens": 8, "completion_tokens": 8, "total_tokens": 16}),
+		));
+		let mut message_data = serde_json::json!({
+			"choices": [],
+			"usage": {"completion_tokens": 8, "cost": 0.00001, "prompt_tokens": 8, "total_tokens": 75}
+		});
+		capture_usage_tail(&mut captured_usage, &mut message_data, AdapterKind::OpenAI, true);
+		let usage = captured_usage.expect("usage");
+		assert_eq!(usage.cost, Some(0.00001));
+		assert_eq!(usage.total_tokens, Some(16), "the finish chunk's counts are kept");
 	}
 
 	#[test]

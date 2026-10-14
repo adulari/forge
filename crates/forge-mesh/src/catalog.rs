@@ -64,6 +64,9 @@ pub struct ModelCatalog {
     /// cache load without it simply shows ids (the previous behaviour).
     #[serde(skip)]
     display_names: HashMap<String, String>,
+    /// Per-model effort rungs a provider published (InferHub `reasoning_levels`); cached.
+    #[serde(default)]
+    reasoning_levels: HashMap<String, Vec<EffortLevel>>,
 }
 
 use crate::calibration::calibration_adjustment;
@@ -856,7 +859,18 @@ impl ModelCatalog {
             calibration: HashMap::new(),
             solve_cost: HashMap::new(),
             display_names: HashMap::new(),
+            reasoning_levels: HashMap::new(),
         }
+    }
+
+    /// Attach + register published effort ladders; cache loads call `register_reasoning_levels`.
+    pub fn with_reasoning_levels(mut self, levels: HashMap<String, Vec<EffortLevel>>) -> Self {
+        self.reasoning_levels = levels;
+        self.register_reasoning_levels();
+        self
+    }
+    pub fn register_reasoning_levels(&self) {
+        forge_types::effort::register_discovered_ladders(self.reasoning_levels.clone());
     }
 
     /// Attach provider-published display names (keyed by full id). Entries for ids not in the

@@ -91,6 +91,7 @@ fn provider_add(
     label: Option<String>,
 ) -> Result<()> {
     let cfg = forge_config::CustomProviderConfig {
+        pricing_stat: None,
         namespace: namespace.clone(),
         base_url: base_url.clone(),
         api_key_env: api_key_env.clone(),

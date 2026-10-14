@@ -211,6 +211,7 @@ pub fn to_embed_response(
 
 	// Create usage information - Gemini doesn't provide token counts in embedding responses
 	let usage = Usage {
+		cost: None,
 		prompt_tokens: None, // Gemini doesn't provide token counts for embeddings
 		completion_tokens: None,
 		total_tokens: None,

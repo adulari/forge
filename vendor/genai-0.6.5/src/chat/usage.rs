@@ -25,6 +25,13 @@ pub struct Usage {
 	/// Total tokens as reported by the API, or computed as prompt + completion
 	/// (including cache read/creation tokens when applicable).
 	pub total_tokens: Option<i32>,
+
+	/// The charge for this call in USD, when the API reports it (`usage.cost`, an
+	/// OpenAI-compatible extension sent by gateways such as InferHub and OpenRouter).
+	/// Forge fork addition. A malformed value reads as `None` rather than failing the
+	/// whole usage object.
+	#[serde(default, deserialize_with = "crate::support::lenient_f64")]
+	pub cost: Option<f64>,
 }
 
 impl Usage {
