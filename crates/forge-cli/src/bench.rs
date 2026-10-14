@@ -49,6 +49,13 @@ pub struct SweInstance {
     pub repo: String,
     pub base_commit: String,
     pub problem_statement: String,
+    /// The graded test ids; only the integrity check reads them (special-casing rule).
+    #[serde(
+        default,
+        rename = "FAIL_TO_PASS",
+        deserialize_with = "integrity::string_or_list"
+    )]
+    pub fail_to_pass: Vec<String>,
 }
 
 /// A prediction row in the schema the official `swebench` evaluator consumes.
@@ -138,6 +145,8 @@ struct RunOutcome {
     /// The bridge turn ran with no working Forge tools (`mcp-serve` failed to start, wave 7). Drives
     /// the once-only fresh-process retry in [`run_one_sweep`]; only the Forge/bridge path sets it.
     tools_unavailable: bool,
+    /// The in-process Forge session's tool calls, for the integrity check. External CLIs: `None`.
+    trace: Option<Vec<integrity::TraceCall>>,
 }
 
 impl RunOutcome {
@@ -153,6 +162,7 @@ impl RunOutcome {
             metrics_complete: false,
             timed_out: false,
             tools_unavailable: false,
+            trace: None,
         }
     }
 }
@@ -302,8 +312,13 @@ pub async fn run_swe(
     agent: Agent,
     timeout_secs: u64,
     attempts: usize,
+    judge: Option<String>,
 ) -> Result<()> {
     let mut instances = load_instances(&dataset)?;
+    let integrity_opts = integrity::SweepOptions {
+        grader_paths: integrity::grader_paths_for(&dataset),
+        judge,
+    };
     if let Some(n) = limit {
         instances.truncate(n);
     }
@@ -327,6 +342,7 @@ pub async fn run_swe(
             agent,
             timeout_secs,
             &seed_out,
+            &integrity_opts,
         )
         .await?;
     }
@@ -428,6 +444,7 @@ async fn run_one_sweep(
     agent: Agent,
     timeout_secs: u64,
     out: &Path,
+    integrity_opts: &integrity::SweepOptions,
 ) -> Result<()> {
     eprintln!(
         "SWE-bench [{}]: {} instance(s) → {}; repos under {}",
@@ -443,6 +460,7 @@ async fn run_one_sweep(
     let orig_cwd = std::env::current_dir().context("reading current dir")?;
     let mut preds = Vec::with_capacity(instances.len());
     let mut metrics = Vec::with_capacity(instances.len());
+    let mut integrity_reports = Vec::with_capacity(instances.len());
     let total = instances.len();
     for (i, inst) in instances.iter().enumerate() {
         eprintln!("[{}/{}] {} ({})", i + 1, total, inst.instance_id, inst.repo);
@@ -473,6 +491,16 @@ async fn run_one_sweep(
         }
         // Always restore CWD so the next instance (and the final write) resolve correctly.
         let _ = std::env::set_current_dir(&orig_cwd);
+        integrity_reports.push(
+            integrity::assess(
+                inst,
+                workdir,
+                &outcome.patch,
+                outcome.trace.as_deref(),
+                integrity_opts,
+            )
+            .await,
+        );
         let patched = !outcome.patch.is_empty();
         let mut instance_runtime = runtime.clone();
         if let Some(runtime) = &mut instance_runtime {
@@ -525,6 +553,13 @@ async fn run_one_sweep(
              after one retry) — these are ERRORS, exclude them from resolve-rate denominators"
         );
     }
+    let integrity_out = integrity::integrity_path(out);
+    std::fs::write(
+        &integrity_out,
+        integrity::reports_to_jsonl(&integrity_reports),
+    )
+    .with_context(|| format!("writing {}", integrity_out.display()))?;
+    integrity::print_summary(&integrity_reports, &integrity_out);
     eprintln!("score with the official evaluator — see docs/benchmarks/swe-bench.md");
     Ok(())
 }
@@ -566,6 +601,9 @@ async fn run_one_instance(
 mod external_agent;
 use external_agent::run_external_agent;
 
+mod integrity;
+pub(crate) use integrity::integrity_cmd;
+
 mod report;
 #[cfg(test)]
 use report::load_metrics;
@@ -583,6 +621,7 @@ async fn prepare_and_run(
     let dir = prepare_repo(inst, workdir)?;
     std::env::set_current_dir(&dir).context("entering instance repo")?;
     let started = std::time::Instant::now();
+    let mut trace = None;
     let (input_tokens, output_tokens, cost_usd, metrics_complete, timed_out, tools_unavailable) =
         match agent {
             Agent::Forge => {
@@ -629,6 +668,7 @@ async fn prepare_and_run(
                     };
                 // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
                 let (inp, out, cost) = session.session_usage_db();
+                trace = Some(integrity::session_trace(&session));
                 // Wave 7: did this turn run toolless because `mcp-serve` failed to start? Only the
                 // bridge/headless path can report it; the harness retries the instance once on it.
                 (inp, out, cost, true, timed_out, session.tools_unavailable())
@@ -657,6 +697,7 @@ async fn prepare_and_run(
         metrics_complete,
         timed_out,
         tools_unavailable,
+        trace,
     })
 }
 

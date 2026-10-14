@@ -131,6 +131,24 @@ pub(crate) enum BenchCmd {
         /// one predictions file per seed (`<out>.seed1.jsonl`, …); aggregate with `bench passk`.
         #[arg(long, default_value_t = 1)]
         attempts: usize,
+        /// Model that reviews each patch for reward hacking after the deterministic integrity
+        /// checks. It can only escalate an attempt to an integrity FAIL, never clear one.
+        #[arg(long)]
+        judge: Option<String>,
+    },
+    /// Run the deterministic integrity checks over an existing predictions file (any harness):
+    /// skip/xfail markers, collection-config edits, deleted asserts and FAIL_TO_PASS
+    /// special-casing score 0; touched test files warn. Writes `<predictions>.integrity.jsonl`.
+    Integrity {
+        /// predictions.jsonl from `bench swe` or another harness.
+        #[arg(long)]
+        predictions: std::path::PathBuf,
+        /// The SWE-bench dataset the predictions answer (supplies FAIL_TO_PASS).
+        #[arg(long)]
+        dataset: std::path::PathBuf,
+        /// Optional reviewer model; it can only escalate to FAIL.
+        #[arg(long)]
+        judge: Option<String>,
     },
     /// Aggregate pass@k from several swebench evaluation reports (one per seed).
     Passk {
@@ -549,6 +567,11 @@ pub(crate) enum Command {
         /// your normal permission mode, exactly as `forge run` would. Single id only.
         #[arg(long)]
         rerun: bool,
+        /// Print secrets verbatim. By default every output (transcript, --json, --html) masks
+        /// configured API keys, secret-named env values, credential shapes (sk-…, ghp_…, JWTs,
+        /// PEM keys, Bearer …) and `password=…`-style values as `[redacted]`.
+        #[arg(long)]
+        no_redact: bool,
     },
     /// The counterfactual: branch a past session BEFORE turn N — every earlier turn held
     /// verbatim as fixed context — and re-ask that one prompt, optionally on a different model.

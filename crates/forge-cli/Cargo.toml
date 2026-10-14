@@ -62,6 +62,7 @@ rmcp = { workspace = true, features = [
 ] }
 serde = { workspace = true }
 serde_json.workspace = true
+regex.workspace = true
 toml = "1.1"
 # APNs (crates/forge-cli/src/apns.rs) requires HTTP/2 — Apple's push gateway rejects HTTP/1.1.
 reqwest = { workspace = true, features = ["http2"] }

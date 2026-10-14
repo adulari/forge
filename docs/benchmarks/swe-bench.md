@@ -102,6 +102,15 @@ done
 Use the **same model family** across agents (e.g. Forge pinned to `anthropic::claude-…` vs
 `--agent claude-code --model …`) to isolate the harness from the model.
 
+## Integrity sidecar
+
+Every `bench swe` run also writes `<out>.integrity.jsonl`: deterministic tamper checks per
+attempt (skip/xfail markers, collection-config edits, deleted asserts, FAIL_TO_PASS special-casing,
+grader reads and git history beyond the base commit). Score a `fail` row 0 whatever the evaluator
+says. `forge bench integrity --predictions … --dataset …` runs the same patch checks on any
+harness's predictions, and `--judge <model>` adds an escalate-only review. See
+[docs/features/bench-integrity.md](../features/bench-integrity.md).
+
 ## Efficiency: resolve rate AND tokens-per-success
 
 Resolve rate alone doesn't capture the goal "Forge gets **more out of a subscription** than the

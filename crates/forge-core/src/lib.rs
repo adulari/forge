@@ -78,6 +78,7 @@ pub mod project_context;
 pub mod push_notify;
 mod quality_gates;
 pub mod readiness;
+pub mod redact;
 mod refinement;
 mod replay;
 mod review_gate;
@@ -698,7 +699,7 @@ paths and verify that each injected failure leaves state unchanged.";
 /// existing-tests-are-spec guard keys on. Matches by basename (`test_*.py`, `*_test.py`,
 /// `*_tests.rs`, `*_test.rs`, `*.test.js/ts`, `*.spec.js/ts`, `test_*.rs`) or by living under a
 /// `tests/` / `test/` / `testing/` directory component. Paths use `/` (git porcelain output).
-pub(crate) fn is_test_path(path: &str) -> bool {
+pub fn is_test_path(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     let by_name = (base.starts_with("test_") && (base.ends_with(".py") || base.ends_with(".rs")))
         || base.ends_with("_test.py")
