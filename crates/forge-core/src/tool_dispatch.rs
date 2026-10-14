@@ -179,6 +179,7 @@ impl Session {
                 summary: summarize(&result),
                 detail: crate::tool_detail(&result),
             });
+            self.record_test_proof(&p.name, &p.args, &result, full.as_deref());
             let kept = self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
             let result = crate::tool_output::fit_for_model(result, kept.as_deref());
             self.store.record_tool_call(
@@ -637,7 +638,11 @@ impl Session {
             let Some(tool) = self.tools.get(&call.name) else {
                 unreachable!("tool `{}` resolved above", call.name)
             };
-            let run = tool.run_full(&effective_args);
+            let run = forge_tools::scope_session(
+                self.id.clone(),
+                self.workspace.root().to_path_buf(),
+                tool.run_full(&effective_args),
+            );
             let outcome = if call.name == "shell"
                 && effective_args
                     .get("background")
@@ -712,6 +717,7 @@ impl Session {
         } else {
             ("permission denied by policy".to_string(), None, false)
         };
+        self.record_test_proof(&call.name, &effective_args, &result, full.as_deref());
 
         self.presenter.emit(PresenterEvent::ToolResult {
             name: call.name.clone(),

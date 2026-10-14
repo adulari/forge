@@ -23,6 +23,7 @@ mod browser;
 mod core_tools;
 mod device;
 mod discovery_tools;
+pub mod evidence;
 mod lattice_tool;
 mod proxy;
 mod sandbox;
@@ -35,6 +36,7 @@ pub use core_tools::{
     ReadFileTool, WriteFileTool,
 };
 pub use device::{DeviceLogsTool, DeviceTool};
+pub use evidence::scope_session;
 pub use lattice_tool::LatticeTool;
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};

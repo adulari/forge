@@ -504,6 +504,9 @@ impl ForgeMcp {
             }
             Err(e) => (format!("error: {e}"), false),
         };
+        if ok {
+            forge_core::evidence_capture::record_bridge_verification_proof(&name, &args, &out);
+        }
 
         // PostToolUse hooks (hooks.md): observe the completed call. Notes are surfaced as a
         // prefix on the result the bridge model sees (no presenter available on this path).
