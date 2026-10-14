@@ -1,43 +1,32 @@
-//! Deferred tool surface for the CLI bridge.
+//! Deferred tool surface for the CLI bridge: a thin `rmcp::Tool` adapter over the registry the
+//! direct path uses ([`forge_core::deferred_tools`]), so both paths share the core set, the
+//! catalog text and the search ranking.
 //!
-//! A bridged CLI re-ingests every advertised tool schema on every request of ITS loop, and Forge's
-//! full surface (device/browser/proxy/subagents/MCP meta-tools/…) is ~15K tokens. Most turns use
-//! six of them. The core coding tools stay advertised; everything else is listed by name inside
-//! `tool_search`'s description and loaded on demand: `tool_search` returns the full description and
-//! schema of the matching tools, `tool_call` invokes one by name through the normal dispatch (so
-//! the permission gate, hooks and bridge caps apply exactly as for an advertised tool).
+//! A bridged CLI re-ingests every advertised tool schema on every request of ITS loop. The core
+//! coding tools stay advertised; everything else is listed inside `tool_search`'s description and
+//! loaded on demand: `tool_search` returns the full description and schema of the matching tools,
+//! `tool_call` invokes one by name through the normal dispatch (so the permission gate, hooks and
+//! bridge caps apply exactly as for an advertised tool).
 
+use forge_core::deferred_tools as shared;
+use forge_provider::ToolSpec;
 use rmcp::model::{JsonObject, Tool};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::Arc;
 
-pub(super) const TOOL_SEARCH: &str = "tool_search";
-pub(super) const TOOL_CALL: &str = "tool_call";
+pub(super) use shared::{is_core, TOOL_CALL, TOOL_SEARCH};
 
-/// Tools advertised up front on a lean bridge. Everything else is deferred behind
-/// [`TOOL_SEARCH`]/[`TOOL_CALL`].
-pub(super) const CORE_TOOLS: &[&str] = &[
-    "shell",
-    "read_file",
-    "edit_file",
-    "multi_edit",
-    "apply_patch",
-    "write_file",
-    "append_file",
-    "delete_file",
-    "search",
-    "glob",
-    "list_dir",
-    "update_tasks",
-    "present_plan",
-    "use_skill",
-    "dispatch_sessions",
-    TOOL_SEARCH,
-    TOOL_CALL,
-];
+fn to_spec(tool: &Tool) -> ToolSpec {
+    ToolSpec {
+        name: tool.name.to_string(),
+        description: tool.description.as_deref().unwrap_or_default().to_string(),
+        schema: Value::Object((*tool.input_schema).clone()),
+    }
+}
 
-pub(super) fn is_core(name: &str) -> bool {
-    CORE_TOOLS.contains(&name)
+fn to_tool(spec: ToolSpec) -> Tool {
+    let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
+    Tool::new(spec.name, spec.description, Arc::new(schema))
 }
 
 /// Split a full tool list into the advertised core and the deferred rest.
@@ -47,127 +36,31 @@ pub(super) fn partition(tools: Vec<Tool>) -> (Vec<Tool>, Vec<Tool>) {
 
 /// The two meta-tools that make the deferred tools reachable. `None` when nothing is deferred.
 pub(super) fn meta_tools(deferred: &[Tool]) -> Option<[Tool; 2]> {
-    if deferred.is_empty() {
-        return None;
-    }
-    let mut names: Vec<&str> = deferred.iter().map(|t| t.name.as_ref()).collect();
-    names.sort_unstable();
-    let search = Tool::new(
-        TOOL_SEARCH,
-        format!(
-            "Look up Forge tools that are not listed here. Returns each match's description and \
-             input schema; then run it with tool_call. Not-listed tools: {}.",
-            names.join(", ")
-        ),
-        schema(json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Tool name or keywords; comma-separate several names."
-                }
-            },
-            "required": ["query"]
-        })),
-    );
-    let call = Tool::new(
-        TOOL_CALL,
-        "Run a tool found with tool_search by its exact name.",
-        schema(json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "arguments": { "type": "object", "description": "Per the tool's input schema." }
-            },
-            "required": ["name"]
-        })),
-    );
-    Some([search, call])
+    let specs: Vec<ToolSpec> = deferred.iter().map(to_spec).collect();
+    shared::meta_specs(&specs, false).map(|pair| pair.map(to_tool))
 }
 
-/// Cap on a per-parameter description on an advertised core tool. The full text of rarely used
-/// parameters (shell's poll/background modes) is re-ingested on every request for no benefit.
-const PARAM_DESC_CAP: usize = 110;
-
-/// Shorten every parameter description on `tool` to its first sentence, at most
-/// [`PARAM_DESC_CAP`] bytes.
+/// Shorten every parameter description on `tool` to its first sentence (see [`shared::slim`]).
 pub(super) fn slim(mut tool: Tool) -> Tool {
-    let mut schema = (*tool.input_schema).clone();
-    if let Some(Value::Object(props)) = schema.get_mut("properties") {
-        for prop in props.values_mut() {
-            if let Some(Value::String(desc)) = prop.get_mut("description") {
-                *desc = first_sentence(desc);
-            }
-        }
-    }
-    tool.input_schema = Arc::new(schema);
+    let slimmed = shared::slim(to_spec(&tool));
+    tool.input_schema = Arc::new(slimmed.schema.as_object().cloned().unwrap_or_default());
     tool
-}
-
-fn first_sentence(desc: &str) -> String {
-    let end = desc
-        .match_indices(". ")
-        .map(|(i, _)| i + 1)
-        .next()
-        .unwrap_or(desc.len());
-    let mut cut = end.min(PARAM_DESC_CAP).min(desc.len());
-    while !desc.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    desc[..cut].trim_end().to_string()
-}
-
-fn schema(value: Value) -> Arc<JsonObject> {
-    Arc::new(value.as_object().cloned().unwrap_or_default())
 }
 
 /// Render the deferred tools matching `query` (exact names, or keywords against name/description).
 pub(super) fn search(deferred: &[Tool], query: &str) -> String {
-    let terms: Vec<String> = query
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .map(|t| t.trim().to_lowercase())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let exact: Vec<&Tool> = deferred
-        .iter()
-        .filter(|t| terms.iter().any(|q| t.name.eq_ignore_ascii_case(q)))
-        .collect();
-    let hits: Vec<&Tool> = if exact.is_empty() {
-        deferred
-            .iter()
-            .filter(|t| {
-                let hay = format!(
-                    "{} {}",
-                    t.name.to_lowercase(),
-                    t.description.as_deref().unwrap_or_default().to_lowercase()
-                );
-                terms.iter().any(|q| hay.contains(q.as_str()))
-            })
-            .collect()
-    } else {
-        exact
-    };
-    if hits.is_empty() {
-        let names: Vec<&str> = deferred.iter().map(|t| t.name.as_ref()).collect();
-        return format!("no tool matches '{query}'. Available: {}", names.join(", "));
-    }
-    hits.iter()
-        .take(8)
-        .map(|t| {
-            format!(
-                "## {}\n{}\ninput schema: {}",
-                t.name,
-                t.description.as_deref().unwrap_or_default(),
-                Value::Object((*t.input_schema).clone())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let specs: Vec<ToolSpec> = deferred.iter().map(to_spec).collect();
+    shared::search(&specs, query)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn schema(value: Value) -> Arc<JsonObject> {
+        Arc::new(value.as_object().cloned().unwrap_or_default())
+    }
 
     fn tool(name: &'static str, desc: &'static str) -> Tool {
         Tool::new(name, desc, schema(json!({"type": "object"})))
@@ -216,7 +109,7 @@ mod tests {
         assert_eq!(search.name, TOOL_SEARCH);
         assert_eq!(call.name, TOOL_CALL);
         let desc = search.description.unwrap();
-        assert!(desc.contains("browser, device"), "{desc}");
+        assert!(desc.contains("browser (b); device (d)"), "{desc}");
     }
 
     #[test]

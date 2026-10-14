@@ -117,7 +117,7 @@ struct ForgeMcp {
     /// default, matching the gate the interactive `/skill` path already applies.
     trust_project: bool,
     /// Lean tool surface (default; `FORGE_BRIDGE_LEAN=0` / `mesh.bridge_lean = false` opts out):
-    /// only [`deferred::CORE_TOOLS`] are advertised, the rest load through `tool_search`.
+    /// only [`forge_core::deferred_tools::CORE_TOOLS`] are advertised, the rest load through `tool_search`.
     lean: bool,
     /// `auto` temper: the classifier for Unknown shell commands (see `auto_classify.rs`).
     auto_classify: auto_classify::AutoClassify,

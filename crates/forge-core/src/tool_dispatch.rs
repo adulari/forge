@@ -4,6 +4,7 @@
 
 use super::*;
 
+mod deferred;
 mod mcp;
 
 /// Patterns for a runtime "always allow", scoped to the command the user was shown. An empty list
@@ -47,60 +48,6 @@ impl Session {
             roots.extend(forge_tools::read_only_roots(root));
         }
         (args, roots)
-    }
-
-    /// Run a single tool call, applying the permission policy, and return its result text.
-    /// Whether `call` is side-effect-free and safe to run concurrently in a batch: not a core-owned
-    /// virtual tool (those mutate session state / prompt the user), not an external MCP tool,
-    /// present in the registry, and ReadOnly — or a `shell` call that provably only reads
-    /// ([`permission::is_read_only_shell_call`]), so independent probes stop running one by one.
-    pub(crate) fn is_concurrent_readonly(&self, call: &forge_types::ToolCall) -> bool {
-        let name = call.name.as_str();
-        // The batch path skips the per-call task-scope gate, so a tool the scope forbids must take
-        // the serial path, which refuses it properly.
-        if self
-            .task_scope
-            .as_ref()
-            .is_some_and(|scope| !scope.permits_tool(name))
-        {
-            return false;
-        }
-        if name == "shell" {
-            // Only when the broker would allow it outright: the batch path never prompts, so a
-            // shell line that would ask must go through the serial path's confirmation instead.
-            return self.tools.get(name).is_some()
-                && permission::is_read_only_shell_call(&call.args)
-                && permission::decide(
-                    self.mode,
-                    forge_types::SideEffect::Shell,
-                    name,
-                    &call.args,
-                    &self.rules,
-                ) == PermissionDecision::Allow;
-        }
-        if name == subagent::SPAWN_AGENTS_TOOL
-            || name == workflow::RUN_WORKFLOW_TOOL
-            || name == ASK_USER_TOOL
-            || name == UPDATE_TASKS_TOOL
-            || name == PRESENT_PLAN_TOOL
-            || name == USE_SKILL_TOOL
-            || name == REMEMBER_TOOL
-            || name == fleet::MESSAGE_SESSION_TOOL
-            || name == fleet::LIST_SESSIONS_TOOL
-            || name == crate::dispatch::DISPATCH_SESSIONS_TOOL
-            || name == heartbeat::MANAGE_HEARTBEATS_TOOL
-            || name == wakeup::SCHEDULE_WAKEUP_TOOL
-            || name == push_notify::PUSH_NOTIFICATION_TOOL
-        {
-            return false;
-        }
-        if self.mcp.as_ref().is_some_and(|m| m.knows_tool(name)) {
-            return false;
-        }
-        self.tools
-            .get(name)
-            .map(|t| t.side_effect() == forge_types::SideEffect::ReadOnly)
-            .unwrap_or(false)
     }
 
     /// Execute a batch of side-effect-free tool calls CONCURRENTLY, then append their results in the
@@ -210,11 +157,14 @@ impl Session {
         Ok(classified)
     }
 
+    /// Run a single tool call, applying the permission policy, and return its result text.
     pub(crate) async fn invoke_tool(
         &mut self,
         msg_id: &str,
         call: &forge_types::ToolCall,
     ) -> Result<String, CoreError> {
+        // Idempotent: the model loop already resolved `tool_call`, so its counters saw the same call.
+        let call = &self.resolve_deferred_call(call);
         // Snapshot args before hooks so the audit row preserves exactly what the model requested.
         let call_args_json = serde_json::to_string(&call.args)?;
         if let Some(scope) = self
@@ -318,6 +268,11 @@ impl Session {
         if call.name == wakeup::SCHEDULE_WAKEUP_TOOL {
             return self.schedule_wakeup(msg_id, call);
         }
+        if call.name == crate::deferred_tools::TOOL_SEARCH
+            || call.name == crate::deferred_tools::TOOL_CALL
+        {
+            return self.invoke_deferred_meta(msg_id, call).await;
+        }
         // External MCP tools (meta-tools + exposed server tools) are owned by the manager, not the
         // built-in registry. Route them here, still through the permission broker (mcp-client.md).
         if self.mcp.as_ref().is_some_and(|m| m.knows_tool(&call.name)) {
@@ -386,7 +341,7 @@ impl Session {
         let Some(tool) = self.tools.get(&call.name) else {
             // Name the valid tools so the model can recover instead of guessing again.
             let mut available: Vec<String> =
-                self.tool_specs().into_iter().map(|s| s.name).collect();
+                self.full_tool_specs().into_iter().map(|s| s.name).collect();
             available.sort();
             let result = format!(
                 "error: unknown tool '{}'. Available tools: {}",

@@ -20,6 +20,15 @@ impl Session {
         failure_nudged: &mut bool,
         observations: &mut Vec<crate::loop_progress::CallObservation>,
     ) -> Result<bool, CoreError> {
+        // A `tool_call{name, arguments}` IS its inner call for every counter below: the phantom-edit
+        // gate (`mutations_ran`), the verification ledger, the failure and doom-loop guards, the
+        // env-fight cap and batch eligibility. Ids are kept, so the tool results still pair with
+        // the assistant message the model sent.
+        let resolved: Vec<forge_types::ToolCall> = calls
+            .iter()
+            .map(|call| self.resolve_deferred_call(call))
+            .collect();
+        let calls = resolved.as_slice();
         // Doom-loop guard: if the model emits the exact same tool call(s) several steps running,
         // it's stuck (re-reading the same file, retrying an identical failing edit). Identical
         // args yield identical results, so halt with a clear message instead of burning the

@@ -47,6 +47,7 @@ pub(crate) mod completion;
 mod context_floor;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
+pub mod deferred_tools;
 mod detached_subagents;
 pub mod dispatch;
 pub mod duel;
@@ -2324,7 +2325,13 @@ impl Session {
         n
     }
 
+    /// The surface the model is shown: lean (core + `tool_search`/`tool_call`) unless switched off.
     fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.advertised_tool_specs(self.full_tool_specs())
+    }
+
+    /// Every tool this session can run, before the lean surface defers any of them.
+    fn full_tool_specs(&self) -> Vec<ToolSpec> {
         let scope = self.task_scope.as_ref();
         let mut specs: Vec<ToolSpec> = self
             .tools
@@ -4938,6 +4945,9 @@ mod tests {
     #[path = "failure_streak_reset.rs"]
     mod failure_streak_reset_tests;
 
+    #[path = "deferred_dispatch.rs"]
+    mod deferred_dispatch_tests;
+
     #[path = "completeness_gate.rs"]
     mod completeness_gate_tests;
 
@@ -6138,9 +6148,23 @@ mod tests {
         .unwrap();
         session.set_mcp(Some(mgr));
 
-        // tool_specs advertises the MCP meta-tools (search + call); server tools are reached
-        // through mcp_call, never advertised individually.
-        let names: Vec<String> = session.tool_specs().into_iter().map(|s| s.name).collect();
+        // The lean surface folds the MCP meta-tools into tool_search/tool_call (the mcp_* names stay
+        // callable as aliases, which the scripted model below uses); the full surface keeps them.
+        let lean = session.tool_specs();
+        let search = lean.iter().find(|s| s.name == "tool_search").unwrap();
+        assert!(
+            search.description.contains("server__tool"),
+            "{}",
+            search.description
+        );
+        assert!(lean
+            .iter()
+            .all(|s| s.name != "mcp_search_tools" && s.name != "mcp_call"));
+        let names: Vec<String> = session
+            .full_tool_specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         assert!(names.iter().any(|n| n == "mcp_search_tools"));
         assert!(
             names.iter().any(|n| n == "mcp_call"),

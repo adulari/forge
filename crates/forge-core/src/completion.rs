@@ -129,6 +129,8 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
         "write_file",
         "append_file",
         "edit_file",
+        "multi_edit",
+        "notebook_edit",
         "apply_patch",
         "delete_file",
         "move_file",

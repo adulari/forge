@@ -399,6 +399,12 @@ warns the user to populate it via env/keyring. The discovery + parsing layer liv
 
 ### 5.4 Deferred tool loading via `mcp_search_tools` + `mcp_call`
 
+> On the direct path with the lean surface on (the default), `tool_search` / `tool_call` replace
+> these two in the advertised list: `tool_search` also searches the MCP catalog, and
+> `tool_call{name: "server__tool", arguments}` routes through `mcp_call`, so the inner-name
+> permission gate below still applies. `mcp_search_tools` / `mcp_call` stay callable as aliases.
+> See [deferred-tools.md](deferred-tools.md).
+
 A server can expose hundreds of tools (helm exposes 313); advertising every schema every turn
 would blow the context budget and degrade tool-selection. Forge advertises only a fixed set of
 **meta-tools** and reaches every server tool *through* one of them:
