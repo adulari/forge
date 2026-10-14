@@ -93,7 +93,7 @@ jobs:
           fi
       - name: Generate completions + man page
         run: cargo run --release --locked -p xtasks -- gen-dist dist-assets
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: forge-assets
           path: dist-assets/**
@@ -299,7 +299,7 @@ jobs:
         run: scripts/check-linux-runtime-deps.sh "target/${{ matrix.target }}/release/${{ matrix.bin }}"
 
       - name: Upload raw binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: forge-raw-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.bin }}
@@ -517,7 +517,7 @@ jobs:
           gh workflow run app-web.yml --ref main -f release_tag="$RELEASE_TAG"
 
       - name: Upload CLI checksums for the manifest job
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: forge-cli-checksums
           path: dist/checksums.txt
