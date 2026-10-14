@@ -27,7 +27,14 @@ pub(crate) async fn run(
     // like the interactive dispatcher — without this the literal `/rust` reaches the model as
     // prose and it guesses at the intent. Unknown tokens (absolute paths, TUI-only builtins)
     // pass through verbatim; `//…` escapes a literal leading slash, mirroring chat.
-    let (prompt, command_guidance, tier) = expand_one_shot_slash(&prompt)?;
+    // `forge run "/goal …"` is a loop, not a prompt: it is published to a running daemon as-is
+    // and otherwise driven locally by `run_goal_headless` (docs/features/goal-evaluator.md).
+    let goal_spec = parse_goal_prompt(&prompt);
+    let (prompt, command_guidance, tier) = if goal_spec.is_some() {
+        (prompt.trim().to_string(), Vec::new(), None)
+    } else {
+        expand_one_shot_slash(&prompt)?
+    };
     let mut guidance = system;
     guidance.extend(command_guidance);
 
@@ -77,7 +84,14 @@ pub(crate) async fn run(
             // them as a baseline so `usage` reports this invocation, as `claude -p` does.
             session.emit_restored_totals();
         }
-        let result = {
+        let result = if let Some(spec) = goal_spec {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let end = run_goal_headless(&mut session, spec, &guidance, &cwd, async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await;
+            end.and_then(GoalRunEnd::into_result)
+        } else {
             let turn = session.run_turn_with(&prompt, &guidance, tier);
             tokio::pin!(turn);
             tokio::select! {
@@ -90,6 +104,9 @@ pub(crate) async fn run(
         return written;
     }
 
+    if tui && goal_spec.is_some() {
+        anyhow::bail!("`forge run --tui` does not run /goal as a loop — use `forge chat`");
+    }
     let mut session = build_session(mock, mode, tui, resume, pin).await?;
     let before = session.session_usage_detail();
 
@@ -124,7 +141,14 @@ pub(crate) async fn run(
 
     // Race the turn against Ctrl-C so a hard kill doesn't discard partial output: on interrupt we
     // drop the turn future (it stops at its next await) and return what already streamed.
-    let result = {
+    let result = if let Some(spec) = goal_spec {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let end = run_goal_headless(&mut session, spec, &guidance, &cwd, async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
+        end.and_then(GoalRunEnd::into_result)
+    } else {
         let turn = session.run_turn_with(&prompt, &guidance, tier);
         tokio::pin!(turn);
         tokio::select! {

@@ -81,10 +81,27 @@ total and shows in per-provider and per-model spend.
 - Interactive TUI (`forge chat`): `run.rs` turn-done handler.
 - Daemon-hosted sessions (`forge serve`, the phone and browser, and `forge run "/goal …"` when it
   is published to a running daemon): the session driver, `run/driver/input.rs`.
+- Local headless `forge run "/goal <objective> [--gate "<cmd>"]... [--max-tokens N]
+  [--max-minutes N]"` — no daemon running, or `--no-publish-to-fleet`, `--usage-json` or a
+  machine `--output-format` (all of which keep the run local): `run/goal_headless.rs`.
 
-Both call `advance_goal` + `launch_goal_step` (`run/goal_progress.rs`), so they cannot drift. A
-local one-shot `forge run` without a daemon does not run `/goal` as a loop (it never did): the
-text goes to the model as a single prompt.
+The interactive and daemon drivers call `advance_goal` + `launch_goal_step`
+(`run/goal_progress.rs`); the headless run has no `App`, so it calls `settle_goal`, the function
+`advance_goal` itself ends in. The evaluator, verdict handling, `GOAL_MAX_ITERS`, token/minute
+budgets, wedge and disagreement stops, and `--gate` quality gates are therefore the same code.
+
+Headless specifics:
+
+- Each iteration is a turn, then one evaluator call (verdict lines print like in the TUI), then
+  the decision. Gates run in the session's workspace root, not the launch directory.
+- Exit code: 0 only when the goal is met (evaluator or task plan says so and all gates pass).
+  Every other end (budget, iteration ceiling, wedged, gate exhausted, agent/evaluator
+  disagreement) prints its reason and exits 1. A turn that ends with open tasks does not fail the
+  run the way a plain one-shot does; the next iteration continues it.
+- Ctrl-C drops the in-flight turn or evaluation, keeps what streamed, and exits 1
+  (`🎯 goal stopped — interrupted`).
+- `--usage-json` covers every iteration and evaluator call of the invocation.
+- `forge run --tui "/goal …"` is rejected; use `forge chat`.
 
 ## 5. Implementation
 
@@ -94,6 +111,8 @@ text goes to the model as a single prompt.
 - `crates/forge-cli/src/cli/commands/run/goal_progress.rs` — the verdict-aware
   `next_goal_decision`, the re-drive prompt, disagreement and wedge tracking, and the shared
   `advance_goal`/`launch_goal_step` used by both drivers.
+- `crates/forge-cli/src/cli/commands/run/goal_headless.rs` — `parse_goal_prompt` and
+  `run_goal_headless`, the local one-shot loop (tests: `goal_headless_tests.rs`).
 - `crates/forge-provider/src/mock_goal.rs` — the `--mock` provider answers the evaluator from the
   task plan in its input (achieved when every task is done), so offline goals end as before.
 - `crates/forge-config/src/goal.rs` — `[goal]`.

@@ -10,7 +10,9 @@
 //!
 //! Both drivers of `/goal` — the interactive TUI loop and the daemon-hosted session driver behind
 //! `forge serve` (which also runs `forge run "/goal …"` published to the fleet) — go through
-//! [`advance_goal`] and [`launch_goal_step`], so they cannot drift apart.
+//! [`advance_goal`] and [`launch_goal_step`], so they cannot drift apart. The headless local
+//! `forge run` (goal_headless.rs) has no `App` to drive, so it calls the same [`settle_goal`] the
+//! two of them end in.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -28,6 +30,19 @@ pub(crate) const GOAL_DISAGREE_MAX: usize = 3;
 /// An "achieved" verdict below this confidence counts only when the agent also claims completion.
 pub(crate) const GOAL_EVAL_MIN_CONFIDENCE: f64 = 0.5;
 const PROMPT_ITEMS: usize = 5;
+
+/// The first turn of a goal: decompose it into a tracked plan, then start.
+pub(crate) fn goal_start_prompt(goal: &str) -> String {
+    format!(
+        "Break this goal into a concrete, ordered plan and record it with the \
+         update_tasks tool, then start on the first step.\n\nGoal: {goal}"
+    )
+}
+
+/// The guidance primed on the session once a goal is set.
+pub(crate) fn goal_session_guidance(goal: &str) -> String {
+    format!("Session goal: {goal}\nKeep every step aligned to this goal until it is fully met.")
+}
 
 /// Evaluator bookkeeping that lives for one `/goal` run.
 #[derive(Debug, Default)]
@@ -75,7 +90,7 @@ impl GoalEvalTrack {
 }
 
 impl GoalState {
-    fn eval_request(&self) -> GoalEvalRequest {
+    pub(crate) fn eval_request(&self) -> GoalEvalRequest {
         GoalEvalRequest {
             goal: self.goal.clone(),
             started_unix: self.started_unix,
@@ -252,6 +267,75 @@ pub(crate) enum GoalNext {
     Continue(String),
 }
 
+/// What a finished turn (and its evaluation) looks like to the goal policy, read off the session.
+pub(crate) struct GoalTurnFacts {
+    done: usize,
+    total: usize,
+    said_complete: bool,
+    /// Gates check the checkout the session is working in, which a `worktree enter` moves away
+    /// from the directory Forge was launched in.
+    root: std::path::PathBuf,
+}
+
+impl GoalTurnFacts {
+    pub(crate) fn read(s: &Session, cwd: &Path) -> Self {
+        let tasks = s.tasks();
+        let root = s.workspace_root();
+        Self {
+            done: tasks
+                .iter()
+                .filter(|t| t.status == forge_types::TodoStatus::Done)
+                .count(),
+            total: tasks.len(),
+            said_complete: is_goal_complete_marker(s.last_assistant_text()),
+            root: if root.as_os_str().is_empty() {
+                cwd.to_path_buf()
+            } else {
+                root.to_path_buf()
+            },
+        }
+    }
+}
+
+/// The decision after a goal turn has been evaluated (or the evaluator is off).
+pub(crate) enum GoalStep {
+    /// The run ended; `met` is false for every reason but a genuine completion.
+    Stop {
+        reason: String,
+        met: bool,
+    },
+    Turn(String),
+    Continue(String),
+}
+
+/// Fold the evaluation left in `gs.eval.slot` (if any) into the next step. Shared by the
+/// interactive/daemon drivers and the headless local run, so the stop conditions cannot drift.
+pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> GoalStep {
+    gs.eval.evaluating = false;
+    let verdict = gs.eval.slot.lock().unwrap().take();
+    let tokens = std::mem::take(&mut gs.eval.pending_tokens);
+    let decision = next_goal_decision(
+        gs,
+        facts.said_complete,
+        facts.done,
+        facts.total,
+        tokens,
+        verdict,
+        &facts.root,
+    )
+    .await;
+    match decision {
+        GoalDecision::Stop(reason) => GoalStep::Stop {
+            met: is_goal_complete_reason(&reason),
+            reason,
+        },
+        GoalDecision::GateFailed { prompt } => GoalStep::Turn(prompt),
+        GoalDecision::Retry { prompt } => {
+            GoalStep::Continue(prompt.unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string()))
+        }
+    }
+}
+
 /// Advance a goal run whose in-flight generation just finished: after a turn, evaluate it (when
 /// the evaluator is on); after the evaluation (or with it off), decide.
 pub(crate) async fn advance_goal(
@@ -268,43 +352,16 @@ pub(crate) async fn advance_goal(
             return GoalNext::Evaluate(gs.eval_request());
         }
     }
-    gs.eval.evaluating = false;
-    let verdict = gs.eval.slot.lock().unwrap().take();
-    let (done, total, said_complete) = {
-        let s = session.lock().await;
-        let tasks = s.tasks();
-        (
-            tasks
-                .iter()
-                .filter(|t| t.status == forge_types::TodoStatus::Done)
-                .count(),
-            tasks.len(),
-            is_goal_complete_marker(s.last_assistant_text()),
-        )
-    };
-    let tokens = std::mem::take(&mut gs.eval.pending_tokens);
-    // Gates check the checkout the session is working in, which a `worktree enter` moves away
-    // from the directory Forge was launched in.
-    let root = {
-        let s = session.lock().await;
-        let root = s.workspace_root();
-        if root.as_os_str().is_empty() {
-            cwd.to_path_buf()
-        } else {
-            root.to_path_buf()
-        }
-    };
-    match next_goal_decision(gs, said_complete, done, total, tokens, verdict, &root).await {
-        GoalDecision::Stop(reason) => {
-            if !is_goal_complete_reason(&reason) {
+    let facts = GoalTurnFacts::read(&*session.lock().await, cwd);
+    match settle_goal(gs, facts).await {
+        GoalStep::Stop { reason, met } => {
+            if !met {
                 app.note(&reason);
             }
             GoalNext::Stop
         }
-        GoalDecision::GateFailed { prompt } => GoalNext::Turn(prompt),
-        GoalDecision::Retry { prompt } => {
-            GoalNext::Continue(prompt.unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string()))
-        }
+        GoalStep::Turn(prompt) => GoalNext::Turn(prompt),
+        GoalStep::Continue(prompt) => GoalNext::Continue(prompt),
     }
 }
 

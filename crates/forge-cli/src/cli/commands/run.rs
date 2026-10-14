@@ -23,6 +23,8 @@ pub(crate) use autonomous::*;
 
 mod gates;
 pub(crate) use gates::*;
+mod goal_headless;
+pub(crate) use goal_headless::*;
 mod goal_progress;
 pub(crate) use goal_progress::*;
 
