@@ -7,6 +7,9 @@ Three pieces that make Forge measurable outside SWE-bench and let the results be
 - `forge run --usage-json <path>` reports what a single headless run consumed, for any harness
   that drives Forge as a subprocess.
 
+A fourth command, `forge bench recall`, measures context recall after compaction and resume; it
+is in [bench-recall.md](bench-recall.md).
+
 The scoring side (`bench report`, pass@1, cost per solved task) is in
 [bench-metrics.md](bench-metrics.md); integrity checks are in
 [bench-integrity.md](bench-integrity.md).

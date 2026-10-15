@@ -197,6 +197,28 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 })
                 .await
             }
+            BenchCmd::Recall {
+                model,
+                mock,
+                turns_scale,
+                skip_resume,
+                keep_workdir,
+                json,
+                price_in,
+                price_out,
+            } => {
+                bench::run_recall(bench::RecallOptions {
+                    model,
+                    mock,
+                    turns_scale,
+                    skip_resume,
+                    keep_workdir,
+                    json,
+                    price_in_per_mtok: price_in,
+                    price_out_per_mtok: price_out,
+                })
+                .await
+            }
             BenchCmd::Export {
                 metrics,
                 out,

@@ -1,0 +1,459 @@
+{
+  "model": "inferhub::glm-5.3-flash",
+  "turns_scale": 1.0,
+  "scenario_turns": 23,
+  "failed_turns": 0,
+  "compactions": [
+    {
+      "label": "mid-scenario",
+      "messages_before": 134,
+      "messages_after": 21
+    },
+    {
+      "label": "near-end",
+      "messages_before": 52,
+      "messages_after": 15
+    }
+  ],
+  "resumed": true,
+  "after_compaction": {
+    "total": {
+      "passed": 17,
+      "total": 18
+    },
+    "by_category": {
+      "constraint": {
+        "passed": 3,
+        "total": 3
+      },
+      "correction": {
+        "passed": 1,
+        "total": 1
+      },
+      "decision": {
+        "passed": 3,
+        "total": 3
+      },
+      "location": {
+        "passed": 2,
+        "total": 2
+      },
+      "error_fix": {
+        "passed": 2,
+        "total": 2
+      },
+      "pending": {
+        "passed": 2,
+        "total": 2
+      },
+      "number": {
+        "passed": 2,
+        "total": 3
+      },
+      "behavior": {
+        "passed": 2,
+        "total": 2
+      }
+    },
+    "by_zone": {
+      "plant": {
+        "passed": 15,
+        "total": 15
+      },
+      "late": {
+        "passed": 2,
+        "total": 3
+      }
+    },
+    "tool_assisted": 0
+  },
+  "after_resume": {
+    "total": {
+      "passed": 17,
+      "total": 18
+    },
+    "by_category": {
+      "constraint": {
+        "passed": 3,
+        "total": 3
+      },
+      "correction": {
+        "passed": 1,
+        "total": 1
+      },
+      "decision": {
+        "passed": 3,
+        "total": 3
+      },
+      "location": {
+        "passed": 2,
+        "total": 2
+      },
+      "error_fix": {
+        "passed": 2,
+        "total": 2
+      },
+      "pending": {
+        "passed": 2,
+        "total": 2
+      },
+      "number": {
+        "passed": 2,
+        "total": 3
+      },
+      "behavior": {
+        "passed": 2,
+        "total": 2
+      }
+    },
+    "by_zone": {
+      "plant": {
+        "passed": 15,
+        "total": 15
+      },
+      "late": {
+        "passed": 2,
+        "total": 3
+      }
+    },
+    "tool_assisted": 0
+  },
+  "usage": {
+    "input_tokens": 1316543,
+    "output_tokens": 9733,
+    "cached_input_tokens": 1151374,
+    "reasoning_tokens": 2972,
+    "model_calls": 160,
+    "tool_calls": 39,
+    "cost_usd": 0.0069229324799999995
+  },
+  "wall_secs": 1051.801079092,
+  "session_id": "f5084a7e-f37f-4dfa-b268-11ed805d91e9",
+  "workdir": "/tmp/forge-recall-ws-VTRugn",
+  "probes": [
+    {
+      "id": "unwrap_rule",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You said `unwrap()` is forbidden in `src/parser.rs`. However, our conversation never recorded a specific replacement you named — the only implied alternative is the codebase's existing `Result`/`Parse...",
+      "tool_calls": 0
+    },
+    {
+      "id": "commit_prefix",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "Every commit message must start with `JIRA-123` (e.g., `JIRA-123: fix header limit`).",
+      "tool_calls": 0
+    },
+    {
+      "id": "parser_choice",
+      "category": "decision",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "We chose our own hand-rolled parser over the nom crate, because nom added about 40 seconds to a clean build and CI build speed matters to us.",
+      "tool_calls": 0
+    },
+    {
+      "id": "timeout_type",
+      "category": "decision",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "We decided timeouts in the config are stored as whole seconds in a `u32` (already the case in `src/config.rs`'s `timeout_secs`), because the config file is edited by humans and `Duration` doesn't dese...",
+      "tool_calls": 0
+    },
+    {
+      "id": "config_filename",
+      "category": "correction",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "The config file the loader should read is `settings.toml` (from the project root) — you corrected my earlier assumption of `config.toml`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "added_function",
+      "category": "location",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You asked me to add `validate_header_len(len: usize) -> Result<(), ParseError>` to `src/limits.rs` — it returns an error when `len` exceeds `MAX_HEADER_BYTES`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "renamed_helper",
+      "category": "location",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "`tok_next` was renamed to `next_token` in src/lexer.rs (with its import and two call sites updated in src/parser.rs).",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_code",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "When we first ran `scripts/check.sh` it failed with `ERROR E-4172: header length limit too small: MAX_HEADER_BYTES (8192) rejects valid 12 KiB cookies`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_fix_value",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "We raised `MAX_HEADER_BYTES` from 8192 to **16384** in src/limits.rs to fix the E-4172 error about 12 KiB cookies being rejected.",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_test",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You said a regression test for the empty-header case still needs to be written later, in `tests/header_empty.rs`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_version",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You said to bump the crate to **0.4.2** once the limits change has landed.",
+      "tool_calls": 0
+    },
+    {
+      "id": "staging_port",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "The staging server listens on port 47123.",
+      "tool_calls": 0
+    },
+    {
+      "id": "latency_target",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You mentioned a p99 latency target of under 230 ms (with the staging server on port 47123).",
+      "tool_calls": 0
+    },
+    {
+      "id": "late_doc_rule",
+      "category": "constraint",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You said every new public function must have a `# Errors` section in its rustdoc.",
+      "tool_calls": 0
+    },
+    {
+      "id": "late_ascii_decision",
+      "category": "decision",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "The lexer stays ASCII-only, and any non-ASCII byte in a header is rejected with an error, because RFC 9110 field names are ASCII tokens. No code has been changed yet for this decision — I had just loc...",
+      "tool_calls": 0
+    },
+    {
+      "id": "late_bench_budget",
+      "category": "number",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "You never gave a time budget for the header benchmark in our conversation. The only timing figure mentioned was that the nom crate added about 40 seconds to a clean build, which is why we chose hand-r...",
+      "tool_calls": 0
+    },
+    {
+      "id": "obey_unwrap_rule",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "file ok | reply: Added `parse_content_length(raw: &str) -> Result<usize, ParseError>` to src/parser.rs:33 — it trims, rejects empty or no...",
+      "tool_calls": 4
+    },
+    {
+      "id": "obey_commit_prefix",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "commit: JIRA-123: raise header limit, rename tok_next to next_token, add validate_header_len",
+      "tool_calls": 1
+    },
+    {
+      "id": "unwrap_rule",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "`src/parser.rs` must never use `unwrap()`; instead, use `?` or an explicit `match`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "commit_prefix",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "Every commit message must start with `JIRA-123`, e.g. `JIRA-123: fix header limit`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "parser_choice",
+      "category": "decision",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "We chose our own hand-rolled parsing code (the `Token` lexer + `parse_header`) over the nom crate, because nom added roughly 40 seconds to a clean build and we need CI to stay fast.",
+      "tool_calls": 0
+    },
+    {
+      "id": "timeout_type",
+      "category": "decision",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "We decided on `u32` whole seconds for `Config::timeout_secs`, because the config file (settings.toml) is edited by humans and `Duration` doesn't deserialize nicely from toml.",
+      "tool_calls": 0
+    },
+    {
+      "id": "config_filename",
+      "category": "correction",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "The loader should read `settings.toml` from the project root — you corrected me on this after I initially said `config.toml`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "added_function",
+      "category": "location",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You asked me to add `validate_header_len(len: usize) -> Result<(), ParseError>`, which returns an error when `len` exceeds `MAX_HEADER_BYTES`, to src/limits.rs (done; the constant was later raised to ...",
+      "tool_calls": 0
+    },
+    {
+      "id": "renamed_helper",
+      "category": "location",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "`tok_next` was renamed to `next_token`, in src/lexer.rs (with its call sites updated in src/parser.rs as well).",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_code",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "`scripts/check.sh` printed `ERROR E-4172` (with the message \"header length limit too small: MAX_HEADER_BYTES (8192) rejects valid 12 KiB cookies\") when we first ran it.",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_fix_value",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "We raised `MAX_HEADER_BYTES` from 8192 to **16384** in src/limits.rs to fix the E-4172 error about 12 KiB cookies being rejected.",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_test",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You said the still-pending TODO is to add a regression test for the empty-header case in `tests/header_empty.rs` (with a version bump to 0.4.2 to follow once the limits change lands).",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_version",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You said to bump the crate version to 0.4.2 once the limits change has landed (still a pending TODO).",
+      "tool_calls": 0
+    },
+    {
+      "id": "staging_port",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "The staging server listens on port 47123 (with a p99 latency target of under 230 ms, per your earlier context note).",
+      "tool_calls": 0
+    },
+    {
+      "id": "latency_target",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You mentioned a p99 latency target of under 230 ms.",
+      "tool_calls": 0
+    },
+    {
+      "id": "late_doc_rule",
+      "category": "constraint",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You said every new public function must have a `# Errors` section in its rustdoc.",
+      "tool_calls": 0
+    },
+    {
+      "id": "late_ascii_decision",
+      "category": "decision",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "We decided the lexer stays ASCII-only, and any non-ASCII byte in a header must be rejected with an error, because RFC 9110 field names are ASCII tokens.",
+      "tool_calls": 0
+    },
+    {
+      "id": "late_bench_budget",
+      "category": "number",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "You never gave a time budget for a header benchmark in our conversation — no such number was ever mentioned. (The only budget-like numbers so far are the p99-under-230 ms latency target and the ~40 s ...",
+      "tool_calls": 0
+    },
+    {
+      "id": "obey_unwrap_rule",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "file ok | reply: Added `parse_content_length` to src/parser.rs:35 — it trims the value, rejects empty/non-ASCII-digit input with `ParseEr...",
+      "tool_calls": 3
+    },
+    {
+      "id": "obey_commit_prefix",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "commit: JIRA-123: rename tok_next to next_token, add validate_header_len, raise MAX_HEADER_BYTES to 16384, document handle_request",
+      "tool_calls": 2
+    }
+  ]
+}

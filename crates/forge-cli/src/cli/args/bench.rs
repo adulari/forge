@@ -84,6 +84,37 @@ pub(crate) enum BenchCmd {
         #[arg(long, default_value_t = 1200)]
         timeout_secs: u64,
     },
+    /// Measure how much of a long session's early context survives compaction and a resume: a
+    /// scripted multi-turn session plants facts (constraints, a correction, decisions, paths, an
+    /// error and its fix, pending tasks, numbers), is compacted twice and resumed from the
+    /// store, then probed one question per fact and scored by regex. Runs in a throwaway
+    /// workspace, store and config (docs/benchmarks/recall-baseline-2026-10.md).
+    Recall {
+        /// Model to pin (provider::model). Defaults to `inferhub::glm-5.3-flash`.
+        #[arg(long)]
+        model: Option<String>,
+        /// Use the offline mock provider: exercises the plumbing, recall is meaningless.
+        #[arg(long)]
+        mock: bool,
+        /// Multiply the number of filler tool-work turns (the planted turns never change).
+        #[arg(long, default_value_t = 1.0)]
+        turns_scale: f64,
+        /// Stop after the post-compaction probes; do not resume and probe again.
+        #[arg(long)]
+        skip_resume: bool,
+        /// Keep the temp workspace and print its path.
+        #[arg(long)]
+        keep_workdir: bool,
+        /// Print the report as JSON on stdout instead of the table.
+        #[arg(long)]
+        json: bool,
+        /// Model price in USD per million input tokens, for models the catalog cannot price.
+        #[arg(long, requires = "price_out")]
+        price_in: Option<f64>,
+        /// Model price in USD per million output tokens.
+        #[arg(long, requires = "price_in")]
+        price_out: Option<f64>,
+    },
     /// Export one redacted trajectory JSONL per attempt (`<out>/<task>.attempt<k>.jsonl`): an
     /// attempt header (outcome, integrity verdict, usage) then every transcript step, read from
     /// the store the run used (`FORGE_DB`). Secrets are masked and fields capped at 8 KB.
