@@ -195,9 +195,11 @@ struct Identity {
 }
 
 mod inbound_sequence;
+mod outbound_sequence;
 use inbound_sequence::{
     accept_inbound_envelopes, validate_inbound_metadata, validate_inbound_routing,
 };
+use outbound_sequence::reserve_outbound;
 
 mod streams;
 use streams::{
@@ -367,7 +369,9 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
     let mut connected_log_interval = tokio::time::interval(CONNECTED_LOG_INTERVAL);
     connected_log_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     connected_log_interval.tick().await;
-    let (local_events_tx, mut local_events_rx) = mpsc::channel(128);
+    // Small on purpose: per-stream queues coalesce stale snapshots, so the shared hop must not
+    // become a second, deeper backlog.
+    let (local_events_tx, mut local_events_rx) = mpsc::channel(8);
     let mut streams = HashMap::<[u8; 16], StreamHandle>::new();
     let blobs = RelayBlobClient {
         http: &http,
@@ -1274,8 +1278,7 @@ fn seal_for_recipient(
     recipient_id: [u8; 16],
     plaintext: &[u8],
 ) -> Result<Vec<u8>> {
-    let (state, sequence) = store.reserve_sequences(1)?;
-    let identity = identity_from_state(&state)?;
+    let (identity, sequence) = reserve_outbound(store)?;
     let envelope = Envelope::seal(
         EnvelopeMetadata {
             kind,
@@ -1689,7 +1692,10 @@ mod tests {
             b"response",
         )
         .expect("seal response");
-        assert_eq!(store.load().expect("reload state").next_sequence, 1);
+        assert_eq!(
+            store.load().expect("reload state").next_sequence,
+            outbound_sequence::OUTBOUND_BLOCK as u64
+        );
         let envelope = Envelope::decode(&encoded).expect("decode response");
         assert_eq!(envelope.metadata.sequence, 0);
         assert_eq!(envelope.metadata.recipient_id, [0x66; 16]);
@@ -2131,7 +2137,10 @@ mod tests {
         .expect("reuse acknowledgement");
         assert_eq!(retry.envelope, first.envelope);
         assert_eq!(retry.idempotency_key, first.idempotency_key);
-        assert_eq!(restarted.load().expect("load state").next_sequence, 1);
+        assert_eq!(
+            restarted.load().expect("load state").next_sequence,
+            outbound_sequence::OUTBOUND_BLOCK as u64
+        );
     }
 
     #[test]

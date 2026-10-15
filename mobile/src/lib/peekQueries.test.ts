@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   pastSessionsRefetchPolicy,
   sessionsRefetchPolicy,
+  sessionsRetryPolicy,
   SESSIONS_RECOVERY_POLL_MS,
 } from "./peekQueries";
 
@@ -55,5 +56,13 @@ describe("pastSessionsRefetchPolicy", () => {
   it("never polls, peeked or not — History is not a live view", () => {
     expect(pastSessionsRefetchPolicy({ peeking: true }).refetchInterval).toBe(false);
     expect(pastSessionsRefetchPolicy({ peeking: false }).refetchInterval).toBe(false);
+  });
+});
+
+describe("sessionsRetryPolicy", () => {
+  it("retries twice, the first time after 300 ms and then after 1 s", () => {
+    expect(sessionsRetryPolicy.retry).toBe(2);
+    expect(sessionsRetryPolicy.retryDelay(0)).toBe(300);
+    expect(sessionsRetryPolicy.retryDelay(1)).toBe(1000);
   });
 });

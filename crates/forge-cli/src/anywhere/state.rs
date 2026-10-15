@@ -342,6 +342,17 @@ impl LocalState {
     }
 }
 
+/// State-file operations lock and fsync; on a multi-thread runtime hand the worker back to tokio
+/// while they run instead of stalling every task parked on it.
+pub(super) fn blocking_fs<T>(operation: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(operation)
+        }
+        _ => operation(),
+    }
+}
+
 pub(crate) struct StateStore {
     pub(crate) path: PathBuf,
 }

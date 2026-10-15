@@ -272,6 +272,8 @@ export function FleetScreen() {
   const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
+  // Seeded from the last-known fleet and not yet confirmed by the host.
+  const showingLastKnown = hasData && query.dataUpdatedAt === 0;
   const pickerState = sessionPickerState({ isLoading: isFirstLoad, isError: query.isError, visibleCount: filteredData.length });
 
   const renderItem = useCallback(
@@ -347,6 +349,11 @@ export function FleetScreen() {
       {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
       <FleetServerSwitcher />
       <FleetHostFilter selected={hostFilter} onSelect={setHostFilter} />
+      {showingLastKnown ? (
+        <Text style={[typeScale.monoMeta, styles.lastKnown, { color: tokens.ink4 }]} accessibilityLiveRegion="polite">
+          {query.isError ? "Last known fleet — host not reachable" : "Last known fleet — updating…"}
+        </Text>
+      ) : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -387,6 +394,7 @@ export function FleetScreen() {
 }
 
 const styles = StyleSheet.create({
+  lastKnown: { paddingHorizontal: space.space16, paddingBottom: space.space8 },
   // Screen's own 16pt gutter is zeroed here — SessionCard/DecisionCard/the skeleton card
   // already carry their own 16pt inset, so leaving Screen's padding on doubled it to 32pt.
   // The header rows below (title/summary/chip strips) carry the single 16pt gutter directly
