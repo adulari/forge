@@ -1467,6 +1467,8 @@ pub struct StoredMessage {
     /// Encrypted provider items stored with an assistant reply (see `Message::provider_items`).
     /// Only the model-facing loads populate it; scrollback reads leave it `None`.
     pub provider_items: Option<forge_types::ProviderItems>,
+    /// Harness-authored nudge / ephemeral note marker (the row's `nudge` column).
+    pub kind: forge_types::MessageKind,
 }
 
 /// One row of a user-facing transcript page (see [`Store::load_history_page`]) — the

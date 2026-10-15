@@ -69,6 +69,7 @@ mod failure_verdict;
 mod final_answer;
 pub mod fleet;
 pub(crate) mod git_hygiene;
+mod harness_notes;
 mod harness_profile;
 pub mod heartbeat;
 pub mod hooks;
@@ -1735,6 +1736,11 @@ pub struct Session {
     context_floor: std::cell::Cell<context_floor::FloorState>,
     /// The window trim later requests reuse while it still fits (context_floor.rs).
     context_trim: std::cell::Cell<Option<context_floor::TrimState>>,
+    /// What the window trim dropped and what this turn already did about it (context_floor.rs).
+    trim_watch: context_floor::TrimWatch,
+    /// The model the last cost/gauge snapshot was for: which model's `[compact_cap]` the idle
+    /// auto-compact check in the CLI applies (see `Session::idle_compaction_trigger`).
+    gauge_model: Option<String>,
     /// Tools were advertised at least once this session, so a later trivial turn keeps them even
     /// after compaction folded away every tool message — dropping them is a full cache miss.
     tools_advertised_once: bool,
@@ -2662,11 +2668,7 @@ impl Session {
                     "all tasks reported done — verifying with a real state check before finishing ({}/{max_verify_attempts}){pending}",
                     *verify_attempts
                 )));
-                let nseq = self.next_seq();
-                let _ = self
-                    .store
-                    .add_message(&self.id, nseq, Role::System, &verify_nudge, None);
-                self.transcript.push(Message::system(verify_nudge));
+                let _ = self.push_note(forge_types::MessageKind::Continue, verify_nudge);
             }
             PostCheckDecision::AcceptNoArtifacts => {
                 self.presenter.emit(PresenterEvent::Warning(
@@ -3144,6 +3146,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_billable_input_tokens = 0;
         self.turn_hard_guard_abort = false;
         self.empty_reply_nudged = false;
+        self.trim_watch.begin_turn();
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
         self.failure_tracker.reset_turn();
@@ -3586,10 +3589,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         // Pair with compaction: compact BEFORE the re-drive if the transcript is
                         // near the window, so the nudge has room to actually do the work.
                         self.auto_compact_if_needed(&active_model).await;
-                        let seq = self.next_seq();
-                        self.store
-                            .add_nudge_message(&self.id, seq, EMPTY_DIFF_NUDGE)?;
-                        self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
+                        self.push_nudge(EMPTY_DIFF_NUDGE)?;
                         let nudge_specs = self.tool_specs();
                         let nudge_outcome = self
                             .run_model_loop(
@@ -3650,9 +3650,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     "{TEST_EDIT_GUARD}\n\nStashed test-file edits:\n- {}",
                     test_edits.join("\n- ")
                 );
-                let gseq = self.next_seq();
-                self.store.add_nudge_message(&self.id, gseq, &guard)?;
-                self.transcript.push(Message::user(&guard));
+                self.push_nudge(guard)?;
                 let guard_specs = self.tool_specs();
                 let guard_outcome = self
                     .run_model_loop(
@@ -4210,9 +4208,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             // Feed the reason back as a synthetic user message and re-drive the model loop (None
             // decision: no cross-model failover for the continuation, like the autofix re-run).
             let cont = format!("[stop hook] {reason}");
-            let seq = self.next_seq();
-            self.store.add_nudge_message(&self.id, seq, &cont)?;
-            self.transcript.push(Message::user(&cont));
+            self.push_nudge(cont)?;
             let cont_specs = self.tool_specs();
             let cont_outcome = self
                 .run_model_loop(
@@ -5068,6 +5064,9 @@ mod tests {
 
     #[path = "nudge_marker.rs"]
     mod nudge_marker_tests;
+
+    #[path = "context_trim_persistence.rs"]
+    mod context_trim_persistence_tests;
 
     #[path = "hooks_parity.rs"]
     mod hooks_parity_tests;

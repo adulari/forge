@@ -97,7 +97,7 @@ impl crate::Session {
     /// Re-drive a turn that reported file changes no mutating tool made. Returns true when a nudge
     /// was queued (caller continues the loop); false once the budget is spent, after a loud warning.
     pub(crate) fn nudge_unapplied_edit(&mut self, nudges: &mut usize) -> bool {
-        use crate::{Message, PresenterEvent, Role};
+        use crate::PresenterEvent;
         if *nudges >= MAX_PHANTOM_EDIT_NUDGES {
             self.presenter.emit(PresenterEvent::Warning(
                 "the turn did NOT apply the file changes it described — no mutating tool ran"
@@ -113,11 +113,7 @@ impl crate::Session {
                      nothing was changed. Perform the edits now with the available tools and \
                      verify the result before giving a final answer. If the change is genuinely \
                      unnecessary, say so explicitly with the reason.";
-        let nseq = self.next_seq();
-        let _ = self
-            .store
-            .add_message(&self.id, nseq, Role::System, nudge, None);
-        self.transcript.push(Message::system(nudge));
+        let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
         true
     }
 }

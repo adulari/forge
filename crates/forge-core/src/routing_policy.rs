@@ -292,13 +292,15 @@ impl Session {
         let floor = self.elision_floor();
         let mut trim = self.sticky_trim(floor);
         let mut out = preamble;
-        out.extend(to_llm_floored(
+        let (view, dropped) = crate::context_pipeline::to_llm_floored_counted(
             &self.transcript,
             budget_tokens.max(256),
             self.config.mesh.tool_result_context_token_budget,
             floor,
             &mut trim,
-        ));
+        );
+        out.extend(view);
+        self.trim_watch.last.set(dropped);
         self.store_trim(floor, trim);
         out
     }

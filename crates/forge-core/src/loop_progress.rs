@@ -374,11 +374,7 @@ impl crate::Session {
         }
         self.presenter
             .emit(forge_types::PresenterEvent::Warning(warning));
-        let seq = self.next_seq();
-        let _ = self
-            .store
-            .add_message(&self.id, seq, forge_types::Role::System, nudge, None);
-        self.transcript.push(forge_types::Message::system(nudge));
+        let _ = self.push_note(forge_types::MessageKind::LoopGuard, nudge);
         false
     }
 }

@@ -127,11 +127,7 @@ impl Session {
             first = unfinished.first().map(String::as_str).unwrap_or(""),
             all = unfinished.join("\n- ")
         );
-        let seq = self.next_seq();
-        let _ = self
-            .store
-            .add_message(&self.id, seq, Role::System, &nudge, None);
-        self.transcript.push(Message::system(&nudge));
+        let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
     }
 
     /// Stop a bridge turn that yielded with tracked tasks open. The turn is always recorded as

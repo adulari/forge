@@ -7,9 +7,6 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
-/// Context-fill fraction above which a turn-end auto-compact fires (context-compaction.md).
-pub(crate) const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
-
 /// The token the model is told to emit when the looped task is fully complete.
 pub(crate) const LOOP_DONE_SENTINEL: &str = "LOOP_COMPLETE";
 
@@ -526,6 +523,31 @@ pub(crate) fn spawn_compact(
     busy: &mut bool,
     busy_since: &mut std::time::Instant,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_compaction(session, done_tx, gen, app, busy, busy_since, false)
+}
+
+/// [`spawn_compact`] for the idle auto-compact: reported to hooks and the progress band as an
+/// automatic compaction, not a manual `/compact`.
+pub(crate) fn spawn_auto_compact(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+) -> tokio::task::JoinHandle<()> {
+    spawn_compaction(session, done_tx, gen, app, busy, busy_since, true)
+}
+
+fn spawn_compaction(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+    auto: bool,
+) -> tokio::task::JoinHandle<()> {
     app.done = false;
     app.tick = 0;
     *busy = true;
@@ -535,7 +557,7 @@ pub(crate) fn spawn_compact(
     tokio::spawn(async move {
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
-        if let Err(e) = sess.compact(false).await {
+        if let Err(e) = sess.compact(auto).await {
             sess.notify_error(&format!("compact failed: {e}"));
         }
     })

@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 mod harness_notice;
 mod job_notice;
+mod message_kind;
+pub use message_kind::MessageKind;
 mod provider_items;
 pub use provider_items::ProviderItems;
 pub mod effort;
@@ -138,6 +140,9 @@ pub struct Message {
     /// Encrypted provider items replayed ahead of this message, for the model that made them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_items: Option<provider_items::ProviderItems>,
+    /// Harness-authored nudge or ephemeral note marker; `Normal` for everything else.
+    #[serde(default, skip_serializing_if = "MessageKind::is_default")]
+    pub kind: MessageKind,
 }
 
 impl Message {
@@ -151,6 +156,7 @@ impl Message {
             visibility: Visibility::Llm,
             reasoning: None,
             provider_items: None,
+            kind: MessageKind::Normal,
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
@@ -167,6 +173,7 @@ impl Message {
             visibility: Visibility::Llm,
             reasoning: None,
             provider_items: None,
+            kind: MessageKind::Normal,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -186,6 +193,7 @@ impl Message {
             visibility: Visibility::Llm,
             reasoning: None,
             provider_items: None,
+            kind: MessageKind::Normal,
         }
     }
     /// A tool result answering a specific call.
@@ -199,7 +207,18 @@ impl Message {
             visibility: Visibility::Llm,
             reasoning: None,
             provider_items: None,
+            kind: MessageKind::Normal,
         }
+    }
+    /// Tag this message as harness-authored (see [`MessageKind`]).
+    pub fn with_kind(mut self, kind: MessageKind) -> Self {
+        self.kind = kind;
+        self
+    }
+    /// A user-role message the person typed (or a prompt that started a turn), as opposed to a
+    /// harness nudge stored as `user`. Only these may anchor a turn or enter a summary as the task.
+    pub fn is_real_user(&self) -> bool {
+        self.role == Role::User && self.kind == MessageKind::Normal
     }
     /// Mark this message as UI-only: shown to the user (and persisted), never sent to a model.
     pub fn ui_only(mut self) -> Self {

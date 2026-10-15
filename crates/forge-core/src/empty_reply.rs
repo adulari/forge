@@ -24,14 +24,10 @@ impl Session {
         self.presenter.emit(PresenterEvent::Warning(
             "model returned an empty response — nudging it to continue (once)".to_string(),
         ));
-        let nseq = self.next_seq();
         // Provider chat APIs require a continuation request to end in a user message. Appending
         // this as System after the empty Assistant response made the recovery request invalid
         // (`last message role must be 'user'`).
-        let _ = self
-            .store
-            .add_nudge_message(&self.id, nseq, EMPTY_REPLY_NUDGE);
-        self.transcript.push(Message::user(EMPTY_REPLY_NUDGE));
+        let _ = self.push_nudge(EMPTY_REPLY_NUDGE);
         true
     }
 

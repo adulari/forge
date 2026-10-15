@@ -207,11 +207,7 @@ impl Session {
             // model is halted next step "after a nudge" it never actually saw.
             let hints: Vec<String> = std::mem::take(&mut self.pending_hints);
             for hint in hints {
-                let hseq = self.next_seq();
-                let _ = self
-                    .store
-                    .add_message(&self.id, hseq, Role::System, &hint, None);
-                self.transcript.push(Message::system(hint));
+                let _ = self.push_note(forge_types::MessageKind::Hint, hint);
             }
         } else {
             // Execute each requested tool through the permission broker, serially.
@@ -241,11 +237,7 @@ impl Session {
                 // interceptor) so the model sees them after the failing tool result.
                 let hints: Vec<String> = std::mem::take(&mut self.pending_hints);
                 for hint in hints {
-                    let hseq = self.next_seq();
-                    let _ = self
-                        .store
-                        .add_message(&self.id, hseq, Role::System, &hint, None);
-                    self.transcript.push(Message::system(hint));
+                    let _ = self.push_note(forge_types::MessageKind::Hint, hint);
                 }
             }
         }
@@ -277,11 +269,7 @@ impl Session {
                  retrying the same way.",
                     kind.label()
                 );
-                let nseq = self.next_seq();
-                let _ = self
-                    .store
-                    .add_message(&self.id, nseq, Role::System, &nudge, None);
-                self.transcript.push(Message::system(nudge));
+                let _ = self.push_note(forge_types::MessageKind::LoopGuard, nudge);
                 // Fresh slate after the nudge: only halt if it loops AGAIN, and don't let a
                 // stale pre-nudge streak trip the halt when the model is now trying something new.
                 ledgers.failure_counts.clear();

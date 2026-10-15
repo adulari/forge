@@ -25,12 +25,12 @@ impl Store {
         )?;
         {
             let mut read = tx.prepare(
-                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility \
+                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility, nudge \
                  FROM message WHERE session_id = ?1 AND active = 1 AND seq < ?2 ORDER BY seq",
             )?;
             let mut write = tx.prepare(
-                "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility, nudge) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?;
             let rows = read.query_map((src, at_seq), |r| {
                 Ok((
@@ -41,10 +41,11 @@ impl Store {
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, Option<String>>(5)?,
                     r.get::<_, String>(6)?,
+                    r.get::<_, i64>(7)?,
                 ))
             })?;
             for row in rows {
-                let (seq, role, content, model, tcj, tcid, vis) = row?;
+                let (seq, role, content, model, tcj, tcid, vis, nudge) = row?;
                 let message_id = forge_types::new_id();
                 write.execute((
                     &message_id,
@@ -56,6 +57,7 @@ impl Store {
                     &tcj,
                     &tcid,
                     &vis,
+                    nudge,
                 ))?;
                 let tool_calls = tcj
                     .as_deref()

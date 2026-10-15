@@ -79,7 +79,7 @@ impl Session {
         self.current_turn_seq = self
             .transcript
             .iter()
-            .rposition(|m| m.role == Role::User)
+            .rposition(Message::is_real_user)
             .map_or(-1, |i| i as i64 + offset);
         self.whitehot_guidance_injected = self
             .transcript
@@ -119,7 +119,7 @@ impl Session {
         // Locate the previous turn's user message before rewinding so chained undos work.
         let prev_turn_seq = self.transcript[..turn_idx]
             .iter()
-            .rposition(|m| m.role == Role::User)
+            .rposition(Message::is_real_user)
             .map(|p| p as i64 + offset)
             .unwrap_or(-1);
         let outcome = self.rewind_to(self.current_turn_seq)?;
@@ -208,6 +208,7 @@ impl Session {
                         tool_call_id: m.tool_call_id,
                         images: Vec::new(),
                         visibility: m.visibility,
+                        kind: m.kind,
                     })
                     .collect();
                 messages_to_replay_items(&msgs)
@@ -233,6 +234,7 @@ impl Session {
                         tool_call_id: m.tool_call_id,
                         images: Vec::new(),
                         visibility: m.visibility,
+                        kind: m.kind,
                     })
                     .collect();
                 (messages_to_replay_items(&msgs), total)
@@ -256,10 +258,12 @@ impl Session {
     /// conversation. (It may exceed the window; the next turn's auto-compaction handles that, now
     /// that token counting is precise.) The user-visible scrollback already shows everything.
     pub fn reload_full_context(&mut self) -> Result<(), CoreError> {
-        let stored = self.store.load_all_messages(&self.id)?;
-        // MAX(seq)+1, not the loaded count — `load_all_messages` includes soft-deleted rows from prior
-        // rewinds, so its length exceeds the real max seq and the count would reuse seqs / inflate the
-        // rewind offset (same class of bug as Session::resume, which is correctly scoped).
+        // Compacted-away rows come back, `/undo`-rewound ones do not: they are no longer part of
+        // the conversation (`uncompact_session_store` keeps them removed for the same reason).
+        let stored = self.store.load_messages_uncompacted(&self.id)?;
+        // MAX(seq)+1, not the loaded count — the loaded rows include compacted-away ones, so the
+        // count would reuse seqs / inflate the rewind offset (same class of bug as
+        // Session::resume, which is correctly scoped).
         self.seq = self.store.next_seq_for_session(&self.id)?;
         self.transcript = stored
             .into_iter()
@@ -272,6 +276,7 @@ impl Session {
                 tool_call_id: m.tool_call_id,
                 images: Vec::new(),
                 visibility: m.visibility,
+                kind: m.kind,
             })
             .collect();
         self.history_epoch += 1;
@@ -377,6 +382,7 @@ impl Session {
                 tool_call_id: m.tool_call_id,
                 images: Vec::new(),
                 visibility: m.visibility,
+                kind: m.kind,
             })
             .collect();
         self.transition_workspace(workspace)?;

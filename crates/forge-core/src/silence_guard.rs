@@ -193,11 +193,7 @@ impl Session {
         if !self.advisory_nudges_on() {
             return Ok(());
         }
-        let seq = self.next_seq();
-        self.store
-            .add_message(&self.id, seq, Role::System, &nudge.model_hint, None)?;
-        self.transcript.push(Message::system(nudge.model_hint));
-        Ok(())
+        self.push_note(forge_types::MessageKind::Silence, nudge.model_hint)
     }
 }
 

@@ -98,7 +98,7 @@ pub(crate) fn deterministic_digest(older: &[Message]) -> String {
     let llm: Vec<&Message> = older.iter().filter(|m| m.visibility.is_llm()).collect();
     let mut kept: Vec<String> = Vec::new();
     let mut used = 0usize;
-    for m in llm.iter().rev().filter(|m| m.role == Role::User) {
+    for m in llm.iter().rev().filter(|m| m.is_real_user()) {
         let text: String = m.content.chars().take(DIGEST_MESSAGE_MAX_CHARS).collect();
         if used + text.len() > DIGEST_MAX_CHARS {
             break;

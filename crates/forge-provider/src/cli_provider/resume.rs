@@ -33,6 +33,84 @@ pub(super) struct ResumeState {
     /// tell a rewritten history from a grown one — but the CLI's own session still holds the
     /// removed turns, and resuming it would put them straight back in front of the model.
     pub(super) epoch: u64,
+    /// Identity of the newest messages handed to that session. `sent` is an index into the view of
+    /// the transcript at the time, and that view is trimmed from the FRONT as it grows, so the
+    /// same index later points at a different message. The mark finds the real position again.
+    pub(super) mark: Option<SentMark>,
+}
+
+/// Fingerprints of the last two messages a CLI session was sent, which is how a later call finds
+/// where the new ones start even after the view was trimmed at the front. Two messages rather than
+/// one, because a single message is often a repeat of an earlier one (the same nudge twice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SentMark {
+    last: u64,
+    prev: Option<u64>,
+}
+
+fn fingerprint(m: &Message) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    m.role.as_str().hash(&mut h);
+    m.content.hash(&mut h);
+    m.tool_call_id.hash(&mut h);
+    for call in &m.tool_calls {
+        call.id.hash(&mut h);
+    }
+    h.finish()
+}
+
+impl SentMark {
+    /// The mark for a call that handed the CLI all of `messages`; `None` for an empty slice.
+    pub(super) fn of(messages: &[Message]) -> Option<Self> {
+        let last = fingerprint(messages.last()?);
+        let prev = messages
+            .len()
+            .checked_sub(2)
+            .map(|i| fingerprint(&messages[i]));
+        Some(Self { last, prev })
+    }
+
+    fn matches_at(&self, messages: &[Message], index: usize) -> bool {
+        fingerprint(&messages[index]) == self.last
+            && match (self.prev, index.checked_sub(1)) {
+                (Some(prev), Some(before)) => fingerprint(&messages[before]) == prev,
+                (None, _) => true,
+                (Some(_), None) => false,
+            }
+    }
+
+    /// Index of the first message in `messages` the CLI has not seen, when `sent` messages had
+    /// been handed over. Front-trimming only moves the marked message toward the start, so the
+    /// unshifted spot is tried first, then earlier ones; more than one candidate there means the
+    /// position is ambiguous, and `None` makes the caller start a fresh session instead of
+    /// risking a skipped message.
+    pub(super) fn locate(&self, messages: &[Message], sent: usize) -> Option<usize> {
+        let top = sent.checked_sub(1)?.min(messages.len().checked_sub(1)?);
+        if sent <= messages.len() && self.matches_at(messages, sent - 1) {
+            return Some(sent);
+        }
+        let mut found = (0..=top).rev().filter(|&i| self.matches_at(messages, i));
+        let first = found.next()?;
+        found.next().is_none().then_some(first + 1)
+    }
+}
+
+/// Where the not-yet-sent messages start in `messages`, for a slot recorded with `sent` messages
+/// and `mark`. `Some(0)` when nothing was sent. Without a mark (a slot recorded without one) the
+/// raw count is trusted only while it still fits.
+pub(super) fn locate_sent(
+    sent: usize,
+    mark: Option<SentMark>,
+    messages: &[Message],
+) -> Option<usize> {
+    if sent == 0 {
+        return Some(0);
+    }
+    match mark {
+        Some(mark) => mark.locate(messages, sent),
+        None => (sent <= messages.len()).then_some(sent),
+    }
 }
 
 /// Whether the recorded CLI session may be resumed for a call over `messages_len` messages of
@@ -44,13 +122,13 @@ pub(super) struct ResumeState {
 pub(super) fn allowed(
     resumes: bool,
     st: &ResumeState,
-    messages_len: usize,
+    messages: &[Message],
     model: &str,
     checkpoint: Option<&CheckpointContext>,
 ) -> bool {
     resumes
         && st.session_id.is_some()
-        && st.sent <= messages_len
+        && locate_sent(st.sent, st.mark, messages).is_some()
         && st.model == bare_model(model)
         // A call with no checkpoint context has no conversation identity (subagents, legacy
         // callers): two of them would match each other's `None` owner and cross-wire transcripts.
@@ -78,4 +156,67 @@ pub(super) fn render_resume_delta(tail: &[Message]) -> String {
         }
     }
     out.join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msgs(texts: &[&str]) -> Vec<Message> {
+        texts.iter().map(|t| Message::user(*t)).collect()
+    }
+
+    #[test]
+    fn the_delta_starts_after_the_last_sent_message_even_when_the_front_was_trimmed() {
+        let sent_view = msgs(&["m0", "m1", "m2", "m3", "m4", "m5"]);
+        let mark = SentMark::of(&sent_view);
+
+        // Three messages were trimmed off the front while two new ones arrived: the old count (6)
+        // now points past the end of a 5-message view and would skip both.
+        let next = msgs(&["m3", "m4", "m5", "new-a", "new-b"]);
+        let at = locate_sent(6, mark, &next).expect("the marked message is still in the view");
+        assert_eq!(at, 3);
+        assert_eq!(
+            render_resume_delta(&next[at..]),
+            "User: new-a\n\nUser: new-b"
+        );
+
+        // The same count with a trim shorter than the growth is the dangerous case: the index
+        // is in range and lands on a message the CLI already has.
+        let next = msgs(&["m1", "m2", "m3", "m4", "m5", "new-a", "new-b", "new-c"]);
+        let at = locate_sent(6, mark, &next).unwrap();
+        assert_eq!(at, 5, "not index 6, which would have skipped new-a");
+    }
+
+    #[test]
+    fn an_untrimmed_view_resumes_at_the_old_count() {
+        let sent_view = msgs(&["a", "b", "c"]);
+        let mark = SentMark::of(&sent_view);
+        let next = msgs(&["a", "b", "c", "d"]);
+        assert_eq!(locate_sent(3, mark, &next), Some(3));
+    }
+
+    #[test]
+    fn a_missing_or_ambiguous_mark_falls_back_to_a_fresh_session() {
+        let mark = SentMark::of(&msgs(&["x", "y", "z"]));
+        // The marked message is gone (elided, compacted away).
+        assert_eq!(locate_sent(3, mark, &msgs(&["p", "q", "r", "s"])), None);
+
+        // Two identical consecutive pairs: the position cannot be told, so do not guess.
+        let mark = SentMark::of(&msgs(&["n", "n"]));
+        assert_eq!(
+            locate_sent(2, mark, &msgs(&["n", "n", "n", "n", "tail"])).unwrap(),
+            2,
+            "the unshifted position is tried first and is correct when nothing moved"
+        );
+        assert_eq!(
+            locate_sent(6, mark, &msgs(&["n", "n", "n", "n", "tail"])),
+            None
+        );
+    }
+
+    #[test]
+    fn nothing_sent_means_a_fresh_render() {
+        assert_eq!(locate_sent(0, None, &msgs(&["a"])), Some(0));
+    }
 }

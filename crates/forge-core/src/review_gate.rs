@@ -5,7 +5,7 @@
 //! request lists several requirements, the change spans many files or lines, or the model's own
 //! answer admits something is unfinished.
 
-use forge_types::{Message, Role};
+use forge_types::Message;
 
 const LARGE_DIFF_FILES: usize = 3;
 const LARGE_DIFF_LINES: usize = 60;
@@ -94,7 +94,7 @@ fn latest_request(transcript: &[Message]) -> &str {
     transcript
         .iter()
         .rev()
-        .find(|m| m.role == Role::User)
+        .find(|m| m.is_real_user())
         .map_or("", |m| m.content.as_str())
 }
 

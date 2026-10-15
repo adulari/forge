@@ -314,7 +314,7 @@ impl Store {
             &[],
             None,
             Visibility::UiOnly,
-            false,
+            forge_types::MessageKind::Normal,
         )
     }
 
@@ -340,7 +340,31 @@ impl Store {
             tool_calls,
             tool_call_id,
             Visibility::Llm,
-            false,
+            forge_types::MessageKind::Normal,
+        )
+    }
+
+    /// Append a harness-authored message tagged with `kind` (see [`forge_types::MessageKind`]):
+    /// a user-role nudge or an ephemeral system note. The kind survives a resume, which is what
+    /// lets the request view supersede old notes and keep nudges out of the task anchor.
+    pub fn add_message_kind(
+        &self,
+        session_id: &str,
+        seq: i64,
+        role: Role,
+        content: &str,
+        kind: forge_types::MessageKind,
+    ) -> Result<String> {
+        self.insert_message(
+            session_id,
+            seq,
+            role,
+            content,
+            None,
+            &[],
+            None,
+            Visibility::Llm,
+            kind,
         )
     }
 
@@ -366,7 +390,7 @@ impl Store {
             tool_calls,
             tool_call_id,
             Visibility::LlmOnly,
-            false,
+            forge_types::MessageKind::Normal,
         )
     }
 
@@ -381,7 +405,7 @@ impl Store {
         tool_calls: &[ToolCall],
         tool_call_id: Option<&str>,
         visibility: Visibility,
-        nudge: bool,
+        kind: forge_types::MessageKind,
     ) -> Result<String> {
         let id = forge_types::new_id();
         let tool_calls_json = if tool_calls.is_empty() {
@@ -402,7 +426,7 @@ impl Store {
                     "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility, nudge)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                      ON CONFLICT(session_id, seq) DO NOTHING",
-                    (&id, session_id, s, role.as_str(), content, model, &tool_calls_json, tool_call_id, visibility.as_str(), nudge),
+                    (&id, session_id, s, role.as_str(), content, model, &tool_calls_json, tool_call_id, visibility.as_str(), kind.code()),
                 );
                 match r {
                     Ok(1) => break,
@@ -427,7 +451,8 @@ impl Store {
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,
                 "visibility": visibility.as_str(),
-                "nudge": nudge,
+                "nudge": kind.code() != 0,
+                "kind": kind.code(),
             }))?;
             append_sync_revision(&tx, "message", &id, SyncJournalOperation::Upsert, &payload)?;
             tx.commit()?;

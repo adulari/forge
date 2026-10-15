@@ -66,6 +66,32 @@ the model see?" was answered in more places.
   messages down to 85% of the budget once and keeps that cut while the result still fits, instead
   of re-deriving a newest-first fill (a new prefix) on every call. A smaller window after failover
   fails the fit check and re-fits.
+- **The trim protects the task, not just the newest user message.** `fit_sticky` (and the
+  last-resort `fit_messages_owned`) always keep the system messages and every *real* user message
+  of the current turn (`context_floor::turn_protected`): the originating request plus any steers
+  queued into it. A turn starts at the newest real user message that does not follow a tool result,
+  an assistant message with calls, or a nudge; a message that does is a steer, and the walk
+  continues to the one before it. If those alone exceed the budget they are clipped from the front,
+  newest kept whole first, never dropped (each keeps at least a 64-token tail).
+- **Harness messages are tagged, not guessed.** `Message.kind` (`forge_types::MessageKind`,
+  persisted in the row's `nudge` column: 0 normal, 1 user-role nudge, 2+ ephemeral note kinds)
+  marks user-role nudges (empty-reply, empty-diff, test-edit guard, stop hook, auto-fix failures)
+  as `Nudge`, so `Message::is_real_user` is false for them: they never anchor a turn, never set
+  `current_turn_seq`, the floor's turn start, the review gate's "latest request" or the
+  deterministic digest. The tag survives a resume (`StoredMessage.kind`).
+- **Ephemeral notes are superseded.** Clock lines (`Clock`), tool-result hints (`Hint`), and the
+  silence / loop-guard / continue / deadline nudges carry their kind; `normalize_system_context`
+  keeps only the newest *run* (consecutive notes of one kind, i.e. one step's hints) of each kind
+  below the floor, under the same cache rule as contracts: a newer run above the floor never
+  reaches back, so the cached prefix is rewritten only when the floor moves. Notes without a kind —
+  AGENTS.md, memory, task list, skill/command guidance, turn contracts, the full clock
+  instruction — are never touched.
+- **A trim that would drop history compacts first, and says so.** After the per-step
+  `auto_compact_if_needed`, `request_provider_response` checks what the request build trimmed
+  (`TrimDrop`): if user or assistant messages were dropped it runs a compaction and rebuilds the
+  request (at most 3 per turn, and not again once one folded nothing). Whatever is still trimmed
+  raises one `context window full: N older message(s) are left out of this request` warning per
+  turn.
 - **System context depends only on what came before.** `normalize_system_context` keeps the first
   copy of repeated guidance plus any repeat directly after an assistant reply (a harness reaction);
   it no longer looks at whether a user prompt follows. Turn contracts stay where they were
@@ -114,6 +140,22 @@ the model see?" was answered in more places.
 `reset_resumed`, `reload_full_context`, and the subagent rebuild map it back onto the live
 transcript; `fork_session` copies it so a UI note in a fork's prefix stays UI-only.
 
+The `nudge` column doubles as the message kind (`MessageKind::code`); nothing else reads it as
+more than "non-zero", and the history page still reports only user-role rows as nudges.
+Compaction persists the tail the live transcript kept: `compact_session_store` is given the
+round-aligned tail length, not a fixed 6, so a resume reproduces the post-compaction transcript
+and never opens on an orphaned tool result. `reload_full_context` (`/uncompact`, "continue
+without compaction") reads `load_messages_uncompacted`: compacted rows return, `/undo`-rewound
+rows do not. A compaction that gives up after `CompactionStarted` emits `CompactionFinished`
+with `before == after`, so the TUI band clears. The CLI's idle auto-compact uses
+`Session::idle_compaction_trigger` (the pinned or last-run model's `compaction_trigger`), so
+`[compact_cap]` and the free-model ceiling apply, and it reports the compaction as automatic.
+
+The CLI bridges track what they sent by identity: `ResumeState`/`LiveSession` keep a `SentMark`
+(fingerprints of the last two sent messages) next to the count, and the resume delta starts after
+the marked message wherever the front-trimmed view now has it; an ambiguous or missing mark means
+a fresh session instead of a skipped message.
+
 ## 4. Invariants
 
 - A `UiOnly` message never reaches any provider, in any session lineage (fresh, resumed,
@@ -127,7 +169,10 @@ transcript; `fork_session` copies it so a UI note in a fork's prefix stays UI-on
 |---|---|
 | `forge-types` | `Visibility` enum + `Message.visibility` + `Message::ui_only()` |
 | `forge-core/src/context_pipeline.rs` | `to_llm_floored`, moved `fit_messages`/`prune_tool_results`/`message_tokens` + tests |
-| `forge-core/src/context_floor.rs` | the elision floor, block advance, `prune_below`, `fit_sticky` |
+| `forge-core/src/context_floor.rs` | the elision floor, block advance, `prune_below`, `fit_sticky`, `turn_protected`, trim watch |
+| `forge-core/src/harness_notes.rs` | `push_note` / `push_nudge`: tagged, persisted harness messages |
+| `forge-core/src/system_context.rs` | supersede ephemeral notes below the floor |
+| `forge-provider/src/cli_provider/resume.rs` | `SentMark`, `locate_sent` |
 | `forge-core/src/cache_instrument.rs` | per-request prefix comparison, miss labels, rewrite-streak warning |
 | `forge-core/src/turn_context.rs` | turn contract / clock / git branch appended only when changed |
 | `forge-provider/src/wire_fingerprint.rs` | per-message wire hashes after system placement + image stripping |

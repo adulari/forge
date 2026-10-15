@@ -302,6 +302,7 @@ impl Session {
     /// at turn end. Uses the conservative transcript estimate as a stand-in until the real count
     /// arrives.
     pub(crate) fn emit_context_gauge(&mut self, model: &str) {
+        self.gauge_model = Some(model.to_string());
         let (session_in, session_out) = self.store.session_tokens(&self.id).unwrap_or((0, 0));
         let session_total_usd = self.store.session_cost(&self.id).unwrap_or(0.0);
         self.presenter.emit(PresenterEvent::Cost {
@@ -328,6 +329,7 @@ impl Session {
         context_tokens: u64,
         active_model: &str,
     ) -> Result<(), CoreError> {
+        self.gauge_model = Some(active_model.to_string());
         let usage = self.store.session_token_usage(&self.id)?;
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd: self.store.session_cost(&self.id)?,
@@ -454,6 +456,7 @@ impl Session {
             kept_tail_start(&self.transcript, COMPACT_KEEP_RECENT, tail_budget),
         );
         if split < COMPACT_MIN_OLDER {
+            self.abandon_compaction(before);
             return Ok((before, before));
         }
         let older = &self.transcript[..split];
@@ -657,6 +660,8 @@ impl Session {
             "[Earlier conversation summarized to save context]\n{}",
             summary.trim()
         )));
+        // The store must keep exactly these rows: the round-aligned tail, not a fixed count.
+        let kept_tail = self.transcript.len() - split;
         compacted.extend(self.transcript.split_off(split));
         self.transcript = compacted;
         // The summarised blocks are gone, so the next edit to a file reports from scratch.
@@ -666,7 +671,7 @@ impl Session {
         // session rehydrates the compacted view instead of the full uncompacted transcript.
         let _ = self
             .store
-            .compact_session_store(&self.id, summary.trim(), COMPACT_KEEP_RECENT);
+            .compact_session_store(&self.id, summary.trim(), kept_tail);
         self.progress.note_compaction();
 
         let after = self.transcript.len();

@@ -236,16 +236,8 @@ impl Session {
                     "turn deadline reached — asking the model to revert unverified changes and stop"
                         .to_string(),
                 ));
-                let dseq = self.next_seq();
-                let _ = self.store.add_message(
-                    &self.id,
-                    dseq,
-                    Role::System,
-                    DEADLINE_RECONCILE_NUDGE,
-                    None,
-                );
-                self.transcript
-                    .push(Message::system(DEADLINE_RECONCILE_NUDGE));
+                let _ =
+                    self.push_note(forge_types::MessageKind::Deadline, DEADLINE_RECONCILE_NUDGE);
             }
             // Every step, not only at nudge points: a 120K-ceiling Kimi turn once grew to 246K.
             self.advance_floor_if_due(&active_model, false);
@@ -553,11 +545,7 @@ impl Session {
                                  task is resolved.",
                                 unfinished.join("\n- ")
                             );
-                            let nseq = self.next_seq();
-                            let _ =
-                                self.store
-                                    .add_message(&self.id, nseq, Role::System, &nudge, None);
-                            self.transcript.push(Message::system(&nudge));
+                            let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
                             continue;
                         }
                         if !made_progress && !bridge_stall_nudged {
@@ -632,11 +620,7 @@ impl Session {
                                          NOT run — text is not a tool call. Make the call through the \
                                          function-calling interface instead. Do not paste tool-call \
                                          markup into your message.";
-                            let nseq = self.next_seq();
-                            let _ =
-                                self.store
-                                    .add_message(&self.id, nseq, Role::System, nudge, None);
-                            self.transcript.push(Message::system(nudge));
+                            let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
                             continue;
                         }
                         // Retries exhausted: do NOT pretend it worked. Surface it loudly so the user

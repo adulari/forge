@@ -1,6 +1,6 @@
 //! The provider-facing view of system-role messages in a transcript.
 
-use forge_types::{Message, Role};
+use forge_types::{Message, MessageKind, Role};
 
 pub(crate) const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
 
@@ -28,6 +28,14 @@ pub(crate) const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
 /// `context_floor`) is a contract that a later contract, also below the floor, superseded dropped:
 /// that region is only rewritten when the floor advances, which is a deliberate cache break anyway.
 ///
+/// Ephemeral notes (`MessageKind::is_ephemeral_note`: clock readings, hints about a tool result,
+/// progress nudges) say only what holds right now, so below `floor` just the newest run of each
+/// kind survives, under the same cache rule as contracts: a newer run above the floor cannot reach
+/// back and drop an older one, because that would rewrite a prefix the provider has cached. A run
+/// is the consecutive notes of one kind delivered together (one step's hints), kept or dropped as a
+/// whole. Standing context — AGENTS.md, memory, the task list, skill guidance, contracts — carries
+/// no kind and is never touched.
+///
 /// Returns the view and how many of its messages came from `messages[..floor]`.
 pub(crate) fn normalize_system_context(
     messages: Vec<Message>,
@@ -44,12 +52,18 @@ pub(crate) fn normalize_system_context(
         .iter()
         .rposition(is_contract);
 
+    let (run_start, newest_run_below_floor) = ephemeral_runs(&messages, floor);
     let roles: Vec<Role> = messages.iter().map(|message| message.role).collect();
     let mut seen = std::collections::HashSet::<String>::new();
     let mut kept_below_floor = 0;
     let mut out = Vec::with_capacity(messages.len());
     for (index, message) in messages.into_iter().enumerate() {
-        let keep = if message.role != Role::System {
+        let superseded = message.kind.is_ephemeral_note()
+            && index < floor
+            && newest_run_below_floor.get(&message.kind) != Some(&run_start[index]);
+        let keep = if superseded {
+            false
+        } else if message.role != Role::System {
             true
         } else if is_contract(&message) {
             index >= floor || Some(index) == newest_contract_below_floor
@@ -65,6 +79,29 @@ pub(crate) fn normalize_system_context(
         }
     }
     (out, kept_below_floor)
+}
+
+/// For each message the index its run of same-kind ephemeral notes started at, and per kind the
+/// start of the newest run that begins below `floor`.
+fn ephemeral_runs(
+    messages: &[Message],
+    floor: usize,
+) -> (Vec<usize>, std::collections::HashMap<MessageKind, usize>) {
+    let mut run_start = Vec::with_capacity(messages.len());
+    let mut newest = std::collections::HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        let continues = index > 0 && messages[index - 1].kind == message.kind;
+        let start = if continues {
+            run_start[index - 1]
+        } else {
+            index
+        };
+        run_start.push(start);
+        if message.kind.is_ephemeral_note() && start < floor {
+            newest.insert(message.kind, start);
+        }
+    }
+    (run_start, newest)
 }
 
 #[cfg(test)]
@@ -185,6 +222,101 @@ mod tests {
 
         for (index, sent) in before.iter().enumerate() {
             assert_eq!(sent.content, after[index].content);
+        }
+    }
+
+    fn note(kind: MessageKind, text: &str) -> Message {
+        Message::system(text).with_kind(kind)
+    }
+
+    #[test]
+    fn only_the_newest_note_of_each_kind_survives_below_the_floor() {
+        let messages = vec![
+            Message::system("AGENTS.md: use tabs"),
+            note(MessageKind::Clock, "[time] 10:00"),
+            Message::user("one"),
+            note(MessageKind::Hint, "hint about step 1"),
+            Message::assistant("a"),
+            note(MessageKind::Clock, "[time] 11:00"),
+            Message::user("two"),
+            note(MessageKind::Hint, "hint about step 2"),
+            Message::assistant("b"),
+            note(MessageKind::Clock, "[time] 12:00"),
+            Message::user("three"),
+        ];
+        // Everything but the last user message sits below the floor.
+        let (view, below) = normalize_system_context(messages, 10);
+        let kept = contents(&view);
+        assert_eq!(
+            kept,
+            vec![
+                "AGENTS.md: use tabs",
+                "one",
+                "a",
+                "two",
+                "hint about step 2",
+                "b",
+                "[time] 12:00",
+                "three"
+            ]
+        );
+        assert_eq!(below, 7);
+    }
+
+    #[test]
+    fn a_newer_note_above_the_floor_cannot_reach_back_and_drop_one_below_it() {
+        let messages = vec![
+            note(MessageKind::Clock, "[time] 10:00"),
+            Message::user("one"),
+            Message::assistant("a"),
+            note(MessageKind::Clock, "[time] 11:00"),
+            Message::user("two"),
+        ];
+        let (view, _) = normalize_system_context(messages, 3);
+        assert_eq!(
+            contents(&view),
+            vec!["[time] 10:00", "one", "a", "[time] 11:00", "two"],
+            "the cached prefix is untouched until the floor itself moves"
+        );
+    }
+
+    #[test]
+    fn hints_delivered_together_are_one_run_kept_whole() {
+        let messages = vec![
+            Message::user("one"),
+            note(MessageKind::Hint, "old hint"),
+            Message::assistant("a"),
+            note(MessageKind::Hint, "new hint A"),
+            note(MessageKind::Hint, "new hint B"),
+            Message::user("two"),
+        ];
+        let (view, _) = normalize_system_context(messages, 6);
+        assert_eq!(
+            contents(&view),
+            vec!["one", "a", "new hint A", "new hint B", "two"]
+        );
+    }
+
+    #[test]
+    fn standing_context_without_a_kind_is_never_superseded() {
+        let messages = vec![
+            Message::system("[memory] the user prefers rust"),
+            Message::user("one"),
+            Message::system("Turn contract: read-only"),
+            Message::system("[skill] review guidance"),
+            Message::user("two"),
+            Message::system("Turn contract: supersedes — build it"),
+            Message::system("[skill] other guidance"),
+            Message::user("three"),
+        ];
+        let (view, _) = normalize_system_context(messages.clone(), 8);
+        let kept = contents(&view);
+        for must in [
+            "[memory] the user prefers rust",
+            "[skill] review guidance",
+            "[skill] other guidance",
+        ] {
+            assert!(kept.contains(&must), "{must} was dropped: {kept:?}");
         }
     }
 }

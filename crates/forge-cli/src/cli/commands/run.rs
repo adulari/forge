@@ -4376,7 +4376,7 @@ pub(crate) async fn run_chat_tui(
                     );
                 }
                 // Auto-compact: when no new turn was spawned (not a loop iteration) and the
-                // context gauge is above AUTO_COMPACT_THRESHOLD, quietly run /compact so the
+                // context gauge is above the session's compaction trigger, quietly run /compact so the
                 // user doesn't need to do it manually (context-compaction.md).
                 // Guard: only fire once per user turn — compact's own Cost event still carries
                 // the old full-context size, so context_tokens won't drop until the next real
@@ -4386,12 +4386,7 @@ pub(crate) async fn run_chat_tui(
                     && turn_gen > last_auto_compact_gen
                 {
                     if let Some(lim) = app.context_limit {
-                        let cap = session.lock().await.compact_cap_tokens();
-                        let trigger = forge_core::auto_compact_trigger_tokens(
-                            lim as u64,
-                            cap,
-                            AUTO_COMPACT_THRESHOLD,
-                        );
+                        let trigger = session.lock().await.idle_compaction_trigger(lim as u64);
                         if app.context_tokens > trigger {
                             let fill = app.context_tokens as f64 / lim as f64;
                             app.note(&format!(
@@ -4400,7 +4395,7 @@ pub(crate) async fn run_chat_tui(
                             ));
                             turn_gen += 1;
                             last_auto_compact_gen = turn_gen;
-                            turn_handle = Some(spawn_compact(
+                            turn_handle = Some(spawn_auto_compact(
                                 &session,
                                 &done_tx,
                                 turn_gen,
