@@ -347,6 +347,8 @@ pub(crate) fn statusline_hint(app: &App) -> &'static str {
         "↑↓ move · ⏎ select · esc close"
     } else if app.busy {
         "esc stop · Ctrl↑ escalate"
+    } else if app.quit_hint_active() {
+        "Press Ctrl+C again to exit"
     } else if app.esc_hint_active() {
         "esc again to rewind · Ctrl-C quit"
     } else if app.done {

@@ -424,3 +424,22 @@ fn strip_ansi(s: &str) -> String {
     }
     out
 }
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_ctrl_c_clears_draft_then_needs_two_presses_to_quit() {
+    // Ctrl-C on a draft clears it (saved for ↑); on an empty input it arms, and the second press
+    // exits. No /quit: a clean exit proves the double press quit.
+    let (clean, plain) = drive_pty(&[
+        ("half typed", 400),
+        ("\x03", 500),
+        ("\x03", 500),
+        ("\x03", 600),
+    ]);
+    assert!(clean, "clean exit via double Ctrl-C: {plain}");
+    assert!(
+        plain.contains("input cleared"),
+        "draft clear noted: {plain}"
+    );
+    assert!(plain.contains("Ctrl+C again"), "arm hint shown: {plain}");
+}
