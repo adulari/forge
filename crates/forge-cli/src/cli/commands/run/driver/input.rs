@@ -578,12 +578,11 @@ impl DriverState {
         }
         if self.turn_handle.is_none() && self.turn_gen > self.last_auto_compact_gen {
             if let Some(lim) = self.app.context_limit {
-                let cap = self.session.lock().await.compact_cap_tokens();
-                let trigger = forge_core::auto_compact_trigger_tokens(
-                    lim as u64,
-                    cap,
-                    AUTO_COMPACT_THRESHOLD,
-                );
+                let trigger = self
+                    .session
+                    .lock()
+                    .await
+                    .idle_compaction_trigger(lim as u64);
                 if self.app.context_tokens > trigger {
                     let fill = self.app.context_tokens as f64 / lim as f64;
                     self.app.note(&format!(
@@ -592,7 +591,7 @@ impl DriverState {
                     ));
                     self.turn_gen += 1;
                     self.last_auto_compact_gen = self.turn_gen;
-                    self.turn_handle = Some(spawn_compact(
+                    self.turn_handle = Some(spawn_auto_compact(
                         &self.session,
                         &self.done_tx,
                         self.turn_gen,

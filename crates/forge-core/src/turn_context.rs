@@ -47,16 +47,17 @@ impl Session {
             .transcript
             .iter()
             .any(|m| m.role == Role::System && clock::is_full_line(&m.content));
-        let line = if told {
-            clock::short_line()
+        let (line, kind) = if told {
+            (clock::short_line(), forge_types::MessageKind::Clock)
         } else {
-            clock::now_line()
+            (clock::now_line(), forge_types::MessageKind::Normal)
         };
-        self.inject_context(
+        self.inject_context_kind(
             pack,
             context_pack::ContextSource::Time,
             "current date and time",
             &line,
+            kind,
         )
     }
 

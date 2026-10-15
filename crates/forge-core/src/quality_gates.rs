@@ -280,9 +280,7 @@ impl Session {
             "Auto-fix: the following checks failed, fix them:\n\n{}",
             failures.join("\n\n")
         );
-        let seq = self.next_seq();
-        self.store.add_nudge_message(&self.id, seq, &body)?;
-        self.transcript.push(Message::user(&body));
+        self.push_nudge(body)?;
 
         Ok(false)
     }

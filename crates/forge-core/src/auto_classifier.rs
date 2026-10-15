@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::permission::AutoVerdict;
 use crate::{
-    BudgetStatus, Message, PermissionDecision, PresenterEvent, Role, Session, StreamEvent, TaskTier,
+    BudgetStatus, Message, PermissionDecision, PresenterEvent, Session, StreamEvent, TaskTier,
 };
 use forge_provider::Provider;
 use forge_store::Store;
@@ -238,7 +238,7 @@ impl Session {
             .transcript
             .iter()
             .rev()
-            .find(|m| m.role == Role::User)
+            .find(|m| m.is_real_user())
             .map(|m| m.content.as_str())
             .unwrap_or("");
         let workspace = self.workspace_binding.read().ok().map(|g| g.clone());

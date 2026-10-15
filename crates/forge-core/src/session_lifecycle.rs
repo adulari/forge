@@ -91,6 +91,7 @@ impl Session {
                 tool_call_id: m.tool_call_id,
                 images: Vec::new(),
                 visibility: m.visibility,
+                kind: m.kind,
             })
             .collect();
         // Restore the permission mode that was active when the session was last saved.
@@ -278,6 +279,8 @@ impl Session {
             turn_hard_guard_abort: false,
             harness_profile: forge_config::HarnessProfile::default(),
             empty_reply_nudged: false,
+            trim_watch: Default::default(),
+            gauge_model: None,
             spend: Default::default(),
             turn_unfinished_tasks: Vec::new(),
             expect_code_change: false,

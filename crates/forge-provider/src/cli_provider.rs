@@ -1142,6 +1142,7 @@ impl CliProvider {
         &self,
         id: Option<String>,
         sent: usize,
+        mark: Option<resume::SentMark>,
         model: &str,
         owner: Option<&str>,
         epoch: u64,
@@ -1152,6 +1153,7 @@ impl CliProvider {
             // the NEXT turn `--resume` the PRIOR session and skip this turn's context entirely.
             st.session_id = id;
             st.sent = sent;
+            st.mark = mark;
             st.model = model.to_string();
             st.owner = owner.map(str::to_string);
             st.epoch = epoch;
@@ -1167,11 +1169,11 @@ impl CliProvider {
     fn can_resume(
         &self,
         st: &ResumeState,
-        messages_len: usize,
+        messages: &[Message],
         model: &str,
         checkpoint: Option<&CheckpointContext>,
     ) -> bool {
-        resume::allowed(self.resumes(), st, messages_len, model, checkpoint)
+        resume::allowed(self.resumes(), st, messages, model, checkpoint)
     }
 
     /// Forget the session (after a resumed turn failed, or the transcript shrank) so the next call
@@ -1975,9 +1977,14 @@ impl CliProvider {
                 .resume
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let can_resume = !isolated && self.can_resume(&st, messages.len(), model, checkpoint);
-            if can_resume {
-                let delta = resume::render_resume_delta(&messages[st.sent..]);
+            // The delta starts where the CLI's own record of the conversation ends; `st.sent` is an
+            // index into an earlier, possibly differently trimmed view (see `SentMark`).
+            let resume_at = resume::locate_sent(st.sent, st.mark, messages);
+            let can_resume = !isolated
+                && resume_at.is_some()
+                && self.can_resume(&st, messages, model, checkpoint);
+            if let (true, Some(at)) = (can_resume, resume_at) {
+                let delta = resume::render_resume_delta(&messages[at..]);
                 if delta.trim().is_empty() {
                     // Nothing new to act on (shouldn't normally happen) — fall back to a fresh render.
                     (
@@ -1994,7 +2001,7 @@ impl CliProvider {
                     (
                         apply_resume_reminder(self.harness, self.kind, delta),
                         st.session_id.clone(),
-                        st.sent,
+                        at,
                     )
                 }
             } else {
@@ -2470,6 +2477,7 @@ impl CliProvider {
             self.record_session(
                 session,
                 messages.len(),
+                resume::SentMark::of(messages),
                 bare_model(model),
                 checkpoint.map(|c| c.session.as_str()),
                 checkpoint.map_or(0, |c| c.epoch),
@@ -2741,7 +2749,7 @@ impl CliProvider {
         bare: &str,
         checkpoint: Option<&CheckpointContext>,
         effort: Option<EffortLevel>,
-        resume: Option<(&str, usize)>,
+        resume: Option<(&str, usize, Option<resume::SentMark>)>,
     ) -> std::io::Result<LiveSession> {
         let forge_exe = self.forge_executable();
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2777,7 +2785,7 @@ impl CliProvider {
             self.harness,
             &forge_exe,
             &mcp_env,
-            resume.map(|(id, _)| id),
+            resume.map(|(id, _, _)| id),
         );
         push_effort_args(&mut args, self.kind, effort);
         args.push("--input-format".into());
@@ -2826,10 +2834,11 @@ impl CliProvider {
             stderr_task,
             pgid,
             model: bare.to_string(),
-            sent: resume.map_or(0, |(_, sent)| sent),
+            sent: resume.map_or(0, |(_, sent, _)| sent),
+            mark: resume.and_then(|(_, _, mark)| mark),
             epoch: checkpoint.map_or(0, |c| c.epoch),
             turn_file: Some(turn_file),
-            claude_session: resume.map(|(id, _)| id.to_string()),
+            claude_session: resume.map(|(id, _, _)| id.to_string()),
             resumed: resume.is_some(),
             needs_init: true,
             effort,
@@ -2878,9 +2887,9 @@ impl CliProvider {
         // its in-process context is stale after a compaction/reset), is on the same history epoch,
         // and isn't mid-turn from a prior call that never finished (see `turn_in_flight`).
         let reuse = matches!(&guard.session, Some(s)
-            if s.model == bare && s.sent > 0 && s.sent <= messages.len() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight
+            if s.model == bare && s.sent > 0 && resume::locate_sent(s.sent, s.mark, messages).is_some() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight
                 && live::same_workspace(s.workspace.as_deref(), checkpoint));
-        let mut resume_plan: Option<(String, usize)> = None;
+        let mut resume_plan: Option<(String, usize, Option<resume::SentMark>)> = None;
         if !reuse {
             if let Some(old) = guard.session.take() {
                 // A session abandoned mid-turn leaves claude's history ahead of Forge's record.
@@ -2890,18 +2899,23 @@ impl CliProvider {
                 old.teardown().await;
             }
             let st = &guard.last;
-            if self.can_resume(st, messages.len(), model, checkpoint)
-                && !resume::render_resume_delta(&messages[st.sent..])
+            let resume_at = resume::locate_sent(st.sent, st.mark, messages);
+            if let (true, Some(at)) = (self.can_resume(st, messages, model, checkpoint), resume_at)
+            {
+                if !resume::render_resume_delta(&messages[at..])
                     .trim()
                     .is_empty()
-            {
-                resume_plan = st.session_id.clone().map(|id| (id, st.sent));
+                {
+                    resume_plan = st.session_id.clone().map(|id| (id, at, st.mark));
+                }
             }
         }
 
         loop {
             if guard.session.is_none() {
-                let plan = resume_plan.as_ref().map(|(id, sent)| (id.as_str(), *sent));
+                let plan = resume_plan
+                    .as_ref()
+                    .map(|(id, sent, mark)| (id.as_str(), *sent, *mark));
                 match self.spawn_live(bare, checkpoint, effort, plan).await {
                     Ok(s) => guard.session = Some(s),
                     Err(e) => {
@@ -2956,6 +2970,15 @@ impl CliProvider {
             // First turn on a process with no claude history gets the full transcript; otherwise
             // only the new messages — the live (or resumed) process already holds the prior
             // context. This is the token win.
+            // The marked message may have moved toward the front since the last turn (the view is
+            // trimmed there), so the delta starts where it now ends, not at the old count.
+            let Some(sent_at) = resume::locate_sent(sess.sent, sess.mark, messages) else {
+                retry_fresh_or!({
+                    guard.last = ResumeState::default();
+                    return Err(PersistentTurn::Fallback);
+                });
+            };
+            sess.sent = sent_at;
             let payload = if sess.sent == 0 {
                 apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
             } else {
@@ -3014,6 +3037,7 @@ impl CliProvider {
             match drive_result {
                 Ok(turn) => {
                     sess.sent = messages.len();
+                    sess.mark = resume::SentMark::of(messages);
                     sess.context_fill = turn.context_fill.or(sess.context_fill);
                     sess.turn_in_flight = false;
                     sess.parked_at = std::time::Instant::now();
@@ -3027,6 +3051,7 @@ impl CliProvider {
                             *last = ResumeState {
                                 session_id: claude_session.clone(),
                                 sent: messages.len(),
+                                mark: resume::SentMark::of(messages),
                                 model: bare.to_string(),
                                 owner: owner.map(str::to_string),
                                 epoch,
@@ -3035,6 +3060,7 @@ impl CliProvider {
                                 self.record_session(
                                     claude_session,
                                     messages.len(),
+                                    resume::SentMark::of(messages),
                                     bare,
                                     owner,
                                     epoch,
@@ -3880,25 +3906,27 @@ mod tests {
             mode: "ask".into(),
             epoch,
         };
-        provider.record_session(Some("sid".into()), 4, "opus", Some("conv-1"), 0);
+        provider.record_session(Some("sid".into()), 4, None, "opus", Some("conv-1"), 0);
         let st = provider.resume.lock().unwrap();
+        let msgs =
+            |n: usize| -> Vec<Message> { (0..n).map(|i| Message::user(format!("m{i}"))).collect() };
         // Same epoch, transcript grew: resume.
-        assert!(provider.can_resume(&st, 6, "claude-cli::opus", Some(&ctx(0))));
+        assert!(provider.can_resume(&st, &msgs(6), "claude-cli::opus", Some(&ctx(0))));
         // Same length as before but the history was rewritten (rewind then re-prompt): fresh.
-        assert!(!provider.can_resume(&st, 6, "claude-cli::opus", Some(&ctx(1))));
+        assert!(!provider.can_resume(&st, &msgs(6), "claude-cli::opus", Some(&ctx(1))));
         // The pre-existing guards still hold.
         assert!(
-            !provider.can_resume(&st, 3, "claude-cli::opus", Some(&ctx(0))),
+            !provider.can_resume(&st, &msgs(3), "claude-cli::opus", Some(&ctx(0))),
             "shrank"
         );
         assert!(
-            !provider.can_resume(&st, 6, "claude-cli::sonnet", Some(&ctx(0))),
+            !provider.can_resume(&st, &msgs(6), "claude-cli::sonnet", Some(&ctx(0))),
             "model"
         );
         let mut other = ctx(0);
         other.session = "conv-2".into();
         assert!(
-            !provider.can_resume(&st, 6, "claude-cli::opus", Some(&other)),
+            !provider.can_resume(&st, &msgs(6), "claude-cli::opus", Some(&other)),
             "owner"
         );
     }

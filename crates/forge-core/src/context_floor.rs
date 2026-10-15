@@ -9,7 +9,7 @@
 //! it stands still every request is a pure append to the previous one. It advances in blocks
 //! (see [`plan_advance`]) and under context pressure, which is the one deliberate cache break.
 
-use forge_types::{Message, Role};
+use forge_types::{Message, MessageKind, Role};
 
 use crate::context_pipeline::{message_tokens, prune_one, PRUNE_KEEP_ROUNDS};
 use crate::Session;
@@ -40,6 +40,31 @@ pub(crate) struct TrimState {
     pub(crate) floor: usize,
     pub(crate) dropped: usize,
 }
+
+/// What the window trim did to the latest request, and what this turn has already done about it.
+#[derive(Debug, Default)]
+pub(crate) struct TrimWatch {
+    /// What the most recent request build dropped; a `Cell` so the `&self` builders can set it.
+    pub(crate) last: std::cell::Cell<TrimDrop>,
+    /// The "window full, older messages left out" notice went out this turn.
+    pub(crate) noticed: bool,
+    /// Compactions this turn started because the trim would have dropped real history.
+    pub(crate) compactions: u8,
+    /// The last such compaction folded nothing, so another would only repeat the model call.
+    pub(crate) stalled: bool,
+}
+
+impl TrimWatch {
+    pub(crate) fn begin_turn(&mut self) {
+        self.noticed = false;
+        self.compactions = 0;
+        self.stalled = false;
+    }
+}
+
+/// Most compactions one turn starts in place of a trim. Each folds a whole stretch, so needing a
+/// fourth means the working set itself no longer fits and a summary cannot help.
+const MAX_TRIM_COMPACTIONS: u8 = 3;
 
 /// Why the floor moved, for the cache instrument's miss label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +138,7 @@ pub(crate) fn initial_floor(messages: &[Message], keep_recent: usize) -> usize {
     let recent = recent_results_boundary(messages, keep_recent);
     let turn_start = messages
         .iter()
-        .rposition(|m| m.role == Role::User)
+        .rposition(Message::is_real_user)
         .unwrap_or(recent);
     snap_to_boundary(messages, recent.min(turn_start))
 }
@@ -165,27 +190,105 @@ pub(crate) fn prune_below(
         .sum()
 }
 
+/// The messages a window trim may never drop: every real user message of the current turn,
+/// which includes the turn's originating request and any steer queued into it. Harness nudges
+/// stored as `user` are not the task and do not count.
+///
+/// A turn starts at the newest real user message whose predecessor is not mid-tool-loop (a tool
+/// result, an assistant message with calls, or a nudge); a message that does follow one is a
+/// steer, so the walk continues back to the real message before it. Without this the trim kept
+/// only the newest user message, and a steer evicted the request it was steering.
+pub(crate) fn turn_protected(messages: &[Message]) -> Vec<usize> {
+    let Some(mut start) = messages.iter().rposition(Message::is_real_user) else {
+        return Vec::new();
+    };
+    loop {
+        let mid_turn = messages[..start]
+            .iter()
+            .rev()
+            .find(|m| m.role != Role::System)
+            .is_some_and(|m| {
+                m.role == Role::Tool
+                    || (m.role == Role::Assistant && !m.tool_calls.is_empty())
+                    || (m.role == Role::User && m.kind == MessageKind::Nudge)
+            });
+        if !mid_turn {
+            break;
+        }
+        match messages[..start].iter().rposition(Message::is_real_user) {
+            Some(earlier) => start = earlier,
+            None => break,
+        }
+    }
+    (start..messages.len())
+        .filter(|&i| messages[i].is_real_user())
+        .collect()
+}
+
 /// Fit `messages` into `budget` tokens, reusing a sticky front trim while it still fits.
 ///
 /// Dropping the oldest messages shifts the whole prompt, so recomputing the cut on every call (as a
 /// plain newest-first fill does) breaks the cache on every request once a session is at its window.
 /// Here a cut, once needed, drops enough to land at 85% of the budget and is then kept for as long
 /// as the result still fits — a smaller window after failover simply fails that check and re-fits.
-/// System messages and the newest user message (the turn's task) are always kept.
+/// System messages and the current turn's real user messages ([`turn_protected`]) are always kept.
+#[cfg(test)]
 pub(crate) fn fit_sticky(
     messages: Vec<Message>,
     budget: usize,
     trim: &mut Option<usize>,
 ) -> Vec<Message> {
-    let anchor = messages.iter().rposition(|m| m.role == Role::User);
+    fit_sticky_counted(messages, budget, trim).0
+}
+
+/// What a trim dropped, for the notice and the compact-instead-of-trim decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TrimDrop {
+    /// Messages cut from the view.
+    pub(crate) messages: usize,
+    /// Of those, user and assistant messages — real history, not just tool output.
+    pub(crate) history: usize,
+}
+
+/// [`fit_sticky`] plus how much it dropped.
+pub(crate) fn fit_sticky_counted(
+    messages: Vec<Message>,
+    budget: usize,
+    trim: &mut Option<usize>,
+) -> (Vec<Message>, TrimDrop) {
+    let before: Vec<Role> = messages.iter().map(|m| m.role).collect();
+    let out = fit_sticky_inner(messages, budget, trim);
+    let count = |roles: &mut dyn Iterator<Item = Role>, only_history: bool| {
+        roles
+            .filter(|r| {
+                *r != Role::System && (!only_history || matches!(r, Role::User | Role::Assistant))
+            })
+            .count()
+    };
+    let kept_all = count(&mut out.iter().map(|m| m.role), false);
+    let kept_history = count(&mut out.iter().map(|m| m.role), true);
+    let drop = TrimDrop {
+        messages: count(&mut before.iter().copied(), false).saturating_sub(kept_all),
+        history: count(&mut before.iter().copied(), true).saturating_sub(kept_history),
+    };
+    (out, drop)
+}
+
+fn fit_sticky_inner(
+    messages: Vec<Message>,
+    budget: usize,
+    trim: &mut Option<usize>,
+) -> Vec<Message> {
+    let protected: std::collections::HashSet<usize> =
+        turn_protected(&messages).into_iter().collect();
     let droppable: Vec<usize> = (0..messages.len())
         .filter(|&i| messages[i].role != Role::System)
         .collect();
-    // Always sent, whatever is dropped: system messages and the task anchor.
+    // Always sent, whatever is dropped: system messages and the turn's real user messages.
     let fixed: usize = messages
         .iter()
         .enumerate()
-        .filter(|(i, m)| m.role == Role::System || Some(*i) == anchor)
+        .filter(|(i, m)| m.role == Role::System || protected.contains(i))
         .map(|(_, m)| message_tokens(m))
         .sum();
     // The fewest leading droppable messages to drop so the rest fits `limit`. Walks newest-first
@@ -198,7 +301,7 @@ pub(crate) fn fit_sticky(
         }
         for slot in (0..droppable.len()).rev() {
             let index = droppable[slot];
-            if Some(index) == anchor {
+            if protected.contains(&index) {
                 continue;
             }
             total += message_tokens(&messages[index]);
@@ -211,7 +314,7 @@ pub(crate) fn fit_sticky(
     let fits_after = |n: usize| {
         let mut total = fixed;
         for &index in droppable[n.min(droppable.len())..].iter().rev() {
-            if Some(index) != anchor {
+            if !protected.contains(&index) {
                 total += message_tokens(&messages[index]);
                 if total > budget {
                     return false;
@@ -221,7 +324,7 @@ pub(crate) fn fit_sticky(
         total <= budget
     };
     if let Some(n) = (*trim).filter(|&n| fits_after(n)) {
-        return drop_front(messages, &droppable[..n.min(droppable.len())], anchor);
+        return drop_front(messages, &droppable[..n.min(droppable.len())], &protected);
     }
     if first_kept(budget) == Some(0) {
         *trim = None;
@@ -230,7 +333,7 @@ pub(crate) fn fit_sticky(
     match first_kept(budget * 85 / 100) {
         Some(n) if n < droppable.len() => {
             *trim = Some(n);
-            drop_front(messages, &droppable[..n], anchor)
+            drop_front(messages, &droppable[..n], &protected)
         }
         _ => {
             *trim = None;
@@ -239,11 +342,15 @@ pub(crate) fn fit_sticky(
     }
 }
 
-fn drop_front(messages: Vec<Message>, dropped: &[usize], anchor: Option<usize>) -> Vec<Message> {
+fn drop_front(
+    messages: Vec<Message>,
+    dropped: &[usize],
+    protected: &std::collections::HashSet<usize>,
+) -> Vec<Message> {
     let dropped: std::collections::HashSet<usize> = dropped
         .iter()
         .copied()
-        .filter(|&i| Some(i) != anchor)
+        .filter(|i| !protected.contains(i))
         .collect();
     messages
         .into_iter()
@@ -295,6 +402,80 @@ impl Session {
         }));
     }
 
+    /// Whether the request just built had to drop user or assistant messages and a compaction may
+    /// still run in its place: the trim is the last resort, a summary keeps what it would drop.
+    pub(crate) fn trim_calls_for_compaction(&self) -> bool {
+        let watch = &self.trim_watch;
+        watch.last.get().history > 0 && !watch.stalled && watch.compactions < MAX_TRIM_COMPACTIONS
+    }
+
+    /// Compact because the trim would otherwise drop real history, then rebuild the request with
+    /// the result. Returns whether the transcript shrank; a compaction that folded nothing latches
+    /// `stalled` so the turn does not pay for the same summary call on every step.
+    pub(crate) async fn compact_instead_of_trim(&mut self, model: &str) -> bool {
+        self.trim_watch.compactions += 1;
+        let (before, after) = self.compact(true).await.unwrap_or_default();
+        let shrank = after < before;
+        if shrank {
+            self.emit_context_gauge(model);
+        } else {
+            self.trim_watch.stalled = true;
+        }
+        shrank
+    }
+
+    /// The request body for `model`, with the trim as the last resort: where building it would
+    /// drop user or assistant messages, summarize them first and rebuild from the compacted
+    /// transcript; whatever is still left out is announced once per turn.
+    pub(crate) async fn request_transcript(
+        &mut self,
+        model: &str,
+        specs: &[forge_provider::ToolSpec],
+    ) -> Vec<Message> {
+        let mut sent = self.transcript_with_preamble_and_tools(model, specs);
+        if self.trim_calls_for_compaction() && self.compact_instead_of_trim(model).await {
+            sent = self.transcript_with_preamble_and_tools(model, specs);
+        }
+        self.note_window_trim();
+        sent
+    }
+
+    /// Say once per turn that the window is full and older messages are being left out of the
+    /// request, since nothing else tells the person the model no longer sees them.
+    pub(crate) fn note_window_trim(&mut self) {
+        let dropped = self.trim_watch.last.get();
+        if dropped.messages == 0 || self.trim_watch.noticed {
+            return;
+        }
+        self.trim_watch.noticed = true;
+        self.presenter
+            .emit(forge_types::PresenterEvent::Warning(format!(
+                "context window full: {} older message(s) are left out of this request. /compact \
+             summarizes them instead of dropping them",
+                dropped.messages
+            )));
+    }
+
+    /// The token count at which an idle chat loop should auto-compact, given the gauge's
+    /// `window`. For the model the session last ran (or its pin) this is exactly
+    /// [`Self::compaction_trigger`], so a `[compact_cap]` entry and the free-model cap apply the
+    /// same as in the turn loop; before any model has run it falls back to the global cap.
+    pub fn idle_compaction_trigger(&self, window: u64) -> u64 {
+        let model = self
+            .pinned_model
+            .as_ref()
+            .and_then(|set| set.first())
+            .or(self.gauge_model.as_ref());
+        match model {
+            Some(model) => self.compaction_trigger(model),
+            None => crate::auto_compact_trigger_tokens(
+                window,
+                self.config.mesh.compact_cap_tokens,
+                crate::AUTO_COMPACT_THRESHOLD,
+            ),
+        }
+    }
+
     /// The compaction trigger for `model`, in tokens.
     pub(crate) fn compaction_trigger(&self, model: &str) -> u64 {
         let window = self.base_context_window(model) as u64;
@@ -327,7 +508,7 @@ impl Session {
         let Some(next) = plan_advance(&self.transcript, floor, target, block, forced) else {
             return 0;
         };
-        let turn_start = self.transcript.iter().rposition(|m| m.role == Role::User);
+        let turn_start = self.transcript.iter().rposition(Message::is_real_user);
         let movement = if turn_start.is_some_and(|start| next > start) {
             FloorMove::AgeRounds
         } else {

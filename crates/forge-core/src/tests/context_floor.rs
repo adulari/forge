@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::context_pipeline::{to_llm_floored, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX};
-use forge_types::ToolCall;
+use forge_types::{MessageKind, ToolCall};
 
 /// Deterministic xorshift, so a failing case reproduces from its seed without a proptest dep.
 struct Rng(u64);
@@ -367,4 +367,127 @@ fn a_sticky_trim_is_reused_until_it_no_longer_fits() {
     let third = fit_sticky(messages, 1_200, &mut smaller);
     assert!(smaller.unwrap() > dropped);
     assert!(third.iter().map(message_tokens).sum::<usize>() <= 1_200);
+}
+
+fn tool_round(id: &str, result: &str) -> [Message; 2] {
+    [
+        Message::assistant_tool_calls(
+            "",
+            vec![ToolCall {
+                id: id.into(),
+                name: "shell".into(),
+                args: serde_json::json!({ "command": "cat file" }),
+            }],
+        ),
+        Message::tool_result(id, result),
+    ]
+}
+
+fn texts(messages: &[Message]) -> Vec<&str> {
+    messages.iter().map(|m| m.content.as_str()).collect()
+}
+
+#[test]
+fn a_trim_keeps_the_originating_request_and_every_steer_of_the_turn() {
+    let mut messages = vec![
+        Message::system("sys"),
+        Message::user("older turn question"),
+        Message::assistant("older turn answer"),
+        Message::user("ORIGINAL REQUEST: refactor the parser"),
+    ];
+    for i in 0..30 {
+        messages.extend(tool_round(&format!("a{i}"), &"output ".repeat(80)));
+        if i == 10 {
+            messages.push(Message::user("STEER ONE: and keep the public API"));
+        }
+        if i == 20 {
+            messages.push(Message::user("STEER TWO: skip the lexer"));
+        }
+    }
+
+    let mut trim = None;
+    let fitted = fit_sticky(messages, 2_500, &mut trim);
+
+    let kept = texts(&fitted);
+    for must in [
+        "ORIGINAL REQUEST: refactor the parser",
+        "STEER ONE: and keep the public API",
+        "STEER TWO: skip the lexer",
+    ] {
+        assert!(kept.contains(&must), "{must} was dropped: {kept:?}");
+    }
+    assert!(
+        !kept.contains(&"older turn question"),
+        "an earlier turn is ordinary history and is trimmed"
+    );
+    assert!(fitted[0].role == Role::System);
+}
+
+#[test]
+fn a_harness_nudge_does_not_take_the_place_of_the_task() {
+    let mut messages = vec![
+        Message::system("sys"),
+        Message::user("THE TASK: port the module"),
+    ];
+    for i in 0..30 {
+        messages.extend(tool_round(&format!("n{i}"), &"output ".repeat(80)));
+    }
+    messages.push(Message::assistant(""));
+    messages.push(Message::user("Your last response was empty.").with_kind(MessageKind::Nudge));
+
+    assert_eq!(
+        turn_protected(&messages),
+        vec![1],
+        "only the person's message is protected"
+    );
+    let mut trim = None;
+    let fitted = fit_sticky(messages, 2_000, &mut trim);
+    let kept = texts(&fitted);
+    assert!(kept.contains(&"THE TASK: port the module"), "{kept:?}");
+}
+
+#[test]
+fn a_user_message_after_a_finished_answer_starts_a_new_turn() {
+    let messages = vec![
+        Message::user("first"),
+        Message::assistant("done"),
+        Message::user("second"),
+        Message::assistant("done too"),
+        Message::user("third"),
+    ];
+    assert_eq!(turn_protected(&messages), vec![4]);
+}
+
+#[test]
+fn protected_messages_too_big_for_the_budget_are_clipped_not_dropped() {
+    let huge = |tag: &str| format!("{} {tag}", "request-detail ".repeat(1_500));
+    let messages = vec![
+        Message::system("sys"),
+        Message::user(huge("ORIGIN")),
+        Message::assistant_tool_calls(
+            "",
+            vec![ToolCall {
+                id: "x".into(),
+                name: "shell".into(),
+                args: serde_json::json!({}),
+            }],
+        ),
+        Message::tool_result("x", "ok"),
+        Message::user(huge("STEER")),
+    ];
+    let mut trim = None;
+    let fitted = fit_sticky(messages, 3_000, &mut trim);
+
+    let users: Vec<&Message> = fitted.iter().filter(|m| m.role == Role::User).collect();
+    assert_eq!(users.len(), 2, "both survive: {:?}", texts(&fitted));
+    assert!(
+        users[0].content.ends_with("ORIGIN") && users[1].content.ends_with("STEER"),
+        "each keeps the end of its text"
+    );
+    assert!(
+        users[0].content.len() < huge("ORIGIN").len(),
+        "the oldest was clipped to make room"
+    );
+    let total: usize = fitted.iter().map(message_tokens).sum();
+    assert!(total <= 3_000, "{total} tokens over the budget");
 }

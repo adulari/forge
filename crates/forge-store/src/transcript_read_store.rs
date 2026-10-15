@@ -124,7 +124,7 @@ impl Store {
             )
             .optional()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility, provider_items_json
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility, provider_items_json, nudge
              FROM message WHERE session_id = ?1 AND active = 1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([session_id], |row| {
@@ -141,6 +141,7 @@ impl Store {
                 tool_call_id: row.get(4)?,
                 visibility: Visibility::parse(&visibility),
                 provider_items: parse_provider_items(session_id, row.get(6)?),
+                kind: forge_types::MessageKind::from_code(row.get(7)?),
             })
         })?;
         let mut msgs = rows
@@ -160,6 +161,7 @@ impl Store {
                     tool_call_id: None,
                     visibility: Visibility::Llm,
                     provider_items: None,
+                    kind: forge_types::MessageKind::Normal,
                 },
             );
         }
@@ -171,11 +173,22 @@ impl Store {
     /// conversation. The model only ever sees the compacted view ([`load_messages`](Self::load_messages)),
     /// but this lets the USER still read the FULL original history in scrollback after a resume.
     pub fn load_all_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
+        self.load_messages_where(session_id, "1 = 1")
+    }
+
+    /// The full uncompacted conversation the MODEL should re-read: active rows plus the rows a
+    /// compaction soft-deleted, but not the rows `/undo` rewound past (those are not part of the
+    /// conversation any more — `uncompact_session_store` keeps them removed for the same reason).
+    pub fn load_messages_uncompacted(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
+        self.load_messages_where(session_id, "(active = 1 OR compacted = 1)")
+    }
+
+    fn load_messages_where(&self, session_id: &str, filter: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility, provider_items_json
-             FROM message WHERE session_id = ?1 ORDER BY seq",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility, provider_items_json, nudge
+             FROM message WHERE session_id = ?1 AND {filter} ORDER BY seq"
+        ))?;
         let rows = stmt.query_map([session_id], |row| {
             let role: String = row.get(0)?;
             let tool_calls_json: Option<String> = row.get(3)?;
@@ -190,6 +203,7 @@ impl Store {
                 tool_call_id: row.get(4)?,
                 visibility: Visibility::parse(&visibility),
                 provider_items: parse_provider_items(session_id, row.get(6)?),
+                kind: forge_types::MessageKind::from_code(row.get(7)?),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -212,7 +226,7 @@ impl Store {
             |row| row.get(0),
         )?;
         let mut stmt = conn.prepare(
-            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility, nudge
              FROM message WHERE session_id = ?1 ORDER BY seq DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map((session_id, limit as i64), |row| {
@@ -229,6 +243,7 @@ impl Store {
                 tool_call_id: row.get(4)?,
                 visibility: Visibility::parse(&visibility),
                 provider_items: None,
+                kind: forge_types::MessageKind::from_code(row.get(6)?),
             })
         })?;
         let mut msgs = rows
@@ -251,7 +266,7 @@ impl Store {
             &[],
             None,
             Visibility::Llm,
-            true,
+            forge_types::MessageKind::Nudge,
         )
     }
 
@@ -748,5 +763,72 @@ mod prompt_history_tests {
         assert_eq!(h, ["first old", "second old", "mine", "mine 2"]);
         let capped = store.recent_user_prompts("new", "/ws", 2).unwrap();
         assert_eq!(capped, ["mine", "mine 2"], "the newest survive the cap");
+    }
+}
+
+#[cfg(test)]
+mod message_kind_tests {
+    use super::*;
+    use forge_types::{MessageKind, Role};
+
+    #[test]
+    fn a_rows_kind_survives_the_round_trip_and_normal_rows_stay_normal() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "ask").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "real", None)
+            .unwrap();
+        store.add_nudge_message(&sid, 1, "keep going").unwrap();
+        store
+            .add_message_kind(&sid, 2, Role::System, "[time] now", MessageKind::Clock)
+            .unwrap();
+        store
+            .add_message_kind(&sid, 3, Role::System, "a hint", MessageKind::Hint)
+            .unwrap();
+
+        let kinds: Vec<MessageKind> = store
+            .load_messages(&sid)
+            .unwrap()
+            .iter()
+            .map(|m| m.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                MessageKind::Normal,
+                MessageKind::Nudge,
+                MessageKind::Clock,
+                MessageKind::Hint
+            ]
+        );
+        // The history page still reports only the user-role nudge as a nudge.
+        let page = store.load_history_page(&sid, None, 20).unwrap();
+        assert_eq!(page.iter().filter(|r| r.nudge).count(), 1);
+    }
+
+    #[test]
+    fn the_uncompacted_load_has_compacted_rows_but_not_undone_ones() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "ask").unwrap();
+        for i in 0..8 {
+            store
+                .add_message(&sid, i, Role::User, &format!("m{i}"), None)
+                .unwrap();
+        }
+        store.compact_session_store(&sid, "summary", 4).unwrap();
+        store.deactivate_messages_from(&sid, 6).unwrap();
+
+        let texts = |rows: Vec<StoredMessage>| -> Vec<String> {
+            rows.into_iter().map(|m| m.content).collect()
+        };
+        assert_eq!(
+            texts(store.load_messages_uncompacted(&sid).unwrap()),
+            ["m0", "m1", "m2", "m3", "m4", "m5"]
+        );
+        assert_eq!(
+            texts(store.load_all_messages(&sid).unwrap()).len(),
+            8,
+            "the scrollback read still has every row"
+        );
     }
 }

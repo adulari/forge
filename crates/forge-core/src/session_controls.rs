@@ -47,12 +47,13 @@ impl Session {
         reason: &str,
         content: &str,
     ) -> Result<(), CoreError> {
-        let seq = self.next_seq();
-        self.store
-            .add_message(&self.id, seq, Role::System, content, None)?;
-        self.transcript.push(Message::system(content));
-        pack.push(source, reason, content);
-        Ok(())
+        self.inject_context_kind(
+            pack,
+            source,
+            reason,
+            content,
+            forge_types::MessageKind::Normal,
+        )
     }
 
     /// Re-read the project `AGENTS.md` and inject it when it is new or has changed since the copy
@@ -512,10 +513,6 @@ impl Session {
     /// (`UserPromptSubmit`, `SessionStart`, `SessionEnd`) outside the tool path.
     pub fn hooks(&self) -> &[forge_config::HookConfig] {
         &self.config.hooks
-    }
-
-    pub fn compact_cap_tokens(&self) -> u64 {
-        self.config.mesh.compact_cap_tokens
     }
 
     /// The session id — used by lifecycle hooks to identify the session.

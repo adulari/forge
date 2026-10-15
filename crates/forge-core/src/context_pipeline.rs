@@ -93,6 +93,24 @@ pub(crate) fn to_llm_floored(
     floor: usize,
     trim: &mut Option<usize>,
 ) -> Vec<Message> {
+    to_llm_floored_counted(
+        messages,
+        budget_tokens,
+        tool_result_token_budget,
+        floor,
+        trim,
+    )
+    .0
+}
+
+/// [`to_llm_floored`] plus what the window trim dropped from the view.
+pub(crate) fn to_llm_floored_counted(
+    messages: &[Message],
+    budget_tokens: usize,
+    tool_result_token_budget: usize,
+    floor: usize,
+    trim: &mut Option<usize>,
+) -> (Vec<Message>, crate::context_floor::TrimDrop) {
     let llm_floor = messages[..floor.min(messages.len())]
         .iter()
         .filter(|m| m.visibility.is_llm())
@@ -121,8 +139,8 @@ pub(crate) fn to_llm_floored(
     // invariant the provider checks, so it is re-established here whatever the walk did. Moonshot
     // rejects the whole request for one unpaired result (`tool_call_id … is not found`), seen live
     // on 2026-09-16 the first time a 246K-token Kimi turn crossed its window budget.
-    let fitted = crate::context_floor::fit_sticky(elided, budget_tokens, trim);
-    normalize_tool_pairs(fitted).messages
+    let (fitted, dropped) = crate::context_floor::fit_sticky_counted(elided, budget_tokens, trim);
+    (normalize_tool_pairs(fitted).messages, dropped)
 }
 
 const INTERRUPTED_TOOL_RESULT: &str = "error: tool call interrupted before a result was recorded";
@@ -455,6 +473,36 @@ fn truncate_message_to_budget(mut message: Message, budget_tokens: usize) -> Opt
     Some(message)
 }
 
+/// Smallest share a clipped protected message keeps, so shrinking the oldest never erases it.
+const PROTECTED_CLIP_FLOOR_TOKENS: usize = 64;
+
+/// The protected messages shrunk to `budget` tokens in total: newest first, each keeps its whole
+/// text while the budget allows it, and an older one is clipped from the front to what is left
+/// (never below [`PROTECTED_CLIP_FLOOR_TOKENS`] while the budget has any room for it).
+fn clip_protected(messages: &[Message], protected: &[usize], budget: usize) -> Vec<Message> {
+    let mut remaining = budget;
+    let mut kept: Vec<Message> = Vec::new();
+    for (rank, &index) in protected.iter().rev().enumerate() {
+        let older = protected.len() - 1 - rank;
+        let reserve = older * PROTECTED_CLIP_FLOOR_TOKENS;
+        let allowed = remaining.saturating_sub(reserve);
+        let message = &messages[index];
+        let cost = message_tokens(message);
+        if cost <= allowed {
+            remaining -= cost;
+            kept.push(message.clone());
+        } else if let Some(clipped) = truncate_message_to_budget(
+            message.clone(),
+            allowed.max(PROTECTED_CLIP_FLOOR_TOKENS.min(remaining)),
+        ) {
+            remaining = remaining.saturating_sub(message_tokens(&clipped));
+            kept.push(clipped);
+        }
+    }
+    kept.reverse();
+    kept
+}
+
 /// Trim a transcript to fit within `budget_tokens` (the model's context window minus the reserved
 /// reply), counted with the real BPE tokenizer. System messages are ALWAYS kept (the standing
 /// instructions); the rest are included newest-first until the budget is hit, then re-ordered to
@@ -476,21 +524,29 @@ pub(crate) fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -
         .filter(|m| m.role == Role::System)
         .map(message_tokens)
         .sum();
-    // The newest user message is the turn's task statement. Everything after it — the assistant's
-    // own reasoning and its tool results — is work done in service of it, and a long tool loop can
-    // fill the whole budget on its own. Walking newest-first without an anchor therefore evicts the
-    // instruction while keeping the output it produced, and the model, seeing only tool results,
-    // reports that no task text arrived and invents one. Reserve it up front like system context.
-    let anchor = messages
+    // The current turn's real user messages are the task statement (the originating request and
+    // any steers into it; see `context_floor::turn_protected`). Everything after them — the
+    // assistant's own reasoning and its tool results — is work done in service of them, and a long
+    // tool loop can fill the whole budget on its own. Walking newest-first without protecting them
+    // therefore evicts the instruction while keeping the output it produced, and the model, seeing
+    // only tool results, reports that no task text arrived and invents one. Reserve them up front
+    // like system context.
+    let protected: Vec<usize> = if budget_tokens > system_cost {
+        crate::context_floor::turn_protected(&messages)
+    } else {
+        Vec::new()
+    };
+    let protected_set: std::collections::HashSet<usize> = protected.iter().copied().collect();
+    let protected_cost: usize = protected
         .iter()
-        .rposition(|m| m.role == Role::User)
-        .filter(|_| budget_tokens > system_cost);
-    let anchor_cost = anchor.map_or(0, |i| message_tokens(&messages[i]));
+        .map(|&i| message_tokens(&messages[i]))
+        .sum();
     let mut remaining = budget_tokens.saturating_sub(system_cost);
-    // An anchor that does not fit is clipped rather than dropped — a shortened objective still
-    // steers the turn, an absent one does not — and nothing else can fit beside it.
-    if let Some(i) = anchor.filter(|_| anchor_cost > remaining) {
-        let clipped = truncate_message_to_budget(messages[i].clone(), remaining);
+    // Protected messages that do not fit are clipped rather than dropped — a shortened objective
+    // still steers the turn, an absent one does not — and nothing else can fit beside them. The
+    // newest keep their text; the oldest are clipped from the front first.
+    if protected_cost > remaining {
+        let clipped = clip_protected(&messages, &protected, remaining);
         let mut out: Vec<Message> = messages
             .into_iter()
             .filter(|message| message.role == Role::System)
@@ -498,12 +554,12 @@ pub(crate) fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -
         out.extend(clipped);
         return out;
     }
-    remaining -= anchor_cost;
+    remaining -= protected_cost;
     let mut keep_idx = std::collections::HashSet::new();
     let mut saw_overflow = false;
 
     for i in (0..messages.len()).rev() {
-        if messages[i].role == Role::System || Some(i) == anchor {
+        if messages[i].role == Role::System || protected_set.contains(&i) {
             continue;
         }
         let cost = message_tokens(&messages[i]);
@@ -530,12 +586,14 @@ pub(crate) fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -
             }
 
             let truncated = truncate_message_to_budget(messages[i].clone(), remaining);
-            // Keep the anchored task statement alongside the standing system context, so the
+            // Keep the protected task statements alongside the standing system context, so the
             // last-resort path still tells the model what it was asked to do.
             let mut out: Vec<Message> = messages
                 .into_iter()
                 .enumerate()
-                .filter(|(index, message)| message.role == Role::System || Some(*index) == anchor)
+                .filter(|(index, message)| {
+                    message.role == Role::System || protected_set.contains(index)
+                })
                 .map(|(_, message)| message)
                 .collect();
             if let Some(message) = truncated {
@@ -552,16 +610,14 @@ pub(crate) fn fit_messages_owned(messages: Vec<Message>, budget_tokens: usize) -
         return messages;
     }
 
-    if let Some(i) = anchor {
-        keep_idx.insert(i);
-    }
+    keep_idx.extend(protected.iter().copied());
     let mut ordered: Vec<usize> = keep_idx.iter().copied().collect();
     ordered.sort_unstable();
     // Strip tool results left at the head of the kept suffix: their call was cut. The anchor is
     // older than the suffix and sorts first, so it must be stepped over rather than treated as
     // the first kept message — stopping at it left the suffix's orphans in place.
     for i in ordered {
-        if Some(i) == anchor {
+        if protected_set.contains(&i) {
             continue;
         }
         if messages[i].role == Role::Tool {
