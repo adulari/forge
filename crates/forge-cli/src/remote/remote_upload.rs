@@ -67,7 +67,12 @@ pub(crate) fn store_upload(
             UPLOAD_MAX_BYTES
         ));
     }
-    let image = upload_is_image(content_type, name);
+    // The bytes decide, not the declared type or the extension: a phone can label a HEIC photo
+    // `image/jpeg`, and a `.png` that is really text would only fail later at load time.
+    let image = crate::image_input::sniff(bytes).is_some();
+    if !image && upload_is_image(content_type, name) {
+        return Err("not a supported image (png/jpeg/gif/webp/heic)".to_string());
+    }
     if !image && std::str::from_utf8(bytes).is_err() {
         return Err("only images and UTF-8 text files can ride a prompt".to_string());
     }

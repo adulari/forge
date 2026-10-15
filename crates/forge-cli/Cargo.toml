@@ -76,7 +76,7 @@ rpassword = "7"
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
 arboard = "3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 flate2 = "1.1.9"
 tar = "0.4.46"

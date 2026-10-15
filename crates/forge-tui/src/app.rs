@@ -462,6 +462,11 @@ pub struct App {
     /// Images resolved from the last submitted prompt, stashed so the user-turn echo can show a
     /// marker line per image (the placeholder was stripped from the text). Cleared by `submit_user`.
     last_submit_images: Vec<forge_types::ImageAttachment>,
+    /// Images typed with a prompt that was queued mid-turn, keyed by the queued text; they ride
+    /// with that prompt when it is finally dequeued ([`Self::promote_queued_images`]).
+    queued_images: Vec<(String, Vec<forge_types::ImageAttachment>)>,
+    /// Images of the prompt just dequeued, waiting for the turn spawn to attach them to the session.
+    ready_images: Vec<forge_types::ImageAttachment>,
     /// The write-tool preview diff awaiting its tool's outcome. `PresenterEvent::Diff` is emitted
     /// BEFORE the permission gate, so while `prompt` is armed this is exactly "what the pending
     /// Allow would touch" — the remote diff card. The following `ToolResult` resolves it: ok →
@@ -2444,6 +2449,36 @@ impl App {
     /// Update the visible queued-prompts list (prompts typed while a turn was running).
     pub fn set_queued(&mut self, queued: &[String]) {
         self.queued = queued.to_vec();
+        // Drop images whose prompt left the queue by any route (removed, absorbed, interrupted).
+        let mut remaining = self.queued.clone();
+        self.queued_images.retain(|(text, _)| {
+            remaining
+                .iter()
+                .position(|q| q == text)
+                .map(|i| remaining.remove(i))
+                .is_some()
+        });
+    }
+
+    /// Remember the images of a prompt queued mid-turn. Call before [`Self::set_queued`].
+    pub fn stash_queued_images(&mut self, text: &str, images: Vec<forge_types::ImageAttachment>) {
+        if !images.is_empty() {
+            self.queued_images.push((text.to_string(), images));
+        }
+    }
+
+    /// A queued prompt is about to run: move its stashed images (if any) to the ready slot.
+    pub fn promote_queued_images(&mut self, text: &str) {
+        if let Some(i) = self.queued_images.iter().position(|(t, _)| t == text) {
+            let (_, images) = self.queued_images.remove(i);
+            self.last_submit_images = images.clone();
+            self.ready_images = images;
+        }
+    }
+
+    /// Images the turn being spawned must carry (empty unless a queued prompt had some).
+    pub fn take_ready_images(&mut self) -> Vec<forge_types::ImageAttachment> {
+        std::mem::take(&mut self.ready_images)
     }
 
     /// Push a dim separator line after replaying a resumed session's transcript, so the user
@@ -4274,6 +4309,25 @@ mod tests {
         app.on_turn_start();
         assert!(!app.workflow.active, "stale active run cleared");
         assert!(app.workflow.rows.is_empty(), "dead run's rows gone");
+    }
+
+    #[test]
+    fn queued_images_follow_their_prompt_and_vanish_with_it() {
+        let img = |d: &str| forge_types::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data_base64: d.to_string(),
+        };
+        let mut app = App::default();
+        app.stash_queued_images("look at this", vec![img("a")]);
+        app.stash_queued_images("and this", vec![img("b")]);
+        app.set_queued(&["look at this".to_string(), "and this".to_string()]);
+        app.promote_queued_images("and this");
+        assert_eq!(app.take_ready_images(), vec![img("b")]);
+        assert!(app.take_ready_images().is_empty());
+        // A prompt that left the queue without running drops its images.
+        app.set_queued(&[]);
+        app.promote_queued_images("look at this");
+        assert!(app.take_ready_images().is_empty());
     }
 
     #[test]

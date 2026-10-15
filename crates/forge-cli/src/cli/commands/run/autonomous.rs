@@ -281,6 +281,7 @@ pub(crate) enum GoalDecision {
 pub(crate) fn dequeue_prompt(queue: &mut Vec<String>, app: &mut forge_tui::App) -> Option<String> {
     let idx = queue.iter().position(|q| !is_command_line(q))?;
     let next = queue.remove(idx);
+    app.promote_queued_images(&next);
     app.set_queued(queue);
     Some(next)
 }
@@ -426,11 +427,15 @@ pub(crate) fn spawn_turn(
     let s = session.clone();
     let dt = done_tx.clone();
     let prompt = prompt.to_string();
+    let images = app.take_ready_images();
     tokio::spawn(async move {
         // DoneGuard fires on the way out — normal return, panic unwind, OR abort (interrupt) —
         // so the UI can never stay stuck "working". It carries this turn's generation.
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
+        if !images.is_empty() {
+            sess.attach_images(images);
+        }
         if let Err(e) = sess.run_turn(&prompt).await {
             sess.notify_error(&format!("turn failed: {e}"));
         }
@@ -498,9 +503,13 @@ pub(crate) fn spawn_turn_with(
     *busy_since = std::time::Instant::now();
     let s = session.clone();
     let dt = done_tx.clone();
+    let images = app.take_ready_images();
     tokio::spawn(async move {
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
+        if !images.is_empty() {
+            sess.attach_images(images);
+        }
         if let Err(e) = sess.run_turn_with(&prompt, &guidance, tier).await {
             sess.notify_error(&format!("turn failed: {e}"));
         }

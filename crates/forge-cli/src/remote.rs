@@ -2324,12 +2324,22 @@ mod tests {
             );
         }
 
-        // Images are detected by content type OR extension — bytes go through unvalidated
-        // (the vision provider is the judge of image bytes, not us).
-        let (_, image) = store_upload(&dir, "shot.png", None, &[0x89, 0x50, 0x4e]).unwrap();
-        assert!(image, "extension marks an image");
-        let (_, image) = store_upload(&dir, "blob", Some("image/jpeg"), &[0xff, 0xd8]).unwrap();
-        assert!(image, "content type marks an image");
+        // Images are detected by content (magic bytes), whatever the extension or declared type.
+        let png = crate::image_input::test_png();
+        let (_, image) = store_upload(&dir, "shot.dat", None, &png).unwrap();
+        assert!(image, "magic bytes mark an image");
+        let (_, image) = store_upload(
+            &dir,
+            "IMG_1.jpg",
+            Some("image/jpeg"),
+            b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00",
+        )
+        .unwrap();
+        assert!(image, "HEIC mislabelled as jpeg is accepted for conversion");
+        assert!(
+            store_upload(&dir, "fake.png", Some("image/png"), b"just text").is_err(),
+            "declared image whose bytes are not an image is refused"
+        );
 
         // Non-image binary is refused: only images and UTF-8 text have an injection path.
         assert!(store_upload(

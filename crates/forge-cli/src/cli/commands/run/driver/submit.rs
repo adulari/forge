@@ -55,13 +55,13 @@ impl DriverState {
                         self.busy_command(text).await?;
                     } else {
                         self.prompt_history.record(&text);
-                        self.queued_prompts.push(text.clone());
-                        self.steer.push(text.clone());
-                        self.app.set_queued(&self.queued_prompts);
-                        self.app.note(&format!(
-                            "⏳ queued ({} pending) — sent at this turn's next step",
-                            self.queued_prompts.len()
-                        ));
+                        queue_prompt(
+                            &mut self.queued_prompts,
+                            &self.steer,
+                            &mut self.app,
+                            text,
+                            Vec::new(),
+                        );
                     }
                     return Ok(());
                 }
@@ -305,6 +305,8 @@ impl DriverState {
                 .note(&format!("⎇ prompt blocked by hook: {reason}")),
             Ok(prompt) => {
                 // Expand `@path` mentions exactly like the TUI submit path.
+                attach_at_images(&prompt, Some(&hook_workspace), &self.session, &mut self.app)
+                    .await;
                 let (file_blocks, included, skipped) = expand_at_files_in(&prompt, &hook_workspace);
                 if !included.is_empty() {
                     self.app

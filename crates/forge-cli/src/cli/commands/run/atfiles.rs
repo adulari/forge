@@ -159,12 +159,14 @@ fn scoped_at_path(workspace: &std::path::Path, raw: &str) -> Option<std::path::P
     Some(path)
 }
 
-fn expand_at_files_impl(
+/// Resolve each distinct `@path` in `prompt` to a real path, applying workspace confinement when
+/// one is given. Paths that do not resolve are left to be plain text.
+fn resolved_at_paths(
     prompt: &str,
     workspace: Option<&std::path::Path>,
-) -> (Vec<String>, Vec<String>, Vec<String>) {
+) -> Vec<(String, std::path::PathBuf)> {
     let mut seen = std::collections::HashSet::new();
-    let (mut blocks, mut included, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
+    let mut out = Vec::new();
     // The scanner is UTF-8-safe and accepts `@{path with spaces}` in addition to the original
     // whitespace-delimited `@path` syntax. The braced form is what graphical file pickers insert
     // for a legitimate workspace path containing spaces.
@@ -175,10 +177,59 @@ fn expand_at_files_impl(
         let resolved = workspace
             .and_then(|root| scoped_at_path(root, &path))
             .or_else(|| workspace.is_none().then(|| std::path::PathBuf::from(&path)));
-        let Some(resolved) = resolved else {
+        if let Some(resolved) = resolved {
+            out.push((path, resolved));
+        }
+    }
+    out
+}
+
+fn is_image_file(path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+    let mut head = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(16).read_to_end(&mut head);
+    }
+    crate::image_input::sniff(&head).is_some()
+}
+
+/// Attach every `@path` that is an image file (by content) as vision input for the next turn.
+/// `workspace` confines remote prompts exactly like [`expand_at_files_in`]. An image already
+/// pending on the session (e.g. a remote upload that also rides as a mention) is not added twice.
+pub(crate) async fn attach_at_images(
+    prompt: &str,
+    workspace: Option<&std::path::Path>,
+    session: &std::sync::Arc<tokio::sync::Mutex<forge_core::Session>>,
+    app: &mut forge_tui::App,
+) {
+    for (_, resolved) in resolved_at_paths(prompt, workspace) {
+        if !is_image_file(&resolved) {
             continue;
-        };
+        }
+        match crate::image_input::load_image_file(&resolved.to_string_lossy()) {
+            Ok((att, label)) => {
+                let mut s = session.lock().await;
+                let mut pending = s.take_pending_images();
+                if !pending.contains(&att) {
+                    pending.push(att);
+                    app.note(&format!("🖼 image attached ({label})"));
+                }
+                s.attach_images(pending);
+            }
+            Err(e) => app.note(&format!("⚠ {e}")),
+        }
+    }
+}
+
+fn expand_at_files_impl(
+    prompt: &str,
+    workspace: Option<&std::path::Path>,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (mut blocks, mut included, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
+    for (path, resolved) in resolved_at_paths(prompt, workspace) {
         match std::fs::read(resolved) {
+            // Images ride as vision input ([`attach_at_images`]), not as file text.
+            Ok(raw) if crate::image_input::sniff(&raw).is_some() => {}
             Ok(raw) if raw.len() > AT_FILE_MAX_BYTES => {
                 skipped.push(format!("@{path} (>{}KB)", AT_FILE_MAX_BYTES / 1024));
             }
@@ -210,6 +261,63 @@ mod tests {
         assert_eq!(included, vec!["My Docs/plan.md"]);
         assert!(blocks[0].contains("the plan"));
         assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn image_mentions_are_not_binary_skips_and_attach_as_vision_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(directory.path().join("shot.png"), png.into_inner()).unwrap();
+        std::fs::write(
+            directory.path().join("blob.bin"),
+            [0xffu8, 0xfe, 0x00, 0x80],
+        )
+        .unwrap();
+
+        let prompt = "see @shot.png and @blob.bin";
+        let (blocks, included, skipped) = expand_at_files_in(prompt, directory.path());
+        assert!(blocks.is_empty() && included.is_empty());
+        assert_eq!(skipped, vec!["@blob.bin (binary)"]);
+
+        let images: Vec<_> = resolved_at_paths(prompt, Some(directory.path()))
+            .into_iter()
+            .filter(|(_, p)| is_image_file(p))
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(images, vec!["shot.png"]);
+    }
+
+    #[tokio::test]
+    async fn attach_at_images_loads_once_even_if_already_pending() {
+        use forge_core::Session;
+        let directory = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let file = directory.path().join("shot.png");
+        std::fs::write(&file, png.into_inner()).unwrap();
+        let config = forge_config::Config::default();
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Session::start(
+                std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap()),
+                std::sync::Arc::new(forge_provider::MockProvider),
+                std::sync::Arc::new(forge_mesh::HeuristicRouter::new(config.clone())),
+                forge_tools::ToolRegistry::with_core_tools(),
+                Box::new(forge_tui::HeadlessPresenter::new(false)),
+                config,
+                ".",
+            )
+            .unwrap(),
+        ));
+        let mut app = forge_tui::App::default();
+        let prompt = "@shot.png";
+        attach_at_images(prompt, Some(directory.path()), &session, &mut app).await;
+        attach_at_images(prompt, Some(directory.path()), &session, &mut app).await;
+        assert_eq!(session.lock().await.take_pending_images().len(), 1);
     }
 
     #[test]
