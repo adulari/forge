@@ -185,10 +185,13 @@ pub(crate) fn map_history_row(
     // but it's Forge talking, not the person, and a client must not render it as "You".
     // A background-job completion notice is stored `role='user'` for the same reason, and is
     // recognised from its text (no column), so history written before this existed classifies too.
+    // Wakeups, heartbeats and peer messages are the same story under `harness_notice`.
     let kind = if row.nudge {
         "nudge"
     } else if role == "user" && forge_types::parse_job_notices(&row.content).is_some() {
         "job_notice"
+    } else if role == "user" && forge_types::parse_harness_notice(&row.content).is_some() {
+        "harness_notice"
     } else if visibility == "ui" {
         match role.as_str() {
             "user" => "user",
@@ -333,5 +336,23 @@ mod job_notice_tests {
             None,
         );
         assert_eq!(typed.kind, "user");
+    }
+
+    #[test]
+    fn wakeups_heartbeats_and_peers_are_harness_notices_on_the_wire() {
+        let wake = forge_types::format_wakeup_delivery(&forge_types::format_wakeup_prompt(
+            "check the file",
+            "waiting",
+        ));
+        let beat = forge_types::format_heartbeat_delivery(Some("ci"), "check CI");
+        for text in [wake.as_str(), beat.as_str(), "[message from cli] hi"] {
+            let row = map_history_row(user_row(text), Some(1_000));
+            assert_eq!(row.kind, "harness_notice", "{text}");
+            assert_eq!(row.role, "user");
+        }
+        assert_eq!(
+            map_history_row(user_row("please check the file"), None).kind,
+            "user"
+        );
     }
 }

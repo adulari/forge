@@ -174,8 +174,8 @@ fn event_notification(
                 "summary": summary,
             }),
         ),
-        forge_tui::PresenterEvent::Steered(text) => match forge_types::parse_job_notices(text) {
-            Some(items) => (
+        forge_tui::PresenterEvent::Steered(text) => match forge_types::parse_harness_notice(text) {
+            Some(forge_types::HarnessNotice::Job(items)) => (
                 LoggingLevel::Info,
                 serde_json::json!({
                     "event": "job_notice",
@@ -185,6 +185,14 @@ fn event_notification(
                         })),
                         forge_types::JobNotice::Dropped(_) => None,
                     }).collect::<Vec<_>>(),
+                }),
+            ),
+            Some(notice) => (
+                LoggingLevel::Info,
+                serde_json::json!({
+                    "event": "harness_notice",
+                    "subtype": notice.subtype(),
+                    "text": text,
                 }),
             ),
             None => (

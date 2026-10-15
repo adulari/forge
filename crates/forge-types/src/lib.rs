@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod harness_notice;
 mod job_notice;
 mod provider_items;
 pub use provider_items::ProviderItems;
@@ -14,6 +15,10 @@ pub mod interaction;
 mod permission_mode;
 mod subscription_pacing;
 mod turn_outcome;
+pub use harness_notice::{
+    format_heartbeat_delivery, format_wakeup_delivery, format_wakeup_prompt, parse_harness_notice,
+    HarnessNotice, PEER_BODY_SEPARATOR, PEER_MESSAGE_PREFIX, WAKEUP_PREFIX,
+};
 pub use job_notice::{parse_job_notices, JobExitNotice, JobNotice};
 pub use permission_mode::PermissionMode;
 

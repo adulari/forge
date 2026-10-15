@@ -78,10 +78,10 @@ pub fn format_heartbeat_interval(secs: i64) -> String {
 fn format_delivery(hb: &forge_store::SessionHeartbeat) -> String {
     match &hb.label {
         Some(label) if label == crate::wakeup::WAKEUP_LABEL => {
-            format!("[scheduled wakeup] {}", hb.prompt)
+            forge_types::format_wakeup_delivery(&hb.prompt)
         }
-        Some(label) => format!("[heartbeat: {label}] {}", hb.prompt),
-        None => format!("[heartbeat] {}", hb.prompt),
+        Some(label) => forge_types::format_heartbeat_delivery(Some(label), &hb.prompt),
+        None => forge_types::format_heartbeat_delivery(None, &hb.prompt),
     }
 }
 
@@ -397,6 +397,10 @@ mod tests {
         let prompts = claim_due_heartbeat_prompts(&store, &session_id).unwrap();
 
         assert_eq!(prompts, vec!["[heartbeat] check in"]);
+        assert!(matches!(
+            forge_types::parse_harness_notice(&prompts[0]),
+            Some(forge_types::HarnessNotice::Heartbeat { label: None, .. })
+        ));
     }
 
     fn test_session() -> Session {

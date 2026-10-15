@@ -452,8 +452,40 @@ function jobNoticeRow(r) {
   return d;
 }
 
+// Wakeups, /heartbeat ticks and peer messages (kind "harness_notice"): same story, one dim line
+// (plus the reason / peer body). Shapes mirror crates/forge-types/src/harness_notice.rs.
+function harnessNoticeRow(r) {
+  const d = document.createElement("div");
+  d.className = "msg jobnotice";
+  const text = String(r.content || "");
+  const clip = t => {
+    const l = (t.split("\n").find(x => x.trim()) || "").trim();
+    return l.length > 120 ? l.slice(0, 119).trimEnd() + "\u2026" : l;
+  };
+  const add = (cls, t) => {
+    const e = document.createElement("div");
+    e.className = cls; e.textContent = t; d.appendChild(e);
+  };
+  let m;
+  if ((m = /^\[scheduled wakeup\] ([\s\S]*)$/.exec(text))) {
+    const w = /^([\s\S]*)\n\n\(scheduled because: ([\s\S]+)\)$/.exec(m[1]);
+    add("jobhead", "\u23f0 wakeup \u00b7 " + clip(w ? w[1] : m[1]));
+    if (w) add("jobtail", "because: " + clip(w[2]));
+  } else if ((m = /^\[heartbeat(?:: ([A-Za-z0-9_-]{1,40}))?\] ([\s\S]*)$/.exec(text))) {
+    add("jobhead", "\u267b heartbeat" + (m[1] ? " " + m[1] : "") + " \u00b7 " + clip(m[2]));
+  } else if ((m = /^\[message from ([^\n]*?)\] ([\s\S]*)$/.exec(text))) {
+    add("jobhead", "\u2709 peer message from " + m[1]);
+    const i = m[2].indexOf("\n---\n");
+    add("jobtail", i >= 0 ? m[2].slice(i + 5) : m[2]);
+  } else {
+    add("jobtail", text);
+  }
+  return d;
+}
+
 function histRow(r) {
   if (r.kind === "job_notice") return jobNoticeRow(r);
+  if (r.kind === "harness_notice") return harnessNoticeRow(r);
   const d = document.createElement("div");
   const note = r.visibility === "ui";
   d.className = "msg " + (note ? "note" : (r.role === "user" ? "user" : "forge"));

@@ -105,21 +105,30 @@ impl Presenter for HeadlessPresenter {
                 println!();
             }
             PresenterEvent::Steered(text) => {
-                if let Some(items) = forge_types::parse_job_notices(&text) {
-                    for item in items {
-                        match item {
-                            forge_types::JobNotice::Dropped(n) => {
-                                println!("  ⚙ {n} earlier job notice(s) dropped");
-                            }
-                            forge_types::JobNotice::Exit(exit) => {
-                                println!("  ⚙ {}", exit.summary());
-                                for l in &exit.tail {
-                                    println!("      {l}");
+                match forge_types::parse_harness_notice(&text) {
+                    Some(forge_types::HarnessNotice::Job(items)) => {
+                        for item in items {
+                            match item {
+                                forge_types::JobNotice::Dropped(n) => {
+                                    println!("  ⚙ {n} earlier job notice(s) dropped");
+                                }
+                                forge_types::JobNotice::Exit(exit) => {
+                                    println!("  ⚙ {}", exit.summary());
+                                    for l in &exit.tail {
+                                        println!("      {l}");
+                                    }
                                 }
                             }
                         }
+                        return;
                     }
-                    return;
+                    Some(notice) => {
+                        if let Some(line) = notice.headline(100) {
+                            println!("  {line}");
+                            return;
+                        }
+                    }
+                    None => {}
                 }
                 println!("  ⚡ steer: {text}");
             }

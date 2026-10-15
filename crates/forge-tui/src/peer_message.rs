@@ -6,13 +6,10 @@
 
 /// `(who, body)` when `line` is a delivered fleet message.
 pub(crate) fn parse(line: &str) -> Option<(String, String)> {
-    let rest = line.strip_prefix("[message from ")?;
-    let (who, tail) = rest.split_once("] ")?;
-    if who.is_empty() || who.contains('\n') {
-        return None;
+    match forge_types::parse_harness_notice(line)? {
+        forge_types::HarnessNotice::Peer { who, body } => Some((who, body)),
+        _ => None,
     }
-    let body = tail.split_once("\n---\n").map_or(tail, |(_, body)| body);
-    Some((who.to_string(), body.to_string()))
 }
 
 #[cfg(test)]

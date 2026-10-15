@@ -118,6 +118,15 @@ stays `user`) and live remote rows carry `kind: "job_notice"` with `meta` `ok`/`
 the web app and mobile render it as dim system output. A prompt that merely mentions a notice
 stays a normal user row.
 
+The same treatment covers the other user-role messages the harness injects
+(`forge_types::parse_harness_notice`, `crates/forge-types/src/harness_notice.rs`): an agent-scheduled
+wakeup (`⏰ wakeup · <prompt>` with the reason dim underneath), a `/heartbeat` tick
+(`♻ heartbeat <label> · <prompt>`) and a peer-session message. Long prompts are cut to two lines in
+the TUI; the model still gets the full text. Remote rows are tagged `kind: "harness_notice"`
+(live rows: `meta` is `wakeup`, `heartbeat` or `peer`). The generators build their text with the
+shared `forge_types` format functions; a prompt you type in exactly one of these shapes is
+rendered as a notice (the model still sees it as yours).
+
 ---
 
 ## 3. Acceptance criteria (Given/When/Then)
