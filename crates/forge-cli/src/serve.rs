@@ -6736,7 +6736,7 @@ pub(crate) mod tests {
                 &handle.session_id,
                 "shot.png",
                 "image/png",
-                &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a],
+                &crate::image_input::test_png(),
             ))
             .await
             .unwrap();

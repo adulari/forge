@@ -176,7 +176,9 @@ pub(crate) use driver::*;
 mod btw;
 mod busy_commands;
 mod busy_queue;
+mod queue_images;
 pub(crate) use busy_commands::*;
+pub(crate) use queue_images::queue_prompt;
 mod effort;
 mod output_view;
 mod subagents;
@@ -1230,11 +1232,17 @@ pub(crate) async fn run_chat_tui(
                     // image clipboard content, so on an empty payload probe the OS clipboard for an
                     // image and drop it in as an attachment block. Otherwise it's a normal text paste.
                     if s.trim().is_empty() {
-                        if let Some((att, label)) = crate::image_input::clipboard_image() {
-                            app.attach_image(att, &label);
-                            app.note(&format!("📎 attached image ({label})"));
-                            continue;
+                        match crate::image_input::clipboard_image_async().await {
+                            crate::image_input::ClipboardImage::Found(att, label) => {
+                                app.attach_image(att, &label);
+                                app.note(&format!("📎 attached image ({label})"));
+                            }
+                            crate::image_input::ClipboardImage::None(why) => app.note(&why),
                         }
+                        continue;
+                    }
+                    if crate::attach_paths::apply_paths(&mut app, &s) {
+                        continue;
                     }
                     app.handle_paste(s);
                     continue;
@@ -1717,6 +1725,16 @@ pub(crate) async fn run_chat_tui(
                 }
 
                 if matches!(key, KeyKind::ToggleVoice) {
+                    // Ctrl+V is "paste image, else voice": a clipboard image wins, so a screenshot
+                    // copied on the laptop lands here the way it does in other terminal agents.
+                    if let crate::image_input::CtrlV::Image(att, label) =
+                        crate::image_input::ctrl_v().await
+                    {
+                        app.attach_image(att, &label);
+                        app.note(&format!("📎 attached image ({label})"));
+                        dirty = true;
+                        continue;
+                    }
                     // Ctrl+V (configurable): same as typing `/voice` — open the recording overlay
                     // (or kick off the whisper model download first, on first use). Not gated on
                     // `busy` here: `dispatch_command`'s own `mutates` check excludes `Voice`
@@ -2957,10 +2975,17 @@ pub(crate) async fn run_chat_tui(
                         handle_key(&mut app.input, &mut app.input_cursor, key)
                     };
                 if let InputOutcome::Submit(raw_line) = outcome {
-                    let (line, _imgs) = app.resolve_paste_blocks(raw_line);
+                    if crate::attach_paths::apply_paths(&mut app, &raw_line) {
+                        dirty = true;
+                        continue;
+                    }
+                    let (line, imgs) = app.resolve_paste_blocks(raw_line);
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
-                        // nothing to queue
+                        // An image with no words: keep it in the input so it is not lost.
+                        for img in imgs {
+                            app.attach_image(img, "image");
+                        }
                     } else if is_command_line(trimmed) {
                         let autonomous = loop_state.is_some() || goal_state.is_some();
                         match route_busy_line(trimmed, &catalog, autonomous) {
@@ -2979,13 +3004,7 @@ pub(crate) async fn run_chat_tui(
                         }
                     } else {
                         prompt_history.record(&line);
-                        queued_prompts.push(line.clone());
-                        steer.push(line.clone());
-                        app.set_queued(&queued_prompts);
-                        app.note(&format!(
-                            "⏳ queued ({} pending) — sent at this turn's next step",
-                            queued_prompts.len()
-                        ));
+                        queue_prompt(&mut queued_prompts, &steer, &mut app, line, imgs);
                     }
                 }
                 dirty = true;
@@ -3146,6 +3165,10 @@ pub(crate) async fn run_chat_tui(
                 };
                 match outcome {
                     InputOutcome::Submit(raw_line) => {
+                        if crate::attach_paths::apply_paths(&mut app, &raw_line) {
+                            dirty = true;
+                            continue;
+                        }
                         let (line, submit_images) = app.resolve_paste_blocks(raw_line);
                         prompt_history.record(&line);
                         // `//foo` escapes to a literal prompt `/foo`; a bare `/cmd` typed without
@@ -3167,6 +3190,9 @@ pub(crate) async fn run_chat_tui(
                                     app.note(&format!("⎇ prompt blocked by hook: {reason}"));
                                 }
                                 Ok(prompt) => {
+                                    if !submit_images.is_empty() {
+                                        session.lock().await.attach_images(submit_images);
+                                    }
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_turn(
                                         &prompt,
@@ -3402,6 +3428,7 @@ pub(crate) async fn run_chat_tui(
                                     }
                                     // Expand `@path` mentions: read those files and ride their
                                     // contents along as turn guidance, leaving the echoed line clean.
+                                    attach_at_images(&prompt, None, &session, &mut app).await;
                                     let (file_blocks, included, skipped) = expand_at_files(&prompt);
                                     if !included.is_empty() {
                                         app.note(&format!("📎 included {}", included.join(", ")));
@@ -3908,6 +3935,13 @@ pub(crate) async fn run_chat_tui(
                                 // Expand `@path` mentions exactly like the local submit path
                                 // (the remote prompt used to skip this — uploads made the gap
                                 // load-bearing).
+                                attach_at_images(
+                                    &prompt,
+                                    Some(&hook_workspace),
+                                    &session,
+                                    &mut app,
+                                )
+                                .await;
                                 let (file_blocks, included, skipped) = expand_at_files(&prompt);
                                 if !included.is_empty() {
                                     app.note(&format!("📎 included {}", included.join(", ")));
@@ -5468,7 +5502,7 @@ mod tests {
 
         // This message's OWN correlated attachment: a real image inside the upload area.
         let real_path = uploads.join("real.png");
-        std::fs::write(&real_path, b"not-real-png-bytes-but-thats-fine-here").unwrap();
+        std::fs::write(&real_path, crate::image_input::test_png()).unwrap();
         let attachments = vec![remote::PromptAttachment {
             path: real_path.display().to_string(),
             image: true,

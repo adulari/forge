@@ -316,26 +316,29 @@ impl DriverState {
         // busy, exactly like local typing mid-turn).
         let outcome = handle_key(&mut self.app.input, &mut self.app.input_cursor, key);
         if let InputOutcome::Submit(raw_line) = outcome {
-            let (line, _imgs) = self.app.resolve_paste_blocks(raw_line);
+            let (line, imgs) = self.app.resolve_paste_blocks(raw_line);
             if self.busy {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
-                    // nothing to queue
+                    for img in imgs {
+                        self.app.attach_image(img, "image");
+                    }
                 } else if is_command_line(trimmed) {
                     self.busy_command(line).await?;
                 } else {
-                    // Same as a remote prompt mid-turn: recall it, and offer it to the running
-                    // turn at its next step.
                     self.prompt_history.record(&line);
-                    self.steer.push(line.clone());
-                    self.queued_prompts.push(line);
-                    self.app.set_queued(&self.queued_prompts);
-                    self.app.note(&format!(
-                        "⏳ queued ({} pending) — sent at this turn's next step",
-                        self.queued_prompts.len()
-                    ));
+                    queue_prompt(
+                        &mut self.queued_prompts,
+                        &self.steer,
+                        &mut self.app,
+                        line,
+                        imgs,
+                    );
                 }
             } else {
+                if !imgs.is_empty() {
+                    self.session.lock().await.attach_images(imgs);
+                }
                 Box::pin(self.submit_line(line, None)).await?;
             }
         } else {

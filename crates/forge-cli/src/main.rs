@@ -58,6 +58,7 @@ mod apns;
 mod apns_e2e;
 mod assay_output;
 mod attach;
+mod attach_paths;
 mod balance;
 mod bench;
 mod benchmarks;
@@ -67,6 +68,7 @@ mod bridge_stats;
 #[path = "cli/browser_args.rs"]
 mod browser_args;
 mod cli;
+mod clipboard_image;
 mod context_windows;
 mod daemon_cwd;
 mod doctor;
