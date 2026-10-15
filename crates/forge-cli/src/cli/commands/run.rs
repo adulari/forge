@@ -1368,7 +1368,8 @@ pub(crate) async fn run_chat_tui(
             };
 
             // Ctrl-C (`Interrupt`): mid-turn it stops the response exactly like Esc (handled below);
-            // inside any overlay it closes that overlay like Esc; idle with nothing open it quits.
+            // inside any overlay it closes that overlay like Esc. Idle with nothing open it clears
+            // a draft (saved to history), or on an empty input needs a second press to quit.
             // A bare Esc no longer quits — see the idle-Esc branch below.
             let key = if matches!(key, KeyKind::Interrupt) {
                 if !busy
@@ -1377,11 +1378,20 @@ pub(crate) async fn run_chat_tui(
                     && app.viewer.is_none()
                     && !any_remote_modal_open(&app)
                 {
-                    quit = true;
-                    break;
+                    match app.idle_interrupt(&mut prompt_history) {
+                        forge_tui::IdleInterrupt::Quit => {
+                            quit = true;
+                            break;
+                        }
+                        forge_tui::IdleInterrupt::Cleared | forge_tui::IdleInterrupt::Armed => {
+                            dirty = true;
+                            continue;
+                        }
+                    }
                 }
                 KeyKind::Esc
             } else {
+                app.disarm_quit();
                 key
             };
 
@@ -4852,7 +4862,7 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
             }
         }
-        if app.expire_esc_hint() {
+        if app.expire_esc_hint() | app.expire_quit_hint() {
             dirty = true;
         }
         if let Some(started) = iter_started {

@@ -303,6 +303,9 @@ pub struct App {
     /// When an idle Esc was last pressed: a second press inside [`ESC_DOUBLE_TAP`] opens the
     /// rewind picker. The statusline hint says so while it is armed.
     pub esc_armed: Option<std::time::Instant>,
+    /// When an idle Ctrl-C on an empty input armed the exit; a second press inside
+    /// [`idle_interrupt::QUIT_DOUBLE_TAP`] quits.
+    pub quit_armed: Option<std::time::Instant>,
     /// A startup phase label ("starting session…") shown with the spinner before the session
     /// exists, so the terminal is never blank while the store and providers come up.
     pub loading: Option<&'static str>,
@@ -3907,6 +3910,8 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
     w.saturating_sub(reserve).max(min)
 }
 
+mod idle_interrupt;
+pub use idle_interrupt::IdleInterrupt;
 mod job_notice;
 mod output_view;
 mod render;

@@ -32,7 +32,7 @@ things kept living on as if the removed turns still existed:
 
 - **Esc Esc** (idle): open the rewind picker. A single Esc arms it and the statusline says
   "esc again to rewind". Esc mid-turn still interrupts the response.
-- **Ctrl-C**: quit when idle with nothing open; close an overlay; interrupt mid-turn. Esc no
+- **Ctrl-C**: clear the draft when idle (saved to history), or on an empty input press twice to quit; close an overlay; interrupt mid-turn. Esc no
   longer quits — that was the accidental one-tap exit.
 
 ## Tests
