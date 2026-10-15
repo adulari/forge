@@ -23,6 +23,10 @@ pub(crate) fn decor(style: Style) -> Style {
     style.add_modifier(NO_COPY)
 }
 
+pub(crate) fn is_decor(modifier: Modifier) -> bool {
+    modifier.intersects(NO_COPY)
+}
+
 /// `style`, marked as a frame-edge row that contributes nothing to a copy.
 pub(crate) fn frame_row(style: Style) -> Style {
     style.add_modifier(NO_COPY | FRAME_ROW)

@@ -1302,32 +1302,49 @@ pub(crate) async fn run_chat_tui(
                     // Full-screen mouse: drag to select text (copied on release), click the floating
                     // jump-to-bottom bar. Only meaningful in the transcript (not the activity viewer).
                     use forge_tui::MouseKind;
-                    if app.fullscreen && app.viewer.is_none() && app.output_view.is_none() {
+                    if app.fullscreen {
                         match kind {
                             MouseKind::Down => {
-                                if app.jump_bar_hit(col, row) {
+                                app.clear_selection();
+                                app.clear_screen_selection();
+                                if app.screen_select_wanted(col, row)
+                                    || app.viewer.is_some()
+                                    || app.output_view.is_some()
+                                {
+                                    app.screen_select_begin(col, row);
+                                } else if app.jump_bar_hit(col, row) {
                                     app.transcript_to_bottom();
                                 } else if app.prev_bar_hit(col, row) {
                                     app.transcript_to_prev_user();
-                                    dirty = true;
                                 } else if app.open_tool_output_at(col, row) {
                                     // Checked before the toggle: the "view full output" row sits
                                     // inside the card, and a toggle would close the drawer instead.
-                                    dirty = true;
                                 } else if app.toggle_tool_card_at(col, row) {
                                     // A click on a tool card opens/closes it. Selection is not
                                     // started here: a card row is a control, and beginning a
                                     // drag-select on it would leave a stray highlight behind
                                     // every toggle.
-                                    dirty = true;
                                 } else {
-                                    app.clear_selection();
                                     app.selection_begin(col, row);
                                 }
+                                dirty = true;
                             }
-                            MouseKind::Drag => app.selection_extend(col, row),
+                            MouseKind::Drag => {
+                                if app.screen_selection_active() {
+                                    app.screen_select_extend(col, row);
+                                    dirty = true;
+                                } else {
+                                    app.selection_extend(col, row);
+                                }
+                            }
                             MouseKind::Up => {
-                                if let Some(text) = app.selection_text() {
+                                let text = if app.screen_selection_active() {
+                                    dirty = true;
+                                    app.screen_select_end()
+                                } else {
+                                    app.selection_text()
+                                };
+                                if let Some(text) = text {
                                     copy_selection(&mut clipboard, &text);
                                 }
                             }
@@ -1364,7 +1381,10 @@ pub(crate) async fn run_chat_tui(
                     }
                     continue;
                 }
-                forge_tui::InputEvent::Key(k) => k,
+                forge_tui::InputEvent::Key(k) => {
+                    app.clear_screen_selection();
+                    k
+                }
             };
 
             // Ctrl-C (`Interrupt`): mid-turn it stops the response exactly like Esc (handled below);

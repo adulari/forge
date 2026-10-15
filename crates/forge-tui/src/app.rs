@@ -521,6 +521,11 @@ pub struct App {
     /// Active text selection in transcript coords: (wrapped_row, col) anchor + cursor. `None` when
     /// nothing is selected. Highlighted in the transcript and copied to the clipboard on release.
     selection: Option<(TextPos, TextPos)>,
+    /// Drag selection in screen cells for popups and viewers; see [`screen_select`].
+    screen_sel: std::cell::Cell<Option<screen_select::ScreenSel>>,
+    screen_snap: std::cell::RefCell<screen_select::ScreenSnapshot>,
+    /// Framed-surface rectangles from the last draw, so a press can find the popup it landed in.
+    panel_rects: std::cell::RefCell<Vec<Rect>>,
     /// Monotonic revision of the in-flight assistant reply. Unlike a byte length, this also
     /// invalidates the preview when text is replaced at an equal length.
     streaming_rev: u64,
@@ -3930,6 +3935,7 @@ mod harness_notice;
 mod job_notice;
 mod output_view;
 mod render;
+mod screen_select;
 #[cfg(test)]
 mod steer_esc_tests;
 pub use output_view::{page_file, OutputAction, OutputView};
