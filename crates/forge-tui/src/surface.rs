@@ -76,6 +76,16 @@ pub(crate) fn panel_with_footer(
     panel(title, tone).title_bottom(footer)
 }
 
+thread_local! {
+    static PANELS: std::cell::RefCell<Vec<Rect>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Rectangles of every framed surface drawn since the last call, bottom-most first. The draw
+/// pass is single-threaded, so a thread-local avoids threading a recorder through every overlay.
+pub(crate) fn take_panels() -> Vec<Rect> {
+    PANELS.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
 /// Clear and frame a surface, returning the usable content rectangle.
 pub(crate) fn render_panel(
     frame: &mut Frame,
@@ -86,6 +96,7 @@ pub(crate) fn render_panel(
 ) -> Rect {
     // Styling a Block only changes cell style; it does not replace existing glyphs from the chat
     // underneath. Clear first so every framed surface is genuinely opaque.
+    PANELS.with(|p| p.borrow_mut().push(area));
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default().style(Style::default().bg(SURFACE_BG)),

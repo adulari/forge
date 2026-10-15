@@ -1,6 +1,12 @@
 use super::*;
 
 pub fn render_live(frame: &mut Frame, app: &App) {
+    surface::take_panels();
+    render_live_inner(frame, app);
+    app.finish_frame(frame.buffer_mut());
+}
+
+fn render_live_inner(frame: &mut Frame, app: &App) {
     // The full-output viewer is opened on request, so it sits above every other takeover.
     if let Some(view) = &app.output_view {
         crate::app::output_view::render_output_view(frame, view);
