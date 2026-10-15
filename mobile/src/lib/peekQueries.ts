@@ -20,6 +20,15 @@ export interface RefetchPolicy {
   refetchOnWindowFocus: boolean;
 }
 
+/**
+ * A relay hiccup right after connect is usually gone within a moment, so the first retry is fast
+ * rather than react-query's default 1 s / 2 s / 4 s ladder.
+ */
+export const sessionsRetryPolicy = {
+  retry: 2,
+  retryDelay: (attempt: number): number => (attempt === 0 ? 300 : 1000),
+};
+
 /** The live fleet list, which both Fleet and Inbox render. */
 export function sessionsRefetchPolicy(
   { peeking, isFocused }: { peeking: boolean; isFocused: boolean },

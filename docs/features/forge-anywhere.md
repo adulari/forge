@@ -90,6 +90,14 @@ Ed25519 signing keys. Payloads use XChaCha20-Poly1305 with a signed, authenticat
 Every key epoch is wrapped separately to authorized devices and to the recovery secret. The
 service enforces unique sender/epoch/sequence tuples to reject replay, but cannot decrypt payloads.
 
+Sequence state is persisted in blocks, not per envelope. The host reserves outbound sequences 256
+at a time under the state-file lock and the phone 1024 at a time in the keychain, then hands them
+out from memory; a crash skips the unused tail and never reuses a number. The phone's inbound replay
+window is enforced in memory immediately and written lazily (about every 1.5 s and on backgrounding)
+because the controller only accepts bridge responses and stream frames bound to in-memory request
+and stream ids, so a replay after a crash is inert; durable acknowledgements and the host's inbound
+window are written before they are accepted.
+
 The service can observe account, sender, recipient and object identifiers, envelope kind, time,
 ciphertext size, connection timing, IP address, subscription state, and aggregate quota use. It
 cannot observe session, prompt, response, command, diff, workspace, or replay plaintext. GitHub and

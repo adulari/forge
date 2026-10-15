@@ -13,6 +13,7 @@ import { SectionHeader } from "../components/ds/SectionHeader";
 import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { formatBytes } from "../lib/anywhere/format";
+import { getColdStartTimings, getRelayMetrics, type RelayLatencyStats } from "../lib/anywhere/relayMetrics";
 import { ApiError } from "../lib/api";
 import { useAppVersion } from "../lib/appVersion";
 import { assessCompatibility, buildSupportSummary } from "../lib/diagnostics";
@@ -39,6 +40,16 @@ function formatUptime(seconds: number): string {
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
+}
+
+function latencyLabel(stats: RelayLatencyStats): string {
+  if (stats.samples === 0) return "No samples yet";
+  return `p50 ${stats.p50Ms!.toFixed(0)} ms · p90 ${stats.p90Ms!.toFixed(0)} ms · max ${stats.maxMs!.toFixed(0)} ms`;
+}
+
+function coldStartLabel(timings: ReturnType<typeof getColdStartTimings>): string {
+  const stage = (value: number | undefined) => (value === undefined ? "—" : `${value.toFixed(0)}`);
+  return `consumers mounted ${stage(timings.consumersMounted)} · relay open ${stage(timings.relayOpen)} · first fleet rows ${stage(timings.firstFleetRows)}`;
 }
 
 function compatibilityTone(status: ReturnType<typeof assessCompatibility>["status"]): BadgeTone {
@@ -68,6 +79,8 @@ export default function DiagnosticsScreen() {
   const update = useDesktopUpdateState();
   const nativeRuntimeVersion = Updates.runtimeVersion ?? null;
   const [performanceSnapshot, setPerformanceSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
+  const [relayMetrics, setRelayMetrics] = useState(() => getRelayMetrics());
+  const [coldStart, setColdStart] = useState(() => getColdStartTimings());
   const diagnostics = query.data;
   const compatibility = useMemo(
     () => assessCompatibility(
@@ -84,7 +97,11 @@ export default function DiagnosticsScreen() {
     // just reads it. Elsewhere nobody else starts it, so this screen owns it for the time it's
     // on screen and stops it again on unmount rather than leaving it sampling in the background.
     if (!isTauri) startDesktopPerformanceMonitor();
-    const timer = setInterval(() => setPerformanceSnapshot(getDesktopPerformanceSnapshot()), 1000);
+    const timer = setInterval(() => {
+      setPerformanceSnapshot(getDesktopPerformanceSnapshot());
+      setRelayMetrics(getRelayMetrics());
+      setColdStart(getColdStartTimings());
+    }, 1000);
     return () => {
       clearInterval(timer);
       if (!isTauri) stopDesktopPerformanceMonitor();
@@ -294,6 +311,23 @@ export default function DiagnosticsScreen() {
                 <ListRow
                   title={`Long-task time ${performanceSnapshot.longTaskTotalMs.toFixed(1)} ms`}
                   subtitle="Browser/WebView PerformanceObserver; unavailable entries are excluded"
+                  showSeparator={false}
+                />
+              </View>
+
+              <View>
+                <SectionHeader>Anywhere relay</SectionHeader>
+                <ListRow
+                  title={`Request round trip (${relayMetrics.roundTrip.samples} samples)`}
+                  subtitle={latencyLabel(relayMetrics.roundTrip)}
+                />
+                <ListRow
+                  title={`Inbound frame handling (${relayMetrics.inboundHandling.samples} samples)`}
+                  subtitle={`${latencyLabel(relayMetrics.inboundHandling)} · last 100 samples`}
+                />
+                <ListRow
+                  title="Cold start (ms after credentials loaded)"
+                  subtitle={coldStartLabel(coldStart)}
                   showSeparator={false}
                 />
               </View>

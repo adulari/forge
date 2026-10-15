@@ -12,7 +12,7 @@ import {
 import { markFirstDataResolve } from "./performance";
 import { mergeNewestHistoryPage } from "./historyMerge";
 import { catalogHasModel } from "./modelCatalog";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
 
 import {
@@ -130,7 +130,9 @@ import {
 } from "./api";
 import { useAuth } from "./auth";
 import { useIsPeeking } from "./peek";
-import { pastSessionsRefetchPolicy, sessionsRefetchPolicy } from "./peekQueries";
+import { pastSessionsRefetchPolicy, sessionsRefetchPolicy, sessionsRetryPolicy } from "./peekQueries";
+import { peekFleetRows, rememberFleetRows } from "./anywhere/fleetRowCache";
+import { markColdStart } from "./anywhere/relayMetrics";
 import { supportsDirectDaemonEndpoints } from "./transport";
 import type { Snapshot } from "./ws";
 import { syncWidgetSessions } from "./widgetData";
@@ -237,10 +239,17 @@ export function useSessions() {
   const peeking = useIsPeeking();
   const query = useQuery<SessionRow[]>({
     queryKey: keys(baseUrl).sessions,
-     queryFn: () => getSessions(baseUrl as string).then((rows) => {
-       markFirstDataResolve();
-       return rows;
-     }),
+    queryFn: () => getSessions(baseUrl as string).then((rows) => {
+      markFirstDataResolve();
+      markColdStart("firstFleetRows");
+      rememberFleetRows(baseUrl, rows);
+      return rows;
+    }),
+    // Last-known rows (relay hosts only) paint at once; `initialDataUpdatedAt: 0` keeps them stale
+    // so the refetch still runs, and `dataUpdatedAt === 0` tells the screen they are not live yet.
+    initialData: () => peekFleetRows(baseUrl),
+    initialDataUpdatedAt: 0,
+    ...sessionsRetryPolicy,
     enabled: baseUrl != null,
     refetchIntervalInBackground: false,
     ...sessionsRefetchPolicy({ peeking, isFocused }),
@@ -346,28 +355,46 @@ export function useSessionSearch(query: string, limit = 30) {
  * chat, fork picker and turn watcher keep the exact stream they always read. A tools page can
  * return MORE rows than it asked for (one assistant carrier expands into a row per call it made),
  * which only ever keeps the length check below paging. */
-export function useHistory(sessionId: string | null, options: { includeTools?: boolean } = {}) {
-  const { baseUrl } = useAuth();
-  const includeTools = options.includeTools ?? false;
+function historyQueryOptions(baseUrl: string | null, sessionId: string | null, includeTools: boolean) {
   // A tools page is a different size class from a plain one, because it must survive the Anywhere
   // relay's inline-body budget (see historyPaging.ts). Both the request and the last-page test
   // below read the SAME value: comparing a 15-row page against 60 would read as "short page, stop
   // paging" and kill scrollback after the first page.
   const pageSize = historyPageSize(includeTools);
-  return useInfiniteQuery<HistoryRow[]>({
+  return {
     queryKey: keys(baseUrl).history(sessionId ?? "", includeTools),
-    queryFn: ({ pageParam }) =>
+    queryFn: ({ pageParam }: { pageParam: unknown }) =>
       getHistory(baseUrl as string, {
         session: sessionId as string,
         limit: pageSize,
         before: pageParam as number | undefined,
         include_tools: includeTools || undefined,
       }),
-    enabled: baseUrl != null && sessionId != null,
     initialPageParam: undefined as number | undefined,
-    getNextPageParam: (lastPage) =>
+    getNextPageParam: (lastPage: HistoryRow[]) =>
       lastPage.length < pageSize ? undefined : lastPage[lastPage.length - 1]?.seq,
+  };
+}
+
+export function useHistory(sessionId: string | null, options: { includeTools?: boolean } = {}) {
+  const { baseUrl } = useAuth();
+  return useInfiniteQuery<HistoryRow[]>({
+    ...historyQueryOptions(baseUrl, sessionId, options.includeTools ?? false),
+    enabled: baseUrl != null && sessionId != null,
   });
+}
+
+/** Starts the session screen's first history page at press-in, before navigation has finished. */
+export function usePrefetchSessionHistory(): (sessionId: string) => void {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useCallback((sessionId: string) => {
+    if (baseUrl == null) return;
+    void queryClient.prefetchInfiniteQuery({
+      ...historyQueryOptions(baseUrl, sessionId, true),
+      staleTime: 10_000,
+    }).catch(() => undefined);
+  }, [baseUrl, queryClient]);
 }
 
 /** Least time between two live history refreshes of one session. */

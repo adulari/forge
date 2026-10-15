@@ -142,7 +142,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const { signedIn } = useAnywhere();
   const { host: authHost } = useAuth();
 
-  const { data: sessionHistory } = useHistory(sessionId);
+  // Same query (and cache entry) the session screen reads: one relay request, not two.
+  const { data: sessionHistory } = useHistory(sessionId, { includeTools: true });
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
     () => (sessionHistory?.pages ?? []).flat().find((row) => row.role === "assistant" && row.model)?.model ?? null,

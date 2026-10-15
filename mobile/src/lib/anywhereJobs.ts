@@ -57,7 +57,12 @@ export interface AnywhereJobCredentials {
   signingPrivateKey: Uint8Array;
   accessToken(): Promise<string>;
   reserveSequence(): Promise<bigint>;
-  acceptSequences(senderDeviceId: string, epoch: number, sequences: readonly bigint[]): Promise<boolean>;
+  acceptSequences(
+    senderDeviceId: string,
+    epoch: number,
+    sequences: readonly bigint[],
+    options?: { durable?: boolean },
+  ): Promise<boolean>;
   signingPublicKey(senderDeviceId: string): Promise<Uint8Array>;
   randomBytes(length: number): Uint8Array;
   now?(): number;
@@ -207,7 +212,7 @@ export class AnywhereJobClient {
       : await this.credentials.dataKeyForEpoch?.(decoded.metadata.keyEpoch);
     if (!dataKey) throw new Error("Remote job acknowledgement uses an unavailable key epoch");
     const opened = openEnvelope(encoded, dataKey, signingKey);
-    if (!await this.credentials.acceptSequences(sender, decoded.metadata.keyEpoch, [decoded.metadata.sequence])) {
+    if (!await this.credentials.acceptSequences(sender, decoded.metadata.keyEpoch, [decoded.metadata.sequence], { durable: true })) {
       throw new Error("Remote job acknowledgement replay rejected");
     }
     const acknowledgement = JSON.parse(new TextDecoder().decode(opened.plaintext)) as CommandAcknowledgement;

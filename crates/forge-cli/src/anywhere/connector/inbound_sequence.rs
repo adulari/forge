@@ -33,15 +33,17 @@ pub(super) fn accept_inbound_envelopes(
     blob_sequence: Option<u64>,
     control_sequence: u64,
 ) -> Result<()> {
-    store.update(|state| {
-        let first_sequence = blob_sequence.unwrap_or(control_sequence);
-        if blob_sequence.is_some_and(|sequence| sequence >= control_sequence) {
-            bail!("relay blob sequence must precede its referencing envelope");
-        }
-        accept_inbound_sequence(state, sender_device_id, key_epoch, first_sequence)?;
-        let namespace = format!("{}:{key_epoch}", hex::encode(sender_device_id));
-        state.accepted_sequences.insert(namespace, control_sequence);
-        Ok(())
+    super::super::state::blocking_fs(|| {
+        store.update(|state| {
+            let first_sequence = blob_sequence.unwrap_or(control_sequence);
+            if blob_sequence.is_some_and(|sequence| sequence >= control_sequence) {
+                bail!("relay blob sequence must precede its referencing envelope");
+            }
+            accept_inbound_sequence(state, sender_device_id, key_epoch, first_sequence)?;
+            let namespace = format!("{}:{key_epoch}", hex::encode(sender_device_id));
+            state.accepted_sequences.insert(namespace, control_sequence);
+            Ok(())
+        })
     })?;
     Ok(())
 }

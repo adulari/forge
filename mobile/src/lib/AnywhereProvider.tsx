@@ -1,5 +1,5 @@
 import * as Linking from "expo-linking";
-import { Platform } from "react-native";
+import { AppState, Platform } from "react-native";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -46,6 +46,9 @@ import {
   recoveryEntropyFromInput,
   type PendingAnywhereKeys,
 } from "./anywhereCrypto";
+import { clearFleetRows, loadFleetRows } from "./anywhere/fleetRowCache";
+import { markColdStart } from "./anywhere/relayMetrics";
+import { hostIdsKey, hostSyncKey, keepIfSameHosts } from "./anywhereHostSignature";
 import { clearAnywhereHostCache, readAnywhereHostCache, writeAnywhereHostCache } from "./anywhereHostCache";
 import { anywhereEnrollmentStore } from "./anywhereEnrollmentStore";
 import {
@@ -98,7 +101,7 @@ import {
   revokePasskey,
   type AnywherePasskey,
 } from "./anywherePasskeys";
-import { acceptReplaySequences } from "./anywhereReplayWindow";
+import { DebouncedPersister, LiveReplayWindows, OutboundSequenceBlock } from "./anywhereSequenceState";
 import {
   clearAnywherePushState,
   disableAnywherePush,
@@ -316,18 +319,47 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const browserAuthWindow = useRef<ReservedBrowserAuthWindow | null>(null);
   const enrollmentInFlight = useRef(false);
 
-  const persistCredentials = useCallback(async (next: StoredAnywhereCredentials) => {
+  const replayWindows = useMemo(() => new LiveReplayWindows(), []);
+  const enqueue = useCallback(<T,>(work: () => Promise<T>): Promise<T> => {
+    const run = mutationQueue.current.catch(() => undefined).then(work);
+    mutationQueue.current = run.then(() => undefined, () => undefined);
+    return run;
+  }, []);
+  // Replay windows change on every relay frame, so they are written lazily and never drive renders.
+  const windowPersister = useMemo(() => new DebouncedPersister(), []);
+  useEffect(() => {
+    windowPersister.setWriter(() => enqueue(async () => {
+      const current = credentialsRef.current;
+      if (current) await credentialStore.save(current);
+    }));
+  }, [enqueue, windowPersister]);
+
+  const persistCredentials = useCallback(async (incoming: StoredAnywhereCredentials) => {
+    const next = replayWindows.adopt(incoming);
+    const version = windowPersister.version;
     credentialsRef.current = next;
     await credentialStore.save(next);
+    windowPersister.markSaved(version);
     setCredentials(next);
-  }, []);
+  }, [replayWindows, windowPersister]);
+
+  useEffect(() => {
+    const flush = () => { void windowPersister.flush().catch(() => undefined); };
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") flush();
+    });
+    return () => {
+      subscription.remove();
+      flush();
+    };
+  }, [windowPersister]);
 
   const requireReauthentication = useCallback(async (rejectedAccessToken?: string) => {
     const current = credentialsRef.current;
     if (!current || (rejectedAccessToken && current.accessToken !== rejectedAccessToken)) return;
     const next = current.reauthenticationRequired
       ? current
-      : { ...current, reauthenticationRequired: true };
+      : replayWindows.adopt({ ...current, reauthenticationRequired: true });
     credentialsRef.current = next;
     setCredentials(next);
     setAccount(null);
@@ -348,7 +380,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     ]).catch(() => {
       // The proven-invalid session remains disabled in memory even if optional cache cleanup fails.
     });
-  }, [syncAnywhereHosts]);
+  }, [replayWindows, syncAnywhereHosts]);
 
   useEffect(() => observeAnywhereUnauthorized((rejectedAccessToken) => {
     void requireReauthentication(rejectedAccessToken);
@@ -381,8 +413,9 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         persistCredentials,
       );
       if (credentialsRef.current?.refreshToken !== next.refreshToken) {
-        credentialsRef.current = next;
-        setCredentials(next);
+        const merged = replayWindows.adopt(next);
+        credentialsRef.current = merged;
+        setCredentials(merged);
       }
       resolved = next.accessToken;
     });
@@ -393,7 +426,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       throw reason;
     }
     return resolved;
-  }, [persistCredentials, requireReauthentication]);
+  }, [persistCredentials, replayWindows, requireReauthentication]);
 
   const pushApi = useMemo<AnywherePushApi>(() => ({
     register: async (input) => {
@@ -418,6 +451,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   /* eslint-disable react-hooks/refs -- these relay callbacks read refs only when invoked after render */
   const runtime = useMemo<AnywhereRelayCredentials | null>(() => {
     if (!credentials) return null;
+    const sequenceBlock = new OutboundSequenceBlock();
     return {
       serviceUrl: credentials.serviceUrl ?? SERVICE_URL,
       accountId: bytesFromHex(credentials.accountIdHex),
@@ -435,31 +469,30 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       keyEpoch: credentials.keyEpoch,
       signingPrivateKey: bytesFromHex(credentials.signingPrivateKeyHex),
       accessToken,
-      reserveSequence: async () => {
-        let reserved = 0n;
-        mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
+      reserveSequence: () => sequenceBlock.reserve({
+        persistedNext: () => {
+          const current = credentialsRef.current;
+          return current ? BigInt(current.nextSequence) : null;
+        },
+        persistNext: async (next) => {
           const latest = credentialsRef.current;
           if (!latest) throw new Error("Forge Anywhere is not signed in");
-          reserved = BigInt(latest.nextSequence);
-          await persistCredentials({ ...latest, nextSequence: (reserved + 1n).toString() });
-        });
-        await mutationQueue.current;
-        return reserved;
-      },
-      acceptSequences: async (sender, epoch, sequences) => {
-        let accepted = false;
-        mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
-          const latest = credentialsRef.current;
-          if (!latest) return;
-          const namespace = `${sender}:${epoch}`;
-          const result = acceptReplaySequences(latest.acceptedSequences[namespace], sequences);
-          if (!result.accepted) return;
-          const next = { ...latest, acceptedSequences: { ...latest.acceptedSequences, [namespace]: result.next } };
-          await persistCredentials(next);
-          accepted = true;
-        });
-        await mutationQueue.current;
-        return accepted;
+          await persistCredentials({ ...latest, nextSequence: next.toString() });
+        },
+        serialize: enqueue,
+      }),
+      // The window is checked and advanced synchronously, so a replay is rejected in-session at
+      // once. Only a crash inside the persist delay can forget the newest sequences, and the
+      // controller accepts only kind 2 (bound to an in-memory pending request id) and kind 3
+      // (bound to an in-memory stream id) envelopes here, so a replay after restart finds no
+      // pending request or stream and is inert. Durable consumers (job acks) pass `durable`.
+      acceptSequences: async (sender, epoch, sequences, options) => {
+        const latest = credentialsRef.current;
+        if (!latest || !replayWindows.accept(sender, epoch, sequences)) return false;
+        credentialsRef.current = { ...latest, acceptedSequences: replayWindows.snapshot() };
+        windowPersister.markDirty();
+        if (options?.durable) await windowPersister.flush();
+        return true;
       },
       signingPublicKey: async (sender) => {
         const value = credentialsRef.current?.signingPublicKeys[sender];
@@ -470,6 +503,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     };
     // Runtime remains stable while tokens/sequences mutate; a key/device epoch change replaces it.
     // Only key identity changes replace live relays; token and replay-state writes are read via refs.
+    // A new runtime also starts a fresh sequence block.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, credentials?.accountDataKeyHex, credentials?.accountIdHex, credentials?.deviceIdHex, credentials?.keyEpoch, credentials?.serviceUrl, credentials?.signingPrivateKeyHex]);
   /* eslint-enable react-hooks/refs */
@@ -551,7 +585,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       const latest = credentialsRef.current;
       setAccount(nextAccount);
       setSubscription(nextSubscription);
-      setHosts(hostList.hosts);
+      setHosts((previous) => keepIfSameHosts(previous, hostList.hosts) as AnywhereHost[]);
       setDevices(deviceList.devices);
       setPasskeys(nextPasskeys);
       if (latest) void writeAnywhereHostCache(latest.accountIdHex, hostList.hosts).catch(() => {
@@ -578,8 +612,13 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       if (cancelled) return;
       const cachedHosts = loaded ? await readAnywhereHostCache(loaded.accountIdHex) : [];
       if (cancelled) return;
-      credentialsRef.current = loaded;
-      setCredentials(loaded);
+      const adopted = loaded ? replayWindows.adopt(loaded) : null;
+      // Rows are read before consumers mount, so the first Fleet paint can use them.
+      await loadFleetRows(cachedHosts.map((host) => host.id));
+      if (cancelled) return;
+      credentialsRef.current = adopted;
+      markColdStart("credentialsLoaded");
+      setCredentials(adopted);
       if (loaded) {
         if (loaded.reauthenticationRequired) {
           setHosts([]);
@@ -625,7 +664,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       if (!cancelled) { setError(message(reason)); setPhase("error"); }
     });
     return () => { cancelled = true; };
-  }, [refresh, syncAnywhereHosts]);
+  }, [refresh, replayWindows, syncAnywhereHosts]);
 
   const preferenceAccountId = credentials?.accountIdHex;
   useEffect(() => {
@@ -684,24 +723,52 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     });
   }, [accessToken, credentials?.pendingDeviceRevocation, persistCredentials, refresh]);
 
+  // One relay per runtime serves every host: envelopes are addressed by host id, so a single
+  // ticket and WebSocket replace one pair per host.
+  // eslint-disable-next-line react-hooks/refs -- the relay's credential callbacks read refs only when invoked
+  const relay = useMemo(() => (runtime ? new EncryptedAnywhereRelay(runtime) : null), [runtime]);
+
+  useEffect(() => {
+    if (!relay || phase !== "ready") return;
+    // Token, ticket and handshake run now instead of serially behind the first fleet request.
+    void relay.warm();
+  }, [phase, relay]);
+
+  useEffect(() => () => relay?.close(), [relay]);
+
+  const hostIds = hostIdsKey(hosts);
+  const hostSync = hostSyncKey(hosts);
+  const hostsRef = useRef(hosts);
+  useEffect(() => { hostsRef.current = hosts; }, [hosts]);
+
+  // Keyed on host identity, not the array: a refresh that returns the same hosts must not
+  // recreate transports.
+  useEffect(() => {
+    if (!relay || phase !== "ready" || auth.isLoading) return;
+    const removers = (hostIds ? hostIds.split(",") : []).map((id) => registerAnywhereTransport(
+      new AnywhereTransport(id, relay),
+    ));
+    return () => {
+      for (const remove of removers) remove();
+    };
+  }, [auth.isLoading, hostIds, phase, relay]);
+
   useEffect(() => {
     if (!runtime || phase !== "ready" || auth.isLoading) {
       if (!runtime) setRegisteredRuntimeId(null);
       return;
     }
     let active = true;
-    const removers = hosts.map((host) => registerAnywhereTransport(
-      new AnywhereTransport(host.id, new EncryptedAnywhereRelay(runtime)),
-    ));
-    void syncAnywhereHosts(hosts.map((host) => ({ id: host.id, name: host.name }))).then(() => {
+    void syncAnywhereHosts(hostsRef.current.map((host) => ({ id: host.id, name: host.name }))).then(() => {
       // Do not mount consumers while Auth still points at an unreconciled managed target.
-      if (active) setRegisteredRuntimeId(runtimeId);
+      if (active) {
+        markColdStart("consumersMounted");
+        setRegisteredRuntimeId(runtimeId);
+      }
     });
-    return () => {
-      active = false;
-      for (const remove of removers) remove();
-    };
-  }, [auth.isLoading, hosts, phase, runtime, runtimeId, syncAnywhereHosts]);
+    return () => { active = false; };
+    // hostSync stands in for the host list: names and membership, not array identity.
+  }, [auth.isLoading, hostSync, phase, runtime, runtimeId, syncAnywhereHosts]);
 
   const startLogin = useCallback(async () => {
     browserAuthWindow.current?.close();
@@ -1596,6 +1663,10 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         }, current.accessToken);
       } catch { /* Local logout must still complete while offline. */ }
     }
+    void clearFleetRows(hostsRef.current.map((host) => host.id));
+    credentialsRef.current = null;
+    replayWindows.reset();
+    windowPersister.dispose();
     await credentialStore.clear();
     await enrollmentStore.clear();
     await clearAnywherePushState().catch(() => {
@@ -1609,9 +1680,9 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     });
     await syncAnywhereHosts([]);
     setPhase("signed_out");
-  }, [syncAnywhereHosts]);
+  }, [replayWindows, syncAnywhereHosts, windowPersister]);
 
-  const value: AnywhereContextValue = {
+  const value = useMemo<AnywhereContextValue>(() => ({
     phase, credentials, account, subscription, hosts, devices, flow, passkeys,
     recoveryWords: recoverySetup?.words ?? null,
     recoveryKit: recoverySetup
@@ -1640,7 +1711,60 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, scheduleCleanReset, cancelCleanReset, registerPasskey: registerRecoveryPasskey, recoverWithPasskey, renamePasskey: renameRecoveryPasskey, revokePasskey: revokeRecoveryPasskey, useRecoveryInstead, restartSetup, refresh, checkout, openBillingPortal,
     revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, inspectPairing, approvePairing, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
-  };
+  }), [
+    accessToken,
+    account,
+    approvalError,
+    approvePairing,
+    cancelCleanReset,
+    cancelLocalHost,
+    checkout,
+    claimantPairing,
+    confirmLocalHost,
+    confirmNewRecovery,
+    credentials,
+    devices,
+    disablePush,
+    enablePush,
+    error,
+    errorIsOffline,
+    exportAccountData,
+    flow,
+    hostTransportPreferences,
+    hosts,
+    inspectPairing,
+    logout,
+    openBillingPortal,
+    openLoginPage,
+    passkeys,
+    pendingApprovalDetails,
+    pendingLocalHost,
+    phase,
+    prepareLocalHost,
+    pushStatus,
+    queueRemoteJob,
+    recoverExisting,
+    recoverWithPasskey,
+    recoverySetup,
+    refresh,
+    refreshPendingApprovals,
+    refreshRemoteJobs,
+    registerRecoveryPasskey,
+    remoteJobs,
+    renameHost,
+    renameRecoveryPasskey,
+    restartSetup,
+    revokeDevice,
+    revokeHost,
+    revokeRecoveryPasskey,
+    scheduleCleanReset,
+    selectHost,
+    setHostDisabled,
+    setHostTransportPreference,
+    startLogin,
+    subscription,
+    useRecoveryInstead,
+  ]);
   const consumersReady = anywhereConsumersReady(phase, runtimeId, registeredRuntimeId);
   return <AnywhereContext.Provider value={value}>{consumersReady ? children : null}</AnywhereContext.Provider>;
 }

@@ -4,6 +4,7 @@ import type {
   AnywhereRelay,
 } from "./AnywhereTransport";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { markColdStart, nowMs, recordInboundHandling, recordRelayRoundTrip } from "../anywhere/relayMetrics";
 import type { RemoteSocket } from "./RemoteTransport";
 import {
   ANYWHERE_HEADER_BYTES,
@@ -84,13 +85,17 @@ export interface AnywhereRelayCredentials {
   keyEpoch: number;
   signingPrivateKey: Uint8Array;
   accessToken(): Promise<string>;
-  /** Persistently reserves a never-reused sequence before returning it. */
+  /** Reserves a never-reused sequence; implementations may persist a whole block ahead of use. */
   reserveSequence(): Promise<bigint>;
-  /** Atomically accepts ordered envelope sequences and persists the accepted maximum. */
+  /**
+   * Atomically accepts ordered envelope sequences. The replay window is updated in memory at
+   * once and persisted lazily unless `durable` asks for an immediate write.
+   */
   acceptSequences(
     senderDeviceId: string,
     keyEpoch: number,
     sequences: readonly bigint[],
+    options?: { durable?: boolean },
   ): Promise<boolean>;
   signingPublicKey(senderDeviceId: string): Promise<Uint8Array>;
   randomBytes(length: number): Uint8Array;
@@ -286,9 +291,11 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
         }
         signal.addEventListener("abort", onAbort, { once: true });
       }
+      const sentAt = nowMs();
       this.pending.set(key, {
         resolve: (response) => {
           settle();
+          recordRelayRoundTrip(nowMs() - sentAt);
           resolve(response);
         },
         reject: (error) => {
@@ -311,7 +318,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     assertLength("host id", recipientId, 16);
     const nonce = this.credentials.randomBytes(24);
     assertLength("nonce", nonce, 24);
-    // reserveSequence persists first; a crash may create a gap but can never create a replay.
+    // reserveSequence persists its block first; a crash may create a gap but can never create a replay.
     const sequence = await this.credentials.reserveSequence();
     return sealEnvelope(
       {
@@ -511,13 +518,28 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       // A rejected decoder task must not poison all later sockets/frames in this relay runtime.
       this.incoming = this.incoming.catch(() => undefined).then(() => this.handleEnvelope(event.data));
     };
-    socket.onclose = () => this.connectionClosed();
-    socket.onerror = () => this.connectionClosed();
+    // A superseded socket (replaced relay, reconnect) must not fail the connection that replaced it.
+    socket.onclose = () => { if (this.connection === socket) this.connectionClosed(); };
+    socket.onerror = () => { if (this.connection === socket) this.connectionClosed(); };
     this.connection = socket;
+    markColdStart("relayOpen");
     return socket;
   }
 
+  /** Opens the socket in the background so the first request does not pay token, ticket and handshake. */
+  warm(): Promise<void> {
+    return this.ensureConnection().then(() => undefined, () => undefined);
+  }
+
+  /** Drops the socket and fails in-flight work; a later request reconnects on demand. */
+  close(): void {
+    const connection = this.connection;
+    this.connectionClosed(new Error("Forge Anywhere relay closed"));
+    connection?.close(1000, "relay replaced");
+  }
+
   private async handleEnvelope(data: unknown): Promise<void> {
+    const startedAt = nowMs();
     try {
       const bytes = await socketBytes(data);
       const decoded = decodeEnvelope(bytes);
@@ -544,6 +566,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       }
       await prepared.consume?.().catch(() => undefined);
       prepared.deliver();
+      recordInboundHandling(nowMs() - startedAt);
     } catch (error) {
       const connection = this.connection;
       this.connectionClosed(asError(error));

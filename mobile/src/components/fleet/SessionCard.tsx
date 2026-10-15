@@ -21,7 +21,7 @@ import Animated, {
 import { ApiError, type MergeDirtyConflictResponse, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
-import { useArchiveSession, useDiscardSession, useMergeSession } from "../../lib/queries";
+import { useArchiveSession, useDiscardSession, useMergeSession, usePrefetchSessionHistory } from "../../lib/queries";
 import { transportForBaseUrl } from "../../lib/serverTargets";
 import { useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
@@ -186,6 +186,9 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
     setDiscardConfirmVisible(true);
   }, [closeSwipe]);
 
+  const prefetchSessionHistory = usePrefetchSessionHistory();
+  const prefetchHistory = useCallback(() => prefetchSessionHistory(row.id), [prefetchSessionHistory, row.id]);
+
   const goToSession = useCallback(() => {
     router.push(`/session/${row.id}`);
   }, [row.id]);
@@ -278,6 +281,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
               >
                 <Pressable
                   ref={rowRef}
+                  onPressIn={prefetchHistory}
                   onPress={goToSession}
                   onLongPress={openActions}
                   accessibilityRole={Platform.OS === "web" ? undefined : "button"}
