@@ -1248,6 +1248,93 @@ mod tests {
         state.turn_handle.take().unwrap().abort();
     }
 
+    /// `/btw` typed mid-turn used to hit the "commands run when the turn is idle" refusal before
+    /// dispatch was ever reached. It must reach `start_btw`'s busy branch: the card opens, nothing
+    /// is queued, and nothing reaches the steer inbox.
+    #[tokio::test]
+    async fn btw_while_busy_opens_the_card_and_is_neither_queued_nor_steered() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "/btw what does the lock do".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        assert!(state.app.btw_open(), "the side-question card opened");
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.steer.is_empty());
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    /// A lock-taking command typed mid-turn waits in the queue (in order with prompts), is never
+    /// steered into the running model turn, and runs through dispatch at the turn boundary.
+    #[tokio::test]
+    async fn a_queue_class_command_while_busy_is_queued_not_steered_and_runs_in_order() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "/compact".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            state.steer.is_empty(),
+            "a command is never offered to the model"
+        );
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "then fix the test".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(!state.steer.is_empty(), "the prompt is");
+        assert_eq!(state.queued_prompts, vec!["/compact", "then fix the test"]);
+        state.turn_handle.take().unwrap().abort();
+
+        state.on_turn_done(10).await;
+        assert!(state.busy, "the command's own background task is running");
+        assert_eq!(
+            state.queued_prompts,
+            vec!["then fix the test"],
+            "/compact left the queue and ran first"
+        );
+        assert!(state.turn_handle.is_some());
+        state.turn_handle.take().unwrap().abort();
+
+        state.on_turn_done(11).await;
+        assert_eq!(state.last_prompt.as_deref(), Some("then fix the test"));
+        assert!(state.queued_prompts.is_empty());
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_refused_command_while_busy_keeps_the_idle_note_and_is_not_queued() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "/undo".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.steer.is_empty());
+        state.turn_handle.take().unwrap().abort();
+    }
+
     /// A prompt sent mid-turn is in prompt history at once, not only once it runs as a turn.
     #[tokio::test]
     async fn a_prompt_queued_while_busy_is_recorded_in_history_immediately() {

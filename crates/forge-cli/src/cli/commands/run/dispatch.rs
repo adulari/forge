@@ -169,32 +169,11 @@ pub(crate) async fn dispatch_command(
 ) -> Result<DispatchOutcome> {
     use forge_tui::CommandAction;
     let action = forge_tui::parse_command(line);
-    // Everything that touches the live `Session` (lock().await) or swaps it is gated while a turn
-    // holds the Mutex — opening the read-only `/sessions` picker is the one exception.
-    let mutates = !matches!(
-        action,
-        CommandAction::Help
-            | CommandAction::Keys
-            | CommandAction::Quit
-            | CommandAction::Unknown(_)
-            | CommandAction::ListSessions
-            | CommandAction::Resume(_)
-            | CommandAction::ClearScreen
-            | CommandAction::PinModel(_)
-            | CommandAction::SetEffort(_)
-            | CommandAction::SetExactEffort(_)
-            | CommandAction::Replay(_, _)
-            | CommandAction::Export(_)
-            | CommandAction::Usage
-            | CommandAction::Remote { .. }
-            | CommandAction::Anywhere
-            | CommandAction::Statusline(_)
-            // /voice only fills the input box on completion — it never touches the running turn
-            // or the session, so (like /usage) it must work while a turn is busy.
-            | CommandAction::Voice
-            // /btw runs beside a busy turn through the session's detached asker (`start_btw`).
-            | CommandAction::Btw(_)
-    );
+    // Commands that need the session lock (held by the running turn) are queued by the input
+    // surfaces before dispatch (`busy_commands::route_busy_line`); this guards direct callers.
+    // File commands/skills guard themselves in `dispatch_catalog`.
+    let mutates = !matches!(action, CommandAction::Unknown(_) | CommandAction::Quit)
+        && busy_policy(&action) != BusyPolicy::Immediate;
     if busy && mutates {
         app.note("⚠ finish or Esc the current turn first");
         return Ok(DispatchOutcome::Handled);

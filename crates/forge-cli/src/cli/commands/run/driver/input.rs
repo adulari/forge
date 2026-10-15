@@ -149,8 +149,7 @@ impl DriverState {
                     self.app.palette.close();
                     self.app.input.clear();
                     if self.busy {
-                        self.app
-                            .note("⏳ commands run when the turn is idle — finish or Stop first");
+                        self.busy_command(line).await?;
                     } else {
                         // Route through the shared submit path (identical DispatchOutcome
                         // handling to a directly-typed command).
@@ -294,6 +293,7 @@ impl DriverState {
                     "⏹ interrupted — stopped responding"
                 };
                 self.app.note(note);
+                self.drain_queue().await;
             }
             return Ok(());
         }
@@ -321,9 +321,8 @@ impl DriverState {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     // nothing to queue
-                } else if trimmed.starts_with('/') && !trimmed.starts_with("//") {
-                    self.app
-                        .note("⏳ commands run when the turn is idle — finish or Stop first");
+                } else if is_command_line(trimmed) {
+                    self.busy_command(line).await?;
                 } else {
                     // Same as a remote prompt mid-turn: recall it, and offer it to the running
                     // turn at its next step.
@@ -568,11 +567,7 @@ impl DriverState {
                 self.goal_state = Some(gs);
             }
         }
-        if self.turn_handle.is_none() {
-            if let Some(next) = self.take_next_queued_prompt() {
-                self.start_turn(&next);
-            }
-        }
+        self.drain_queue().await;
         // A due heartbeat only gets to run when nothing else claimed the next turn above — a
         // typed-while-busy prompt / active /loop or /goal always wins.
         if self.turn_handle.is_none() {

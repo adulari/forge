@@ -20,6 +20,7 @@
 use forge_core::steer::SteerInbox;
 use forge_tui::{App, PresenterEvent};
 
+use super::busy_commands::head_is_command;
 use super::dequeue_prompt;
 
 /// What an interrupt starts next.
@@ -98,6 +99,11 @@ impl SteerTracker {
         let mut resend = std::mem::take(&mut self.unanswered);
         resend.extend(self.settle(queue, steer, app));
         if resend.is_empty() {
+            // A queued command at the head runs through dispatch (the caller's idle pump), not as
+            // a model prompt, and keeps its place ahead of later prompts.
+            if head_is_command(queue) {
+                return None;
+            }
             dequeue_prompt(queue, app).map(InterruptNext::Fresh)
         } else {
             Some(InterruptNext::Resume(resend.join("\n\n")))
