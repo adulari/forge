@@ -1,8 +1,9 @@
 # Feature: context compaction (`/compact` · `/uncompact`)
 
-> **Status: shipped, including auto-trigger, persistence, and undo.** `/compact` summarizes the
-> older part of the transcript into one system message via a cheap model call, shrinking the live
-> context sent on subsequent turns; it also fires automatically at 80% of the context gauge.
+> **Status: shipped, including auto-trigger, persistence, and undo.** `/compact [what to keep]`
+> summarizes the older part of the transcript into one system message written by the session's own
+> model, shrinking the live context sent on subsequent turns; it also fires automatically at 80% of
+> the context gauge.
 > `/uncompact` reverses it — the full transcript is always recoverable. Pairs with the
 > context-window gauge (tui-token-counter.md).
 
@@ -18,8 +19,9 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
 - `/compact` (TUI command + palette entry) summarizes all but the most recent
   `COMPACT_KEEP_RECENT` (6) messages into a single `Role::System` summary, prepended ahead of
   the kept tail. No-op when there are fewer than `KEEP_RECENT + COMPACT_MIN_OLDER` messages.
-- The summary is produced by one **trivial-tier** model call (cheap, mesh-routed) with a fixed
-  system prompt that preserves decisions, facts, file paths, names, and open threads.
+- The summary is written by the **session's own model** (see "Summary quality" below), not by a
+  trivial-tier model: a summary replaces everything it folds, so it is the one side call worth
+  spending a capable model on.
 - Runs as a **background task** like a turn (the spinner ticks; doesn't block the render loop).
 
 **Shipped since the MVP**
@@ -43,14 +45,61 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   first kept message is a tool result, the split walks back to the assistant call that produced
   it, so a few more than `COMPACT_KEEP_RECENT` messages survive rather than results whose call
   is in the summary (Moonshot rejects that request; other providers lose the results silently).
-- **The summary has to be worth keeping.** `COMPACT_SYSTEM` asks for a sectioned working memory
-  (goal, current state, files and code, findings and decisions, errors, next steps) sized to the
-  conversation, and the call runs at the model's default effort instead of the cheap rung. A reply
-  under 600 chars for more than 20K chars of transcript counts as thin, like an empty one: the
-  chain moves on, and only when every candidate was thin is the fullest thin reply used. Kimi's
-  reasoning prefill is not applied to tool-less side calls, and the summary reserve is up to 6K
-  tokens (an eighth of a small window). Observed 2026-09-16: 189 chars stood in for 240K tokens.
-  Side-call usage rows now name the model (`Store::record_side_call_usage_for`).
+- **The summary has to be worth keeping.** A reply that is empty, shorter than 600 chars for more
+  than 20K chars of transcript, or without the sectioned structure counts as thin: the chain moves
+  on (without benching the model), and only when every candidate was thin is the fullest thin reply
+  used, with a notice of what was dropped. The structure check counts section markers (at least
+  three of the eight numbered sections, or three markdown headings) instead of looking for an
+  English word, so a summary in the user's language passes. Kimi's reasoning prefill is not applied
+  to tool-less side calls. Observed 2026-09-16: 189 chars stood in for 240K tokens. Side-call usage
+  rows name the model (`Store::record_side_call_usage_for`).
+
+### Summary quality (PR A of the context-management program)
+
+Forge's compaction used to lose information for structural reasons: a free model wrote the summary,
+it read tool results already cut to 1,500-char heads, an oversized payload lost its middle, and
+nothing carried the user's own words across. All four are fixed.
+
+- **The session model writes the summary.** `[mesh] compact_model = "session" | "auto"`, default
+  `session`. With `session` the chain is the session model (the `/model` pin set, else the model
+  the last turn ran on, else the routed pick for a session that has not run a turn), then its
+  fallbacks, then the free `compact_candidates()` shortlist. `auto` is the previous order: free
+  shortlist first, the session's model last. Both keep `callable_summarizers` (disabled or unkeyed
+  models never receive the transcript) and the foreign-subscription guard (a plan the session is
+  not on is never spent on a summary). The call runs at the session's effort (`/effort exact`, the
+  `/effort` pin, else the routed rung), not the model's default.
+- **Claude Code's structure.** The model first writes an `<analysis>` scratchpad (a chronological
+  walk through the requests, actions, decisions, code changes, errors and user corrections), then a
+  `<summary>` with eight sections: primary request and intent; key technical concepts; files and
+  code (with snippets); errors and fixes (including user corrections); problem solving; pending
+  tasks; current work; next step (with a verbatim quote of the latest instruction, only when it
+  follows from it). The scratchpad is stripped before anything is stored; a reply without the tags
+  is used whole.
+- **The user's words, appended by the harness.** After the model's summary Forge adds a
+  `## User messages (verbatim)` section built from the folded range's real user messages: the
+  newest whole, older ones capped at 2,000 chars, the whole section within ~8k tokens, oldest
+  dropped first with the count said. Harness-injected user-role rows (the empty-reply nudge, auto-fix
+  and stop-hook feedback, background-job notices, continuation nudges, anything the store marked
+  `nudge = 1`) are excluded; steers are the user's own input and stay. Messages are numbered across
+  the whole session, so a later compaction reads the earlier block back out of the summary it
+  absorbs, appends its own messages and drops from the oldest end. The model never sees the old
+  block (the harness re-appends it), so it cannot paraphrase or lose it.
+- **Full-fidelity input.** The summarizer reads each tool result as the store holds it (up to
+  32,000 chars as the model first saw it) rather than the in-memory pruned head, capped at 12,000
+  chars head+tail per result so one giant output cannot dominate. UI-only rows stay out.
+- **Rolling summary instead of a dropped middle.** When the folded range exceeds the summarizer's
+  input budget (its window minus a 20K-token reserve for the reply, a quarter of a small window at
+  most), it is summarized in parts, oldest first: each call receives the summary so far in
+  `<previous_summary>` and writes the updated whole. The last-resort per-part guard
+  (`fit_compaction_payload`) only cuts a single entry that alone exceeds a window. A failover hop
+  recomputes the remaining parts against the next model's window and carries the summary so far.
+- **`/compact <focus>`.** Anything after the command (`/compact keep the migration plan and every
+  file path`) is appended to the summary prompt for that one compaction, like `/reground`'s
+  directive. It does not change the section structure.
+- **Bounded call.** The reply is capped at 20,000 tokens (less on a small window); the call has the
+  stream-idle watchdog and a 300 s overall limit, and a timeout moves to the next candidate without
+  benching a model that may only have been slow.
+
 - **Recent tool rounds survive both passes.** Mid-turn, the prune pass leaves the last
   `PRUNE_KEEP_ROUNDS` (4) tool rounds whole, and a summary keeps those rounds verbatim beside it
   while they cost at most a quarter of the transcript (capped at 40K tokens). Observed 2026-09-16:
@@ -116,17 +165,19 @@ summarize round-trip (and its model cost) entirely. (Adopted from opencode's `co
 `docs/harness/competitor-gap-analysis.md`.)
 
 ## 4. Design
-`Session::compact()` (forge-core): splits the transcript at `len - COMPACT_KEEP_RECENT`, renders
-the older messages as `role: content` text, routes a trivial-tier model
-(`route_hinted(..., Some(Trivial))`), calls `provider.complete` once with a fixed
-summary system prompt, then sets `transcript = [system summary, ...recent]`. Returns
-`(before, after)` and emits a `Warning` note. `/compact` → `CommandAction::Compact` →
+`Session::compact()` (forge-core, `compaction_run.rs`): splits the transcript at the round-aligned
+kept tail, builds the summarizer input from the folded range (`compaction_input.rs`: stored tool
+results, harness-nudge detection), walks the candidate chain (`compaction_chain.rs`) calling
+`provider.complete_with` once per part with the system prompt in `compaction_summary.rs`, strips
+the scratchpad, appends the verbatim user messages, then sets `transcript = [system summary,
+...recent]`. Returns `(before, after)` and emits a `Warning` note. `/compact` → `CommandAction::Compact` →
 `DispatchOutcome::RunCompact` → `spawn_compact` (background task, busy/done machinery), gated
 while a turn is in flight.
 
 ## 5. Definition of done
 - [x] `Session::compact()` folds older → summary, keeps recent, no-op when short.
-- [x] Trivial-tier model call; fixed information-preserving prompt.
+- [x] Session-model summary call (`[mesh] compact_model`); structured prompt with a hidden scratchpad.
+- [x] Verbatim user messages, full-fidelity input, rolling parts, `/compact <focus>`, 20K output cap and timeout.
 - [x] `/compact` command + palette entry; runs as a background task.
 - [x] Unit tests (fold + no-op); `cargo fmt` + `clippy -D warnings` clean.
 - [x] Auto-trigger on gauge threshold (80%); zero-LLM prune pass first.

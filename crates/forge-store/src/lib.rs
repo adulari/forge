@@ -41,6 +41,7 @@ use migrations::{
     ANYWHERE_PRERELEASE_MIN_VERSION, MIGRATIONS,
 };
 mod cc_link_store;
+mod compaction_source_store;
 mod provenance_store;
 mod quota_store;
 mod schema;
@@ -61,6 +62,7 @@ mod usage_store;
 pub use bench_solve_store::{BenchSolveRun, BenchSolveTotals};
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
 pub use codemode_store::{CodemodeStats, ToolCallRow};
+pub use compaction_source_store::CompactionSource;
 pub use detached_child_store::{DetachedChild, DetachedChildStatus};
 pub use dispatch_store::{
     dispatch_item_status, dispatch_status, DispatchItemRow, DispatchRow, NewDispatchItem,

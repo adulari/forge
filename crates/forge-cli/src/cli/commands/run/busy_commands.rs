@@ -49,7 +49,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Mode
         | CommandAction::Assay { .. }
         | CommandAction::Checkpoint(_)
-        | CommandAction::Compact
+        | CommandAction::Compact(_)
         | CommandAction::Commit(_)
         | CommandAction::Uncompact
         | CommandAction::Reground

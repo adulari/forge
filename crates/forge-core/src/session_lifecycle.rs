@@ -301,6 +301,7 @@ impl Session {
             turns_since_refine: 0,
             host_guard: Default::default(),
             compact_directive: None,
+            compact_timeout: crate::compaction_run::COMPACT_CALL_TIMEOUT,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });

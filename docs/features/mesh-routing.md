@@ -1362,6 +1362,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `adaptive_effort` | `true` | Low reasoning effort for the step after a successful read-only tool round (adaptive-effort.md) |
 | `adaptive_effort_providers` | `["openai", "codex-oauth", "gemini"]` | Providers `adaptive_effort` applies to: only those where an effort change keeps the prompt cache |
 | `vision_fallback` | `"warn"` | What a request does when its selected model cannot read the images it carries: `warn`, `describe` or `switch` (image-delivery.md) |
+| `compact_model` | `"session"` | Which model writes the compaction summary: `session` (the session's own model, then its fallbacks, then the free shortlist) or `auto` (free shortlist first, session model last) (context-compaction.md) |
 
 Multi-key rotation: every key-based provider accepts multiple API keys (repeat
 `forge auth <provider>`, a comma-separated env value, or numbered `_2`… env siblings —

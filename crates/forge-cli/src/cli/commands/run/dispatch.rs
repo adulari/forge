@@ -410,8 +410,15 @@ pub(crate) async fn dispatch_command(
                 None => app.note("✓ checkpoint saved"),
             }
         }
-        // `/compact` makes a model call → run it as a background task so the spinner ticks.
-        CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        // `/compact [focus]` makes a model call → run it as a background task so the spinner
+        // ticks. The focus is armed on the session as a one-shot directive, like `/reground`'s, so
+        // every surface that spawns the compaction carries it without a new parameter.
+        CommandAction::Compact(focus) => {
+            if let Some(focus) = focus {
+                session.lock().await.set_compact_focus(&focus);
+            }
+            return Ok(DispatchOutcome::RunCompact);
+        }
         // `/commit [hint]` — one turn that commits the session's uncommitted work. The model does
         // it through the ordinary shell tool (and its permission gate); Forge never pushes here.
         CommandAction::Commit(hint) => {

@@ -17,6 +17,7 @@ pub mod agents;
 pub mod browser;
 pub mod codemode;
 mod commit_policy;
+mod compact_model;
 pub mod goal;
 mod harness_profile;
 mod lsp_diagnostics;
@@ -34,6 +35,7 @@ mod vision_fallback;
 pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
+pub use compact_model::CompactModel;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
@@ -2151,6 +2153,11 @@ pub struct MeshConfig {
     /// requests append to a stable prefix instead of re-trimming on every call.
     #[serde(default = "default_compact_low_water")]
     pub compact_low_water: f64,
+    /// Which model writes the compaction summary: `session` (default; the model the session is
+    /// running on, then its fallbacks, then the free shortlist) or `auto` (the best free capable
+    /// model first and the session's own last, the order before this setting existed).
+    #[serde(default)]
+    pub compact_model: CompactModel,
     /// Per-turn cumulative input-token ceiling for a CLI bridge turn (wave 5). A bridge runs its
     /// own tool loop inside a subprocess, so the direct-path cost guards (which only see
     /// `resp.tool_calls`) never fire on it — an unbounded bridge turn is the dominant tail-cost
@@ -2959,6 +2966,7 @@ impl Default for Config {
                 tool_result_context_keep_recent: default_tool_result_context_keep_recent(),
                 context_floor_block_tokens: default_context_floor_block_tokens(),
                 compact_low_water: default_compact_low_water(),
+                compact_model: CompactModel::default(),
                 bridge_turn_token_cap: default_bridge_turn_token_cap(),
                 explicit_models: Vec::new(),
                 bridge_models: HashMap::new(),
@@ -4092,6 +4100,17 @@ models = {}
             parsed.mesh.compact_low_water,
             shipped.mesh.compact_low_water
         );
+        assert_eq!(parsed.mesh.compact_model, CompactModel::Session);
+        let auto: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+compact_model = "auto"
+"#,
+        )
+        .expect("compact_model = \"auto\" parses");
+        assert_eq!(auto.mesh.compact_model, CompactModel::Auto);
         assert!(parsed.mesh.cross_session_cache_key);
         assert_eq!(
             parsed.mesh.cross_session_cache_key,
