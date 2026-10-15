@@ -35,6 +35,9 @@ async fn advance_to_next_usable(
         if forge_provider::bridge_credentials_known_absent(forge_config::provider_of(&next)) {
             continue;
         }
+        if session.skips_for_vision(&next) {
+            continue;
+        }
         if skip_reserved && session.store.is_model_reserved(&next) {
             continue;
         }
@@ -150,6 +153,7 @@ pub(super) async fn request_provider_response(
         // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
         // smaller-window model still fits. The immutable borrow ends before the block below.
         let sent = session.transcript_with_preamble_and_tools(active_model, specs);
+        let sent = session.apply_vision_policy(active_model, sent).await;
         session.cache.stage(active_model, &sent, specs);
         let cache_key = session.main_loop_cache_key(active_model, specs, &checkpoint_ctx.session);
         // Auto-routed completions reserve a model before dispatch so independent sessions

@@ -71,7 +71,7 @@ pub(crate) fn place_system_messages(messages: &[Message]) -> Vec<Message> {
 /// The one user turn whose images still go on the wire. Providers cap the images per request
 /// ("At most 1 image(s) may be provided in one prompt") and an image only matters on the turn that
 /// introduced it, so every earlier image turn is sent text-only.
-pub(crate) fn last_image_turn(messages: &[Message]) -> Option<usize> {
+pub fn last_image_turn(messages: &[Message]) -> Option<usize> {
     messages
         .iter()
         .rposition(|m| matches!(m.role, Role::User) && !m.images.is_empty())

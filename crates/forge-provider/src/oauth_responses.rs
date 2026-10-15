@@ -128,6 +128,26 @@ pub fn bare_model(model: &str) -> &str {
         .unwrap_or(model)
 }
 
+/// A user turn's `content`: the plain string, or — for the one image turn that still goes on the
+/// wire — `input_text` + `input_image` parts. Without this the Responses backends never saw the
+/// image at all.
+fn user_content(m: &Message, with_images: bool) -> serde_json::Value {
+    if !with_images || m.images.is_empty() {
+        return serde_json::Value::String(m.content.clone());
+    }
+    let mut parts = Vec::new();
+    if !m.content.is_empty() {
+        parts.push(serde_json::json!({"type": "input_text", "text": m.content}));
+    }
+    for img in &m.images {
+        parts.push(serde_json::json!({
+            "type": "input_image",
+            "image_url": format!("data:{};base64,{}", img.media_type, img.data_base64),
+        }));
+    }
+    serde_json::Value::Array(parts)
+}
+
 /// Map Forge messages/tools into an OpenAI Responses API request body (`stream: true`).
 pub fn build_responses_request(
     model: &str,
@@ -139,7 +159,8 @@ pub fn build_responses_request(
     let mut instructions = String::new();
     let mut input = Vec::new();
     let mut leading_system_prefix = true;
-    for m in messages {
+    let image_turn = crate::system_placement::last_image_turn(messages);
+    for (index, m) in messages.iter().enumerate() {
         match m.role {
             Role::System if leading_system_prefix => {
                 if !instructions.is_empty() {
@@ -157,7 +178,10 @@ pub fn build_responses_request(
             }
             Role::User => {
                 leading_system_prefix = false;
-                input.push(serde_json::json!({"role": "user", "content": m.content}));
+                input.push(serde_json::json!({
+                    "role": "user",
+                    "content": user_content(m, Some(index) == image_turn),
+                }));
             }
             Role::Assistant => {
                 leading_system_prefix = false;
@@ -622,6 +646,40 @@ pub async fn execute_responses_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latest_image_turn_is_sent_as_input_image_parts_and_earlier_ones_as_text() {
+        let image = |data: &str| forge_types::ImageAttachment {
+            media_type: "image/png".into(),
+            data_base64: data.into(),
+        };
+        let mut old = Message::user("first shot");
+        old.images = vec![image("OLD")];
+        let mut new = Message::user("second shot");
+        new.images = vec![image("NEW")];
+        let messages = vec![
+            old,
+            Message::assistant("ok"),
+            new,
+            Message::user("and now?"),
+        ];
+        let body = build_responses_request(
+            "codex-oauth::gpt-5.6-sol",
+            &messages,
+            &[],
+            &CompletionOptions::default(),
+            8_192,
+        );
+        assert_eq!(body["input"][0]["content"], "first shot");
+        assert_eq!(
+            body["input"][2]["content"],
+            serde_json::json!([
+                {"type": "input_text", "text": "second shot"},
+                {"type": "input_image", "image_url": "data:image/png;base64,NEW"},
+            ])
+        );
+        assert_eq!(body["input"][3]["content"], "and now?");
+    }
 
     #[test]
     fn only_leading_system_run_is_hoisted_into_stable_instructions() {

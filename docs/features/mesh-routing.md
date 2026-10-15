@@ -243,11 +243,17 @@ reason. See [zero-retention.md](zero-retention.md).
 
 ### 3.3 Vision
 
-`supports_vision` (`crates/forge-mesh/src/catalog.rs:163`) is a name-heuristic **allowlist** of
-image-capable families (gpt-4o/4.1/5, o1/o3/o4, Claude 3+, Gemini, Llama-3.2-vision/Llama-4,
-pixtral, Qwen-VL, Grok). When the current turn carries image attachments, routing prefers
-vision-capable candidates and fails open to the unfiltered list if none is usable
-(`ordered_usable_for_tier`, `crates/forge-mesh/src/lib.rs:818-830`).
+Whether a model reads images is resolved by `catalog::supports_vision` / `vision_capability`
+(`crates/forge-mesh/src/vision.rs`): a transport with no image channel (`agy-cli`) never does;
+otherwise fetched catalog data wins (OpenRouter `input_modalities`, first-party models.dev
+`modalities.input`, cached beside the context windows), and a name heuristic covers the rest.
+
+Routing treats a request as image-bearing when the transcript still carries an image that will be
+sent (the latest image turn), not only when one is pending, so follow-ups and tool steps keep
+routing to vision-capable models, failover included. When no usable candidate is vision-capable the
+router still fails open to the unfiltered list; the session then applies `[mesh] vision_fallback`
+(`warn` | `describe` | `switch`) before the request is sent instead of letting the image vanish
+silently. See [image-delivery.md](image-delivery.md).
 
 ## 4. Scoring a candidate: `route_score`
 
@@ -1355,6 +1361,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `subagents.inherit_pin` (per session) | — | `/subagents free\|pinned` overrides the default for one session; persisted (§9.1) |
 | `adaptive_effort` | `true` | Low reasoning effort for the step after a successful read-only tool round (adaptive-effort.md) |
 | `adaptive_effort_providers` | `["openai", "codex-oauth", "gemini"]` | Providers `adaptive_effort` applies to: only those where an effort change keeps the prompt cache |
+| `vision_fallback` | `"warn"` | What a request does when its selected model cannot read the images it carries: `warn`, `describe` or `switch` (image-delivery.md) |
 
 Multi-key rotation: every key-based provider accepts multiple API keys (repeat
 `forge auth <provider>`, a comma-separated env value, or numbered `_2`… env siblings —

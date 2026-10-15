@@ -1966,7 +1966,7 @@ impl CliProvider {
         // Decide whether to RESUME the CLI's prior session (claude `--resume`) and send only the new
         // messages, or start FRESH with the full transcript. Resume when we hold a session id and the
         // transcript only grew (a shrink → it was compacted/reset, so the high-water mark is stale).
-        let (mut prompt, resume_id): (String, Option<String>) = {
+        let (mut prompt, resume_id, seen): (String, Option<String>, usize) = {
             // Poison-tolerant: if a prior turn panicked while holding this lock, a plain `.unwrap()`
             // would panic on EVERY later turn — a sticky brick with no recovery. Recover the guard
             // and carry on; the worst case is treating the session as stale (a fresh, full-transcript
@@ -1983,6 +1983,7 @@ impl CliProvider {
                     (
                         apply_harness_preamble(self.harness, self.kind, render_prompt(messages)),
                         None,
+                        0,
                     )
                 } else {
                     // Resume: claude already holds the prior CONTEXT in its own session, so we skip
@@ -1993,15 +1994,18 @@ impl CliProvider {
                     (
                         apply_resume_reminder(self.harness, self.kind, delta),
                         st.session_id.clone(),
+                        st.sent,
                     )
                 }
             } else {
                 (
                     apply_harness_preamble(self.harness, self.kind, render_prompt(messages)),
                     None,
+                    0,
                 )
             }
         };
+        let images = images::turn_images(messages, seen);
         // Soft nudge: steer the CLI to route web access through Forge's MCP tools rather than
         // its own native search/browsing. codex's subscription-backed web search (web.run)
         // can't be hard-disabled from here, so this instruction is best-effort; claude has no
@@ -2043,7 +2047,7 @@ impl CliProvider {
         let mut mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
         push_bridge_classifier_model(&mut mcp_env, self.kind);
 
-        let args = build_oneshot_args(
+        let mut args = build_oneshot_args(
             self.kind,
             bare_model(model),
             self.harness,
@@ -2053,6 +2057,26 @@ impl CliProvider {
             &prompt,
             effort,
         );
+        // Images ride the CLI's own channel: claude takes content blocks on stream-json stdin,
+        // codex takes decoded files via `--image` (kept alive until the turn ends).
+        let mut stdin_payload = prompt.clone().into_bytes();
+        let _codex_images = match self.kind {
+            CliKind::ClaudeCode if !images.is_empty() => {
+                args.push("--input-format".into());
+                args.push("stream-json".into());
+                stdin_payload =
+                    format!("{}\n", images::claude_user_line(&prompt, &images)).into_bytes();
+                None
+            }
+            CliKind::Codex if !images.is_empty() => {
+                let files = images::CodexImageFiles::write(&images).map_err(|e| {
+                    ProviderError::Request(format!("preparing image attachments failed: {e}"))
+                })?;
+                args.extend(files.args());
+                Some(files)
+            }
+            _ => None,
+        };
 
         let mut cmd = bridge_command(&self.binary, &args);
         if let Some(context) = checkpoint {
@@ -2114,7 +2138,7 @@ impl CliProvider {
         let write_error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         if let Some(mut stdin) = child.stdin.take() {
-            let bytes = prompt.into_bytes();
+            let bytes = stdin_payload;
             let write_error = std::sync::Arc::clone(&write_error);
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
@@ -2698,16 +2722,7 @@ fn finish_persistent_turn(binary: &str, turn: TurnData) -> Result<ModelResponse,
     })
 }
 
-/// JSON-encode one user turn as a Claude Code streaming-input line (`{"type":"user", …}`). Pulled
-/// out so the framing is unit-testable without a live process.
-fn stream_user_line(payload: &str) -> String {
-    serde_json::json!({
-        "type": "user",
-        "message": { "role": "user", "content": payload },
-    })
-    .to_string()
-}
-
+mod images;
 mod live;
 use live::*;
 
@@ -2972,7 +2987,8 @@ impl CliProvider {
             // drop the `LiveSession` (it stays parked in the slot), so its `kill_on_drop` child
             // never fires — the whole bridge process TREE would leak. Disarmed once the turn ends.
             let mut kill_guard = GroupKillGuard::new(sess.pgid);
-            if let Err(e) = sess.write_user(&payload).await {
+            let images = images::turn_images(messages, sess.sent);
+            if let Err(e) = sess.write_user(&payload, &images).await {
                 kill_guard.disarm();
                 retry_fresh_or!({
                     guard.last = ResumeState::default();
@@ -5608,7 +5624,7 @@ mod tests {
 
     #[test]
     fn stream_user_line_is_a_valid_streaming_input_envelope() {
-        let line = stream_user_line("hello \"world\"\nline2");
+        let line = images::claude_user_line("hello \"world\"\nline2", &[]);
         let v: Value = serde_json::from_str(&line).expect("valid JSON");
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
@@ -5884,7 +5900,7 @@ mod tests {
     /// table, which our forks can never inherit, and it is closed before `cp` exits — so the inode we
     /// hand the provider has never had a writer in this process and the exec cannot race.
     #[cfg(unix)]
-    fn install_fake_cli(name: &str, script: &str) -> String {
+    pub(in crate::cli_provider) fn install_fake_cli(name: &str, script: &str) -> String {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

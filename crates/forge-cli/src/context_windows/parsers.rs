@@ -178,7 +178,7 @@ pub(super) fn openrouter_pricing(body: &serde_json::Value) -> Vec<(String, f64, 
 /// against a real catalog rather than assumed. `opencode-go` is deliberately ABSENT: models.dev
 /// prices 34 models under it and not one id matches an `opencode_go::` id Forge routes to, so
 /// mapping it would add rows that can never be looked up while implying the gateway is priced.
-const MODELS_DEV_NAMESPACES: &[(&str, &[&str])] = &[
+pub(super) const MODELS_DEV_NAMESPACES: &[(&str, &[&str])] = &[
     ("openai", &["openai", "codex-cli", "codex-oauth"]),
     ("anthropic", &["anthropic"]),
     ("google", &["gemini"]),
@@ -395,6 +395,68 @@ pub(super) fn new_api_pricing(
             ))
         })
         .collect()
+}
+
+/// Whether an input-modality list includes images.
+fn takes_images(modalities: &serde_json::Value) -> Option<bool> {
+    let list = modalities.as_array()?;
+    Some(list.iter().any(|m| m.as_str() == Some("image")))
+}
+
+/// Per-model vision flags from OpenRouter (`architecture.input_modalities`) and models.dev
+/// (`modalities.input`), keyed like [`forge_mesh::vision::install_modalities`] expects: the exact
+/// Forge ids (`openrouter::<id>`, the native cross-map, the mapped models.dev providers) plus a
+/// `~basename` key so a gateway id (`inferhub::glm-5.3-flash`) borrows the same model's row.
+///
+/// Only first-party models.dev providers are read: the aggregators there (nano-gpt, kilo, poe, …)
+/// disagree with each other about the same model, and a wrong `false` from one of them would
+/// hard-reject images on a model that takes them. Where sources conflict on a basename, "takes
+/// images" wins for the same reason.
+pub(super) fn vision_modalities(
+    openrouter: Option<&serde_json::Value>,
+    models_dev: Option<&serde_json::Value>,
+) -> HashMap<String, bool> {
+    const EXTRA_FIRST_PARTY: &[(&str, &[&str])] = &[("moonshotai", &["kimi"]), ("zai", &["zai"])];
+    let mut table: HashMap<String, bool> = HashMap::new();
+    let mut basenames: HashMap<String, bool> = HashMap::new();
+    let mut put = |full: Option<String>, id: &str, flag: bool| {
+        if let Some(full) = full {
+            table.insert(full.to_lowercase(), flag);
+        }
+        basenames
+            .entry(forge_mesh::vision::basename_key(id))
+            .and_modify(|e| *e |= flag)
+            .or_insert(flag);
+    };
+    if let Some(models) = openrouter.and_then(|b| b["data"].as_array()) {
+        for m in models {
+            let (Some(id), Some(flag)) = (
+                m["id"].as_str(),
+                takes_images(&m["architecture"]["input_modalities"]),
+            ) else {
+                continue;
+            };
+            put(Some(format!("openrouter::{id}")), id, flag);
+            put(native_model_id(id), id, flag);
+        }
+    }
+    if let Some(body) = models_dev {
+        for (provider, namespaces) in MODELS_DEV_NAMESPACES.iter().chain(EXTRA_FIRST_PARTY) {
+            let Some(models) = body[provider]["models"].as_object() else {
+                continue;
+            };
+            for (id, model) in models {
+                let Some(flag) = takes_images(&model["modalities"]["input"]) else {
+                    continue;
+                };
+                for ns in namespaces.iter() {
+                    put(Some(format!("{ns}::{id}")), id, flag);
+                }
+            }
+        }
+    }
+    table.extend(basenames);
+    table
 }
 
 #[cfg(test)]
