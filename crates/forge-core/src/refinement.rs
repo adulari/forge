@@ -28,9 +28,8 @@ const REFINE_TRAJECTORY_MESSAGES: usize = 60;
 /// How many past refinement batches for this session are shown as history, so the model doesn't
 /// repeat or thrash a decision it (or a rollback) already made.
 const REFINE_HISTORY_LIMIT: usize = 5;
-/// Reply room reserved for the refinement JSON itself when sizing the request — mirrors
-/// [`COMPACT_SUMMARY_RESERVE_TOKENS`], the same reasoning: the answer is small and fixed-shape,
-/// so this does not need the main loop's large planning cushion.
+/// Reply room reserved for the refinement JSON itself when sizing the request: the answer is small
+/// and fixed-shape, so this does not need the main loop's large planning cushion.
 const REFINE_RESPONSE_RESERVE_TOKENS: usize = 2_048;
 
 const REFINE_SYSTEM: &str = "You are Forge's Continual Harness: after real work, you propose \

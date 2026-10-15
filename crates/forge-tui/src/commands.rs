@@ -148,7 +148,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "compact",
         desc: "summarize older messages to free up context",
-        usage: "/compact",
+        usage: "/compact [what to keep]",
     },
     Command {
         name: "commit",
@@ -349,8 +349,8 @@ pub enum CommandAction {
     Checkpoint(Option<String>),
     /// Open the checkpoint picker.
     ListCheckpoints,
-    /// Summarize older transcript messages to free up context (`/compact`).
-    Compact,
+    /// Summarize older transcript messages to free up context (`/compact [focus instructions]`).
+    Compact(Option<String>),
     /// Ask the model to commit the session's uncommitted work (`/commit [hint]`).
     Commit(String),
     /// Restore the full pre-compaction transcript after a `/compact` (`/uncompact`).
@@ -676,7 +676,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "rewind" | "undo" | "u" => CommandAction::Undo,
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,
-        "compact" => CommandAction::Compact,
+        "compact" => CommandAction::Compact((!arg.is_empty()).then_some(arg)),
         "commit" => CommandAction::Commit(arg.to_string()),
         "uncompact" => CommandAction::Uncompact,
         "reground" => CommandAction::Reground,
@@ -1270,7 +1270,11 @@ mod tests {
         assert_eq!(parse_command("/m"), CommandAction::Mode);
         assert_eq!(parse_command("/undo"), CommandAction::Undo);
         assert_eq!(parse_command("/rewind"), CommandAction::Undo);
-        assert_eq!(parse_command("/compact"), CommandAction::Compact);
+        assert_eq!(parse_command("/compact"), CommandAction::Compact(None));
+        assert_eq!(
+            parse_command("/compact  keep the migration plan "),
+            CommandAction::Compact(Some("keep the migration plan".into()))
+        );
         assert_eq!(parse_command("/uncompact"), CommandAction::Uncompact);
         assert_eq!(parse_command("/reground"), CommandAction::Reground);
         assert_eq!(

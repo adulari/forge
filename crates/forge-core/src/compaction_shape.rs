@@ -9,15 +9,16 @@ const THIN_SUMMARY_INPUT_CHARS: usize = 20_000;
 /// Least a summary of a transcript that size may be. 189 chars once stood in for 240K tokens.
 const THIN_SUMMARY_MIN_CHARS: usize = 600;
 
-/// Whether `summary` is too little to replace `entries`: empty always, and under
-/// [`THIN_SUMMARY_MIN_CHARS`] when the input was large.
+/// Whether `summary` is too little to replace `entries`: empty always, and, when the input was
+/// large, under [`THIN_SUMMARY_MIN_CHARS`] or without the sectioned structure the prompt asks for
+/// (counted from section markers, so a summary in the user's language passes).
 pub(crate) fn summary_too_thin(summary: &str, entries: &[String]) -> bool {
     let summary = summary.trim();
     let input: usize = entries.iter().map(String::len).sum();
     summary.is_empty()
         || (input > THIN_SUMMARY_INPUT_CHARS
             && (summary.chars().count() < THIN_SUMMARY_MIN_CHARS
-                || !summary.to_lowercase().contains("goal")))
+                || !crate::compaction_summary::has_summary_structure(summary)))
 }
 
 /// Where an auto-compaction should leave the transcript, as a share of the trigger that fired it.
@@ -85,42 +86,6 @@ pub(crate) fn clip_tool_results_to_budget(messages: &mut [Message], budget: usiz
     start.saturating_sub(total)
 }
 
-/// Most characters of the user's own messages a deterministic digest carries.
-const DIGEST_MAX_CHARS: usize = 16_000;
-/// Longest single user message kept whole in a digest.
-const DIGEST_MESSAGE_MAX_CHARS: usize = 1_500;
-
-/// A summary written without a model, for when none produced a usable one: the user's own words
-/// from the folded stretch (newest preferred, shown oldest first) plus a count of what was dropped.
-/// Tool output and assistant steps are the bulk and the least irreplaceable part; what the user
-/// asked for is not.
-pub(crate) fn deterministic_digest(older: &[Message]) -> String {
-    let llm: Vec<&Message> = older.iter().filter(|m| m.visibility.is_llm()).collect();
-    let mut kept: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    for m in llm.iter().rev().filter(|m| m.is_real_user()) {
-        let text: String = m.content.chars().take(DIGEST_MESSAGE_MAX_CHARS).collect();
-        if used + text.len() > DIGEST_MAX_CHARS {
-            break;
-        }
-        used += text.len();
-        kept.push(text);
-    }
-    kept.reverse();
-    let tool_results = llm.iter().filter(|m| m.role == Role::Tool).count();
-    let steps = llm.iter().filter(|m| m.role == Role::Assistant).count();
-    let mut out = format!(
-        "No model could summarize this stretch, so it was trimmed instead: {steps} assistant \
-         steps and {tool_results} tool results were dropped. Goal and requests, in the user's \
-         own words (oldest first):\n"
-    );
-    for text in kept {
-        out.push_str("\n- ");
-        out.push_str(text.trim());
-    }
-    out
-}
-
 /// Most tokens of recent tool rounds a summary keeps verbatim next to it.
 pub(crate) const COMPACT_KEEP_ROUNDS_TOKENS: usize = 40_000;
 
@@ -179,11 +144,29 @@ mod tests {
     }
 
     #[test]
-    fn a_summary_without_the_goal_section_is_thin_for_a_long_transcript() {
+    fn an_unstructured_summary_is_thin_for_a_long_transcript() {
         let big = vec!["x".repeat(30_000)];
         assert!(summary_too_thin(&"s".repeat(800), &big));
+        assert!(
+            summary_too_thin(&format!("the goal is {}", "s".repeat(800)), &big),
+            "the word \"goal\" no longer stands in for structure"
+        );
         assert!(!summary_too_thin(
-            &format!("## Goal\n{}", "s".repeat(800)),
+            &format!(
+                "1. Primary request\n2. Key concepts\n3. Files\n{}",
+                "s".repeat(800)
+            ),
+            &big
+        ));
+        assert!(
+            !summary_too_thin(
+                &format!("## Verzoek\n## Bestanden\n## Fouten\n{}", "s".repeat(800)),
+                &big
+            ),
+            "headings in any language count"
+        );
+        assert!(summary_too_thin(
+            "1. Primary request\n2. Key concepts\n3. Files",
             &big
         ));
     }
@@ -246,17 +229,5 @@ mod tests {
             rounds >= 5,
             "only {rounds} rounds of headroom after a compaction"
         );
-    }
-
-    #[test]
-    fn the_digest_keeps_the_users_words_and_drops_tool_output() {
-        let mut older = vec![Message::user("fix the flaky login test")];
-        older.extend(read_round("c1", &"noise ".repeat(5_000)));
-        older.push(Message::user("and keep the CI green"));
-        let digest = deterministic_digest(&older);
-        assert!(digest.contains("fix the flaky login test"));
-        assert!(digest.contains("keep the CI green"));
-        assert!(!digest.contains("noise"));
-        assert!(digest.contains("1 tool results"));
     }
 }

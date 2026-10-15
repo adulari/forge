@@ -50,9 +50,13 @@ pub mod capsule;
 pub(crate) mod clock;
 pub mod codemode;
 mod commit_policy;
+mod compaction_chain;
 mod compaction_headroom;
+mod compaction_input;
 mod compaction_policy;
+mod compaction_run;
 mod compaction_shape;
+mod compaction_summary;
 mod completeness;
 pub(crate) mod completion;
 mod context_floor;
@@ -182,26 +186,6 @@ fn completion_prefix_tokens(messages: &[Message], tools: &[ToolSpec]) -> u64 {
 /// rest. Only compact when there are at least `COMPACT_MIN_OLDER` older messages to fold.
 pub(crate) const COMPACT_KEEP_RECENT: usize = 6;
 pub(crate) const COMPACT_MIN_OLDER: usize = 4;
-const COMPACT_SYSTEM: &str = "You are writing the working memory of a coding agent. The \
-conversation below is about to be removed from its context; your summary is ALL it will remember \
-of it, so a detail you leave out is lost for good. Do not continue the task, do not call tools, \
-and do not address the user — only write the summary.\n\n\
-Use these sections, in this order, as markdown headings:\n\
-1. Goal — what the user asked for, in their own words where it matters, including constraints \
-and preferences they stated, and any correction or complaint they made about how you were working \
-(for example being told you were looping or repeating yourself).\n\
-2. Current state — what is done, what is in progress, and exactly where the work stopped, \
-including what you have already answered or tried so it is not answered or tried again.\n\
-3. Files and code — every file path, function, type, command, and config key that was read, \
-changed, or found relevant, each with one line on why.\n\
-4. Findings and decisions — facts established, causes found, approaches chosen and rejected, and \
-why.\n\
-5. Errors — failures seen and whether each was fixed.\n\
-6. Next steps — the concrete remaining work, in order.\n\n\
-Be specific: exact names, paths, numbers, and error text beat paraphrase. Scale the length to \
-the conversation — a long session needs a long summary; do not compress hours of work into a \
-paragraph.";
-
 const SHELL_DIAGNOSE_SYSTEM: &str = "A shell command run by a coding agent just failed. \
 Respond with exactly one or two lines:\n\
 Line 1: the most likely cause in one terse sentence (no preamble, no restating the command).\n\
@@ -1303,14 +1287,6 @@ fn compact_candidate_chain(
     out
 }
 
-/// Reply room reserved for the compaction summary itself when sizing its request.
-///
-/// Deliberately far smaller than the main loop's [`output_planning_reserve_tokens`]:
-/// [`COMPACT_SYSTEM`] asks for a concise summary, not an unbounded answer, and reserving the main
-/// loop's 8k planning cushion would leave an 8k-window trivial summarizer with no input budget at
-/// all — the chain is trivial-tier first precisely because those models are cheap and small.
-const COMPACT_SUMMARY_RESERVE_TOKENS: usize = 6_144;
-
 /// Stands in for the messages a compaction payload had to drop. `{}` is the dropped count.
 ///
 /// Said out loud in the payload rather than dropped silently, so the summarizer knows its input has
@@ -1861,8 +1837,10 @@ pub struct Session {
     turns_since_refine: u32,
     /// Stale-path guard armed when the session moved hosts (host_move.rs).
     host_guard: host_move::HostGuard,
-    /// One-shot extra instruction for the next compaction (`/reground`).
+    /// One-shot extra instruction for the next compaction (`/reground`, `/compact <focus>`).
     compact_directive: Option<String>,
+    /// Longest one summary call may run before compaction moves to the next model.
+    compact_timeout: std::time::Duration,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -4980,6 +4958,9 @@ mod tests {
 
     #[path = "mid_intent.rs"]
     mod mid_intent_tests;
+
+    #[path = "compaction_summary.rs"]
+    mod compaction_summary_tests;
 
     #[path = "vision_fallback.rs"]
     mod vision_fallback_tests;
@@ -10344,7 +10325,7 @@ mod tests {
         assert!(compaction_policy::summary_too_thin("done.", &big));
         assert!(!compaction_policy::summary_too_thin("done.", &small));
         assert!(!compaction_policy::summary_too_thin(
-            &format!("Goal: {}", "s".repeat(800)),
+            &format!("1. Request\n2. Concepts\n3. Files\n{}", "s".repeat(800)),
             &big
         ));
     }
@@ -10651,79 +10632,6 @@ mod tests {
             "{after} tokens left; the next tool result must not re-trigger compaction"
         );
         assert!(!compaction_policy::needs_compaction(after, trigger, true));
-    }
-
-    /// Records the payload the summarizer was actually handed, so a test can assert the request was
-    /// fitted to the model's window BEFORE dispatch rather than after a round of overflow errors.
-    #[derive(Default)]
-    struct CapturePayloadProvider {
-        payload: std::sync::Mutex<Option<String>>,
-    }
-    #[async_trait::async_trait]
-    impl Provider for CapturePayloadProvider {
-        async fn complete(
-            &self,
-            _model: &str,
-            messages: &[Message],
-            _tools: &[ToolSpec],
-            _on_event: &mut forge_provider::EventSink<'_>,
-        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
-            *self.payload.lock().unwrap() = messages
-                .iter()
-                .find(|m| m.role == Role::User)
-                .map(|m| m.content.clone());
-            Ok(forge_provider::ModelResponse {
-                content: "SUMMARY: fitted".into(),
-                ..Default::default()
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn compaction_payload_is_fitted_to_the_summarizer_window_before_dispatch() {
-        // The defect: `compact` sent the entire untrimmed older transcript, so on a long session
-        // every trivial-tier summarizer returned a context-overflow error before the summary could
-        // be produced at all.
-        let provider = Arc::new(CapturePayloadProvider::default());
-        let router = Arc::new(FixedRouter {
-            model: "small::summarizer".into(),
-            fallbacks: vec![],
-        });
-        let (store, mut session) = fixed_session(provider.clone(), router);
-        // A small FETCHED window, so the budget is deterministic instead of riding the conservative
-        // floor, and far smaller than the transcript below.
-        store.set_model_context("small::summarizer", 8_000).unwrap();
-        let filler = "alpha bravo charlie delta echo foxtrot ".repeat(200);
-        for i in 0..46 {
-            session
-                .transcript
-                .push(Message::user(format!("message {i} {filler}")));
-        }
-
-        let (before, after) = session.compact(false).await.unwrap();
-        assert_eq!(before, 46);
-        assert_eq!(after, COMPACT_KEEP_RECENT + 1, "the summary landed");
-
-        let payload = provider
-            .payload
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("the summarizer was called exactly once");
-        let budget = session.compact_input_budget("small::summarizer");
-        assert!(
-            tokens::count_message(&payload) <= budget,
-            "the summarizer must never be handed more than its window holds: {} > {budget}",
-            tokens::count_message(&payload)
-        );
-        assert!(
-            payload.contains("message 0 ") && payload.contains("message 39 "),
-            "both ends of the older stretch must survive the fit"
-        );
-        assert!(
-            !payload.contains("message 20 "),
-            "the middle is what was dropped"
-        );
     }
 
     #[tokio::test]
