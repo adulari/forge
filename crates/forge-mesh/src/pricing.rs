@@ -326,10 +326,34 @@ pub fn cross_namespace_window(id: &str, windows: &HashMap<String, u32>) -> Optio
 
 /// A model id reduced to the vendor-independent name used to match the same model across
 /// namespaces: the part after `provider::`, then after the last `/`, minus Forge's `-free` tier
-/// suffix, lowercased.
+/// suffix and a trailing quantization tag, lowercased, with a dash between two digits read as a
+/// version dot. Gateway aliases spell one model many ways: InferHub's `combo/glm-5-3-flash-fp` is
+/// `glm-5.3-flash`, and without this it matched nothing and fell to the 32k floor.
 fn normalized_bare_name(id: &str) -> String {
     let bare = bedrock_model_name(id).unwrap_or_else(|| bare_model_name(id));
-    bare.strip_suffix("-free").unwrap_or(bare).to_lowercase()
+    let mut name = bare.strip_suffix("-free").unwrap_or(bare).to_lowercase();
+    const QUANT_TAGS: &[&str] = &[
+        "-fp", "-fp4", "-fp8", "-fp16", "-bf16", "-int4", "-int8", "-awq", "-gptq",
+    ];
+    if let Some(tag) = QUANT_TAGS.iter().find(|tag| name.ends_with(*tag)) {
+        name.truncate(name.len() - tag.len());
+    }
+    let chars: Vec<char> = name.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let between_digits = c == '-'
+                && i > 0
+                && chars[i - 1].is_ascii_digit()
+                && chars.get(i + 1).is_some_and(char::is_ascii_digit);
+            if between_digits {
+                '.'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// A Bedrock id names the vendor, and for an inference profile the routing geography, ahead of the
@@ -455,6 +479,28 @@ mod tests {
             super::cross_namespace_window("openai::gpt-5.6", &windows),
             None,
             "dots outside Bedrock ids are part of the model name"
+        );
+    }
+
+    #[test]
+    fn a_gateway_alias_with_dashed_version_and_quant_tag_borrows_the_window() {
+        use std::collections::HashMap;
+        let mut windows = HashMap::new();
+        windows.insert("inferhub::glm-5.3-flash".to_string(), 1_000_000_u32);
+        windows.insert("inferhub::glm-5.3-flashx".to_string(), 1_000_000_u32);
+        windows.insert("openrouter::z-ai/glm-5.2".to_string(), 200_000_u32);
+        assert_eq!(
+            super::cross_namespace_window("inferhub::combo/glm-5-3-flash-fp", &windows),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            super::cross_namespace_window("inferhub::combo/glm-5-3-flash-fp8", &windows),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            super::cross_namespace_window("inferhub::combo/glm-5-1-flash-fp", &windows),
+            None,
+            "a different version never matches"
         );
     }
 
