@@ -586,6 +586,7 @@ impl TranscriptKind {
             Self::Assistant => "assistant",
             Self::Tool => "tool",
             Self::JobNotice => "job_notice",
+            Self::HarnessNotice => "harness_notice",
         }
     }
 }
@@ -613,6 +614,14 @@ impl LineOrigin {
             kind: TranscriptKind::JobNotice,
             tool: None,
             meta: meta.map(str::to_string),
+        }
+    }
+
+    fn harness(subtype: &str) -> Self {
+        Self {
+            kind: TranscriptKind::HarnessNotice,
+            tool: None,
+            meta: Some(subtype.to_string()),
         }
     }
 
@@ -2390,11 +2399,16 @@ impl App {
         self.turn_diffs.clear();
         self.turn_diffs_skipped = 0;
         self.plan = None;
-        if self.echo_job_notices(line) {
+        if self.echo_harness_notice(line) {
             return;
         }
         let peer = crate::peer_message::parse(line);
-        self.tag_flush(LineOrigin::user(), |s| {
+        let origin = if peer.is_some() {
+            LineOrigin::harness("peer")
+        } else {
+            LineOrigin::user()
+        };
+        self.tag_flush(origin, |s| {
             match &peer {
                 Some((who, _)) => s.flush.push(header_line(
                     &format!("peer message from {who}"),
@@ -2532,7 +2546,7 @@ impl App {
     /// where it landed in the conversation. Deliberately does NOT reset the turn's diff/plan
     /// projections the way `submit_user` does — this is the same turn continuing.
     fn echo_steered(&mut self, text: &str) {
-        if self.echo_job_notices(text) {
+        if self.echo_harness_notice(text) {
             return;
         }
         self.tag_flush(LineOrigin::user(), |s| {
@@ -3912,6 +3926,7 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 
 mod idle_interrupt;
 pub use idle_interrupt::IdleInterrupt;
+mod harness_notice;
 mod job_notice;
 mod output_view;
 mod render;
@@ -5398,6 +5413,68 @@ mod tests {
         );
         app.submit_user("[background job 9 `make` exited 2] but really, retry it");
         assert!(drain_text_lines(&mut app).contains("you"));
+    }
+
+    #[test]
+    fn wakeup_renders_as_a_dim_harness_row_with_the_reason_underneath() {
+        let mut app = App::default();
+        let stored = forge_types::format_wakeup_prompt(
+            "Check the probe file\nsecond line\nthird line\nfourth line",
+            "Waiting for the probe answer",
+        );
+        app.submit_user(&forge_types::format_wakeup_delivery(&stored));
+        let text = drain_text_lines(&mut app);
+        assert!(
+            !text.contains("you") && !text.contains("[scheduled wakeup]"),
+            "{text}"
+        );
+        assert!(text.contains("⏰ wakeup · Check the probe file"), "{text}");
+        assert!(text.contains("second line"), "{text}");
+        assert!(!text.contains("third line") && text.contains("…"), "{text}");
+        assert!(
+            text.contains("because: Waiting for the probe answer"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_renders_with_its_label_via_the_steer_path() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Steered(
+            forge_types::format_heartbeat_delivery(Some("ci-watch"), "check CI"),
+        ));
+        let text = drain_text_lines(&mut app);
+        assert!(text.contains("♻ heartbeat ci-watch · check CI"), "{text}");
+        assert!(!text.contains("steer") && !text.contains("you"), "{text}");
+    }
+
+    #[test]
+    fn heartbeat_rows_reach_the_remote_ring_with_a_subtype() {
+        let mut app = App::default();
+        app.submit_user(&forge_types::format_heartbeat_delivery(None, "check in"));
+        app.drain_flush_remote();
+        let rows: Vec<_> = app
+            .recent_transcript
+            .iter()
+            .map(|r| (r.kind.as_str(), r.meta.as_deref()))
+            .collect();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|r| *r == ("harness_notice", Some("heartbeat"))),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn peer_message_rows_carry_the_harness_notice_kind() {
+        let mut app = App::default();
+        app.submit_user("[message from cli] hello there");
+        app.drain_flush_remote();
+        assert!(app
+            .recent_transcript
+            .iter()
+            .all(|r| (r.kind.as_str(), r.meta.as_deref()) == ("harness_notice", Some("peer"))));
     }
 
     #[test]

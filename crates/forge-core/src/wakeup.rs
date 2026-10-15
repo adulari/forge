@@ -62,12 +62,7 @@ pub fn clamp_delay(secs: i64) -> i64 {
 
 /// The text submitted when the wakeup fires.
 pub(crate) fn compose_prompt(prompt: &str, reason: &str) -> String {
-    let reason = reason.trim();
-    if reason.is_empty() {
-        prompt.trim().to_string()
-    } else {
-        format!("{}\n\n(scheduled because: {reason})", prompt.trim())
-    }
+    forge_types::format_wakeup_prompt(prompt, reason)
 }
 
 /// Arm (or re-arm) the session's wakeup. Shared by the direct path and the CLI-bridge handler,
@@ -256,6 +251,10 @@ mod tests {
         assert!(ok);
         let first = heartbeat::claim_due_heartbeat_prompts(&store, &sid).unwrap();
         assert_eq!(first, vec!["[scheduled wakeup] ping"]);
+        assert!(matches!(
+            forge_types::parse_harness_notice(&first[0]),
+            Some(forge_types::HarnessNotice::Wakeup { .. })
+        ));
         assert!(
             store.list_heartbeats(&sid).unwrap().is_empty(),
             "one-shot row removed"

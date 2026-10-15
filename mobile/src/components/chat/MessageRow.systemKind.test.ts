@@ -18,6 +18,7 @@ describe("MessageRow system-row classification", () => {
   });
 
   it("routes a background-job notice (a user-role harness row) to SystemOutput", () => {
-    expect(normalizedSource).toMatch(/const jobNotice = /);
+    expect(normalizedSource).toMatch(/const jobNotice = isAnyHarnessNotice\(row\.kind\);/);
+    expect(normalizedSource).toMatch(/formatAnyHarnessNotice\(row\.kind, row\.content\)/);
   });
 });

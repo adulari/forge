@@ -7,7 +7,7 @@ import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
 import { isHarnessNudge } from "../../lib/harnessNudge";
-import { formatJobNotice, isJobNotice } from "../../lib/jobNotice";
+import { formatAnyHarnessNotice, isAnyHarnessNotice } from "../../lib/harnessNotice";
 import { parseReasoning } from "../../lib/reasoning";
 import { haptics } from "../../lib/haptics";
 import { useSessionStable } from "../../lib/sessionContext";
@@ -150,9 +150,10 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   // fallback for an older daemon. Treat it as NOT the user everywhere below (bubble style,
   // mention parsing, speaker label) so it never claims to be their words.
   const isNudge = isHarnessNudge(row.role, row.content, row.kind);
-  // A background-job completion notice is also a stored user turn, tagged `kind: "job_notice"`;
-  // it renders as dim system output (lib/jobNotice.ts), never as the person's words.
-  const jobNotice = isJobNotice(row.kind);
+  // A background-job exit, wakeup, /heartbeat tick or peer message is also a stored user turn,
+  // tagged `kind: "job_notice"` / `"harness_notice"`; it renders as dim system output
+  // (lib/jobNotice.ts, lib/harnessNotice.ts), never as the person's words.
+  const jobNotice = isAnyHarnessNotice(row.kind);
   const isUser = row.role === "user" && !isNudge && !jobNotice;
   // A `kind: "tool"` row (only ever on an `include_tools` page) is machine output, not a turn —
   // the chat renders those through ToolCallRow, and this guard keeps any that slip through from
@@ -242,7 +243,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : null}
         {isSystem ? null : <SpeakerTag speaker={isNudge ? "nudge" : isUser ? "you" : "forge"} model={row.model} />}
         {isSystem ? (
-          <SystemOutput content={jobNotice ? formatJobNotice(row.content) : row.content} />
+          <SystemOutput content={jobNotice ? formatAnyHarnessNotice(row.kind, row.content) : row.content} />
         ) : parsed ? (
           <>
             {parsed.reasoning ? <ReasoningDisclosure reasoning={parsed.reasoning} /> : null}

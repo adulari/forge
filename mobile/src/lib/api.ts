@@ -384,7 +384,7 @@ export interface SessionSearchResult {
  * `transcript_rows` never sends it today (a nudge isn't echoed into the live scrollback), so
  * `lib/ws.ts`'s `TranscriptRow.kind` stays the same union for forward compatibility, not because
  * the server currently emits it there. */
-export type TranscriptKind = "user" | "assistant" | "tool" | "system" | "nudge" | "job_notice";
+export type TranscriptKind = "user" | "assistant" | "tool" | "system" | "nudge" | "job_notice" | "harness_notice";
 
 export interface HistoryRow {
   seq: number;

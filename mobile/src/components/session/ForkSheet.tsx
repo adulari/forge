@@ -43,7 +43,7 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
     () =>
       history.data?.pages
         .flat()
-        .filter((row) => row.role === "user" && row.kind !== "nudge" && row.kind !== "job_notice")
+        .filter((row) => row.role === "user" && row.kind !== "nudge" && row.kind !== "job_notice" && row.kind !== "harness_notice")
         .slice()
         .reverse() ?? [],
     [history.data?.pages],
