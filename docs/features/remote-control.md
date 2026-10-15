@@ -29,7 +29,7 @@
 >
 > **v5 — bulletproof reconnect + full scrollback + rich transcript:** every broadcast frame
 > lands in a bounded per-server event log, and the WS handshake takes `?rev=<last seen
-> revision>` — a reconnecting page replays exactly the frames it missed (no gap, no flicker),
+> revision>` — a reconnecting page replays exactly the frames it missed (no gap, no flicker; a gap longer than 8 frames gets the current snapshot as one `resync` instead, since every frame is a complete snapshot),
 > falling back to one full snapshot flagged `resync` when the gap is unfillable (§2b). A
 > token-scoped `GET /<token>/api/history?before=<seq>&limit=<n>` pages the session's persisted
 > transcript from the store, and the page fetches older pages on scroll-up — unlimited

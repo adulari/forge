@@ -1454,6 +1454,8 @@ async fn ws_session(socket: WebSocket, state: Arc<ServerState>, since: u64) {
     .await
 }
 
+const MAX_REPLAY_FRAMES: usize = 8;
+
 /// The transport-independent body of one connected WebSocket client: replay-from-rev (or a
 /// full `resync` snapshot), then live-follow the watch channel out and parse [`RemoteInput`]s
 /// in. Shared verbatim between the in-chat single-session server ([`ws_session`]) and the
@@ -1478,7 +1480,12 @@ pub(crate) async fn pump_ws(
     let replay = if since == 0 {
         None
     } else {
-        Some(lock_event_log(&events).replay_after(since)).flatten()
+        // Every frame is a complete snapshot, so a long replay only re-sends superseded state:
+        // a phone back from a busy stretch got ~500 frames (3.2 MB) through the relay before it
+        // reached the present. Past a short gap, the current snapshot as a resync says the same.
+        lock_event_log(&events)
+            .replay_after(since)
+            .filter(|missed| missed.len() <= MAX_REPLAY_FRAMES)
     };
     let last_sent = match replay {
         Some(missed) => {
@@ -2983,14 +2990,37 @@ mod tests {
             );
             drop(ws);
 
-            // 5. An unknown/future rev (a page from a previous server run) must resync.
+            // 5. A gap longer than MAX_REPLAY_FRAMES is not replayed frame by frame: the
+            //    current snapshot arrives once as a resync, then the stream follows live.
+            (7..=(7 + MAX_REPLAY_FRAMES as u64)).for_each(&broadcast);
+            let current = 7 + MAX_REPLAY_FRAMES as u64;
+            let ws_url = format!("ws://127.0.0.1:{port}/{token}/ws?rev=6");
+            let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
+                .await
+                .expect("WS handshake after a long gap");
+            let v: serde_json::Value = next_snapshot(&mut ws).await;
+            assert_eq!(
+                v["revision"], current,
+                "a long gap jumps straight to the present"
+            );
+            assert_eq!(v["resync"], true, "the jump is flagged as a resync");
+            broadcast(current + 1);
+            let v: serde_json::Value = next_snapshot(&mut ws).await;
+            assert_eq!(v["revision"], current + 1, "live-follow after the resync");
+            drop(ws);
+
+            // 6. An unknown/future rev (a page from a previous server run) must resync.
             let ws_url = format!("ws://127.0.0.1:{port}/{token}/ws?rev=999");
             let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
                 .await
                 .expect("WS handshake with foreign rev");
             let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert_eq!(v["resync"], true, "an unfillable gap resyncs");
-            assert_eq!(v["revision"], 6, "resync carries the current state");
+            assert_eq!(
+                v["revision"],
+                current + 1,
+                "resync carries the current state"
+            );
             drop(ws);
 
             // 6. History pagination: the session id comes from the snapshot; before/limit pass
