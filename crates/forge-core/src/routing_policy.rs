@@ -428,6 +428,7 @@ Rules:\n\
             "auto-classify" => Some(64),
             "memory" | "shell-diagnose" => Some(256),
             "btw" | crate::goal_evaluator::GOAL_EVALUATOR_PURPOSE => Some(2_048),
+            "vision-describe" => Some(1_500),
             _ => None,
         };
         CompletionOptions {

@@ -130,6 +130,7 @@ mod turn_context;
 pub mod turn_contract;
 mod turn_guards;
 mod unapplied_edit;
+mod vision_policy;
 pub mod workflow;
 pub mod workflow_meta;
 mod workspace_context;
@@ -1756,6 +1757,8 @@ pub struct Session {
     /// Images attached to the *next* user turn (vision input, e.g. via `/image <path>`). Drained
     /// when that turn's user message is built; empty for text-only turns.
     pending_images: Vec<forge_types::ImageAttachment>,
+    /// `[mesh] vision_fallback` bookkeeping: warnings already shown, descriptions already made.
+    vision: vision_policy::VisionState,
     /// Count of successful writes made by `invoke_tool` in the current turn. Reset at the start
     /// of each turn; used to gate the autofix stage (skip it when nothing was edited).
     edits_this_turn: u32,
@@ -2812,7 +2815,7 @@ impl Session {
         let effective_tier = tier_override.or(self.pinned_tier);
         // Whether THIS turn has image attachments queued (vision input) — route around a
         // text-only model so an image doesn't land on a provider that 404s on it.
-        let has_images = !self.pending_images.is_empty();
+        let has_images = self.transcript_carries_images();
         // Routing happens before the current user message is appended, so the transcript is
         // exactly the bounded prior-turn context needed to interpret "continue", "fix that", etc.
         let routing_context = RoutingContext::from_messages(&self.transcript)
@@ -2894,8 +2897,19 @@ impl Session {
         // never pinned to. Clamp the decision here, after every routing path has produced it, so
         // escaping the pin is structurally impossible rather than a property each site must
         // remember. Fallbacks are confined to the pin set for the same reason.
+        let (decision, left_pin_for_vision) = self
+            .vision_switch(
+                decision,
+                prompt,
+                budget,
+                &health,
+                &quota,
+                effective_tier,
+                &routing_context,
+            )
+            .await;
         let mut decision = decision;
-        if let Some(pin) = self.effective_pin() {
+        if let Some(pin) = self.effective_pin().filter(|_| !left_pin_for_vision) {
             if !pin.iter().any(|m| m == &decision.model) {
                 let forced = pin[0].clone();
                 self.presenter.emit(PresenterEvent::Warning(format!(
@@ -4970,6 +4984,9 @@ mod tests {
 
     #[path = "mid_intent.rs"]
     mod mid_intent_tests;
+
+    #[path = "vision_fallback.rs"]
+    mod vision_fallback_tests;
 
     #[path = "failure_streak_reset.rs"]
     mod failure_streak_reset_tests;

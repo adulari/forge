@@ -269,6 +269,7 @@ impl Session {
             project_prompt_injected,
             agents_md_fingerprint: None,
             pending_images: Vec::new(),
+            vision: Default::default(),
             edits_this_turn: 0,
             mutations_this_turn: 0,
             turn_input_tokens: 0,

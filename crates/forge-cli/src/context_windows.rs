@@ -198,6 +198,13 @@ pub async fn fetch_and_persist(models: &[String]) {
         },
     );
 
+    // Input modalities ride the same two fetches: routing and pin checks read them through
+    // `forge_mesh::vision`, which falls back to a name heuristic for anything not listed.
+    forge_mesh::vision::install_modalities(vision_modalities(
+        or_body.as_ref(),
+        models_dev_body.as_ref(),
+    ));
+
     // ── OpenRouter first (keyless, always) ───────────────────────────────────────────────────────
     // Applied before native providers so we can build the basename fallback index used by custom
     // provider results below. Native results (Anthropic, Gemini, Groq) are applied afterward and
@@ -440,7 +447,7 @@ mod parsers;
 use parsers::{
     anthropic_windows, build_basename_index, gemini_windows, is_new_api_listing,
     marketplace_pricing, models_dev_pricing, new_api_pricing, openai_compatible_windows,
-    openrouter_native_cross_map, openrouter_pricing, openrouter_windows,
+    openrouter_native_cross_map, openrouter_pricing, openrouter_windows, vision_modalities,
 };
 
 /// A llama.cpp server's ACTUAL context window, from its `/props` endpoint (`n_ctx`).
@@ -616,6 +623,39 @@ mod tests {
                   "pricing": { "prompt": "0.0000002", "completion": "0.0000008" } },
             ]
         })
+    }
+
+    #[test]
+    fn vision_modalities_come_from_first_party_data_with_basename_fallback() {
+        let or = json!({"data": [
+            {"id": "mistralai/mistral-large-2407",
+             "architecture": {"input_modalities": ["text", "file"]}},
+            {"id": "mistralai/mistral-large-2512",
+             "architecture": {"input_modalities": ["text", "image", "file"]}},
+            {"id": "vendor/no-architecture"},
+        ]});
+        let md = json!({
+            "zai": {"models": {
+                "glm-5.3-flash": {"modalities": {"input": ["text", "image"]}},
+                "glm-5.3": {"modalities": {"input": ["text"]}}
+            }},
+            "kilo": {"models": {"zai/glm-5.3": {"modalities": {"input": ["text", "image"]}}}}
+        });
+        let t = vision_modalities(Some(&or), Some(&md));
+        assert_eq!(t.get("mistral::mistral-large-2407"), Some(&false));
+        assert_eq!(t.get("mistral::mistral-large-2512"), Some(&true));
+        assert_eq!(
+            t.get("openrouter::mistralai/mistral-large-2512"),
+            Some(&true)
+        );
+        assert_eq!(
+            t.get("zai::glm-5.3"),
+            Some(&false),
+            "aggregator rows are ignored"
+        );
+        assert_eq!(t.get("~glm-5.3-flash"), Some(&true));
+        assert!(!t.contains_key("openrouter::vendor/no-architecture"));
+        assert!(vision_modalities(None, None).is_empty());
     }
 
     #[test]

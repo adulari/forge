@@ -32,6 +32,7 @@ pub mod prompt_cache;
 pub(crate) use prompt_cache::prompt_cache_key_unsupported;
 mod refresh_lock;
 mod system_placement;
+pub use system_placement::last_image_turn;
 mod tool_recovery;
 pub mod wire_fingerprint;
 pub mod wire_params;

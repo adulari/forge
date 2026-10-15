@@ -30,6 +30,7 @@ pub mod privacy;
 pub mod provider_oauth;
 pub mod quota_status;
 pub mod secret_store;
+mod vision_fallback;
 pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
@@ -51,6 +52,7 @@ pub use paths::{
     mark_project_auto_setup_attempted, project_auto_setup_attempted, project_initialization,
     ProjectInitialization,
 };
+pub use vision_fallback::VisionFallback;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -2263,6 +2265,11 @@ pub struct MeshConfig {
     /// leaves the prompt cache intact ([`CACHE_SAFE_EFFORT_PROVIDERS`]).
     #[serde(default = "adaptive_effort::default_adaptive_effort_providers")]
     pub adaptive_effort_providers: Vec<String>,
+    /// What to do when the selected model cannot read the images a request carries: `warn`
+    /// (default; send text only and say so), `describe` (a vision side call describes the image
+    /// once) or `switch` (route to a vision-capable model even when pinned).
+    #[serde(default)]
+    pub vision_fallback: VisionFallback,
 }
 
 impl MeshConfig {
@@ -2973,6 +2980,7 @@ impl Default for Config {
                 harness_profiles: std::collections::BTreeMap::new(),
                 adaptive_effort: true,
                 adaptive_effort_providers: adaptive_effort::default_adaptive_effort_providers(),
+                vision_fallback: VisionFallback::default(),
             },
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),

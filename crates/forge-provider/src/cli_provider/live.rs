@@ -330,9 +330,13 @@ impl LiveSession {
     }
 
     /// Write one user turn to the live process's stdin (kept open afterwards).
-    pub(super) async fn write_user(&mut self, payload: &str) -> std::io::Result<()> {
+    pub(super) async fn write_user(
+        &mut self,
+        payload: &str,
+        images: &[&forge_types::ImageAttachment],
+    ) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
-        let line = stream_user_line(payload);
+        let line = super::images::claude_user_line(payload, images);
         self.stdin.write_all(line.as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await
