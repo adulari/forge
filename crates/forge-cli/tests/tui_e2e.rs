@@ -316,6 +316,35 @@ fn tui_esc_sends_a_queued_prompt_the_turn_already_absorbed() {
 
 #[test]
 #[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_btw_runs_and_compact_queues_while_a_turn_is_running() {
+    // Paced mock so "hello" is still running when the commands are typed. `/btw` must run beside
+    // the turn (no idle refusal), `/compact` must be queued rather than refused or steered, and
+    // Esc must hand the queued command to dispatch instead of sending "/compact" to the model.
+    let (clean, plain) = drive_pty_env(
+        &[
+            ("hello\r", 1000),
+            ("/btw what is a mutex\r", 400),
+            ("\x1b", 300), // closes the side-question card
+            ("/compact\r", 400),
+            ("\x1b", 2500),
+            ("/quit\r", 600),
+        ],
+        &[("FORGE_MOCK_STREAM_DELAY_MS", "500")],
+    );
+    assert!(clean, "clean exit: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    assert!(
+        !plain.contains("commands run when the turn is idle"),
+        "neither command was refused: {plain}"
+    );
+    assert!(
+        plain.contains("queued /compact"),
+        "/compact waited in the queue: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
 fn tui_config_opens_wizard_fullscreen_and_returns_to_chat() {
     // /config takes over the screen with the setup wizard; Esc cancels it and the inline chat
     // loop must resume cleanly (raw mode re-enabled, viewport rebuilt) — then /quit exits. This

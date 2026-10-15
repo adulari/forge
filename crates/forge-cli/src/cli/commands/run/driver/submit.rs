@@ -51,9 +51,8 @@ impl DriverState {
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
                         // nothing to queue
-                    } else if trimmed.starts_with('/') && !trimmed.starts_with("//") {
-                        self.app
-                            .note("⏳ commands run when the turn is idle — finish or Stop first");
+                    } else if is_command_line(trimmed) {
+                        self.busy_command(text).await?;
                     } else {
                         self.prompt_history.record(&text);
                         self.queued_prompts.push(text.clone());
@@ -118,6 +117,7 @@ impl DriverState {
                         "⏹ remote interrupted — stopped responding"
                     };
                     self.app.note(note);
+                    self.drain_queue().await;
                 }
             }
             remote::RemoteInput::Dequeue { index, text } => {
@@ -186,7 +186,9 @@ impl DriverState {
                 .await;
             }
             remote::RemoteInput::Steer { text } => {
-                if self.busy {
+                if self.busy && is_command_line(&text) {
+                    self.busy_command(text).await?;
+                } else if self.busy {
                     self.steer.push(text.clone());
                     forge_core::fleet::insert_into_queue(
                         &mut self.queued_prompts,
@@ -201,6 +203,40 @@ impl DriverState {
             }
         }
         Ok(())
+    }
+
+    /// A `/command` that arrived while a turn runs, routed by [`busy_policy`]: run beside the turn,
+    /// queue for the turn boundary (never into the steer inbox), or refuse.
+    pub(super) async fn busy_command(&mut self, line: String) -> Result<()> {
+        let autonomous = self.loop_state.is_some() || self.goal_state.is_some();
+        match route_busy_line(&line, &self.catalog, autonomous) {
+            BusyRoute::RunNow => Box::pin(self.submit_line(line, None)).await?,
+            BusyRoute::Queue => {
+                self.prompt_history.record(&line);
+                queue_command(&mut self.queued_prompts, &mut self.app, &line);
+            }
+            BusyRoute::Refuse => self
+                .app
+                .note("⏳ commands run when the turn is idle — finish or Stop first"),
+            BusyRoute::RefuseAutonomous => self.app.note(REFUSE_AUTONOMOUS_NOTE),
+        }
+        Ok(())
+    }
+
+    /// Run what the queue holds, in typed order, until a turn is running or the queue is empty.
+    /// Queued commands go through normal idle dispatch.
+    pub(super) async fn drain_queue(&mut self) {
+        while self.turn_handle.is_none() {
+            match dequeue_next(&mut self.queued_prompts, &mut self.app) {
+                Some(Queued::Command(line)) => {
+                    if let Err(e) = Box::pin(self.submit_line(line, None)).await {
+                        self.app.note(&format!("⚠ {e}"));
+                    }
+                }
+                Some(Queued::Prompt(next)) => self.start_turn(&next),
+                None => break,
+            }
+        }
     }
 
     /// Submit one idle-state line: `//` escape, `/command` dispatch, or a plain prompt —

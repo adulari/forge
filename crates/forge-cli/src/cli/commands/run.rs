@@ -174,7 +174,9 @@ pub(crate) use dispatch::*;
 pub(crate) mod driver;
 pub(crate) use driver::*;
 mod btw;
+mod busy_commands;
 mod busy_queue;
+pub(crate) use busy_commands::*;
 mod effort;
 mod output_view;
 mod subagents;
@@ -920,6 +922,13 @@ pub(crate) async fn run_chat_tui(
     // (like Claude Code / aider). An interrupt cancels only the active response; queued user work
     // remains valid and starts immediately under a fresh generation.
     let mut queued_prompts: Vec<String> = Vec::new();
+    // Command lines the loop must run through the remote-prompt dispatch path next iteration:
+    // `(line, from_queue)`. A busy-typed `/btw` runs now (`false`); a queued command popped at a
+    // turn boundary runs idle (`true`). Never fed to the model as text.
+    let mut local_lines: Vec<(String, bool)> = Vec::new();
+    // A queued command just ran (or an interrupt left one at the head): keep draining the queue
+    // once the loop is idle, so one command cannot strand the prompts queued behind it.
+    let mut pump_queue = false;
     let mut steer_tracker = SteerTracker::default();
     // Rate-limits the idle session-heartbeat check — the render loop iterates far more often than
     // this needs to be re-checked (turn-end already checks it immediately).
@@ -2887,6 +2896,7 @@ pub(crate) async fn run_chat_tui(
                         app.note("⏹ interrupted — continuing with the next queued prompt");
                     } else {
                         app.note("⏹ interrupted — stopped responding");
+                        pump_queue = !queued_prompts.is_empty();
                     }
                     dirty = true;
                     continue;
@@ -2951,8 +2961,22 @@ pub(crate) async fn run_chat_tui(
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         // nothing to queue
-                    } else if trimmed.starts_with('/') && !trimmed.starts_with("//") {
-                        app.note("⏳ commands run when the turn is idle — finish or Esc first");
+                    } else if is_command_line(trimmed) {
+                        let autonomous = loop_state.is_some() || goal_state.is_some();
+                        match route_busy_line(trimmed, &catalog, autonomous) {
+                            BusyRoute::RunNow => {
+                                prompt_history.record(&line);
+                                local_lines.push((line.clone(), false));
+                            }
+                            BusyRoute::Queue => {
+                                prompt_history.record(&line);
+                                queue_command(&mut queued_prompts, &mut app, &line);
+                            }
+                            BusyRoute::Refuse => app.note(
+                                "⏳ commands run when the turn is idle — finish or Esc first",
+                            ),
+                            BusyRoute::RefuseAutonomous => app.note(REFUSE_AUTONOMOUS_NOTE),
+                        }
                     } else {
                         prompt_history.record(&line);
                         queued_prompts.push(line.clone());
@@ -3504,17 +3528,26 @@ pub(crate) async fn run_chat_tui(
             // Both channels feed the same injection path: `/remote`'s (the user's own browser) and
             // the fleet channel the apps are proxied into. Drained into one list first so the
             // handling below stays a single body rather than being duplicated per channel.
-            let mut remote_inputs: Vec<remote::RemoteInput> = Vec::new();
+            let mut remote_inputs: Vec<(remote::RemoteInput, Option<bool>)> = Vec::new();
             for rc in [remote.as_mut(), fleet_control.as_mut()]
                 .into_iter()
                 .flatten()
             {
                 while let Ok(input) = rc.input_rx.try_recv() {
-                    remote_inputs.push(input);
+                    remote_inputs.push((input, None));
                 }
             }
-            for input in remote_inputs {
+            // Host-typed command lines ride the same dispatch path as a remote prompt (`Some`).
+            remote_inputs.extend(local_lines.drain(..).map(|(text, from_queue)| {
+                let input = remote::RemoteInput::Prompt {
+                    text,
+                    attachments: Vec::new(),
+                };
+                (input, Some(from_queue))
+            }));
+            for (input, local) in remote_inputs {
                 dirty = true;
+                pump_queue |= local == Some(true);
                 // Fleet-messaging "steer" delivery — outrank the queued backlog for the target's
                 // very next turn boundary without touching an in-flight turn (mirrors the headless
                 // daemon driver's `driver/submit.rs`). This TUI-attached remote loop is never the
@@ -3523,7 +3556,7 @@ pub(crate) async fn run_chat_tui(
                 // Steer the same way regardless: while idle there's no backlog to outrank, so it
                 // behaves exactly like a normal Prompt.
                 let input = match input {
-                    remote::RemoteInput::Steer { text } if busy => {
+                    remote::RemoteInput::Steer { text } if busy && !is_command_line(&text) => {
                         prompt_history.record(&text);
                         steer.push(text.clone());
                         forge_core::fleet::insert_into_queue(
@@ -3577,7 +3610,7 @@ pub(crate) async fn run_chat_tui(
                         // `/keys` is host-only BY DESIGN: it runs a blocking fullscreen
                         // configurator loop on the host terminal — dispatching it from here
                         // would freeze the host TUI on a screen the remote can't see or drive.
-                        if !busy
+                        if local.is_none()
                             && matches!(
                                 forge_tui::parse_command(&text),
                                 forge_tui::CommandAction::Keys
@@ -3589,18 +3622,33 @@ pub(crate) async fn run_chat_tui(
                             );
                             continue;
                         }
-                        if busy {
-                            // Mid-turn: queue plain prompts to run after this turn, exactly like
-                            // local typing (they used to be refused here, so the phone couldn't
-                            // do what the keyboard could). `/commands` still wait for idle —
-                            // they need the session lock the running turn holds.
+                        // Mid-turn: queue plain prompts to run after this turn, exactly like local
+                        // typing. A `/command` follows `busy_policy`: it runs beside the turn
+                        // (falls through to dispatch below), queues for the turn boundary, or is
+                        // refused.
+                        let busy_route = (busy && local != Some(false) && is_command_line(&text))
+                            .then(|| {
+                                route_busy_line(
+                                    &text,
+                                    &catalog,
+                                    loop_state.is_some() || goal_state.is_some(),
+                                )
+                            });
+                        if busy && local != Some(false) && busy_route != Some(BusyRoute::RunNow) {
                             let trimmed = text.trim();
                             if trimmed.is_empty() {
                                 // nothing to queue
-                            } else if trimmed.starts_with('/') && !trimmed.starts_with("//") {
-                                app.note(
-                                    "⏳ commands run when the turn is idle — finish or Esc first",
-                                );
+                            } else if let Some(route) = busy_route {
+                                match route {
+                                    BusyRoute::Queue => {
+                                        prompt_history.record(&text);
+                                        queue_command(&mut queued_prompts, &mut app, &text);
+                                    }
+                                    BusyRoute::RefuseAutonomous => app.note(REFUSE_AUTONOMOUS_NOTE),
+                                    _ => app.note(
+                                        "⏳ commands run when the turn is idle — finish or Esc first",
+                                    ),
+                                }
                             } else {
                                 prompt_history.record(&text);
                                 queued_prompts.push(text.clone());
@@ -3994,6 +4042,7 @@ pub(crate) async fn run_chat_tui(
                                 );
                             } else {
                                 app.note("⏹ remote interrupted — stopped responding");
+                                pump_queue = !queued_prompts.is_empty();
                             }
                         }
                     }
@@ -4069,6 +4118,32 @@ pub(crate) async fn run_chat_tui(
         }
         if quit {
             break;
+        }
+
+        // A queued command just ran without starting a turn (or an interrupt left one at the
+        // head): carry on with the rest of the queue in typed order.
+        if std::mem::take(&mut pump_queue)
+            && !busy
+            && turn_handle.is_none()
+            && local_lines.is_empty()
+        {
+            match dequeue_next(&mut queued_prompts, &mut app) {
+                Some(Queued::Command(line)) => local_lines.push((line, true)),
+                Some(Queued::Prompt(next)) => {
+                    last_prompt = Some(next.clone());
+                    turn_gen += 1;
+                    turn_handle = Some(spawn_turn(
+                        &next,
+                        &session,
+                        &done_tx,
+                        turn_gen,
+                        &mut app,
+                        &mut busy,
+                        &mut busy_since,
+                    ));
+                }
+                None => {}
+            }
         }
 
         // Clear busy only on the *current* turn's done-signal; a stale signal from an interrupted
@@ -4197,23 +4272,29 @@ pub(crate) async fn run_chat_tui(
                 // Drain a queued prompt (typed while this turn was running): run it as the next
                 // turn, ahead of auto-compaction (the queued turn auto-compacts itself if needed).
                 if turn_handle.is_none() {
-                    if let Some(next) = dequeue_prompt(&mut queued_prompts, &mut app) {
-                        last_prompt = Some(next.clone());
-                        turn_gen += 1;
-                        turn_handle = Some(spawn_turn(
-                            &next,
-                            &session,
-                            &done_tx,
-                            turn_gen,
-                            &mut app,
-                            &mut busy,
-                            &mut busy_since,
-                        ));
+                    match dequeue_next(&mut queued_prompts, &mut app) {
+                        // A queued command runs through dispatch on the next iteration, ahead of
+                        // heartbeats and auto-compaction (guarded on `local_lines` below).
+                        Some(Queued::Command(line)) => local_lines.push((line, true)),
+                        Some(Queued::Prompt(next)) => {
+                            last_prompt = Some(next.clone());
+                            turn_gen += 1;
+                            turn_handle = Some(spawn_turn(
+                                &next,
+                                &session,
+                                &done_tx,
+                                turn_gen,
+                                &mut app,
+                                &mut busy,
+                                &mut busy_since,
+                            ));
+                        }
+                        None => {}
                     }
                 }
                 // A due heartbeat only gets to run when nothing else claimed the next turn above
                 // — a typed-while-busy prompt / active /loop or /goal always wins.
-                if turn_handle.is_none() {
+                if turn_handle.is_none() && local_lines.is_empty() {
                     report_heartbeat_delivery(
                         try_deliver_due_heartbeats(
                             &session,
@@ -4236,7 +4317,10 @@ pub(crate) async fn run_chat_tui(
                 // Guard: only fire once per user turn — compact's own Cost event still carries
                 // the old full-context size, so context_tokens won't drop until the next real
                 // turn. Without the gen guard this would re-fire on every compact completion.
-                if turn_handle.is_none() && turn_gen > last_auto_compact_gen {
+                if turn_handle.is_none()
+                    && local_lines.is_empty()
+                    && turn_gen > last_auto_compact_gen
+                {
                     if let Some(lim) = app.context_limit {
                         let cap = session.lock().await.compact_cap_tokens();
                         let trigger = forge_core::auto_compact_trigger_tokens(

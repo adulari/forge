@@ -25,7 +25,12 @@ answered with the conversation in view:
   registers it by session id (weakly, so it is dropped with the session). While busy, the TUI
   (`spawn_busy_btw` in `run/btw.rs`) looks it up with `forge_core::busy_asker` and runs it on its
   own task; the turn's handle, generation and spinner are untouched, and the answer card arrives
-  through the presenter like any other event. Idle, `/btw` runs exactly as before.
+  through the presenter like any other event. Idle, `/btw` runs exactly as before. Typed with
+  Enter while a turn runs it now actually gets there: every input surface (local keyboard, remote
+  prompt from phone/web/`forge attach`, the daemon driver's typed input and palette) used to refuse
+  any `/command` while busy before dispatch ran, so this path was dead code. They now share
+  `busy_policy` (`run/busy_commands.rs`), which classifies `/btw` as immediate. The slash palette
+  only opens while idle on the local keyboard; typing the full `/btw <question>` works anywhere.
 - **With context.** The call carries an excerpt of the session read from the store (which already
   holds the running turn's steps): user and assistant text, the tools called, shortened tool
   results, and the compaction summary when one exists. Newest material wins within 60,000
@@ -97,9 +102,8 @@ possible follow-up, not planned work.
 - **Dispatch:** `/btw` makes a model call, so it's spawned as a background task exactly like
   `/compact` — `DispatchOutcome::RunBtw { question }` (`run/dispatch.rs`) →
   `spawn_btw` (`crates/forge-cli/src/cli/commands/run/btw.rs`, a new file for the same
-  ratchet-ceiling reason) → `Session::ask_btw`. It's excluded from the "safe while a turn is busy"
-  exemption list (like `/compact`, unlike `/replay`) since it needs the session lock to reach the
-  provider/router.
+  ratchet-ceiling reason) → `Session::ask_btw`. It runs while a turn is busy
+  (`BusyPolicy::Immediate`): `start_btw` takes the session's detached asker instead of the lock.
 
 ## Testing
 

@@ -436,6 +436,33 @@ merges arbitrary ordered sources and records each definition's scope.
 | Resume of a session that used a skill | Guidance messages were persisted, so resume rehydrates them; the skill file is **not** re-read. |
 | CC file with unknown frontmatter keys | Parsed leniently; unknown keys ignored, `model` mapped, no failure. |
 
+### Commands typed while a turn is running
+
+The running turn holds the session lock for its whole length, so a command that awaits the lock
+would freeze the render loop. Instead of refusing every `/command` mid-turn, each one has a
+`BusyPolicy` (`run/busy_commands.rs`, one exhaustive `match` so new commands must be classified),
+used by the local keyboard, the remote prompt path, the palette and the daemon driver, and by
+`dispatch_command` itself:
+
+- **Immediate** runs right now beside the turn and never takes the session lock.
+- **Queue** waits in the queued-prompts list (same panel, typed order preserved with prompts) and
+  runs through normal dispatch when the turn ends, before any later queued prompt. Shows
+  `⏳ queued /<cmd> — runs when this turn finishes`. A queued command is never sent to the steer
+  inbox (that feeds the running model turn); an Esc interrupt hands a command at the head of the
+  queue to dispatch too. While a `/loop` or `/goal` owns the queue, commands are refused rather
+  than queued.
+- **Refuse** keeps the old `commands run when the turn is idle` note.
+
+| Class | Commands |
+| --- | --- |
+| Immediate | `/btw` (`/side`), `/help`, `/keys`, `/sessions` (`/resume` with no id), `/board`, `/config`, `/clear`, `/remote`, `/anywhere`, `/thinking`, `/output`, `/image`, `/statusline`, `/voice` |
+| Queue | `/compact`, `/uncompact`, `/reground`, `/commit`, `/pr`, `/new`, `/mode`, `/model`, `/models`, `/effort`, `/subagents`, `/plan`, `/execute`, `/goal`, `/loop`, `/duel`, `/assay`, `/refine`, `/workflow`, `/heartbeat`, `/init`, `/dispatch`, `/mcp`, `/lattice`, `/replay`, `/export`, `/usage`, `/mesh`, `/copy`, `/remember`, `/memories`, `/self-mcp`, `/checkpoint`, file commands and skills |
+| Refuse | `/resume <id>`, `/undo`, `/checkpoints`, `/claude`, `/quit` |
+
+`/usage`, `/replay`, `/export`, `/model` and `/effort` look read-only but await the session lock, so
+they are Queue, not Immediate. An unknown `/name` (no builtin, command or skill) still just prints
+`unknown command` immediately.
+
 ## 6. Definition of done
 
 - `forge-skills` crate exists with `Command`, `Skill`/`SkillMeta`, `Catalog`,

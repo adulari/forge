@@ -276,10 +276,11 @@ pub(crate) enum GoalDecision {
 
 /// Remove the oldest prompt submitted while a turn was active and refresh the visible queue. Shared
 /// by ordinary FIFO drain and `/loop`/`/goal` steering so a user correction always owns the very
-/// next iteration. Prompt history is recorded when the prompt is submitted, not here.
+/// next iteration. Prompt history is recorded when the prompt is submitted, not here. Queued
+/// slash commands are skipped: they run through dispatch ([`dequeue_next`]), never as model text.
 pub(crate) fn dequeue_prompt(queue: &mut Vec<String>, app: &mut forge_tui::App) -> Option<String> {
-    let next = queue.first().cloned()?;
-    queue.remove(0);
+    let idx = queue.iter().position(|q| !is_command_line(q))?;
+    let next = queue.remove(idx);
     app.set_queued(queue);
     Some(next)
 }
