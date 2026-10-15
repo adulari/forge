@@ -19,6 +19,9 @@ pub(super) struct LiveSession {
     pub(super) sent: usize,
     /// Identity of the newest messages `sent` counts; see [`super::resume::SentMark`].
     pub(super) mark: Option<super::resume::SentMark>,
+    /// Fingerprint of the pinned session context the process was last given; see
+    /// [`super::resume::ResumeState::pinned`].
+    pub(super) pinned: Option<u64>,
     /// [`CheckpointContext::epoch`] at spawn — see [`ResumeState::epoch`]. A rewind mid-session
     /// forces a respawn so the parked process's context can't outlive the history it came from.
     pub(super) epoch: u64,

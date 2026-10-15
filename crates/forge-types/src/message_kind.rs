@@ -19,6 +19,13 @@ pub enum MessageKind {
     LoopGuard,
     Continue,
     Deadline,
+    /// The session's pinned context block (project instructions, memories, goal, task list). Built
+    /// fresh for every request and never stored, so it cannot be folded into a summary; the kind
+    /// is how a provider tells it from the system prompt in front of it.
+    Pinned,
+    /// Recently read files re-read from disk right after a compaction. Stored, but only the newest
+    /// copy is ever sent: a later compaction replaces it rather than stacking another.
+    FilesRestored,
 }
 
 impl MessageKind {
@@ -32,6 +39,8 @@ impl MessageKind {
             MessageKind::LoopGuard => 5,
             MessageKind::Continue => 6,
             MessageKind::Deadline => 7,
+            MessageKind::Pinned => 8,
+            MessageKind::FilesRestored => 9,
         }
     }
     pub fn from_code(code: i64) -> MessageKind {
@@ -43,6 +52,8 @@ impl MessageKind {
             5 => MessageKind::LoopGuard,
             6 => MessageKind::Continue,
             7 => MessageKind::Deadline,
+            8 => MessageKind::Pinned,
+            9 => MessageKind::FilesRestored,
             _ => MessageKind::Normal,
         }
     }
@@ -51,6 +62,9 @@ impl MessageKind {
     }
     /// A system note whose older copies are superseded by the newest of its kind.
     pub fn is_ephemeral_note(self) -> bool {
-        self.code() >= MessageKind::Clock.code()
+        !matches!(
+            self,
+            MessageKind::Normal | MessageKind::Nudge | MessageKind::Pinned
+        )
     }
 }

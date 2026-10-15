@@ -195,7 +195,20 @@ impl Session {
         // staleness tracker remembers that, so if one of them then stops moving the escalation can
         // say why the model cannot work out what it meant (task_staleness.rs).
         self.stale_tasks.note_compaction();
+        self.rehydrate_after_compaction().await;
         Ok((before, after))
+    }
+
+    /// Put back what the summary cannot carry: the task list as it stands now, the memories most
+    /// relevant to the work that is left, and the text of the files the session was working on.
+    /// The project instructions need nothing: the pinned block never left the request.
+    async fn rehydrate_after_compaction(&mut self) {
+        self.refresh_pinned_tasks();
+        let query = self.recall_query(&self.latest_user_request());
+        self.recall_pinned_memories(&query).await;
+        if let Err(error) = self.restore_recent_files() {
+            tracing::warn!(%error, "could not record the files restored after compaction");
+        }
     }
 
     /// The summarizer chain for this compaction, per `[mesh] compact_model`.

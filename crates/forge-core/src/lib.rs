@@ -80,6 +80,7 @@ pub mod hooks;
 mod hooks_cc;
 pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
+mod file_restore;
 pub mod job_wake;
 mod lean_context;
 pub mod llm_router;
@@ -98,11 +99,13 @@ mod narration_dedupe;
 mod nudge_policy;
 mod orchestration;
 pub mod permission;
+mod pinned_context;
 mod prefix_cache_key;
 pub mod project_context;
 pub mod push_notify;
 mod quality_gates;
 pub mod readiness;
+mod recent_files;
 pub mod redact;
 mod refinement;
 mod replay;
@@ -145,6 +148,7 @@ pub mod worktree_reclaim;
 pub mod zero_retention;
 
 pub use llm_router::LlmRouter;
+pub use pinned_context::render_task_list;
 use replay::messages_to_replay_items;
 pub use session_usage_detail::SessionUsageDetail;
 use session_virtual_tools::ASK_USER_TOOL;
@@ -1732,10 +1736,16 @@ pub struct Session {
     /// The bridge's tool results never enter [`Session::transcript`], so on a long bridged
     /// session the transcript estimate stays small while the real context keeps growing.
     bridge_context_tokens: u64,
-    /// Whether `.forge/AGENTS.md` (or `AGENTS.md`) has been injected as a standing system prompt.
-    /// False for fresh sessions so it's injected on the first turn; true for resumed sessions
-    /// (the content is already in the stored transcript) and after injection.
+    /// Whether the first-turn standing guidance (learned harness context, orchestration, git
+    /// attribution) has been injected. False for fresh sessions; true for resumed ones, whose
+    /// stored transcript already carries it. The project instructions and memories are not part of
+    /// this: they live in the pinned block (`pinned_context.rs`) on every request.
     project_prompt_injected: bool,
+    /// Pinned session context: recalled memories, goal, plan and the task list snapshot.
+    pinned: pinned_context::PinnedState,
+    /// Files this session read or edited most recently, newest first, for the restore after a
+    /// compaction (`recent_files.rs`).
+    recent_files: recent_files::RecentFiles,
     /// Images attached to the *next* user turn (vision input, e.g. via `/image <path>`). Drained
     /// when that turn's user message is built; empty for text-only turns.
     pending_images: Vec<forge_types::ImageAttachment>,
@@ -1807,16 +1817,13 @@ pub struct Session {
     /// user message is persisted so the refresh await can't reopen the abort-before-persist
     /// window). `None` outside a git repo.
     cached_git_branch: Option<String>,
-    /// The project `AGENTS.md` body, read ONCE at construction (sync, off the async executor) so the
-    /// first turn can inject it await-free + syscall-free — a `tokio::fs` read at the injection site
-    /// deterministically reintroduces the abort-before-persist cancel window on the current-thread
-    /// runtime. `None` for a resumed session (already in the transcript) or when no file exists;
-    /// `take()`-n on injection. Only ever seeds the FIRST turn — `agents_md_fingerprint` below is
-    /// what keeps a running session current afterwards.
+    /// The project `AGENTS.md` body the pinned block carries on every request. Read at
+    /// construction (sync, off the async executor) and kept current by `agents_md_fingerprint`
+    /// below; `None` when no file exists.
     cached_agents_md: Option<String>,
-    /// Fingerprint (path, modified time, length) of the `AGENTS.md` this session has already
-    /// injected, so `refresh_project_instructions` can tell "unchanged" from "written or edited
-    /// since" with one `stat` per turn. `None` until the first check.
+    /// Fingerprint (path, modified time, length) of the `AGENTS.md` the pinned block carries, so
+    /// `refresh_project_instructions` can tell "unchanged" from "written or edited since" with one
+    /// `stat` per turn. `None` until the first check.
     agents_md_fingerprint: Option<(std::path::PathBuf, std::time::SystemTime, u64)>,
     /// What project/codebase this session is operating in (project_context.rs) — read ONCE at
     /// construction, same rationale as `cached_git_branch`, and passed to the mesh router on every
@@ -3000,62 +3007,11 @@ impl Session {
             self.whitehot_guidance_injected = true;
         }
 
-        // Inject the project AGENTS.md as a standing system prompt on the first turn of a fresh
-        // session. The file was read ONCE at session construction (sync `std::fs`, off the async
-        // executor — see `build`) into `cached_agents_md`, so this use-site is await-free AND does
-        // no blocking syscall: an abort() between here and the user-message persistence below must
-        // not skip the recording (`aborting_a_running_turn_releases_the_session_lock` pins this),
-        // and a `tokio::fs` read here would deterministically reintroduce that cancel window on the
-        // current-thread runtime (the blocking-pool completion doesn't promptly unpark the driver,
-        // so the abort lands on the parked read before persistence runs).
+        // The project instructions and recalled memories are not injected here: the pinned session
+        // context block carries them on every request (pinned_context.rs), so a compaction cannot
+        // fold them away. What stays one-shot is the guidance below.
         if !self.project_prompt_injected {
             self.project_prompt_injected = true;
-            if let Some(body) = self.cached_agents_md.take().filter(|body| {
-                !(routed_model.starts_with("claude-cli::")
-                    && lean_context::claude_md_covers(self.workspace.root(), body))
-            }) {
-                self.inject_context(
-                    &mut context_pack,
-                    context_pack::ContextSource::ProjectInstructions,
-                    "project AGENTS.md",
-                    &body,
-                )?;
-            }
-
-            // Auto-memory RECALL: surface the few durable facts from past sessions in this project
-            // most relevant to the prompt (preferences/decisions/conventions). The edge over a
-            // dump-everything memory file: only the RELEVANT memories are injected, ranked by the
-            // prompt then salience + recency. Once per session, like AGENTS.md.
-            if self.config.mesh.auto_memory {
-                memory_scope::align_memory_scopes(&self.store, self.workspace.root());
-                let scope = memory_scope_at(self.workspace.root());
-                let recalled = match embed_one(&self.config.lattice.embeddings, prompt).await {
-                    Some(qemb) => self.store.recall_semantic(&scope, &qemb, 6),
-                    None => self.store.recall_memories(&scope, prompt, 6),
-                };
-                if let Ok(mems) = recalled {
-                    if !mems.is_empty() {
-                        let mut block = String::from(
-                            "Remembered from earlier sessions in this project (durable facts — \
-                             use them, and don't re-ask what's already settled):\n",
-                        );
-                        for m in &mems {
-                            block.push_str(&format!("- [{}] {}\n", m.kind, m.text));
-                        }
-                        self.inject_context(
-                            &mut context_pack,
-                            context_pack::ContextSource::Memory,
-                            "relevant durable project memories",
-                            &block,
-                        )?;
-                        // Emit a one-line presenter note so the user sees recall happened.
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "💭 recalled {} memories from past sessions",
-                            mems.len()
-                        )));
-                    }
-                }
-            }
 
             // Continual Harness context injection (refinement.rs): surface the learned
             // prompt/skill/subagent entries this agent has proposed about itself in past
@@ -3244,12 +3200,17 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
         // Standing project instructions can appear or change WHILE a session runs, and the
         // construction-time read alone could never see that: the session that writes AGENTS.md (or
-        // runs `/init`) never got it, and a resume set `project_prompt_injected = true` without
-        // reading at all — so a long-lived daemon session stayed on whatever existed the day it
-        // started, restart after restart. Re-check here, in the same post-persist window the git
-        // branch uses, and inject only a body the transcript does not already carry (so an
-        // unchanged file costs one `stat` per turn and nothing else).
-        self.refresh_project_instructions(&mut context_pack).await?;
+        // runs `/init`) never got it. Re-check here, in the same post-persist window the git
+        // branch uses; an unchanged file costs one `stat` per turn. The pinned block carries it.
+        self.refresh_project_instructions().await;
+        // A new or resumed session recalls its memories now, against the goal and this prompt;
+        // a compaction runs the same recall again (compaction_run.rs). Post-persist, like the
+        // refresh above, so the embedding await cannot reopen the abort-before-persist window.
+        if self.pinned.recall_due {
+            self.pinned.recall_due = false;
+            let query = self.recall_query(prompt);
+            self.recall_pinned_memories(&query).await;
+        }
 
         // The model is told WHERE it is by the `<env>` preamble but was never told WHEN: with no
         // clock anywhere in the prompt or the tool set it answers "today" from its training cutoff.
@@ -3290,6 +3251,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // it, and show the model the task list this new message lands on so a steer edits the plan
         // instead of replacing it. The harness never removes a task on its own.
         self.resolve_stale_tasks(&mut context_pack)?;
+        self.audit_pinned_context(&mut context_pack);
 
         // ★ Auto-retrieve relevant code from the Lattice index and inject it as a system message
         // before the first provider call (code-intelligence.md §5.1). Retrieve into an owned value
@@ -4961,6 +4923,9 @@ mod tests {
 
     #[path = "compaction_summary.rs"]
     mod compaction_summary_tests;
+
+    #[path = "pinned_context.rs"]
+    mod pinned_context_tests;
 
     #[path = "vision_fallback.rs"]
     mod vision_fallback_tests;
@@ -17988,146 +17953,6 @@ mod tests {
     }
 
     // ── Auto-review gate tests ────────────────────────────────────────────────────────────────
-
-    /// A workspace with an optional `AGENTS.md`, plus a session rooted in it.
-    fn agents_md_workspace(name: &str) -> std::path::PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("forge-agents-md-{name}-{}", forge_types::new_id()));
-        std::fs::create_dir_all(&root).unwrap();
-        root
-    }
-
-    fn agents_md_session(store: &Arc<Store>, root: &std::path::Path) -> Session {
-        Session::start(
-            Arc::clone(store),
-            Arc::new(MockProvider),
-            Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools_in(root),
-            Box::new(CapturePresenter::default()),
-            Config::default(),
-            root.to_str().unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn injected_agents_bodies(store: &Store, id: &str, needle: &str) -> Vec<String> {
-        store
-            .load_messages(id)
-            .unwrap()
-            .into_iter()
-            .filter(|m| m.role == Role::System && m.content.contains(needle))
-            .map(|m| m.content)
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn an_agents_md_written_mid_session_reaches_the_next_turn() {
-        // The session that WRITES the file (or runs `/init`) used to be the one session that never
-        // saw it: the body was read once at construction, so a repo that gained its standing
-        // instructions at 15:58 left the session started at 13:53 running without them for days.
-        let root = agents_md_workspace("mid-session");
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let mut session = agents_md_session(&store, &root);
-        let id = session.id().to_string();
-
-        session.run_turn("first prompt").await.unwrap();
-        assert!(
-            injected_agents_bodies(&store, &id, "PROJECT-RULES").is_empty(),
-            "nothing to inject before the file exists"
-        );
-
-        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES v1\n").unwrap();
-        session.run_turn("second prompt").await.unwrap();
-        assert_eq!(
-            injected_agents_bodies(&store, &id, "PROJECT-RULES"),
-            vec!["PROJECT-RULES v1\n".to_string()],
-            "the new file is injected exactly once on the next turn"
-        );
-
-        // An unchanged file must not pile up a copy per turn.
-        session.run_turn("third prompt").await.unwrap();
-        assert_eq!(
-            injected_agents_bodies(&store, &id, "PROJECT-RULES").len(),
-            1,
-            "unchanged AGENTS.md is not re-injected"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[tokio::test]
-    async fn an_edited_agents_md_is_re_injected_and_a_resumed_session_picks_it_up() {
-        let root = agents_md_workspace("edited");
-        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES v1\n").unwrap();
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let mut session = agents_md_session(&store, &root);
-        let id = session.id().to_string();
-        session.run_turn("first prompt").await.unwrap();
-        assert_eq!(
-            injected_agents_bodies(&store, &id, "PROJECT-RULES"),
-            vec!["PROJECT-RULES v1\n".to_string()],
-            "a fresh session still injects at construction time"
-        );
-
-        // Edit it. `stat` fingerprints on (mtime, len); the length changes here, so this does not
-        // depend on filesystem timestamp granularity.
-        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES v2 — revised\n").unwrap();
-
-        // Resume: the path that used to give up entirely (`project_prompt_injected = true`, no read).
-        let mut resumed = Session::resume(
-            Arc::clone(&store),
-            Arc::new(MockProvider),
-            Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools_in(&root),
-            Box::new(CapturePresenter::default()),
-            Config::default(),
-            &id,
-        )
-        .unwrap();
-        resumed.run_turn("after the edit").await.unwrap();
-        let bodies = injected_agents_bodies(&store, &id, "PROJECT-RULES");
-        assert_eq!(
-            bodies.len(),
-            2,
-            "the revised body joins the original: {bodies:?}"
-        );
-        assert!(
-            bodies[1].contains("v2"),
-            "and it is the new text: {bodies:?}"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[tokio::test]
-    async fn a_resumed_session_with_an_unchanged_agents_md_stays_quiet() {
-        // The counterpart guard: resuming must not re-state instructions the transcript already
-        // carries, or every daemon restart would grow the context by another copy.
-        let root = agents_md_workspace("unchanged");
-        std::fs::write(root.join("AGENTS.md"), "PROJECT-RULES stable\n").unwrap();
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let mut session = agents_md_session(&store, &root);
-        let id = session.id().to_string();
-        session.run_turn("first prompt").await.unwrap();
-
-        for _ in 0..2 {
-            let mut resumed = Session::resume(
-                Arc::clone(&store),
-                Arc::new(MockProvider),
-                Arc::new(HeuristicRouter::new(Config::default())),
-                ToolRegistry::with_core_tools_in(&root),
-                Box::new(CapturePresenter::default()),
-                Config::default(),
-                &id,
-            )
-            .unwrap();
-            resumed.run_turn("another prompt").await.unwrap();
-        }
-        assert_eq!(
-            injected_agents_bodies(&store, &id, "PROJECT-RULES").len(),
-            1,
-            "two resumes, still one copy"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
     #[tokio::test]
     async fn serve_style_sessions_keep_distinct_workspace_metadata() {

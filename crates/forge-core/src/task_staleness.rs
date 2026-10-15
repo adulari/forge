@@ -36,9 +36,6 @@ pub(crate) const ESCALATE_AFTER_TURNS: u32 = 3;
 /// Further unchanged turns after the escalation before the harness asks the user about the task.
 pub(crate) const ASK_AFTER_ESCALATION: u32 = 2;
 
-/// Titles quoted back in a carried-list note before the rest are summarized as a count.
-const LISTED_TASKS: usize = 12;
-
 pub(crate) const KEEP: &str = "Keep working on it";
 pub(crate) const DONE: &str = "It is done";
 pub(crate) const REMOVE: &str = "Remove it";
@@ -284,45 +281,26 @@ pub(crate) fn question(title: &str, compacted: bool) -> (String, Vec<QChoice>) {
     (text, options)
 }
 
-fn status_word(status: TodoStatus) -> &'static str {
-    if status == TodoStatus::Done {
-        "done"
-    } else if status == TodoStatus::InProgress {
-        "in progress"
-    } else {
-        "pending"
-    }
-}
-
-/// The task list a new message lands on, for the model, or `None` when nothing is open.
+/// The instruction that goes with the task list a new message lands on, or `None` when nothing is
+/// open. The list itself is in the pinned session context (`pinned_context.rs`), which the turn
+/// start refreshes before this runs; quoting it again here would only stack a second copy.
 ///
-/// Without it, a message arriving mid-work read to the model like a fresh request: live
-/// (2026-09-13), the first `update_tasks` after a user message replaced the entire list 51% of the
-/// time and dropped at least one open task 69% of the time, against 3% and 24% mid-work — the user
-/// steered, and the plan they were steering vanished.
+/// Without the instruction, a message arriving mid-work read to the model like a fresh request:
+/// live (2026-09-13), the first `update_tasks` after a user message replaced the entire list 51% of
+/// the time and dropped at least one open task 69% of the time, against 3% and 24% mid-work — the
+/// user steered, and the plan they were steering vanished.
 pub(crate) fn carried_list_note(tasks: &[TodoItem]) -> Option<String> {
     if tasks.iter().all(|t| t.status == TodoStatus::Done) {
         return None;
     }
-    let listed = tasks
-        .iter()
-        .take(LISTED_TASKS)
-        .map(|t| format!("- [{}] {}", status_word(t.status), t.title))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let more = tasks.len().saturating_sub(LISTED_TASKS);
-    let more = if more > 0 {
-        format!("\n- (and {more} more)")
-    } else {
-        String::new()
-    };
-    Some(format!(
-        "[task list] Your task list, carried into this message:\n{listed}{more}\n\nApply the \
-         user's latest message to this list rather than starting a new one: keep the tasks it does \
-         not affect, change or add the ones it calls for, and remove a task only when the message \
-         makes it moot — and say which. Replace the whole list only if the user asked you to drop \
-         the old plan."
-    ))
+    Some(
+        "[task list] Your task list, as shown in the session context, is carried into this \
+         message. Apply the user's latest message to it rather than starting a new one: keep the \
+         tasks it does not affect, change or add the ones it calls for, and remove a task only \
+         when the message makes it moot — and say which. Replace the whole list only if the user \
+         asked you to drop the old plan."
+            .to_string(),
+    )
 }
 
 /// Open tasks present `before` an update and missing `after` it.
@@ -377,6 +355,7 @@ impl crate::Session {
                 &text,
             )?;
         }
+        self.refresh_pinned_tasks();
         if let Some(note) = carried_list_note(&self.tasks) {
             self.inject_context(
                 pack,
@@ -574,29 +553,19 @@ mod tests {
     }
 
     #[test]
-    fn a_carried_list_names_open_work_and_says_to_apply_the_message_to_it() {
+    fn a_carried_list_says_to_apply_the_message_to_it_without_quoting_it_again() {
         assert!(carried_list_note(&[]).is_none());
         assert!(carried_list_note(&[task("a", TodoStatus::Done)]).is_none());
         let note = carried_list_note(&[
-            task("a", TodoStatus::Done),
-            task("b", TodoStatus::InProgress),
-            task("c", TodoStatus::Pending),
+            task("write the parser", TodoStatus::InProgress),
+            task("document it", TodoStatus::Pending),
         ])
         .unwrap();
-        assert!(note.contains("- [done] a"));
-        assert!(note.contains("- [in progress] b"));
-        assert!(note.contains("- [pending] c"));
         assert!(note.contains("rather than starting a new one"));
-    }
-
-    #[test]
-    fn a_long_carried_list_is_capped() {
-        let tasks: Vec<TodoItem> = (0..15)
-            .map(|i| task(&format!("t{i}"), TodoStatus::Pending))
-            .collect();
-        let note = carried_list_note(&tasks).unwrap();
-        assert!(note.contains("t11") && !note.contains("t12"));
-        assert!(note.contains("(and 3 more)"));
+        assert!(
+            !note.contains("write the parser") && !note.contains("document it"),
+            "the pinned session context holds the list: {note}"
+        );
     }
 
     #[test]
