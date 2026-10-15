@@ -1138,11 +1138,13 @@ impl CliProvider {
     /// Record a live session after a successful turn so the next call can `--resume` it. `owner` is
     /// the calling conversation's [`CheckpointContext::session`] id, so a later call from a
     /// DIFFERENT conversation sharing this provider never reuses this slot (see [`ResumeState::owner`]).
+    #[allow(clippy::too_many_arguments)]
     fn record_session(
         &self,
         id: Option<String>,
         sent: usize,
         mark: Option<resume::SentMark>,
+        pinned: Option<u64>,
         model: &str,
         owner: Option<&str>,
         epoch: u64,
@@ -1154,6 +1156,7 @@ impl CliProvider {
             st.session_id = id;
             st.sent = sent;
             st.mark = mark;
+            st.pinned = pinned;
             st.model = model.to_string();
             st.owner = owner.map(str::to_string);
             st.epoch = epoch;
@@ -1984,7 +1987,10 @@ impl CliProvider {
                 && resume_at.is_some()
                 && self.can_resume(&st, messages, model, checkpoint);
             if let (true, Some(at)) = (can_resume, resume_at) {
-                let delta = resume::render_resume_delta(&messages[at..]);
+                let delta = resume::render_resume_delta(
+                    &messages[at..],
+                    resume::pinned_update(messages, st.pinned),
+                );
                 if delta.trim().is_empty() {
                     // Nothing new to act on (shouldn't normally happen) — fall back to a fresh render.
                     (
@@ -2478,6 +2484,7 @@ impl CliProvider {
                 session,
                 messages.len(),
                 resume::SentMark::of(messages),
+                resume::pinned_fingerprint(messages),
                 bare_model(model),
                 checkpoint.map(|c| c.session.as_str()),
                 checkpoint.map_or(0, |c| c.epoch),
@@ -2836,6 +2843,7 @@ impl CliProvider {
             model: bare.to_string(),
             sent: resume.map_or(0, |(_, sent, _)| sent),
             mark: resume.and_then(|(_, _, mark)| mark),
+            pinned: None,
             epoch: checkpoint.map_or(0, |c| c.epoch),
             turn_file: Some(turn_file),
             claude_session: resume.map(|(id, _, _)| id.to_string()),
@@ -2890,6 +2898,7 @@ impl CliProvider {
             if s.model == bare && s.sent > 0 && resume::locate_sent(s.sent, s.mark, messages).is_some() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight
                 && live::same_workspace(s.workspace.as_deref(), checkpoint));
         let mut resume_plan: Option<(String, usize, Option<resume::SentMark>)> = None;
+        let mut resume_pinned: Option<u64> = None;
         if !reuse {
             if let Some(old) = guard.session.take() {
                 // A session abandoned mid-turn leaves claude's history ahead of Forge's record.
@@ -2902,11 +2911,12 @@ impl CliProvider {
             let resume_at = resume::locate_sent(st.sent, st.mark, messages);
             if let (true, Some(at)) = (self.can_resume(st, messages, model, checkpoint), resume_at)
             {
-                if !resume::render_resume_delta(&messages[at..])
+                if !resume::render_resume_delta(&messages[at..], None)
                     .trim()
                     .is_empty()
                 {
                     resume_plan = st.session_id.clone().map(|id| (id, at, st.mark));
+                    resume_pinned = st.pinned;
                 }
             }
         }
@@ -2917,7 +2927,10 @@ impl CliProvider {
                     .as_ref()
                     .map(|(id, sent, mark)| (id.as_str(), *sent, *mark));
                 match self.spawn_live(bare, checkpoint, effort, plan).await {
-                    Ok(s) => guard.session = Some(s),
+                    Ok(mut s) => {
+                        s.pinned = resume_pinned;
+                        guard.session = Some(s);
+                    }
                     Err(e) => {
                         tracing::warn!(
                             "persistent bridge spawn failed, falling back to one-shot: {e}"
@@ -2945,6 +2958,7 @@ impl CliProvider {
                         guard.last = ResumeState::default();
                         self.reset_session();
                         resume_plan = None;
+                        resume_pinned = None;
                         continue;
                     }
                     $fallback
@@ -2982,9 +2996,14 @@ impl CliProvider {
             let payload = if sess.sent == 0 {
                 apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
             } else {
-                let delta = resume::render_resume_delta(&messages[sess.sent..]);
+                let update = resume::pinned_update(messages, sess.pinned);
+                let delta = resume::render_resume_delta(&messages[sess.sent..], update.clone());
                 if delta.trim().is_empty() {
-                    apply_resume_reminder(self.harness, self.kind, resume::CONTINUE_PROMPT.into())
+                    let prompt = match update {
+                        Some(update) => format!("{update}\n\n{}", resume::CONTINUE_PROMPT),
+                        None => resume::CONTINUE_PROMPT.to_string(),
+                    };
+                    apply_resume_reminder(self.harness, self.kind, prompt)
                 } else {
                     apply_resume_reminder(self.harness, self.kind, delta)
                 }
@@ -3038,6 +3057,7 @@ impl CliProvider {
                 Ok(turn) => {
                     sess.sent = messages.len();
                     sess.mark = resume::SentMark::of(messages);
+                    sess.pinned = resume::pinned_fingerprint(messages);
                     sess.context_fill = turn.context_fill.or(sess.context_fill);
                     sess.turn_in_flight = false;
                     sess.parked_at = std::time::Instant::now();
@@ -3052,6 +3072,7 @@ impl CliProvider {
                                 session_id: claude_session.clone(),
                                 sent: messages.len(),
                                 mark: resume::SentMark::of(messages),
+                                pinned: resume::pinned_fingerprint(messages),
                                 model: bare.to_string(),
                                 owner: owner.map(str::to_string),
                                 epoch,
@@ -3061,6 +3082,7 @@ impl CliProvider {
                                     claude_session,
                                     messages.len(),
                                     resume::SentMark::of(messages),
+                                    resume::pinned_fingerprint(messages),
                                     bare,
                                     owner,
                                     epoch,
@@ -3906,7 +3928,7 @@ mod tests {
             mode: "ask".into(),
             epoch,
         };
-        provider.record_session(Some("sid".into()), 4, None, "opus", Some("conv-1"), 0);
+        provider.record_session(Some("sid".into()), 4, None, None, "opus", Some("conv-1"), 0);
         let st = provider.resume.lock().unwrap();
         let msgs =
             |n: usize| -> Vec<Message> { (0..n).map(|i| Message::user(format!("m{i}"))).collect() };
@@ -3942,7 +3964,7 @@ mod tests {
             Message::system("The plan is NOT finished — continue."),
             Message::user("also handle the edge case"),
         ];
-        let delta = resume::render_resume_delta(&tail);
+        let delta = resume::render_resume_delta(&tail, None);
         assert!(delta.contains("The plan is NOT finished"));
         assert!(delta.contains("User: also handle the edge case"));
         assert!(
@@ -3951,7 +3973,7 @@ mod tests {
         );
         assert!(!delta.contains("ok"), "tool result is not re-sent");
         // Nothing actionable → empty (caller falls back to a fresh full render).
-        assert!(resume::render_resume_delta(&[Message::assistant("x")]).is_empty());
+        assert!(resume::render_resume_delta(&[Message::assistant("x")], None).is_empty());
     }
 
     #[test]
@@ -4067,7 +4089,7 @@ mod tests {
             if turn == 0 {
                 on_bytes += render_prompt(&messages).len();
             } else {
-                on_bytes += resume::render_resume_delta(&messages[sent..]).len();
+                on_bytes += resume::render_resume_delta(&messages[sent..], None).len();
             }
             sent = messages.len();
             // The bridge produced a (chunky) assistant turn + a tool result; then a re-drive nudge.
@@ -6566,6 +6588,87 @@ done
             (Some(2), Some("bypass")),
             "the turn file changes between turns"
         );
+    }
+
+    /// Three turns against one bridge conversation: the pinned session context goes in with the
+    /// first prompt, is not repeated while it is unchanged, and is sent again in the delta once it
+    /// changes. A resume delta carries only what follows the leading system block, so without the
+    /// explicit update an edited AGENTS.md or task list would never reach a resumed CLI.
+    #[cfg(unix)]
+    async fn pinned_context_reaches_a_resumed_bridge_once_and_on_change(persistent: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let provider = resumable_provider(dir.path()).with_persistent(persistent);
+        let pinned = |text: &str| {
+            Message::system(format!("[session context] {text}"))
+                .with_kind(forge_types::MessageKind::Pinned)
+        };
+        let ctx = |seq| test_ctx("conv-pin", seq, "default", ws.path());
+
+        let mut history = vec![
+            Message::system("base prompt"),
+            pinned("PINNED-A"),
+            Message::user("one"),
+        ];
+        let r1 = run_turn(&provider, &ctx(1), &history).await;
+        history.push(Message::assistant(&r1.content));
+        history.push(Message::user("two"));
+        let r2 = run_turn(&provider, &ctx(2), &history).await;
+        let count = |needle: &str| {
+            read_log(dir.path(), "stdin.log")
+                .iter()
+                .map(|line| line.matches(needle).count())
+                .sum::<usize>()
+        };
+        assert_eq!(count("PINNED-A"), 1, "sent with the first prompt only");
+        assert_eq!(count("Updated session context"), 0);
+
+        history[1] = pinned("PINNED-B");
+        history.push(Message::assistant(&r2.content));
+        history.push(Message::user("three"));
+        run_turn(&provider, &ctx(3), &history).await;
+        assert_eq!(count("PINNED-B"), 1, "the changed block is sent once");
+        assert_eq!(count("Updated session context"), 1);
+        assert_eq!(count("PINNED-A"), 1, "and the old text is not resent");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_context_reaches_a_persistent_bridge_once_and_on_change() {
+        pinned_context_reaches_a_resumed_bridge_once_and_on_change(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_context_reaches_a_one_shot_resumed_bridge_once_and_on_change() {
+        pinned_context_reaches_a_resumed_bridge_once_and_on_change(false).await;
+    }
+
+    #[test]
+    fn a_pinned_update_is_due_only_when_the_block_is_new_or_changed() {
+        let block = |text: &str| {
+            vec![
+                Message::system("base"),
+                Message::system(text).with_kind(forge_types::MessageKind::Pinned),
+                Message::user("hi"),
+            ]
+        };
+        let a = block("A");
+        let sent = resume::pinned_fingerprint(&a);
+        assert!(sent.is_some());
+        assert_eq!(resume::pinned_update(&a, sent), None, "unchanged");
+        let update = resume::pinned_update(&block("B"), sent).expect("changed");
+        assert!(update.contains('B') && update.contains("Updated session context"));
+        assert!(resume::pinned_update(&a, None).is_some(), "never sent");
+        let none = vec![Message::system("base"), Message::user("hi")];
+        assert_eq!(
+            resume::pinned_update(&none, sent),
+            None,
+            "no block, no update"
+        );
+        let delta = resume::render_resume_delta(&[Message::user("next")], Some("UPDATE".into()));
+        assert_eq!(delta, "UPDATE\n\nUser: next");
+        assert_eq!(resume::render_resume_delta(&[], Some("UPDATE".into())), "");
     }
 
     #[cfg(unix)]

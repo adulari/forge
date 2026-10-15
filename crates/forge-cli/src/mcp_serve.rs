@@ -301,8 +301,9 @@ impl ForgeMcp {
                 .count();
             report_to_sink(serde_json::json!({ "k": "tasks", "tasks": tasks }));
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "task list updated: {} task(s) — {done} done",
-                tasks.len()
+                "task list updated: {} task(s) — {done} done\n{}",
+                tasks.len(),
+                forge_core::render_task_list(&tasks)
             ))]));
         }
 

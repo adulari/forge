@@ -81,6 +81,7 @@ pub(crate) async fn run_goal_headless(
     session
         .prime_guidance(&[goal_session_guidance(&spec.goal)])
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    session.set_active_goal(Some(&spec.goal));
     let mut prompt = goal_start_prompt(&spec.goal);
     let mut gs = GoalState::new(0, spec.goal, spec.gates, spec.max_tokens, spec.max_minutes);
     let mut turn_guidance = guidance.to_vec();

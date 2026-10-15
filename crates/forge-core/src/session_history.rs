@@ -85,10 +85,8 @@ impl Session {
             .transcript
             .iter()
             .any(|m| m.role == Role::System && m.content == workflow::WHITEHOT_GUIDANCE);
-        // The per-turn AGENTS.md refresh re-injects the file only when the transcript no longer
-        // carries its exact text; dropping the fingerprint makes it look again on the next turn.
+        // Dropping the fingerprint makes the per-turn refresh read the file again on the next turn.
         self.project_prompt_injected = !self.transcript.is_empty();
-        self.cached_agents_md = None;
         self.agents_md_fingerprint = None;
     }
 
@@ -304,11 +302,8 @@ impl Session {
             self.checkpoint_root = self.workspace.root().join(".forge/checkpoints");
         }
         self.cached_git_branch = current_git_branch(self.workspace.root());
-        self.cached_agents_md = if self.project_prompt_injected {
-            None
-        } else {
-            read_project_agents_md(self.workspace.root())
-        };
+        let body = read_project_agents_md(self.workspace.root());
+        self.set_agents_md(body);
         let (project, project_diagnostic) =
             crate::project_context::compute_with_diagnostic(self.workspace.root());
         self.project = project;
@@ -351,7 +346,11 @@ impl Session {
         self.tasks.clear();
         self.forget_context_shape();
         self.project_prompt_injected = false;
-        self.cached_agents_md = read_project_agents_md(self.workspace.root());
+        self.pinned = Default::default();
+        self.pinned.recall_due = true;
+        self.recent_files = Default::default();
+        let body = read_project_agents_md(self.workspace.root());
+        self.set_agents_md(body);
         self.presenter.emit(PresenterEvent::SessionStarted { id });
         Ok(())
     }
@@ -397,6 +396,13 @@ impl Session {
             }
         };
         self.project_prompt_injected = true;
+        self.pinned = Default::default();
+        self.pinned.recall_due = true;
+        self.recent_files = Default::default();
+        self.refresh_pinned_tasks();
+        let body = self.cached_agents_md.take();
+        self.set_agents_md(body);
+        self.agents_md_fingerprint = None;
         self.presenter.emit(PresenterEvent::SessionStarted {
             id: session_id.to_string(),
         });

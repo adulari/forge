@@ -309,6 +309,7 @@ pub(crate) async fn goal_outcome(
         let mut s = session.lock().await;
         s.prime_guidance(&[super::goal_session_guidance(&text)])
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+        s.set_active_goal(Some(&text));
     }
     app.note(&format!("🎯 goal set — {text}"));
     Ok(DispatchOutcome::StartGoal {

@@ -52,15 +52,23 @@ pub(crate) fn normalize_system_context(
         .iter()
         .rposition(is_contract);
 
+    // Restored file contents come with a compaction, which rewrites the prompt anyway, so only
+    // the newest copy is sent whether or not an older one sits below the floor.
+    let newest_files_restored = messages
+        .iter()
+        .rposition(|message| message.kind == MessageKind::FilesRestored);
+
     let (run_start, newest_run_below_floor) = ephemeral_runs(&messages, floor);
     let roles: Vec<Role> = messages.iter().map(|message| message.role).collect();
     let mut seen = std::collections::HashSet::<String>::new();
     let mut kept_below_floor = 0;
     let mut out = Vec::with_capacity(messages.len());
     for (index, message) in messages.into_iter().enumerate() {
-        let superseded = message.kind.is_ephemeral_note()
-            && index < floor
-            && newest_run_below_floor.get(&message.kind) != Some(&run_start[index]);
+        let superseded = (message.kind == MessageKind::FilesRestored
+            && Some(index) != newest_files_restored)
+            || (message.kind.is_ephemeral_note()
+                && index < floor
+                && newest_run_below_floor.get(&message.kind) != Some(&run_start[index]));
         let keep = if superseded {
             false
         } else if message.role != Role::System {

@@ -127,6 +127,9 @@ impl Session {
                 detail: crate::tool_detail(&result),
             });
             self.record_test_proof(&p.name, &p.args, &result, full.as_deref());
+            if ok {
+                self.note_read_files(&p.name, &p.args);
+            }
             let kept = self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
             let result = crate::tool_output::fit_for_model(result, kept.as_deref());
             self.store.record_tool_call(
@@ -634,6 +637,9 @@ impl Session {
                         );
                         // Count this successful write so the autofix stage knows edits happened.
                         self.edits_this_turn += 1;
+                        if let Some(shown) = path.to_str() {
+                            self.note_file_use(shown);
+                        }
                         // Commit discipline: every N successful edits since the last commit or
                         // reminder, remind the model (right after this result) that its work is
                         // uncommitted. `git status` runs only when the reminder is due.
@@ -690,6 +696,7 @@ impl Session {
         )?;
 
         if ok {
+            self.note_read_files(&call.name, &effective_args);
             self.failure_tracker.record_success(&call.name);
             // A shell command that may have moved HEAD (commit, amend, reset, …) is the moment the
             // commit-discipline tracker forgets whatever is no longer dirty.

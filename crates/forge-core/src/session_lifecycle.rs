@@ -189,11 +189,7 @@ impl Session {
         let project_prompt_injected = !transcript.is_empty();
         let checkpoint_root = workspace.root().join(".forge/checkpoints");
         let cached_git_branch = current_git_branch(workspace.root());
-        let cached_agents_md = if project_prompt_injected {
-            None
-        } else {
-            read_project_agents_md(workspace.root())
-        };
+        let cached_agents_md = read_project_agents_md(workspace.root());
         let (project, project_diagnostic) =
             crate::project_context::compute_with_diagnostic(workspace.root());
         if let Some(diagnostic) = project_diagnostic {
@@ -291,9 +287,11 @@ impl Session {
             env_fight: EnvFightTracker::default(),
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch,
-            // Read AGENTS.md eagerly (sync, off the async path) only when it will actually be
-            // injected — i.e. a fresh session. A resumed session already has it in the transcript.
+            // Read AGENTS.md eagerly (sync, off the async path): the pinned block carries it on
+            // every request, a resumed session included.
             cached_agents_md,
+            pinned: Default::default(),
+            recent_files: Default::default(),
             project,
             last_context_pack: context_pack::ContextPack::default(),
             last_turn_contract: turn_contract::TurnContract::default(),
@@ -303,6 +301,10 @@ impl Session {
             compact_directive: None,
             compact_timeout: crate::compaction_run::COMPACT_CALL_TIMEOUT,
         };
+        s.pinned.recall_due = true;
+        let body = s.cached_agents_md.take();
+        s.set_agents_md(body);
+        s.refresh_pinned_tasks();
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
         s

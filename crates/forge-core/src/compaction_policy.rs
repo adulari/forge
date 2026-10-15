@@ -99,11 +99,14 @@ impl Session {
     /// are excluded — they never reach a provider, so they must not inflate the gauge or trip
     /// auto-compaction.
     pub(crate) fn estimated_transcript_tokens(&self) -> u64 {
+        // The pinned block rides on every request though it is not in the transcript; counting it
+        // keeps the gauge and the compaction trigger where they were when its text was.
         self.transcript
             .iter()
             .filter(|m| m.visibility.is_llm())
             .map(|m| message_tokens(m) as u64)
-            .sum()
+            .sum::<u64>()
+            + self.pinned_tokens() as u64
     }
 
     /// Estimated request prefix another exact provider/model id would ingest cold.

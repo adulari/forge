@@ -16,7 +16,27 @@ fn accepts_cache_breakpoints(model: &str) -> bool {
     }
 }
 
-pub(crate) fn mark_cache_breakpoints(model: &str, msgs: &mut [ChatMessage]) {
+/// Where a system-prefix cache breakpoint goes before the pinned session context: the index of the
+/// last message in front of it, or `None` when the request carries no such block. The prompt and
+/// env block in front of it never change, while the block itself moves with the session's
+/// instructions, memories and task list; a breakpoint on each lets the stable part be read from
+/// cache when only the block changed.
+pub(crate) fn stable_prefix_end(messages: &[forge_types::Message]) -> Option<usize> {
+    let leading = messages
+        .iter()
+        .take_while(|m| m.role == forge_types::Role::System);
+    let pinned = leading
+        .enumerate()
+        .find(|(_, m)| m.kind == forge_types::MessageKind::Pinned)?
+        .0;
+    pinned.checked_sub(1)
+}
+
+pub(crate) fn mark_cache_breakpoints(
+    model: &str,
+    msgs: &mut [ChatMessage],
+    stable_prefix_end: Option<usize>,
+) {
     if msgs.is_empty() || !accepts_cache_breakpoints(model) {
         return;
     }
@@ -30,8 +50,13 @@ pub(crate) fn mark_cache_breakpoints(model: &str, msgs: &mut [ChatMessage]) {
         .take_while(|m| m.role == ChatRole::System)
         .count()
         .checked_sub(1);
-    let last = msgs.len() - 1;
-    for idx in [last_leading_system, Some(last)].into_iter().flatten() {
+    let len = msgs.len();
+    let last = len - 1;
+    for idx in [stable_prefix_end, last_leading_system, Some(last)]
+        .into_iter()
+        .flatten()
+        .filter(|idx| *idx < len)
+    {
         msgs[idx].options = Some(CacheControl::Ephemeral.into());
     }
 }

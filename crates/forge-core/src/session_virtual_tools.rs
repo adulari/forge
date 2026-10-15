@@ -32,7 +32,9 @@ impl Session {
     }
 
     /// Replace the session's task list (the `update_tasks` virtual tool): parse the full list,
-    /// persist it, emit it to the TUI, and return a one-line summary to the model.
+    /// persist it, emit it to the TUI, and return the full list to the model. The result stays in
+    /// the conversation, so it is where the model finds the newest list: the pinned block only
+    /// snapshots it at the start of a turn.
     pub(crate) fn update_tasks(
         &mut self,
         msg_id: &str,
@@ -70,8 +72,9 @@ impl Session {
             .filter(|t| t.status == TodoStatus::InProgress)
             .count();
         let result = format!(
-            "task list updated: {} task(s) — {done} done, {in_progress} in progress",
-            self.tasks.len()
+            "task list updated: {} task(s) — {done} done, {in_progress} in progress\n{}",
+            self.tasks.len(),
+            render_task_list(&self.tasks)
         );
         self.store
             .record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "ok")?;
@@ -105,6 +108,8 @@ impl Session {
             })
             .collect();
         self.persist_tasks();
+        self.pinned.plan = Some(pinned_context::render_plan(plan));
+        self.refresh_pinned_tasks();
         self.presenter
             .emit(PresenterEvent::Tasks(self.tasks.clone()));
     }

@@ -358,6 +358,7 @@ pub(crate) async fn advance_goal(
             if !met {
                 app.note(&reason);
             }
+            session.lock().await.set_active_goal(None);
             GoalNext::Stop
         }
         GoalStep::Turn(prompt) => GoalNext::Turn(prompt),

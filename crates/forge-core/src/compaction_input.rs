@@ -43,7 +43,11 @@ fn is_harness_text(text: &str) -> bool {
 pub(crate) fn fold_inputs(older: &[Message], tool_results: &[(String, String)]) -> FoldedInput {
     let mut out = FoldedInput::default();
     let mut cursor = 0usize;
-    for message in older.iter().filter(|m| m.visibility.is_llm()) {
+    // Restored file text is a copy of what is on disk, and a compaction restores it again.
+    for message in older
+        .iter()
+        .filter(|m| m.visibility.is_llm() && m.kind != forge_types::MessageKind::FilesRestored)
+    {
         let mut message = message.clone();
         match message.role {
             Role::Tool => {

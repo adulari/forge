@@ -1084,7 +1084,11 @@ impl GenAiProvider {
         if let Some(prefill) = partial_prefill(prefill_seed.as_deref(), opts) {
             genai_messages.push(prefill);
         }
-        crate::cache_hints::mark_cache_breakpoints(model, &mut genai_messages);
+        crate::cache_hints::mark_cache_breakpoints(
+            model,
+            &mut genai_messages,
+            crate::cache_hints::stable_prefix_end(messages),
+        );
         let mut req = ChatRequest::new(genai_messages);
         if !tools.is_empty() {
             req = req.with_tools(tools.iter().map(to_genai_tool).collect::<Vec<_>>());
@@ -1981,7 +1985,7 @@ mod tests {
             Message::user("fix this bug"),
         ];
         let mut genai = to_genai_messages(&msgs, false);
-        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut genai);
+        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut genai, None);
         // System (idx 0) and final user message (idx 3) carry a cache breakpoint; the middle
         // turns don't, so the cache reads the largest stable prefix.
         assert!(genai[0].options.is_some(), "system should be a breakpoint");
@@ -2004,7 +2008,7 @@ mod tests {
             Message::user("do it"),
         ];
         let mut genai = to_genai_messages(&msgs, false);
-        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut genai);
+        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut genai, None);
         assert!(genai[0].options.is_none(), "not just the first system");
         assert!(genai[1].options.is_none());
         assert!(
@@ -2015,9 +2019,35 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_block_gets_its_own_breakpoint_behind_the_stable_prefix() {
+        // The prompt and env block never change; the pinned block behind them moves with the
+        // session's instructions and tasks. A breakpoint on each keeps the stable part cached.
+        let msgs = [
+            Message::system("base prompt"),
+            Message::system("<env>"),
+            Message::system("[session context]").with_kind(forge_types::MessageKind::Pinned),
+            Message::user("do it"),
+        ];
+        assert_eq!(crate::cache_hints::stable_prefix_end(&msgs), Some(1));
+        let mut genai = to_genai_messages(&msgs, false);
+        crate::cache_hints::mark_cache_breakpoints(
+            "anthropic::claude-opus-5",
+            &mut genai,
+            crate::cache_hints::stable_prefix_end(&msgs),
+        );
+        assert!(genai[0].options.is_none());
+        assert!(genai[1].options.is_some(), "end of the stable prefix");
+        assert!(genai[2].options.is_some(), "end of the pinned block");
+        assert!(genai[3].options.is_some(), "final message");
+
+        let without = [Message::system("base prompt"), Message::user("do it")];
+        assert_eq!(crate::cache_hints::stable_prefix_end(&without), None);
+    }
+
+    #[test]
     fn cache_breakpoints_on_empty_is_noop() {
         let mut empty: Vec<ChatMessage> = Vec::new();
-        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut empty);
+        crate::cache_hints::mark_cache_breakpoints("anthropic::claude-opus-5", &mut empty, None);
         assert!(empty.is_empty());
     }
 

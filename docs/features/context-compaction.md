@@ -124,8 +124,34 @@ nothing carried the user's own words across. All four are fixed.
   (`Store::uncompact_session_store`), then `Session::uncompact()` reloads the live transcript
   and reports `before → after`. A no-op with a note when the session was never compacted.
 
+### Rehydration after a compaction (PR B of the context-management program)
+
+A summary says what happened; it cannot hold the standing instructions or the text the model was
+working from. Before, AGENTS.md, the recalled memories and the task list were ordinary transcript
+messages, so a compaction folded them into the summary and nothing restored them. Now:
+
+- **The standing context never enters the transcript.** Project instructions, memories, the goal,
+  the approved plan and the task list are the *pinned session context block*, rebuilt for every
+  request and placed right after the system prompt (context-pipeline.md, "Standing context is
+  pinned"). A compaction cannot fold it away, a resume has it from the first request, and a legacy
+  session that still has the old persisted AGENTS.md / memory messages is not sent them twice.
+- **Memories are recalled again** at the end of every compaction (`rehydrate_after_compaction`),
+  against the goal and the latest real user request still in the transcript, top 6; a resumed
+  session recalls on its first turn.
+- **The task list snapshot is refreshed** at the same point, so the block carries the list as it
+  stood when the summary was written. `update_tasks` returns the full rendered list, which is
+  what the model has in hand after a mid-turn compaction, so nothing re-injects the list.
+- **Recently used files come back.** The newest five of the last 20 files read or edited are
+  re-read from disk and appended as one `[files restored after compaction]` system note (skipping
+  a file over 25k tokens, binaries and anything past 40k tokens in total); a bridged claude/codex
+  gets the paths only. The note is appended after the store compaction, so the store keeps exactly
+  the in-memory tail. The summarizer input leaves such notes out, and only the newest one is sent
+  after a later compaction, so copies do not accumulate (`file_restore.rs`, `recent_files.rs`).
+
 **Deferred**
-- Pinning/protecting specific messages; configurable keep-count; summary-of-summaries.
+- Protecting specific messages; configurable keep-count; summary-of-summaries; restoring the
+  invoked skill/command guidance and the orchestration/harness one-shots (still stored messages
+  that a compaction folds); persisting the approved plan across a resume.
 
 ## Non-goals
 - No change to cost math or the agent loop. Compaction reshapes what the next turn sends (and
@@ -170,7 +196,7 @@ kept tail, builds the summarizer input from the folded range (`compaction_input.
 results, harness-nudge detection), walks the candidate chain (`compaction_chain.rs`) calling
 `provider.complete_with` once per part with the system prompt in `compaction_summary.rs`, strips
 the scratchpad, appends the verbatim user messages, then sets `transcript = [system summary,
-...recent]`. Returns `(before, after)` and emits a `Warning` note. `/compact` → `CommandAction::Compact` →
+...recent]`, then rehydrates (memory recall, task snapshot, restored files). Returns `(before, after)` and emits a `Warning` note. `/compact` → `CommandAction::Compact` →
 `DispatchOutcome::RunCompact` → `spawn_compact` (background task, busy/done machinery), gated
 while a turn is in flight.
 

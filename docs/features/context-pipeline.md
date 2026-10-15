@@ -84,8 +84,59 @@ the model see?" was answered in more places.
   keeps only the newest *run* (consecutive notes of one kind, i.e. one step's hints) of each kind
   below the floor, under the same cache rule as contracts: a newer run above the floor never
   reaches back, so the cached prefix is rewritten only when the floor moves. Notes without a kind —
-  AGENTS.md, memory, task list, skill/command guidance, turn contracts, the full clock
-  instruction — are never touched.
+  skill/command guidance, turn contracts, the full clock instruction — are never touched. A
+  `FilesRestored` note (the file text re-read after a compaction) is the exception to the floor
+  rule: only the newest copy is ever sent, because a new one appears together with a compaction,
+  which rewrote the prompt anyway.
+- **Standing context is pinned, not injected** (`pinned_context.rs`). The project instructions
+  (`.forge/AGENTS.md` / `AGENTS.md`), the memories recalled for the session, the active goal, the
+  approved plan and the task list used to be ordinary system messages injected once, so a
+  compaction folded them into the summary and nothing put them back. They are now one system
+  message of kind `Pinned`, built fresh for every request (`Session::pinned_context_message`) and
+  placed right after the system prompt, env block and codemode guidance in
+  `transcript_with_preamble_and_tools` (and at the head of `transcript_for`, which the planner and
+  the finalizer read). It is never stored and never in the in-memory transcript, so it can be
+  neither folded nor duplicated, and its tokens are subtracted from the window budget and counted
+  in `estimated_transcript_tokens`. Its inputs:
+  - **Project instructions**: `Session::cached_agents_md`, read at construction (resumed sessions
+    too) and re-read when the file's (path, mtime, length) fingerprint moves, checked with one
+    `stat` per turn (`refresh_project_instructions`). A bridged `claude-cli` leaves them out when
+    its own `CLAUDE.md` already carries them (`lean_context::claude_md_covers`).
+  - **Memories**: recalled with the goal plus the person's request (top 6) on a session's first
+    turn, on the first turn after a resume, and again after every compaction
+    (`recall_pinned_memories`; the compaction recall uses the latest real user request still in
+    the transcript). Auto-memory off leaves the section out.
+  - **Goal**: `Session::set_active_goal`, set by `/goal` and cleared when the goal run stops.
+  - **Plan**: the plan the person approved (`activate_plan_tasks`); in memory only.
+  - **Task list**: a snapshot taken at the start of each turn and after each compaction, not live.
+    A live list would rewrite the block, and with it the provider's cached prefix for the whole
+    conversation behind it, on every `update_tasks` call. `update_tasks` returns the full rendered
+    list instead (`- [status] title` per task), so the newest state is in the conversation where
+    the model made it, and the block's heading says that a later `update_tasks` result is newer.
+    The per-turn `[task list]` note keeps its instruction (apply the new message to the list,
+    do not start over) but no longer quotes the list a second time.
+  - **Legacy sessions**: a session stored before the block existed carries the AGENTS.md text and
+    the memory block as persisted system messages. While the transcript still holds the exact
+    AGENTS.md body, or a message opening with the memory header, the block leaves that section
+    out; once a compaction folds the stored copy away, the block carries it.
+  - **Cache**: the block follows the stable prefix, so `forge_provider::cache_hints` marks a
+    breakpoint at the end of the prompt/env prefix, one at the end of the block and one on the
+    last message; the block changing re-bills the block and the conversation, not the prompt. It
+    changes only when AGENTS.md is edited, a recall finds different memories, the goal or plan
+    changes, or a turn starts or a compaction runs with a different task list.
+  - **Bridges**: `render_prompt` puts the block in the system preamble of a fresh session. A resume
+    delta carries only what follows the leading system run, so `ResumeState`/`LiveSession` keep a
+    fingerprint of the block they last sent and the delta opens with `Updated session context
+    (replaces the earlier version): …` when it differs; unchanged, it is not sent again.
+- **Files come back after a compaction** (`recent_files.rs`, `file_restore.rs`). The session keeps
+  the 20 files it read (`read_file` `path`/`file_path`/`paths`, line ranges stripped) or edited
+  (the write tools' path) most recently, newest first. Right after a successful compaction the
+  newest five that still exist on disk are re-read and appended as one system note of kind
+  `FilesRestored` (`[files restored after compaction]`, one `===== path =====` block per file,
+  verbatim like `read_file`): a file over 25k tokens, a binary or non-UTF-8 file, or one that would
+  pass the 40k-token total is skipped, not cut. A bridged `claude-cli`/`codex-cli` session only
+  gets the paths (up to 10), since the CLI reads files itself. The note is stored, so a resume has
+  it; the summarizer input leaves it out; a later compaction's note replaces it in the request.
 - **A trim that would drop history compacts first, and says so.** After the per-step
   `auto_compact_if_needed`, `request_provider_response` checks what the request build trimmed
   (`TrimDrop`): if user or assistant messages were dropped it runs a compaction and rebuilds the
@@ -171,8 +222,12 @@ a fresh session instead of a skipped message.
 | `forge-core/src/context_pipeline.rs` | `to_llm_floored`, moved `fit_messages`/`prune_tool_results`/`message_tokens` + tests |
 | `forge-core/src/context_floor.rs` | the elision floor, block advance, `prune_below`, `fit_sticky`, `turn_protected`, trim watch |
 | `forge-core/src/harness_notes.rs` | `push_note` / `push_nudge`: tagged, persisted harness messages |
-| `forge-core/src/system_context.rs` | supersede ephemeral notes below the floor |
-| `forge-provider/src/cli_provider/resume.rs` | `SentMark`, `locate_sent` |
+| `forge-core/src/system_context.rs` | supersede ephemeral notes below the floor; newest `FilesRestored` only |
+| `forge-core/src/pinned_context.rs` | the pinned session context block, memory recall, task/plan rendering |
+| `forge-core/src/recent_files.rs`, `file_restore.rs` | recently used files; re-read and restore after a compaction |
+| `forge-types` | `MessageKind::Pinned` (never stored), `MessageKind::FilesRestored` |
+| `forge-provider/src/cache_hints.rs` | breakpoint behind the stable prefix, before the pinned block |
+| `forge-provider/src/cli_provider/resume.rs` | `SentMark`, `locate_sent`, pinned-context fingerprint and update |
 | `forge-core/src/cache_instrument.rs` | per-request prefix comparison, miss labels, rewrite-streak warning |
 | `forge-core/src/turn_context.rs` | turn contract / clock / git branch appended only when changed |
 | `forge-provider/src/wire_fingerprint.rs` | per-message wire hashes after system placement + image stripping |

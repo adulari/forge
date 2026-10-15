@@ -2,7 +2,7 @@
 //! `--resume` the CLI's own session and send only the delta, and the rule that decides when that
 //! is still safe.
 
-use forge_types::{Message, Role};
+use forge_types::{Message, MessageKind, Role};
 
 use super::{bare_model, CheckpointContext};
 
@@ -37,6 +37,11 @@ pub(super) struct ResumeState {
     /// the transcript at the time, and that view is trimmed from the FRONT as it grows, so the
     /// same index later points at a different message. The mark finds the real position again.
     pub(super) mark: Option<SentMark>,
+    /// Fingerprint of the pinned session context the CLI session was last given
+    /// ([`pinned_fingerprint`]); `None` when the request carried none. The block sits in the
+    /// leading system run, which a resume delta never re-sends, so a change to it is carried in
+    /// the delta explicitly.
+    pub(super) pinned: Option<u64>,
 }
 
 /// Fingerprints of the last two messages a CLI session was sent, which is how a later call finds
@@ -96,6 +101,32 @@ impl SentMark {
     }
 }
 
+/// The pinned session context (project instructions, memories, goal, task list) in a request.
+fn pinned_block(messages: &[Message]) -> Option<&Message> {
+    messages
+        .iter()
+        .take_while(|m| m.role == Role::System)
+        .find(|m| m.kind == MessageKind::Pinned)
+}
+
+/// A fingerprint of the pinned block, `None` when the request has none.
+pub(super) fn pinned_fingerprint(messages: &[Message]) -> Option<u64> {
+    pinned_block(messages).map(fingerprint)
+}
+
+/// The pinned block as a resumed CLI session has to be told, when it is not what that session was
+/// last given. A fresh render carries it in the system preamble; a delta carries only what came
+/// after, so without this a changed task list or edited AGENTS.md never reaches a resumed CLI.
+pub(super) fn pinned_update(messages: &[Message], sent: Option<u64>) -> Option<String> {
+    let block = pinned_block(messages)?;
+    (Some(fingerprint(block)) != sent).then(|| {
+        format!(
+            "Updated session context (replaces the earlier version):\n{}",
+            block.content
+        )
+    })
+}
+
 /// Where the not-yet-sent messages start in `messages`, for a slot recorded with `sent` messages
 /// and `mark`. `Some(0)` when nothing was sent. Without a mark (a slot recorded without one) the
 /// raw count is trusted only while it still fits.
@@ -146,14 +177,17 @@ pub(super) const CONTINUE_PROMPT: &str = "Continue from where you left off. Noth
 /// model's own prior turn and the tool results it produced, so re-sending Forge's record of them
 /// would duplicate. The result is the just the new instruction(s) — a `continue` nudge, or a new user
 /// turn. Empty if `tail` carries nothing the model still needs to act on.
-pub(super) fn render_resume_delta(tail: &[Message]) -> String {
-    let mut out = Vec::new();
+pub(super) fn render_resume_delta(tail: &[Message], pinned: Option<String>) -> String {
+    let mut out: Vec<String> = Vec::new();
     for m in tail {
         match m.role {
             Role::System => out.push(m.content.clone()),
             Role::User => out.push(format!("User: {}", m.content)),
             Role::Assistant | Role::Tool => {} // the resumed session already has these
         }
+    }
+    if !out.is_empty() {
+        out.splice(0..0, pinned);
     }
     out.join("\n\n")
 }
@@ -177,7 +211,7 @@ mod tests {
         let at = locate_sent(6, mark, &next).expect("the marked message is still in the view");
         assert_eq!(at, 3);
         assert_eq!(
-            render_resume_delta(&next[at..]),
+            render_resume_delta(&next[at..], None),
             "User: new-a\n\nUser: new-b"
         );
 

@@ -218,14 +218,20 @@ impl Session {
         let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         // Real-token budget: window minus the reply reservation, with 5% headroom for the small
         // magnitude difference between our o200k counter and the target model's own tokenizer.
-        let budget_tokens = window.saturating_sub(reserve) * 95 / 100;
-        to_llm_floored(
+        // The planner and the finalizer read this view too, and the project instructions they used
+        // to find in the transcript now live in the pinned block.
+        let pinned = self.pinned_context_message(Some(model));
+        let pinned_tokens = pinned.as_ref().map_or(0, message_tokens);
+        let budget_tokens = window.saturating_sub(reserve).saturating_sub(pinned_tokens) * 95 / 100;
+        let mut out: Vec<Message> = pinned.into_iter().collect();
+        out.extend(to_llm_floored(
             &self.transcript,
             budget_tokens.max(256),
             self.config.mesh.tool_result_context_token_budget,
             self.elision_floor(),
             &mut None,
-        )
+        ));
+        out
     }
 
     /// The base harness preamble prepended (fresh, never persisted) to every main-loop request:
@@ -279,6 +285,9 @@ impl Session {
         if crate::codemode::guidance_advertised(specs) {
             preamble.insert(1, Message::system(crate::codemode::GUIDANCE));
         }
+        // The pinned session context follows the stable prefix, so the provider can cache that
+        // prefix on its own and only the block behind it moves when its content does.
+        preamble.extend(self.pinned_context_message(Some(model)));
         let window = self.effective_context_window(model) as usize;
         let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();
