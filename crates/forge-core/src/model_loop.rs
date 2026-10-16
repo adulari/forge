@@ -708,7 +708,13 @@ impl Session {
                         if self.nudge_unapplied_edit(&mut phantom_edit_nudges) {
                             continue;
                         }
-                    } else if unfinished == 0 && !self.tasks.is_empty() {
+                    } else if unfinished == 0
+                        && !self.tasks.is_empty()
+                        // A question-only turn must not re-verify an all-Done list left over from
+                        // an earlier turn: the gate needs a tool call (or edit) in THIS turn.
+                        && (tools_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
+                            || self.mutations_this_turn > 0)
+                    {
                         // Every tracked task reported Done — same completion authority as the bridge:
                         // accept fresh evidence newer than the last mutation, otherwise request a
                         // tool-grounded state check. A self-reported "done" without an inspection is

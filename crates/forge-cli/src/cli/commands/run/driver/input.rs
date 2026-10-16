@@ -194,6 +194,13 @@ impl DriverState {
             return Ok(());
         }
         // @path file picker.
+        if self.app.at_picker.open
+            && matches!(key, KeyKind::Enter)
+            && self.app.at_picker.selected_path().is_none()
+        {
+            // Nothing to complete: Enter submits the prompt instead of being swallowed.
+            self.app.at_picker.close();
+        }
         if self.app.at_picker.open {
             match key {
                 KeyKind::Esc => self.app.at_picker.close(),

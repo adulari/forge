@@ -588,7 +588,7 @@ impl Store {
         let (i, o): (i64, i64) = conn.query_row(
             "SELECT COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0)
              FROM usage u JOIN message m ON m.id = u.message_id
-             WHERE m.session_id = ?1 AND m.active = 1",
+             WHERE m.session_id = ?1 AND (m.active = 1 OR m.compacted = 1)",
             [session_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -605,7 +605,7 @@ impl Store {
         let (cached, reporting): (i64, i64) = conn.query_row(
             "SELECT COALESCE(SUM(u.cached_input_tokens), 0), COUNT(u.cached_input_tokens)
              FROM usage u JOIN message m ON m.id = u.message_id
-             WHERE m.session_id = ?1 AND m.active = 1",
+             WHERE m.session_id = ?1 AND (m.active = 1 OR m.compacted = 1)",
             [session_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -619,7 +619,7 @@ impl Store {
         let conn = self.lock()?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM usage u JOIN message m ON m.id = u.message_id
-             WHERE m.session_id = ?1 AND m.active = 1",
+             WHERE m.session_id = ?1 AND (m.active = 1 OR m.compacted = 1)",
             [session_id],
             |r| r.get(0),
         )?;

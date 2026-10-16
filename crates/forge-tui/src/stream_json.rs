@@ -14,6 +14,8 @@ use crate::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, NO_ANSWER};
 pub struct StreamJsonPresenter {
     out: Box<dyn Write + Send>,
     session_id: String,
+    next_tool_id: u64,
+    pending_tool_ids: std::collections::VecDeque<(String, String)>,
 }
 
 impl Default for StreamJsonPresenter {
@@ -21,6 +23,8 @@ impl Default for StreamJsonPresenter {
         Self {
             out: Box::new(std::io::stdout()),
             session_id: String::new(),
+            next_tool_id: 0,
+            pending_tool_ids: std::collections::VecDeque::new(),
         }
     }
 }
@@ -35,6 +39,8 @@ impl StreamJsonPresenter {
         Self {
             out,
             session_id: String::new(),
+            next_tool_id: 0,
+            pending_tool_ids: std::collections::VecDeque::new(),
         }
     }
 
@@ -81,20 +87,30 @@ impl Presenter for StreamJsonPresenter {
                 // `args` is a JSON string; embed the parsed value when possible (CC `tool_use.input`).
                 let input = serde_json::from_str::<serde_json::Value>(&args)
                     .unwrap_or(serde_json::Value::String(args));
+                self.next_tool_id += 1;
+                let id = format!("toolu_{:04}", self.next_tool_id);
+                self.pending_tool_ids.push_back((name.clone(), id.clone()));
                 self.line(serde_json::json!({
                     "type": "assistant", "session_id": sid,
                     "message": { "role": "assistant",
-                                 "content": [ { "type": "tool_use", "name": name, "input": input } ] }
+                                 "content": [ { "type": "tool_use", "id": id, "name": name, "input": input } ] }
                 }));
             }
             PresenterEvent::ToolResult {
                 name, ok, summary, ..
-            } => self.line(serde_json::json!({
-                "type": "user", "session_id": sid,
-                "message": { "role": "user",
-                             "content": [ { "type": "tool_result", "tool_name": name,
-                                            "is_error": !ok, "content": summary } ] }
-            })),
+            } => {
+                let at = self.pending_tool_ids.iter().position(|(n, _)| *n == name);
+                let id = at
+                    .and_then(|i| self.pending_tool_ids.remove(i))
+                    .map(|(_, id)| id);
+                self.line(serde_json::json!({
+                    "type": "user", "session_id": sid,
+                    "message": { "role": "user",
+                                 "content": [ { "type": "tool_result", "tool_use_id": id,
+                                                "tool_name": name,
+                                                "is_error": !ok, "content": summary } ] }
+                }));
+            }
             PresenterEvent::ToolOutput { name, output } => self.line(serde_json::json!({
                 "type": "system", "subtype": "tool_output", "session_id": sid,
                 "tool_name": name, "path": output.path, "lines": output.lines,

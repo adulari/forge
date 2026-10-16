@@ -38,6 +38,16 @@ pub(crate) async fn run(
     };
     let mut guidance = system;
     guidance.extend(command_guidance);
+    if goal_spec.is_none() {
+        let (file_blocks, included, skipped) = expand_at_files(&prompt);
+        if !included.is_empty() && !output_format.is_machine() {
+            eprintln!("included {}", included.join(", "));
+        }
+        for s in &skipped {
+            eprintln!("skipped {s}");
+        }
+        guidance.extend(file_blocks);
+    }
 
     // `--output-format stream-json` is a CONTRACT: the caller is a program that will parse stdout.
     // Publishing to the fleet answers with two lines of prose and exit 0 instead, so every such

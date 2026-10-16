@@ -85,7 +85,16 @@ mod kimi_quota;
 /// Code). Each refresher carries its own freshness gate and no-key early return, so callers on the
 /// routing path pay at most one plain GET per provider every few minutes.
 pub(crate) async fn refresh_polled_quotas(store: &forge_store::Store) {
-    refresh_opencode_go_quota(store).await;
+    // A provider the user disabled must not be polled with its key.
+    let go_disabled = super::load_config().is_ok_and(|config| {
+        forge_config::is_model_disabled(
+            &format!("{OPENCODE_GO_PROVIDER}::any"),
+            &config.mesh.disabled,
+        )
+    });
+    if !go_disabled {
+        refresh_opencode_go_quota(store).await;
+    }
     kimi_quota::refresh_kimi_quota(store).await;
 }
 

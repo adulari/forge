@@ -9361,6 +9361,24 @@ mod tests {
     }
 
     #[test]
+    fn worktree_fingerprint_exists_in_a_repo_without_commits() {
+        let dir = std::env::temp_dir().join(format!("forge-fp-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(completeness::worktree_fingerprint(&dir), None);
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(&dir)
+            .status();
+        if init.is_ok_and(|s| s.success()) {
+            let empty = completeness::worktree_fingerprint(&dir);
+            assert!(empty.is_some());
+            std::fs::write(dir.join("a.txt"), "x").unwrap();
+            assert_ne!(completeness::worktree_fingerprint(&dir), empty);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn shell_command_failed_reads_the_exit_status() {
         assert!(!shell_command_failed("shell: exit 0 in 5ms\n\nhi"));
         assert!(!shell_command_failed("shell: ready after 0s (exit 0)"));
@@ -9372,6 +9390,7 @@ mod tests {
         ));
         assert!(shell_command_failed("shell: exit 1 in 5ms"));
         assert!(shell_command_failed("shell: exit 127 in 5ms"));
+        assert!(!shell_command_failed("shell: started background job 3"));
         assert!(shell_command_failed("shell: timed out after 1s (killed)"));
         assert!(shell_command_failed("shell: failed to start (cwd .): x"));
         assert!(shell_command_failed("shell: exit signal in 5ms"));

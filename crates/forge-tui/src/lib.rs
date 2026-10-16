@@ -169,6 +169,12 @@ mod stream_json_tests {
         // tool_result carries the is_error flag.
         assert_eq!(parsed[4]["message"]["content"][0]["type"], "tool_result");
         assert_eq!(parsed[4]["message"]["content"][0]["is_error"], false);
+        // tool_use and tool_result are paired by id.
+        assert!(parsed[3]["message"]["content"][0]["id"].is_string());
+        assert_eq!(
+            parsed[3]["message"]["content"][0]["id"],
+            parsed[4]["message"]["content"][0]["tool_use_id"]
+        );
         // terminal result event.
         assert_eq!(parsed[5]["type"], "result");
         assert_eq!(parsed[5]["result"], "done");
