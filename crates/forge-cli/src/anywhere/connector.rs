@@ -272,6 +272,33 @@ fn record_link_state(connected: bool, last_exchange_ms: u64, error: Option<Strin
     }
 }
 
+/// A worker error with digit runs collapsed, so messages that differ only by an embedded
+/// timestamp or counter (expired-certificate errors) de-duplicate instead of logging every tick.
+pub(super) fn error_fingerprint(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut in_digits = false;
+    for ch in message.chars() {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                out.push('#');
+            }
+            in_digits = true;
+        } else {
+            in_digits = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Whether `message` differs from the last reported error (by fingerprint); records it if so.
+pub(super) fn is_new_error(last: &mut String, message: &str) -> bool {
+    let fingerprint = error_fingerprint(message);
+    let changed = fingerprint != *last;
+    *last = fingerprint;
+    changed
+}
+
 async fn command_worker_loop(local_base_url: &str) {
     let worker_id = hex::encode(rand::random::<[u8; 16]>());
     let mut last_error = String::new();
@@ -288,11 +315,12 @@ async fn command_worker_loop(local_base_url: &str) {
             }
             Err(error) => {
                 let message = format!("{error:#}");
-                if message != last_error {
+                let fingerprint = error_fingerprint(&message);
+                if fingerprint != last_error {
                     eprintln!(
                         "⚠ Forge Anywhere remote jobs unavailable — live relay and local/direct Forge are unaffected: {message}"
                     );
-                    last_error = message.clone();
+                    last_error = fingerprint;
                     record_command_state(Some(message));
                 }
             }
@@ -354,7 +382,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
     refresh_account_epoch(&store, &mut state, &service_url, &access_token).await?;
     let identity = identity_from_state(&state)?;
     let http = client()?;
-    let devices = active_device_keys(&http, &service_url, &access_token).await?;
+    let mut devices = active_device_keys(&http, &service_url, &access_token).await?;
     let ticket: RelayTicketResponse = send_json(
         http.post(format!("{service_url}/v1/relay/tickets"))
             .bearer_auth(&access_token)
@@ -403,7 +431,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     Message::Binary(bytes) => {
                         last_exchange_ms = now_ms();
                         record_link_state(true, last_exchange_ms, None);
-                        if let Some(pending) = handle_relay_envelope(
+                        let mut handled = handle_relay_envelope(
                             &store,
                             &identity,
                             &devices,
@@ -413,7 +441,34 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                             &local_events_tx,
                             &blobs,
                             &mut relay_write,
-                        ).await? {
+                        ).await;
+                        // A device enrolled after this connection opened is not in the cached
+                        // key set yet: refresh once and retry, and only discard this envelope
+                        // (never the whole relay connection) if the sender is still unknown.
+                        if matches!(&handled, Err(error) if error.is::<UnknownSenderDevice>()) {
+                            if let Ok(fresh) = active_device_keys(&http, &service_url, &access_token).await {
+                                devices = fresh;
+                                handled = handle_relay_envelope(
+                                    &store,
+                                    &identity,
+                                    &devices,
+                                    local_base_url,
+                                    bytes.as_ref(),
+                                    &mut streams,
+                                    &local_events_tx,
+                                    &blobs,
+                                    &mut relay_write,
+                                ).await;
+                            }
+                        }
+                        let handled = match handled {
+                            Err(error) if error.is::<UnknownSenderDevice>() => {
+                                eprintln!("⚠ Forge Anywhere discarded an envelope: {error:#}");
+                                None
+                            }
+                            other => other?,
+                        };
+                        if let Some(pending) = handled {
                             in_flight.push(async move {
                                 let response = dispatch_http(local_base_url, &pending.request).await;
                                 (pending, response)
@@ -725,6 +780,17 @@ impl DurableCommandClient<'_> {
     }
 }
 
+#[derive(Debug)]
+struct UnknownSenderDevice;
+
+impl std::fmt::Display for UnknownSenderDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("relay envelope came from an unknown or revoked device")
+    }
+}
+
+impl std::error::Error for UnknownSenderDevice {}
+
 mod command_journal;
 use command_journal::*;
 
@@ -748,9 +814,7 @@ where
     let envelope = Envelope::decode(encoded).context("decode relay envelope")?;
     validate_inbound_metadata(&envelope, identity)?;
     let sender_device_id = envelope.metadata.sender_device_id;
-    let verifying_key = devices
-        .get(&sender_device_id)
-        .context("relay envelope came from an unknown or revoked device")?;
+    let verifying_key = devices.get(&sender_device_id).ok_or(UnknownSenderDevice)?;
     let plaintext = envelope
         .open(&identity.data_key, verifying_key)
         .context("authenticate and decrypt relay envelope")?;
@@ -1502,6 +1566,18 @@ fn bridge_error(request_id: [u8; 16], status: u16, message: &str) -> BridgeRespo
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn error_fingerprint_ignores_embedded_timestamps() {
+        assert_eq!(
+            super::error_fingerprint("certificate expired: now 1789000001 > not after 1788000000"),
+            super::error_fingerprint("certificate expired: now 1789000009 > not after 1788000000"),
+        );
+        assert_ne!(
+            super::error_fingerprint("certificate expired"),
+            super::error_fingerprint("connection refused"),
+        );
+    }
+
     use super::*;
 
     #[test]

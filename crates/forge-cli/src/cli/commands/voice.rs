@@ -78,6 +78,18 @@ fn resolve_model_kind(
 /// Print a single self-overwriting progress line to stderr as a model downloads (stdout stays
 /// clean for the transcript).
 fn download_progress(done: u64, total: Option<u64>) {
+    use std::io::IsTerminal;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    if !std::io::stderr().is_terminal() {
+        // One line per 8 MB keeps a redirected log readable.
+        static LAST_BUCKET: AtomicU64 = AtomicU64::new(u64::MAX);
+        let bucket = done / (8 * 1_048_576);
+        if LAST_BUCKET.swap(bucket, Ordering::Relaxed) == bucket {
+            return;
+        }
+        eprintln!("fetching whisper model: {} MB", done / 1_048_576);
+        return;
+    }
     let done_mb = done as f64 / 1_048_576.0;
     match total {
         Some(total) if total > 0 => {

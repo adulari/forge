@@ -221,9 +221,12 @@ fn image_attachments(content: &serde_json::Value) -> Result<Vec<ImageAttachment>
                     "image data URL must use an image MIME type and base64 encoding".into(),
                 );
             }
-            base64::engine::general_purpose::STANDARD
+            let bytes = base64::engine::general_purpose::STANDARD
                 .decode(encoded)
                 .map_err(|_| "image data URL contains invalid base64".to_string())?;
+            if crate::image_input::sniff(&bytes).is_none() {
+                return Err("image data URL does not contain a supported image (png, jpeg, gif, webp, heic)".into());
+            }
             Ok(ImageAttachment {
                 media_type: media_type.to_string(),
                 data_base64: encoded.to_string(),

@@ -444,6 +444,25 @@ impl LspRegistry {
         self.servers.lock().await.len()
     }
 
+    /// `(language, command)` for every known or configured language whose server binary is not
+    /// on `PATH`, sorted by language. Spawn failures are otherwise silent (`forge doctor` row).
+    pub fn missing_servers(&self) -> Vec<(String, String)> {
+        let mut langs: Vec<String> = ["rust", "typescript", "python", "go"]
+            .iter()
+            .map(|lang| lang.to_string())
+            .collect();
+        langs.extend(self.config.servers.keys().cloned());
+        langs.sort();
+        langs.dedup();
+        langs
+            .into_iter()
+            .filter_map(|lang| {
+                let (command, _) = self.server_for_lang(&lang)?;
+                which(&command).is_none().then_some((lang, command))
+            })
+            .collect()
+    }
+
     fn server_for_lang(&self, lang: &str) -> Option<(String, Vec<String>)> {
         if let Some(entry) = self.config.servers.get(lang) {
             return Some((entry.command.clone(), entry.args.clone()));

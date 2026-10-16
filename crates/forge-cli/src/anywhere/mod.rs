@@ -27,6 +27,8 @@ use sha2::{Digest as _, Sha256};
 use crate::{AnywhereCmd, ShareExpiry};
 
 mod connector;
+mod display;
+use display::{configured_host_name, display_timestamp};
 mod handoff;
 mod jobs;
 pub(crate) mod peers;
@@ -428,7 +430,7 @@ async fn login(recovery: bool) -> Result<()> {
     let signing_key = SigningKey::from_bytes(&signing_private);
     let exchange_private = rand::random::<[u8; 32]>();
     let exchange_public = exchange_public_key(&exchange_private);
-    let device_name = default_host_name();
+    let device_name = configured_host_name();
     let config = forge_config::load()?;
     let service_url = config.anywhere.service_url();
     let client = client()?;
@@ -1243,7 +1245,7 @@ async fn enable(name: Option<String>) -> Result<()> {
         .device_id
         .as_deref()
         .context("device is not enrolled")?;
-    let name = name.unwrap_or_else(default_host_name);
+    let name = name.unwrap_or_else(configured_host_name);
     if name.trim().is_empty() || name.len() > 80 {
         bail!("host name must contain 1–80 characters");
     }
@@ -1359,11 +1361,11 @@ async fn status() -> Result<()> {
     let config = forge_config::load()?;
     println!(
         "Local: {} · connector {} · sync {}",
-        state
-            .github_login
-            .as_deref()
-            .map(|login| format!("logged in as {login}"))
-            .unwrap_or_else(|| "logged out".into()),
+        match (state.is_logged_in(), state.github_login.as_deref()) {
+            (true, Some(login)) => format!("logged in as {login}"),
+            (true, None) => "logged in".to_string(),
+            (false, _) => "logged out".to_string(),
+        },
         if config.anywhere.enabled {
             "enabled"
         } else {
@@ -1405,8 +1407,8 @@ async fn status() -> Result<()> {
         human_bytes(me.storage_used_bytes),
         human_bytes(me.storage_limit_bytes)
     );
-    if let Some(trial_end) = me.trial_ends_at {
-        println!("Trial ends: {trial_end}");
+    if let Some(trial_end) = me.trial_ends_at.filter(|_| me.entitlement == "trial") {
+        println!("Trial ends: {}", display_timestamp(&trial_end));
     }
     Ok(())
 }
@@ -1414,11 +1416,10 @@ async fn status() -> Result<()> {
 pub(crate) fn tui_status_summary() -> Result<String> {
     let state = StateStore::platform()?.load()?;
     let config = forge_config::load()?;
-    let account = state
-        .github_login
-        .as_deref()
-        .map(|login| format!("signed in as {login}"))
-        .unwrap_or_else(|| "not enrolled".to_string());
+    let account = match state.github_login.as_deref() {
+        Some(login) if state.is_logged_in() => format!("signed in as {login}"),
+        _ => "not enrolled".to_string(),
+    };
     Ok(format!(
         "Forge Anywhere: {account} · connector {} · sync {}",
         if config.anywhere.enabled {
@@ -1540,12 +1541,12 @@ fn doctor_next_action(
         "run `forge anywhere setup` to activate this host"
     } else if !enabled {
         "run `forge anywhere enable`"
+    } else if !service_ready {
+        "keep using local/LAN Forge and retry when the service is available"
     } else if !matches!(link_health, LinkHealth::Healthy { .. }) {
         "restart `forge serve` if the connector does not reconnect shortly"
     } else if command_error.is_some() {
         "inspect the durable command journal; remote jobs are failing while relay stays live"
-    } else if !service_ready {
-        "keep using local/LAN Forge and retry when the service is available"
     } else {
         "none; setup is healthy"
     }
@@ -1626,10 +1627,10 @@ async fn devices(revoke: Option<&str>) -> Result<()> {
             "{}  {}  enrolled {}{}",
             device.id,
             device.name,
-            device.created_at,
+            display_timestamp(&device.created_at),
             device
                 .last_seen_at
-                .map(|seen| format!("  last seen {seen}"))
+                .map(|seen| format!("  last seen {}", display_timestamp(&seen)))
                 .unwrap_or_default()
         );
     }
@@ -1710,15 +1711,20 @@ async fn revoke_device(
     if current_recovery.epoch != current_epoch {
         bail!("service returned the wrong recovery key epoch");
     }
-    let recovery_words = rpassword::prompt_password("24-word recovery phrase: ")?;
-    let recovery = RecoverySecret::from_words(recovery_words.trim())?;
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        bail!("revoking a device needs the Recovery Kit typed at a terminal; run this in an interactive shell");
+    }
+    let recovery_words = rpassword::prompt_password(
+        "Recovery Kit (12 or 24 words, or the path to a .forge-recovery file): ",
+    )?;
+    let recovery_words = recovery_words.trim();
     let old_envelope = Envelope::decode(
         &URL_SAFE_NO_PAD
             .decode(&current_recovery.recovery_wrap_envelope)
             .context("decode current recovery wrap")?,
     )?;
     let old_recovery_key =
-        derive_recovery_wrap_key(recovery.as_bytes(), &account_id, current_epoch)?;
+        recovery_wrap_key_from_input(recovery_words, service_url, &account_id, current_epoch)?;
     let old_signing_key = ed25519_dalek::VerifyingKey::from_bytes(&decode_base64_array(
         &current_recovery.signing_public_key,
         "recovery-wrap signing key",
@@ -1770,7 +1776,8 @@ async fn revoke_device(
             envelope: URL_SAFE_NO_PAD.encode(envelope),
         });
     }
-    let recovery_wrap_key = derive_recovery_wrap_key(recovery.as_bytes(), &account_id, new_epoch)?;
+    let recovery_wrap_key =
+        recovery_wrap_key_from_input(recovery_words, service_url, &account_id, new_epoch)?;
     let recovery_wrap = key_wrap_envelope(
         new_data_key,
         *recovery_wrap_key.as_bytes(),
@@ -2177,7 +2184,9 @@ fn service_error(status: StatusCode, body: &[u8]) -> String {
             .to_ascii_lowercase()
         })
         .unwrap_or_default();
-    if searchable.contains("expired") || status == StatusCode::GONE {
+    if searchable.contains("entitlement_read_only") || searchable.contains("read-only") {
+        "this account is read-only (subscription or trial ended) — existing data stays readable, but writes need an active plan; enrollment is not the problem".into()
+    } else if searchable.contains("expired") || status == StatusCode::GONE {
         "request expired — start the approval or setup again".into()
     } else if searchable.contains("denied") {
         "approval denied — confirm the device name and start setup again".into()

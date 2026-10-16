@@ -119,6 +119,7 @@ pub(super) async fn create(session: &str, destination: &str) -> Result<()> {
         return Err(error).context("freeze source session for handoff");
     }
     let prepared = async {
+        let repository = repository_root(Path::new(&local.cwd))?;
         archive_source_session(&local.id).await?;
         let stopped_checkpoints = store
             .list_checkpoints(&local.id)
@@ -132,7 +133,6 @@ pub(super) async fn create(session: &str, destination: &str) -> Result<()> {
             .context("export portable session after source driver stopped")?;
         let session_json =
             serde_json::to_vec(&exported_session).context("encode portable session")?;
-        let repository = repository_root(Path::new(&local.cwd))?;
         let temporary = tempfile::tempdir().context("create handoff staging directory")?;
         let archive_path = temporary.path().join("workspace.forge-capsule");
         let exported = forge_core::capsule::export_capsule(
@@ -210,7 +210,7 @@ pub(super) async fn create(session: &str, destination: &str) -> Result<()> {
             rollback_pre_network_handoff(&state_store, &store, &local.id, &capsule_id)
                 .context("local handoff preparation failed and rollback could not complete")?;
             return Err(error.context(
-                "local handoff preparation failed before service reservation; source was unfrozen",
+                "local handoff preparation failed before service reservation; source was unfrozen (if its live driver was already stopped, reopen the session to restart it)",
             ));
         }
     };
@@ -819,11 +819,10 @@ pub(super) async fn capsule_worker_loop() {
             Ok(()) => last_error.clear(),
             Err(error) => {
                 let message = format!("{error:#}");
-                if message != last_error {
+                if super::connector::is_new_error(&mut last_error, &message) {
                     eprintln!(
                         "⚠ Forge Anywhere handoff receiver unavailable — local/direct Forge is unaffected: {message}"
                     );
-                    last_error = message;
                 }
             }
         }

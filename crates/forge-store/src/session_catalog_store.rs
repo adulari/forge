@@ -323,6 +323,24 @@ impl Store {
             )?;
         }
         for id in session_ids.iter().rev() {
+            // Only sessions other devices could hold (journaled or adopted from sync) need a
+            // tombstone; the journal call is itself a no-op while sync is off.
+            let synced: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_journal WHERE record_kind = 'session' AND stable_id = ?1)
+                     OR EXISTS(SELECT 1 FROM anywhere_sync_materialized
+                               WHERE record_kind = 'session' AND stable_id = ?1)",
+                [id],
+                |row| row.get(0),
+            )?;
+            if synced {
+                crate::append_sync_revision(
+                    &tx,
+                    "session",
+                    id,
+                    crate::SyncJournalOperation::Tombstone,
+                    &[],
+                )?;
+            }
             tx.execute("DELETE FROM session WHERE id = ?1", [id])?;
         }
         tx.commit()?;

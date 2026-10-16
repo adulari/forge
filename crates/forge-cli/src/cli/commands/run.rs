@@ -2980,9 +2980,13 @@ pub(crate) async fn run_chat_tui(
                 app.prompt = None;
                 if outcome == ConfirmOutcome::AlwaysAllow {
                     // The session core persists the rule, scoped to the command it approved.
-                    app.note(&format!(
-                        "✓ {tool} always allowed — saved to .forge/config.toml"
-                    ));
+                    // MCP tools get an in-memory rule only; the session core persists the rest.
+                    let scope = if tool == forge_mcp::MCP_CALL || tool.contains("__") {
+                        "for this session"
+                    } else {
+                        "saved to .forge/config.toml"
+                    };
+                    app.note(&format!("✓ {tool} always allowed — {scope}"));
                 }
             } else if app.awaiting_question() {
                 // Answering an `ask_user` form (the turn task is blocked in `ask_form()`): the
@@ -3209,7 +3213,7 @@ pub(crate) async fn run_chat_tui(
                             dirty = true;
                             continue;
                         }
-                        let (line, submit_images) = app.resolve_paste_blocks(raw_line);
+                        let (line, mut submit_images) = app.resolve_paste_blocks(raw_line);
                         prompt_history.record(&line);
                         // `//foo` escapes to a literal prompt `/foo`; a bare `/cmd` typed without
                         // the palette still dispatches as a command; everything else is a prompt.
@@ -3253,6 +3257,11 @@ pub(crate) async fn run_chat_tui(
                                 }
                             }
                         } else if line.starts_with('/') {
+                            // A command line consumes the input box; images attached earlier go
+                            // back into it so a second `/image` does not drop the first.
+                            for img in std::mem::take(&mut submit_images) {
+                                app.attach_image(img, "image");
+                            }
                             match dispatch_command(
                                 &line,
                                 &session,

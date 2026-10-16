@@ -243,9 +243,14 @@ export default function NewSessionScreen() {
 
   useEffect(() => {
     if (!activeServerId || !projects.data) return;
-    const initializationKey = `${activeServerId}:${requestedCwd ?? ""}`;
+    // default_cwd is part of the key so a fresh response replaces the one from the persisted
+    // query cache, unless the user already picked a project on this screen.
+    const serverKey = `${activeServerId}:${requestedCwd ?? ""}`;
+    const initializationKey = `${serverKey}:${projects.data.default_cwd}`;
     if (initializedProjectKey.current === initializationKey) return;
+    const sameServer = initializedProjectKey.current?.startsWith(`${serverKey}:`) ?? false;
     initializedProjectKey.current = initializationKey;
+    if (sameServer && projectSelectionRevision.current > 0) return;
     if (requestedCwd) {
       setCwd(requestedCwd);
       return;

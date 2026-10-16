@@ -126,6 +126,7 @@ pub async fn run() -> anyhow::Result<usize> {
     sections.push(("Model health", crate::doctor_health::model_health_checks()));
     sections.push(("Background daemon", daemon));
     sections.push(("Forge Anywhere", crate::doctor_health::anywhere_checks()));
+    sections.extend(crate::doctor_health::lsp_section());
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Session store", store_checks()));
     // Worktree build artifacts are the quietest way to lose a machine: 76 registered worktrees

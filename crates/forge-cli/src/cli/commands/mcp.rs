@@ -293,6 +293,9 @@ pub(crate) fn mcp_logout(server: &str, account: Option<&str>) -> Result<()> {
             Err(e) => anyhow::bail!("keyring error: {e}"),
         },
     }
+    if account.is_none() {
+        forge_mcp::oauth::clear_registered_client(server).map_err(anyhow::Error::msg)?;
+    }
     Ok(())
 }
 
@@ -374,6 +377,18 @@ fn mcp_scope_path(scope: &Scope) -> Result<std::path::PathBuf> {
     }
 }
 
+fn validate_server_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("server name must not be empty");
+    }
+    if name.contains("__") || name.chars().any(char::is_whitespace) {
+        anyhow::bail!(
+            "server name '{name}' must not contain whitespace or '__' (it prefixes tool names as <name>__<tool>)"
+        );
+    }
+    Ok(())
+}
+
 /// `forge mcp add <name> [--transport stdio|sse|http] [--scope local|user|project] ...`
 ///
 /// Adds a server entry to the chosen scope's `mcp.toml`. Secrets (bearer token env vars) are
@@ -390,6 +405,8 @@ pub(crate) fn mcp_add(
     command: Vec<String>,
 ) -> Result<()> {
     let path = mcp_scope_path(&scope)?;
+
+    validate_server_name(&name)?;
 
     // Parse KEY=VALUE env vars.
     let mut env_map = std::collections::HashMap::new();
@@ -408,6 +425,19 @@ pub(crate) fn mcp_add(
             .or_else(|| h.split_once(':'))
             .ok_or_else(|| anyhow::anyhow!("--header must be KEY=VALUE or KEY:VALUE, got: {h}"))?;
         header_map.insert(k.to_string(), v.to_string());
+    }
+
+    for (k, v) in env_map.iter().chain(header_map.iter()) {
+        if !v.is_empty()
+            && (forge_config::looks_secret(k)
+                || k.eq_ignore_ascii_case("authorization")
+                || forge_config::embeds_credentials(v))
+        {
+            eprintln!(
+                "warning: '{k}' looks like a secret and is written in plaintext to {}; prefer --bearer-token-env-var or `forge mcp import`, which stores it in the keyring",
+                path.display()
+            );
+        }
     }
 
     let mcp_transport = match transport {
@@ -489,6 +519,9 @@ pub(crate) fn mcp_remove(name: String, scope: Scope) -> Result<()> {
     forge_config::write_mcp_toml(&path, &config)
         .with_context(|| format!("writing {}", path.display()))?;
     println!("✓ removed server '{name}' from {}", path.display());
+    if let Err(e) = forge_mcp::oauth::clear_registered_client(&name) {
+        eprintln!("warning: {e}");
+    }
     Ok(())
 }
 

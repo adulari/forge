@@ -21,35 +21,52 @@ interface WrappedCredentials {
  */
 export function anywhereCredentialStore(): AnywhereCredentialStore {
   return {
-    async load(): Promise<StoredAnywhereCredentials | null> {
-      const database = await openDatabase();
-      const wrapped = await get<WrappedCredentials>(database, CIPHERTEXT);
-      if (wrapped == null) return null;
-      const key = await get<CryptoKey>(database, WRAPPING_KEY);
-      if (key == null) throw new Error("Forge Anywhere browser wrapping key is missing");
-      const plaintext = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: wrapped.iv },
-        key,
-        wrapped.ciphertext,
-      );
-      return parseStoredCredentials(new TextDecoder().decode(plaintext));
-    },
+    load: (): Promise<StoredAnywhereCredentials | null> => withDatabase(loadCredentials),
     async save(credentials): Promise<void> {
-      const database = await openDatabase();
-      const key = await wrappingKey(database);
-      const iv = crypto.getRandomValues(new Uint8Array(12));
-      const plaintext = new TextEncoder().encode(JSON.stringify(credentials));
-      const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
-      await put(database, CIPHERTEXT, {
-        iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength),
-        ciphertext,
-      } satisfies WrappedCredentials);
+      await withDatabase((database) => saveCredentials(database, credentials));
     },
     async clear(): Promise<void> {
-      const database = await openDatabase();
-      await Promise.all([remove(database, CIPHERTEXT), remove(database, WRAPPING_KEY)]);
+      await withDatabase(async (database) => {
+        await Promise.all([remove(database, CIPHERTEXT), remove(database, WRAPPING_KEY)]);
+      });
     },
   };
+}
+
+async function withDatabase<T>(run: (database: IDBDatabase) => Promise<T>): Promise<T> {
+  const database = await openDatabase();
+  try {
+    return await run(database);
+  } finally {
+    database.close();
+  }
+}
+
+async function loadCredentials(database: IDBDatabase): Promise<StoredAnywhereCredentials | null> {
+  const wrapped = await get<WrappedCredentials>(database, CIPHERTEXT);
+  if (wrapped == null) return null;
+  const key = await get<CryptoKey>(database, WRAPPING_KEY);
+  if (key == null) throw new Error("Forge Anywhere browser wrapping key is missing");
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: wrapped.iv },
+    key,
+    wrapped.ciphertext,
+  );
+  return parseStoredCredentials(new TextDecoder().decode(plaintext));
+}
+
+async function saveCredentials(
+  database: IDBDatabase,
+  credentials: StoredAnywhereCredentials,
+): Promise<void> {
+  const key = await wrappingKey(database);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(credentials));
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
+  await put(database, CIPHERTEXT, {
+    iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength),
+    ciphertext,
+  } satisfies WrappedCredentials);
 }
 
 async function wrappingKey(database: IDBDatabase): Promise<CryptoKey> {

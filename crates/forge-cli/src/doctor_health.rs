@@ -394,6 +394,38 @@ pub(crate) fn anywhere_checks() -> Vec<Check> {
     }
 }
 
+/// The "Language servers" report section, present only when `[lsp] enabled`.
+pub(crate) fn lsp_section() -> Option<(&'static str, Vec<Check>)> {
+    let config = forge_config::load().ok()?;
+    config
+        .lsp
+        .enabled
+        .then(|| ("Language servers", lsp_checks(&config.lsp)))
+}
+
+fn lsp_checks(config: &forge_config::LspConfig) -> Vec<Check> {
+    let missing = forge_lsp::LspRegistry::from_config(config).missing_servers();
+    if missing.is_empty() {
+        return vec![check(
+            Status::Ok,
+            "lsp",
+            "every known language server binary is on PATH",
+            None,
+        )];
+    }
+    missing
+        .into_iter()
+        .map(|(lang, command)| {
+            check(
+                Status::Warn,
+                &format!("lsp {lang}"),
+                format!("`{command}` not found on PATH; {lang} diagnostics are skipped silently"),
+                Some("install it, or point [lsp.servers.<lang>] at the right binary"),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

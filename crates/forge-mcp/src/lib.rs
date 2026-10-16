@@ -708,7 +708,7 @@ impl McpManager {
                     .iter()
                     .map(|term| if hay.contains(term) { 1 } else { 0 })
                     .sum();
-                if terms.is_empty() || score > 0 {
+                if (terms.is_empty() || score > 0) && self.config.tool_allowed(&t.qualified) {
                     scored.push((
                         score,
                         t.qualified.clone(),
@@ -720,11 +720,19 @@ impl McpManager {
         }
         drop(conns);
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let total = scored.len();
         scored.truncate(15);
         if scored.is_empty() {
             return McpCallOutcome::ok("no matching MCP tools".to_string());
         }
-        let mut out = format!("{} matching MCP tool(s):\n", scored.len());
+        let mut out = if total > scored.len() {
+            format!(
+                "{total} matching MCP tool(s), showing the top {} (narrow the query or pass `server`):\n",
+                scored.len()
+            )
+        } else {
+            format!("{} matching MCP tool(s):\n", scored.len())
+        };
         for (_, name, desc, hint) in &scored {
             out.push_str(&format!("  {name} — {desc}\n      args: {hint}\n"));
         }
@@ -844,6 +852,28 @@ impl McpManager {
             })
         };
         let Some((server, raw_name)) = resolved else {
+            let unhealthy = {
+                let conns = self.conns.lock();
+                conns
+                    .values()
+                    .filter(|c| {
+                        qualified
+                            .strip_prefix(c.name.as_str())
+                            .is_some_and(|rest| rest.starts_with("__"))
+                    })
+                    .find_map(|c| match &c.status {
+                        ServerStatus::Connected | ServerStatus::Slow => None,
+                        ServerStatus::Failed(reason) => {
+                            Some(format!("server '{}' failed: {reason}", c.name))
+                        }
+                        other => Some(format!("server '{}' is {}", c.name, other.word())),
+                    })
+            };
+            if let Some(reason) = unhealthy {
+                return McpCallOutcome::err(format!(
+                    "mcp: tool '{qualified}' is unavailable, {reason}"
+                ));
+            }
             return McpCallOutcome::err(format!(
                 "mcp: tool '{qualified}' no longer exists (server updated its tools)"
             ));
