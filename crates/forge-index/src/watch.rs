@@ -169,8 +169,9 @@ where
     // only fails once the worker has exited (channel closed); that can't normally happen while the
     // watcher is alive, so it's ignored.
     let handler_errors = Arc::clone(&errors);
+    let handler_root = root.to_path_buf();
     let handler = move |res: notify::Result<Event>| match res {
-        Ok(event) => forward_event(&event, &tx),
+        Ok(event) => forward_event(&event, &tx, &handler_root),
         Err(e) => record_watcher_error(&handler_errors, &format!("notify backend error: {e}")),
     };
 
@@ -203,12 +204,14 @@ where
 
     let shared: SharedWatcher = Arc::new(Mutex::new(watcher));
     let worker_watcher = Arc::downgrade(&shared);
+    let worker_root = root.to_path_buf();
     let worker = std::thread::Builder::new()
         .name("forge-lattice-reindex".into())
         .spawn(move || {
             let mut registrar = DirRegistrar {
                 watcher: worker_watcher,
                 watched,
+                root: worker_root,
             };
             run_reindex_worker(rx, coalesce, &mut registrar, reindex);
         })
@@ -229,7 +232,7 @@ fn source_dirs(root: &Path) -> Vec<PathBuf> {
 /// Turn one notify event into worker messages. Pure apart from a single `is_dir` stat on
 /// create/rename events (needed to tell a new directory from a new file); every other event is
 /// classified from its kind and path alone.
-fn forward_event(event: &Event, tx: &Sender<Change>) {
+fn forward_event(event: &Event, tx: &Sender<Change>, root: &Path) {
     if !is_content_event(&event.kind) {
         return;
     }
@@ -240,9 +243,9 @@ fn forward_event(event: &Event, tx: &Sender<Change>) {
             | EventKind::Modify(ModifyKind::Name(_))
     );
     for path in &event.paths {
-        if should_reindex(path) {
+        if should_reindex(path, root) {
             let _ = tx.send(Change::Source(path.clone()));
-        } else if may_be_new_dir && is_watchable_dir(path) {
+        } else if may_be_new_dir && is_watchable_dir(path, root) {
             let _ = tx.send(Change::NewDir(path.clone()));
         }
     }
@@ -263,11 +266,13 @@ fn is_content_event(kind: &EventKind) -> bool {
 /// A directory the watcher should register when it appears at runtime: exists, is a directory,
 /// and no component of its path is a skipped directory (a new `target/debug/…` build dir or a
 /// fresh worktree under `.forge/` must not pull the watch set back up to tens of thousands).
-fn is_watchable_dir(path: &Path) -> bool {
+fn is_watchable_dir(path: &Path, root: &Path) -> bool {
     if !path.is_dir() {
         return false;
     }
     let skipped = path
+        .strip_prefix(root)
+        .unwrap_or(path)
         .components()
         .filter_map(|c| c.as_os_str().to_str())
         .any(is_skippable_dir);
@@ -280,6 +285,7 @@ fn is_watchable_dir(path: &Path) -> bool {
 struct DirRegistrar {
     watcher: Weak<Mutex<Box<dyn Watcher + Send>>>,
     watched: HashSet<PathBuf>,
+    root: PathBuf,
 }
 
 impl DirRegistrar {
@@ -305,7 +311,7 @@ impl DirRegistrar {
                     }
                     Err(e) => tracing::debug!("lattice watch skipped {path:?}: {e}"),
                 }
-            } else if should_reindex(path) {
+            } else if should_reindex(path, &self.root) {
                 files.push(path.to_path_buf());
             }
         }
@@ -367,12 +373,16 @@ fn drain_pending(rx: &Receiver<Change>, batch: &mut HashSet<Change>) {
 
 /// A changed path is worth reindexing only if it's a supported source file and none of its path
 /// components is a skipped directory (build output, `.git`, `node_modules`, …).
-fn should_reindex(path: &Path) -> bool {
+fn should_reindex(path: &Path, root: &Path) -> bool {
     // Only the DIRECTORY components are skip-tested — not the filename. `is_skippable_dir` treats any
     // dot-prefixed name as a skipped dir, so checking the final component wrongly excluded dotfile
     // SOURCE files (`.eslintrc.js`, a hidden `.foo.rs`) that the initial `update()` walk DID index
     // (it only applies the skip to directory entries), leaving the watcher unable to refresh them.
+    // Skip-test only the part below the watch root: a root that itself lives under a dot dir
+    // (`~/.local/...`, a `build/` checkout) must still be watched.
     let skipped = path
+        .strip_prefix(root)
+        .unwrap_or(path)
         .parent()
         .into_iter()
         .flat_map(|p| p.components())
@@ -506,8 +516,13 @@ mod tests {
         DirRegistrar {
             watcher: Weak::new(),
             watched: HashSet::new(),
+            root: PathBuf::new(),
         }
     }
+
+    /// Serializes tests that create watchers: `inotify_watch_count` is process-wide, so a sibling
+    /// test's watcher would skew the before/after delta.
+    static WATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn fresh_root(tag: &str) -> PathBuf {
         let n = N.fetch_add(1, Ordering::SeqCst);
@@ -559,6 +574,7 @@ mod tests {
 
     #[test]
     fn the_reindexers_own_reads_do_not_feed_the_watcher() {
+        let _serial = WATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Production shape: the reindex action READS the file it was woken for. With access events
         // forwarded, that read is itself an event for the same file, and the watcher feeds itself
         // forever (one core per Forge process, observed). So: trigger one real write, wait for it
@@ -606,6 +622,7 @@ mod tests {
 
     #[test]
     fn only_source_directories_are_watched() {
+        let _serial = WATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Build output, VCS, and dependency trees get no watch at all — not merely filtered after
         // the fact. Measured directly on inotify where available: exactly root + src.
         let root = fresh_root("scope");
@@ -658,6 +675,7 @@ mod tests {
 
     #[test]
     fn a_directory_created_after_startup_is_watched() {
+        let _serial = WATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A new module directory (mkdir + first file) must be picked up without a restart: the
         // watch set follows the tree, it is not a startup snapshot.
         let root = fresh_root("newdir");
@@ -691,20 +709,41 @@ mod tests {
         // A dot-prefixed SOURCE file must be reindexed (the initial walk indexes it); only a
         // dot/skip DIRECTORY in the path excludes it.
         assert!(
-            should_reindex(Path::new("src/.hidden.rs")),
+            should_reindex(Path::new("src/.hidden.rs"), Path::new("")),
             "dotfile source"
         );
-        assert!(should_reindex(Path::new(".eslintrc.js")), "dotfile at root");
-        assert!(!should_reindex(Path::new(".git/config.rs")), "inside .git");
         assert!(
-            !should_reindex(Path::new("node_modules/x.js")),
+            should_reindex(Path::new(".eslintrc.js"), Path::new("")),
+            "dotfile at root"
+        );
+        assert!(
+            !should_reindex(Path::new(".git/config.rs"), Path::new("")),
+            "inside .git"
+        );
+        assert!(
+            !should_reindex(Path::new("node_modules/x.js"), Path::new("")),
             "vendor dir"
         );
-        assert!(!should_reindex(Path::new("src/a.txt")), "unsupported ext");
+        assert!(
+            !should_reindex(Path::new("src/a.txt"), Path::new("")),
+            "unsupported ext"
+        );
+        assert!(
+            should_reindex(
+                Path::new("/home/u/.local/build/proj/src/a.rs"),
+                Path::new("/home/u/.local/build/proj")
+            ),
+            "dot/build dirs ABOVE the watch root do not count"
+        );
+        assert!(!should_reindex(
+            Path::new("/home/u/.local/build/proj/.git/a.rs"),
+            Path::new("/home/u/.local/build/proj")
+        ));
     }
 
     #[test]
     fn external_edit_is_reindexed_automatically() {
+        let _serial = WATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = N.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!("forge-watch-{}-{n}", std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -740,6 +779,7 @@ mod tests {
 
     #[test]
     fn poll_backend_reindexes_external_edit() {
+        let _serial = WATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Proves the POLLING backend (used on 9p/remote filesystems where inotify is unreliable)
         // actually picks up edits — exercised here on the native test fs via `build_watcher(poll=true)`
         // with a short interval, since CI has no 9p mount.
@@ -783,6 +823,7 @@ mod tests {
 
     #[test]
     fn watcher_held_only_through_a_channel_still_reindexes() {
+        let _serial = WATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Production never drains the watcher: it's sent into an mpsc channel and the Session holds
         // the Receiver for keep-alive (so setup is off-thread + the watcher is owned per-session).
         // Prove a watcher sitting UN-received in the channel buffer still runs and reindexes — and
@@ -887,10 +928,19 @@ mod tests {
 
     #[test]
     fn skips_build_dirs_and_unsupported_files() {
-        assert!(should_reindex(Path::new("crates/forge-index/src/lib.rs")));
-        assert!(!should_reindex(Path::new("target/debug/build.rs")));
-        assert!(!should_reindex(Path::new("notes.txt")));
-        assert!(!should_reindex(Path::new("node_modules/x/index.js")));
+        assert!(should_reindex(
+            Path::new("crates/forge-index/src/lib.rs"),
+            Path::new("")
+        ));
+        assert!(!should_reindex(
+            Path::new("target/debug/build.rs"),
+            Path::new("")
+        ));
+        assert!(!should_reindex(Path::new("notes.txt"), Path::new("")));
+        assert!(!should_reindex(
+            Path::new("node_modules/x/index.js"),
+            Path::new("")
+        ));
     }
 
     #[test]
