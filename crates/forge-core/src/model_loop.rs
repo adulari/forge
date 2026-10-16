@@ -123,6 +123,16 @@ impl Session {
         // (tools executed, tasks resolved) captured when the last continue-nudge was sent — see
         // `nudge_policy::decide`.
         let mut last_nudge_progress: Option<nudge_policy::Progress> = None;
+        // Unanswered nudges from earlier turns count against this one while no task has moved,
+        // so an unrelated question does not restart the budget on a list the person abandoned.
+        let done_now = self
+            .tasks
+            .len()
+            .saturating_sub(nudge_policy::open_titles(&self.tasks).len());
+        if self.idle_nudge_carry.0 > 0 && self.idle_nudge_carry.1 == done_now {
+            idle_nudges = self.idle_nudge_carry.0;
+            last_nudge_progress = Some((0, done_now));
+        }
         // Mid-intent nudges sent in the current stretch of idleness; see `followup_intent_nudge`.
         let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
@@ -660,6 +670,7 @@ impl Session {
                                     progress_now,
                                 );
                                 last_nudge_progress = Some(progress_now);
+                                self.idle_nudge_carry = (idle_nudges, progress_now.1);
                                 // Kimi K3 answers a plain nudge by repeating its announcement.
                                 self.require_tool_call = true;
                                 self.presenter.emit(PresenterEvent::Warning(

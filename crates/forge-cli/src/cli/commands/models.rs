@@ -274,7 +274,18 @@ pub(crate) async fn models(
     }
     // An explicit `forge models` runs with the user's full key environment — persist what it
     // found so the daemon's /api/models (which serves this cache) reflects it immediately.
-    save_catalog(&cat);
+    // When every provider that was asked answered, a smaller catalog is the truth (a provider was
+    // disabled or its key removed), not degraded discovery: skip the clobber guard.
+    if statuses.iter().all(|s| {
+        matches!(
+            s.kind,
+            DiscoveryStatusKind::Discovered | DiscoveryStatusKind::Unsupported
+        )
+    }) {
+        discovery::write_catalog(&cat);
+    } else {
+        save_catalog(&cat);
+    }
     let store = open_store()?;
 
     if probe {

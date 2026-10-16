@@ -5,6 +5,7 @@
 use super::*;
 
 mod deferred;
+mod denial;
 mod mcp;
 mod permission_hooks;
 
@@ -382,9 +383,10 @@ impl Session {
         };
 
         let side_effect = tool.side_effect();
+        let announced = serde_json::to_string(&call.args).unwrap_or_else(|_| args_json.clone());
         self.presenter.emit(PresenterEvent::ToolStart {
             name: call.name.clone(),
-            args: args_json.clone(),
+            args: announced,
         });
 
         // PreToolUse hooks (hooks.md): run user shell hooks before the tool. A non-zero exit
@@ -697,16 +699,13 @@ impl Session {
             )
         } else if let Some(note) = self.floor_denial(&call.name, &effective_args) {
             (note, None, false)
-        } else if user_declined {
-            // Not "by policy": nothing forbade it, the person said no. The model reads this, and
-            // "policy" would send it hunting for a rule to work around instead of asking.
-            (
-                "permission denied by the user (declined at the prompt)".to_string(),
-                None,
-                false,
-            )
         } else {
-            ("permission denied by policy".to_string(), None, false)
+            denial::result(
+                &call.name,
+                self.mode,
+                user_declined,
+                self.presenter.is_attended(),
+            )
         };
         self.record_test_proof(&call.name, &effective_args, &result, full.as_deref());
 

@@ -106,6 +106,19 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the session's last terminal process died without its clean-exit cleanup: still
+    /// flagged local-live but silent for longer than [`LOCAL_PRESENCE_STALE_SECS`]. Clears the
+    /// stale flag when it reports `true`, so the notice is shown once.
+    pub fn take_unclean_exit(&self, session_id: &str) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "UPDATE session SET local_live = 0, local_busy = 0, local_control_url = NULL
+             WHERE id = ?1 AND local_live = 1
+               AND COALESCE(local_last_seen, 0) < strftime('%s','now') - ?2",
+            rusqlite::params![session_id, crate::LOCAL_PRESENCE_STALE_SECS],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Refresh the liveness heartbeat and busy flag for a locally-live session. Called at turn
     /// start/end and on a coarse idle tick so a killed terminal's row ages out instead of showing
     /// live forever. A no-op (0 rows touched) if the session isn't currently marked local-live —

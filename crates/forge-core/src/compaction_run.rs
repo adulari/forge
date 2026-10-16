@@ -109,7 +109,14 @@ impl Session {
     }
 
     pub async fn compact(&mut self, auto: bool) -> Result<(usize, usize), CoreError> {
-        self.compact_for(auto, None).await
+        let result = self.compact_for(auto, None).await;
+        // The auto path refreshes the gauge itself; a manual compaction must too.
+        if let (false, Ok((before, after))) = (auto, &result) {
+            if before != after {
+                self.refresh_gauge_after_history_change();
+            }
+        }
+        result
     }
 
     /// The number auto-compaction compares against for `model` (the session's own when `None`):
