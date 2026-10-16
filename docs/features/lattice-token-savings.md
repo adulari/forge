@@ -235,3 +235,7 @@ spending model calls.
 - **Repo/symbol map** — a compact file list to kill `glob`/`ls` orientation calls.
 - **1-hop call-graph names** — callers/callees of the top symbols.
 - **Ranking** — centrality penalty for noise names (`new`, `run`) + file-locality boost.
+
+## TypeScript and TSX
+
+`.ts`, `.mts`, `.cts` and `.tsx` files are indexed with the JavaScript tags query plus the typescript crate's own, with enums and type aliases added, so functions, classes, methods, interfaces, enums and type aliases all appear in `map` and `query`.
