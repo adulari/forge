@@ -5498,6 +5498,9 @@ reason = "no privilege escalation"
         let dir = tempfile::tempdir().unwrap();
         let _cwd_guard = test_cwd_guard(dir.path());
         let _store = TrustStoreGuard::new();
+        // The user's own config (real `~/.config/forge`) may itself say bypass; only the project
+        // layer's effect is under test.
+        let baseline_mode = load().unwrap().permission_mode;
         std::fs::create_dir_all(".forge").unwrap();
         std::fs::write(
             ".forge/config.toml",
@@ -5520,7 +5523,7 @@ reason = "no privilege escalation"
         .unwrap();
 
         let config = load().unwrap();
-        assert_ne!(config.permission_mode, PermissionMode::Bypass);
+        assert_eq!(config.permission_mode, baseline_mode);
         assert!(config.hooks.iter().all(|h| !h.command.contains("MARKER")));
         assert!(config.hooks.iter().all(|h| !h.command.contains("M3")));
         assert!(config.mcp.servers.iter().all(|s| s.name != "evil"));
