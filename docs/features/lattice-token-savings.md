@@ -45,6 +45,8 @@ close-without-write — are dropped before they reach the worker; `Close(Write)`
 shows up, is kept. `the_reindexers_own_reads_do_not_feed_the_watcher` uses the production shape (a
 reindex action that reads its file) and asserts the count stops moving once the tree is quiet.
 
+The skip rules (dot directories, `build/`, `vendor/`, …) apply only to the part of an event path below the watch root, so a project that itself lives under `~/.local/` or a `build/` checkout is still watched (`should_reindex` in `crates/forge-index/src/watch.rs`).
+
 **Watch what you index.** One recursive watch on the project root registered ~55,000 inotify
 watches here — `target/`, `node_modules/`, `.git/`, every worktree — so any cargo build in a
 sibling worktree woke the watcher thread for nothing. The watcher now registers one non-recursive
