@@ -530,6 +530,14 @@ app's WebSocket onto it — see `serve/serve_local_control.rs`. The proxy is pro
 messages both ways, `?rev=` reconnect replay included, so a terminal session behaves identically to
 a daemon-hosted one and there is nothing to keep in step as `Snapshot` and `RemoteInput` grow.
 
+Archive, delete and resume are gated for such a session: `POST /api/sessions/{id}/archive`,
+`DELETE /api/sessions/{id}` and `POST /api/sessions {"resume": id}` answer 409 (`resume` with code
+`session_open_in_terminal`) while the terminal's presence heartbeat is fresh. Deleting used to
+remove the rows out from under the live writer, which then re-created a stub with only what it sent
+afterwards; resuming put a second driver on one session. The opposite direction is guarded too:
+`forge chat --resume <id>`, `--continue` and the `/resume` picker refuse a session a live
+`forge serve` daemon is driving (`forge attach <id>` instead).
+
 Two independent row flags fall out of that. `terminal` says the session runs in a terminal and this
 daemon owns none of its lifecycle — it gates archive/merge/discard, which stop a driver that does
 not exist here. `read_only` says there is no input path at all, and is now true only for a terminal

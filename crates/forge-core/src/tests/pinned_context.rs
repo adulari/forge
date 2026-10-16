@@ -666,3 +666,75 @@ async fn a_stored_memory_message_keeps_the_recalled_memories_out_of_the_block() 
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn global_memories_are_recalled_alongside_the_projects() {
+    let dir = workspace(None);
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    store
+        .add_memory(
+            "global",
+            "fact",
+            "GLOBALFACT the staging cluster is blue",
+            "manual",
+        )
+        .unwrap();
+    store
+        .add_memory(
+            &crate::memory_scope_at(&dir),
+            "fact",
+            "PROJFACT the build uses green runners",
+            "manual",
+        )
+        .unwrap();
+    let provider = Arc::new(Recorder::default());
+    let mut config = quiet_config();
+    config.mesh.auto_memory = true;
+    let mut session = start(&store, &dir, &provider, config);
+    session
+        .run_turn("which cluster and runners?")
+        .await
+        .unwrap();
+
+    let request = provider.last();
+    assert_eq!(holding(&request, "GLOBALFACT"), 1, "global memory recalled");
+    assert_eq!(
+        holding(&request, "PROJFACT"),
+        1,
+        "project memory still recalled"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn merge_recalled_reserves_room_for_global_memories_without_wasting_slots() {
+    fn mem(id: &str) -> forge_store::Memory {
+        forge_store::Memory {
+            id: id.into(),
+            scope: String::new(),
+            kind: "fact".into(),
+            text: id.into(),
+            source_session: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            salience: 0.5,
+        }
+    }
+    let ids = |v: Vec<forge_store::Memory>| v.into_iter().map(|m| m.id).collect::<Vec<_>>();
+    let many: Vec<_> = (0..6).map(|i| mem(&format!("p{i}"))).collect();
+    let merged = crate::pinned_context::merge_recalled(many.clone(), vec![mem("g0"), mem("g1")], 6);
+    assert_eq!(ids(merged), ["p0", "p1", "p2", "p3", "g0", "g1"]);
+    // Nothing global: the project keeps every slot. Nothing project: global fills them.
+    assert_eq!(
+        crate::pinned_context::merge_recalled(many.clone(), vec![], 6).len(),
+        6
+    );
+    let globals: Vec<_> = (0..8).map(|i| mem(&format!("g{i}"))).collect();
+    assert_eq!(
+        crate::pinned_context::merge_recalled(vec![], globals, 6).len(),
+        6
+    );
+    // The same row in both scopes is listed once.
+    let both = crate::pinned_context::merge_recalled(vec![mem("x")], vec![mem("x")], 6);
+    assert_eq!(ids(both), ["x"]);
+}

@@ -662,12 +662,9 @@ pub(crate) async fn run_chat_tui(
         app.note(&format!("⚠ {w}"));
     }
     let trust_project = session.lock().await.commands_trust_project();
-    // Git attribution: auto-install the model-aware commit hook when enabled, and remember the
-    // flag so each turn's routed model is written where the hook can stamp it.
-    let git_coauthor = tui_config.git.coauthor;
-    if git_coauthor {
-        maybe_install_git_hook(&tui_config);
-    }
+    // Git attribution: install the commit hook up front when enabled (the session keeps the
+    // hook's model file current itself, before every model request).
+    maybe_install_git_hook(&tui_config);
     let (sid, session_store) = {
         let (hooks, sid, workspace, store) = {
             let s = session.lock().await;
@@ -902,8 +899,6 @@ pub(crate) async fn run_chat_tui(
     // only begins a calm blink after a short idle gap (like Claude Code) — measured from the last
     // input event, so it never flickers mid-keystroke.
     let mut last_input_at = std::time::Instant::now();
-    // Last model written to `$GIT_DIR/forge-model` for commit attribution (only when coauthor on).
-    let mut last_model_written = String::new();
     // ↑/↓ prompt history. Seeded from the store so it survives closing the session: this
     // session's own prompts, preceded by recent prompts from other sessions in this workspace.
     // Every prompt is recorded the moment it is submitted, idle or busy (`PromptHistory`).
@@ -2503,6 +2498,10 @@ pub(crate) async fn run_chat_tui(
                     }
                     KeyKind::Up => app.picker.move_up(),
                     KeyKind::Down => app.picker.move_down(),
+                    KeyKind::PageUp => app.picker.page_up(picker_page_rows(tui.height())),
+                    KeyKind::PageDown => app.picker.page_down(picker_page_rows(tui.height())),
+                    KeyKind::Home => app.picker.home(),
+                    KeyKind::End => app.picker.end(),
                     // `->` on a pinnable model opens its effort rungs (the `>` affordance in the
                     // row). Enter still pins at the best value, so the second step is opt-in for
                     // when the trade matters rather than a keystroke everyone pays.
@@ -2526,7 +2525,9 @@ pub(crate) async fn run_chat_tui(
                         if let Some(row) = app.picker.selected_row() {
                             if !row.id.starts_with("observe:") {
                                 let store = crate::open_store()?;
-                                if app.show_archived {
+                                // The row's own state decides, not the view: a row is only
+                                // un-archived if it is archived.
+                                if store.session_archived(&row.id)? {
                                     store.unarchive_session(&row.id)?;
                                 } else {
                                     store.archive_session(&row.id)?;
@@ -2729,10 +2730,12 @@ pub(crate) async fn run_chat_tui(
                     KeyKind::Char(c) => {
                         app.picker.query.push(c);
                         app.picker.clamp();
+                        augment_sessions_picker_search(&mut app);
                     }
                     KeyKind::Backspace => {
                         app.picker.query.pop();
                         app.picker.clamp();
+                        augment_sessions_picker_search(&mut app);
                     }
                     KeyKind::Tab
                     | KeyKind::CycleTemper
@@ -3564,17 +3567,6 @@ pub(crate) async fn run_chat_tui(
         }
         if let Some(started) = apply_started.filter(|_| applied) {
             forge_tui::perf::record(forge_tui::perf::Metric::Apply, started.elapsed());
-        }
-
-        // Keep the commit hook's model file current with whichever model ran the latest turn, so a
-        // commit the agent makes is attributed to the model that actually did the work.
-        if git_coauthor {
-            if let Some(model) = app.routing.as_ref().map(|r| r.model.clone()) {
-                if !model.is_empty() && model != last_model_written {
-                    write_active_model(&model);
-                    last_model_written = model;
-                }
-            }
         }
 
         // Drain remote-control inputs (a browser sent a prompt / answer / interrupt) and inject

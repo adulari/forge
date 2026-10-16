@@ -486,8 +486,19 @@ pub(crate) enum Command {
         #[arg(long)]
         mock: bool,
     },
-    /// List past sessions (newest first).
-    Sessions,
+    /// List past sessions (newest first). Archived sessions are hidden unless asked for; resuming
+    /// one (`forge chat --resume <id>`) or `--unarchive <id>` brings it back.
+    Sessions {
+        /// List only archived sessions.
+        #[arg(long, conflicts_with = "all")]
+        archived: bool,
+        /// List live and archived sessions together (archived ones are tagged).
+        #[arg(long)]
+        all: bool,
+        /// Un-archive this session (id or unique prefix) so it shows in the normal list again.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["archived", "all"])]
+        unarchive: Option<String>,
+    },
     /// Replay a past session from the record: one id prints its turn-by-turn transcript
     /// (model, tokens, cost, time per turn); two ids diff their summaries.
     Replay {
@@ -1099,13 +1110,16 @@ pub(crate) enum ExportScope {
 #[derive(Subcommand)]
 pub(crate) enum GitCmd {
     /// Install the `prepare-commit-msg` git hook that strips Claude/Codex co-author lines and
-    /// adds `Co-Authored-By: Forge <noreply@forge.dev>`. Requires `[git] coauthor = true` in
+    /// adds `Co-Authored-By: Forge <forge@adulari.dev>`. Works in linked worktrees and submodules,
+    /// keeps (and chains) an existing hook, and reports `core.hooksPath` instead of ignoring it. Requires `[git] coauthor = true` in
     /// `.forge/config.toml` (or pass `--force` to install regardless).
     Setup {
         /// Install the hook even if `[git] coauthor` is not set in config.
         #[arg(long)]
         force: bool,
     },
+    /// Print the hook script, for calling from your own hook when `core.hooksPath` is set.
+    Hook,
 }
 
 #[derive(Subcommand)]

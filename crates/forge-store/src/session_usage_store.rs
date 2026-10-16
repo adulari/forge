@@ -316,6 +316,7 @@ impl Store {
             Visibility::UiOnly,
             forge_types::MessageKind::Normal,
         )
+        .map(|(id, _)| id)
     }
 
     /// Append a message, including any tool-call linkage (assistant tool calls / tool
@@ -342,6 +343,7 @@ impl Store {
             Visibility::Llm,
             forge_types::MessageKind::Normal,
         )
+        .map(|(id, _)| id)
     }
 
     /// Append a harness-authored message tagged with `kind` (see [`forge_types::MessageKind`]):
@@ -366,6 +368,7 @@ impl Store {
             Visibility::Llm,
             kind,
         )
+        .map(|(id, _)| id)
     }
 
     /// Append provider-continuity transcript that must not appear as a user-facing reply (for
@@ -392,8 +395,13 @@ impl Store {
             Visibility::LlmOnly,
             forge_types::MessageKind::Normal,
         )
+        .map(|(id, _)| id)
     }
 
+    /// Append a message and return `(id, seq)` where `seq` is the row's REAL position. The seq
+    /// asked for can be taken already (a side-call usage anchor row, a concurrent writer), in which
+    /// case the row lands at MAX(seq)+1. Callers that key other state by the row's seq (a rewind
+    /// checkpoint, a snapshot dir) must use the returned one, not the one they asked for.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_message(
         &self,
@@ -406,8 +414,9 @@ impl Store {
         tool_call_id: Option<&str>,
         visibility: Visibility,
         kind: forge_types::MessageKind,
-    ) -> Result<String> {
+    ) -> Result<(String, i64)> {
         let id = forge_types::new_id();
+        let mut landed = seq;
         let tool_calls_json = if tool_calls.is_empty() {
             None
         } else {
@@ -456,9 +465,10 @@ impl Store {
             }))?;
             append_sync_revision(&tx, "message", &id, SyncJournalOperation::Upsert, &payload)?;
             tx.commit()?;
+            landed = s;
             Ok(())
         })?;
-        Ok(id)
+        Ok((id, landed))
     }
 
     /// Record the Mesh's routing decision for a message.

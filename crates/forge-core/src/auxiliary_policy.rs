@@ -142,7 +142,17 @@ prompt text, nothing else.";
             let scope = memory_scope_at(workspace.root());
             // Collect lines into owned Strings before the per-line await to avoid holding
             // a borrow across the embed_one await point.
-            let lines: Vec<String> = r.content.lines().take(3).map(str::to_string).collect();
+            // The extractor quotes whatever the turn contained, and a stored memory is injected
+            // into every later prompt of the project: mask credentials before they persist.
+            let redactor = tokio::task::spawn_blocking(crate::redact::Redactor::from_environment)
+                .await
+                .unwrap_or_default();
+            let lines: Vec<String> = r
+                .content
+                .lines()
+                .take(3)
+                .map(|line| redactor.redact(line).into_owned())
+                .collect();
             for raw in lines {
                 let line = raw.trim().trim_start_matches(['-', '*', '•']).trim();
                 let Some((kind, text)) = line.split_once(':') else {

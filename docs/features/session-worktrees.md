@@ -37,8 +37,8 @@ not merged into the main checkout's `HEAD`; `force: true` discards both, `keep_b
 the branch. The main checkout, the worktree the session is in, and a worktree a `forge serve`
 daemon created for the session are never removed by this tool.
 
-The default location is ignored inside the main checkout (`.forge/worktrees/.gitignore` with
-`*`), so the nested checkouts never show up in its `git status`.
+The default location is ignored inside the main checkout (a `*` `.gitignore` in `.forge/worktrees/`, and the same for
+`.forge/worktree-owners/`), so the nested checkouts never show up in its `git status`.
 
 `FORGE_SYSTEM` carries one line telling the model to use this tool instead of `git worktree add`
 plus `cd`.

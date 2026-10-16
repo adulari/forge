@@ -241,6 +241,31 @@ fn a_linked_worktree_head_is_read_through_its_gitdir_pointer() {
 }
 
 #[test]
+fn a_subdirectory_workspace_and_a_detached_head_still_name_the_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = repo(dir.path());
+    let inner = main.join("pkg").join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    assert_eq!(
+        current_git_branch(&inner).as_deref(),
+        Some("main"),
+        "a workspace below the repository root resolves the repository"
+    );
+    let sha = git(&main, &["rev-parse", "HEAD"]);
+    git(&main, &["checkout", "-q", "--detach"]);
+    assert_eq!(
+        current_git_branch(&inner),
+        Some(format!("(detached HEAD at {})", &sha[..7])),
+        "a detached HEAD is reported, not dropped"
+    );
+    assert_eq!(
+        parse_git_head("ref: refs/heads/feat/x\n").as_deref(),
+        Some("feat/x")
+    );
+    assert_eq!(parse_git_head("not a head"), None);
+}
+
+#[test]
 fn the_session_follows_a_root_the_bridge_recorded_in_the_store() {
     let dir = tempfile::tempdir().unwrap();
     let main = repo(dir.path());

@@ -97,3 +97,10 @@ same way?" — the reproducibility/audit half of the feature.
 
 The pure prompt-extraction (`replay::user_prompts`) is unit-tested; the orchestration reuses
 the same `build_session` + `run_turn` path as `forge run`.
+
+## One entry per answer
+
+A finished turn stores its final answer twice: a provider-continuity `llm_only` row (which carries
+the usage) and the published `ui` copy. `Store::load_replay` drops the published copy when it
+repeats the row right before it, so `forge replay` and `--html` print each answer once with its
+model and cost.

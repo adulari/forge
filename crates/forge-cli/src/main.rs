@@ -20,7 +20,7 @@ pub(crate) use cli::args::{
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
-pub(crate) use cli::commands::git::{git_cmd, maybe_install_git_hook, write_active_model};
+pub(crate) use cli::commands::git::{git_cmd, maybe_install_git_hook};
 pub(crate) use cli::commands::import::import_cmd;
 pub(crate) use cli::commands::lattice::lattice_cmd;
 pub(crate) use cli::commands::local::{
@@ -140,6 +140,14 @@ fn init_tracing() {
         }
         LogTarget::File => {
             let _ = std::fs::create_dir_all(".forge");
+            // `.forge/` also holds files a project commits (config, skills, commands), so ignore
+            // only the runtime state, and never touch an ignore file the project already has.
+            if !std::path::Path::new(".forge/.gitignore").exists() {
+                let _ = std::fs::write(
+                    ".forge/.gitignore",
+                    "# Forge runtime state; safe to edit.\n.gitignore\nforge.log\n",
+                );
+            }
             match std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

@@ -27,6 +27,28 @@ and it survives compaction.";
 /// Most recalled memories the block carries.
 pub(crate) const RECALL_LIMIT: usize = 6;
 
+/// The scope `forge memory add --global` writes to.
+const GLOBAL_MEMORY_SCOPE: &str = "global";
+
+/// Merge the two recalls into at most `limit` memories. Global memories get up to half the slots
+/// so a long project list cannot crowd them out; slots a side does not need go to the other.
+pub(crate) fn merge_recalled(
+    project: Vec<forge_store::Memory>,
+    global: Vec<forge_store::Memory>,
+    limit: usize,
+) -> Vec<forge_store::Memory> {
+    let global: Vec<_> = global
+        .into_iter()
+        .filter(|g| project.iter().all(|p| p.id != g.id))
+        .collect();
+    let global_slots = global.len().min((limit / 2).max(1));
+    let project_slots = project.len().min(limit - global_slots.min(limit));
+    let global_slots = global.len().min(limit - project_slots);
+    let mut merged: Vec<forge_store::Memory> = project.into_iter().take(project_slots).collect();
+    merged.extend(global.into_iter().take(global_slots));
+    merged
+}
+
 /// Tasks listed in the block; the rest are counted.
 const LISTED_TASKS: usize = 60;
 
@@ -254,13 +276,18 @@ impl Session {
         }
         memory_scope::align_memory_scopes(&self.store, self.workspace.root());
         let scope = memory_scope_at(self.workspace.root());
-        let recalled = match embed_one(&self.config.lattice.embeddings, query).await {
-            Some(embedding) => self.store.recall_semantic(&scope, &embedding, RECALL_LIMIT),
-            None => self.store.recall_memories(&scope, query, RECALL_LIMIT),
+        let embedding = embed_one(&self.config.lattice.embeddings, query).await;
+        let recall = |scope: &str, limit: usize| match embedding.as_deref() {
+            Some(embedding) => self.store.recall_semantic(scope, embedding, limit),
+            None => self.store.recall_memories(scope, query, limit),
         };
-        let Ok(memories) = recalled else {
+        let Ok(project) = recall(&scope, RECALL_LIMIT) else {
             return;
         };
+        // `forge memory add --global` writes to the `global` scope: recall it alongside the
+        // project's. A failed global read must not hide the project memories.
+        let global = recall(GLOBAL_MEMORY_SCOPE, RECALL_LIMIT).unwrap_or_default();
+        let memories = merge_recalled(project, global, RECALL_LIMIT);
         if memories.is_empty() {
             self.pinned.memories = None;
             return;

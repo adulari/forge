@@ -27,6 +27,15 @@ pub struct Memory {
     pub salience: f64,
 }
 
+/// What [`Store::add_memory_outcome`] did: the row now holding the fact, the text stored on it,
+/// and whether it merged into an existing near-duplicate rather than inserting a new row.
+#[derive(Debug, Clone)]
+pub struct MemoryAdded {
+    pub id: String,
+    pub text: String,
+    pub duplicate: bool,
+}
+
 /// Jaccard token-overlap at or above this counts two memory texts as the same fact (dedup + bump).
 const DUP_JACCARD: f64 = 0.6;
 
@@ -46,32 +55,58 @@ impl Store {
         text: &str,
         source_session: &str,
     ) -> Result<String> {
+        self.add_memory_outcome(scope, kind, text, source_session)
+            .map(|outcome| outcome.id)
+    }
+
+    /// [`Store::add_memory`] that also reports whether the text matched an existing memory (and
+    /// then which text is actually stored), so a caller can tell the person "already remembered"
+    /// instead of echoing text that was never written.
+    pub fn add_memory_outcome(
+        &self,
+        scope: &str,
+        kind: &str,
+        text: &str,
+        source_session: &str,
+    ) -> Result<MemoryAdded> {
         let text = text.trim();
         if text.is_empty() {
-            return Err(StoreError::Pool("empty memory text".into()));
+            return Err(StoreError::InvalidValue("empty memory text".into()));
         }
         let id = forge_types::new_id();
         with_busy_retry(|| {
             let mut conn = self.lock()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let stored_id = if let Some(existing) = find_duplicate_memory_on(&tx, scope, text)? {
+            let outcome = if let Some(existing) = find_duplicate_memory_on(&tx, scope, text)? {
                 tx.execute(
                     "UPDATE memory SET salience = min(1.0, salience + 0.1), \
                      updated_at = strftime('%s','now') WHERE id = ?1",
                     [&existing],
                 )?;
-                existing
+                let stored_text: String =
+                    tx.query_row("SELECT text FROM memory WHERE id = ?1", [&existing], |r| {
+                        r.get(0)
+                    })?;
+                MemoryAdded {
+                    id: existing,
+                    text: stored_text,
+                    duplicate: true,
+                }
             } else {
                 tx.execute(
                     "INSERT INTO memory (id, scope, kind, text, source_session) VALUES (?1, ?2, ?3, ?4, ?5)",
                     rusqlite::params![&id, scope, kind, text, source_session],
                 )?;
-                id.clone()
+                MemoryAdded {
+                    id: id.clone(),
+                    text: text.to_string(),
+                    duplicate: false,
+                }
             };
-            append_memory_snapshot(&tx, &stored_id)?;
+            append_memory_snapshot(&tx, &outcome.id)?;
             evict_memories_over_cap_on(&tx, scope)?;
             tx.commit()?;
-            Ok(stored_id)
+            Ok(outcome)
         })
     }
 
@@ -91,7 +126,7 @@ impl Store {
         }
         let text = text.trim();
         if text.is_empty() {
-            return Err(StoreError::Pool("empty memory text".into()));
+            return Err(StoreError::InvalidValue("empty memory text".into()));
         }
         let bytes = f32_to_le_bytes(embedding);
         let id = forge_types::new_id();
@@ -438,6 +473,31 @@ mod tests {
 
     fn store() -> Store {
         Store::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn the_outcome_names_the_stored_text_and_whether_it_merged() {
+        let s = store();
+        let first = s
+            .add_memory_outcome("proj", "fact", "always use tabs", "m")
+            .unwrap();
+        assert!(!first.duplicate);
+        let again = s
+            .add_memory_outcome("proj", "fact", "Always   use tabs", "m")
+            .unwrap();
+        assert!(again.duplicate);
+        assert_eq!(again.id, first.id);
+        assert_eq!(
+            again.text, "always use tabs",
+            "the row keeps its original text"
+        );
+        let empty = s
+            .add_memory_outcome("proj", "fact", "   ", "m")
+            .unwrap_err();
+        assert!(
+            !empty.to_string().contains("connection pool"),
+            "an empty text is invalid input, not a pool failure: {empty}"
+        );
     }
 
     #[test]

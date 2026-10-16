@@ -108,7 +108,21 @@ pub(crate) struct Tracker {
     head: Option<String>,
     push_nudged_head: Option<String>,
     top: Option<PathBuf>,
+    /// Successful edits since the last commit (unlike `edits_since_nudge`, a reminder does not
+    /// reset it). Named in the mid-turn reminder, which also keeps two reminders for the same
+    /// dirty set from being byte-identical: the request view drops an exact repeat of a system
+    /// message, so the second one (edit 20 on one file) never reached the model.
+    edits_uncommitted: u32,
+    /// The dirty set the last turn-start reminder named, and how many turn starts have passed
+    /// since it was sent; an unchanged set is repeated only every [`TURN_NUDGE_REPEAT_GAP`]th turn.
+    last_turn_nudge: Option<BTreeSet<PathBuf>>,
+    turns_since_turn_nudge: u32,
 }
+
+/// An unchanged dirty set is re-announced at turn start only this often. The first mention, and any
+/// change to the set, are never delayed: this only quiets "same three files, again" on every turn
+/// of a long conversation.
+const TURN_NUDGE_REPEAT_GAP: u32 = 3;
 
 /// A reminder the session should place in front of the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +131,8 @@ pub(crate) enum Nudge {
     Commit {
         files: Vec<PathBuf>,
         ahead: Option<u32>,
+        /// Edits since the last commit, for the mid-turn reminder.
+        edits: Option<u32>,
     },
     /// Nothing of ours is dirty, but the branch has commits the remote does not.
     Push { ahead: u32, branch: Option<String> },
@@ -141,6 +157,7 @@ impl Tracker {
             self.touched.insert(rel.to_path_buf());
         }
         self.edits_since_nudge += 1;
+        self.edits_uncommitted += 1;
         if every > 0 && self.edits_since_nudge >= every {
             self.edits_since_nudge = 0;
             return true;
@@ -156,6 +173,7 @@ impl Tracker {
         }
         self.head = head;
         self.edits_since_nudge = 0;
+        self.edits_uncommitted = 0;
         self.retain_dirty(root);
         true
     }
@@ -180,11 +198,20 @@ impl Tracker {
         self.head = head;
         let status = self.retain_dirty(root)?;
         if !self.touched.is_empty() {
+            let unchanged = self.last_turn_nudge.as_ref() == Some(&self.touched);
+            if unchanged && self.turns_since_turn_nudge + 1 < TURN_NUDGE_REPEAT_GAP {
+                self.turns_since_turn_nudge += 1;
+                return None;
+            }
+            self.last_turn_nudge = Some(self.touched.clone());
+            self.turns_since_turn_nudge = 0;
             return Some(Nudge::Commit {
                 files: self.touched.iter().cloned().collect(),
                 ahead: status.ahead.filter(|&n| push_ahead > 0 && n >= push_ahead),
+                edits: None,
             });
         }
+        self.last_turn_nudge = None;
         let ahead = status.ahead?;
         if push_ahead == 0 || ahead < push_ahead || self.push_nudged_head == self.head {
             return None;
@@ -205,6 +232,7 @@ impl Tracker {
         Some(Nudge::Commit {
             files: self.touched.iter().cloned().collect(),
             ahead: None,
+            edits: Some(self.edits_uncommitted),
         })
     }
 }
@@ -217,7 +245,11 @@ pub(crate) fn may_move_head(command: &str) -> bool {
 impl Nudge {
     pub(crate) fn render(&self) -> String {
         match self {
-            Nudge::Commit { files, ahead } => {
+            Nudge::Commit {
+                files,
+                ahead,
+                edits,
+            } => {
                 let listed: Vec<String> = files
                     .iter()
                     .take(8)
@@ -229,8 +261,16 @@ impl Nudge {
                 } else {
                     listed.join(", ")
                 };
+                let since = edits
+                    .map(|n| {
+                        format!(
+                            " ({n} edit{} since your last commit)",
+                            if n == 1 { "" } else { "s" }
+                        )
+                    })
+                    .unwrap_or_default();
                 let mut text = format!(
-                    "[git] {} file{} you edited in this session {} still uncommitted: {names}. \
+                    "[git] {} file{} you edited in this session {} still uncommitted: {names}{since}. \
                      Commit each verified unit of work as you finish it — stage those specific \
                      files (never `git add -A`) with a focused conventional-commit message — and \
                      leave any unrelated changes the user has in the tree alone. If the work is \
@@ -343,7 +383,7 @@ mod tests {
         std::fs::write(root.join("a.rs"), "fn a() { 2 }\n").unwrap();
         t.record_edit(root, Path::new("a.rs"), 0);
         match t.turn_start_nudge(root, None, 3) {
-            Some(Nudge::Commit { files, ahead }) => {
+            Some(Nudge::Commit { files, ahead, .. }) => {
                 assert_eq!(files, [PathBuf::from("a.rs")]);
                 assert_eq!(ahead, None, "no upstream → no push talk");
             }
@@ -399,10 +439,57 @@ mod tests {
         let text = Nudge::Commit {
             files,
             ahead: Some(5),
+            edits: None,
         }
         .render();
         assert!(text.contains("… and 4 more"));
         assert!(text.contains("5 commits ahead"));
         assert!(text.contains("do not push unasked"));
+    }
+
+    #[test]
+    fn two_mid_turn_reminders_for_the_same_dirty_set_differ() {
+        let dir = repo();
+        let root = dir.path();
+        let mut t = Tracker::default();
+        std::fs::write(root.join("a.rs"), "fn a() { 9 }\n").unwrap();
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            for _ in 0..10 {
+                t.record_edit(root, &root.join("a.rs"), 0);
+            }
+            texts.push(t.mid_turn_nudge(root).unwrap().render());
+        }
+        assert_ne!(
+            texts[0], texts[1],
+            "an identical repeat is dropped from the request"
+        );
+        assert!(
+            texts[0].contains("10 edits since your last commit"),
+            "{}",
+            texts[0]
+        );
+        assert!(
+            texts[1].contains("20 edits since your last commit"),
+            "{}",
+            texts[1]
+        );
+    }
+
+    #[test]
+    fn an_unchanged_dirty_set_is_not_re_announced_every_turn() {
+        let dir = repo();
+        let root = dir.path();
+        let mut t = Tracker::default();
+        std::fs::write(root.join("a.rs"), "fn a() { 3 }\n").unwrap();
+        t.record_edit(root, Path::new("a.rs"), 0);
+        let fired: Vec<bool> = (0..7)
+            .map(|_| t.turn_start_nudge(root, None, 3).is_some())
+            .collect();
+        assert_eq!(fired, [true, false, false, true, false, false, true]);
+        // A change to the set is announced at once, whatever the gap.
+        std::fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+        t.record_edit(root, Path::new("b.rs"), 0);
+        assert!(t.turn_start_nudge(root, None, 3).is_some());
     }
 }

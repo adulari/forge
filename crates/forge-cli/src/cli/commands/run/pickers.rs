@@ -34,20 +34,33 @@ pub(crate) fn open_resume_choice_picker(app: &mut forge_tui::App) {
 
 pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Result<()> {
     let store = open_store()?;
-    let list = if app.show_archived {
-        store.list_sessions_for_resume()
+    // Tab flips between the live list and the archived-only list; resuming from the archived
+    // view brings the session back (see `picker_accept`).
+    let list: Vec<_> = if app.show_archived {
+        store
+            .list_sessions_for_resume()
+            .context("listing sessions")?
+            .into_iter()
+            .filter(|s| s.archived)
+            .collect()
     } else {
-        store.list_sessions()
-    }
-    .context("listing sessions")?;
+        store.list_sessions().context("listing sessions")?
+    };
     if list.is_empty() {
+        if app.show_archived {
+            // An empty archived view would leave the picker blank with Tab as the only way out:
+            // say so and stay on the live list instead.
+            app.note("no archived sessions");
+            app.show_archived = false;
+            return open_sessions_picker(app, query);
+        }
         app.note("no past sessions yet");
         return Ok(());
     }
     let active_ids = store.active_agent_session_ids().unwrap_or_default();
     let rows = list
         .into_iter()
-        .take(50)
+        .take(200)
         .map(|s| {
             let is_active = active_ids.contains(&s.id);
             let id8: String = s.id.chars().take(8).collect();
@@ -95,13 +108,88 @@ pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Res
         if app.show_archived {
             "resume a session · Tab active · Del archive/unarchive"
         } else {
-            "resume a session · Tab archived · Del archive"
+            "resume a session · Tab archived · Del archive · type to search titles and messages"
         },
         rows,
     );
     app.picker.query = query.to_string();
     app.picker.clamp();
     Ok(())
+}
+
+/// Rows per PageUp/PageDown in a picker: a screenful less the heading and the input chrome.
+pub(crate) fn picker_page_rows(terminal_height: u16) -> usize {
+    (terminal_height as usize).saturating_sub(6).clamp(1, 40)
+}
+
+/// `/sessions` filters its rows client-side, which only ever sees title, id and subtitle. The
+/// daemon's search also reads message bodies; do the same here so a phrase that appears only in a
+/// conversation finds it. Runs only for a real query the local rows barely answer, because it is a
+/// full scan of the store.
+pub(crate) fn augment_sessions_picker_search(app: &mut forge_tui::App) {
+    if app.picker.kind != Some(forge_tui::PickerKind::Sessions) {
+        return;
+    }
+    app.picker.reset_to_base();
+    let query = app.picker.query.trim().to_string();
+    if query.chars().count() < 3 || app.picker.matches().len() >= 5 {
+        return;
+    }
+    let Ok(store) = open_store() else {
+        return;
+    };
+    let Ok(hits) = store.search_sessions(&query, 20) else {
+        return;
+    };
+    let known: std::collections::HashSet<String> = app
+        .picker
+        .matches()
+        .into_iter()
+        .map(|row| row.id.trim_start_matches("observe:").to_string())
+        .collect();
+    // A hit that is already in the opening list (it just did not match on its title) keeps that
+    // row's id and title; only the subtitle changes to show where the text was found.
+    let opened: std::collections::HashMap<String, (String, String)> = app
+        .picker
+        .base_rows()
+        .iter()
+        .map(|row| {
+            (
+                row.id.trim_start_matches("observe:").to_string(),
+                (row.id.clone(), row.title.clone()),
+            )
+        })
+        .collect();
+    let extra: Vec<forge_tui::PickerRow> = hits
+        .into_iter()
+        .filter(|hit| !known.contains(&hit.id))
+        .filter(|hit| hit.archived == app.show_archived)
+        .map(|hit| {
+            let id8: String = hit.id.chars().take(8).collect();
+            let excerpt = hit.match_excerpt.clone().unwrap_or_default();
+            let (row_id, title) = opened.get(&hit.id).cloned().unwrap_or_else(|| {
+                (
+                    hit.id.clone(),
+                    hit.title
+                        .clone()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| format!("session {id8}")),
+                )
+            });
+            forge_tui::PickerRow {
+                title,
+                subtitle: format!(
+                    "{id8} · {} · {} msgs · …{}…",
+                    fmt_age(hit.last_activity),
+                    hit.message_count,
+                    excerpt.replace('\n', " ")
+                ),
+                id: row_id,
+            }
+        })
+        .collect();
+    app.picker.extend_rows(extra);
+    app.picker.clamp();
 }
 
 /// Read the session's checkpoints (one per turn, newest first) and open the rewind picker.
@@ -531,11 +619,21 @@ pub(crate) async fn picker_accept(
 ) -> Result<()> {
     match kind {
         forge_tui::PickerKind::Sessions => {
-            if app.show_archived {
-                open_store()?
+            let store = open_store()?;
+            // Two writers on one session otherwise: a daemon-driven session is attached to, not
+            // taken over.
+            if let Err(refusal) = super::super::replay::ensure_not_daemon_driven(&store, &row.id) {
+                app.note(&format!("⚠ {refusal}"));
+                return Ok(());
+            }
+            // Resuming is the explicit "bring it back": decided by the session's own state, not
+            // by which view the picker was in.
+            if store.session_archived(&row.id)? {
+                store
                     .unarchive_session(&row.id)
                     .context("unarchiving resumed session")?;
             }
+            drop(store);
             let (items, compacted, view) = {
                 let mut s = session.lock().await;
                 s.reset_resumed(&row.id)
@@ -578,8 +676,11 @@ pub(crate) async fn picker_accept(
             app.note("● rewound to that point");
             app.replay_history(&items);
             note_restore(app, &outcome.restore);
-            // Put the rewound-to message back in the input box so it can be edited/resubmitted.
+            // Put the rewound-to message back in the input box so it can be edited/resubmitted,
+            // with the cursor after it: left at its old offset, typed text landed in the middle
+            // of the restored prompt and Ctrl-U cleared nothing.
             if let Some(prompt) = outcome.rewound_prompt {
+                app.input_cursor = prompt.len();
                 app.input = prompt;
             }
         }

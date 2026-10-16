@@ -27,7 +27,12 @@ use crate::serve::{
 };
 
 mod branches;
+mod diff;
 pub(crate) use branches::{git_branches, git_create_branch, git_switch_branch};
+use diff::{
+    is_untracked, parse_unified_diff, parse_unified_diff_window, staged_rename_source,
+    untracked_counts, untracked_diff,
+};
 
 /// Hunk lines returned per file. A review dock needs the whole change, but an unbounded diff of a
 /// generated file would push megabytes at a phone — the excess is reported as `skipped_lines`.
@@ -122,7 +127,12 @@ pub(crate) struct GitDiffFile {
     adds: usize,
     dels: usize,
     hunks: Vec<GitDiffHunk>,
+    /// Hunk lines NOT in `hunks`: the ones before `offset` plus the ones past the line cap.
     skipped_lines: usize,
+    /// First hunk line (0-based, counted across the whole file) that `hunks` carries.
+    offset: usize,
+    /// Every hunk line the file has, returned or not — what a client pages through with `offset`.
+    total_lines: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -174,6 +184,17 @@ pub(crate) struct GitDiffQuery {
     path: String,
     #[serde(default)]
     staged: bool,
+    /// Where a staged rename came from (`orig_path` of the status row). Without it git cannot pair
+    /// the new name with the deleted old one and reports a brand-new file. Detected from the index
+    /// when omitted.
+    #[serde(default)]
+    orig_path: Option<String>,
+    /// Hunk lines to skip from the start, so a reviewer can page past the line cap.
+    #[serde(default)]
+    offset: usize,
+    /// Hunk lines to return (default and maximum: the per-file cap).
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(serde::Deserialize)]
@@ -430,9 +451,20 @@ pub(crate) async fn git_status(
             |_, y| (y != ' ' && y != '?').then_some(y),
             &mut truncated,
         );
+        // Untracked files have no numstat; count their lines so the row agrees with the diff
+        // route (it used to say +0 -0 for a 20,000-line file the diff showed as all additions).
+        let mut untracked_stat = std::collections::HashMap::new();
+        let mut budget: u64 = 16 * 1024 * 1024;
+        for (x, y, path, _) in &entries {
+            if *x == '?' && *y == '?' {
+                if let Some(counts) = untracked_counts(&root, path, &mut budget) {
+                    untracked_stat.insert(path.clone(), counts);
+                }
+            }
+        }
         let untracked = status_rows(
             &entries,
-            &std::collections::HashMap::new(),
+            &untracked_stat,
             |x, y| (x == '?' && y == '?').then_some('?'),
             &mut truncated,
         );
@@ -457,138 +489,6 @@ pub(crate) async fn git_status(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Unified-diff parsing
-// ---------------------------------------------------------------------------
-
-/// Path out of a `diff --git a/<x> b/<y>` header. Git quotes non-ASCII/space paths in this header
-/// unless `core.quotePath=false` is set (the callers do), so a plain split is faithful.
-fn header_paths(line: &str) -> Option<(String, String)> {
-    let rest = line.strip_prefix("diff --git ")?;
-    let (a, b) = rest.split_once(" b/")?;
-    Some((a.strip_prefix("a/").unwrap_or(a).to_string(), b.to_string()))
-}
-
-/// Parse a multi-file unified diff into [`GitDiffFile`] rows, capping hunk lines per file.
-fn parse_unified_diff(raw: &str) -> Vec<GitDiffFile> {
-    let mut files: Vec<GitDiffFile> = Vec::new();
-    let mut current: Option<GitDiffFile> = None;
-    for line in raw.split('\n') {
-        if line.starts_with("diff --git ") {
-            if let Some(file) = current.take() {
-                files.push(file);
-            }
-            let (_, path) = header_paths(line).unwrap_or_default();
-            current = Some(GitDiffFile {
-                path,
-                kind: "modified".to_string(),
-                orig_path: None,
-                binary: false,
-                adds: 0,
-                dels: 0,
-                hunks: Vec::new(),
-                skipped_lines: 0,
-            });
-            continue;
-        }
-        let Some(file) = current.as_mut() else {
-            continue;
-        };
-        if line.starts_with("new file mode") {
-            file.kind = "created".to_string();
-            file.orig_path = None;
-            continue;
-        }
-        if line.starts_with("deleted file mode") {
-            file.kind = "deleted".to_string();
-            file.orig_path = None;
-            continue;
-        }
-        if let Some(rename) = line.strip_prefix("rename from ") {
-            file.kind = "renamed".to_string();
-            file.orig_path = Some(rename.to_string());
-            continue;
-        }
-        if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
-            file.binary = true;
-            continue;
-        }
-        if line.starts_with("@@") {
-            file.hunks.push(GitDiffHunk {
-                header: line.to_string(),
-                lines: Vec::new(),
-            });
-            continue;
-        }
-        // Everything before the first `@@` (index/mode/---/+++ lines) is metadata, not content.
-        if file.hunks.is_empty() {
-            continue;
-        }
-        match line.as_bytes().first() {
-            Some(b'+') => file.adds += 1,
-            Some(b'-') => file.dels += 1,
-            Some(b' ') => {}
-            // `\ No newline at end of file` and the blank line git emits after a diff.
-            _ => continue,
-        }
-        let used: usize = file.hunks.iter().map(|hunk| hunk.lines.len()).sum();
-        if used >= MAX_DIFF_LINES {
-            file.skipped_lines += 1;
-            continue;
-        }
-        if let Some(hunk) = file.hunks.last_mut() {
-            hunk.lines.push(line.to_string());
-        }
-    }
-    if let Some(file) = current.take() {
-        files.push(file);
-    }
-    files
-}
-
-/// Render an untracked file as an all-additions diff. `git diff` cannot produce one without
-/// `--no-index` (which is not portable across the daemon's target platforms), so the content is
-/// read directly — bounded by [`MAX_UNTRACKED_BYTES`] and by [`MAX_DIFF_LINES`].
-fn untracked_diff(root: &Path, rel: &str) -> Result<GitDiffFile, String> {
-    let full = root.join(rel);
-    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("not a regular file".to_string());
-    }
-    let mut file = GitDiffFile {
-        path: rel.to_string(),
-        kind: "created".to_string(),
-        orig_path: None,
-        binary: false,
-        adds: 0,
-        dels: 0,
-        hunks: Vec::new(),
-        skipped_lines: 0,
-    };
-    if meta.len() > MAX_UNTRACKED_BYTES {
-        file.binary = true;
-        return Ok(file);
-    }
-    let Ok(text) = std::fs::read_to_string(&full) else {
-        file.binary = true;
-        return Ok(file);
-    };
-    let mut lines: Vec<String> = Vec::new();
-    for line in text.lines() {
-        file.adds += 1;
-        if lines.len() >= MAX_DIFF_LINES {
-            file.skipped_lines += 1;
-            continue;
-        }
-        lines.push(format!("+{line}"));
-    }
-    file.hunks.push(GitDiffHunk {
-        header: format!("@@ -0,0 +1,{} @@", file.adds),
-        lines,
-    });
-    Ok(file)
-}
-
 /// `GET /api/git/diff?session=<id>&path=<p>&staged=<bool>` — one file's hunks. `staged=true` reads
 /// the index against HEAD; `staged=false` reads the working tree against the index, and falls back
 /// to an all-additions render when the path is untracked (git has no diff for it).
@@ -604,19 +504,32 @@ pub(crate) async fn git_diff(
         Err(message) => return err_response(axum::http::StatusCode::BAD_REQUEST, &message),
     };
     let staged = params.staged;
+    let orig = match params.orig_path.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(orig) => match repo_relative(orig) {
+            Ok(orig) => Some(orig),
+            Err(message) => return err_response(axum::http::StatusCode::BAD_REQUEST, &message),
+        },
+        None => None,
+    };
+    let (offset, limit) = (params.offset, params.limit.unwrap_or(MAX_DIFF_LINES));
     let result = tokio::task::spawn_blocking(move || -> Result<GitDiffResponse, String> {
         let root = repo_root_of(&dir)?;
+        // A staged rename is only recognised when git sees BOTH names in the pathspec.
+        let orig = orig.or_else(|| staged.then(|| staged_rename_source(&root, &rel)).flatten());
         let mut args = vec!["-c", "core.quotePath=false", "diff"];
         if staged {
             args.push("--cached");
         }
         args.extend_from_slice(&["--find-renames", "--", rel.as_str()]);
+        if let Some(orig) = orig.as_deref() {
+            args.push(orig);
+        }
         let raw = String::from_utf8_lossy(&git_raw(&root, &args)?).into_owned();
-        let mut files = parse_unified_diff(&raw);
-        if files.is_empty() && !staged {
-            // No tracked diff — the file is either untracked or unchanged. `untracked_diff`
-            // distinguishes them: a missing file yields an empty `files`, not a fabricated hunk.
-            if let Ok(file) = untracked_diff(&root, &rel) {
+        let mut files = parse_unified_diff_window(&raw, offset, limit);
+        if files.is_empty() && !staged && is_untracked(&root, &rel) {
+            // No tracked diff — the file is untracked (rendered as all additions) or unchanged
+            // (no diff at all: a tracked file identical to HEAD must not show as "created").
+            if let Ok(file) = untracked_diff(&root, &rel, offset, limit) {
                 files.push(file);
             }
         }
@@ -891,5 +804,131 @@ mod tests {
         assert_eq!(files[1].path, "b.png");
         assert_eq!(files[1].kind, "created");
         assert!(files[1].binary);
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        for (name, body) in files {
+            if let Some(parent) = Path::new(name).parent() {
+                std::fs::create_dir_all(dir.path().join(parent)).unwrap();
+            }
+            std::fs::write(dir.path().join(name), body).unwrap();
+            git_in(dir.path(), &["add", name]);
+        }
+        git_in(dir.path(), &["commit", "-qm", "init"]);
+        dir
+    }
+
+    #[test]
+    fn an_unchanged_tracked_file_is_not_untracked() {
+        let dir = repo_with(&[("src/b.txt", "two\n")]);
+        std::fs::write(dir.path().join("new.txt"), "x\n").unwrap();
+        assert!(
+            !is_untracked(dir.path(), "src/b.txt"),
+            "tracked + unchanged"
+        );
+        assert!(is_untracked(dir.path(), "new.txt"));
+        assert!(!is_untracked(dir.path(), "missing.txt"));
+    }
+
+    #[test]
+    fn a_staged_rename_is_paired_with_its_source() {
+        let dir = repo_with(&[("README.md", "base\n")]);
+        git_in(dir.path(), &["mv", "README.md", "RENAMED.md"]);
+        assert_eq!(
+            staged_rename_source(dir.path(), "RENAMED.md").as_deref(),
+            Some("README.md")
+        );
+        assert_eq!(staged_rename_source(dir.path(), "other.md"), None);
+        // With both names in the pathspec git reports a rename, not a brand-new file.
+        let raw = git_raw(
+            dir.path(),
+            &[
+                "diff",
+                "--cached",
+                "--find-renames",
+                "--",
+                "RENAMED.md",
+                "README.md",
+            ],
+        )
+        .unwrap();
+        let files = parse_unified_diff(&String::from_utf8_lossy(&raw));
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].kind, "renamed");
+        assert_eq!(files[0].orig_path.as_deref(), Some("README.md"));
+        assert!(
+            files[0].hunks.is_empty(),
+            "a pure rename has no content diff"
+        );
+    }
+
+    #[test]
+    fn untracked_rows_carry_the_line_counts_the_diff_route_shows() {
+        let dir = repo_with(&[("a.txt", "a\n")]);
+        let body: String = (0..250).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("big.txt"), &body).unwrap();
+        let mut budget = 1024 * 1024;
+        assert_eq!(
+            untracked_counts(dir.path(), "big.txt", &mut budget),
+            Some((250, 0, false))
+        );
+        assert_eq!(
+            untracked_diff(dir.path(), "big.txt", 0, MAX_DIFF_LINES)
+                .unwrap()
+                .adds,
+            250
+        );
+        let mut spent = 0;
+        assert_eq!(
+            untracked_counts(dir.path(), "big.txt", &mut spent),
+            None,
+            "budget spent"
+        );
+    }
+
+    #[test]
+    fn a_diff_window_reaches_the_additions_a_head_only_cap_hides() {
+        // A full rewrite: every `-` line comes first, then every `+` line.
+        let mut raw = String::from(
+            "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,10 +1,10 @@\n",
+        );
+        for i in 0..10 {
+            raw.push_str(&format!("-old {i}\n"));
+        }
+        for i in 0..10 {
+            raw.push_str(&format!("+new {i}\n"));
+        }
+        let head = parse_unified_diff_window(&raw, 0, 4);
+        assert_eq!(head[0].total_lines, 20);
+        assert_eq!(head[0].skipped_lines, 16);
+        assert!(head[0].hunks[0].lines.iter().all(|l| l.starts_with('-')));
+        let tail = parse_unified_diff_window(&raw, 10, 4);
+        assert_eq!(tail[0].offset, 10);
+        assert_eq!(
+            tail[0].hunks[0].lines,
+            ["+new 0", "+new 1", "+new 2", "+new 3"]
+        );
+        assert_eq!(
+            (tail[0].adds, tail[0].dels),
+            (10, 10),
+            "counts cover the whole file"
+        );
     }
 }

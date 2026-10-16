@@ -58,3 +58,14 @@ A fork changes one variable; a rerun changes them all.
   source untouched.
 - Live e2e (mock, scratch repo, isolated DB): two-turn session → `fork --turn 2 --rerun --mock`
   held turn 1, re-ran turn 2, printed the counterfactual card; `forge tree` showed the lineage.
+
+## `forge tree` and fork validation
+
+`forge tree` draws every fork family as a nested tree: forks of forks appear under the fork they
+came from, siblings use `├─` and the last one `└─`. A fork whose source session was deleted is
+drawn as its own root marked `(source removed)`; "no forks yet" only appears when no session has a
+fork relation at all.
+
+`forge fork --model <id>` validates the provider prefix before it writes anything (the same check
+`--model` gets on `forge run`), so a typo no longer leaves an orphan session behind and exits
+non-zero.

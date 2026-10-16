@@ -23,12 +23,29 @@ fn pin_or_stored(store: &Store, pin: Option<String>, resume: Option<&str>) -> Op
 /// "a,b" as one id only ever fixed the FIRST member's provider prefix, and validating it looked up
 /// a model literally named "a,b", which no catalog contains: the set was reported "unknown" and
 /// the session started unpinned.
-fn pin_members(pin: &str) -> Vec<String> {
+pub(crate) fn pin_members(pin: &str) -> Vec<String> {
     pin.split(',')
         .map(str::trim)
         .filter(|member| !member.is_empty())
         .map(|member| forge_provider::normalize_model_id(member).into_owned())
         .collect()
+}
+
+/// Hard stop for a pinned id whose provider prefix is not a recognized one — valid even when
+/// discovery is off/timed-out and there is no catalog to check against (it would otherwise pass
+/// straight through to a raw resolver error every turn). Callers that write state on the strength
+/// of a `--model` (`forge fork`) run this first so a typo leaves nothing behind.
+pub(crate) fn ensure_pin_providers_known(pin: &str) -> Result<()> {
+    for id in pin_members(pin) {
+        let prefix = forge_config::provider_of(&id);
+        if !prefix.is_empty() && !forge_config::is_known_provider(prefix) {
+            anyhow::bail!(
+                "unknown model '{id}': '{prefix}' is not a known provider. \
+                 Run `forge models` to see usable ids, or `forge auth` to add a provider."
+            );
+        }
+    }
+    Ok(())
 }
 
 fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
@@ -283,18 +300,12 @@ pub(crate) async fn build_session_with_self_mcp(
 
     // Validate the pinned model so unknown ids fail fast with a clear message rather than a
     // confusing provider "Resolver error" at the first API call.
+    if let Some(pin) = pin.as_deref() {
+        ensure_pin_providers_known(pin)?;
+    }
     for id in pin.as_deref().map(pin_members).unwrap_or_default() {
         let id = id.as_str();
         let prefix = forge_config::provider_of(id);
-        // A prefixed id whose provider isn't a recognized one is clearly invalid — hard stop, even
-        // when discovery is off/timed-out and there's no catalog to check against (it would
-        // otherwise pass straight through to a raw resolver error every turn).
-        if !prefix.is_empty() && !forge_config::is_known_provider(prefix) {
-            anyhow::bail!(
-                "unknown model '{id}': '{prefix}' is not a known provider. \
-                 Run `forge models` to see usable ids, or `forge auth` to add a provider."
-            );
-        }
         // With a catalog, also flag a known-provider id that isn't in it (likely a typo). This
         // stays a soft warning: a brand-new model may simply not be discovered yet.
         if let Some(cat) = catalog.as_ref() {

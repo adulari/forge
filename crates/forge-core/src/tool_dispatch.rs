@@ -536,6 +536,7 @@ impl Session {
                 self.presenter.emit(PresenterEvent::Warning(n));
             }
         }
+        let mut user_declined = false;
         let allowed = match decision {
             PermissionDecision::Allow => true,
             PermissionDecision::Deny => false,
@@ -570,7 +571,10 @@ impl Session {
                     true
                 }
                 forge_types::ConfirmOutcome::Allow => true,
-                forge_types::ConfirmOutcome::Deny => false,
+                forge_types::ConfirmOutcome::Deny => {
+                    user_declined = true;
+                    false
+                }
             },
         };
         let permission_label = if allowed { "allowed" } else { "denied" };
@@ -673,14 +677,25 @@ impl Session {
             && permission::is_shell_tool(&call.name)
         {
             (permission::plan_shell_denial(), None, false)
+        } else if user_declined {
+            // Not "by policy": nothing forbade it, the person said no. The model reads this, and
+            // "policy" would send it hunting for a rule to work around instead of asking.
+            (
+                "permission denied by the user (declined at the prompt)".to_string(),
+                None,
+                false,
+            )
         } else {
             ("permission denied by policy".to_string(), None, false)
         };
         self.record_test_proof(&call.name, &effective_args, &result, full.as_deref());
 
+        // The call ran, so `ok` stays true for the failure tracker and the commit bookkeeping, but
+        // a shell command that exited non-zero must not be drawn with a success mark.
+        let shown_ok = ok && !(call.name == "shell" && shell_command_failed(&result));
         self.presenter.emit(PresenterEvent::ToolResult {
             name: call.name.clone(),
-            ok,
+            ok: shown_ok,
             summary: summarize(&result),
             detail: crate::tool_detail(&result),
         });

@@ -260,9 +260,17 @@ impl Session {
     /// `context_limit` is deliberately `None`: no model has been routed yet, so there is no honest
     /// denominator to show. The gauge fills in on the first real call.
     pub fn emit_restored_totals(&mut self) {
+        self.emit_session_totals(false);
+    }
+
+    /// [`Self::emit_restored_totals`], optionally emitting even for a session with nothing
+    /// recorded. A live swap (`/new`, `/resume`) needs the zeros: the display still holds the
+    /// PREVIOUS session's gauge and totals, and "nothing to restore" must not mean "leave the old
+    /// session's numbers on screen".
+    pub(crate) fn emit_session_totals(&mut self, even_if_empty: bool) {
         let session_total_usd = self.store.session_cost(&self.id).unwrap_or(0.0);
         let (session_in, session_out) = self.store.session_tokens(&self.id).unwrap_or((0, 0));
-        if session_total_usd <= 0.0 && session_in == 0 && session_out == 0 {
+        if !even_if_empty && session_total_usd <= 0.0 && session_in == 0 && session_out == 0 {
             return; // a genuinely fresh session has nothing to restore
         }
         self.presenter.emit(PresenterEvent::Cost {

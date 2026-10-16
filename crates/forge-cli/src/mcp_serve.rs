@@ -144,7 +144,11 @@ fn persist_bridge_memory(
     text: &str,
     session_id: &str,
 ) -> std::result::Result<(), forge_store::StoreError> {
-    store.add_memory(scope, kind, text, session_id).map(|_| ())
+    // A bridged model's memory is injected into later prompts: mask credentials before storing.
+    let masked = forge_core::redact::Redactor::from_environment().redact(text);
+    store
+        .add_memory(scope, kind, &masked, session_id)
+        .map(|_| ())
 }
 
 /// Merge and persist a bridge task update for its parent session. Keep the read and write in one
@@ -1054,7 +1058,23 @@ mod tests {
     fn bridge_memory_persistence_reports_store_failures() {
         let store = Store::open_in_memory().unwrap();
         let error = persist_bridge_memory(&store, "global", "fact", "", "bridge").unwrap_err();
-        assert!(matches!(error, forge_store::StoreError::Pool(_)));
+        assert!(matches!(error, forge_store::StoreError::InvalidValue(_)));
+    }
+
+    #[test]
+    fn bridge_memory_masks_credentials_before_storing() {
+        let store = Store::open_in_memory().unwrap();
+        persist_bridge_memory(
+            &store,
+            "global",
+            "fact",
+            "deploy key is sk-abcdefghijklmnopqrstuvwxyz1234567890",
+            "bridge",
+        )
+        .unwrap();
+        let stored = store.list_memories("global").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(!stored[0].text.contains("sk-abcdef"), "{}", stored[0].text);
     }
 
     #[test]

@@ -287,6 +287,7 @@ impl Session {
             env_fight: EnvFightTracker::default(),
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch,
+            attribution: Default::default(),
             // Read AGENTS.md eagerly (sync, off the async path): the pinned block carries it on
             // every request, a resumed session included.
             cached_agents_md,

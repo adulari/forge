@@ -128,10 +128,14 @@ pub(crate) fn resolve_resume_mode(
                 .ok_or_else(|| {
                     anyhow::anyhow!("no prior sessions — run `forge chat` to start one")
                 })?;
+            ensure_not_daemon_driven(store, &id)?;
+            unarchive_on_resume(store, &id);
             Ok(ResumeMode::Id(id))
         }
         (false, Some(Some(prefix))) => {
             let id = resolve_session(store, &prefix)?;
+            ensure_not_daemon_driven(store, &id)?;
+            unarchive_on_resume(store, &id);
             Ok(ResumeMode::Id(id))
         }
         (false, Some(None)) => {
@@ -158,24 +162,89 @@ pub(crate) fn resolve_session(store: &Store, prefix: &str) -> Result<String> {
     }
 }
 
-pub(crate) fn sessions() -> Result<()> {
+pub(crate) fn sessions(archived_only: bool, all: bool, unarchive: Option<&str>) -> Result<()> {
     let store = open_store()?;
-    let list = store.list_sessions().context("listing sessions")?;
+    if let Some(prefix) = unarchive {
+        let id = resolve_session(&store, prefix)?;
+        if !store.session_archived(&id)? {
+            println!("{} is not archived", &id[..id.len().min(8)]);
+            return Ok(());
+        }
+        store.unarchive_session(&id).context("un-archiving")?;
+        println!(
+            "un-archived {} — it is back in `forge sessions`",
+            &id[..id.len().min(8)]
+        );
+        return Ok(());
+    }
+    let list: Vec<_> = if archived_only || all {
+        store
+            .list_sessions_for_resume()
+            .context("listing sessions")?
+            .into_iter()
+            .filter(|s| all || s.archived)
+            .collect()
+    } else {
+        store.list_sessions().context("listing sessions")?
+    };
     if list.is_empty() {
-        println!("no sessions yet — run `forge run \"<task>\"` to start one");
+        if archived_only {
+            println!("no archived sessions");
+        } else {
+            println!("no sessions yet — run `forge run \"<task>\"` to start one");
+        }
         return Ok(());
     }
     for s in list {
         let id: String = s.id.chars().take(8).collect();
+        let tag = if s.archived { "  [archived]" } else { "" };
         println!(
-            "{id}  {:>7}  {:>3} msgs  ${:>8.4}  {}",
+            "{id}  {:>7}  {:>3} msgs  ${:>8.4}  {}{tag}",
             fmt_age(s.last_activity),
             s.message_count,
             s.total_cost_usd,
             session_title(s.preview.as_deref()),
         );
     }
+    if archived_only {
+        println!(
+            "\nbring one back: forge sessions --unarchive <id>  (or forge chat --resume <id>)"
+        );
+    }
     Ok(())
+}
+
+/// Refuse a terminal resume of a session the `forge serve` daemon is driving right now: both
+/// would append to one session and interleave their turns. The durable `daemon_live` flag alone
+/// is not enough (a killed daemon leaves it set), so it only counts while the daemon that wrote
+/// `serve-state.json` is still a live process.
+pub(crate) fn ensure_not_daemon_driven(store: &Store, id: &str) -> Result<()> {
+    if !store.session_daemon_live(id).unwrap_or(false) {
+        return Ok(());
+    }
+    refuse_if_daemon_alive(id, crate::serve::read_state().ok().flatten())
+}
+
+fn refuse_if_daemon_alive(id: &str, state: Option<crate::serve::ServeState>) -> Result<()> {
+    let Some(state) = state.filter(|s| s.process_is_alive()) else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "session {} is being driven by the forge serve daemon (pid {}); resuming it here would \
+         put two writers on one session. Watch or steer it with `forge attach {}`, or stop it \
+         from the app first.",
+        &id[..id.len().min(8)],
+        state.pid,
+        &id[..id.len().min(8)]
+    )
+}
+
+/// Resuming from the terminal is an explicit "bring this back": an archived session comes out of
+/// the archive, as it does when the daemon resumes one.
+pub(crate) fn unarchive_on_resume(store: &Store, id: &str) {
+    if store.session_archived(id).unwrap_or(false) && store.unarchive_session(id).is_ok() {
+        eprintln!("un-archived {}", &id[..id.len().min(8)]);
+    }
 }
 
 /// `forge replay <id>` reconstructs a session's transcript; `forge replay <a> <b>` diffs two;
@@ -366,6 +435,11 @@ pub(crate) async fn fork_cmd(
     };
     let prompt = entry.content.clone();
     let at_seq = entry.seq;
+    // Validate before the fork row exists: a bad `--model` used to be reported only after the
+    // new session had been written, leaving an orphan behind with a zero exit code.
+    if let Some(m) = model.as_deref() {
+        super::run::ensure_pin_providers_known(m)?;
+    }
 
     let fork_id = store.fork_session(&id, at_seq).context("forking session")?;
     let f8 = &fork_id[..8];
@@ -414,20 +488,6 @@ pub(crate) async fn fork_cmd(
 pub(crate) fn tree_cmd() -> Result<()> {
     let store = open_store()?;
     let nodes = store.fork_nodes().context("loading sessions")?;
-    let in_family: std::collections::HashSet<&str> = nodes
-        .iter()
-        .filter_map(|node| node.forked_from.as_deref())
-        .chain(
-            nodes
-                .iter()
-                .filter(|node| node.forked_from.is_some())
-                .map(|node| node.id.as_str()),
-        )
-        .collect();
-    if in_family.is_empty() {
-        println!("no forks yet — `forge fork <session> --turn N [--model id] --rerun`");
-        return Ok(());
-    }
     let label = |id: &str| -> String {
         let first = store
             .load_replay(id)
@@ -436,24 +496,93 @@ pub(crate) fn tree_cmd() -> Result<()> {
             .unwrap_or_default();
         replay_preview(&first)
     };
-    println!("fork tree — counterfactual branches\n");
-    for node in &nodes {
-        if node.forked_from.is_some() || !in_family.contains(node.id.as_str()) {
-            continue; // roots only here; forks render nested below their source
+    match render_fork_tree(&nodes, label) {
+        Some(tree) => {
+            println!("fork tree — counterfactual branches\n");
+            print!("{tree}");
+            println!("\ncompare any pair: forge replay <a> <b>");
         }
-        println!("● {}  {}", &node.id[..8], label(&node.id));
-        for fork in &nodes {
-            if fork.forked_from.as_deref() == Some(node.id.as_str()) {
-                let at = fork
-                    .forked_at_seq
-                    .map(|seq| format!(" @seq {seq}"))
-                    .unwrap_or_default();
-                println!("└─ {}{}  {}", &fork.id[..8], at, label(&fork.id));
-            }
+        None => println!("no forks yet — `forge fork <session> --turn N [--model id] --rerun`"),
+    }
+    Ok(())
+}
+
+/// Draw every fork family as a nested tree (`├─` for a non-last sibling, `└─` for the last, a
+/// `│` rail under non-last branches), forks of forks included. A fork whose source session no
+/// longer exists is drawn as its own root, marked `(source removed)`, so lineage never vanishes.
+/// `None` when no session is part of a fork relation.
+fn render_fork_tree(
+    nodes: &[forge_store::ForkNode],
+    label: impl Fn(&str) -> String,
+) -> Option<String> {
+    use std::collections::{HashMap, HashSet};
+    let known: HashSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    let mut children: HashMap<&str, Vec<&forge_store::ForkNode>> = HashMap::new();
+    for node in nodes {
+        if let Some(parent) = node.forked_from.as_deref() {
+            children.entry(parent).or_default().push(node);
         }
     }
-    println!("\ncompare any pair: forge replay <a> <b>");
-    Ok(())
+    let is_root = |n: &&forge_store::ForkNode| match n.forked_from.as_deref() {
+        None => children.contains_key(n.id.as_str()),
+        Some(parent) => !known.contains(parent),
+    };
+    let roots: Vec<&forge_store::ForkNode> = nodes.iter().filter(is_root).collect();
+    if roots.is_empty() {
+        return None;
+    }
+    fn short(id: &str) -> &str {
+        &id[..id.len().min(8)]
+    }
+    fn walk(
+        out: &mut String,
+        node: &forge_store::ForkNode,
+        children: &std::collections::HashMap<&str, Vec<&forge_store::ForkNode>>,
+        label: &dyn Fn(&str) -> String,
+        prefix: &str,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        let Some(kids) = children.get(node.id.as_str()) else {
+            return;
+        };
+        for (i, fork) in kids.iter().enumerate() {
+            if !seen.insert(fork.id.clone()) {
+                continue;
+            }
+            let last = i + 1 == kids.len();
+            let at = fork
+                .forked_at_seq
+                .map(|seq| format!(" @seq {seq}"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "{prefix}{} {}{at}  {}\n",
+                if last { "└─" } else { "├─" },
+                short(&fork.id),
+                label(&fork.id)
+            ));
+            let next = format!("{prefix}{}", if last { "   " } else { "│  " });
+            walk(out, fork, children, label, &next, seen);
+        }
+    }
+    let mut out = String::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for root in roots {
+        if !seen.insert(root.id.clone()) {
+            continue;
+        }
+        let orphan = if root.forked_from.is_some() {
+            "  (source removed)"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "● {}  {}{orphan}\n",
+            short(&root.id),
+            label(&root.id)
+        ));
+        walk(&mut out, root, &children, &label, "", &mut seen);
+    }
+    Some(out)
 }
 
 /// First line of a prompt, truncated for one-line tree/fork labels.
@@ -479,5 +608,98 @@ mod store_path_tests {
     fn a_debug_build_does_not_resolve_to_the_release_store() {
         assert_eq!(default_store_file_name(), "forge-dev.db");
         assert_ne!(default_store_file_name(), "forge.db");
+    }
+}
+
+#[cfg(test)]
+mod fork_tree_tests {
+    use super::render_fork_tree;
+    use forge_store::ForkNode;
+
+    fn node(id: &str, from: Option<&str>, at: Option<i64>) -> ForkNode {
+        ForkNode {
+            id: id.to_string(),
+            title: None,
+            forked_from: from.map(str::to_string),
+            forked_at_seq: at,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn forks_of_forks_nest_and_siblings_use_branch_glyphs() {
+        let nodes = vec![
+            node("sssssssss", None, None),
+            node("aaaaaaaaa", Some("sssssssss"), Some(8)),
+            node("ccccccccc", Some("sssssssss"), Some(8)),
+            node("bbbbbbbbb", Some("aaaaaaaaa"), Some(4)),
+        ];
+        let tree = render_fork_tree(&nodes, |id| format!("L{}", &id[..1])).unwrap();
+        assert_eq!(
+            tree,
+            "● ssssssss  Ls\n├─ aaaaaaaa @seq 8  La\n│  └─ bbbbbbbb @seq 4  Lb\n└─ cccccccc @seq 8  Lc\n"
+        );
+    }
+
+    #[test]
+    fn a_fork_whose_source_was_deleted_is_still_drawn() {
+        let nodes = vec![
+            node("aaaaaaaaa", Some("gone"), Some(2)),
+            node("bbbbbbbbb", Some("aaaaaaaaa"), Some(6)),
+        ];
+        let tree = render_fork_tree(&nodes, |_| String::new()).unwrap();
+        assert!(tree.contains("● aaaaaaaa"), "{tree}");
+        assert!(tree.contains("(source removed)"), "{tree}");
+        assert!(tree.contains("└─ bbbbbbbb @seq 6"), "{tree}");
+    }
+
+    #[test]
+    fn no_fork_relation_means_no_tree() {
+        let nodes = vec![node("sssssssss", None, None)];
+        assert!(render_fork_tree(&nodes, |_| String::new()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod daemon_guard_tests {
+    use super::*;
+
+    fn state(pid: u32) -> crate::serve::ServeState {
+        crate::serve::ServeState {
+            pid,
+            port: 1,
+            exposure: "local".into(),
+            base_url: "http://127.0.0.1:1/t".into(),
+            token: "t".into(),
+            started_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_live_daemon_blocks_a_terminal_resume_but_a_dead_one_does_not() {
+        let id = "0123456789abcdef";
+        let live = refuse_if_daemon_alive(id, Some(state(std::process::id())));
+        let message = live.unwrap_err().to_string();
+        assert!(message.contains("01234567"), "{message}");
+        assert!(message.contains("forge attach"), "{message}");
+        // No daemon record, or one whose process is gone (stale flag after a crash): resume works.
+        assert!(refuse_if_daemon_alive(id, None).is_ok());
+        assert!(refuse_if_daemon_alive(id, Some(state(u32::MAX - 1))).is_ok());
+    }
+
+    #[test]
+    fn a_session_the_daemon_does_not_own_is_never_refused() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.create_session("/tmp", "default").unwrap();
+        assert!(ensure_not_daemon_driven(&store, &id).is_ok());
+    }
+
+    #[test]
+    fn archived_sessions_come_back_when_resumed_from_the_terminal() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.create_session("/tmp", "default").unwrap();
+        store.archive_session(&id).unwrap();
+        unarchive_on_resume(&store, &id);
+        assert!(!store.session_archived(&id).unwrap());
     }
 }

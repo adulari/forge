@@ -300,7 +300,9 @@ async fn rewind_into_compacted_history_reactivates_it_first() {
             .collect::<Vec<_>>(),
         vec!["msg 0", "msg 1"]
     );
-    assert_eq!(session.seq, 2);
+    // Rewound rows stay in the table, so the next row lands after ALL of them: reusing seq 2 made
+    // the insert collide and drift the in-memory counter away from the DB's.
+    assert_eq!(session.seq, 10);
 }
 
 #[test]
