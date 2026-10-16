@@ -31,6 +31,15 @@ pub(crate) async fn run(
     // `forge run "/goal …"` is a loop, not a prompt: it is published to a running daemon as-is
     // and otherwise driven locally by `run_goal_headless` (docs/features/goal-evaluator.md).
     let goal_spec = parse_goal_prompt(&prompt);
+    match prompt.split_whitespace().next() {
+        Some("/goal") if goal_spec.is_none() => anyhow::bail!(
+            "could not parse the /goal command: --max-tokens and --max-minutes need whole numbers"
+        ),
+        Some("/loop") => anyhow::bail!(
+            "/loop is interactive only; use `forge run \"/goal ...\"` for an unattended loop or `forge schedule` for a recurring run"
+        ),
+        _ => {}
+    }
     let (prompt, command_guidance, tier) = if goal_spec.is_some() {
         (prompt.trim().to_string(), Vec::new(), None)
     } else {
@@ -110,10 +119,8 @@ pub(crate) async fn run(
         let mut interrupted = false;
         let result = if let Some(spec) = goal_spec {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let end = run_goal_headless(&mut session, spec, &guidance, &cwd, async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await;
+            let end =
+                run_goal_headless(&mut session, spec, &guidance, &cwd, interrupt_signal()).await;
             end.and_then(GoalRunEnd::into_result)
         } else {
             let turn = session.run_turn_with(&prompt, &guidance, tier);

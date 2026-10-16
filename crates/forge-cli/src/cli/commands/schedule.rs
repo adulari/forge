@@ -154,6 +154,13 @@ fn add_schedule_cmd(
     if task.trim().is_empty() {
         anyhow::bail!("empty task — usage: forge schedule add \"<task>\" --every 30m");
     }
+    if let Some(m) = mode.as_deref() {
+        if <crate::cli::args::Mode as clap::ValueEnum>::from_str(m, true).is_err() {
+            anyhow::bail!(
+                "unknown --mode `{m}`; expected default, accept-edits, bypass, plan or auto"
+            );
+        }
+    }
     let spec = match (every, at, cron) {
         (Some(e), None, None) => ScheduleSpec::Every(parse_every(&e)?),
         (None, Some(a), None) => {

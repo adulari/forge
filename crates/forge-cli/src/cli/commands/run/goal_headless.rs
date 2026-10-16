@@ -53,7 +53,7 @@ impl GoalRunEnd {
     pub(crate) fn into_result(self) -> Result<()> {
         match self {
             GoalRunEnd::Met => Ok(()),
-            GoalRunEnd::NotMet(reason) => anyhow::bail!(reason),
+            GoalRunEnd::NotMet(reason) => anyhow::bail!("goal not met: {reason}"),
         }
     }
 }
