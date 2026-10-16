@@ -71,6 +71,11 @@ pub(crate) async fn transcribe_upload(
         .model
         .parse()
         .map_err(|e: forge_voice::VoiceError| anyhow::anyhow!("{e}"))?;
+    let samples =
+        tokio::task::spawn_blocking(move || forge_voice::decode_audio(&bytes, hint.as_deref()))
+            .await
+            .context("decode task panicked")?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
     let model_path = forge_voice::ensure_model(kind, models_dir, |_, _| {})
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -79,11 +84,6 @@ pub(crate) async fn transcribe_upload(
     let language =
         language.or_else(|| (config.language != "auto").then(|| config.language.clone()));
 
-    let samples =
-        tokio::task::spawn_blocking(move || forge_voice::decode_audio(&bytes, hint.as_deref()))
-            .await
-            .context("decode task panicked")?
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
     let text =
         tokio::task::spawn_blocking(move || transcriber.transcribe(&samples, language.as_deref()))
             .await

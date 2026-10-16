@@ -1535,6 +1535,7 @@ pub(crate) async fn pump_ws(
         }
     };
 
+    let (note_tx, mut note_rx) = mpsc::unbounded_channel::<String>();
     let mut forward = tokio::spawn(async move {
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(20));
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1560,6 +1561,14 @@ pub(crate) async fn pump_ws(
                         break;
                     }
                 }
+                Some(reason) = note_rx.recv() => {
+                    // Carries `keepalive` so every existing client skips it as a control frame;
+                    // newer clients can surface `input_error`.
+                    let frame = serde_json::json!({ "keepalive": true, "input_error": reason });
+                    if tx.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -1582,9 +1591,14 @@ pub(crate) async fn pump_ws(
             if text.len() > MAX_INPUT_BYTES {
                 continue;
             }
-            if let Ok(input) = serde_json::from_str::<RemoteInput>(&text) {
-                if input_tx.send(input).await.is_err() {
-                    break; // render loop dropped the receiver (remote turned off)
+            match serde_json::from_str::<RemoteInput>(&text) {
+                Ok(input) => {
+                    if input_tx.send(input).await.is_err() {
+                        break; // render loop dropped the receiver (remote turned off)
+                    }
+                }
+                Err(error) => {
+                    let _ = note_tx.send(format!("input ignored: {error}"));
                 }
             }
         }

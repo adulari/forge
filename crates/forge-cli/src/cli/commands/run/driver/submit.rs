@@ -107,6 +107,11 @@ impl DriverState {
                             self.app.note("⚠ remote answer was invalid — re-asking");
                         }
                     }
+                } else {
+                    push_remote_note(
+                        &mut self.notes,
+                        "⚠ no question is waiting — answer a permission prompt with Allow/Deny",
+                    );
                 }
             }
             remote::RemoteInput::Interrupt => {

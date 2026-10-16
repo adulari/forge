@@ -97,6 +97,9 @@ pub struct Composer {
     pub text: String,
     /// Char index of the cursor.
     pub cursor: usize,
+    /// The text is a prefill nobody has edited yet: the first typed character replaces it
+    /// instead of extending it (a `/model` pin is retyped, not appended to the old id).
+    pub replace_on_type: bool,
 }
 
 impl Composer {
@@ -116,12 +119,18 @@ impl Composer {
     }
 
     pub fn insert(&mut self, s: &str) {
+        if self.replace_on_type {
+            self.text.clear();
+            self.cursor = 0;
+            self.replace_on_type = false;
+        }
         let byte = self.byte_at(self.cursor);
         self.text.insert_str(byte, s);
         self.cursor += s.chars().count();
     }
 
     pub fn backspace(&mut self) {
+        self.replace_on_type = false;
         if self.cursor == 0 {
             return;
         }
@@ -132,6 +141,7 @@ impl Composer {
     }
 
     pub fn delete_word_back(&mut self) {
+        self.replace_on_type = false;
         let chars: Vec<char> = self.text.chars().collect();
         let mut i = self.cursor;
         while i > 0 && chars[i - 1] == ' ' {
@@ -153,10 +163,12 @@ impl Composer {
     }
 
     pub fn move_left(&mut self) {
+        self.replace_on_type = false;
         self.cursor = self.cursor.saturating_sub(1);
     }
 
     pub fn move_right(&mut self) {
+        self.replace_on_type = false;
         self.cursor = (self.cursor + 1).min(self.text.chars().count());
     }
 
