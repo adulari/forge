@@ -382,7 +382,17 @@ pub(crate) fn shell_command_failed(result: &str) -> bool {
                 .and_then(|t| t.parse::<i32>().ok())
                 != Some(0)
         }
-        None => first.starts_with("shell:"),
+        // Poll-ready, background-start and not-yet-ready poll results are not failures.
+        None => {
+            first.starts_with("shell:")
+                && ![
+                    "shell: ready after",
+                    "shell: started background job",
+                    "shell: not ready",
+                ]
+                .iter()
+                .any(|ok| first.starts_with(ok))
+        }
     }
 }
 

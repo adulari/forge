@@ -16,6 +16,20 @@ const MIN_ENTRY_BUDGET: usize = 2 * 1024;
 /// Exit code reported for an entry that timed out (the `timeout(1)` convention).
 const TIMED_OUT_CODE: i32 = 124;
 
+/// A contradictory combination of arguments, as an error message.
+pub(super) fn conflicting_args(args: &Value, use_pty: bool) -> Option<&'static str> {
+    let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
+    if args.get("commands").is_some() && args.get("command").is_some() {
+        Some("shell: pass either `command` or `commands`, not both")
+    } else if flag("background") && flag("poll_until_exit_zero") {
+        Some("shell: background and poll_until_exit_zero cannot be combined")
+    } else if use_pty && flag("background") {
+        Some("shell: background:true is not supported with pty:true (a job that outlives the call has no terminal to attach to)")
+    } else {
+        None
+    }
+}
+
 /// The entries of a `commands` argument, validated.
 pub(super) fn batch_commands(list: &Value) -> Result<Vec<String>, String> {
     let Some(items) = list.as_array() else {

@@ -653,3 +653,10 @@ A model doing multi-step shell work used to spend one round trip per command. Tw
 
 The tool description and `FORGE_SYSTEM` tell the model to use `commands` for ordered steps,
 parallel calls for independent read-only probes, and a script file for long or repeated procedures.
+
+## Environment, capture and pipelines
+
+- Provider API keys that Forge itself injected into its process from the secret store are removed from every command the shell tool starts (plain, poll, background and PTY). Variables you exported yourself are untouched.
+- Captured output over 1 MiB keeps the first half and the last half, so the final lines of a long run survive; the middle is marked as omitted.
+- RTK output rewriting only applies where a person reads the result. A pipeline into a data consumer (`wc`, `grep -c`, `sort`, ...), a redirect, or machine-readable `git status` flags (`--porcelain`, `-s`, `-z`) run unrewritten; `| tail` and `| head` still use RTK.
+- Contradictory arguments (`command` with `commands`, `background` with `poll_until_exit_zero` or `pty`) are errors, not silently resolved.

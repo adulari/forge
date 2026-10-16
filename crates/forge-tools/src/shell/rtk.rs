@@ -118,6 +118,9 @@ pub(crate) fn rewrite_with(command: &str, skip: &[String], rtk: &str) -> Option<
     if skip.iter().any(|s| s == program_name) {
         return None;
     }
+    if !data_stays_raw(trimmed) {
+        return None;
+    }
     let (_, subcommands) = ELIGIBLE.iter().find(|(name, _)| *name == program_name)?;
     if let Some(allowed) = subcommands {
         // The first non-flag word after the program is the subcommand.
@@ -125,9 +128,70 @@ pub(crate) fn rewrite_with(command: &str, skip: &[String], rtk: &str) -> Option<
         if !allowed.contains(&sub) {
             return None;
         }
+        // Machine-readable status output must pass through byte for byte.
+        if program_name == "git"
+            && words.any(|w| {
+                matches!(w, "-z" | "-s" | "-sb" | "--short" | "--null")
+                    || w.starts_with("--porcelain")
+                    || w.starts_with("--format")
+            })
+        {
+            return None;
+        }
     }
     let leading = &command[..command.len() - trimmed.len()];
     Some(format!("{leading}{rtk} {trimmed}"))
+}
+
+/// RTK reformats output, so it may only sit where a person reads the result: a command whose
+/// output is piped into a data consumer (`wc`, `grep -c`, `sort`, `jq`, ...) or redirected into
+/// a file would receive RTK's format instead of the real bytes. Display-only trimmers
+/// (`tail`/`head`) are fine.
+fn data_stays_raw(command: &str) -> bool {
+    let chars: Vec<char> = command.chars().collect();
+    let mut quote: Option<char> = None;
+    let mut segments_start = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match quote {
+            Some(q) => {
+                if c == '\\' && q == '"' {
+                    i += 1;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '`' => return false,
+                '$' if chars.get(i + 1) == Some(&'(') => return false,
+                '>' => {
+                    let before: String = chars[..i].iter().collect();
+                    let after: String = chars[i..].iter().take(3).collect();
+                    let merge_stderr = before.ends_with('2') && after == ">&1";
+                    if !merge_stderr {
+                        return false;
+                    }
+                }
+                '|' => {
+                    if chars.get(i + 1) == Some(&'|') {
+                        i += 1;
+                    } else {
+                        segments_start.push(i + 1);
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    segments_start.into_iter().all(|start| {
+        let rest: String = chars[start..].iter().collect();
+        let rest = rest.trim_start();
+        let program = rest.split_whitespace().next().unwrap_or("");
+        matches!(program, "tail" | "head")
+    })
 }
 
 /// Mark a tool result header so the model knows the output was RTK-filtered and how to get the
@@ -187,6 +251,22 @@ mod tests {
         ] {
             assert_eq!(rw(cmd), None, "{cmd:?} must not be rewritten");
         }
+    }
+
+    #[test]
+    fn data_pipelines_and_machine_output_are_not_rewritten() {
+        for cmd in [
+            "ls -1 | wc -l",
+            "ls | grep -c hidden",
+            "git status --porcelain",
+            "git status -s",
+            "ls > out.txt",
+            "ls $(pwd)",
+        ] {
+            assert_eq!(rw(cmd), None, "{cmd:?} must not be rewritten");
+        }
+        assert!(rw("ls -la | head -3").is_some());
+        assert!(rw("cargo test 2>&1 | tail -5").is_some());
     }
 
     #[test]

@@ -16,6 +16,9 @@ impl Session {
         msg_id: &str,
         call: &forge_types::ToolCall,
     ) -> Result<String, CoreError> {
+        if !self.config.mesh.subagents.enabled {
+            return Ok("spawn_agents is disabled ([mesh.subagents] enabled = false)".to_string());
+        }
         let args_json = serde_json::to_string(&call.args)?;
         let max = self.config.mesh.subagents.max_agents;
         let requests = match subagent::parse_requests(&call.args, max) {

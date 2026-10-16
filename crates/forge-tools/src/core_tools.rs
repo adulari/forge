@@ -153,6 +153,69 @@ async fn read_preview_source(path: &str) -> Result<Option<String>, std::io::Erro
     }
 }
 
+/// An io error that names the path, and — for a missing file — up to three existing siblings with
+/// a similar name, so a typo in one call of a parallel batch is attributable and fixable.
+pub(super) fn io_with_path(error: std::io::Error, path: &str) -> ToolError {
+    if error.kind() != std::io::ErrorKind::NotFound {
+        return ToolError::Failed(format!("{path}: {error}"));
+    }
+    let p = std::path::Path::new(path);
+    let name = p
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let dir = p
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let mut similar: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|c| {
+            let c = c.to_lowercase();
+            !name.is_empty()
+                && (c.contains(&name)
+                    || name.contains(&c)
+                    || (c.len().abs_diff(name.len()) <= 2 && edit_distance_le2(&c, &name)))
+        })
+        .collect();
+    similar.sort();
+    similar.truncate(3);
+    if similar.is_empty() {
+        ToolError::Failed(format!("{path}: no such file or directory"))
+    } else {
+        ToolError::Failed(format!(
+            "{path}: no such file or directory (similar in {}: {})",
+            dir.display(),
+            similar.join(", ")
+        ))
+    }
+}
+
+/// True when `a` and `b` differ by at most two single-character edits (insert, delete,
+/// substitute) or one adjacent transposition.
+fn edit_distance_le2(a: &str, b: &str) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut prev2: Vec<usize> = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        let mut cur = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                cur[j] = cur[j].min(prev2[j - 2] + 1);
+            }
+        }
+        prev2 = prev;
+        prev = cur;
+    }
+    prev[b.len()] <= 2
+}
+
 /// Hard ceiling on any local file this crate will load whole into memory via `read_to_string`,
 /// checked via a metadata pre-check BEFORE the read. Unlike `cap_read`/`cap_bytes` (which only
 /// truncate what's RETURNED to the model, after the full file is already buffered), this stops
@@ -165,7 +228,14 @@ const MAX_READABLE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Refuse to load `path` whole into memory if it's over [`MAX_READABLE_FILE_BYTES`]. Call this
 /// before every `tokio::fs::read_to_string`/`std::fs::read_to_string` in this module.
 pub(super) async fn check_readable_size(path: &str) -> Result<(), ToolError> {
-    let meta = tokio::fs::metadata(path).await?;
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| io_with_path(e, path))?;
+    if !meta.is_file() {
+        return Err(ToolError::Failed(format!(
+            "{path} is not a regular file (directory, device, FIFO or socket) — refusing to read it"
+        )));
+    }
     if meta.len() > MAX_READABLE_FILE_BYTES {
         return Err(ToolError::Failed(format!(
             "{path} is {} MiB, over the {} MiB single-read limit — too large to load into memory \
@@ -255,6 +325,13 @@ impl Tool for ReadFileTool {
             .and_then(Value::as_array)
             .filter(|paths| !paths.is_empty())
         {
+            if args.get("path").is_some() || args.get("file_path").is_some() {
+                return Err(ToolError::BadArgs(
+                    "read_file: pass either `path` or `paths`, not both (put every file in \
+                     `paths` to read several)"
+                        .to_string(),
+                ));
+            }
             return Ok(read_many(paths).await);
         }
         let path = match args.get("file_path").and_then(Value::as_str) {
@@ -265,7 +342,9 @@ impl Tool for ReadFileTool {
         check_readable_size(path).await?;
         let (start_line, end_line) = read_range(args);
 
-        let content = tokio::fs::read_to_string(path).await?;
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| io_with_path(e, path))?;
         let out = if start_line.is_none() && end_line.is_none() {
             if content.len() <= READ_WHOLE_MAX_BYTES {
                 content
@@ -277,6 +356,20 @@ impl Tool for ReadFileTool {
             }
         } else {
             let lines: Vec<&str> = content.lines().collect();
+            if let Some(s) = start_line.filter(|s| *s > lines.len().max(1)) {
+                return Ok(format!(
+                    "{path} has {} lines; start_line {s} is past the end",
+                    lines.len()
+                ));
+            }
+            if let (Some(s), Some(e)) = (start_line, end_line) {
+                if e < s.max(1) {
+                    return Ok(format!(
+                        "end_line {e} is before start_line {s} — nothing to read ({path} has {} lines)",
+                        lines.len()
+                    ));
+                }
+            }
             let start = start_line.unwrap_or(1).saturating_sub(1); // 0-indexed
             let end = end_line.map(|e| e.min(lines.len())).unwrap_or(lines.len());
             // Clamp start to `end` so an inverted range (start_line > end_line) yields an empty
@@ -313,6 +406,14 @@ const READ_WHOLE_MAX_BYTES: usize = 24 * 1024;
 const OUTLINE_MAX_CHARS: usize = 16_000;
 /// Opening lines shown under the outline, by characters.
 const OUTLINE_HEAD_CHARS: usize = 8_000;
+
+fn floor_char_boundary_str(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
 
 /// A too-large file as a map: its size, every definition with its line span (tree-sitter, for
 /// languages Lattice parses; markdown headings otherwise), then the opening lines.
@@ -366,6 +467,16 @@ fn outline_read(path: &str, content: &str) -> String {
                 total_entries - entries.len()
             ));
         }
+    }
+    if head_end == 0 && !lines.is_empty() {
+        let cut = floor_char_boundary_str(lines[0], OUTLINE_HEAD_CHARS);
+        out.push_str(&format!(
+            "\n----- line 1: first {cut} of {} bytes (a single line cannot be read by line \
+             range; use shell `head -c`/`cut -c` for more) -----\n{}",
+            lines[0].len(),
+            &lines[0][..cut]
+        ));
+        return out;
     }
     out.push_str(&format!("\n----- lines 1-{head_end} -----\n"));
     out.push_str(&lines[..head_end].join("\n"));
@@ -735,12 +846,20 @@ impl Tool for EditFileTool {
 
         confine(path)?;
         check_readable_size(path).await?;
-        let content = tokio::fs::read_to_string(path).await?;
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| io_with_path(e, path))?;
+        let replacements = if replace_all {
+            content.matches(old).count()
+        } else {
+            1
+        };
         let (updated, note) = apply_edit_mode(&content, old, new, replace_all)
             .map_err(|e| ToolError::Failed(format!("{e} (in {path})")))?;
         tokio::fs::write(path, &updated).await?;
+        let plural = if replacements == 1 { "" } else { "s" };
         Ok(format!(
-            "edited {} (1 replacement){note}{}",
+            "edited {} ({replacements} replacement{plural}){note}{}",
             shown(path),
             edit_snippet(&updated, new)
         ))
@@ -778,6 +897,9 @@ pub use multi_edit::MultiEditTool;
 
 #[cfg(test)]
 mod read_batch_tests;
+
+#[cfg(test)]
+mod g08_tests;
 
 mod codex_patch;
 
@@ -846,7 +968,6 @@ impl Tool for ApplyPatchTool {
                         "-c",
                         "core.eol=lf",
                         "apply",
-                        "--recount",
                         "--whitespace=nowarn",
                     ])
                     .args(extra)
@@ -880,18 +1001,28 @@ impl Tool for ApplyPatchTool {
             }
         };
 
+        // Byte-exact first: `--recount` re-derives hunk sizes from the body and so miscounts a
+        // multi-file diff that has no `diff --git` separators. It is only the second attempt, for
+        // patches whose `@@ -a,b +c,d @@` counts a model got wrong.
         let out = run_git_apply(&[]).await?;
         let out = if out.status.success() {
             out
         } else {
-            // Context-line drift (trailing/leading whitespace) is the one class of "doesn't
-            // apply" that's safe to paper over automatically — unlike content drift, it can't
-            // land the hunk in the wrong place. Retry once with it tolerated before giving up.
-            let retry = run_git_apply(&["--ignore-whitespace", "--ignore-space-change"]).await?;
-            if retry.status.success() {
-                retry
+            let recount = run_git_apply(&["--recount"]).await?;
+            if recount.status.success() {
+                recount
             } else {
-                out
+                // Context-line drift (trailing/leading whitespace) is the one class of "doesn't
+                // apply" that's safe to paper over automatically — unlike content drift, it can't
+                // land the hunk in the wrong place. Retry once with it tolerated before giving up.
+                let retry =
+                    run_git_apply(&["--recount", "--ignore-whitespace", "--ignore-space-change"])
+                        .await?;
+                if retry.status.success() {
+                    retry
+                } else {
+                    out
+                }
             }
         };
         if out.status.success() {
@@ -1464,7 +1595,10 @@ mod tests {
             .run(&json!({ "path": path.to_str().unwrap(), "start_line": 8, "end_line": 3 }))
             .await
             .expect("inverted range must not panic");
-        assert_eq!(out, "", "inverted range yields an empty slice, not a panic");
+        assert!(
+            out.contains("before start_line"),
+            "inverted range is explained, not a panic: {out}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
