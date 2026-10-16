@@ -495,3 +495,36 @@ jobs:
             # duplicate dispatching stayed invisible in the first place.
             echo "#$pr: branch updated"
           done
+
+  ota-catch-up:
+    name: publish the iOS OTA a token-authored merge skipped
+    # Auto-merge completed by a GITHUB_TOKEN-driven update is pushed as github-actions, and a
+    # GITHUB_TOKEN push starts no `push` workflows, so eas-update never ran for #1552 and #1565
+    # (2026-10-16) although both changed mobile/. workflow_dispatch is the one event a
+    # GITHUB_TOKEN may still start, so dispatch it when the newest mobile/ commit on main is
+    # newer than the newest eas-update run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch eas-update when the newest mobile/ commit has no run after it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          committed=$(gh api "repos/$GITHUB_REPOSITORY/commits?sha=main&path=mobile&per_page=1" \
+            --jq '.[0].commit.committer.date')
+          last_run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow eas-update.yml --limit 1 \
+            --json createdAt --jq '.[0].createdAt // ""')
+          echo "newest mobile/ commit: $committed; newest eas-update run: ${last_run:-none}"
+          # A human-authored merge starts its own push run seconds later; give it 10 minutes so
+          # this job does not race it into a duplicate publish. The 30-minute schedule catches up.
+          if (( $(date -u +%s) - $(date -u -d "$committed" +%s) < 600 )); then
+            echo "newest mobile/ commit is under 10 minutes old; leaving it to its own push run"
+            exit 0
+          fi
+          if [[ -n "$last_run" && "$last_run" > "$committed" ]]; then
+            echo "eas-update already ran after the newest mobile/ commit"
+            exit 0
+          fi
+          gh workflow run eas-update.yml -R "$GITHUB_REPOSITORY" --ref main
+          echo "::notice title=OTA dispatched::eas-update had not run since the mobile/ commit at $committed"
