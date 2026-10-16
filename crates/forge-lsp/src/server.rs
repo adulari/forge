@@ -347,11 +347,8 @@ async fn monitor_process_tree_memory(
             let members = process_tree_pids(root, &relationships);
             let resident_bytes = members.iter().fold(0u64, |total, pid| {
                 total.saturating_add(
-                    // Linux lists every thread as a process that reports the whole process's
-                    // memory; counting them multiplies real RSS by the thread count.
                     system
                         .process(*pid)
-                        .filter(|process| process.thread_kind().is_none())
                         .map(sysinfo::Process::memory)
                         .unwrap_or(0),
                 )
