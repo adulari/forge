@@ -172,6 +172,12 @@ fn main() {
     // the sole thread. Logged later, once tracing exists.
     let login_path_added = login_path::hydrate_for_daemon();
     alloc_policy::init();
+    #[cfg(unix)]
+    // SAFETY: single-threaded here; ignoring SIGXFSZ turns an `ulimit -f` overrun into an ordinary
+    // write error instead of a core-dumping kill.
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -231,17 +231,53 @@ fn print_session_list(sessions: &[SessionInfo]) {
     }
 }
 
+const RECONNECT_ATTEMPTS: u32 = 8;
+
+/// Attach, and re-attach with backoff when the connection drops (network blip, daemon restart).
+/// A deliberate detach, a session closed by the daemon and stdin EOF all end the command; only a
+/// lost connection is retried, and giving up is an error rather than a silent exit 0.
 async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
+    let mut first = true;
+    let mut failures = 0u32;
+    loop {
+        match attach_once(base, token, id, first).await {
+            Ok(false) => return Ok(()),
+            Ok(true) => failures = 0,
+            Err(e) if first => return Err(e),
+            Err(_) => {}
+        }
+        first = false;
+        failures += 1;
+        if failures > RECONNECT_ATTEMPTS {
+            bail!("lost the connection to session {id} and could not reconnect");
+        }
+        let wait = std::time::Duration::from_secs((1u64 << failures.min(4)).min(15));
+        eprintln!(
+            "⚒ reconnecting in {}s (attempt {failures}/{RECONNECT_ATTEMPTS})…",
+            wait.as_secs()
+        );
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// One connection. Returns `Ok(true)` when the connection was lost (worth retrying), `Ok(false)`
+/// for any deliberate end.
+async fn attach_once(base: &str, token: &str, id: &str, first: bool) -> Result<bool> {
     let ws_base = ws_scheme(base)?;
     let ws_url = format!("{ws_base}/{token}/ws?session={id}&rev=0");
     let (ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
         .await
         .map_err(|e| map_ws_error(e, id))?;
     let (mut ws_tx, mut ws_rx) = ws.split();
+    let mut lost = false;
 
-    println!("⚒ attached to session {id} — type a prompt and press Enter.");
-    println!("   commands: /q quit · /i interrupt (stop the current turn)");
-    println!("   when a permission prompt appears, answer with  y  or  n\n");
+    if first {
+        println!("⚒ attached to session {id} — type a prompt and press Enter.");
+        println!("   commands: /q quit · /i interrupt (stop the current turn)");
+        println!("   when a permission prompt appears, answer with  y  or  n\n");
+    } else {
+        println!("⚒ reconnected to session {id}.");
+    }
 
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
     let mut line = String::new();
@@ -269,12 +305,14 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        println!("\n⚒ connection closed — detaching.");
+                        println!("\n⚒ connection closed.");
+                        lost = true;
                         break;
                     }
                     Some(Ok(_)) => {} // ping/pong/binary — ignored
                     Some(Err(e)) => {
                         eprintln!("\n⚠ websocket error: {e}");
+                        lost = true;
                         break;
                     }
                 }
@@ -296,7 +334,8 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
                                 Action::Send(json) => {
                                     let text = json.to_string();
                                     if ws_tx.send(Message::Text(text.into())).await.is_err() {
-                                        println!("\n⚒ connection dropped while sending — detaching.");
+                                        println!("\n⚒ connection dropped while sending.");
+                                        lost = true;
                                         break;
                                     }
                                 }
@@ -311,7 +350,7 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(lost)
 }
 
 /// Decode a server-to-client data frame without mistaking JSON control messages for snapshots.

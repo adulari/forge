@@ -154,10 +154,11 @@ pub(crate) async fn run(
 
     // Race the turn against Ctrl-C so a hard kill doesn't discard partial output: on interrupt we
     // drop the turn future (it stops at its next await) and return what already streamed.
+    let mut interrupted = false;
     let result = if let Some(spec) = goal_spec {
         let cwd = std::env::current_dir().unwrap_or_default();
         let end = run_goal_headless(&mut session, spec, &guidance, &cwd, async {
-            let _ = tokio::signal::ctrl_c().await;
+            interrupt_signal().await;
         })
         .await;
         end.and_then(GoalRunEnd::into_result)
@@ -166,8 +167,9 @@ pub(crate) async fn run(
         tokio::pin!(turn);
         tokio::select! {
             r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
-            _ = tokio::signal::ctrl_c() => {
-                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — stopping turn (partial output kept)\x1b[0m");
+            _ = interrupt_signal() => {
+                interrupted = true;
+                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — turn stopped (what streamed above is not saved to the session)\x1b[0m");
                 Ok(())
             }
         }
@@ -179,7 +181,28 @@ pub(crate) async fn run(
     }
     let written = write_usage(&session, &before);
     result?;
-    written
+    written?;
+    if interrupted {
+        // Conventional 128 + SIGINT; a script must not read an aborted turn as success.
+        std::process::exit(130);
+    }
+    Ok(())
+}
+
+/// Resolves on Ctrl-C or (unix) SIGTERM, so a `kill` or a supervisor's stop is handled like Ctrl-C.
+async fn interrupt_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// `cat file | forge run "summarize"` (like `claude -p`): piped stdin is appended to the prompt, or

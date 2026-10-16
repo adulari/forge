@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
+use std::io::Write as _;
 use std::path::Path;
 
 use crate::*;
@@ -213,17 +214,25 @@ pub(crate) fn sessions(archived_only: bool, all: bool, unarchive: Option<&str>) 
         }
         return Ok(());
     }
+    // `forge sessions | head` closes the pipe early: stop quietly instead of panicking in println!.
+    let mut out = std::io::stdout().lock();
     for s in list {
         let id: String = s.id.chars().take(8).collect();
         let tag = if s.archived { "  [archived]" } else { "" };
-        println!(
+        if writeln!(
+            out,
             "{id}  {:>7}  {:>3} msgs  ${:>8.4}  {}{tag}",
             fmt_age(s.last_activity),
             s.message_count,
             s.total_cost_usd,
             session_title(s.preview.as_deref()),
-        );
+        )
+        .is_err()
+        {
+            return Ok(());
+        }
     }
+    drop(out);
     if archived_only {
         println!(
             "\nbring one back: forge sessions --unarchive <id>  (or forge chat --resume <id>)"

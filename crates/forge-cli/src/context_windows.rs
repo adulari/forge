@@ -99,7 +99,9 @@ fn persist_configured_windows(store: &forge_store::Store) {
     for (model, window) in &config.mesh.context_windows {
         if *window > 0 {
             if let Err(e) = store.set_model_context(model, *window) {
-                tracing::warn!(model, "could not persist configured context window: {e}");
+                // One locked store means every later row would wait out the busy timeout too.
+                tracing::warn!(model, "could not persist configured context windows: {e}");
+                return;
             }
         }
     }

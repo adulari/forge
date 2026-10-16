@@ -5631,6 +5631,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_agent_active_flag_stops_exempting_a_session_from_retention() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        store.set_session_agent_active(&sid, true).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let set_age = |days: i64| {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE session SET updated_at = ?1 WHERE id = ?2",
+                    (now - days * 86_400, &sid),
+                )
+                .unwrap();
+        };
+        set_age(31);
+        assert_eq!(
+            store.prune(30 * 86_400, 10).unwrap(),
+            0,
+            "within the grace week"
+        );
+        set_age(40);
+        assert_eq!(
+            store.prune(30 * 86_400, 10).unwrap(),
+            1,
+            "flag is a leftover"
+        );
+    }
+
+    #[test]
     fn live_event_append_outlasts_a_writer_stall_longer_than_busy_timeout() {
         // A foreign writer that holds the single WAL write lock for longer than the 5s
         // `busy_timeout` — a VACUUM, or a large lattice indexing batch — makes the IMMEDIATE BEGIN
