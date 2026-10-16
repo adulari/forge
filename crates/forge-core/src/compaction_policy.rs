@@ -148,10 +148,14 @@ impl Session {
     /// Below this, the turn proceeds as-is; at/over it, auto-compaction kicks in (and a failover to
     /// a model that fails this check triggers the consent prompt).
     pub(crate) fn transcript_fits(&self, model: &str) -> bool {
+        self.estimated_transcript_tokens() <= self.usable_window_tokens(model)
+    }
+
+    /// What [`Self::transcript_fits`] allows a transcript: 80% of the window left after the reply.
+    pub(crate) fn usable_window_tokens(&self, model: &str) -> u64 {
         let window = self.effective_context_window(model) as u64;
         let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as u64;
-        let usable = window.saturating_sub(reserve) * 8 / 10;
-        self.estimated_transcript_tokens() <= usable
+        window.saturating_sub(reserve) * 8 / 10
     }
 
     /// Decide whether to admit a mesh-chosen failover `model`. If the transcript already fits, use
@@ -196,7 +200,7 @@ impl Session {
                 return Ok(false); // No / cancelled → skip this model
             }
         }
-        self.compact(true).await?;
+        self.compact_for(true, Some(model)).await?;
         Ok(true)
     }
 
@@ -211,6 +215,14 @@ impl Session {
             trigger,
             self.transcript_fits(model),
         ) {
+            // A context that has not grown since the last compaction left it would only be
+            // summarized again for almost nothing: at its size nothing more can be folded.
+            let effective = self.effective_compaction_trigger(Some(model));
+            let pressure = self.context_pressure_tokens();
+            if self.compact_guard.holds(&self.id, pressure, effective) {
+                tracing::debug!(pressure, effective, "auto-compaction held: no regrowth yet");
+                return;
+            }
             // Cheap first: advance the elision floor to the working set and cut the bulky results
             // it releases (no model call). Often reclaims enough that the summary isn't needed.
             if self.advance_floor_if_due(model, true) > 0 {
@@ -226,7 +238,10 @@ impl Session {
                 low_water,
                 self.transcript_fits(model),
             ) {
-                let (before, after) = self.compact(true).await.unwrap_or_default();
+                let (before, after) = self
+                    .compact_for(true, Some(model))
+                    .await
+                    .unwrap_or_default();
                 self.enforce_post_compact_headroom(trigger);
                 // Continual Harness auto-refine gate (`harness.auto_refine = "compact"`,
                 // refinement.rs): only when this call actually folded something — `compact`

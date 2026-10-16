@@ -250,7 +250,24 @@ fn cap_chars(text: &str, max: usize) -> String {
 /// absorbs) followed by `new` messages, oldest first. The newest message is kept whole, older
 /// ones are capped, and the whole section stays inside [`USER_MESSAGES_BUDGET_TOKENS`] by
 /// dropping the oldest, with the count said. Empty when there are no messages at all.
+#[cfg(test)]
 pub(crate) fn render_verbatim_block(previous: &[VerbatimEntry], new: &[String]) -> String {
+    render_verbatim_block_within(
+        previous,
+        new,
+        USER_MESSAGES_BUDGET_TOKENS,
+        USER_MESSAGE_OLDER_MAX_CHARS,
+    )
+}
+
+/// [`render_verbatim_block`] with the section held to `budget` tokens and older messages to
+/// `older_max_chars`, for a compaction whose trigger leaves less room than the defaults assume.
+pub(crate) fn render_verbatim_block_within(
+    previous: &[VerbatimEntry],
+    new: &[String],
+    budget: usize,
+    older_max_chars: usize,
+) -> String {
     let mut all: Vec<VerbatimEntry> = previous.to_vec();
     let first_new = all.last().map_or(0, |e| e.number) + 1;
     for (number, text) in (first_new..).zip(new) {
@@ -262,7 +279,6 @@ pub(crate) fn render_verbatim_block(previous: &[VerbatimEntry], new: &[String]) 
     if all.is_empty() {
         return String::new();
     }
-    let budget = USER_MESSAGES_BUDGET_TOKENS;
     let mut kept: Vec<String> = Vec::new();
     let mut used = 0usize;
     let mut first_kept = all.last().map_or(1, |e| e.number);
@@ -271,7 +287,7 @@ pub(crate) fn render_verbatim_block(previous: &[VerbatimEntry], new: &[String]) 
         let text = if is_newest {
             fit_whole(&entry.text, budget)
         } else {
-            cap_chars(&entry.text, USER_MESSAGE_OLDER_MAX_CHARS)
+            cap_chars(&entry.text, older_max_chars)
         };
         let rendered = format!("{}\n{text}", marker(entry.number));
         let cost = tokens::count_text(&rendered) + 2;

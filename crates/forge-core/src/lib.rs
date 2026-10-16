@@ -64,6 +64,7 @@ pub mod capsule;
 pub(crate) mod clock;
 pub mod codemode;
 mod commit_policy;
+mod compaction_budget;
 mod compaction_chain;
 mod compaction_headroom;
 mod compaction_input;
@@ -1762,6 +1763,9 @@ pub struct Session {
     /// stored transcript already carries it. The project instructions and memories are not part of
     /// this: they live in the pinned block (`pinned_context.rs`) on every request.
     project_prompt_injected: bool,
+    /// Where the last compaction left the context, so auto-compaction waits for regrowth
+    /// (compaction_budget.rs).
+    compact_guard: compaction_budget::ThrashGuard,
     /// Pinned session context: recalled memories, goal, plan and the task list snapshot.
     pinned: pinned_context::PinnedState,
     /// Files this session read or edited most recently, newest first, for the restore after a

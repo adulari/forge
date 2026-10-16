@@ -2,19 +2,17 @@
 //! user's own words verbatim.
 
 use super::*;
+use crate::compaction_budget::{size_directive, CompactionBudget, COMPACT_OUTPUT_TOKENS};
 use crate::compaction_chain::chain_for;
 use crate::compaction_headroom::callable_summarizers;
 use crate::compaction_input::{fold_inputs, render_entry, trim_notice, FoldedInput};
 use crate::compaction_policy::round_aligned_split;
-use crate::compaction_shape::{kept_tail_start, summary_too_thin, COMPACT_KEEP_ROUNDS_TOKENS};
+use crate::compaction_shape::{kept_tail_start, summary_too_thin};
 use crate::compaction_summary::{
-    extract_summary, focus_directive, render_verbatim_block, rolling_payload, system_prompt,
-    SUMMARY_PREFIX,
+    extract_summary, focus_directive, head_tail, render_verbatim_block_within, rolling_payload,
+    system_prompt, SUMMARY_PREFIX,
 };
 use crate::spend_guard::priced;
-
-/// Output ceiling of one summary call, and the room reserved for it in the request window.
-const COMPACT_OUTPUT_TOKENS: usize = 20_000;
 
 /// Longest one summary call may take before the chain moves to the next model. Generous because
 /// the call writes up to [`COMPACT_OUTPUT_TOKENS`]; a hung stream is caught earlier by the idle
@@ -111,6 +109,35 @@ impl Session {
     }
 
     pub async fn compact(&mut self, auto: bool) -> Result<(usize, usize), CoreError> {
+        self.compact_for(auto, None).await
+    }
+
+    /// The number auto-compaction compares against for `model` (the session's own when `None`):
+    /// the configured trigger, or the room the window leaves for a request when that is smaller.
+    /// Every part a compaction puts back is budgeted from this, so the result lands under it.
+    pub(crate) fn effective_compaction_trigger(&self, model: Option<&str>) -> u64 {
+        let model = model
+            .map(str::to_string)
+            .or_else(|| self.session_model_hint())
+            .or_else(|| self.gauge_model.clone());
+        match model {
+            Some(model) => self
+                .compaction_trigger(&model)
+                .min(self.usable_window_tokens(&model)),
+            None => crate::auto_compact_trigger_tokens(
+                u64::from(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW),
+                self.config.mesh.compact_cap_tokens,
+                crate::AUTO_COMPACT_THRESHOLD,
+            ),
+        }
+    }
+
+    /// [`Self::compact`] for a session about to run on `model`, whose trigger sizes the budgets.
+    pub(crate) async fn compact_for(
+        &mut self,
+        auto: bool,
+        model: Option<&str>,
+    ) -> Result<(usize, usize), CoreError> {
         // Taken first so a no-op compaction cannot leave it armed for an unrelated later one.
         let directive = self.compact_directive.take();
         let before = self.transcript.len();
@@ -126,9 +153,12 @@ impl Session {
             serde_json::json!({ "trigger": if auto { "auto" } else { "manual" } }),
         )
         .await;
+        let trigger = self.effective_compaction_trigger(model);
+        let budget = CompactionBudget::for_trigger(trigger, self.pinned_tokens());
+        tracing::debug!(?budget, auto, "compaction budget");
         let tail_budget = usize::try_from(self.estimated_transcript_tokens() / 4)
             .unwrap_or(usize::MAX)
-            .min(COMPACT_KEEP_ROUNDS_TOKENS);
+            .min(budget.keep_rounds_tokens);
         let split = round_aligned_split(
             &self.transcript,
             kept_tail_start(&self.transcript, COMPACT_KEEP_RECENT, tail_budget),
@@ -142,7 +172,17 @@ impl Session {
         // had its older results cut to a head by the prune pass.
         let source = self.store.compaction_source(&self.id).unwrap_or_default();
         let folded = fold_inputs(&self.transcript[..split], &source.tool_results);
-        let written = self.write_summary(&folded, directive.as_deref()).await;
+        let directive = match (directive, budget.summary_is_scaled()) {
+            (Some(focus), true) => Some(format!(
+                "{focus}\n\n{}",
+                size_directive(budget.summary_tokens)
+            )),
+            (None, true) => Some(size_directive(budget.summary_tokens)),
+            (directive, false) => directive,
+        };
+        let written = self
+            .write_summary(&folded, directive.as_deref(), &budget)
+            .await;
         let (model, body) = match written {
             Ok(written) => written,
             Err(error) => {
@@ -150,7 +190,22 @@ impl Session {
                 return Err(error);
             }
         };
-        let block = render_verbatim_block(&folded.previous_verbatim, &folded.user_messages);
+        let body = if tokens::count_message(&body) > budget.summary_hard_cap() {
+            tracing::debug!(
+                tokens = tokens::count_message(&body),
+                cap = budget.summary_hard_cap(),
+                "summary over its budget, cutting its middle"
+            );
+            head_tail(&body, budget.summary_tokens * 4)
+        } else {
+            body
+        };
+        let block = render_verbatim_block_within(
+            &folded.previous_verbatim,
+            &folded.user_messages,
+            budget.verbatim_tokens,
+            budget.verbatim_older_chars(),
+        );
         let summary = if block.is_empty() {
             body.trim().to_string()
         } else {
@@ -195,18 +250,21 @@ impl Session {
         // staleness tracker remembers that, so if one of them then stops moving the escalation can
         // say why the model cannot work out what it meant (task_staleness.rs).
         self.stale_tasks.note_compaction();
-        self.rehydrate_after_compaction().await;
+        self.rehydrate_after_compaction(&budget).await;
+        self.settle_after_compaction(&budget);
         Ok((before, after))
     }
 
     /// Put back what the summary cannot carry: the task list as it stands now, the memories most
     /// relevant to the work that is left, and the text of the files the session was working on.
     /// The project instructions need nothing: the pinned block never left the request.
-    async fn rehydrate_after_compaction(&mut self) {
+    async fn rehydrate_after_compaction(&mut self, budget: &CompactionBudget) {
         self.refresh_pinned_tasks();
         let query = self.recall_query(&self.latest_user_request());
         self.recall_pinned_memories(&query).await;
-        if let Err(error) = self.restore_recent_files() {
+        // Before the files go back, so they get what is left rather than what was there.
+        self.enforce_post_compact_headroom(budget.trigger);
+        if let Err(error) = self.restore_recent_files(budget) {
             tracing::warn!(%error, "could not record the files restored after compaction");
         }
     }
@@ -263,7 +321,7 @@ impl Session {
                 models
             }
         };
-        chain_for(
+        let chain = chain_for(
             mode,
             usable(self.router.compact_candidates()),
             usable(session_fallbacks),
@@ -271,7 +329,17 @@ impl Session {
             anchor,
             |m| health.is_benched(m),
             forge_mesh::catalog::is_subscription,
-        )
+        );
+        tracing::info!(
+            ?mode,
+            session_model,
+            pinned = pin.is_some(),
+            router_pinned = decision.pinned,
+            session_model_benched = health.is_benched(&session_model),
+            ?chain,
+            "compaction chain"
+        );
+        chain
     }
 
     /// Write the model's part of the summary: walk the candidate chain, summarizing the folded
@@ -282,6 +350,7 @@ impl Session {
         &mut self,
         folded: &FoldedInput,
         directive: Option<&str>,
+        shape: &CompactionBudget,
     ) -> Result<(String, String), CoreError> {
         let entries: Vec<String> = folded.messages.iter().map(render_entry).collect();
         let costs: Vec<usize> = entries.iter().map(|e| tokens::count_message(e)).collect();
@@ -355,7 +424,10 @@ impl Session {
             let part = fit_compaction_payload(&entries[position..end], available);
             let payload = rolling_payload(previous.as_deref(), &part, is_last);
             let system = system_prompt(directive, previous.is_some() || !is_last);
-            options.max_output_tokens = Some(self.compact_summary_reserve(&model) as u32);
+            options.max_output_tokens = Some(
+                self.compact_summary_reserve(&model)
+                    .min(shape.output_tokens().max(1_024)) as u32,
+            );
 
             let outcome = call_summarizer(
                 self.provider.clone(),
@@ -384,6 +456,11 @@ impl Session {
                     // WITHOUT benching: the session's own model is in the chain, and benching it
                     // would fail the very turn this compaction is trying to make room for.
                     if summary_too_thin(&text, &entries[position..end]) {
+                        tracing::warn!(
+                            model = %model,
+                            chars = text.len(),
+                            "compaction: summary too thin, trying the next model"
+                        );
                         if !text.is_empty()
                             && best_thin
                                 .as_ref()
@@ -422,6 +499,7 @@ impl Session {
                 }
                 Err(SummarizerFailure::TimedOut) => {
                     let secs = self.compact_timeout.as_secs();
+                    tracing::warn!(model = %model, secs, "compaction: summarizer timed out");
                     self.presenter.emit(PresenterEvent::Warning(format!(
                         "compaction: {model} did not finish within {secs}s — trying the next model"
                     )));
@@ -442,6 +520,12 @@ impl Session {
                 // aborting — `advance_fallback` already excludes/benches the dead model
                 // appropriately either way.
                 Err(SummarizerFailure::Provider(error)) if failover => {
+                    tracing::warn!(
+                        model = %model,
+                        reason = error.reason(),
+                        %error,
+                        "compaction: summarizer call failed, advancing the chain"
+                    );
                     match self.advance_fallback(&model, &error, &mut chain, "compact") {
                         Some(next) => model = next,
                         None => return Err(CoreError::Provider(error)),

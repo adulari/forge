@@ -69,6 +69,27 @@ impl Session {
     }
 }
 
+impl Session {
+    /// Close a compaction: remember where it left the context so the next auto-compaction waits
+    /// for real growth, and say so once when what is left (the standing context and the
+    /// irreducible tail) already fills the trigger.
+    pub(crate) fn settle_after_compaction(
+        &mut self,
+        budget: &crate::compaction_budget::CompactionBudget,
+    ) {
+        let size = self.context_pressure_tokens();
+        self.compact_guard.note_compaction(&self.id, size);
+        if size >= budget.trigger && self.compact_guard.first_notice() {
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "compaction cannot bring the context under its ceiling (~{size} of {} tokens remain \
+                 after trimming); it will not summarize again until the context grows by ~{} tokens",
+                budget.trigger,
+                crate::compaction_budget::ThrashGuard::regrowth(budget.trigger),
+            )));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::callable_summarizers;

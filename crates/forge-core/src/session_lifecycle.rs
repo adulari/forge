@@ -284,6 +284,7 @@ impl Session {
             // Read AGENTS.md eagerly (sync, off the async path): the pinned block carries it on
             // every request, a resumed session included.
             cached_agents_md,
+            compact_guard: Default::default(),
             pinned: Default::default(),
             recent_files: Default::default(),
             project,

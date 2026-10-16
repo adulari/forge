@@ -250,6 +250,11 @@ async fn the_summary_runs_at_the_sessions_effort_with_a_20k_output_cap() {
     let (store, mut session) = session_with(provider.clone(), shortlist_router());
     store.set_model_context("routed::session", 200_000).unwrap();
     session.set_effort(Some(forge_types::EffortLevel::High));
+    session.route_affinity = Some(SessionAffinity {
+        model: "routed::session".into(),
+        tier: forge_types::TaskTier::Standard,
+        code_heavy: false,
+    });
     push_requests(&mut session, 0..8);
     session.compact(false).await.unwrap();
     let call = &provider.calls()[0];

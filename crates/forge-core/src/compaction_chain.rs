@@ -45,8 +45,19 @@ fn session_first_chain(
     is_benched: impl Fn(&str) -> bool,
     is_subscription: impl Fn(&str) -> bool,
 ) -> Vec<String> {
-    let admitted =
-        |m: &str| !m.is_empty() && !is_benched(m) && !(is_subscription(m) && m != session_model);
+    let admitted = |m: &str| {
+        let benched = is_benched(m);
+        let foreign_subscription = is_subscription(m) && m != session_model;
+        if benched || foreign_subscription {
+            tracing::debug!(
+                model = m,
+                benched,
+                foreign_subscription,
+                "compaction chain: candidate skipped"
+            );
+        }
+        !m.is_empty() && !benched && !foreign_subscription
+    };
     let mut out: Vec<String> = Vec::new();
     let add = |m: String, out: &mut Vec<String>| {
         if !out.contains(&m) {
@@ -57,6 +68,12 @@ fn session_first_chain(
     // back as the backstop instead of the front.
     if admitted(session_model) {
         add(session_model.to_string(), &mut out);
+    } else {
+        tracing::info!(
+            session_model,
+            "compaction chain: the session model is not first (benched or empty); it is kept as \
+             the last resort"
+        );
     }
     for m in fallbacks.into_iter().filter(|m| admitted(m)) {
         add(m, &mut out);
