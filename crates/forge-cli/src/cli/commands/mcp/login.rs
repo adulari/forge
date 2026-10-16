@@ -61,18 +61,16 @@ pub(crate) async fn mcp_login(
     let issuer = if let Some(i) = &oauth_cfg.issuer {
         i.clone()
     } else {
-        // Probe the server's well-known resource-metadata endpoint (RFC 9728).
+        // RFC 9728: the 401's resource_metadata URL, else the path-aware well-known URL.
         let url = match &srv.transport {
-            forge_config::McpTransport::Http { url, .. } => {
-                let base = url.trim_end_matches('/');
-                format!("{base}/.well-known/oauth-protected-resource/mcp")
-            }
+            forge_config::McpTransport::Http { url, .. } => url.clone(),
             _ => anyhow::bail!("OAuth login only supported for HTTP transports"),
         };
-        println!("Discovering auth server from {url} …");
-        let meta = forge_mcp::oauth::fetch_resource_metadata(&http, &url)
+        println!("Discovering auth server for {url} …");
+        let (found, meta) = forge_mcp::oauth::discover_resource_metadata(&http, &url)
             .await
-            .map_err(|e| anyhow::anyhow!("fetching resource metadata from {url}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("discovering resource metadata for {url}: {e}"))?;
+        println!("Resource metadata: {found}");
         meta.authorization_servers
             .into_iter()
             .next()

@@ -290,3 +290,7 @@ commands, filenames, diffs, credentials, recovery words, or decrypted captures t
 - [Privacy data inventory and analytics allowlist](../anywhere/privacy-data-inventory.md)
 - [AGPL/private-service boundary checklist](../anywhere/agpl-service-boundary-checklist.md)
 - [Known-plaintext canary harness](../../scripts/ci/check-anywhere-plaintext-canary.sh)
+
+## Connector lifecycle
+
+The daemon stops the relay connector (and its sync worker) when `anywhere.enabled` turns off and restarts it on the next `forge anywhere enable`, so a new host id takes effect without restarting the daemon. Sessions synced in from another host are materialized in Ask mode.

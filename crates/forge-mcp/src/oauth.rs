@@ -20,6 +20,78 @@ pub async fn fetch_resource_metadata(
         .map_err(|e| format!("parse resource metadata from {url}: {e}"))
 }
 
+/// RFC 9728 candidate metadata URLs for a protected resource: the well-known segment goes between
+/// the origin and the resource path (`/mcp` -> `/.well-known/oauth-protected-resource/mcp`), then
+/// the origin-root form.
+pub fn resource_metadata_urls(mcp_url: &str) -> Vec<String> {
+    let Some((scheme, rest)) = mcp_url.split_once("://") else {
+        return Vec::new();
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+    let path = path.trim_end_matches('/');
+    let origin = format!("{scheme}://{authority}/.well-known/oauth-protected-resource");
+    let mut out = Vec::new();
+    if !path.is_empty() {
+        out.push(format!("{origin}{path}"));
+    }
+    out.push(origin);
+    out
+}
+
+/// The `resource_metadata` URL a 401's `WWW-Authenticate` header points at (RFC 9728 section 5.1).
+pub fn resource_metadata_hint(www_authenticate: &str) -> Option<String> {
+    let at = www_authenticate.find("resource_metadata=")? + "resource_metadata=".len();
+    let rest = &www_authenticate[at..];
+    let value = if let Some(quoted) = rest.strip_prefix('"') {
+        quoted.split('"').next()?
+    } else {
+        rest.split([',', ' ']).next()?
+    };
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Discover protected-resource metadata for an MCP endpoint: the URL the server's 401 names, then
+/// the RFC 9728 path-aware and root well-known URLs; the first with an authorization server wins.
+pub async fn discover_resource_metadata(
+    client: &reqwest::Client,
+    mcp_url: &str,
+) -> Result<(String, ProtectedResourceMetadata), String> {
+    let mut candidates = Vec::new();
+    if let Ok(resp) = client.get(mcp_url).send().await {
+        if let Some(hint) = resp
+            .headers()
+            .get_all(reqwest::header::WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(resource_metadata_hint)
+        {
+            candidates.push(hint);
+        }
+    }
+    candidates.extend(resource_metadata_urls(mcp_url));
+    let mut last = format!("no resource-metadata URL could be derived from {mcp_url}");
+    for url in candidates {
+        let resp = match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                last = format!("GET {url}: HTTP {}", r.status());
+                continue;
+            }
+            Err(e) => {
+                last = format!("GET {url}: {e}");
+                continue;
+            }
+        };
+        match resp.json::<ProtectedResourceMetadata>().await {
+            Ok(meta) if !meta.authorization_servers.is_empty() => return Ok((url, meta)),
+            Ok(_) => last = format!("{url}: resource metadata has no authorization_servers"),
+            Err(e) => last = format!("parse resource metadata from {url}: {e}"),
+        }
+    }
+    Err(last)
+}
+
 /// Fetch RFC 8414 authorization-server metadata from `<issuer>/.well-known/oauth-authorization-server`.
 pub async fn fetch_auth_server_metadata(
     client: &reqwest::Client,
@@ -394,4 +466,35 @@ fn parse_token_response(
         client_id: client_id.to_string(),
         scopes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn well_known_goes_between_origin_and_path() {
+        assert_eq!(
+            resource_metadata_urls("http://127.0.0.1:9/mcp/?x=1"),
+            [
+                "http://127.0.0.1:9/.well-known/oauth-protected-resource/mcp",
+                "http://127.0.0.1:9/.well-known/oauth-protected-resource"
+            ]
+        );
+        assert_eq!(resource_metadata_urls("https://h").len(), 1);
+    }
+
+    #[test]
+    fn the_401_hint_is_parsed_quoted_or_bare() {
+        assert_eq!(
+            resource_metadata_hint(r#"Bearer realm="x", resource_metadata="https://a/b""#)
+                .as_deref(),
+            Some("https://a/b")
+        );
+        assert_eq!(
+            resource_metadata_hint("Bearer resource_metadata=https://a/b, error=x").as_deref(),
+            Some("https://a/b")
+        );
+        assert_eq!(resource_metadata_hint("Bearer realm=x"), None);
+    }
 }

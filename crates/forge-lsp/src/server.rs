@@ -251,7 +251,8 @@ impl LspServer {
         timeout: Duration,
     ) -> std::io::Result<Vec<Diagnostic>> {
         let mut diags = Vec::new();
-        let deadline = tokio::time::Instant::now() + timeout;
+        let mut deadline = tokio::time::Instant::now() + timeout;
+        let hard_deadline = deadline;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -284,7 +285,11 @@ impl LspServer {
                         if let Some(arr) = params.get("diagnostics").and_then(|v| v.as_array()) {
                             diags = arr.iter().filter_map(parse_diagnostic).collect();
                         }
-                        break;
+                        // Servers like rust-analyzer publish an empty set first and the real one
+                        // moments later: keep the latest publish once the stream goes quiet.
+                        deadline =
+                            hard_deadline.min(tokio::time::Instant::now() + DIAGNOSTICS_SETTLE);
+                        continue;
                     }
                 }
             }
@@ -292,6 +297,9 @@ impl LspServer {
         Ok(diags)
     }
 }
+
+/// Quiet time after a matching publishDiagnostics before it is taken as the final set.
+const DIAGNOSTICS_SETTLE: Duration = Duration::from_millis(750);
 
 fn initialize_request(id: u64, root_uri: &str, initialization_options: Option<Value>) -> Value {
     let mut params = json!({
@@ -329,9 +337,11 @@ async fn monitor_process_tree_memory(
         let sample = tokio::task::spawn_blocking(move || {
             system.refresh_processes(ProcessesToUpdate::All, true);
             let root_exists = system.process(root).is_some();
+            // Linux lists every thread as a process entry repeating its process's RSS.
             let relationships = system
                 .processes()
                 .iter()
+                .filter(|(_, process)| process.thread_kind().is_none())
                 .map(|(pid, process)| (*pid, process.parent()))
                 .collect::<Vec<_>>();
             let members = process_tree_pids(root, &relationships);
@@ -505,6 +515,32 @@ fn parse_diagnostic(v: &Value) -> Option<Diagnostic> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn diagnostics_wait_past_an_empty_first_publish() {
+        let uri = "file:///w/main.rs";
+        let empty = format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{uri}","diagnostics":[]}}}}"#
+        );
+        let full = format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{uri}","diagnostics":[{{"message":"mismatched types","severity":1,"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":1}}}}}}]}}}}"#
+        );
+        let script = format!(
+            "printf 'Content-Length: %d\\r\\n\\r\\n%s' {} '{empty}'; sleep 0.3; \
+             printf 'Content-Length: %d\\r\\n\\r\\n%s' {} '{full}'; sleep 5",
+            empty.len(),
+            full.len()
+        );
+        let mut server = LspServer::spawn("/bin/sh", &["-c".to_string(), script])
+            .await
+            .unwrap();
+        let diags = server
+            .collect_diagnostics(uri, 0, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(diags.len(), 1);
+    }
 
     #[test]
     fn initialize_request_carries_resource_safe_options() {

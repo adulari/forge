@@ -2,6 +2,8 @@
 
 use super::*;
 
+const MAX_QUEUE_STAMP_SKEW_MS: u64 = 15 * 60 * 1000;
+
 pub(super) fn verify_command_envelope(
     metadata: &QueuedCommandMetadata,
     encoded: &[u8],
@@ -16,8 +18,14 @@ pub(super) fn verify_command_envelope(
         bail!("durable command envelope has the wrong kind");
     }
     validate_inbound_routing(&envelope, identity)?;
+    // The service stamps its own clock when the POST lands, which can be a later second than the
+    // sealed envelope (or a delayed retry): accept a queue stamp at or after the envelope, within
+    // a bounded skew so a re-stamp cannot stretch the command's expiry.
+    let stamp_skew = metadata
+        .created_at_ms
+        .checked_sub(envelope.metadata.created_at_ms);
     if envelope.metadata.sender_device_id != metadata.sender_device_id
-        || envelope.metadata.created_at_ms != metadata.created_at_ms
+        || !stamp_skew.is_some_and(|skew| skew <= MAX_QUEUE_STAMP_SKEW_MS)
     {
         bail!("durable command envelope does not match its queue metadata");
     }

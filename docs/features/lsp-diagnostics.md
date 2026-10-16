@@ -76,3 +76,7 @@ Bench: 6 Python tasks × 3 reps, `inferhub::glm-5.3-flash`, real basedpyright, b
 
 LSP characters on the wire fell 84%, their re-sent weight 83%, and mean input tokens per task
 20%, with no change in pass rate.
+
+## Diagnostics settling
+
+Post-edit diagnostics are taken from the last `publishDiagnostics` for the file once the server has been quiet for 750 ms (bounded by `timeout_ms`), because servers such as rust-analyzer publish an empty set before the real one. The memory guard sums resident memory over real processes only; Linux thread entries are skipped.

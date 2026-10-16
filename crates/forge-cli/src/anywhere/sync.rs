@@ -168,26 +168,32 @@ async fn upload_batch() -> Result<()> {
     let store = crate::open_store()?;
     let http = client()?;
     let started = std::time::Instant::now();
-    loop {
-        let entries = store.pending_sync_journal(BATCH_SIZE)?;
-        if entries.is_empty() {
-            break;
+    // An upload failure (a revision conflict, say) must not starve the download side: remote
+    // changes keep arriving and the failure is reported once the rest of this pass is done.
+    let upload_result: Result<()> = async {
+        loop {
+            let entries = store.pending_sync_journal(BATCH_SIZE)?;
+            if entries.is_empty() {
+                break;
+            }
+            for entry in entries {
+                upload_entry(
+                    &store,
+                    &state_store,
+                    &http,
+                    &service_url,
+                    &access_token,
+                    &entry,
+                )
+                .await?;
+            }
+            if started.elapsed() >= DRAIN_BUDGET {
+                break;
+            }
         }
-        for entry in entries {
-            upload_entry(
-                &store,
-                &state_store,
-                &http,
-                &service_url,
-                &access_token,
-                &entry,
-            )
-            .await?;
-        }
-        if started.elapsed() >= DRAIN_BUDGET {
-            break;
-        }
+        Ok(())
     }
+    .await;
     let started = std::time::Instant::now();
     while download_changes(&store, &state_store, &http, &service_url, &access_token).await? {
         if started.elapsed() >= DRAIN_BUDGET {
@@ -216,7 +222,7 @@ async fn upload_batch() -> Result<()> {
     // payloads forever. Keep this bounded so a long-lived daemon amortizes old cleanup without a
     // latency or write-lock spike; conflicts and each local record's newest revision are retained.
     store.prune_terminal_sync_rows(1_000)?;
-    Ok(())
+    upload_result
 }
 
 /// Reads and stages one feed page. Returns whether the page held any changes, so the caller can

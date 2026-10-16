@@ -39,6 +39,16 @@ impl SteerInbox {
         }
     }
 
+    /// Withdraw the oldest not-yet-taken `text`; false when the turn already took it.
+    pub fn remove_pending(&self, text: &str) -> bool {
+        self.inner.lock().is_ok_and(|mut q| {
+            q.pending
+                .iter()
+                .position(|t| t == text)
+                .is_some_and(|i| q.pending.remove(i).is_some())
+        })
+    }
+
     /// Take every queued text, oldest first, recording each as delivered.
     pub fn drain(&self) -> Vec<String> {
         self.inner
@@ -83,6 +93,16 @@ impl SteerInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_withdrawn_text_is_never_drained() {
+        let inbox = SteerInbox::default();
+        inbox.push("a");
+        inbox.push("b");
+        assert!(inbox.remove_pending("a"));
+        assert!(!inbox.remove_pending("a"));
+        assert_eq!(inbox.drain(), ["b"]);
+    }
 
     #[test]
     fn drains_in_order_and_ignores_blank() {

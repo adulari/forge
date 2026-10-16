@@ -169,22 +169,36 @@ pub fn commit_worktree(worktree_path: &Path) -> Result<bool, WorktreeError> {
     // writes its per-turn checkpoint snapshots there, and without the exclusion they ride the
     // snapshot into the parent tree / result branch (found live in `forge queue run --mock`).
     let add = Command::new("git")
-        .args([
-            "-C",
-            wt,
-            "add",
-            "-A",
-            "--",
-            ".",
-            ":(exclude).cargo",
-            ":(exclude).forge/checkpoints",
-        ])
+        .args(["-C", wt, "add", "-A", "--", "."])
         .output()
         .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
     if !add.status.success() {
         return Err(WorktreeError::NonZeroExit {
             cmd: "add -A".into(),
             stderr: String::from_utf8_lossy(&add.stderr).into_owned(),
+        });
+    }
+    // Unstage the plumbing AFTER adding: an explicit `:(exclude)` pathspec naming an ignored
+    // path (any repo that gitignores `.forge`) makes `git add` exit 1 and snapshot nothing.
+    let unstage = Command::new("git")
+        .args([
+            "-C",
+            wt,
+            "rm",
+            "-r",
+            "--cached",
+            "-q",
+            "--ignore-unmatch",
+            "--",
+            ".cargo",
+            ".forge/checkpoints",
+        ])
+        .output()
+        .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
+    if !unstage.status.success() {
+        return Err(WorktreeError::NonZeroExit {
+            cmd: "rm --cached".into(),
+            stderr: String::from_utf8_lossy(&unstage.stderr).into_owned(),
         });
     }
     // Staged-only emptiness check (`status --porcelain` would still list the excluded `.cargo`
@@ -572,6 +586,43 @@ mod tests {
             std::fs::read_to_string(repo.join("child.txt")).unwrap(),
             "uncommitted work\n",
             "the child's uncommitted edit must reach the main tree"
+        );
+    }
+
+    #[test]
+    fn snapshot_works_when_forge_dir_is_gitignored() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo();
+        std::fs::write(repo.join(".gitignore"), ".forge/\n").unwrap();
+        run_git(&repo, &["add", ".gitignore"], "add").unwrap();
+        run_git(&repo, &["commit", "-m", "ignore"], "commit").unwrap();
+        let wt_path = repo.join(".forge").join("worktrees").join("ignored");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "forge/subagent/ignored",
+                "HEAD",
+            ],
+            "worktree add",
+        )
+        .unwrap();
+        std::fs::create_dir_all(wt_path.join(".forge/checkpoints")).unwrap();
+        std::fs::write(wt_path.join(".forge/checkpoints/c"), "x").unwrap();
+        std::fs::write(wt_path.join("child.txt"), "work\n").unwrap();
+        assert!(commit_worktree(&wt_path).unwrap());
+        let tree = String::from_utf8(
+            run_git(&wt_path, &["ls-tree", "-r", "--name-only", "HEAD"], "ls").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            tree.contains("child.txt") && !tree.contains("checkpoints"),
+            "{tree}"
         );
     }
 

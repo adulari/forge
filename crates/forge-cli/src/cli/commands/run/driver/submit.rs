@@ -124,6 +124,7 @@ impl DriverState {
                 let idx = index as usize;
                 if idx < self.queued_prompts.len() && self.queued_prompts[idx] == text {
                     self.queued_prompts.remove(idx);
+                    self.steer.remove_pending(&text);
                     self.app.set_queued(&self.queued_prompts);
                     self.app.note(&format!(
                         "✕ remote dequeued — {} pending",

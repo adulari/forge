@@ -206,9 +206,18 @@ use streams::{
     open_stream, stale_stream_close, LocalSocketCommand, LocalSocketEvent, StreamHandle,
 };
 
+/// Aborts the wrapped task when dropped, so stopping the connector also stops its sync worker.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(super) fn spawn(local_base_url: String) -> tokio::task::JoinHandle<()> {
-    let _sync_worker = super::sync::spawn();
     tokio::spawn(async move {
+        let _sync_worker = AbortOnDrop(super::sync::spawn());
         let command_base_url = local_base_url.clone();
         tokio::join!(
             relay_connector_loop(&local_base_url),
@@ -2312,6 +2321,26 @@ mod tests {
             queued_metadata([0xa8; 16], sender_id, service_ms, whole_second.len() as u64);
         verify_command_envelope(&metadata, &whole_second, &identity, &devices)
             .expect("a whole-second envelope matches what the service records");
+
+        // The POST landed in a later second than the envelope was sealed.
+        let metadata = queued_metadata(
+            [0xa9; 16],
+            sender_id,
+            service_ms + 1_000,
+            whole_second.len() as u64,
+        );
+        verify_command_envelope(&metadata, &whole_second, &identity, &devices)
+            .expect("a queue stamp one second after the envelope is accepted");
+        let metadata = queued_metadata(
+            [0xaa; 16],
+            sender_id,
+            service_ms + 3_600_000,
+            whole_second.len() as u64,
+        );
+        assert!(
+            verify_command_envelope(&metadata, &whole_second, &identity, &devices).is_err(),
+            "a stamp far after the envelope could extend its expiry"
+        );
     }
 
     #[test]

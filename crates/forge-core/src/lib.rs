@@ -9093,6 +9093,16 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_a_plan_on_a_resumed_session_never_escalates_to_accept_edits() {
+        let mut s = scripted_session("Cancel", Arc::new(Mutex::new(0)));
+        s.set_temper(PermissionMode::Plan);
+        s.pre_plan_mode = None;
+
+        assert_eq!(s.resolve_plan_approval(&one_step_plan()), None);
+        assert_eq!(s.mode, PermissionMode::Default);
+    }
+
+    #[test]
     fn presenting_a_plan_enters_plan_mode_and_captures_the_current_temper() {
         let mut s = scripted_session("Build it", Arc::new(Mutex::new(0)));
         s.set_temper(PermissionMode::Bypass);
