@@ -521,7 +521,9 @@ async fn mesh_smoke_rows(
                 &project,
             )
             .await;
-        let viable = decision.model != "unknown" && !decision.rationale.contains("no usable key");
+        let viable = decision.model != "unknown"
+            && !decision.unroutable
+            && !decision.rationale.contains("no usable key");
         rows.push(MeshSmokeRow {
             tier,
             model: decision.model,

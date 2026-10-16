@@ -487,6 +487,15 @@ pub(super) fn parse_codex_line(line: &str) -> Vec<Parsed> {
                         .and_then(Value::as_str)
                         .map(str::to_string)
                         .or_else(|| {
+                            item.and_then(|i| i.get("result"))
+                                .and_then(|r| r.get("content"))
+                                .and_then(Value::as_array)
+                                .and_then(|c| c.iter().find_map(|b| b.get("text")))
+                                .and_then(Value::as_str)
+                                .map(|t| t.chars().take(200).collect::<String>())
+                                .filter(|t| !t.is_empty())
+                        })
+                        .or_else(|| {
                             item.and_then(|i| i.get("tool"))
                                 .and_then(Value::as_str)
                                 .map(str::to_string)

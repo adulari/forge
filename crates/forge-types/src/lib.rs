@@ -700,9 +700,9 @@ pub enum CreditMode {
     /// No conservation — use the best model for each task (default).
     #[default]
     Normal,
-    /// Prefer free/subscription models; cap output tokens at 2048; skip auto-probing.
+    /// Prefer free/subscription models; skip auto-probing. No output-token cap is applied.
     Frugal,
-    /// Only route to free-tier or subscription models; cap output tokens at 1024.
+    /// Only route to free-tier or subscription models. No output-token cap is applied.
     Strict,
 }
 
@@ -718,8 +718,8 @@ impl CreditMode {
     pub fn description(self) -> &'static str {
         match self {
             CreditMode::Normal => "no restriction — best model per task",
-            CreditMode::Frugal => "prefer free/sub; cap output to 2048 tokens",
-            CreditMode::Strict => "free/sub only; cap output to 1024 tokens",
+            CreditMode::Frugal => "prefer free/subscription models",
+            CreditMode::Strict => "free/subscription models only",
         }
     }
 

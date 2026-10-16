@@ -51,6 +51,14 @@ pub(crate) fn any_credentials_available() -> bool {
         || forge_provider::any_bridge_logged_in()
 }
 
+pub(crate) fn in_set_advance_reason(rejected_twice: bool) -> &'static str {
+    if rejected_twice {
+        "the provider rejected this model twice in a row"
+    } else {
+        "still unreachable after backoff retries"
+    }
+}
+
 pub(crate) fn failure_verdict(failures: &[AttemptFailure], has_credentials: bool) -> String {
     let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
     // A zero-credential install is the actionable cause whatever the attempts said: a first-run
@@ -63,12 +71,10 @@ pub(crate) fn failure_verdict(failures: &[AttemptFailure], has_credentials: bool
         );
     }
     if !failures.is_empty() && count(AttemptFailure::NoCredentials) == failures.len() {
-        return format!(
-            "No usable model: none of your configured providers have credentials.\n\
-             {NO_CREDENTIALS_GUIDANCE}\n\
-             Set one of ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or log in to the \
-             Claude or Codex CLI."
-        );
+        return "No usable model: every attempted provider rejected its credentials (HTTP 401/403). \
+                Re-run `forge auth <provider>` with a valid key, or log in to the Claude or Codex CLI \
+                again."
+            .to_string();
     }
     if !failures.is_empty() && count(AttemptFailure::RateLimited) == failures.len() {
         return "No usable model: every attempted model was rate-limited.".to_string();
@@ -103,18 +109,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn verdict_for_all_missing_credentials_is_actionable_and_mentions_no_rate_limit() {
+    fn verdict_for_rejected_credentials_does_not_claim_none_configured() {
         let verdict = failure_verdict(
             &[AttemptFailure::NoCredentials, AttemptFailure::NoCredentials],
             true,
         );
-        assert!(verdict.contains("none of your configured providers have credentials"));
-        assert!(verdict.contains("forge setup"));
-        assert!(
-            verdict.contains(NO_CREDENTIALS_GUIDANCE),
-            "reuses the shared guidance so it cannot drift from the unroutable path"
-        );
+        assert!(verdict.contains("rejected its credentials"));
+        assert!(!verdict.contains("none of your configured providers"));
         assert!(!verdict.contains("rate-limit"));
+    }
+
+    #[test]
+    fn verdict_without_any_credentials_leads_with_setup_guidance() {
+        let verdict = failure_verdict(&[AttemptFailure::NoCredentials], false);
+        assert!(verdict.contains(NO_CREDENTIALS_GUIDANCE));
     }
 
     #[test]

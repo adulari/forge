@@ -318,6 +318,9 @@ pub(super) fn is_capability_failure(text: &str) -> bool {
         "function calling",
         "function-calling",
         "function call",
+        // Ollama: "registry.ollama.ai/library/<m> does not support tools".
+        "support tools",
+        "supports tools",
     ];
     const UNSUPPORTED_TERMS: &[&str] = &[
         "not supported",
@@ -326,6 +329,11 @@ pub(super) fn is_capability_failure(text: &str) -> bool {
         "unsupported",
     ];
     const PROXIMITY: usize = 60;
+    // vLLM's "\"auto\" tool choice requires --enable-auto-tool-choice ..." carries no
+    // "unsupported" phrase, so the proximity rule cannot see it.
+    if l.contains("tool choice requires") || l.contains("enable-auto-tool-choice") {
+        return true;
+    }
     let tool_positions: Vec<usize> = TOOL_TERMS
         .iter()
         .flat_map(|t| l.match_indices(t).map(|(i, _)| i))

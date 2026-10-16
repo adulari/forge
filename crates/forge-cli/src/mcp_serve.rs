@@ -15,7 +15,7 @@
 //! mesh-routed child agents that run in *this* process (it builds its own provider/router/store).
 //! Two cross-process mechanisms ride env vars inherited forge → claude/codex → mcp-serve:
 //! - `FORGE_SUBAGENT_DEPTH` bounds recursion: this server advertises `spawn_agents` only while
-//!   `depth < max_depth`, and bumps the var for anything it spawns (Phase 3c).
+//!   `depth <= max_depth`, and bumps the var for anything it spawns (Phase 3c).
 //! - `FORGE_SUBAGENT_SINK` names a JSONL file we append child lifecycle to, which the parent
 //!   Forge process tails so bridge-spawned subagents are visible in the TUI (Phase 3c).
 
@@ -103,7 +103,7 @@ struct ForgeMcp {
     mode: PermissionMode,
     rules: Vec<PermissionRule>,
     config: Config,
-    /// Present when subagents are enabled here (subagents on + `depth < max_depth`).
+    /// Present when subagents are enabled here (subagents on + `depth <= max_depth`).
     subagents: Option<SubagentSupport>,
     /// Store used by the `update_tasks` virtual tool to persist the bridge turn's task list,
     /// keyed by the parent session id the parent's `run_turn` exported via `ENV_SESSION`.
@@ -824,7 +824,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
     // (the same hazard class the explicit `CheckpointContext` threading removed for
     // FORGE_CHECKPOINT_*).
     std::env::set_var(crate::FORGE_SUBAGENT_DEPTH_ENV, (depth + 1).to_string());
-    let subagents = if config.mesh.subagents.enabled && depth < config.mesh.subagents.max_depth {
+    let subagents = if config.mesh.subagents.enabled && depth <= config.mesh.subagents.max_depth {
         // Same global store the parent uses — NOT a relative `.forge/forge.db`, which is a DIFFERENT
         // file (the parent's store lives in the per-user data dir). The divergence created spurious
         // empty sessions and broke the bridge task round-trip (the parent reloaded tasks from the

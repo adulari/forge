@@ -47,7 +47,7 @@ function ProviderCard({ block }: { block: ProviderBlock }) {
         <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{block.kind}</Text>
       </View>
       {costUsd > 0 ? (
-        <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]}>{formatCost(costUsd)} today</Text>
+        <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]}>{formatCost(costUsd)} (7d)</Text>
       ) : null}
       {block.quotas.map((quota) => {
         const pct = quota.fraction == null ? 0 : Math.max(0, Math.min(100, quota.fraction * 100));

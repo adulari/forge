@@ -101,6 +101,11 @@ fn probe_command() -> std::process::Command {
 /// Returns `(window, fraction, reset instant)` tuples. Best-effort: empty on failure. Costs one
 /// tiny Haiku turn, so callers should gate it on staleness.
 pub fn probe_claude_limits() -> Vec<(String, f64, Option<i64>)> {
+    if forge_config::load()
+        .is_ok_and(|c| forge_config::is_model_disabled("claude-cli", &c.mesh.disabled))
+    {
+        return Vec::new();
+    }
     // Bound the probe: `claude --print` can stall on a cold network or an auth prompt. Run it on a
     // detached thread and wait at most PROBE_TIMEOUT for the result; on timeout return empty so the
     // (backgrounded) quota refresh completes instead of leaking a task blocked on a hung child. The

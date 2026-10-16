@@ -741,12 +741,12 @@ async fn provider_reachability_checks() -> Vec<Check> {
 async fn bridge_roundtrip_checks() -> Vec<Check> {
     const BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     use forge_provider::Provider as _;
-    // Launch every available bridge CONCURRENTLY — each spawns its OWN independent subprocess, so a
-    // sequential loop made doctor pay the SUM of every bridge's 30s budget (3 bridges ≈ 90s worst
-    // case). join_all collapses that to the slowest single launch; results stay in CliKind order.
+    // Launch every enabled bridge CONCURRENTLY (own subprocess each): a sequential loop paid the
+    // SUM of every bridge's 30s budget. Results stay in CliKind order.
+    let disabled = forge_config::load().map_or_else(|_| Vec::new(), |c| c.mesh.disabled);
     let probes = forge_provider::CliKind::all()
         .into_iter()
-        .filter(|k| k.available())
+        .filter(|k| k.available() && !forge_config::is_model_disabled(k.prefix(), &disabled))
         .map(|k| async move {
             // harness=false → a plain CLI turn (no Forge-tool MCP bridge): the cheapest probe that
             // still exercises the binary launch + auth + a streamed reply.

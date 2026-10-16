@@ -6059,6 +6059,16 @@ reason = "no privilege escalation"
             ..p.clone()
         };
         assert!(add_custom_provider_at(&path, &collide).is_err());
+        for reserved in ["ollama", "claude-cli", "codex-oauth"] {
+            let shadow = CustomProviderConfig {
+                namespace: reserved.into(),
+                ..p.clone()
+            };
+            let err = add_custom_provider_at(&path, &shadow)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("built-in provider"), "{reserved}: {err}");
+        }
 
         // Remove is idempotent.
         assert!(remove_custom_provider_at(&path, "lmstudio").unwrap());
