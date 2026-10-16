@@ -8,6 +8,9 @@ use super::{
 };
 
 fn systemd_user_dir() -> Result<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Ok(std::path::PathBuf::from(xdg).join("systemd/user"));
+    }
     let home =
         forge_config::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?;
     Ok(home.join(".config/systemd/user"))
@@ -126,8 +129,11 @@ fn quote_unit_arg(s: &str) -> String {
     format!(
         "\"{}\"",
         s.replace('%', "%%")
+            .replace('$', "$$")
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
+            .replace('\r', " ")
+            .replace('\n', "\\n")
     )
 }
 
@@ -401,4 +407,16 @@ fn uninstall_schtasks(id: &str) -> Result<()> {
         &["/Delete", "/TN", &format!("forge-{id}"), "/F"],
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod quote_tests {
+    use super::quote_unit_arg;
+
+    #[test]
+    fn quote_unit_arg_escapes_dollar_and_newlines() {
+        let q = quote_unit_arg("echo $HOME\nsecond \"x\"");
+        assert_eq!(q, "\"echo $$HOME\\nsecond \\\"x\\\"\"");
+        assert!(!q.contains('\n'));
+    }
 }

@@ -217,8 +217,14 @@ pub fn parse_requests(
     if arr.is_empty() {
         return Err("spawn_agents `agents` must not be empty".into());
     }
+    if arr.len() > max_agents {
+        return Err(format!(
+            "spawn_agents accepts at most {max_agents} agents per call (got {}); split the rest into a later call",
+            arr.len()
+        ));
+    }
     let mut out = Vec::new();
-    for entry in arr.iter().take(max_agents) {
+    for entry in arr.iter() {
         let task = entry
             .get("task")
             .and_then(|t| t.as_str())

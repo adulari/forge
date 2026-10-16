@@ -189,7 +189,7 @@ impl Default for TurnContract {
 
 /// Directive phrases that are imperative by construction, so they are safe to match anywhere in
 /// the prompt: no ordinary description of a system contains them.
-const READ_ONLY_DIRECTIVES: [&str; 15] = [
+const READ_ONLY_DIRECTIVES: [&str; 20] = [
     "do not make changes",
     "without changing files",
     "this is read-only",
@@ -207,6 +207,11 @@ const READ_ONLY_DIRECTIVES: [&str; 15] = [
     "do not modify any files",
     "do not change any files",
     "make no edits",
+    "do not change anything",
+    "don't change anything",
+    "don't modify anything",
+    "do not write any files",
+    "don't make any changes",
 ];
 
 /// Bare read-only tokens. These are ordinary technical vocabulary — a bug report says the sandbox
@@ -314,6 +319,16 @@ pub(crate) fn explicitly_requests_change(prompt: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn natural_read_only_phrasings_are_read_only() {
+        for p in [
+            "Look around. Do not change anything.",
+            "Explain it, don't modify anything please",
+        ] {
+            assert!(explicitly_read_only(p), "{p}");
+        }
+    }
 
     #[test]
     fn a_first_contract_is_sent_as_is_and_an_unchanged_one_is_not_repeated() {

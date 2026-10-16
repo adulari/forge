@@ -311,7 +311,8 @@ pub fn merge_worktree_back(repo_root: &Path, branch: &str) -> Result<MergeReport
             // "Applied patch <file> with conflicts." or "error: patch failed: <file>:N"
             if let Some(rest) = line.strip_prefix("Applied patch ") {
                 if let Some(f) = rest.strip_suffix(" with conflicts.") {
-                    return Some(f.to_string());
+                    let f = f.strip_prefix("to ").unwrap_or(f);
+                    return Some(f.trim_matches('\'').to_string());
                 }
             }
             if let Some(rest) = line.strip_prefix("error: patch failed: ") {

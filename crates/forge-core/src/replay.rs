@@ -18,7 +18,7 @@ pub(crate) fn messages_to_replay_items(msgs: &[Message]) -> Vec<forge_types::Rep
         }
         match m.role {
             Role::User => {
-                if !m.content.trim().is_empty() {
+                if m.kind != forge_types::MessageKind::Nudge && !m.content.trim().is_empty() {
                     out.push(ReplayItem::User(m.content.clone()));
                 }
             }
@@ -58,4 +58,18 @@ pub(crate) fn messages_to_replay_items(msgs: &[Message]) -> Vec<forge_types::Rep
         }
     }
     out
+}
+
+#[cfg(test)]
+mod nudge_tests {
+    use super::*;
+
+    #[test]
+    fn harness_nudges_are_not_replayed_as_user_prompts() {
+        let mut nudge = Message::new(Role::User, "Implement the fix now.");
+        nudge.kind = forge_types::MessageKind::Nudge;
+        let real = Message::new(Role::User, "hello");
+        let items = messages_to_replay_items(&[nudge, real]);
+        assert_eq!(items.len(), 1);
+    }
 }

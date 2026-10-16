@@ -76,6 +76,15 @@ pub fn jobs_dir(workspace: Option<&Path>, cwd: &str) -> PathBuf {
     root.join(".forge").join("jobs")
 }
 
+/// Keep job records and logs out of `git status`: a `*` ignore file inside the directory ignores
+/// everything under it without touching the user's own `.gitignore`.
+fn ensure_jobs_git_ignored(dir: &Path) {
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        let _ = std::fs::write(ignore, "*\n");
+    }
+}
+
 /// A job as it exists on disk.
 pub struct Job {
     pub pid: u32,
@@ -149,6 +158,7 @@ pub async fn start(
     }
     let dir = jobs_dir(workspace, cwd);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    ensure_jobs_git_ignored(&dir);
 
     // The log has to exist before the spawn (it is the child's stdout), but the id is the pid,
     // which only exists after it. Open under a provisional name and rename once the pid is known —

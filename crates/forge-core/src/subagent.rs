@@ -1041,8 +1041,13 @@ mod tests {
     #[test]
     fn parse_requests_caps_at_max_agents() {
         let agents: Vec<_> = (0..20).map(|i| json!({"task": format!("t{i}")})).collect();
-        let reqs = parse_requests(&json!({ "agents": agents }), 3).unwrap();
-        assert_eq!(reqs.len(), 3, "must not exceed max_agents");
+        let err = parse_requests(&json!({ "agents": agents }), 3).unwrap_err();
+        assert!(err.contains("at most 3"), "{err}");
+        let few: Vec<_> = (0..3).map(|i| json!({"task": format!("t{i}")})).collect();
+        assert_eq!(
+            parse_requests(&json!({ "agents": few }), 3).unwrap().len(),
+            3
+        );
     }
 
     #[test]

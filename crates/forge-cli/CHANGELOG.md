@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Autonomy and subagent robustness (batch ML-G11).** Harness nudges no longer replay as your own prompts; "do not change/modify anything" counts as read-only; schedule units escape `$` and newlines and honour `XDG_CONFIG_HOME`; `spawn_agents` over the cap is rejected with a message instead of silently dropping agents; worktree conflict reports name the real file; the git-commit reminder sees files in new untracked directories; background job files are git-ignored; `forge queue run` exits non-zero when every task failed and no longer double-records a shadow win for the same model; `/heartbeat status` shows no countdown for a paused heartbeat (`crates/forge-core/src/turn_contract.rs`, `replay.rs`, `worktree.rs`, `git_hygiene.rs`, `subagent/requests.rs`, `crates/forge-cli/src/cli/commands/queue.rs`, `schedule/native.rs`).
+
 ### Added
 
 - **Archived sessions are reachable from the terminal too.** `forge sessions --archived` lists them, `--all` lists everything with an `[archived]` tag, `--unarchive <id>` brings one back, and `forge chat --resume <id>` un-archives what it resumes, matching the daemon and the app (`crates/forge-cli/src/cli/commands/replay.rs`).
