@@ -2315,14 +2315,18 @@ impl App {
     pub fn handle_paste(&mut self, content: String) {
         self.sanitize_cursor();
         let content = sanitize_paste(&content);
-        if !content.contains('\n') {
-            // Single-line: insert directly as if the user typed it.
+        if !content.contains('\n') && content.chars().count() <= 2000 {
+            // Short single-line: insert directly as if the user typed it.
             self.input.insert_str(self.input_cursor, &content);
             self.input_cursor += content.len();
             return;
         }
         let n = content.lines().count();
-        let placeholder = format!("[pasted text ({n} lines)]");
+        let placeholder = if n <= 1 {
+            format!("[pasted text ({} chars)]", content.chars().count())
+        } else {
+            format!("[pasted text ({n} lines)]")
+        };
         self.insert_block(placeholder, PasteKind::Text(content));
     }
 
@@ -2443,8 +2447,23 @@ impl App {
                 None => s.flush.push(header_line("you", USER)),
             }
             let shown = peer.as_ref().map_or(line, |(_, body)| body.as_str());
-            for l in shown.lines() {
-                s.flush.push(body_line(l));
+            // A huge paste is sent in full but echoed only in part, so scrollback stays usable.
+            const ECHO_LINES: usize = 40;
+            const ECHO_LINE_CHARS: usize = 2000;
+            let total = shown.lines().count();
+            for l in shown.lines().take(ECHO_LINES) {
+                if l.chars().count() > ECHO_LINE_CHARS {
+                    let cut: String = l.chars().take(ECHO_LINE_CHARS).collect();
+                    s.flush.push(body_line(&format!("{cut}…")));
+                } else {
+                    s.flush.push(body_line(l));
+                }
+            }
+            if total > ECHO_LINES {
+                s.flush.push(body_line(&format!(
+                    "… {} more lines (sent in full)",
+                    total - ECHO_LINES
+                )));
             }
             for img in std::mem::take(&mut s.last_submit_images) {
                 let kb = (img.data_base64.len() * 3 / 4).div_ceil(1024);
@@ -8293,5 +8312,19 @@ mod tests {
         assert_eq!(super::prev_char_boundary(s, accent_end), family_end);
         assert_eq!(super::prev_char_boundary(s, 0), 0);
         assert_eq!(super::next_char_boundary(s, s.len()), s.len());
+    }
+}
+
+#[cfg(test)]
+mod paste_cap_tests {
+    use super::*;
+
+    #[test]
+    fn a_huge_single_line_paste_collapses_to_a_chip() {
+        let mut app = App::default();
+        app.handle_paste("A".repeat(5000));
+        assert_eq!(app.input, "[pasted text (5000 chars)]");
+        app.handle_paste("short".into());
+        assert!(app.input.ends_with("short"));
     }
 }

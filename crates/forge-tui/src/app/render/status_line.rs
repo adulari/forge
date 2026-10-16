@@ -1,3 +1,4 @@
+use super::span_fit::fit_spans;
 use super::*;
 use crate::git_location::GitHead;
 use crate::surface::{TEXT, TOOLCYAN};
@@ -480,7 +481,11 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         let cols =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len)]).split(row1);
         frame.render_widget(
-            Paragraph::new(TextLine::from(left_spans)).style(bg),
+            Paragraph::new(TextLine::from(fit_spans(
+                left_spans,
+                (cols[0].width as usize).saturating_sub(1),
+            )))
+            .style(bg),
             cols[0],
         );
         frame.render_widget(
@@ -497,7 +502,11 @@ pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         let cols =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len)]).split(row1);
         frame.render_widget(
-            Paragraph::new(TextLine::from(left_spans)).style(bg),
+            Paragraph::new(TextLine::from(fit_spans(
+                left_spans,
+                (cols[0].width as usize).saturating_sub(1),
+            )))
+            .style(bg),
             cols[0],
         );
         frame.render_widget(

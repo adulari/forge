@@ -5,6 +5,40 @@ use forge_config::{KeyCombo, KeybindsConfig};
 
 use crate::app::KeyKind;
 
+/// Whether `key` is a name `matches` can ever match: a known token or a single character.
+pub fn is_valid_key_name(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.chars().count() == 1
+        || matches!(
+            k.as_str(),
+            "up" | "down"
+                | "left"
+                | "right"
+                | "enter"
+                | "esc"
+                | "backspace"
+                | "delete"
+                | "pageup"
+                | "pagedown"
+                | "home"
+                | "end"
+                | "tab"
+        )
+        || k.strip_prefix('f')
+            .and_then(|n| n.parse::<u8>().ok())
+            .is_some_and(|n| (1..=12).contains(&n))
+}
+
+/// `(action, key)` pairs whose key name can never fire (e.g. `"ctrl+z"` instead of key `z` +
+/// `ctrl = true`).
+pub fn invalid_binds(cfg: &KeybindsConfig) -> Vec<(String, String)> {
+    cfg.binds
+        .iter()
+        .filter(|(_, c)| !is_valid_key_name(&c.key))
+        .map(|(a, c)| (a.clone(), c.key.clone()))
+        .collect()
+}
+
 /// Returns true when `ev` matches `combo`.
 pub fn matches(combo: &KeyCombo, ev: &KeyEvent) -> bool {
     let key = combo.key.to_ascii_lowercase();
@@ -249,5 +283,20 @@ mod tests {
         assert!(combo.ctrl && !combo.alt && !combo.shift);
         assert!(matches(&combo, &e));
         assert_eq!(combo_display(&combo), "Ctrl-k");
+    }
+}
+
+#[cfg(test)]
+mod validity_tests {
+    use super::*;
+
+    #[test]
+    fn key_names_are_validated() {
+        assert!(is_valid_key_name("z"));
+        assert!(is_valid_key_name("PageUp"));
+        assert!(is_valid_key_name("f12"));
+        assert!(!is_valid_key_name("ctrl+z"));
+        assert!(!is_valid_key_name("f13"));
+        assert!(!is_valid_key_name(""));
     }
 }

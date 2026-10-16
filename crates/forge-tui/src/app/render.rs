@@ -6,6 +6,7 @@ pub(crate) mod input;
 pub(crate) mod live;
 mod overlays;
 mod question;
+mod span_fit;
 pub(crate) mod status_line;
 mod status_widgets;
 mod transcript;

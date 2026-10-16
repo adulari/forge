@@ -329,6 +329,13 @@ pub(crate) async fn dispatch_command(
                     effort: rung,
                 });
                 app.note(&format!("⊕ model pinned: {model_id} (clear with /model)"));
+                let unknown =
+                    super::dispatch_checks::model_not_in_catalog(session, &model_id).await;
+                if unknown {
+                    app.note(&format!(
+                        "⚠ {model_id} is not in the model catalog — the provider may be unknown or have no key; /models lists what is usable"
+                    ));
+                }
             } else {
                 open_model_pin_picker(session, app, &model_id).await?;
             }
@@ -427,6 +434,11 @@ pub(crate) async fn dispatch_command(
         // `/commit [hint]` — one turn that commits the session's uncommitted work. The model does
         // it through the ordinary shell tool (and its permission gate); Forge never pushes here.
         CommandAction::Commit(hint) => {
+            let root = session.lock().await.workspace_root().to_path_buf();
+            if let Some(why) = super::dispatch_checks::git_blocker(&root, true) {
+                app.note(why);
+                return Ok(DispatchOutcome::Handled);
+            }
             app.note("⎇ committing this session's work…");
             return Ok(DispatchOutcome::RunTurn {
                 prompt: super::commit_prompt::commit_prompt(&hint),
@@ -623,6 +635,11 @@ and keep going."
         // opens the PR with generated evidence + provenance (docs/features/open-pr.md).
         CommandAction::Pr(title) => {
             let title = title.trim();
+            let root = session.lock().await.workspace_root().to_path_buf();
+            if let Some(why) = super::dispatch_checks::git_blocker(&root, false) {
+                app.note(why);
+                return Ok(DispatchOutcome::Handled);
+            }
             let sid = session.lock().await.id().to_string();
             let title_line = if title.is_empty() {
                 "a concise conventional-commit title".to_string()
@@ -1287,27 +1304,7 @@ pub(crate) async fn dispatch_catalog(
             Ok(DispatchOutcome::Handled)
         }
         Resolved::Unknown(x) => {
-            if x.contains('/') || x.contains('.') {
-                app.note(&format!(
-                    "unknown command: /{x} — to send a path as a prompt, start the line with // (e.g. /{line})"
-                ));
-                return Ok(DispatchOutcome::Handled);
-            }
-            let lower = x.to_lowercase();
-            let near = forge_tui::COMMANDS
-                .iter()
-                .filter(|c| {
-                    let d = command_edit_distance(c.name, &lower);
-                    d <= 2 && d < lower.len().max(1)
-                })
-                .min_by_key(|c| command_edit_distance(c.name, &lower));
-            match near {
-                Some(c) => app.note(&format!(
-                    "unknown command: /{x} — did you mean /{}? (try /help)",
-                    c.name
-                )),
-                None => app.note(&format!("unknown command: /{x} — try /help")),
-            }
+            app.note(&super::dispatch_checks::unknown_command_note(&x, line));
             Ok(DispatchOutcome::Handled)
         }
         // A `/`-line never resolves to Plain, but stay safe rather than silently submit it.
@@ -1316,18 +1313,4 @@ pub(crate) async fn dispatch_catalog(
             Ok(DispatchOutcome::Handled)
         }
     }
-}
-
-fn command_edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut cur = vec![i + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let sub = prev[j] + usize::from(ca != *cb);
-            cur.push(sub.min(prev[j + 1] + 1).min(cur[j] + 1));
-        }
-        prev = cur;
-    }
-    prev[b.len()]
 }

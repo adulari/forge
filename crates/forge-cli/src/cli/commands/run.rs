@@ -19,6 +19,7 @@ use crate::*;
 
 mod autonomous;
 mod commit_prompt;
+mod dispatch_checks;
 pub(crate) use autonomous::*;
 
 mod gates;
@@ -502,6 +503,11 @@ pub(crate) async fn run_chat_tui(
     // Wire statusline config from the loaded config.
     app.statusline_config = tui_config.statusline.clone();
     app.keybinds = tui_config.keybinds.clone();
+    for (action, key) in forge_tui::keybinds::invalid_binds(&app.keybinds) {
+        app.note(&format!(
+            "⚠ keybind `{action}`: `{key}` is not a valid key name — use a single key plus ctrl/alt/shift flags"
+        ));
+    }
     // Full-screen banner goes into the transcript log (no native scrollback in full-screen mode).
     // Inline banner was already printed directly to stdout above.
     if matches!(resume_mode, ResumeMode::Fresh) && fullscreen {
@@ -516,6 +522,7 @@ pub(crate) async fn run_chat_tui(
     let session = {
         app.loading = Some("starting session…");
         tui.draw(&app);
+        let pin_for_status = pin.clone();
         let build = build_session_with(
             Box::new(ChannelPresenter::new(tx)),
             mock,
@@ -547,6 +554,14 @@ pub(crate) async fn run_chat_tui(
             }
         };
         app.loading = None;
+        if let Some(pinned) = pin_for_status.filter(|p| p.contains("::") && !p.contains(',')) {
+            app.apply(forge_tui::PresenterEvent::Routing {
+                tier: "pinned".to_string(),
+                model: forge_provider::normalize_model_id(&pinned).into_owned(),
+                rationale: "pinned by --model".to_string(),
+                effort: None,
+            });
+        }
         let mut session = session;
         // A terminal session can list and message its peers through a running daemon; only offer
         // the tools when one answers, so the model is never handed a tool that cannot work.
@@ -1274,6 +1289,30 @@ pub(crate) async fn run_chat_tui(
                             } else {
                                 app.mesh_overlay.cursor = (app.mesh_overlay.cursor + 1).min(max);
                             }
+                        }
+                    } else if app.command_center.open {
+                        if up {
+                            app.command_center.move_up();
+                        } else {
+                            app.command_center.move_down(&app.palette.extra);
+                        }
+                    } else if app.palette.open {
+                        if up {
+                            app.palette.move_up();
+                        } else {
+                            app.palette.move_down();
+                        }
+                    } else if app.at_picker.open {
+                        if up {
+                            app.at_picker.move_up();
+                        } else {
+                            app.at_picker.move_down();
+                        }
+                    } else if app.picker.open {
+                        if up {
+                            app.picker.move_up();
+                        } else {
+                            app.picker.move_down();
                         }
                     } else if app.output_view_scroll(up, STEP) {
                         // The full-output viewer took the wheel.
@@ -2448,12 +2487,21 @@ pub(crate) async fn run_chat_tui(
                         }
                         app.at_picker.close();
                     }
-                    KeyKind::Char(c) => {
-                        app.input.push(c);
-                        sync_at_picker_to_at_token(&mut app);
-                    }
-                    KeyKind::Backspace => {
-                        app.input.pop();
+                    KeyKind::Char(_)
+                    | KeyKind::Backspace
+                    | KeyKind::DeleteForward
+                    | KeyKind::DeleteWordBack
+                    | KeyKind::KillLineBack
+                    | KeyKind::KillLineForward
+                    | KeyKind::Left
+                    | KeyKind::Right
+                    | KeyKind::WordLeft
+                    | KeyKind::WordRight
+                    | KeyKind::Home
+                    | KeyKind::End => {
+                        // Readline editing keeps working under the picker; it re-syncs to
+                        // whatever `@token` the cursor is now in (and closes if none).
+                        let _ = handle_key(&mut app.input, &mut app.input_cursor, key);
                         sync_at_picker_to_at_token(&mut app);
                     }
                     KeyKind::CycleTemper

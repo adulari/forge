@@ -124,6 +124,26 @@ fn keybind_reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
             Span::styled(action_desc(action), Style::default().fg(DIM)),
         ])
     }));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Fixed keys (not rebindable)",
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )));
+    for (key, desc) in [
+        ("Ctrl+T", "Expand/collapse the latest tool call"),
+        ("Ctrl+O", "Toggle subagent detail"),
+        ("Ctrl+J / Shift+Enter / Alt+Enter", "Insert a newline"),
+        ("Ctrl+A / Ctrl+E", "Start / end of line"),
+        ("Ctrl+W / Ctrl+U", "Delete word back / line back"),
+        ("Alt+B / Alt+F, Alt+Left / Alt+Right", "Move by word"),
+        ("Alt+Backspace", "Delete word back"),
+        ("Shift+Tab", "Cycle temper"),
+    ] {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {key:<22}"), Style::default().fg(TEXT)),
+            Span::styled(desc, Style::default().fg(DIM)),
+        ]));
+    }
     lines
 }
 
