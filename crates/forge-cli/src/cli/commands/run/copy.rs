@@ -16,7 +16,7 @@ pub(crate) fn copy_selection(clipboard: &mut Option<arboard::Clipboard>, text: &
 
 /// Emit an OSC 52 "set clipboard" escape so the terminal copies `text` (base64-encoded). When
 /// running inside tmux/screen, wrap it in the multiplexer passthrough so it reaches the outer
-/// terminal (requires tmux `set-clipboard on` / `allow-passthrough on`, the modern defaults).
+/// terminal (needs tmux `set-clipboard on` or `allow-passthrough on`; stock tmux has neither by default).
 fn osc52_copy(text: &str) {
     use base64::Engine as _;
     use std::io::Write as _;
@@ -24,7 +24,9 @@ fn osc52_copy(text: &str) {
     let term = std::env::var("TERM").unwrap_or_default();
     let seq = if term.starts_with("tmux") || term.starts_with("screen") {
         // tmux passthrough: ESC P tmux ; <payload with each ESC doubled> ESC \
-        format!("\x1bPtmux;\x1b\x1b]52;c;{b64}\x07\x1b\\")
+        // The plain sequence too: with `allow-passthrough off` (tmux's default) the wrapped one is
+        // dropped, while tmux's own `set-clipboard` can still honour the bare one.
+        format!("\x1b]52;c;{b64}\x07\x1bPtmux;\x1b\x1b]52;c;{b64}\x07\x1b\\")
     } else {
         format!("\x1b]52;c;{b64}\x07")
     };

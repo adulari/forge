@@ -13,7 +13,8 @@ pub(crate) async fn chat(
     maybe_first_run_setup(mock)?;
     maybe_autostart_local();
     // Default to the interactive (animated) TUI on a real terminal.
-    if !plain && std::io::stdout().is_terminal() {
+    let dumb_term = std::env::var("TERM").is_ok_and(|t| t == "dumb");
+    if !plain && !dumb_term && std::io::stdout().is_terminal() {
         // Update check happens in background inside run_chat_tui (via the UiMsg channel) so it
         // never delays TUI startup. The check has a 3s network timeout — blocking here would
         // freeze the terminal for up to 3s once per day.

@@ -240,6 +240,11 @@ impl Session {
         self.catalog.as_ref()
     }
 
+    /// Whether `[mesh] disabled` excludes this model (pickers must not offer it).
+    pub fn is_model_disabled(&self, model_id: &str) -> bool {
+        forge_config::is_model_disabled(model_id, &self.config.mesh.disabled)
+    }
+
     /// Override the session's permission mode at runtime. Used by `forge mcp agent` so the
     /// orchestrating agent can switch to bypass/accept-edits without restarting the session.
     pub fn set_mode(&mut self, mode: PermissionMode) {

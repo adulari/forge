@@ -25,7 +25,7 @@ pub(crate) async fn set_effort_ceiling(
                 ));
             }
             None => app.note(&format!(
-                "⚠ unknown effort level '{s}' — use low/medium/high/xhigh"
+                "⚠ unknown effort level '{s}' — use low/medium/high/xhigh/max/whitehot"
             )),
         },
         // Bare /effort → open the slider (same as Ctrl+R).

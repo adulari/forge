@@ -20,6 +20,7 @@ ratatui.workspace = true
 crossterm.workspace = true
 # Cell width of glyphs (CJK/emoji = 2 cells) so mouse-selection maps screen columns → chars correctly.
 unicode-width = "0.2"
+unicode-segmentation = "1"
 tokio.workspace = true
 pulldown-cmark.workspace = true
 syntect.workspace = true

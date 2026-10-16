@@ -377,6 +377,7 @@ pub(crate) async fn open_model_pin_picker(
                 .by_provider(pricing)
                 .into_iter()
                 .flat_map(|g| g.models)
+                .filter(|m| !s.is_model_disabled(&m.id))
                 .collect();
             // Sort by tier priority: subscription first, then frontier, then paid, then free.
             // Within same tier, alphabetical by id.

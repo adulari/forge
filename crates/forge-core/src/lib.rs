@@ -344,6 +344,9 @@ pub enum CoreError {
     SessionNotFound(String),
     #[error("invalid session workspace: {0}")]
     Workspace(String),
+    /// A precondition the user can fix (not a Forge bug): shown without an "internal" prefix.
+    #[error("{0}")]
+    Precondition(String),
     /// A tool aimed at a previous host's path after the session moved (host_move.rs).
     #[error("{0}")]
     StaleHostPath(String),
@@ -2402,6 +2405,15 @@ impl Session {
         self.presenter.emit(PresenterEvent::Done {
             final_text: String::new(),
             stop_reason: StopReason::NoOutput,
+        });
+    }
+
+    pub fn notify_warning(&mut self, msg: &str) {
+        self.presenter
+            .emit(PresenterEvent::Warning(msg.to_string()));
+        self.presenter.emit(PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: StopReason::FinalAnswer,
         });
     }
 
@@ -10576,11 +10588,17 @@ mod tests {
 
         session.ask_btw("what is 2+2?").await;
 
-        let after = store.load_all_messages(&id).unwrap().len();
-        assert_eq!(
-            after, 0,
-            "/btw must not write ANY row (active or soft-deleted) to the message table"
+        // The only row a /btw leaves is the inactive carrier of its usage record (side-call
+        // accounting); nothing active, so no later turn can ever load it.
+        assert!(
+            store.load_messages(&id).unwrap().is_empty(),
+            "/btw must not write an active row to the message table"
         );
+        assert!(store
+            .load_all_messages(&id)
+            .unwrap()
+            .iter()
+            .all(|m| m.role != forge_types::Role::User && m.role != forge_types::Role::Assistant));
         // The transcript used for the NEXT real turn's context must also be untouched.
         assert!(session.transcript.is_empty());
     }

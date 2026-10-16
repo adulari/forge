@@ -16,6 +16,7 @@
 
 use super::*;
 use crate::compaction_policy::record_model_failure_in;
+use crate::spend_guard::priced;
 
 const BTW_SYSTEM: &str = "You are answering a quick side question asked out-of-band via /btw \
 while a coding session continues. Below the question's context is an excerpt of that session's \
@@ -53,6 +54,7 @@ pub struct BtwAsker {
     pinned_model: Option<Vec<String>>,
     pinned_effort: Option<EffortLevel>,
     catalog: Option<ModelCatalog>,
+    pricing: forge_mesh::pricing::Pricing,
     /// Where a busy-path answer is shown; the idle path emits through the session's presenter.
     sink: Option<std::sync::Mutex<Box<dyn Presenter>>>,
 }
@@ -129,12 +131,21 @@ impl BtwAsker {
             .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
             .await
         {
-            Ok(r) => PresenterEvent::BtwAnswer {
-                question: question.to_string(),
-                answer: r.content,
-                model,
-                cost_usd: Some(r.usage.cost_usd),
-            },
+            Ok(r) => {
+                let usage = priced(&self.pricing, &model, &r.usage);
+                let _ = self.store.record_side_call_usage_for(
+                    &self.session_id,
+                    "btw",
+                    Some(&model),
+                    &usage,
+                );
+                PresenterEvent::BtwAnswer {
+                    question: question.to_string(),
+                    answer: r.content,
+                    model,
+                    cost_usd: Some(usage.cost_usd),
+                }
+            }
             Err(e) => {
                 record_model_failure_in(
                     &self.store,
@@ -255,6 +266,7 @@ impl Session {
             pinned_model: self.pinned_model.clone(),
             pinned_effort: self.pinned_effort,
             catalog: self.catalog.clone(),
+            pricing: self.pricing.clone(),
             sink: self.presenter.recap_sink().map(std::sync::Mutex::new),
         });
         if let Ok(mut askers) = ASKERS.lock() {

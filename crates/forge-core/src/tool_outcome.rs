@@ -129,3 +129,15 @@ impl Session {
         }
     }
 }
+
+impl Session {
+    /// Draw a finished tool call's card from its result text.
+    pub(crate) fn emit_tool_card(&mut self, name: &str, ok: bool, result: &str) {
+        self.presenter.emit(PresenterEvent::ToolResult {
+            name: name.to_string(),
+            ok,
+            summary: summarize(result),
+            detail: crate::tool_detail(result),
+        });
+    }
+}

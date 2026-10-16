@@ -122,12 +122,8 @@ impl Session {
         // tool_call_id is answered in sequence. Also classify each result for the failure-loop guard.
         let mut classified = Vec::with_capacity(pend.len());
         for (p, (result, full, ok)) in pend.iter().zip(results) {
-            self.presenter.emit(PresenterEvent::ToolResult {
-                name: p.name.clone(),
-                ok,
-                summary: summarize(&result),
-                detail: crate::tool_detail(&result),
-            });
+            let shown_ok = ok && !(p.name == "shell" && shell_command_failed(&result));
+            self.emit_tool_card(&p.name, shown_ok, &result);
             self.record_test_proof(&p.name, &p.args, &result, full.as_deref());
             if ok {
                 self.note_read_files(&p.name, &p.args);
@@ -191,6 +187,7 @@ impl Session {
                 "denied",
                 "error",
             )?;
+            self.emit_tool_card(&call.name, false, &result);
             return Ok(result);
         }
         if let Some(warning) = self

@@ -189,49 +189,66 @@ pub(crate) fn wrap_lines_indexed(
     let mut out: Vec<TextLine<'static>> = Vec::with_capacity(lines.len());
     let mut origins: Vec<usize> = Vec::with_capacity(lines.len());
     for (src, line) in lines.iter().enumerate() {
-        let mut cur: Vec<Span<'static>> = Vec::new();
-        let mut cur_w = 0usize;
         // A framed line's continuation rows carry no gutter of their own, so tag them for the copy
         // path to rejoin rather than treat them as separate source lines.
         let framed = crate::copy_mark::has_decor(line);
-        for span in &line.spans {
-            let style = span.style;
-            let mut buf = String::new();
-            for ch in span.content.chars() {
-                // Wrap on terminal CELL width, not char count: a CJK ideograph / emoji is 2 cells, so
-                // counting it as 1 over-fills the row and the renderer overflows/truncates. A wide
-                // glyph that won't fit in the remaining cells starts the next row (never split across).
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
-                if cur_w + cw > width && cur_w > 0 {
-                    if !buf.is_empty() {
-                        cur.push(Span::styled(std::mem::take(&mut buf), style));
-                    }
-                    out.push(TextLine::from(std::mem::take(&mut cur)));
-                    origins.push(src);
-                    cur_w = 0;
-                    if framed {
-                        cur.push(crate::copy_mark::soft_wrap_marker());
-                    }
-                }
-                buf.push(ch);
-                cur_w += cw;
-                if cur_w >= width {
-                    cur.push(Span::styled(std::mem::take(&mut buf), style));
-                    out.push(TextLine::from(std::mem::take(&mut cur)));
-                    origins.push(src);
-                    cur_w = 0;
-                    if framed {
-                        cur.push(crate::copy_mark::soft_wrap_marker());
-                    }
-                }
+        // Wrap on terminal CELL width, not char count: a CJK ideograph / emoji is 2 cells. Break
+        // after the last space in the row when there is one (so prose is never split mid-word);
+        // an unbreakable token is split at the row edge. A wide glyph that won't fit starts the
+        // next row.
+        let cells: Vec<(char, ratatui::style::Style, usize)> = line
+            .spans
+            .iter()
+            .flat_map(|sp| {
+                let style = sp.style;
+                sp.content
+                    .chars()
+                    .map(move |ch| (ch, style, UnicodeWidthChar::width(ch).unwrap_or(1)))
+            })
+            .collect();
+        let mut rows = 0usize;
+        let mut push_row = |slice: &[(char, ratatui::style::Style, usize)],
+                            out: &mut Vec<TextLine<'static>>,
+                            origins: &mut Vec<usize>| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if framed && rows > 0 {
+                spans.push(crate::copy_mark::soft_wrap_marker());
             }
-            if !buf.is_empty() {
-                cur.push(Span::styled(buf, style));
+            let mut buf = String::new();
+            let mut cur_style = None;
+            for (ch, style, _) in slice {
+                if cur_style.is_some_and(|c| c != *style) {
+                    spans.push(Span::styled(std::mem::take(&mut buf), cur_style.unwrap()));
+                }
+                cur_style = Some(*style);
+                buf.push(*ch);
+            }
+            if let Some(style) = cur_style {
+                spans.push(Span::styled(buf, style));
+            }
+            out.push(TextLine::from(spans));
+            origins.push(src);
+            rows += 1;
+        };
+        let mut start = 0usize;
+        let mut cur_w = 0usize;
+        let mut last_space: Option<usize> = None;
+        for idx in 0..cells.len() {
+            let (ch, _, cw) = cells[idx];
+            while cur_w + cw > width && cur_w > 0 {
+                let brk = last_space.filter(|&b| b > start).unwrap_or(idx);
+                push_row(&cells[start..brk], &mut out, &mut origins);
+                start = brk;
+                last_space = None;
+                cur_w = cells[start..idx].iter().map(|c| c.2).sum();
+            }
+            cur_w += cw;
+            if ch == ' ' {
+                last_space = Some(idx + 1);
             }
         }
         // Always emit a line for this logical line (even if empty → preserves blank spacing).
-        out.push(TextLine::from(std::mem::take(&mut cur)));
-        origins.push(src);
+        push_row(&cells[start..], &mut out, &mut origins);
     }
     (out, origins)
 }
@@ -512,5 +529,36 @@ mod tests {
             "60 cells / 10 → ≥6 rows, got {}",
             wrapped.len()
         );
+    }
+
+    #[test]
+    fn prose_wraps_at_spaces_not_mid_word() {
+        let lines = vec![TextLine::from(Span::raw("alpha beta gamma delta"))];
+        let rows: Vec<String> = wrap_lines(&lines, 12)
+            .iter()
+            .map(|r| {
+                r.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(rows, vec!["alpha beta ", "gamma delta"]);
+    }
+
+    #[test]
+    fn unbreakable_token_still_splits_at_the_edge() {
+        let lines = vec![TextLine::from(Span::raw("abcdefghijklmnop"))];
+        let rows: Vec<String> = wrap_lines(&lines, 6)
+            .iter()
+            .map(|r| {
+                r.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(rows[0], "abcdef");
+        assert_eq!(rows.concat(), "abcdefghijklmnop");
     }
 }

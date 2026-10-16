@@ -90,7 +90,7 @@ pub async fn run(
     on_event: &mut (dyn FnMut(Lifecycle) + Send),
 ) -> Result<(DuelReport, Vec<worktree::WorktreeGuard>), CoreError> {
     if !worktree::is_git_repo(&ctx.repo_root) {
-        return Err(CoreError::Internal("duel needs a git repo".to_string()));
+        return Err(CoreError::Precondition("duel needs a git repo".to_string()));
     }
 
     let readiness = crate::readiness::ProviderReadiness::snapshot(&ctx.config, &ctx.store);
@@ -119,7 +119,7 @@ pub async fn run(
         .take(MAX_CANDIDATES)
         .collect();
     if decisions.len() < 2 {
-        return Err(CoreError::Internal(
+        return Err(CoreError::Precondition(
             "mesh offered only one usable model — /duel needs at least two to race".to_string(),
         ));
     }

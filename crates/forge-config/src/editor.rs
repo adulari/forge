@@ -452,7 +452,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "local.model" => "Ollama tag to auto-start (e.g. gemma4:12b). Set it via `forge local install`.",
         "local.endpoint" => "Ollama HTTP endpoint (default http://localhost:11434).",
         "tui.fullscreen" => "Full-screen TUI on the alternate screen. Off = inline in native scrollback.",
-        "tui.mouse_capture" => "Wheel scrolls the transcript in full-screen mode (minimal button+wheel reporting, no motion tracking — native click-drag text selection still works). Default on. Off disables mouse reporting entirely; scroll with PgUp/PgDn/Home/End.",
+        "tui.mouse_capture" => "Wheel scrolls the transcript in full-screen mode (button, drag and wheel reporting — hold Shift for native text selection). Default on. Off disables mouse reporting entirely; scroll with PgUp/PgDn/Home/End.",
         "project.auto_initialize" => "Run a model-backed, tailored Forge setup once when opening an uninitialized project.",
         "recap.enabled" => "Show a one-line AI recap after each completed turn.",
         "update.check" => "Check GitHub for a newer Forge release on startup (throttled to once a day).",

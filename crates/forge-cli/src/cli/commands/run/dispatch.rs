@@ -217,6 +217,7 @@ pub(crate) async fn dispatch_command(
                 tui.clear_screen();
             }
             app.clear_transcript();
+            app.reset_session_stats();
             app.note("● new session");
         }
         // `/mode` opens the operating-mode (temper) picker — a reliable, discoverable alternative
@@ -375,7 +376,7 @@ pub(crate) async fn dispatch_command(
             } else {
                 match crate::image_input::load_image_file(path) {
                     Ok((att, label)) => app.attach_image(att, &label),
-                    Err(e) => app.note(&format!("⚠ {e}")),
+                    Err(e) => app.note(&format!("⚠ {e:#}")),
                 }
             }
         }
@@ -1286,7 +1287,27 @@ pub(crate) async fn dispatch_catalog(
             Ok(DispatchOutcome::Handled)
         }
         Resolved::Unknown(x) => {
-            app.note(&format!("unknown command: /{x} — try /help"));
+            if x.contains('/') || x.contains('.') {
+                app.note(&format!(
+                    "unknown command: /{x} — to send a path as a prompt, start the line with // (e.g. /{line})"
+                ));
+                return Ok(DispatchOutcome::Handled);
+            }
+            let lower = x.to_lowercase();
+            let near = forge_tui::COMMANDS
+                .iter()
+                .filter(|c| {
+                    let d = command_edit_distance(c.name, &lower);
+                    d <= 2 && d < lower.len().max(1)
+                })
+                .min_by_key(|c| command_edit_distance(c.name, &lower));
+            match near {
+                Some(c) => app.note(&format!(
+                    "unknown command: /{x} — did you mean /{}? (try /help)",
+                    c.name
+                )),
+                None => app.note(&format!("unknown command: /{x} — try /help")),
+            }
             Ok(DispatchOutcome::Handled)
         }
         // A `/`-line never resolves to Plain, but stay safe rather than silently submit it.
@@ -1295,4 +1316,18 @@ pub(crate) async fn dispatch_catalog(
             Ok(DispatchOutcome::Handled)
         }
     }
+}
+
+fn command_edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur.push(sub.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
