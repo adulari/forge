@@ -32,7 +32,7 @@ use forge_tools::ToolRegistry;
 use forge_types::{PermissionDecision, PermissionMode, PermissionRule};
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::io::stdio;
@@ -178,8 +178,8 @@ fn tools_list_result(tools: Vec<Tool>) -> ListToolsResult {
 }
 
 impl ServerHandler for ForgeMcp {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.instructions = Some(
             "Forge's own tools (read_file, write_file, edit_file, list_dir, search, shell), \
