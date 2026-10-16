@@ -10,7 +10,7 @@
 > live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
 > adds to a phone home screen and runs standalone; a `◉ remote` statusline segment; a QR
 > code printed into the TUI scrollback. The wire is a versioned `Snapshot`/`RemoteInput`
-> protocol (`PROTOCOL_VERSION`, currently **9**); the page shows a "refresh to update" banner
+> protocol (`PROTOCOL_VERSION`, currently **10**); the page shows a "refresh to update" banner
 > on a mismatch. Auto-start is configurable (`[remote] auto`). The server reuses the running
 > session's presenter channel — no second process, no IPC, no keys to configure.
 >
@@ -735,7 +735,7 @@ the normal cooldown rather than treating that child eviction as a daemon failure
 
 | Layer | Change |
 |---|---|
-| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (9), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (10), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
 | `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons; v7: fleet dashboard (waiting-first list, needs-decision badge, token gauge), plan + diff cards, 📎 upload button + paste-an-image + chips, 🎤 voice input |
 | `forge-config/src/lib.rs` | `[remote]` block: exposure/tunnel settings plus `project_roots` for the remote folder-browser allowlist |
 | `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed); Phase 5: `PushSubscription` + `upsert/delete/list_push_subscriptions` (endpoint-deduped) |

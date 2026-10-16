@@ -2394,7 +2394,7 @@ impl Session {
         self.presenter.emit(PresenterEvent::Error(msg.to_string()));
         self.presenter.emit(PresenterEvent::Done {
             final_text: String::new(),
-            stop_reason: StopReason::FinalAnswer,
+            stop_reason: StopReason::NoOutput,
         });
     }
 
@@ -11574,10 +11574,11 @@ mod tests {
             "notify_error must not ALSO downgrade to a Warning: {captured:?}"
         );
         assert!(
-            captured
-                .iter()
-                .any(|e| matches!(e, PresenterEvent::Done { .. })),
-            "notify_error must still end the turn with a Done marker so busy clears: {captured:?}"
+            captured.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Done { stop_reason, .. } if stop_reason.outcome() == "failed"
+            )),
+            "notify_error must end the turn with a failed Done marker so busy clears: {captured:?}"
         );
     }
 

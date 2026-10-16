@@ -51,6 +51,13 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
         anyhow::bail!("{e}");
     }
     if config.mcp.active_servers().next().is_none() {
+        if !config.mcp.servers.is_empty() {
+            println!(
+                "{} MCP server(s) declared, but none is enabled and allowed (check `enabled` and [mcp.allow] servers).",
+                config.mcp.servers.len()
+            );
+            return Ok(());
+        }
         println!("no MCP servers configured. Declare them in .forge/mcp.toml, or run `forge mcp import`.");
         return Ok(());
     }

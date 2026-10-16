@@ -190,7 +190,7 @@ impl DriverState {
                 if self.busy && is_command_line(&text) {
                     self.busy_command(text).await?;
                 } else if self.busy {
-                    self.steer.push(text.clone());
+                    self.steer.push_front(text.clone());
                     forge_core::fleet::insert_into_queue(
                         &mut self.queued_prompts,
                         forge_core::fleet::MessageMode::Steer,

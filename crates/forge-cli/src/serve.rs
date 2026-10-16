@@ -1643,10 +1643,13 @@ pub(crate) async fn start_session(
         dispatch_worker: req.dispatch_worker,
     };
     let handle = spawn_session_driver(spec).await.map_err(|e| {
-        StartSessionError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("session create failed: {e}"),
-        )
+        let message = format!("session create failed: {e}");
+        let status = if message.contains("unknown model") {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        StartSessionError::new(status, message)
     })?;
     if let Some(guard) = worktree_guard {
         std::mem::forget(guard);
@@ -1701,6 +1704,15 @@ async fn fork_session(
             .session_cwd(&source)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "no such session".to_string())?;
+        let max_seq = store_for_fork
+            .session_max_seq(&source)
+            .map_err(|error| error.to_string())?;
+        if req.at_seq < 0 || req.at_seq > max_seq {
+            return Err(format!(
+                "at_seq {} is outside this session's history (0..={max_seq})",
+                req.at_seq
+            ));
+        }
         let fork_id = store_for_fork
             .fork_session(&source, req.at_seq)
             .map_err(|error| error.to_string())?;
@@ -3407,9 +3419,29 @@ async fn history_page(
     let before = params.before;
     let include_tools = remote::history_include_tools(params.include_tools.as_deref());
     let store = state.store.clone();
-    let rows: Vec<remote::HistoryRow> = if sid.is_empty() {
-        Vec::new()
-    } else {
+    if sid.is_empty() {
+        return err_response(axum::http::StatusCode::BAD_REQUEST, "session is required");
+    }
+    {
+        let store = store.clone();
+        let sid = sid.clone();
+        let known = tokio::task::spawn_blocking(move || store.session_cwd(&sid))
+            .await
+            .map(|r| r.map(|c| c.is_some()));
+        match known {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                return err_response(axum::http::StatusCode::NOT_FOUND, "no such session")
+            }
+            _ => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "history lookup failed",
+                )
+            }
+        }
+    }
+    let rows: Vec<remote::HistoryRow> = {
         tokio::task::spawn_blocking(move || {
             // Same mapping the TUI's `/remote` provider uses, so both routes serve one shape —
             // including the v9 replay fields, whose zero point is the first row OF THE SET this
@@ -3504,6 +3536,7 @@ async fn interrupt_session(
     let Some(handle) = state.registry.get(&id).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "session not found");
     };
+    let was_busy = handle.snapshot_rx.borrow().snapshot.busy;
     if handle
         .input_tx
         .send(remote::RemoteInput::Interrupt)
@@ -3515,7 +3548,7 @@ async fn interrupt_session(
             "session driver is no longer accepting input (it is shutting down)",
         );
     }
-    json_response(&serde_json::json!({ "id": id, "interrupted": true }))
+    json_response(&serde_json::json!({ "id": id, "interrupted": was_busy }))
 }
 
 async fn set_session_mode(
@@ -4723,7 +4756,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
-        assert_eq!(json_body(response).await["interrupted"], true);
+        assert_eq!(
+            json_body(response).await["interrupted"],
+            false,
+            "an idle session had nothing to interrupt"
+        );
 
         // The session is still in the fleet: an interrupt ends a turn, not the session.
         assert!(registry.get(&live.session_id).await.is_some());

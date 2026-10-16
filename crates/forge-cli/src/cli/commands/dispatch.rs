@@ -514,14 +514,19 @@ fn format_age(secs: i64) -> String {
     }
 }
 
-/// `(finished, total)` items.
+/// `(finished, total)` among the items that actually run: not-selected (skipped) and cancelled
+/// items are neither finished work nor outstanding work.
 fn progress(dispatch: &DispatchView) -> (usize, usize) {
-    let done = dispatch
+    let counted: Vec<_> = dispatch
         .items
+        .iter()
+        .filter(|i| i.status != item_status::SKIPPED && i.status != item_status::CANCELLED)
+        .collect();
+    let done = counted
         .iter()
         .filter(|i| item_status::is_terminal(&i.status))
         .count();
-    (done, dispatch.items.len())
+    (done, counted.len())
 }
 
 fn count(dispatch: &DispatchView, status: &str) -> usize {
@@ -1021,6 +1026,18 @@ mod tests {
             text.ends_with("cancel        forge dispatch cancel d1234567"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn progress_ignores_skipped_and_cancelled_items() {
+        let mut d = view("d1234567-abcd", "running", 0);
+        d.items = vec![
+            item(1, "a", "succeeded", &[], None),
+            item(2, "b", "skipped", &[], None),
+            item(3, "c", "cancelled", &[], None),
+            item(4, "d", "queued", &[], None),
+        ];
+        assert_eq!(progress(&d), (1, 2));
     }
 
     #[test]

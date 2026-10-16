@@ -159,16 +159,21 @@ pub(crate) async fn fetch_sessions(
 ) -> Result<Vec<SessionInfo>> {
     let url = format!("{base}/{token}/api/sessions");
     let resp = http.get(&url).send().await.map_err(|e| {
+        let detail = e.without_url().to_string();
         anyhow::anyhow!(
-            "could not reach the forge serve daemon at {base} — is it running? \
-             (start it with `forge serve --local`)  [{e}]"
+            "could not reach the forge serve daemon at {base} — is it running, and is --url \
+             http(s) matching how it was started (`--lan` serves self-signed HTTPS)? \
+             (start it with `forge serve --local`)  [{detail}]"
         )
     })?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         bail!("daemon rejected the token (404) — wrong --token, or the daemon rotated it");
     }
     if !resp.status().is_success() {
-        bail!("daemon returned {} for {url}", resp.status());
+        bail!(
+            "daemon returned {} for {base}/<token>/api/sessions",
+            resp.status()
+        );
     }
     resp.json::<Vec<SessionInfo>>()
         .await
