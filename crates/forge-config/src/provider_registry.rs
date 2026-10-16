@@ -819,6 +819,13 @@ pub(crate) mod test_support {
     }
 }
 
+/// Whether a file can actually be created in `dir` (an existing read-only directory passes
+/// `create_dir_all`, so existence alone says nothing).
+pub fn dir_is_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!(".write-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"").is_ok() && std::fs::remove_file(&probe).is_ok()
+}
+
 #[cfg(test)]
 mod atomic_write_tests {
     #[test]
