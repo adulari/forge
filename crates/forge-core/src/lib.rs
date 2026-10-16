@@ -13484,8 +13484,8 @@ mod tests {
         assert_eq!(out.text, "worse::model");
         let events = events.lock().unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rejected this model twice") && w.contains("502"))),
-            "the warning must say the provider rejected the model and quote the error"
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rejected this model twice"))),
+            "the warning must say the provider rejected the model"
         );
     }
 

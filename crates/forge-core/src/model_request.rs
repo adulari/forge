@@ -598,11 +598,7 @@ pub(super) async fn request_provider_response(
                         if !chain.as_slice().is_empty() {
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model}: {} — moving to the next model in the pinned set",
-                                if reject_advance {
-                                    format!("the provider rejected this model twice in a row ({message})")
-                                } else {
-                                    format!("still unreachable after {pinned_outage_attempts} backoff retries")
-                                }
+                                crate::failure_verdict::in_set_advance_reason(reject_advance)
                             )));
                             *pinned_outage_attempts = 0;
                             *pinned_outage_waited = std::time::Duration::ZERO;

@@ -51,6 +51,14 @@ pub(crate) fn any_credentials_available() -> bool {
         || forge_provider::any_bridge_logged_in()
 }
 
+pub(crate) fn in_set_advance_reason(rejected_twice: bool) -> &'static str {
+    if rejected_twice {
+        "the provider rejected this model twice in a row"
+    } else {
+        "still unreachable after backoff retries"
+    }
+}
+
 pub(crate) fn failure_verdict(failures: &[AttemptFailure], has_credentials: bool) -> String {
     let count = |kind| failures.iter().filter(|failure| **failure == kind).count();
     // A zero-credential install is the actionable cause whatever the attempts said: a first-run
