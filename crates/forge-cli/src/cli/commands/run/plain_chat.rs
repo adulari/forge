@@ -68,10 +68,10 @@ pub(crate) async fn chat(
             ChatAction::Run(task) => {
                 let hooks = session.hooks().to_vec();
                 let hook_workspace = session.workspace_root().to_path_buf();
-                let task = match forge_core::hooks::run_prompt_hooks_in(
-                    &hooks,
-                    &task,
-                    Some(&hook_workspace),
+                let hook_runner = session.llm_hook_runner().await;
+                let task = match forge_core::hooks_llm::with_runner(
+                    hook_runner,
+                    forge_core::hooks::run_prompt_hooks_in(&hooks, &task, Some(&hook_workspace)),
                 )
                 .await
                 {

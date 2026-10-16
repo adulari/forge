@@ -106,6 +106,10 @@ async fn run_cc_hook(
                     outcome.blocked = Some(reason);
                     return true;
                 }
+                // Claude Code shows a PostToolUse block reason to the model (the tool already ran).
+                if event == HookEvent::PostToolUse {
+                    outcome.injected_context.push(reason.clone());
+                }
                 outcome.notes.push(format!("⎇ hook: {reason}"));
             }
             if event == HookEvent::PreToolUse {
@@ -156,6 +160,12 @@ pub async fn run_hooks(
                     };
                     outcome.blocked = Some(reason);
                     break;
+                }
+                // Exit 2 after the call (CC semantics): the reason is feedback for the model.
+                if event == HookEvent::PostToolUse && code == 2 && !stderr.trim().is_empty() {
+                    let reason = truncate(stderr.trim(), 800);
+                    outcome.notes.push(format!("⎇ hook: {reason}"));
+                    outcome.injected_context.push(reason);
                 }
                 // exit 0 + non-empty stdout: interpret the structured directive protocol (rewrite /
                 // inject / block / allow), falling back to the legacy "bare object = rewrite" and to
@@ -376,6 +386,142 @@ pub async fn run_lifecycle_hooks(
     outcome
 }
 
+/// A `PermissionRequest` hook's answer for the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionHookDecision {
+    /// Approve the call; `updated_input` (Forge argument names) replaces its arguments.
+    Allow {
+        updated_input: Option<serde_json::Value>,
+    },
+    /// Refuse the call; `message` is what the model reads. `interrupt` ends the agent's turn.
+    Deny { message: String, interrupt: bool },
+}
+
+/// The combined effect of the `PermissionRequest` hooks for one call.
+#[derive(Debug, Default)]
+pub struct PermissionHookOutcome {
+    /// `None` when no hook answered: the user is asked as usual.
+    pub decision: Option<PermissionHookDecision>,
+    pub notes: Vec<String>,
+}
+
+/// Run the `PermissionRequest` hooks matching `tool` (Claude-Code semantics): a hook answers with
+/// `hookSpecificOutput.decision.behavior` = `allow` (optionally `updatedInput`) or `deny` (optional
+/// `message`, `interrupt`), or blocks with exit 2 / `{"decision":"block"}`. Native hooks may also
+/// print `{"action":"allow"}` / `{"action":"deny","reason":…}`, and a non-zero exit denies. A deny
+/// from any hook wins; otherwise the first allow does. No answer leaves the prompt to the user.
+pub async fn run_permission_hooks(
+    hooks: &[HookConfig],
+    tool: &str,
+    payload: &str,
+) -> PermissionHookOutcome {
+    let mut outcome = PermissionHookOutcome::default();
+    for h in hooks
+        .iter()
+        .filter(|h| h.event == HookEvent::PermissionRequest && h.matches(tool))
+    {
+        let sent = if h.cc_compat {
+            to_cc_payload(payload, HookEvent::PermissionRequest, "")
+        } else {
+            payload.to_string()
+        };
+        let (code, stdout, stderr) = match run_one(h, &sent).await {
+            Ok(result) => result,
+            Err(e) => {
+                outcome.notes.push(format!("⎇ hook error: {e}"));
+                continue;
+            }
+        };
+        let decision = permission_decision_of(h, tool, code, &stdout, &stderr);
+        match decision {
+            Some(deny @ PermissionHookDecision::Deny { .. }) => {
+                outcome.decision = Some(deny);
+                break;
+            }
+            Some(allow) => {
+                outcome.decision.get_or_insert(allow);
+            }
+            None => {
+                let text = stdout.trim();
+                if !text.is_empty() && serde_json::from_str::<serde_json::Value>(text).is_err() {
+                    outcome
+                        .notes
+                        .push(format!("⎇ hook: {}", truncate(text, 800)));
+                }
+            }
+        }
+    }
+    outcome
+}
+
+fn permission_decision_of(
+    h: &HookConfig,
+    tool: &str,
+    code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> Option<PermissionHookDecision> {
+    let deny = |message: String, interrupt: bool| PermissionHookDecision::Deny {
+        message: truncate(&message, 800),
+        interrupt,
+    };
+    let failure_reason = || {
+        let err = stderr.trim();
+        if !err.is_empty() {
+            err.to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("{tool} denied by PermissionRequest hook (exit {code})")
+        }
+    };
+    if code == 2 || (!h.cc_compat && code != 0) {
+        return Some(deny(failure_reason(), false));
+    }
+    if code != 0 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    if let Some(decision) = value
+        .get("hookSpecificOutput")
+        .and_then(|h| h.get("decision"))
+    {
+        return match decision.get("behavior").and_then(serde_json::Value::as_str) {
+            Some("allow") => Some(PermissionHookDecision::Allow {
+                updated_input: decision
+                    .get("updatedInput")
+                    .filter(|i| i.is_object())
+                    .map(|i| cc_input_to_forge(tool, i)),
+            }),
+            Some("deny") => Some(deny(
+                decision
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("denied by PermissionRequest hook")
+                    .to_string(),
+                decision
+                    .get("interrupt")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            )),
+            _ => None,
+        };
+    }
+    let field = |k: &str| value.get(k).and_then(serde_json::Value::as_str);
+    match field("action").or_else(|| field("decision")) {
+        Some("allow" | "approve") => Some(PermissionHookDecision::Allow {
+            updated_input: None,
+        }),
+        Some("deny" | "block") => Some(deny(
+            field("reason")
+                .unwrap_or("denied by PermissionRequest hook")
+                .to_string(),
+            false,
+        )),
+        _ => None,
+    }
+}
+
 fn hook_shell() -> (&'static str, &'static str) {
     #[cfg(windows)]
     return ("cmd", "/C");
@@ -391,7 +537,52 @@ pub async fn run_session_hooks(
     run_session_hooks_in(hooks, event, session_id, None).await
 }
 
+/// Run one hook and report it the way a command hook would: `(exit code, stdout, stderr)`. A
+/// `prompt` / `agent` hook's `{"ok": false, "reason"}` becomes exit 2 with `reason` on stderr, so
+/// every event interprets it exactly like a blocking command hook; `ok: true` is a clean exit
+/// (and, for `PermissionRequest`, an explicit allow).
 async fn run_one(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
+    if h.kind == forge_config::HookKind::Command {
+        return run_command(h, payload).await;
+    }
+    let runner = crate::hooks_llm::current_runner()
+        .ok_or("prompt/agent hook skipped: no model is available on this surface")?;
+    let input = serde_json::from_str::<serde_json::Value>(payload)
+        .unwrap_or_else(|_| serde_json::Value::String(payload.to_string()));
+    let verdict = tokio::time::timeout(
+        Duration::from_secs(h.timeout_secs),
+        runner.evaluate(h, &input),
+    )
+    .await
+    .map_err(|_| format!("timed out after {}s", h.timeout_secs))??;
+    Ok(if verdict.ok {
+        let stdout = if h.event == HookEvent::PermissionRequest {
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "allow"}
+            }})
+            .to_string()
+        } else {
+            String::new()
+        };
+        (0, stdout, String::new())
+    } else {
+        let reason = verdict
+            .reason
+            .unwrap_or_else(|| format!("blocked by {} hook", hook_kind_label(h)));
+        (2, String::new(), reason)
+    })
+}
+
+fn hook_kind_label(h: &HookConfig) -> &'static str {
+    match h.kind {
+        forge_config::HookKind::Command => "command",
+        forge_config::HookKind::Prompt => "prompt",
+        forge_config::HookKind::Agent => "agent",
+    }
+}
+
+async fn run_command(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
     let (sh, sh_flag) = hook_shell();
     let mut cmd = tokio::process::Command::new(sh);
     cmd.arg(sh_flag).arg(&h.command);
@@ -443,8 +634,11 @@ mod tests {
     fn hook(event: HookEvent, command: &str) -> HookConfig {
         HookConfig {
             event,
+            kind: Default::default(),
             matcher: None,
             command: command.into(),
+            prompt: None,
+            model: None,
             timeout_secs: 10,
             cc_compat: false,
         }
@@ -453,8 +647,11 @@ mod tests {
     fn cc_hook(event: HookEvent, command: &str) -> HookConfig {
         HookConfig {
             event,
+            kind: Default::default(),
             matcher: None,
             command: command.into(),
+            prompt: None,
+            model: None,
             timeout_secs: 10,
             cc_compat: true,
         }
@@ -960,5 +1157,181 @@ mod tests {
                     .await;
             assert!(o.blocked.is_none());
         }
+    }
+
+    // ---- PermissionRequest + prompt/agent hooks (CC parity) ----
+
+    struct FixedVerdict(bool, Option<&'static str>);
+
+    #[async_trait::async_trait]
+    impl crate::hooks_llm::LlmHookRunner for FixedVerdict {
+        async fn evaluate(
+            &self,
+            _hook: &HookConfig,
+            input: &serde_json::Value,
+        ) -> Result<crate::hooks_llm::LlmVerdict, String> {
+            assert!(
+                input.is_object(),
+                "the event JSON reaches the model: {input}"
+            );
+            Ok(crate::hooks_llm::LlmVerdict {
+                ok: self.0,
+                reason: self.1.map(str::to_string),
+            })
+        }
+    }
+
+    fn prompt_hook(event: HookEvent) -> HookConfig {
+        HookConfig {
+            kind: forge_config::HookKind::Prompt,
+            prompt: Some("judge $ARGUMENTS".into()),
+            ..cc_hook(event, "")
+        }
+    }
+
+    fn runner(
+        ok: bool,
+        reason: Option<&'static str>,
+    ) -> Option<std::sync::Arc<dyn crate::hooks_llm::LlmHookRunner>> {
+        Some(std::sync::Arc::new(FixedVerdict(ok, reason)))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permission_request_hooks_allow_deny_or_pass() {
+        let payload = r#"{"tool":"shell","args":{"command":"ls"}}"#;
+        let allow = cc_hook(
+            HookEvent::PermissionRequest,
+            r#"echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"command":"ls -la"}}}}'"#,
+        );
+        let out = run_permission_hooks(std::slice::from_ref(&allow), "shell", payload).await;
+        assert_eq!(
+            out.decision,
+            Some(PermissionHookDecision::Allow {
+                updated_input: Some(serde_json::json!({"command": "ls -la"}))
+            })
+        );
+
+        let deny = cc_hook(
+            HookEvent::PermissionRequest,
+            r#"echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"no","interrupt":true}}}'"#,
+        );
+        let out = run_permission_hooks(&[allow.clone(), deny], "shell", payload).await;
+        assert_eq!(
+            out.decision,
+            Some(PermissionHookDecision::Deny {
+                message: "no".into(),
+                interrupt: true
+            }),
+            "a deny wins over an earlier allow"
+        );
+
+        let exit2 = cc_hook(HookEvent::PermissionRequest, "echo nope >&2; exit 2");
+        assert!(matches!(
+            run_permission_hooks(&[exit2], "shell", payload).await.decision,
+            Some(PermissionHookDecision::Deny { message, .. }) if message == "nope"
+        ));
+        let native_allow = hook(HookEvent::PermissionRequest, r#"echo '{"action":"allow"}'"#);
+        assert!(matches!(
+            run_permission_hooks(&[native_allow], "shell", payload)
+                .await
+                .decision,
+            Some(PermissionHookDecision::Allow {
+                updated_input: None
+            })
+        ));
+        let native_fail = hook(HookEvent::PermissionRequest, "exit 1");
+        assert!(matches!(
+            run_permission_hooks(&[native_fail], "shell", payload)
+                .await
+                .decision,
+            Some(PermissionHookDecision::Deny { .. })
+        ));
+        let silent = cc_hook(HookEvent::PermissionRequest, "true");
+        assert_eq!(
+            run_permission_hooks(&[silent], "shell", payload)
+                .await
+                .decision,
+            None
+        );
+        let other_tool = HookConfig {
+            matcher: Some("Write".into()),
+            ..cc_hook(HookEvent::PermissionRequest, "exit 2")
+        };
+        assert_eq!(
+            run_permission_hooks(&[other_tool], "shell", payload)
+                .await
+                .decision,
+            None,
+            "the matcher scopes the hook"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_hooks_block_or_pass_like_command_hooks() {
+        let payload = r#"{"tool":"shell","args":{"command":"ls"}}"#;
+        let hooks = [prompt_hook(HookEvent::PreToolUse)];
+        let blocked = crate::hooks_llm::with_runner(
+            runner(false, Some("tests first")),
+            run_hooks(&hooks, HookEvent::PreToolUse, "shell", payload),
+        )
+        .await;
+        assert_eq!(blocked.blocked.as_deref(), Some("tests first"));
+        let passed = crate::hooks_llm::with_runner(
+            runner(true, None),
+            run_hooks(&hooks, HookEvent::PreToolUse, "shell", payload),
+        )
+        .await;
+        assert!(
+            passed.blocked.is_none() && passed.notes.is_empty(),
+            "{passed:?}"
+        );
+
+        let permission = [prompt_hook(HookEvent::PermissionRequest)];
+        let out = crate::hooks_llm::with_runner(
+            runner(true, None),
+            run_permission_hooks(&permission, "shell", payload),
+        )
+        .await;
+        assert!(matches!(
+            out.decision,
+            Some(PermissionHookDecision::Allow { .. })
+        ));
+
+        let stop = [HookConfig {
+            kind: forge_config::HookKind::Agent,
+            ..prompt_hook(HookEvent::Stop)
+        }];
+        let out = crate::hooks_llm::with_runner(
+            runner(false, Some("the build is red")),
+            run_lifecycle_hooks(&stop, HookEvent::Stop, "s", serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(out.blocked.as_deref(), Some("the build is red"));
+    }
+
+    #[tokio::test]
+    async fn a_model_hook_without_a_runner_is_skipped_not_guessed() {
+        let hooks = [prompt_hook(HookEvent::PreToolUse)];
+        let out = run_hooks(&hooks, HookEvent::PreToolUse, "shell", "{}").await;
+        assert!(out.blocked.is_none());
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.contains("no model is available")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_post_tool_use_block_reason_reaches_the_model() {
+        let hooks = [cc_hook(
+            HookEvent::PostToolUse,
+            "echo lint failed >&2; exit 2",
+        )];
+        let out = run_hooks(&hooks, HookEvent::PostToolUse, "shell", "{}").await;
+        assert_eq!(out.injected_context, vec!["lint failed".to_string()]);
     }
 }

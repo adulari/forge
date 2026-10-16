@@ -6,6 +6,7 @@ use super::*;
 
 mod deferred;
 mod mcp;
+mod permission_hooks;
 
 /// Patterns for a runtime "always allow", scoped to the command the user was shown. An empty list
 /// means tool-wide (the previous behaviour), kept for cases we cannot narrow confidently.
@@ -348,6 +349,12 @@ impl Session {
             return Ok(result);
         }
 
+        // Resolved before the registry borrow below: building it may route a side-call model.
+        let pre_hook_runner = if self.config.hooks.is_empty() {
+            None
+        } else {
+            self.llm_hook_runner().await
+        };
         let Some(tool) = self.tools.get(&call.name) else {
             // Name the valid tools so the model can recover instead of guessing again.
             let mut available: Vec<String> =
@@ -388,11 +395,14 @@ impl Session {
                 "tool": call.name, "args": effective_args, "cwd": self.workspace.display(), "session_id": self.id
             })
             .to_string();
-            let outcome = hooks::run_hooks(
-                &self.config.hooks,
-                forge_config::HookEvent::PreToolUse,
-                &call.name,
-                &payload,
+            let outcome = crate::hooks_llm::with_runner(
+                pre_hook_runner,
+                hooks::run_hooks(
+                    &self.config.hooks,
+                    forge_config::HookEvent::PreToolUse,
+                    &call.name,
+                    &payload,
+                ),
             )
             .await;
             for n in outcome.notes {
@@ -512,24 +522,26 @@ impl Session {
         let decision = self
             .settle_auto(decision, auto_verdict, &effective_args)
             .await;
-        let decision = if decision == PermissionDecision::Allow
-            && self.mode == forge_types::PermissionMode::AcceptEdits
-            && side_effect == forge_types::SideEffect::Write
-            && self.writes_beyond_workspace(&effective_args)
-        {
-            PermissionDecision::Ask
-        } else {
-            decision
-        };
+        let decision = crate::accept_edits_write_gate(decision, self.mode, side_effect, || {
+            self.writes_beyond_workspace(&effective_args)
+        });
+        // PermissionRequest hooks (Claude-Code parity): a hook may answer the prompt for the user.
+        let (decision, hook_denial) = self
+            .settle_permission_hooks(decision, &call.name, &mut effective_args, &mut args_json)
+            .await;
         // Notification lifecycle hook (Claude-Code parity): the agent needs the user's attention to
         // approve this tool. Fired just before the prompt is shown (inert when no hooks configured).
         // Inlined with field-level borrows (the hooks call needs only `config`, `id`, `presenter`).
         if matches!(decision, PermissionDecision::Ask) && !self.config.hooks.is_empty() {
-            let outcome = hooks::run_lifecycle_hooks(
-                &self.config.hooks,
-                forge_config::HookEvent::Notification,
-                &self.id,
-                serde_json::json!({ "message": format!("permission needed: {}", call.name) }),
+            let runner = self.llm_hook_runner().await;
+            let outcome = crate::hooks_llm::with_runner(
+                runner,
+                hooks::run_lifecycle_hooks(
+                    &self.config.hooks,
+                    forge_config::HookEvent::Notification,
+                    &self.id,
+                    serde_json::json!({ "message": format!("permission needed: {}", call.name) }),
+                ),
             )
             .await;
             for n in outcome.notes {
@@ -677,6 +689,14 @@ impl Session {
             && permission::is_shell_tool(&call.name)
         {
             (permission::plan_shell_denial(), None, false)
+        } else if let Some(reason) = hook_denial {
+            (
+                format!("denied by PermissionRequest hook: {reason}"),
+                None,
+                false,
+            )
+        } else if let Some(note) = self.floor_denial(&call.name, &effective_args) {
+            (note, None, false)
         } else if user_declined {
             // Not "by policy": nothing forbade it, the person said no. The model reads this, and
             // "policy" would send it hunting for a rule to work around instead of asking.
@@ -737,11 +757,16 @@ impl Session {
             let payload =
                 serde_json::json!({ "tool": call.name, "args": call.args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id })
                     .to_string();
-            let outcome = hooks::run_hooks(
-                &self.config.hooks,
-                forge_config::HookEvent::PostToolUse,
-                &call.name,
-                &payload,
+            let runner = self.llm_hook_runner().await;
+
+            let outcome = crate::hooks_llm::with_runner(
+                runner,
+                hooks::run_hooks(
+                    &self.config.hooks,
+                    forge_config::HookEvent::PostToolUse,
+                    &call.name,
+                    &payload,
+                ),
             )
             .await;
             for n in outcome.notes {

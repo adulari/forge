@@ -832,6 +832,19 @@ pub(crate) enum Command {
         #[arg(long)]
         demo: bool,
     },
+    /// Trust the current project (or PATH): load its `.forge/` hooks, MCP servers, permission
+    /// mode and allow rules. Until then Forge applies only a project's restrictive and cosmetic
+    /// settings. `--revoke` forgets the trust; `--list` shows every trusted project.
+    Trust {
+        /// Project directory (defaults to the current directory).
+        path: Option<std::path::PathBuf>,
+        /// Stop trusting the project.
+        #[arg(long, conflicts_with = "list")]
+        revoke: bool,
+        /// List trusted projects.
+        #[arg(long)]
+        list: bool,
+    },
     /// Local whisper.cpp speech-to-text (voice.md, V1) — transcribe an audio file, or
     /// pre-download a model.
     Voice {

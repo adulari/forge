@@ -51,6 +51,23 @@ fn default_store_file_name() -> &'static str {
     }
 }
 
+/// The data dir holds the session store and kept tool output: owner-only (0700), like the config
+/// dir that holds the secrets.
+#[cfg(not(test))]
+fn restrict_data_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(dir) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
 pub(crate) fn open_store() -> Result<Store> {
     // The store lives in a stable per-user data dir so usage/budget and session history persist
     // across restarts and don't reset when `forge` is launched from a different directory (the
@@ -76,6 +93,7 @@ pub(crate) fn open_store() -> Result<Store> {
         Store::open(&path).context("opening session store")?
     } else if let Some(dir) = forge_config::data_dir() {
         std::fs::create_dir_all(&dir).context("creating data directory")?;
+        restrict_data_dir(&dir);
         let db = dir.join(default_store_file_name());
         // One-time migration: if there's no global store yet but a legacy `./.forge/forge.db` exists in
         // this directory, move its history over so the switch doesn't appear to wipe past usage.

@@ -1345,6 +1345,9 @@ impl Store {
     }
 
     fn build(source: ConnSource) -> Result<Self> {
+        if let ConnSource::File(path) = &source {
+            create_owner_only(path);
+        }
         let reservation_source = source.clone();
         let in_memory = matches!(source, ConnSource::Memory);
         let db_path = match &source {
@@ -1401,6 +1404,9 @@ impl Store {
                 add_column_if_missing(&conn, "ALTER TABLE sync_journal ADD COLUMN base_hash BLOB")?;
                 Ok(())
             })?;
+        }
+        if let Some(path) = &db_path {
+            restrict_store_files(path);
         }
         let reservation_store_id = match reservation_source {
             ConnSource::File(path) => std::fs::canonicalize(&path)
@@ -1877,8 +1883,69 @@ pub struct FleetMessage {
     pub delivered_at: Option<i64>,
 }
 
+/// The store holds transcripts and tool output, so it is owner-only like the secrets files
+/// (0600). SQLite gives the `-wal`/`-shm` files the database file's mode, so creating the file
+/// owner-only up front covers them; an existing store created under a looser umask is tightened.
+#[cfg(unix)]
+fn create_owner_only(path: &Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    if !path.exists() {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path);
+    }
+}
+
+#[cfg(not(unix))]
+fn create_owner_only(_path: &Path) {}
+
+#[cfg(unix)]
+fn restrict_store_files(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        let file = std::path::PathBuf::from(file);
+        if let Ok(meta) = std::fs::metadata(&file) {
+            if meta.permissions().mode() & 0o077 != 0 {
+                let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_store_files(_path: &Path) {}
+
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn store_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("forge-store-perm-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fresh.db");
+        let store = Store::open(&path).unwrap();
+        store.create_session("s1", "m").ok();
+        for suffix in ["", "-wal", "-shm"] {
+            let file = format!("{}{suffix}", path.display());
+            if let Ok(meta) = std::fs::metadata(&file) {
+                assert_eq!(meta.permissions().mode() & 0o777, 0o600, "{file}");
+            }
+        }
+        drop(store);
+        let loose = dir.join("loose.db");
+        std::fs::write(&loose, b"").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _store = Store::open(&loose).unwrap();
+        let mode = std::fs::metadata(&loose).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "an existing world-readable store is tightened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     #[test]

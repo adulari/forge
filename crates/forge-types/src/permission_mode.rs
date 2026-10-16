@@ -10,7 +10,8 @@ pub enum PermissionMode {
     #[default]
     #[serde(alias = "ask")]
     Default,
-    /// Auto-allow file writes/edits; still ask for shell. Temper: **Auto-edit**.
+    /// Auto-allow workspace edits and ordinary shell; ask for writes beyond the workspace and for
+    /// shell that deletes, moves or writes outside it. Temper: **Auto-edit**.
     #[serde(alias = "auto-edit", alias = "autoedit")]
     AcceptEdits,
     /// Auto-allow everything (explicit, dangerous opt-in). Temper: **Full**.

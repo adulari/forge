@@ -31,6 +31,7 @@ pub(crate) mod switch;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tour;
+pub(crate) mod trust;
 pub(crate) mod voice;
 pub(crate) mod worktree;
 

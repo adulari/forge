@@ -359,6 +359,14 @@ fn config_checks() -> Vec<Check> {
             None,
         ));
     }
+    if let Some(notice) = forge_config::project_trust::untrusted_notice() {
+        out.push(check(
+            Status::Warn,
+            "project trust",
+            notice,
+            Some("run `forge trust` after reviewing .forge/ to apply them"),
+        ));
+    }
     // Data dir writable (the session store lives here).
     match forge_config::data_dir() {
         Some(d) => {

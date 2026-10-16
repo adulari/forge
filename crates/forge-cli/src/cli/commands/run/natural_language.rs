@@ -73,7 +73,12 @@ instructions.\n\
     for c in &context {
         session.inject_hook_context(c);
     }
-    let query = match forge_core::hooks::run_prompt_hooks_in(&hooks, &query, Some(&workspace)).await
+    let hook_runner = session.llm_hook_runner().await;
+    let query = match forge_core::hooks_llm::with_runner(
+        hook_runner,
+        forge_core::hooks::run_prompt_hooks_in(&hooks, &query, Some(&workspace)),
+    )
+    .await
     {
         Ok(query) => query,
         Err(reason) => {

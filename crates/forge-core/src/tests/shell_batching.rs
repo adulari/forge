@@ -50,8 +50,11 @@ async fn tool_event_order(commands: Vec<&'static str>) -> String {
 fn hook(event: forge_config::HookEvent) -> forge_config::HookConfig {
     forge_config::HookConfig {
         event,
+        kind: Default::default(),
         matcher: None,
         command: "true".into(),
+        prompt: None,
+        model: None,
         timeout_secs: 5,
         cc_compat: false,
     }

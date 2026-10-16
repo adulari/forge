@@ -91,7 +91,7 @@ fn collect_commands(cmd: &str, depth: usize, out: &mut Vec<String>, ok: &mut boo
 /// `rm -rf ~` deny nor its substring fallback. Three things keep honest multi-line commands intact:
 /// a backslash-newline is a line continuation (not a separator), a newline inside quotes stays in
 /// its segment, and heredoc bodies are removed by [`strip_heredocs`] before we get here.
-fn split_operators(cmd: &str) -> Vec<String> {
+pub(super) fn split_operators(cmd: &str) -> Vec<String> {
     let mut segs = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
@@ -529,6 +529,10 @@ fn strip_wrappers(tokens: &[String]) -> Vec<String> {
 /// If the command is `bash -c "<script>"` / `sh -lc "<script>"` / `cmd /C "<command>"` etc.,
 /// return the inner script so catastrophic-deny patterns can be checked recursively.
 fn inner_script(tokens: &[String]) -> Option<String> {
+    // `eval 'rm -rf ~'` runs its (concatenated) arguments as a script of their own.
+    if tokens.first().is_some_and(|t| t == "eval") && tokens.len() >= 2 {
+        return Some(tokens[1..].join(" "));
+    }
     if tokens.len() < 3 {
         return None;
     }
