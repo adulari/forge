@@ -16,7 +16,7 @@ pub(crate) fn custom_provider_checks(out: &mut Vec<Check>) -> bool {
                 out.push(check(
                     Status::Warn,
                     &name,
-                    &format!("env var {var} is not set"),
+                    format!("env var {var} is not set"),
                     Some("export it, or remove `api_key_env` for a keyless server"),
                 ));
             }
