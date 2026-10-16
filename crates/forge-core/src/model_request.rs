@@ -95,26 +95,6 @@ fn warn_paced_held_skips(session: &mut Session, deferred_held: &[String], warned
     )));
 }
 
-/// How long a turn whose only usable model is busy waits for it before failing as unavailable.
-const RESERVATION_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
-
-async fn wait_for_reservation(
-    store: &forge_store::Store,
-    model: &str,
-    max_wait: std::time::Duration,
-) -> Option<forge_store::ModelReservation> {
-    let deadline = std::time::Instant::now() + max_wait;
-    loop {
-        if let Some(reservation) = store.try_reserve_model(model) {
-            return Some(reservation);
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-}
-
 pub(super) const PACING_LAST_RESORT_RATIONALE: &str = "last resort: pacing hold overridden";
 
 #[allow(clippy::too_many_arguments)]
@@ -179,15 +159,9 @@ pub(super) async fn request_provider_response(
         // Auto-routed completions reserve a model before dispatch so independent sessions
         // can distribute across the fallback chain. Explicit pins deliberately bypass this
         // scheduler: their existing pin outage/failover policy remains authoritative.
-        let mut reservation = (!explicit_pin)
-            .then(|| session.store.try_reserve_model(active_model))
-            .flatten();
-        if !explicit_pin && reservation.is_none() && chain.len() == 0 && deferred_held.is_empty() {
-            // The only candidate is serving another session and there is nothing to fail over
-            // to: queue behind it rather than failing the turn.
-            reservation =
-                wait_for_reservation(&session.store, active_model, RESERVATION_WAIT).await;
-        }
+        let only = chain.len() == 0 && deferred_held.is_empty();
+        let reservation =
+            crate::model_wait::reserve(&session.store, active_model, explicit_pin, only).await;
         let reserved = reservation.is_some();
         // Pre-dispatch key backstop: a model can reach here with NO provider key via a path
         // that isn't key-filtered (the last-resort fallback, or an architect editor/planner
@@ -828,25 +802,6 @@ pub(super) async fn request_provider_response(
 mod tests {
     use super::*;
     use crate::failure_verdict::AttemptFailure;
-
-    #[tokio::test]
-    async fn a_busy_only_model_is_waited_for_then_reserved() {
-        let store = forge_store::Store::open_in_memory().unwrap();
-        let held = store.try_reserve_model("m").unwrap();
-        let waiter = wait_for_reservation(&store, "m", std::time::Duration::from_secs(5));
-        let release = async {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            drop(held);
-        };
-        let (got, ()) = tokio::join!(waiter, release);
-        assert!(got.is_some());
-        assert!(
-            wait_for_reservation(&store, "m", std::time::Duration::from_millis(250))
-                .await
-                .is_none(),
-            "a still-held model times out"
-        );
-    }
 
     fn test_session() -> Session {
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

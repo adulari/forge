@@ -110,6 +110,7 @@ mod model_request;
 mod model_response;
 mod model_stream;
 mod model_tools;
+mod model_wait;
 mod narration_dedupe;
 mod nudge_policy;
 mod orchestration;
