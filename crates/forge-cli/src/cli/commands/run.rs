@@ -2416,6 +2416,12 @@ pub(crate) async fn run_chat_tui(
             }
 
             // The @path file-path picker is modal while open.
+            if app.at_picker.open
+                && matches!(key, KeyKind::Enter)
+                && app.at_picker.selected_path().is_none()
+            {
+                app.at_picker.close();
+            }
             if app.at_picker.open {
                 match key {
                     KeyKind::Esc => app.at_picker.close(),

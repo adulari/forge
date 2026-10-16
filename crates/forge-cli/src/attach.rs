@@ -116,7 +116,15 @@ pub(crate) async fn attach_cmd(
     }
 
     let full_id = resolve_session_id(&sessions, &id)?;
-    run_attach(&base, &token, &full_id).await
+    let result = run_attach(&base, &token, &full_id).await;
+    if result.is_ok() {
+        // The pending stdin read lives on a blocking thread that runtime shutdown would wait on
+        // until Enter is pressed; every detach path has already printed its goodbye.
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+    result
 }
 
 /// Default base URL: the local daemon on the configured `[remote] port` (7420), loopback. The

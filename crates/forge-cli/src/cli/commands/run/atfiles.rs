@@ -4,7 +4,7 @@
 /// repo on Windows. A plain `std::fs` walk works everywhere and needs no external program.
 pub(crate) fn load_at_files() -> Vec<String> {
     if let Ok(out) = std::process::Command::new("git")
-        .args(["ls-files"])
+        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
         .output()
     {
         if out.status.success() {

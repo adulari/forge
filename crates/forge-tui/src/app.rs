@@ -1283,22 +1283,20 @@ impl App {
             PresenterEvent::AssistantDone => {
                 self.set_turn_activity(TurnPhase::Finalizing, "response stream completed");
                 if self.streaming_active {
-                    let rest = std::mem::take(&mut self.streaming);
-                    self.streaming_rev = self.streaming_rev.wrapping_add(1);
-                    let cache = std::mem::take(&mut *self.stream_cache.borrow_mut());
-                    self.tag_flush(LineOrigin::assistant(), |s| {
-                        if !rest.is_empty() {
-                            s.flush.extend(cache.finish(&rest));
-                        }
-                        s.flush.push(TextLine::default());
-                    });
-                    self.streaming_active = false;
+                    self.finish_streaming_text();
                 } else {
                     // Reasoning arrived but no answer text streamed — still show the thinking.
                     self.flush_reasoning();
                 }
             }
-            PresenterEvent::Steered(text) => self.echo_steered(&text),
+            PresenterEvent::Steered(text) => {
+                // The steered reply is a new message: close the text streamed so far so the two
+                // are not glued into one paragraph.
+                if self.streaming_active {
+                    self.finish_streaming_text();
+                }
+                self.echo_steered(&text)
+            }
             PresenterEvent::Warning(msg) => {
                 if !self.apply_btw_failure(&msg) {
                     self.flush.push(warning_line(&msg));
@@ -2545,6 +2543,20 @@ impl App {
     pub fn esc_hint_active(&self) -> bool {
         self.esc_armed
             .is_some_and(|at| at.elapsed() < ESC_DOUBLE_TAP)
+    }
+
+    /// Render the streamed assistant text as finished scrollback and end the stream.
+    fn finish_streaming_text(&mut self) {
+        let rest = std::mem::take(&mut self.streaming);
+        self.streaming_rev = self.streaming_rev.wrapping_add(1);
+        let cache = std::mem::take(&mut *self.stream_cache.borrow_mut());
+        self.tag_flush(LineOrigin::assistant(), |s| {
+            if !rest.is_empty() {
+                s.flush.extend(cache.finish(&rest));
+            }
+            s.flush.push(TextLine::default());
+        });
+        self.streaming_active = false;
     }
 
     /// Echo a prompt the running turn just picked up from the queue (`PresenterEvent::Steered`),
@@ -5424,6 +5436,22 @@ mod tests {
             text.trim_end(),
             "  ⚙ job 3429249 ✓ exited 0 · /tmp/batch.sh > /tmp/batch_result.log 2>&1"
         );
+    }
+
+    #[test]
+    fn a_steer_closes_the_text_streamed_before_it() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::AssistantDelta("first answer".into()));
+        app.apply(PresenterEvent::Steered("also rename it".into()));
+        assert!(!app.streaming_active && app.streaming.is_empty());
+        app.apply(PresenterEvent::AssistantDelta("second answer".into()));
+        let text = drain_text_lines(&mut app);
+        let (first, steer, second) = (
+            text.find("first answer").unwrap(),
+            text.find("also rename it").unwrap(),
+            text.find("second answer"),
+        );
+        assert!(first < steer && second.is_none());
     }
 
     #[test]

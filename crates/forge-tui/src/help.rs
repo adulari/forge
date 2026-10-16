@@ -41,6 +41,14 @@ impl HelpTab {
     }
 }
 
+const GROUP_ORDER: [&str; 5] = [
+    "Session",
+    "History",
+    "Models & routing",
+    "Work",
+    "Project & tools",
+];
+
 fn command_group(name: &str) -> &'static str {
     match name {
         "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline"
@@ -59,7 +67,15 @@ fn command_reference_lines() -> Vec<Line<'static>> {
         Style::default().fg(DIM),
     ))];
     let mut previous_group = None;
-    for command in COMMANDS {
+    let group_rank = |group: &str| {
+        GROUP_ORDER
+            .iter()
+            .position(|g| *g == group)
+            .unwrap_or(GROUP_ORDER.len())
+    };
+    let mut ordered: Vec<_> = COMMANDS.iter().collect();
+    ordered.sort_by_key(|command| group_rank(command_group(command.name)));
+    for command in ordered {
         let group = command_group(command.name);
         if previous_group != Some(group) {
             lines.push(Line::default());
@@ -195,5 +211,24 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(text.contains("F1"));
+    }
+
+    #[test]
+    fn each_command_group_heading_appears_once() {
+        let text: Vec<String> = command_reference_lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        for group in GROUP_ORDER {
+            assert!(
+                text.iter().filter(|l| l.as_str() == group).count() <= 1,
+                "{group} repeated"
+            );
+        }
     }
 }

@@ -1693,6 +1693,12 @@ async fn fork_session(
     AxumPath(id): AxumPath<String>,
     axum::Json(req): axum::Json<ForkSessionReq>,
 ) -> Response {
+    if req.at_seq < 0 {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "at_seq must be a non-negative message sequence number",
+        );
+    }
     let store = state.store.clone();
     let source = id.clone();
     let store_for_fork = store.clone();

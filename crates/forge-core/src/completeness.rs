@@ -412,9 +412,13 @@ pub(crate) fn worktree_fingerprint(root: &std::path::Path) -> Option<u64> {
             .map(|o| o.stdout)
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    git(&["rev-parse", "HEAD"])?.hash(&mut hasher);
+    // A repository with no commits has no HEAD: `status` still succeeds there, so only a missing
+    // repository yields `None`.
+    git(&["rev-parse", "HEAD"])
+        .unwrap_or_default()
+        .hash(&mut hasher);
     git(&["status", "--porcelain=v1", "-uall"])?.hash(&mut hasher);
-    git(&["diff", "HEAD"])?.hash(&mut hasher);
+    git(&["diff", "HEAD"]).unwrap_or_default().hash(&mut hasher);
     Some(hasher.finish())
 }
 
