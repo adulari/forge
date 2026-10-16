@@ -906,27 +906,35 @@ pub enum InputOutcome {
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
-    let mut p = pos;
-    loop {
-        if p == 0 {
-            return 0;
-        }
-        p -= 1;
-        if s.is_char_boundary(p) {
-            return p;
-        }
+    use unicode_segmentation::GraphemeCursor;
+    let mut pos = pos.min(s.len());
+    while !s.is_char_boundary(pos) {
+        pos -= 1;
     }
+    if pos == 0 {
+        return 0;
+    }
+    GraphemeCursor::new(pos, s.len(), true)
+        .prev_boundary(s, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
 fn next_char_boundary(s: &str, pos: usize) -> usize {
+    use unicode_segmentation::GraphemeCursor;
     if pos >= s.len() {
         return s.len();
     }
-    let mut p = pos + 1;
-    while p < s.len() && !s.is_char_boundary(p) {
-        p += 1;
+    let mut pos = pos;
+    while !s.is_char_boundary(pos) {
+        pos -= 1;
     }
-    p
+    GraphemeCursor::new(pos, s.len(), true)
+        .next_boundary(s, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(s.len())
 }
 
 fn is_word_char(c: char) -> bool {
@@ -2900,6 +2908,22 @@ impl App {
         self.transcript_follow = true;
         self.suggested_prompt = None; // stale once the session it was predicted for is gone
         self.turn_activity = TurnActivity::default();
+    }
+
+    /// Zero the statusline's usage counters, for a brand-new session (`/new`).
+    pub fn reset_session_stats(&mut self) {
+        self.session_in = 0;
+        self.session_cached_in = None;
+        self.session_out = 0;
+        self.context_tokens = 0;
+        self.turn_elapsed_secs = 0;
+        self.turn_in = 0;
+        self.turn_cached_in = None;
+        self.turn_out = 0;
+        self.turn_base_in = 0;
+        self.turn_base_cached_in = None;
+        self.turn_base_out = 0;
+        self.cost_usd = 0.0;
     }
 
     /// Wrapped-row metrics for the full-screen transcript: total rows at the given width, and the
@@ -8256,5 +8280,18 @@ mod tests {
         app.custom_widget_cache
             .insert("x".to_string(), String::new());
         assert_eq!(crate::app::render::statusline_height(&app), h);
+    }
+
+    #[test]
+    fn composer_cursor_moves_by_grapheme_cluster() {
+        let s = "a👨‍👩‍👧e\u{301}b";
+        let family_end = "a👨‍👩‍👧".len();
+        assert_eq!(super::next_char_boundary(s, 1), family_end);
+        assert_eq!(super::prev_char_boundary(s, family_end), 1);
+        let accent_end = family_end + "e\u{301}".len();
+        assert_eq!(super::next_char_boundary(s, family_end), accent_end);
+        assert_eq!(super::prev_char_boundary(s, accent_end), family_end);
+        assert_eq!(super::prev_char_boundary(s, 0), 0);
+        assert_eq!(super::next_char_boundary(s, s.len()), s.len());
     }
 }

@@ -557,8 +557,12 @@ fn spawn_compaction(
     tokio::spawn(async move {
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
-        if let Err(e) = sess.compact(auto).await {
-            sess.notify_error(&format!("compact failed: {e}"));
+        match sess.compact(auto).await {
+            Ok((before, after)) if !auto && before == after => {
+                sess.notify_warning("nothing to compact yet — the transcript is still short");
+            }
+            Ok(_) => {}
+            Err(e) => sess.notify_error(&format!("compact failed: {e}")),
         }
     })
 }

@@ -255,8 +255,15 @@ prompt text, nothing else.";
         let Some(model) = self.post_turn_auxiliary_model(&decision) else {
             return;
         };
-        let user_snippet: String = prompt.chars().take(400).collect();
-        let assistant_snippet: String = final_text.chars().take(800).collect();
+        let user_snippet: String = prompt.chars().take(1000).collect();
+        // A long answer ends with its conclusion, which is what a recap is about: keep the tail.
+        let assistant_snippet: String = if final_text.chars().count() > 2000 {
+            let head: String = final_text.chars().take(600).collect();
+            let tail: Vec<char> = final_text.chars().rev().take(1400).collect();
+            format!("{head} … {}", tail.into_iter().rev().collect::<String>())
+        } else {
+            final_text.to_string()
+        };
         let messages = vec![
             Message::system(Self::RECAP_SYSTEM),
             Message::user(format!(

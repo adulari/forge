@@ -128,7 +128,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
 
             let help_text = match &mode {
                 OverlayMode::Browse => {
-                    "j/k Up/Down navigate  •  Enter rebind  •  r reset  •  R reset all  •  s save+close  •  q discard"
+                    "j/k Up/Down navigate  •  Enter rebind  •  r reset  •  R reset all  •  s save+close  •  q/Esc discard"
                 }
                 OverlayMode::Capture { .. } => "Press the new key combination...  •  Esc cancel",
             };
@@ -272,6 +272,23 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                             if k.code == KeyCode::Esc {
                                 mode = OverlayMode::Browse;
                             } else if let Some(combo) = key_event_to_combo(&k) {
+                                let owner = working
+                                    .binds
+                                    .iter()
+                                    .find(|(a, c)| **a != action && **c == combo)
+                                    .map(|(a, _)| a.clone());
+                                if let Some(owner) = owner {
+                                    status = Some((
+                                        format!(
+                                            "✗ {} is already bound to {} — pick another key",
+                                            combo_display(&combo),
+                                            owner
+                                        ),
+                                        false,
+                                    ));
+                                    mode = OverlayMode::Browse;
+                                    continue;
+                                }
                                 working.binds.insert(action.clone(), combo.clone());
                                 changes += 1;
                                 status = Some((
@@ -286,10 +303,10 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                 }
                 OverlayMode::Browse => match ev {
                     Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
-                        KeyCode::Char('q') => {
+                        KeyCode::Char('q') | KeyCode::Esc => {
                             break;
                         }
-                        KeyCode::Char('s') | KeyCode::Esc => {
+                        KeyCode::Char('s') => {
                             *keybinds = working.clone();
                             saved = true;
                             break;

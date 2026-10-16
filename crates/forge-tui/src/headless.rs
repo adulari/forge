@@ -137,7 +137,11 @@ impl Presenter for HeadlessPresenter {
             }
             PresenterEvent::Error(msg) => {
                 // Red + distinct glyph so a hard failure can't be mistaken for the yellow ⚠.
-                eprintln!("\x1b[31m  ✖ {msg}\x1b[0m");
+                if std::env::var_os("NO_COLOR").is_some() {
+                    eprintln!("  ✖ {msg}");
+                } else {
+                    eprintln!("\x1b[31m  ✖ {msg}\x1b[0m");
+                }
             }
             PresenterEvent::ModelSearch { model, retrying } => {
                 // Headless has no animated indicator; a concise dim line keeps the failover

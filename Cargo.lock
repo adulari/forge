@@ -2399,6 +2399,7 @@ dependencies = [
  "similar 3.2.0",
  "syntect",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

@@ -2049,7 +2049,11 @@ pub(crate) async fn run_chat_tui(
                         // wrote (`/loop do it`); only autocomplete-to-selection when the line is
                         // the bare command token, so args are never dropped.
                         let has_args = app.input.trim().contains(char::is_whitespace);
-                        let line = if has_args {
+                        let typed_is_command = !matches!(
+                            forge_tui::parse_command(&app.input),
+                            forge_tui::CommandAction::Unknown(_)
+                        );
+                        let line = if has_args || typed_is_command {
                             app.input.clone()
                         } else {
                             app.palette
@@ -2922,6 +2926,9 @@ pub(crate) async fn run_chat_tui(
                         h.abort(); // cancel the turn task; its DoneGuard drop releases the lock
                     }
                     turn_gen += 1; // discard the aborted turn's (now stale) done-signal
+                                   // Events the aborted turn already queued would otherwise render as a ghost
+                                   // block (and get glued onto the next reply) on the next drain.
+                    while rx.try_recv().is_ok() {}
                     busy = false;
                     loop_state = None; // a `/loop` in progress stops on interrupt
                     goal_state = None; // a `/goal` in progress stops on interrupt
@@ -3042,7 +3049,7 @@ pub(crate) async fn run_chat_tui(
                                 queue_command(&mut queued_prompts, &mut app, &line);
                             }
                             BusyRoute::Refuse => app.note(
-                                "⏳ commands run when the turn is idle — finish or Esc first",
+                                "⏳ that command can't run mid-turn and was not queued — finish or Esc, then retype it",
                             ),
                             BusyRoute::RefuseAutonomous => app.note(REFUSE_AUTONOMOUS_NOTE),
                         }
@@ -3729,7 +3736,7 @@ pub(crate) async fn run_chat_tui(
                                     }
                                     BusyRoute::RefuseAutonomous => app.note(REFUSE_AUTONOMOUS_NOTE),
                                     _ => app.note(
-                                        "⏳ commands run when the turn is idle — finish or Esc first",
+                                        "⏳ that command can't run mid-turn and was not queued — finish or Esc, then retype it",
                                     ),
                                 }
                             } else {
@@ -4116,6 +4123,7 @@ pub(crate) async fn run_chat_tui(
                                 h.abort();
                             }
                             turn_gen += 1;
+                            while rx.try_recv().is_ok() {}
                             busy = false;
                             loop_state = None;
                             goal_state = None;

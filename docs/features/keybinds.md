@@ -56,11 +56,13 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `help` | F1 | Show keybind reference overlay |
 | `checkpoint` | Ctrl-S | Save session checkpoint (`/checkpoint`) |
 | `reload` | Alt-R | Reload keybinds, the tier override and the model catalog (hooks, statusline, MCP, mesh and skills need a restart) |
+| `voice` | Ctrl-V | Open the `/voice` recording overlay |
+| `kill_line_forward` | Alt-K | Delete from the cursor to the end of the line |
 
 ## 3. Implementation
 
 - **`forge-config`** — `KeyCombo`, `KeybindsConfig` (`BTreeMap<String, KeyCombo>`), a `Default`
-  with the binds above (the shipped default map has 22), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
+  with the binds above (the shipped default map has 23), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
   preserving all other config keys). `Config` gains a `keybinds` field.
 - **`forge-tui/keybinds.rs`** — `matches(combo, key_event)` compares a combo against a crossterm
   `KeyEvent`; `resolve_action()` returns the `KeyKind` for the first matching configured action.
@@ -68,7 +70,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
   (copy) don't collide. `key_event_to_combo()` captures a fresh binding in the configurator.
 - **`forge-tui/keybind_configurator.rs`** — a fullscreen takeover (run via `Tui::run_fullscreen`)
   listing actions, current binding, and description; rebind (Enter → capture), reset one (r),
-  reset all (R/Shift-R), save (s/Esc), discard (q).
+  reset all (R/Shift-R), save (s), discard (q/Esc). A key already bound to another action is refused.
 - **`forge-tui/driver.rs`** — `poll_event()` calls `resolve_action()` **before** the static
   defaults, so configured binds win. The `Tui` carries the loaded `KeybindsConfig`.
 - **`forge-cli/run.rs`** — the chat loop dispatches each new `KeyKind`. Global action keys
