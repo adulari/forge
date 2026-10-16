@@ -187,6 +187,34 @@ fn an_untrusted_project_skill_is_invisible_and_unloadable_to_the_model() {
         .contains("Attacker body."));
 }
 
+/// A cloned repo shipping a skill named like the user's must not hide the user's skill.
+#[test]
+fn an_untrusted_project_skill_does_not_mask_the_users_skill_of_the_same_name() {
+    let t = Tmp::new();
+    t.skill(
+        "user",
+        "deploy",
+        "---\nname: deploy\ndescription: user deploy\n---\nUSER-BODY",
+    );
+    t.skill(
+        "project",
+        "deploy",
+        "---\nname: deploy\ndescription: project deploy\n---\nPROJECT-BODY",
+    );
+    let cat = t.load();
+    let listing = cat.skill_listing(false);
+    assert!(listing.contains(&("deploy".to_string(), "user deploy".to_string())));
+    assert!(!listing.iter().any(|(_, d)| d == "project deploy"));
+    assert!(cat
+        .skill_guidance("deploy", false)
+        .unwrap()
+        .contains("USER-BODY"));
+    assert!(cat
+        .skill_guidance("deploy", true)
+        .unwrap()
+        .contains("PROJECT-BODY"));
+}
+
 #[test]
 fn skill_listing_and_guidance_back_use_skill() {
     let t = Tmp::new();

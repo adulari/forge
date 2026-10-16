@@ -19,6 +19,7 @@ mod builtin;
 pub mod from_session;
 mod frontmatter;
 pub mod normalize;
+mod summary;
 mod template;
 
 pub use from_session::{
@@ -26,6 +27,7 @@ pub use from_session::{
     TranscriptEntry,
 };
 pub use normalize::normalize_skill_content;
+pub use summary::summarize_description;
 pub use template::expand;
 
 /// Where a definition came from. Precedence: `Project` > `User` > `Builtin`.
@@ -226,6 +228,9 @@ pub struct Entry {
 pub struct Catalog {
     commands: BTreeMap<String, Command>,
     skills: BTreeMap<String, SkillMeta>,
+    /// The non-project skill a project skill of the same name replaced, so an untrusted project
+    /// definition cannot hide the user's or built-in one.
+    trusted_fallback: BTreeMap<String, SkillMeta>,
     shadowed: Vec<(String, Scope)>,
     warnings: Vec<String>,
 }
@@ -362,15 +367,32 @@ impl Catalog {
         match self.skills.get(&meta.name) {
             Some(existing) if existing.scope >= meta.scope => {
                 self.shadowed.push((meta.name.clone(), meta.scope));
+                if existing.scope == Scope::Project && meta.scope != Scope::Project {
+                    self.trusted_fallback.insert(meta.name.clone(), meta);
+                }
             }
             Some(existing) => {
                 self.shadowed.push((existing.name.clone(), existing.scope));
+                if meta.scope == Scope::Project && existing.scope != Scope::Project {
+                    self.trusted_fallback
+                        .insert(existing.name.clone(), existing.clone());
+                }
                 self.skills.insert(meta.name.clone(), meta);
             }
             None => {
                 self.skills.insert(meta.name.clone(), meta);
             }
         }
+    }
+
+    /// The skill `name` resolves to when project skills are not trusted: a project definition
+    /// falls back to the lower-scope one it shadowed, if any.
+    fn visible_skill(&self, name: &str, allow_project: bool) -> Option<&SkillMeta> {
+        let meta = self.skills.get(name)?;
+        if allow_project || meta.scope != Scope::Project {
+            return Some(meta);
+        }
+        self.trusted_fallback.get(name)
     }
 
     fn insert_builtin_commands(&mut self) {
@@ -587,8 +609,8 @@ impl Catalog {
     pub fn skill_listing(&self, allow_project: bool) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = self
             .skills
-            .values()
-            .filter(|m| allow_project || m.scope != Scope::Project)
+            .keys()
+            .filter_map(|name| self.visible_skill(name, allow_project))
             .map(|m| (m.name.clone(), forge_native(&m.description)))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -602,9 +624,7 @@ impl Catalog {
     /// Loading returns the skill's FULL body as authoritative methodology, so an untrusted project
     /// skill here is direct instruction injection from a cloned repo.
     pub fn skill_guidance(&self, name: &str, allow_project: bool) -> Option<String> {
-        self.skills
-            .get(name)
-            .filter(|m| allow_project || m.scope != Scope::Project)
+        self.visible_skill(name, allow_project)
             .map(|m| Skill::load(m).guidance())
     }
 

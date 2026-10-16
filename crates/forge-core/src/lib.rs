@@ -1892,11 +1892,30 @@ fn current_git_branch(root: &std::path::Path) -> Option<String> {
         .and_then(parse_git_head)
 }
 
+/// Instruction files in precedence order: the project's Forge files, the Claude Code
+/// `CLAUDE.md` convention, then the user-global files. The first non-empty one is injected.
+fn agents_md_candidates(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut paths = vec![
+        root.join(".forge/AGENTS.md"),
+        root.join("AGENTS.md"),
+        root.join("CLAUDE.md"),
+        root.join(".claude/CLAUDE.md"),
+    ];
+    if let Some(config) = forge_config::config_dir() {
+        paths.push(config.join("AGENTS.md"));
+    }
+    if let Some(home) = forge_config::home_dir() {
+        paths.push(home.join(".forge/AGENTS.md"));
+        paths.push(home.join(".claude/CLAUDE.md"));
+    }
+    paths
+}
+
 /// Read the project `AGENTS.md` synchronously (`.forge/AGENTS.md`, then `AGENTS.md`), returning the
 /// first non-empty body. Used only at session construction (one-time setup, not on the async turn
 /// path) so the first-turn injection site stays await-free + syscall-free.
 fn read_project_agents_md(root: &std::path::Path) -> Option<String> {
-    for path in [root.join(".forge/AGENTS.md"), root.join("AGENTS.md")] {
+    for path in agents_md_candidates(root) {
         if let Ok(body) = std::fs::read_to_string(path) {
             if !body.trim().is_empty() {
                 return Some(body);
@@ -1913,7 +1932,7 @@ fn read_project_agents_md(root: &std::path::Path) -> Option<String> {
 async fn project_agents_md_stat(
     root: &std::path::Path,
 ) -> Option<(std::path::PathBuf, std::time::SystemTime, u64)> {
-    for path in [root.join(".forge/AGENTS.md"), root.join("AGENTS.md")] {
+    for path in agents_md_candidates(root) {
         if let Ok(meta) = tokio::fs::metadata(&path).await {
             if meta.len() > 0 {
                 let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
@@ -4393,7 +4412,7 @@ pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> T
         .skill_listing(allow_project)
         .into_iter()
         .map(|(name, desc)| {
-            let desc: String = desc.chars().take(SKILL_SUMMARY_CHARS).collect();
+            let desc = forge_skills::summarize_description(&desc, SKILL_SUMMARY_CHARS);
             format!("- {name}: {desc}")
         })
         .collect::<Vec<_>>()
@@ -9630,7 +9649,7 @@ mod tests {
         let summary = line.trim_start_matches("- wordy: ");
         assert_eq!(
             summary.chars().count(),
-            SKILL_SUMMARY_CHARS,
+            SKILL_SUMMARY_CHARS + 1,
             "a long description is clipped to the listing budget: {line}"
         );
         let _ = std::fs::remove_dir_all(&dir);

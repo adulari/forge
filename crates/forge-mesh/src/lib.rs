@@ -1615,7 +1615,9 @@ impl HeuristicRouter {
     /// dropped by the separate strict-credit-mode filter (a paid/metered model policy exclusion,
     /// not a quota problem) — checked before defaulting to "quota exhausted".
     fn unusable_reason(&self, model: &str, health: &ModelHealth) -> &'static str {
-        if !privacy::allows(&self.config, model) {
+        if forge_config::is_model_disabled(model, &self.config.mesh.disabled) {
+            "disabled in [mesh] disabled"
+        } else if !privacy::allows(&self.config, model) {
             "excluded by zero-retention mode"
         } else if !(self.model_available)(model) {
             "no usable key"
@@ -5710,6 +5712,17 @@ mod tests {
 
     fn benched(models: &[&str]) -> ModelHealth {
         ModelHealth::new(models.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn a_config_disabled_model_is_reported_as_disabled_not_quota_exhausted() {
+        let mut config = Config::default();
+        config.mesh.disabled = vec!["fake::fake-1".into()];
+        let r = HeuristicRouter::new(config).with_availability(|_| true);
+        assert_eq!(
+            r.unusable_reason("fake::fake-1", &ModelHealth::default()),
+            "disabled in [mesh] disabled"
+        );
     }
 
     #[tokio::test]

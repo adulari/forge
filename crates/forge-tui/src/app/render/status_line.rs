@@ -717,11 +717,11 @@ fn location_spans(app: &App, budget: usize) -> Vec<Span<'static>> {
 
 fn layout_shows_location(config: &forge_config::StatuslineConfig) -> bool {
     use forge_config::StatuslineWidget as W;
+    // Only the left segment and the extra rows are drawn, so a branch widget configured in the
+    // center or right segment must not suppress the default location chip.
     config
         .left
         .iter()
-        .chain(&config.center)
-        .chain(&config.right)
         .chain(config.extra_rows.iter().flatten())
         .any(|widget| matches!(widget, W::GitBranch | W::RepoName))
 }

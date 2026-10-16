@@ -2742,17 +2742,17 @@ fn default_custom_refresh_secs() -> u64 {
     5
 }
 
-/// Customizable statusline layout (left / center / right segments).
+/// Customizable statusline layout (the left segment and extra rows render today).
 /// Default matches the current built-in layout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatuslineConfig {
     /// Left segment widgets (rendered left-aligned).
     #[serde(default = "default_sl_left")]
     pub left: Vec<StatuslineWidget>,
-    /// Center segment widgets (centered; empty = no center).
+    /// Reserved: center widgets are parsed but not drawn yet (use `left` or `extra_rows`).
     #[serde(default)]
     pub center: Vec<StatuslineWidget>,
-    /// Right segment widgets (rendered right-aligned).
+    /// Reserved: right widgets are parsed but not drawn yet (use `left` or `extra_rows`).
     #[serde(default)]
     pub right: Vec<StatuslineWidget>,
     /// Separator between widgets within a segment.
@@ -2802,7 +2802,7 @@ impl Default for StatuslineConfig {
 pub struct KeyCombo {
     /// Key name: a single character (e.g. "c", "k", ","), or a named key
     /// ("up", "down", "left", "right", "enter", "esc", "backspace", "delete",
-    /// "pageup", "pagedown", "home", "end", "tab", "f1"–"f12").
+    /// "pageup", "pagedown", "home", "end", "tab", "f1"–"f12"); names are case-insensitive.
     pub key: String,
     #[serde(default)]
     pub ctrl: bool,

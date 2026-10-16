@@ -230,10 +230,17 @@ fn pick_root(clone: &Path, subdir: Option<&str>) -> Result<PathBuf> {
 }
 
 /// Install every skill found in `root` (top-level `*.md` files and any directory containing a
-/// `SKILL.md`) into `skills_dir`, normalizing path/binary references. `overwrite` replaces an
-/// existing skill of the same name (used by update); otherwise existing ones are kept + reported.
-/// Returns the names written.
-fn install_from(root: &Path, skills_dir: &Path, overwrite: bool) -> Result<Vec<String>> {
+/// `SKILL.md`) into `skills_dir`, normalizing path/binary references. `owned` (used by update) is
+/// the pack's lockfile file list: an existing skill of the same name is replaced only if the pack
+/// owns it. Otherwise (and on a fresh install, `owned = None`) it is kept and its name pushed to
+/// `skipped`. Returns the names written.
+fn install_from(
+    root: &Path,
+    skills_dir: &Path,
+    owned: Option<&[String]>,
+    skipped: &mut Vec<String>,
+) -> Result<Vec<String>> {
+    let may_replace = |name: &str| owned.is_some_and(|o| o.iter().any(|f| f == name));
     use crate::cli::commands::import::copy_dir;
     std::fs::create_dir_all(skills_dir).ok();
     let mut installed = Vec::new();
@@ -249,7 +256,8 @@ fn install_from(root: &Path, skills_dir: &Path, overwrite: bool) -> Result<Vec<S
             }
             let dest = skills_dir.join(&name);
             if dest.exists() {
-                if !overwrite {
+                if !may_replace(&name) {
+                    skipped.push(name);
                     continue;
                 }
                 std::fs::remove_dir_all(&dest).ok();
@@ -260,7 +268,8 @@ fn install_from(root: &Path, skills_dir: &Path, overwrite: bool) -> Result<Vec<S
             }
         } else if from.extension().and_then(|e| e.to_str()) == Some("md") {
             let dest = skills_dir.join(&name);
-            if dest.exists() && !overwrite {
+            if dest.exists() && !may_replace(&name) {
+                skipped.push(name);
                 continue;
             }
             if let Ok(raw) = std::fs::read_to_string(&from) {
@@ -274,6 +283,29 @@ fn install_from(root: &Path, skills_dir: &Path, overwrite: bool) -> Result<Vec<S
         }
     }
     Ok(installed)
+}
+
+fn report_skipped(skipped: &[String]) {
+    if !skipped.is_empty() {
+        eprintln!(
+            "  ! kept your existing skill(s) instead of the pack's: {}",
+            skipped.join(", ")
+        );
+    }
+}
+
+/// Packs may carry more than skills; only skills are installed, so say what was left out.
+fn report_unsupported_components(repo: &Path) {
+    let ignored: Vec<&str> = ["hooks", "agents", "commands", ".mcp.json"]
+        .into_iter()
+        .filter(|c| repo.join(c).exists())
+        .collect();
+    if !ignored.is_empty() {
+        eprintln!(
+            "  ! not installed (only skills are): {}",
+            ignored.join(", ")
+        );
+    }
 }
 
 /// Normalize every `.md` under a freshly-copied skill directory in place.
@@ -314,7 +346,8 @@ pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) 
             resolved.clone_target
         );
     }
-    let installed = install_from(&root, &skills_dir, false)?;
+    let mut skipped = Vec::new();
+    let installed = install_from(&root, &skills_dir, None, &mut skipped)?;
     if installed.is_empty() {
         anyhow::bail!(
             "no skills found in {} (looked for *.md files and SKILL.md directories)",
@@ -340,6 +373,8 @@ pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) 
         installed.len(),
         skills_dir.display()
     );
+    report_skipped(&skipped);
+    report_unsupported_components(&clone.0);
     println!("  update later with: forge plugin update {}", resolved.name);
     Ok(())
 }
@@ -386,7 +421,10 @@ pub(crate) async fn update_installed(name: Option<&str>) -> Result<()> {
                 continue;
             }
         };
-        match install_from(&root, &skills_dir, true) {
+        let mut skipped = Vec::new();
+        let result = install_from(&root, &skills_dir, Some(&entry.files), &mut skipped);
+        report_skipped(&skipped);
+        match result {
             Ok(files) if !files.is_empty() => {
                 record_installed_at(
                     &lock_path,
@@ -494,6 +532,36 @@ mod tests {
         assert!(!remove_marketplace_at(&path, "community").unwrap());
         assert_eq!(load_marketplaces_at(&path).unwrap().marketplaces.len(), 1);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn update_never_replaces_a_skill_the_pack_does_not_own() {
+        let root = tmp("owned-root");
+        let skills = tmp("owned-skills");
+        for dir in [&root, &skills] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(root.join("mine.md"), "PLUGIN-BODY").unwrap();
+        std::fs::write(root.join("theirs.md"), "PLUGIN-NEW").unwrap();
+        std::fs::write(skills.join("mine.md"), "HANDWRITTEN-BODY").unwrap();
+        std::fs::write(skills.join("theirs.md"), "OLD").unwrap();
+
+        let mut skipped = Vec::new();
+        let owned = vec!["theirs.md".to_string()];
+        let written = install_from(&root, &skills, Some(&owned), &mut skipped).unwrap();
+        assert_eq!(written, vec!["theirs.md".to_string()]);
+        assert_eq!(skipped, vec!["mine.md".to_string()]);
+        assert_eq!(
+            std::fs::read_to_string(skills.join("mine.md")).unwrap(),
+            "HANDWRITTEN-BODY"
+        );
+
+        let mut fresh = Vec::new();
+        let written = install_from(&root, &skills, None, &mut fresh).unwrap();
+        assert!(written.is_empty());
+        assert_eq!(fresh.len(), 2);
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&skills).ok();
     }
 
     #[test]

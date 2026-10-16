@@ -7,7 +7,8 @@ use crate::app::KeyKind;
 
 /// Returns true when `ev` matches `combo`.
 pub fn matches(combo: &KeyCombo, ev: &KeyEvent) -> bool {
-    let code_matches = match combo.key.as_str() {
+    let key = combo.key.to_ascii_lowercase();
+    let code_matches = match key.as_str() {
         "up" => ev.code == KeyCode::Up,
         "down" => ev.code == KeyCode::Down,
         "left" => ev.code == KeyCode::Left,
@@ -185,6 +186,17 @@ mod tests {
 
     fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn named_keys_match_case_insensitively() {
+        let combo = KeyCombo {
+            key: "F2".into(),
+            ctrl: false,
+            alt: false,
+            shift: false,
+        };
+        assert!(matches(&combo, &ev(KeyCode::F(2), KeyModifiers::NONE)));
     }
 
     /// Ctrl-C must resolve to interrupt, NOT copy_last — they share key `c`+ctrl and differ
