@@ -305,7 +305,7 @@ fn no_such_session() -> Response {
 /// Run `git -C <root> <args>` and return raw (untrimmed) stdout — the diff routes need the exact
 /// bytes, which [`git_stdout`]'s trim would corrupt.
 fn git_raw(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut full = vec!["-C", root.to_str().unwrap_or(".")];
+    let mut full = vec!["--literal-pathspecs", "-C", root.to_str().unwrap_or(".")];
     full.extend_from_slice(args);
     let out = std::process::Command::new("git")
         .args(&full)

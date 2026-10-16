@@ -166,7 +166,8 @@ function renderSessionList(rows) {
         .then(() => { if (r.id === curSession) detach(); pollSessions(); })
         .catch(() => {});
     };
-    d.appendChild(main); d.appendChild(arch);
+    d.appendChild(main);
+    if (!r.terminal) d.appendChild(arch);
     // Worktree sessions can be merged back into their base branch or discarded outright.
     if (r.worktree) {
       d.appendChild(worktreeBtn(r, "merge", "smerge", false));
@@ -487,7 +488,7 @@ function histRow(r) {
   if (r.kind === "job_notice") return jobNoticeRow(r);
   if (r.kind === "harness_notice") return harnessNoticeRow(r);
   const d = document.createElement("div");
-  const note = r.visibility === "ui";
+  const note = r.visibility === "ui" && r.role !== "assistant";
   d.className = "msg " + (note ? "note" : (r.role === "user" ? "user" : "forge"));
   const head = document.createElement("div");
   head.className = "mrole";
@@ -1305,14 +1306,16 @@ function initPush() {
   $("pushrow").hidden = false;
   $("pushbtn").onclick = async () => {
     $("pushbtn").disabled = true;
+    let failure = null;
     try {
       const sub = await pushSubscription();
       if (sub) await disablePush(); else await enablePush();
     } catch (e) {
-      $("pushinfo").textContent = "push setup failed: " + (e && e.message || e);
+      failure = "push setup failed: " + (e && e.message || e);
     } finally {
       $("pushbtn").disabled = false;
-      paintPush();
+      await paintPush();
+      if (failure) $("pushinfo").textContent = failure;
     }
   };
   paintPush();

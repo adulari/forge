@@ -39,6 +39,18 @@ impl SteerInbox {
         }
     }
 
+    /// Like [`Self::push`] but delivered before everything already waiting: an explicit steer
+    /// outranks queued follow-ups, matching where the queue display puts it.
+    pub fn push_front(&self, text: impl Into<String>) {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut q) = self.inner.lock() {
+            q.pending.push_front(text);
+        }
+    }
+
     /// Withdraw the oldest not-yet-taken `text`; false when the turn already took it.
     pub fn remove_pending(&self, text: &str) -> bool {
         self.inner.lock().is_ok_and(|mut q| {
@@ -93,6 +105,14 @@ impl SteerInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_front_is_delivered_before_queued_texts() {
+        let inbox = SteerInbox::default();
+        inbox.push("follow-up");
+        inbox.push_front("steer");
+        assert_eq!(inbox.drain(), ["steer", "follow-up"]);
+    }
 
     #[test]
     fn a_withdrawn_text_is_never_drained() {

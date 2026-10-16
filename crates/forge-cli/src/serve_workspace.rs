@@ -64,6 +64,10 @@ impl From<std::io::Error> for WorkspaceFailure {
             std::io::ErrorKind::PermissionDenied => {
                 Self::forbidden("workspace path is not readable")
             }
+            std::io::ErrorKind::InvalidInput => Self::new(
+                StatusCode::BAD_REQUEST,
+                "workspace path is not valid (embedded NUL byte?)",
+            ),
             _ => Self::internal(error),
         }
     }
