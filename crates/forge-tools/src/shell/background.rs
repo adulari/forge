@@ -184,6 +184,9 @@ pub async fn start(
         .stderr(std::process::Stdio::from(log_for_err))
         // Explicitly NOT kill_on_drop: outliving this call is the entire point.
         .kill_on_drop(false);
+    for var in forge_types::child_env::scrubbed_vars() {
+        cmd.env_remove(var);
+    }
     detach_into_new_session(&mut cmd);
     super::maybe_install_sandbox(&mut cmd, policy, cwd, None);
 

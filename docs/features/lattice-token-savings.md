@@ -92,6 +92,10 @@ a truncated retrieval that looks identical to a clean one is precisely the failu
 
 ---
 
+## TypeScript symbols
+
+TypeScript and TSX files are tagged with the JavaScript tags query plus the TypeScript grammar's own, so exported classes, functions, methods and arrow-function constants are indexed alongside interfaces and signatures (the TypeScript query alone covers only the latter).
+
 ## 1. Problem
 
 Lattice already retrieved relevant symbols and injected them before each turn, but **signature-only**:

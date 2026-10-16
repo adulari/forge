@@ -721,10 +721,45 @@ pub fn is_test_path(path: &str) -> bool {
     by_name || by_dir
 }
 
+/// "Don't change or weaken the existing tests", "never touch the tests", ... — a negation, then a
+/// modifying verb, then "test", all inside one sentence.
+fn forbids_touching_tests(prompt: &str) -> bool {
+    const NEGATIONS: [&str; 8] = [
+        "do not",
+        "don't",
+        "dont",
+        "never",
+        "must not",
+        "mustn't",
+        "should not",
+        "shouldn't",
+    ];
+    const VERBS: [&str; 7] = [
+        "modify", "change", "weaken", "edit", "touch", "alter", "rewrite",
+    ];
+    prompt
+        .replace('\u{2019}', "'")
+        .split(['.', '!', '?', '\n', ';'])
+        .any(|sentence| {
+            NEGATIONS.iter().any(|neg| {
+                let Some(at) = sentence.find(neg) else {
+                    return false;
+                };
+                let after = &sentence[at + neg.len()..];
+                VERBS.iter().any(|verb| {
+                    after
+                        .find(verb)
+                        .is_some_and(|v| after[v + verb.len()..].contains("test"))
+                })
+            })
+        })
+}
+
 fn prompt_requires_pristine_existing_tests(prompt: &str) -> bool {
-    let prompt = prompt.to_ascii_lowercase();
+    let prompt = prompt.to_lowercase();
     prompt.contains("test")
-        && (prompt.contains("do not weaken")
+        && (forbids_touching_tests(&prompt)
+            || prompt.contains("do not weaken")
             || prompt.contains("no tests weakened")
             || prompt.contains("do not modify existing tests")
             || prompt.contains("keep existing tests unchanged"))
@@ -3650,7 +3685,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "code-change turn modified {} existing test file(s) — stashed the test edits \
-                     and pushing back once: hidden evaluation runs the ORIGINAL tests",
+                     and pushing back once: existing tests must keep their original assertions",
                     test_edits.len()
                 )));
                 let guard = format!(
@@ -4659,6 +4694,10 @@ pub fn persist_plan(session_id: &str, plan: &forge_types::PlanProposal) {
     // runtime is active (a plain sync caller, e.g. a unit test) fall back to an inline write.
     let do_write = move || {
         if std::fs::create_dir_all(&dir).is_ok() {
+            let ignore = dir.join(".gitignore");
+            if !ignore.exists() {
+                let _ = std::fs::write(&ignore, "*\n");
+            }
             let _ = std::fs::write(&file, md);
         }
     };
@@ -9300,8 +9339,33 @@ mod tests {
     }
 
     #[test]
+    fn natural_phrasings_of_do_not_touch_the_tests_enable_the_guard() {
+        for p in [
+            "Do not modify the existing tests.",
+            "Don't change or weaken the existing tests.",
+            "Implement pagination. Never touch the tests.",
+            "Don\u{2019}t edit existing tests",
+        ] {
+            assert!(prompt_requires_pristine_existing_tests(p), "{p}");
+        }
+        assert!(!prompt_requires_pristine_existing_tests(
+            "Do not add logging. Update the tests."
+        ));
+        assert!(!prompt_requires_pristine_existing_tests(
+            "Implement pagination."
+        ));
+    }
+
+    #[test]
     fn shell_command_failed_reads_the_exit_status() {
         assert!(!shell_command_failed("shell: exit 0 in 5ms\n\nhi"));
+        assert!(!shell_command_failed("shell: ready after 0s (exit 0)"));
+        assert!(!shell_command_failed(
+            "shell: started background job 1 (pid 2)"
+        ));
+        assert!(!shell_command_failed(
+            "shell: not ready after 3s (last exit 1)"
+        ));
         assert!(shell_command_failed("shell: exit 1 in 5ms"));
         assert!(shell_command_failed("shell: exit 127 in 5ms"));
         assert!(shell_command_failed("shell: timed out after 1s (killed)"));

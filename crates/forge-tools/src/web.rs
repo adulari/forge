@@ -44,7 +44,32 @@ fn bundled_client_builder() -> reqwest::ClientBuilder {
         .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok());
     reqwest::Client::builder()
         .tls_certs_only(certs)
+        .dns_resolver(std::sync::Arc::new(PublicOnlyResolver))
         .redirect(safe_redirect_policy())
+}
+
+/// Resolves hostnames itself and drops every loopback/private/link-local answer, so a hostname
+/// that merely *points at* an internal address (`localtest.me`, `127.0.0.1.nip.io`, DNS
+/// rebinding) cannot reach it. The connection uses exactly the addresses returned here, for the
+/// first request and for every redirect hop alike.
+struct PublicOnlyResolver;
+
+impl reqwest::dns::Resolve for PublicOnlyResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async move {
+            let host = name.as_str().to_string();
+            let addrs = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let public: Vec<std::net::SocketAddr> =
+                addrs.filter(|addr| !is_private_ip(addr.ip())).collect();
+            if public.is_empty() {
+                return Err(format!(
+                    "refusing to connect: '{host}' resolves only to private/loopback addresses"
+                )
+                .into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 fn safe_redirect_policy() -> reqwest::redirect::Policy {
@@ -108,14 +133,72 @@ impl Tool for WebFetchTool {
             .await
             .map_err(|e| ToolError::Failed(format!("fetching {url}: {e}")))?;
         let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
         let bytes = read_body_capped(resp, MAX_BODY_BYTES, url).await?;
         if !status.is_success() {
             return Err(ToolError::Failed(format!("{url} returned HTTP {status}")));
         }
+        if is_binary_response(&content_type, &bytes) {
+            let kind = if content_type.is_empty() {
+                "unknown type"
+            } else {
+                content_type.as_str()
+            };
+            return Ok(format!(
+                "{url} returned binary content ({kind}, {} bytes) — not fetched as text. Download it with a shell command if you need the file.",
+                bytes.len()
+            ));
+        }
 
-        let body = String::from_utf8_lossy(&bytes);
+        let body = decode_body(&content_type, &bytes);
         let text = html_to_text(&body);
         Ok(truncate_chars(&text, max_chars))
+    }
+}
+
+/// Whether a response is not text: a non-text content type, or (without one) NUL bytes up front.
+fn is_binary_response(content_type: &str, bytes: &[u8]) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    let ct = ct.split(';').next().unwrap_or("").trim();
+    if ct.is_empty() {
+        return bytes.iter().take(1024).any(|b| *b == 0);
+    }
+    let textual = ct.starts_with("text/")
+        || [
+            "json",
+            "xml",
+            "javascript",
+            "ecmascript",
+            "yaml",
+            "html",
+            "x-www-form-urlencoded",
+            "csv",
+            "toml",
+        ]
+        .iter()
+        .any(|t| ct.contains(t));
+    !textual
+}
+
+/// Decode a body honouring the `charset` of its Content-Type: Latin-1 / Windows-1252 are mapped
+/// byte-for-byte, everything else (including no charset) is read as UTF-8.
+fn decode_body(content_type: &str, bytes: &[u8]) -> String {
+    let lower = content_type.to_ascii_lowercase();
+    let charset = lower
+        .split(';')
+        .filter_map(|p| p.trim().strip_prefix("charset="))
+        .next()
+        .map(|c| c.trim_matches('"').trim().to_string());
+    match charset.as_deref() {
+        Some("iso-8859-1" | "latin1" | "latin-1" | "iso8859-1" | "windows-1252" | "cp1252") => {
+            bytes.iter().map(|b| *b as char).collect()
+        }
+        _ => String::from_utf8_lossy(bytes).into_owned(),
     }
 }
 
@@ -180,7 +263,8 @@ pub(crate) fn is_safe_url(url: &str) -> Result<(), ToolError> {
         .host_str()
         .ok_or_else(|| ToolError::BadArgs(format!("URL has no host: {url}")))?;
 
-    let lower = host.to_ascii_lowercase();
+    // A trailing dot is the same name (`LOCALHOST.` is `localhost`).
+    let lower = host.to_ascii_lowercase().trim_end_matches('.').to_string();
     if lower == "localhost" || lower.ends_with(".local") || lower.ends_with(".localhost") {
         return Err(ToolError::BadArgs(format!(
             "refusing to fetch local host '{host}'"
@@ -744,5 +828,17 @@ mod tests {
             .expect("ddg search");
         assert!(out.contains("rust") || out.contains("Rust"), "got: {out}");
         assert!(out.contains("http"), "has urls: {out}");
+    }
+
+    #[test]
+    fn trailing_dot_localhost_is_refused_and_binary_bodies_detected() {
+        assert!(is_safe_url("http://LOCALHOST.:8080/").is_err());
+        assert!(is_binary_response("image/png", b"\x89PNG"));
+        assert!(!is_binary_response("text/html; charset=utf-8", b"<p>"));
+        assert!(!is_binary_response("application/json", b"{}"));
+        assert_eq!(
+            decode_body("text/html; charset=ISO-8859-1", b"caf\xe9"),
+            "café"
+        );
     }
 }

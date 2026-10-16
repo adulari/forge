@@ -30,12 +30,15 @@ impl Tool for ListDirTool {
         confine(path)?;
         let path = path.to_string();
         tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
-            let meta = std::fs::metadata(&path)?;
+            let meta =
+                std::fs::metadata(&path).map_err(|e| super::core_tools::io_with_path(e, &path))?;
             if !meta.is_dir() {
                 return Err(ToolError::Failed(format!("{path} is not a directory")));
             }
             let mut entries: Vec<String> = Vec::new();
-            for entry in std::fs::read_dir(&path)? {
+            for entry in
+                std::fs::read_dir(&path).map_err(|e| super::core_tools::io_with_path(e, &path))?
+            {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if entry.file_type()?.is_dir() {
@@ -319,6 +322,14 @@ impl Tool for SearchTool {
                             }
                             continue;
                         }
+                        // FIFOs and devices block or never end; only regular files (or links to
+                        // them) are searchable.
+                        if !ft.is_file()
+                            && !(ft.is_symlink()
+                                && std::fs::metadata(&path).is_ok_and(|m| m.is_file()))
+                        {
+                            continue;
+                        }
                         let rel = path.strip_prefix(&root).unwrap_or(&path);
                         if let Some(ref fg) = file_glob {
                             if !fg.is_match(rel) {
@@ -497,6 +508,36 @@ fn context_hunks(rel: &str, lines: &[&str], hits: &[usize], ctx: usize) -> Vec<S
         .collect()
 }
 
+/// An absolute glob (`/etc/host*`) is matched relative to the root, so it would never match
+/// anything. Split it at its first wildcard component: the literal directory prefix becomes the
+/// root and the rest the pattern.
+fn split_absolute_pattern(root: &str, pattern: &str) -> (String, String) {
+    let p = std::path::Path::new(pattern);
+    if !p.is_absolute() {
+        return (root.to_string(), pattern.to_string());
+    }
+    let mut literal = std::path::PathBuf::new();
+    let mut rest: Vec<String> = Vec::new();
+    for comp in p.components() {
+        let text = comp.as_os_str().to_string_lossy().into_owned();
+        if rest.is_empty() && !text.contains(['*', '?', '[', '{']) {
+            literal.push(comp);
+        } else {
+            rest.push(text);
+        }
+    }
+    if rest.is_empty() {
+        // No wildcard at all: match the one file inside its directory.
+        let name = literal
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        literal.pop();
+        rest.push(name);
+    }
+    (literal.display().to_string(), rest.join("/"))
+}
+
 /// List files matching a glob pattern, recursively. Skips hidden directories and `target/`.
 pub struct GlobTool;
 
@@ -531,6 +572,8 @@ impl Tool for GlobTool {
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let pattern = str_arg(args, "pattern")?;
         let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let (root, pattern) = split_absolute_pattern(root, pattern);
+        let (root, pattern) = (root.as_str(), pattern.as_str());
         confine(root)?;
         let root_meta = std::fs::metadata(root).map_err(|e| {
             ToolError::Failed(format!(

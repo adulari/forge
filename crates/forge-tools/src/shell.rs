@@ -52,7 +52,9 @@ mod rtk;
 pub use background::ShellJobTool;
 pub use rtk::RtkRewriter;
 mod batch;
+mod capture;
 mod output;
+use capture::read_capped;
 use output::{render_streams, stream_text, truncate_for_model};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -210,6 +212,9 @@ impl Tool for ShellTool {
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .clamp(1, MAX_TIMEOUT_SECS);
         let use_pty = args.get("pty").and_then(Value::as_bool).unwrap_or(false);
+        if let Some(message) = batch::conflicting_args(args, use_pty) {
+            return Err(ToolError::BadArgs(message.to_string()));
+        }
         if let Some(list) = args.get("commands") {
             let single_only = ["background", "pty", "poll_until_exit_zero"]
                 .into_iter()
@@ -397,6 +402,9 @@ async fn run_command_inner(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     put_in_own_process_group(&mut cmd);
+    for var in forge_types::child_env::scrubbed_vars() {
+        cmd.env_remove(var);
+    }
 
     // Scoped build-target carve-out: for cargo/rust build commands, relocate CARGO_TARGET_DIR to a
     // per-project dir outside the (possibly read-only) workspace so the build can write its target
@@ -583,31 +591,6 @@ pub(super) fn pty_kill_child(pid: Option<u32>) {
     {
         let _ = pid;
     }
-}
-
-/// Read an async stream up to [`CAPTURE_CAP`] bytes; returns the bytes and whether it capped.
-async fn read_capped<R: AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, bool) {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    let mut capped = false;
-    loop {
-        match r.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(n) => {
-                if buf.len() < CAPTURE_CAP {
-                    let take = n.min(CAPTURE_CAP - buf.len());
-                    buf.extend_from_slice(&chunk[..take]);
-                    if buf.len() >= CAPTURE_CAP {
-                        capped = true;
-                    }
-                } else {
-                    capped = true;
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    (buf, capped)
 }
 
 /// Compute the scoped, writable `CARGO_TARGET_DIR` to inject for `command`, or `None` to leave the
@@ -820,7 +803,18 @@ async fn terminate(child: &mut Child, pgid: Option<i32>) -> Vec<String> {
             if let Err(error) = signal_process_group(pg, libc::SIGTERM) {
                 errors.push(format!("SIGTERM: {error}"));
             }
-            tokio::time::sleep(KILL_GRACE).await;
+            // Wait out the grace only while something in the group is still alive: a command
+            // that dies on SIGTERM must not cost the full grace period.
+            let deadline = tokio::time::Instant::now() + KILL_GRACE;
+            loop {
+                let _ = child.try_wait(); // reap, so a zombie leader doesn't count as alive
+                let gone = unsafe { libc::kill(-pg, 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                if gone || tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
             if let Err(error) = signal_process_group(pg, libc::SIGKILL) {
                 errors.push(format!("SIGKILL: {error}"));
             }

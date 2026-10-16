@@ -52,6 +52,9 @@ pub async fn run_command_pty(
     cb.arg(flag);
     cb.arg(command);
     cb.cwd(cwd);
+    for var in forge_types::child_env::scrubbed_vars() {
+        cb.env_remove(var);
+    }
 
     // Spawn into the slave end.
     let mut child = match pair.slave.spawn_command(cb) {

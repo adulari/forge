@@ -590,6 +590,17 @@ pub fn helper() -> String { String::new() }
     }
 
     #[test]
+    fn typescript_classes_and_functions_are_indexed() {
+        let src = "export class UserAccountant {\n  total(): number { return 1; }\n}\nexport function handleGet(x: string) { return new UserAccountant(); }\nexport const make = (a: number) => a;\ninterface Shape { area(): number }\n";
+        let p = extract("a.ts", src);
+        assert_eq!(def(&p, "UserAccountant").kind, "class");
+        def(&p, "handleGet");
+        def(&p, "total");
+        def(&p, "make");
+        def(&p, "Shape");
+    }
+
+    #[test]
     fn python_class_nesting() {
         // A Python class lexically contains its methods, so span-nesting gives a dotted qualname.
         let src = "class Greeter:\n    def hi(self):\n        pass\n";

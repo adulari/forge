@@ -40,6 +40,7 @@ fn plan(args: &Value) -> Result<Vec<(String, Vec<EditStep>)>, ToolError> {
                 ))
             })?;
         let step = EditStep {
+            number: index + 1,
             old: old.to_string(),
             new: new.to_string(),
             replace_all: item
@@ -47,9 +48,13 @@ fn plan(args: &Value) -> Result<Vec<(String, Vec<EditStep>)>, ToolError> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         };
-        match files.iter_mut().find(|(existing, _)| existing == path) {
+        let key: std::path::PathBuf = std::path::Path::new(path).components().collect();
+        match files
+            .iter_mut()
+            .find(|(existing, _)| std::path::Path::new(existing) == key.as_path())
+        {
             Some((_, steps)) => steps.push(step),
-            None => files.push((path.to_string(), vec![step])),
+            None => files.push((key.to_string_lossy().into_owned(), vec![step])),
         }
     }
     Ok(files)

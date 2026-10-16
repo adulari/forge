@@ -4261,8 +4261,12 @@ pub fn inject_provider_keys() {
                     std::env::set_var(var, value);
                 }
                 set.insert(var.to_string());
+                forge_types::child_env::scrub(var);
             }
-            None if set.remove(var) => std::env::remove_var(var),
+            None if set.remove(var) => {
+                std::env::remove_var(var);
+                forge_types::child_env::unscrub(var);
+            }
             None => {}
         }
     }

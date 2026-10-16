@@ -14,11 +14,34 @@ pub(super) fn render_streams(out: &[u8], err: &[u8]) -> String {
 pub(super) fn stream_text(bytes: &[u8]) -> Option<String> {
     (!bytes.is_empty()).then(|| {
         if bytes.contains(&0) {
-            format!("<binary output: {} bytes, not shown>", bytes.len())
+            binary_aware_text(bytes)
         } else {
             strip_ansi(&String::from_utf8_lossy(bytes))
         }
     })
+}
+
+/// A stream with NUL bytes: lines that hold one collapse into a `<binary output: N bytes, not
+/// shown>` marker, the readable lines around them stay.
+fn binary_aware_text(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut binary_run = 0usize;
+    let flush = |out: &mut String, run: &mut usize| {
+        if *run > 0 {
+            out.push_str(&format!("<binary output: {run} bytes, not shown>\n"));
+            *run = 0;
+        }
+    };
+    for line in bytes.split_inclusive(|b| *b == b'\n') {
+        if line.contains(&0) {
+            binary_run += line.len();
+        } else {
+            flush(&mut out, &mut binary_run);
+            out.push_str(&strip_ansi(&String::from_utf8_lossy(line)));
+        }
+    }
+    flush(&mut out, &mut binary_run);
+    out
 }
 
 pub(super) fn strip_ansi(text: &str) -> String {
@@ -114,6 +137,11 @@ mod tests {
         assert_eq!(strip_ansi("\x1b]0;title\x07\x1b[31mred\x1b[0m"), "red");
         assert_eq!(render_streams(b"out", b"err"), "out\n[stderr]\nerr");
         assert!(stream_text(&[0, 1]).unwrap().contains("binary output"));
+        let mixed = stream_text(b"a\0b\nok\n").unwrap();
+        assert!(
+            mixed.contains("<binary output: 4 bytes") && mixed.ends_with("ok\n"),
+            "{mixed:?}"
+        );
     }
     #[test]
     fn truncation_is_utf8_safe_and_retains_both_ends() {

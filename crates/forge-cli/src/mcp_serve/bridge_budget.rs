@@ -59,6 +59,10 @@ pub(super) fn bridge_cap_for(tool: &str) -> Option<(usize, &'static str)> {
             BRIDGE_SHELL_CAP_BYTES,
             "re-run with a narrower command or filters (grep/head/tail)",
         )),
+        "list_dir" | "glob" => Some((
+            BRIDGE_READ_CAP_BYTES,
+            "narrow the path or pattern (a subdirectory, a more specific glob)",
+        )),
         _ => None,
     }
 }

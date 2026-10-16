@@ -126,3 +126,7 @@ AC7  web_search with a mock backend → formatted, numbered results (title / url
 - [ ] No-key path returns an actionable error; mock-backend path renders results (AC6–AC7).
 - [ ] `forge auth brave` stores to keyring; key injected before a session runs.
 - [ ] clippy -D warnings + fmt clean; full workspace green.
+
+## Fetch safety and decoding
+
+`web_fetch` resolves hostnames through a resolver that discards loopback, private and link-local answers, for the first request and every redirect, so a public-looking name that points at an internal address (`localtest.me`, `127.0.0.1.nip.io`) is refused along with `localhost.`. Binary responses (non-text content type, or NUL bytes without one) are reported, not decoded, and a Latin-1 / Windows-1252 `charset` is honoured.

@@ -23,6 +23,7 @@ enum CodexOp {
     },
     Update {
         path: String,
+        move_to: Option<String>,
         hunks: Vec<(String, String)>,
     },
 }
@@ -53,14 +54,20 @@ fn parse(patch: &str) -> Result<Vec<CodexOp>, String> {
         if let Some(path) = line.strip_prefix("*** Update File: ") {
             let path = path.trim().to_string();
             i += 1;
-            if lines
+            let mut move_to = None;
+            if let Some(target) = lines
                 .get(i)
-                .is_some_and(|l| l.trim_start().starts_with("*** Move to:"))
+                .and_then(|l| l.trim_start().strip_prefix("*** Move to:"))
             {
-                i += 1; // renames: applied in place at the original path, target name ignored
+                move_to = Some(target.trim().to_string());
+                i += 1;
             }
             let (hunks, next) = parse_update_hunks(&lines, i);
-            ops.push(CodexOp::Update { path, hunks });
+            ops.push(CodexOp::Update {
+                path,
+                move_to,
+                hunks,
+            });
             i = next;
         } else if let Some(path) = line.strip_prefix("*** Add File: ") {
             let path = path.trim().to_string();
@@ -142,37 +149,75 @@ fn parse_update_hunks(lines: &[&str], start: usize) -> (Vec<(String, String)>, u
     (hunks, i)
 }
 
+/// The tree as the patch will leave it: staged writes (`Some`) and deletions (`None`) layered
+/// over the real filesystem, so later operations see earlier ones and nothing hits disk until
+/// every operation has applied.
+#[derive(Default)]
+struct Staged {
+    order: Vec<std::path::PathBuf>,
+    files: std::collections::HashMap<std::path::PathBuf, Option<String>>,
+}
+
+impl Staged {
+    fn put(&mut self, full: &Path, content: Option<String>) {
+        if !self.files.contains_key(full) {
+            self.order.push(full.to_path_buf());
+        }
+        self.files.insert(full.to_path_buf(), content);
+    }
+
+    async fn read(&self, full: &Path) -> std::io::Result<Option<String>> {
+        match self.files.get(full) {
+            Some(staged) => Ok(staged.clone()),
+            None => tokio::fs::read_to_string(full).await.map(Some),
+        }
+    }
+
+    async fn exists(&self, full: &Path) -> bool {
+        match self.files.get(full) {
+            Some(staged) => staged.is_some(),
+            None => tokio::fs::metadata(full).await.is_ok(),
+        }
+    }
+}
+
 /// Apply a Codex patch envelope under `cwd` (already confined/absolute). Each `Update File`
 /// section's hunks are folded over the file's content via [`apply_edits`] — exact match first,
 /// falling back to the whitespace-insensitive and block-anchor tiers — so content drift is
-/// tolerated the same way a hand-written `multi_edit` call is.
+/// tolerated the same way a hand-written `multi_edit` call is. All-or-nothing: every operation
+/// is staged in memory and written only once all of them applied.
 pub(super) async fn apply(patch: &str, cwd: &Path) -> Result<String, ToolError> {
     let ops = parse(patch).map_err(ToolError::Failed)?;
     let mut summary = Vec::new();
+    let mut staged = Staged::default();
 
     for op in ops {
         match op {
             CodexOp::Add { path, content } => {
                 let full = resolve(cwd, &path)?;
-                if tokio::fs::metadata(&full).await.is_ok() {
+                if staged.exists(&full).await {
                     return Err(ToolError::Failed(format!(
                         "apply_patch: {path} already exists (use Update File to modify it)"
                     )));
                 }
-                if let Some(parent) = full.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                tokio::fs::write(&full, &content).await?;
+                staged.put(&full, Some(content));
                 summary.push(format!("added {path}"));
             }
             CodexOp::Delete { path } => {
                 let full = resolve(cwd, &path)?;
-                tokio::fs::remove_file(&full)
-                    .await
-                    .map_err(|e| ToolError::Failed(format!("apply_patch: deleting {path}: {e}")))?;
+                if !staged.exists(&full).await {
+                    return Err(ToolError::Failed(format!(
+                        "apply_patch: deleting {path}: no such file"
+                    )));
+                }
+                staged.put(&full, None);
                 summary.push(format!("deleted {path}"));
             }
-            CodexOp::Update { path, hunks } => {
+            CodexOp::Update {
+                path,
+                move_to,
+                hunks,
+            } => {
                 if hunks.iter().any(|(old, _)| old.is_empty()) {
                     return Err(ToolError::Failed(format!(
                         "apply_patch: {path} has a hunk with no context/removed lines to anchor \
@@ -180,12 +225,20 @@ pub(super) async fn apply(patch: &str, cwd: &Path) -> Result<String, ToolError> 
                     )));
                 }
                 let full = resolve(cwd, &path)?;
-                let original = tokio::fs::read_to_string(&full)
+                let original = staged
+                    .read(&full)
                     .await
-                    .map_err(|e| ToolError::Failed(format!("apply_patch: reading {path}: {e}")))?;
+                    .map_err(|e| ToolError::Failed(format!("apply_patch: reading {path}: {e}")))?
+                    .ok_or_else(|| {
+                        ToolError::Failed(format!(
+                            "apply_patch: {path} is deleted earlier in the patch"
+                        ))
+                    })?;
                 let steps: Vec<EditStep> = hunks
                     .into_iter()
-                    .map(|(old, new)| EditStep {
+                    .enumerate()
+                    .map(|(k, (old, new))| EditStep {
+                        number: k + 1,
                         old,
                         new,
                         replace_all: false,
@@ -194,8 +247,41 @@ pub(super) async fn apply(patch: &str, cwd: &Path) -> Result<String, ToolError> 
                 let hunk_count = steps.len();
                 let updated = apply_edits(&original, &steps)
                     .map_err(|e| ToolError::Failed(format!("apply_patch: {path}: {e}")))?;
-                tokio::fs::write(&full, &updated).await?;
-                summary.push(format!("updated {path} ({hunk_count} hunk(s))"));
+                match move_to {
+                    Some(target) if target != path => {
+                        let target_full = resolve(cwd, &target)?;
+                        if staged.exists(&target_full).await {
+                            return Err(ToolError::Failed(format!(
+                                "apply_patch: cannot move {path} to {target}: target already exists"
+                            )));
+                        }
+                        staged.put(&target_full, Some(updated));
+                        staged.put(&full, None);
+                        summary.push(format!(
+                            "updated {path} ({hunk_count} hunk(s)) and moved to {target}"
+                        ));
+                    }
+                    _ => {
+                        staged.put(&full, Some(updated));
+                        summary.push(format!("updated {path} ({hunk_count} hunk(s))"));
+                    }
+                }
+            }
+        }
+    }
+
+    for full in &staged.order {
+        match &staged.files[full] {
+            Some(content) => {
+                if let Some(parent) = full.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::write(full, content).await?;
+            }
+            None => {
+                tokio::fs::remove_file(full).await.map_err(|e| {
+                    ToolError::Failed(format!("apply_patch: deleting {}: {e}", full.display()))
+                })?;
             }
         }
     }
@@ -243,7 +329,7 @@ mod tests {
         let ops = parse(patch).unwrap();
         assert_eq!(ops.len(), 1);
         match &ops[0] {
-            CodexOp::Update { path, hunks } => {
+            CodexOp::Update { path, hunks, .. } => {
                 assert_eq!(path, "f.rs");
                 assert_eq!(hunks.len(), 1);
                 assert_eq!(hunks[0].0, "fn a() {\n    old();\n}");
@@ -324,6 +410,34 @@ mod tests {
             std::fs::read_to_string(dir.join("f.rs")).unwrap(),
             "fn a() {\n    stays();\n}\n",
             "untouched on failure"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn apply_is_atomic_across_files() {
+        let dir = tmp("atomic");
+        write(&dir, "a.txt", "1\n2\n");
+        write(&dir, "b.txt", "3\n4\n");
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n 1\n-2\n+TWO\n*** Update File: b.txt\n@@\n-NOPE\n+x\n*** End Patch\n";
+        assert!(apply(patch, &dir).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "1\n2\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn apply_performs_move_to_and_keeps_crlf() {
+        let dir = tmp("move");
+        write(&dir, "r.txt", "a\r\nb\r\nc\r\n");
+        let patch = "*** Begin Patch\n*** Update File: r.txt\n*** Move to: sub/r2.txt\n@@\n a\n-b\n+B\n+B2\n c\n*** End Patch\n";
+        apply(patch, &dir).await.unwrap();
+        assert!(!dir.join("r.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sub/r2.txt")).unwrap(),
+            "a\r\nB\r\nB2\r\nc\r\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
