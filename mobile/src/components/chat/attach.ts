@@ -44,6 +44,14 @@ export function makeAttachmentId(): string {
   return `att-${Date.now().toString(36)}-${nextId++}`;
 }
 
+/** The picker gives no file name on Android; its URI tail is a media-store id (`1000000022`). */
+function friendlyImageName(uri: string, mimeType: string | undefined): string {
+  const tail = uri.split("/").pop()?.split("?")[0] ?? "";
+  if (/\.[A-Za-z0-9]{2,5}$/.test(tail) && !/^\d+\.[A-Za-z0-9]+$/.test(tail)) return tail;
+  const ext = (mimeType?.split("/")[1] ?? "jpeg").replace("jpeg", "jpg");
+  return `photo-${Date.now().toString(36)}.${ext}`;
+}
+
 /** Photo library picker (multi-select). Returns `[]` on cancel or denied permission. */
 export async function pickImages(): Promise<PickedFile[]> {
   const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -56,7 +64,7 @@ export async function pickImages(): Promise<PickedFile[]> {
   if (result.canceled) return [];
   return result.assets.map((a) => ({
     uri: a.uri,
-    name: a.fileName ?? a.uri.split("/").pop() ?? "image.jpg",
+    name: a.fileName ?? friendlyImageName(a.uri, a.mimeType),
     mimeType: a.mimeType ?? "image/jpeg",
     image: true,
     file: a.file,

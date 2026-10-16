@@ -15,6 +15,7 @@ import * as Updates from "expo-updates";
 import { useAppVersion } from "../lib/appVersion";
 import { useAuth } from "../lib/auth";
 import { useChangelog } from "../lib/queries";
+import { isTauri } from "../lib/platform";
 import {
   loadLastSeenBuild,
   rememberBuild,
@@ -37,8 +38,15 @@ export function UpdateNotice() {
   React.useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const seedUpdateSeen = await invoke<boolean>("perf_seed_update_seen");
+      let seedUpdateSeen = false;
+      if (isTauri) {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          seedUpdateSeen = await invoke<boolean>("perf_seed_update_seen");
+        } catch {
+          seedUpdateSeen = false;
+        }
+      }
       if (seedUpdateSeen) {
         await rememberBuild({ updateId: Updates.updateId ?? null, appVersion });
         return;

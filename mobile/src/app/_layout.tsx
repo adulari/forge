@@ -43,6 +43,7 @@ import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
 import { AnywhereProvider as LegacyAnywhereProvider } from "../lib/anywhere/store";
 import { AuthProvider, useAuth } from "../lib/auth";
+import { rememberPendingRoute } from "../lib/pendingRoute";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
 import { checkDesktopUpdate } from "../lib/updater";
@@ -95,7 +96,12 @@ const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|perf-fi
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
 // (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
 // before any Direct server exists, and /legal keeps privacy/support available before pairing.
-const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal)(\/|$)/;
+const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal|connect)(\/|$)/;
+
+function RedirectToConnect({ from }: { from: string }) {
+  rememberPendingRoute(from);
+  return <Redirect href="/connect" />;
+}
 
 function RootNavigator() {
   markReactMountStart();
@@ -306,7 +312,7 @@ function RootNavigator() {
           expo-router resolved on cold start/deep-link, bounce to /connect once we know
           there's no active server. */}
       {perfFixtureEnabled && pathname !== "/perf-fixture" ? <Redirect href="/perf-fixture" /> : null}
-      {!isPaired && !UNPAIRED_ROUTES.test(pathname) ? <Redirect href="/connect" /> : null}
+      {!isPaired && !UNPAIRED_ROUTES.test(pathname) ? <RedirectToConnect from={pathname} /> : null}
     </>
   );
 }

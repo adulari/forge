@@ -10,7 +10,7 @@
 // parent has usually stopped rendering this card entirely (permission_prompt
 // went null).
 import React, { useEffect, useRef, useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Platform, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import Animated, { FadeOut, useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
 
 import { Button } from "../ds/Button";
@@ -141,11 +141,6 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
   useHotkey("y", () => respond(true), { meta: false });
   useHotkey("n", () => respond(false), { meta: false });
 
-  // No `RemoteInput` kind exists yet for "always allow for this session" — inventing one
-  // client-side would silently no-op against the daemon, which is worse than saying so.
-  // Surfaces as a disabled-looking hint + toast until the protocol grows a real kind.
-  const onAlwaysAllow = () => toast.show("always allow — coming soon", { tone: "neutral" });
-
   return (
     <Animated.View exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
       <Card variant="feature" style={{ borderColor: hexToRgba(tokens.danger, 0.35) }}>
@@ -186,15 +181,6 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
               <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>y · n</Text>
             ) : null}
           </View>
-          <Pressable
-            onPress={onAlwaysAllow}
-            hitSlop={13}
-            accessibilityRole="button"
-            accessibilityLabel="always allow for this session"
-            style={styles.alwaysAllow}
-          >
-            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>always allow for this session</Text>
-          </Pressable>
         </Animated.View>
       </Card>
     </Animated.View>
@@ -209,7 +195,4 @@ const styles = StyleSheet.create({
   actions: { flex: 1, flexDirection: "row", gap: space.space8 },
   allowBtn: { flex: 1.4 },
   denyBtn: { flex: 1 },
-  // Not wired to any daemon protocol yet (see onAlwaysAllow) — visually reads as
-  // not-yet-functional rather than a normal live affordance.
-  alwaysAllow: { alignSelf: "flex-start", marginTop: space.space8, opacity: 0.6 },
 });

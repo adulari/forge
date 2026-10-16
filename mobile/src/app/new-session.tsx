@@ -167,6 +167,13 @@ function HostPicker({
   );
 }
 
+// A worktree session's cwd is `<repo>/.forge/worktrees/<id>`; remembering that as the project
+// would nest the next worktree inside it.
+function projectRootOf(cwd: string): string {
+  const i = cwd.indexOf("/.forge/worktrees/");
+  return i > 0 ? cwd.slice(0, i) : cwd;
+}
+
 export default function NewSessionScreen() {
   const tokens = useTokens();
   const { scheme } = useTheme();
@@ -318,7 +325,7 @@ export default function NewSessionScreen() {
         res = await create.mutateAsync(baseBody);
       }
       if (incomingShareId) void consumeShare(incomingShareId);
-      if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), res.cwd);
+      if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), projectRootOf(res.cwd));
       const initialQueue = promptDelivered ? [] : buildInitialPromptQueue(task);
       const seedQueue = initialQueue.length > 0
         ? AsyncStorage.setItem(offlineQueueKey(baseUrl, res.id), JSON.stringify(initialQueue)).catch(() => {

@@ -36,6 +36,7 @@ export function Checkbox({ value, onValueChange, disabled = false, accessibility
         testID={testID}
         accessibilityRole="checkbox"
         accessibilityState={{ checked: value, disabled }}
+        aria-checked={value}
         accessibilityLabel={accessibilityLabel}
         hitSlop={11}
         style={[styles.hit, { borderColor: focused ? tokens.accent : "transparent" }, style]}

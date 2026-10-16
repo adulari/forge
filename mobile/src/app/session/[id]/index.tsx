@@ -135,7 +135,7 @@ function LiveToolActivity({ entries, startedAt }: { entries: string[]; startedAt
         <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
         <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
         <Text style={[typeScale.monoMeta, tabularNums, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
-          {summarizeToolLine(entries[entries.length - 1])}
+          {summarizeToolLine(entries[entries.length - 1] ?? "")}
         </Text>
         <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
       </View>

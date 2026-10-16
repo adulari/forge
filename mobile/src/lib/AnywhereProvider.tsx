@@ -825,8 +825,11 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     await Linking.openURL(flow.verification_uri);
   }, [flow]);
 
+  // Keyed on the keypair, not `pending`: a successful poll replaces `pending` (same keys), and
+  // re-running this effect then restarted polling and swallowed the enrollment error.
+  const pendingKeys = pending?.keys;
   useEffect(() => {
-    if (phase !== "authorizing" || !flow || !pending) return;
+    if (phase !== "authorizing" || !flow || !pendingKeys) return;
     let cancelled = false;
     const deadline = flowExpiresAtMs ?? Date.now() + flow.expires_in * 1000;
     const timer = setInterval(() => {
@@ -847,7 +850,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         clearInterval(timer);
         browserAuthWindow.current?.close();
         browserAuthWindow.current = null;
-        const nextPending = { auth: session, keys: pending.keys };
+        const nextPending = { auth: session, keys: pendingKeys };
         setPending(nextPending);
         if (!session.new_account) {
           void listPasskeys(SERVICE_URL, session.access_token).then(setPasskeys).catch(() => setPasskeys([]));
@@ -862,8 +865,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
           const request = {
             version: 1 as const,
             device_name: deviceName(),
-            signing_public_key: base64Url(pending.keys.signingPublicKey),
-            exchange_public_key: base64Url(pending.keys.exchangePublicKey),
+            signing_public_key: base64Url(pendingKeys.signingPublicKey),
+            exchange_public_key: base64Url(pendingKeys.exchangePublicKey),
           };
           const created = await createEnrollmentRequest(
             SERVICE_URL,
@@ -894,7 +897,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       });
     }, Math.max(1, flow.interval) * 1000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [flow, flowExpiresAtMs, pending, phase]);
+  }, [flow, flowExpiresAtMs, pendingKeys, phase]);
 
   const finishEnrollment = useCallback(async (
     login: PendingLogin,

@@ -125,6 +125,11 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
         form.append("file", blobOrFile as unknown as Blob);
       }
       const res = await transcribe.mutateAsync({ form });
+      if (!res.text.trim()) {
+        setPhase("error");
+        setErrorMsg("no speech detected");
+        return;
+      }
       onAppend(res.text);
       close();
     } catch (err) {

@@ -45,8 +45,9 @@ export function fillerHistoryRows(
  * daemon forwards them as assistant rows, so the filler painted each as its own Forge message
  * until history arrived. */
 function isTerminalChrome(row: TranscriptRow): boolean {
-  if (row.kind !== "assistant") return false;
   const text = row.text.trim();
+  if (row.kind === "user") return text === "you";
+  if (row.kind !== "assistant") return false;
   return text === "⚒ forge" || /^💭 thinking… \(\/thinking to expand\)$/.test(text);
 }
 
