@@ -4889,10 +4889,12 @@ fn budget_override_active() -> bool {
 fn over_budget_message(b: &BudgetState) -> String {
     let cap = |c: Option<f64>| c.map(|v| format!("${v:.2}")).unwrap_or_else(|| "∞".into());
     format!(
-        "budget cap reached — today ${:.4}/{}, month ${:.4}/{}. Refusing further model calls. \
-         Set FORGE_BUDGET_OVERRIDE=1 to proceed.",
+        "budget cap reached — today ${:.4}/{}, week ${:.4}/{}, month ${:.4}/{}. Refusing further \
+         model calls. Set FORGE_BUDGET_OVERRIDE=1 to proceed.",
         b.spent_today_usd,
         cap(b.daily_cap_usd),
+        b.spent_week_usd,
+        cap(b.weekly_cap_usd),
         b.spent_month_usd,
         cap(b.monthly_cap_usd)
     )
@@ -13421,7 +13423,7 @@ mod tests {
         });
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
-            fallbacks: vec!["worse::model".into()],
+            fallbacks: vec![],
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.mesh.pin_outage_wait_secs = 600; // the default budget: must NOT be spent
@@ -13449,6 +13451,41 @@ mod tests {
                 |e| matches!(e, PresenterEvent::Warning(w) if w.contains("still unreachable"))
             ),
             "must not run to outage-budget exhaustion"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_set_advances_to_the_next_member_on_an_identical_instant_rejection() {
+        // Live case (OpenCode Go, 2026-09-02): a model served on a different endpoint answered
+        // an identical `500 Internal server error` in 0.4 s on every request, and the pinned turn
+        // sat in "recovering provider" for 6m47s of outage backoff. Two identical instant errors
+        // are a rejection: surface the real text and fail the turn inside the first backoff
+        // step, without spending the outage budget.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable, // identical "502", answered instantly, every call
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 600; // the default budget: must NOT be spent
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let started = std::time::Instant::now();
+        let out = session.run_turn("fix the bug").await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "must not sit in outage backoff, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(out.text, "worse::model");
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rejected this model twice") && w.contains("502"))),
+            "the warning must say the provider rejected the model and quote the error"
         );
     }
 

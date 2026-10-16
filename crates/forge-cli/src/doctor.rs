@@ -744,9 +744,13 @@ async fn bridge_roundtrip_checks() -> Vec<Check> {
     // Launch every available bridge CONCURRENTLY — each spawns its OWN independent subprocess, so a
     // sequential loop made doctor pay the SUM of every bridge's 30s budget (3 bridges ≈ 90s worst
     // case). join_all collapses that to the slowest single launch; results stay in CliKind order.
+    let disabled = forge_config::load()
+        .map(|c| c.mesh.disabled)
+        .unwrap_or_default();
     let probes = forge_provider::CliKind::all()
         .into_iter()
         .filter(|k| k.available())
+        .filter(|k| !forge_config::is_model_disabled(k.prefix(), &disabled))
         .map(|k| async move {
             // harness=false → a plain CLI turn (no Forge-tool MCP bridge): the cheapest probe that
             // still exercises the binary launch + auth + a streamed reply.

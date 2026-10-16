@@ -547,7 +547,16 @@ fn add_custom_provider_at(
 ) -> Result<(), ConfigError> {
     // Validate the entry (and that it doesn't collide with a native/built-in provider).
     let rp = p.clone().into_runtime().map_err(ConfigError::Write)?;
-    if PROVIDER_ENV_VARS.iter().any(|(n, _)| *n == rp.namespace)
+    const RESERVED_NAMESPACES: &[&str] = &[
+        "xai-oauth",
+        "codex-oauth",
+        "claude-cli",
+        "codex-cli",
+        "agy-cli",
+        "ollama",
+    ];
+    if RESERVED_NAMESPACES.contains(&rp.namespace.as_str())
+        || PROVIDER_ENV_VARS.iter().any(|(n, _)| *n == rp.namespace)
         || CUSTOM_OPENAI_PROVIDERS
             .iter()
             .any(|c| c.namespace == rp.namespace)

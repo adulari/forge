@@ -2715,6 +2715,12 @@ mod tests {
             "this model does not support tool use"
         ));
         assert!(is_capability_failure("unsupported: function calling"));
+        assert!(is_capability_failure(
+            "registry.ollama.ai/library/gemma3 does not support tools"
+        ));
+        assert!(is_capability_failure(
+            "\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set"
+        ));
 
         // Single-turn-only preview models (Gemini/Antigravity) reject multi-turn agentic chat —
         // a permanent per-model incapability, must be excluded not turn-failed.

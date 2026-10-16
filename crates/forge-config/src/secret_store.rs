@@ -492,6 +492,16 @@ fn load_or_create_key() -> Result<Key, ConfigError> {
             return Key::try_from(bytes.as_slice())
                 .map_err(|e| ConfigError::Keyring(e.to_string()));
         }
+        // A truncated/corrupt key file is NOT "no key": silently minting a new one would make
+        // every stored secret undecryptable. Make the user decide.
+        if !bytes.is_empty() {
+            return Err(ConfigError::Keyring(format!(
+                "{} is {} bytes, expected 32 — it looks corrupted. Restore it from a backup, or \
+                 delete it (and secrets.enc) to start over; re-add keys with `forge auth`.",
+                path.display(),
+                bytes.len()
+            )));
+        }
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ConfigError::Keyring(e.to_string()))?;

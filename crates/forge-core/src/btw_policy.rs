@@ -237,7 +237,16 @@ pub(crate) fn side_call_model(
     if !(routed.pinned || session_pin.is_some()) {
         return routed.model.clone();
     }
-    let own = session_pin.unwrap_or_else(|| routed.model.clone());
+    // With a multi-model pin set, the model that actually served the turn is the session's own
+    // model, not whichever member happens to be listed first.
+    let own = match session_pin {
+        Some(first) if pinned_model.is_some_and(|set| set.contains(&routed.model)) => {
+            let _ = first;
+            routed.model.clone()
+        }
+        Some(first) => first,
+        None => routed.model.clone(),
+    };
     // A side call that already failed permanently (model_not_found, auth, 402) is benched in the
     // shared store; without this filter the same doomed call repeated every turn.
     config

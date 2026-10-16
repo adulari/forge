@@ -541,7 +541,8 @@ pub(super) async fn request_provider_response(
                         let repeated =
                             pinned_outage_last_error.as_deref() == Some(message.as_str());
                         *pinned_outage_last_error = fast.then(|| message.clone());
-                        if fast && repeated {
+                        let reject_advance = fast && repeated && !chain.as_slice().is_empty();
+                        if fast && repeated && !reject_advance {
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model}: the provider rejected this model twice in a \
                                  row ({message}) — not waiting for an outage that isn't one \
@@ -564,7 +565,7 @@ pub(super) async fn request_provider_response(
                         let budget = std::time::Duration::from_secs(
                             session.config.mesh.pin_outage_wait_secs,
                         );
-                        if *pinned_outage_waited + delay <= budget {
+                        if !reject_advance && *pinned_outage_waited + delay <= budget {
                             *pinned_outage_attempts = attempt;
                             *pinned_outage_waited += delay;
                             // One-shot warning the first time cumulative wait crosses 50%
@@ -596,9 +597,12 @@ pub(super) async fn request_provider_response(
                         // branch above, for the same reason.
                         if !chain.as_slice().is_empty() {
                             session.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model}: still unreachable after \
-                             {pinned_outage_attempts} backoff retries — moving to the next \
-                             model in the pinned set"
+                                "{active_model}: {} — moving to the next model in the pinned set",
+                                if reject_advance {
+                                    format!("the provider rejected this model twice in a row ({message})")
+                                } else {
+                                    format!("still unreachable after {pinned_outage_attempts} backoff retries")
+                                }
                             )));
                             *pinned_outage_attempts = 0;
                             *pinned_outage_waited = std::time::Duration::ZERO;

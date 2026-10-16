@@ -668,11 +668,11 @@ pub(crate) enum Command {
         /// Delete all stored keys for this provider instead of setting one. For `xai-oauth` /
         /// `codex-oauth`: bare `--remove` signs out every account; pair with `--account <id>` to
         /// remove one.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["list", "replace"])]
         remove: bool,
         /// Show how many keys are stored for this provider (masked), don't read a new one. For
         /// `xai-oauth` / `codex-oauth`, lists every signed-in account and which one is active.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "replace")]
         list: bool,
         /// Replace all stored keys with the single key read from stdin (instead of appending).
         /// Ignored for OAuth providers.

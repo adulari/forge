@@ -97,8 +97,10 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
             let tok_str = format!("↑{} ↓{}", format_tok(inp), format_tok(out));
             let cost_str = if cost > 0.0 {
                 format!("${cost:.4}")
-            } else {
+            } else if inp + out > 0 {
                 "sub".to_string()
+            } else {
+                "$0.0000".to_string()
             };
             if let Some(c) = cap {
                 let pct = (cost / c * 100.0).min(100.0);
