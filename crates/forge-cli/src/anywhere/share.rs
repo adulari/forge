@@ -38,6 +38,8 @@ pub(super) async fn create(session_prefix: &str, expiry: ShareExpiry) -> Result<
     let mut replay_entries = crate::open_store()?
         .load_replay(&session_id)
         .context("load replay for encrypted share")?;
+    // System rows carry the working directory and harness prompt, which a public link must not.
+    replay_entries.retain(|entry| entry.role != forge_types::Role::System);
     forge_core::redact::Redactor::from_environment().redact_replay(&mut replay_entries);
     if replay_entries.is_empty() {
         bail!("session {session_prefix} has no replay history to share");

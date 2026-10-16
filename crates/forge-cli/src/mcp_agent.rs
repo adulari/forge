@@ -470,7 +470,12 @@ impl ForgeAgentServer {
                     "bypass" => PermissionMode::Bypass,
                     "accept_edits" => PermissionMode::AcceptEdits,
                     "auto" => PermissionMode::Auto,
-                    _ => PermissionMode::Default,
+                    "default" => PermissionMode::Default,
+                    other => {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                            "unknown mode `{other}`; expected one of bypass, accept_edits, default"
+                        ))]));
+                    }
                 };
                 // Update both the session's internal mode and the presenter's mode so
                 // permission checks on the next turn use the new value.

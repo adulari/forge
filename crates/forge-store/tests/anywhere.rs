@@ -1246,3 +1246,19 @@ fn a_local_edit_of_an_adopted_session_continues_the_remote_revision() {
         .expect("a journaled revision");
     assert!(revision > 8, "restarted at {revision} under the remote's 8");
 }
+
+#[test]
+fn deleting_a_synced_session_journals_a_tombstone() {
+    let store = Store::open_in_memory().expect("open store");
+    store.set_sync_journal_enabled(true).expect("enable sync");
+    let session = store.create_session("/tmp/tombstone", "default").unwrap();
+    assert!(store.delete_session(&session).unwrap());
+    let pending = store.pending_sync_journal(50).unwrap();
+    assert!(
+        pending.iter().any(|row| row.record_kind == "session"
+            && row.stable_id == session
+            && row.operation == "tombstone"),
+        "no session tombstone in {} pending rows",
+        pending.len()
+    );
+}

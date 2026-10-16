@@ -386,15 +386,23 @@ pub(crate) fn html_to_text(html: &str) -> String {
     let without_blocks = strip_block(&strip_block(html, "script"), "style");
     let mut out = String::with_capacity(without_blocks.len());
     let mut in_tag = false;
+    let mut quote: Option<char> = None;
     for ch in without_blocks.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => {
-                in_tag = false;
-                out.push(' ');
+        if in_tag {
+            match (quote, ch) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), _) => {}
+                (None, '"' | '\'') => quote = Some(ch),
+                (None, '>') => {
+                    in_tag = false;
+                    out.push(' ');
+                }
+                _ => {}
             }
-            _ if !in_tag => out.push(ch),
-            _ => {}
+        } else if ch == '<' {
+            in_tag = true;
+        } else {
+            out.push(ch);
         }
     }
     let decoded = decode_entities(&out);
@@ -544,6 +552,11 @@ impl Tool for WebSearchTool {
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let query = str_arg(args, "query")?;
+        if query.trim().is_empty() {
+            return Err(ToolError::Failed(
+                "web_search: `query` must not be empty".to_string(),
+            ));
+        }
         let count = args
             .get("count")
             .and_then(Value::as_u64)
@@ -645,6 +658,12 @@ mod tests {
             !text.contains('<') || text.contains("<3"),
             "tags stripped: {text}"
         );
+    }
+
+    #[test]
+    fn html_to_text_ignores_gt_inside_quoted_attributes() {
+        let text = html_to_text(r#"<a title="a > b" href='x>y'>link</a> tail"#);
+        assert_eq!(text, "link tail");
     }
 
     #[test]

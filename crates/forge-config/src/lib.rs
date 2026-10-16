@@ -40,9 +40,9 @@ pub use compact_model::CompactModel;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
-    discover_import_sources, import_mcp_json, load_mcp_toml, load_mcp_toml_with_diagnostic,
-    write_mcp_toml, ImportSource, McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
-    ParsedServers,
+    discover_import_sources, embeds_credentials, import_mcp_json, load_mcp_toml,
+    load_mcp_toml_with_diagnostic, looks_secret, write_mcp_toml, ImportSource, McpAllowlist,
+    McpAuth, McpConfig, McpServerConfig, McpTransport, ParsedServers,
 };
 pub use oauth::{
     add_oauth_account, authorize_url, clear_oauth_tokens, list_oauth_accounts, load_oauth_tokens,
@@ -3219,8 +3219,24 @@ fn merge_mcp_toml(config: &mut McpConfig, path: &std::path::Path) {
                     .cloned()
             })
             .is_some();
+        let table = toml::from_str::<toml::Value>(&text).ok();
+        let has_key = |key: &str| {
+            table
+                .as_ref()
+                .and_then(|value| value.as_table())
+                .is_some_and(|table| table.contains_key(key))
+        };
         match toml::from_str::<McpConfig>(&text) {
             Ok(mcp) => {
+                if has_key("call_timeout_secs") {
+                    config.call_timeout_secs = mcp.call_timeout_secs;
+                }
+                if has_key("connect_timeout_secs") {
+                    config.connect_timeout_secs = mcp.connect_timeout_secs;
+                }
+                if has_key("max_reconnect_attempts") {
+                    config.max_reconnect_attempts = mcp.max_reconnect_attempts;
+                }
                 merge_mcp_servers(&mut config.servers, mcp.servers);
                 if has_allow {
                     config.allow = mcp.allow;
@@ -4189,6 +4205,11 @@ pub fn store_secret(key: &str, value: &str) -> Result<(), ConfigError> {
 /// Read a stored secret by key (keyring, then the encrypted-file fallback). Used for MCP tokens.
 pub fn load_secret(key: &str) -> Option<String> {
     secret_store::get(key)
+}
+
+/// Delete a stored secret by key. `Ok(false)` when nothing was stored.
+pub fn delete_secret(key: &str) -> Result<bool, ConfigError> {
+    secret_store::delete(key)
 }
 
 /// Make stored keys visible to the provider client (genai reads keys from the environment): for

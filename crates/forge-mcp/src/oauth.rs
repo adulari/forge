@@ -289,6 +289,25 @@ pub fn store_registered_client(server: &str, c: &RegisteredClient) -> Result<(),
 }
 
 /// Load a server's previously-registered client, or `None` if it has never registered.
+/// Delete every stored dynamic-registration record for `server` (latest, per-id and
+/// per-issuer/redirect entries) so the next login registers a fresh client. Returns whether
+/// anything was removed.
+pub fn clear_registered_client(server: &str) -> Result<bool, String> {
+    let mut keys = vec![registered_client_key(server)];
+    if let Some(client) = load_registered_client(server) {
+        keys.push(registered_client_id_key(server, &client.client_id));
+        if let (Some(issuer), Some(redirect_uri)) = (&client.issuer, &client.redirect_uri) {
+            keys.push(registered_client_key_for(server, issuer, redirect_uri));
+        }
+    }
+    let mut removed = false;
+    for key in keys {
+        removed |= forge_config::delete_secret(&key)
+            .map_err(|e| format!("clearing registered client: {e}"))?;
+    }
+    Ok(removed)
+}
+
 pub fn load_registered_client(server: &str) -> Option<RegisteredClient> {
     let json = forge_config::load_secret(&registered_client_key(server))?;
     let val: serde_json::Value = serde_json::from_str(&json).ok()?;

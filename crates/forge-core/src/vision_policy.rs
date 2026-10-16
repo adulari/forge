@@ -144,7 +144,7 @@ impl Session {
             let hint = match self.config.mesh.vision_fallback {
                 VisionFallback::Warn => " — set mesh.vision_fallback = \"describe\" or \"switch\"",
                 VisionFallback::Describe => " — no vision model was available to describe it",
-                VisionFallback::Switch => " — no vision-capable model was available to switch to",
+                VisionFallback::Switch => " — no vision-capable model was available to switch to (a --model pin restricts routing to that model)",
             };
             self.presenter.emit(PresenterEvent::Warning(format!(
                 "{model} can't read images; sent text only{hint}"

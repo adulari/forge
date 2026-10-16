@@ -259,7 +259,7 @@ pub fn resolve_token(auth: &McpAuth) -> Option<String> {
 
 /// Env-var name patterns that almost certainly hold a secret — used by the importer to avoid
 /// copying a plaintext token out of `.mcp.json` into Forge's TOML.
-fn looks_secret(key: &str) -> bool {
+pub fn looks_secret(key: &str) -> bool {
     let k = key.to_ascii_uppercase();
     [
         "TOKEN",
@@ -272,6 +272,17 @@ fn looks_secret(key: &str) -> bool {
     ]
     .iter()
     .any(|m| k.contains(m))
+}
+
+/// Whether a value is a connection string carrying inline credentials (`scheme://user:pass@host`).
+pub fn embeds_credentials(value: &str) -> bool {
+    let Some((_, rest)) = value.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority
+        .rsplit_once('@')
+        .is_some_and(|(userinfo, _)| userinfo.contains(':'))
 }
 
 /// The result of parsing one tool's MCP config: the servers (with secrets *referenced*, never
@@ -327,7 +338,8 @@ fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServer
             keys.sort();
             for k in keys {
                 let val = env_obj.get(k).and_then(|v| v.as_str()).unwrap_or("");
-                let is_secret = !val.is_empty() && (explicit_secret.contains(k) || looks_secret(k));
+                let is_secret = !val.is_empty()
+                    && (explicit_secret.contains(k) || looks_secret(k) || embeds_credentials(val));
                 if !is_secret {
                     env.insert(k.clone(), val.to_string());
                     continue;
@@ -368,6 +380,11 @@ fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServer
             auth,
         )
     } else if let Some(url) = spec.get("url").and_then(|v| v.as_str()) {
+        if embeds_credentials(url) {
+            out.notes.push(format!(
+                "server '{name}': the url embeds credentials (user:password@) that Forge will keep in plaintext config; move them to a header or token env var"
+            ));
+        }
         let mut headers = HashMap::new();
         let mut auth: Option<McpAuth> = None;
         if let Some(h) = spec.get("headers").and_then(|v| v.as_object()) {
@@ -1111,5 +1128,29 @@ Authorization = "Bearer SECRET-TOKEN"
         assert_eq!(reparsed.servers.len(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn connection_strings_with_inline_credentials_are_detected() {
+        assert!(embeds_credentials("postgres://user:pw@db.local/app"));
+        assert!(embeds_credentials("https://u:p@host/x"));
+        assert!(!embeds_credentials("https://host/path@thing:1"));
+        assert!(!embeds_credentials("postgres://user@db.local/app"));
+        assert!(!embeds_credentials("plain text"));
+    }
+
+    #[test]
+    fn import_moves_a_credential_bearing_env_value_to_the_keyring() {
+        let spec: serde_json::Value = serde_json::from_str(
+            r#"{"mcpServers":{"db":{"command":"srv","env":{"DATABASE_URL":"postgres://u:pw@h/db","MODE":"ro"}}}}"#,
+        )
+        .unwrap();
+        let parsed = servers_from_json(&spec);
+        assert!(parsed.secrets.values().any(|v| v == "postgres://u:pw@h/db"));
+        let McpTransport::Stdio { env, .. } = &parsed.servers[0].transport else {
+            panic!("stdio")
+        };
+        assert!(!env.contains_key("DATABASE_URL"));
+        assert_eq!(env.get("MODE").map(String::as_str), Some("ro"));
     }
 }

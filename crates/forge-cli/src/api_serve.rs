@@ -918,7 +918,7 @@ mod tests {
             "role": "user",
             "content": [
                 {"type": "text", "text": "What is this?"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAEC"}},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
             ],
         }))
         .unwrap();
@@ -929,7 +929,7 @@ mod tests {
             messages[0].images,
             vec![forge_types::ImageAttachment {
                 media_type: "image/png".into(),
-                data_base64: "AAEC".into(),
+                data_base64: "iVBORw0KGgo=".into(),
             }]
         );
     }
@@ -940,6 +940,7 @@ mod tests {
             "https://example.test/image.png",
             "data:image/png;base64,not-base64!",
             "data:image/png;base64,",
+            "data:image/png;base64,AAEC",
         ] {
             let incoming: IncomingMessage = serde_json::from_value(serde_json::json!({
                 "role": "user",
@@ -1046,7 +1047,7 @@ mod tests {
                 "role": "user",
                 "content": [{
                     "type": "image_url",
-                    "image_url": {"url": "data:image/png;base64,AAEC"}
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}
                 }]
             }]
         }));
@@ -1057,7 +1058,7 @@ mod tests {
                 "role": "user",
                 "content": [{
                     "type": "image_url",
-                    "image_url": {"url": "data:image/png;base64,BAUG"}
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgoB"}
                 }]
             }]
         }));
