@@ -69,6 +69,9 @@ headlines are superseded where repositories were not history-isolated or Codex u
   same-model SWE-bench routing evidence.
 - [Cell-validity ledger](cell-validity-2026-07.md) — every retained formal cell, official outcome,
   integrity finding, and exclusion reason.
+- [Recall baseline, 2026-10](recall-baseline-2026-10.md) — how much of a long session survives
+  compaction and resume, from `forge bench recall` (harness in
+  [bench-recall](../features/bench-recall.md)).
 - [Measured-results history](results.md) — earlier results, corrections, and caveats.
 - [SWE-bench guide](swe-bench.md) — reproduce official comparisons with `forge bench`.
 - [Why Forge is a better harness](../harness/why-forge-is-a-better-harness.md) — broader

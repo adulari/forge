@@ -115,3 +115,79 @@ fn run_usage_json_reports_the_sessions_consumption() {
     assert!(v["input_tokens"].as_u64().unwrap() > 0, "{v}");
     assert!(v["wall_secs"].as_f64().is_some(), "{v}");
 }
+
+#[test]
+fn bench_recall_runs_the_scenario_end_to_end_against_the_mock_provider() {
+    let tmp = tempfile::tempdir().expect("temp workspace");
+    let ws = tmp.path();
+    let output = forge(ws)
+        .args(["bench", "recall", "--mock", "--json", "--turns-scale", "0"])
+        .output()
+        .expect("spawn forge");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "forge failed: {stderr}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is the JSON report ({e}): {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    assert_eq!(v["model"], "mock");
+    assert_eq!(v["resumed"], true, "{stderr}");
+    assert_eq!(v["compactions"].as_array().unwrap().len(), 2);
+    assert!(
+        v["compactions"][0]["messages_after"].as_u64().unwrap()
+            < v["compactions"][0]["messages_before"].as_u64().unwrap(),
+        "{v}"
+    );
+    let total = v["after_compaction"]["total"]["total"].as_u64().unwrap();
+    assert!(total >= 15, "one probe per planted fact: {v}");
+    assert_eq!(v["after_resume"]["total"]["total"], total);
+    assert!(v["usage"]["model_calls"].as_u64().unwrap() > 0, "{v}");
+    assert!(v["session_id"].is_string());
+    assert!(
+        !ws.join("config").join("forge").join("config.toml").exists(),
+        "the bench uses its own temp config, never the caller's"
+    );
+}
+
+#[test]
+fn bench_recall_hard_scenario_runs_against_the_mock_and_reports_compaction_stats() {
+    let tmp = tempfile::tempdir().expect("temp workspace");
+    let output = forge(tmp.path())
+        .args([
+            "bench",
+            "recall",
+            "--scenario",
+            "hard",
+            "--mock",
+            "--json",
+            "--skip-resume",
+            "--turns-scale",
+            "0",
+        ])
+        .output()
+        .expect("spawn forge");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "forge failed: {stderr}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert_eq!(v["scenario"], "hard");
+    assert!(v.get("after_resume").is_none());
+    assert_eq!(v["compaction_stats"]["manual"], 2, "{v}");
+    assert!(v["compaction_stats"]["auto"].is_u64(), "{v}");
+    let ids: Vec<&str> = v["probes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "work_state_files",
+        "work_state_pending",
+        "region_quota",
+        "tasks_open",
+        "obey_agents_doc_rule",
+    ] {
+        assert!(ids.contains(&expected), "{expected} missing from {ids:?}");
+    }
+}

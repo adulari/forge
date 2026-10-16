@@ -686,7 +686,9 @@ mod report;
 #[cfg(test)]
 use report::load_metrics;
 pub(crate) use report::{passk, report, ReportInputs};
+mod recall;
 mod routing_record;
+pub(crate) use recall::{run_recall, RecallOptions};
 mod scoring;
 mod suite;
 pub(crate) use suite::{run_tasks, TasksOptions};
