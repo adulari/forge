@@ -7,7 +7,7 @@ use forge_tui::{App, OutputAction, Tui};
 pub(super) fn open(app: &mut App, tui: Option<&mut Tui>) -> std::io::Result<()> {
     if app.fullscreen {
         if !app.open_latest_tool_output() {
-            app.note("no tool output to show yet");
+            app.note("no kept tool output yet: only output too long for the scrollback is kept (click a card or press Ctrl+T to expand a short one)");
         }
         return Ok(());
     }

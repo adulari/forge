@@ -271,7 +271,22 @@ fn install_terminate_restore() {
     }
 }
 
+fn alt_only(k: &crossterm::event::KeyEvent) -> bool {
+    k.modifiers.contains(KeyModifiers::ALT) && !k.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 impl Tui {
+    /// The built-in Ctrl+`ch` chord only applies while its action has not been rebound elsewhere,
+    /// so rebinding releases the old key.
+    fn default_chord_unrebound(&self, action: &str, ch: char) -> bool {
+        self.keybinds.binds.get(action).is_none_or(|c| {
+            c.ctrl
+                && !c.alt
+                && c.key.chars().count() == 1
+                && c.key.eq_ignore_ascii_case(&ch.to_string())
+        })
+    }
+
     pub fn new(
         fullscreen: bool,
         mouse_capture: bool,
@@ -471,12 +486,26 @@ impl Tui {
                     KeyCode::Char('e') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::End
                     }
-                    KeyCode::Char('r') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('r')
+                        if k.modifiers.contains(KeyModifiers::CONTROL)
+                            && self.default_chord_unrebound("toggle_reasoning", 'r') =>
+                    {
                         KeyKind::ToggleReasoning
                     }
+                    KeyCode::Char('b') if alt_only(&k) => KeyKind::WordLeft,
+                    KeyCode::Char('f') if alt_only(&k) => KeyKind::WordRight,
+                    // An unbound Alt chord must not type its letter into the draft.
+                    KeyCode::Char(_) if alt_only(&k) => return Ok(None),
                     KeyCode::Char(c) => KeyKind::Char(c),
+                    KeyCode::Backspace if alt_only(&k) => KeyKind::DeleteWordBack,
                     KeyCode::Backspace => KeyKind::Backspace,
                     KeyCode::Delete => KeyKind::DeleteForward,
+                    KeyCode::Enter
+                        if k.modifiers
+                            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+                    {
+                        KeyKind::InsertNewline
+                    }
                     KeyCode::Enter => KeyKind::Enter,
                     KeyCode::Esc => KeyKind::Esc,
                     KeyCode::BackTab => KeyKind::CycleTemper,
@@ -488,10 +517,12 @@ impl Tui {
                     KeyCode::Left if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::WordLeft
                     }
+                    KeyCode::Left if alt_only(&k) => KeyKind::WordLeft,
                     KeyCode::Left => KeyKind::Left,
                     KeyCode::Right if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::WordRight
                     }
+                    KeyCode::Right if alt_only(&k) => KeyKind::WordRight,
                     KeyCode::Right => KeyKind::Right,
                     KeyCode::Home if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::JumpPrevUser

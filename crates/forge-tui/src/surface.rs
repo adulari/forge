@@ -12,7 +12,7 @@ use ratatui::Frame;
 
 pub(crate) const ORANGE: Color = Color::Rgb(255, 138, 48);
 pub(crate) const ACCENT: Color = Color::Rgb(82, 162, 255);
-pub(crate) const DIM: Color = Color::Rgb(82, 87, 108);
+pub(crate) const DIM: Color = Color::Rgb(128, 134, 158);
 pub(crate) const VERY_DIM: Color = Color::Rgb(54, 58, 74);
 pub(crate) const TEXT: Color = Color::Rgb(208, 213, 224);
 pub(crate) const USER: Color = Color::Rgb(122, 183, 255);
