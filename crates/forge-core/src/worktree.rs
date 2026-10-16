@@ -46,6 +46,9 @@ impl WorktreeGuard {
     pub fn create(repo_root: &Path, child_id: &str) -> Result<WorktreeGuard, WorktreeError> {
         let worktree_path = repo_root.join(".forge").join("worktrees").join(child_id);
         let branch = format!("forge/subagent/{child_id}");
+        if let Some(parent) = worktree_path.parent() {
+            let _ = crate::ensure_dir_git_ignored(parent);
+        }
 
         run_git(
             repo_root,
@@ -127,8 +130,17 @@ impl Drop for WorktreeGuard {
 /// repo's `target/` dir (shared cache) rather than a private multi-GB one. Best-effort: any failure
 /// is ignored and the worktree just falls back to its own target.
 fn write_shared_target_config(worktree_path: &Path, repo_root: &Path) {
+    // Only a Rust project has a target dir to share, and a repo that tracks its own
+    // `.cargo/config.toml` keeps it: overwriting it would turn the worktree dirty from its first
+    // second (the shim used to appear as untracked `.cargo/` in repos with no Rust at all, which
+    // made `open_pr` refuse).
     let cargo_dir = worktree_path.join(".cargo");
-    if std::fs::create_dir_all(&cargo_dir).is_err() {
+    if !worktree_path.join("Cargo.toml").is_file() || cargo_dir.join("config.toml").exists() {
+        return;
+    }
+    // Self-ignoring (a `*` ignore file inside ignores itself too): plumbing never shows in
+    // `git status`, without editing the user's own ignore files.
+    if crate::ensure_dir_git_ignored(&cargo_dir).is_err() {
         return;
     }
     // TOML basic string: escape backslashes (Windows paths) and double-quotes.
@@ -397,6 +409,10 @@ mod tests {
             return;
         }
         let repo = init_repo();
+        // The shared-target shim is for Rust projects (see `write_shared_target_config`).
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        run_git(&repo, &["add", "Cargo.toml"], "add").unwrap();
+        run_git(&repo, &["commit", "-m", "rust", "--no-gpg-sign"], "commit").unwrap();
         let child_id = "child-abc";
         let expected_path = repo.join(".forge").join("worktrees").join(child_id);
         let branch_name = format!("forge/subagent/{child_id}");
@@ -431,6 +447,70 @@ mod tests {
             "tracking branch deleted after guard drop"
         );
 
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    fn status(dir: &Path) -> String {
+        String::from_utf8_lossy(
+            &run_git(
+                dir,
+                &["status", "--porcelain", "--untracked-files=all"],
+                "status",
+            )
+            .unwrap(),
+        )
+        .into_owned()
+    }
+
+    /// Forge's own scaffolding must not make a worktree dirty: `open_pr` refused to run in a
+    /// daemon worktree session because of an untracked `.cargo/` in a repo with no Rust at all.
+    #[test]
+    fn worktree_plumbing_never_shows_in_git_status() {
+        if !git_available() {
+            return;
+        }
+        // Not a Rust project: no shim at all.
+        let repo = init_repo();
+        let guard = WorktreeGuard::create(&repo, "plain").unwrap();
+        assert!(
+            !guard.path().join(".cargo").exists(),
+            "no Cargo.toml, no shim"
+        );
+        assert_eq!(status(guard.path()), "", "worktree is clean");
+        assert_eq!(
+            status(&repo),
+            "",
+            "and so is the main checkout: {}",
+            status(&repo)
+        );
+        drop(guard);
+        std::fs::remove_dir_all(&repo).ok();
+
+        // A Rust project gets the shim, self-ignored.
+        let repo = init_repo();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        run_git(&repo, &["add", "Cargo.toml"], "add").unwrap();
+        run_git(&repo, &["commit", "-m", "rust", "--no-gpg-sign"], "commit").unwrap();
+        let guard = WorktreeGuard::create(&repo, "rusty").unwrap();
+        assert!(guard.path().join(".cargo/config.toml").is_file());
+        assert_eq!(status(guard.path()), "", "the shim is git-ignored");
+        drop(guard);
+        std::fs::remove_dir_all(&repo).ok();
+
+        // A repo that tracks its own `.cargo/config.toml` keeps it untouched.
+        let repo = init_repo();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        std::fs::create_dir_all(repo.join(".cargo")).unwrap();
+        std::fs::write(repo.join(".cargo/config.toml"), "[alias]\nb = \"build\"\n").unwrap();
+        run_git(&repo, &["add", "Cargo.toml", ".cargo/config.toml"], "add").unwrap();
+        run_git(&repo, &["commit", "-m", "rust", "--no-gpg-sign"], "commit").unwrap();
+        let guard = WorktreeGuard::create(&repo, "tracked").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(guard.path().join(".cargo/config.toml")).unwrap(),
+            "[alias]\nb = \"build\"\n"
+        );
+        assert_eq!(status(guard.path()), "");
+        drop(guard);
         std::fs::remove_dir_all(&repo).ok();
     }
 

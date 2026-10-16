@@ -124,6 +124,20 @@ fn turn_dir(root: &Path, session: &str, seq: i64) -> PathBuf {
     root.join(session).join(seq.to_string())
 }
 
+/// Turn seqs that have a snapshot dir for `session` and are `>= from`, newest first. Rewind walks
+/// these instead of every seq in a range, which the DB seq space made both long and sparse.
+pub fn turn_seqs_from(root: &Path, session: &str, from: i64) -> Vec<i64> {
+    let Ok(entries) = std::fs::read_dir(root.join(session)) else {
+        return Vec::new();
+    };
+    let mut seqs: Vec<i64> = entries
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i64>().ok())
+        .filter(|s| *s >= from)
+        .collect();
+    seqs.sort_unstable_by(|a, b| b.cmp(a));
+    seqs
+}
+
 /// Resolve a tool's path to an absolute one (without requiring it to exist), so the snapshot key
 /// is independent of the working directory — the same file resolves identically whether the write
 /// happened in-process or in the `forge mcp-serve` bridge subprocess, and whether the model passed
@@ -199,10 +213,7 @@ pub(crate) fn changed_files_this_turn(root: &Path, session: &str, seq: i64) -> V
 /// ignores everything under it (itself included), so nothing the user owns is edited and the model
 /// stops reporting a stray untracked `.forge/` as if it were part of its change.
 fn ensure_git_ignored(root: &Path) {
-    let ignore = root.join(".gitignore");
-    if !ignore.exists() {
-        let _ = std::fs::write(ignore, "*\n");
-    }
+    let _ = crate::ensure_dir_git_ignored(root);
 }
 
 fn save_manifest(root: &Path, session: &str, seq: i64, m: &Manifest) -> std::io::Result<()> {

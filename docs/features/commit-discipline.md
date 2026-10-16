@@ -46,6 +46,31 @@ Plus `/commit [hint]`: one turn that asks the model to `git status` / `git diff`
 changes into focused conventional commits, stage the specific files, and report the hashes — and
 not push. It is in the command palette under *Review & ship* and in the mobile command list.
 
+Rate limiting. The turn-start reminder names the same dirty set at most every third turn; a
+changed set is announced at once. Each mid-turn reminder carries the edits since the last commit
+(`(20 edits since your last commit)`), which also keeps two reminders for the same file from
+being byte-identical: the request view drops an exact repeat of a system message, so the
+edit-20 reminder for a single file used to vanish.
+
+`/commit` tells the model to name the paths it stages (never `git add -A`, `git add .` or
+`git commit -a`) and never to pass `--no-verify`/`-n`: a failing pre-commit hook is fixed, not
+skipped.
+
+## Commit attribution (`[git] coauthor = true`)
+
+The system prompt promises "a Co-Authored-By: Forge trailer is added automatically by a git hook"
+on every surface, so every surface installs it: `forge_core::git_attribution` installs the
+`prepare-commit-msg` hook for the session's workspace before the first model request and keeps
+`<git dir>/forge-model` current (TUI, headless `forge run` and daemon sessions alike). The hook is
+written to `git rev-parse --git-path hooks`, which is the shared hooks directory of a linked
+worktree and works in a submodule (whose `.git` is a pointer file). An existing
+`prepare-commit-msg` hook is kept as `prepare-commit-msg.pre-forge` and run first, never
+overwritten. With `core.hooksPath` set, git ignores `.git/hooks`: Forge installs nothing, says so,
+and `forge git hook` prints the script to call from your own hook. The script strips Claude, Codex
+and Anthropic co-author lines in any casing, adds the Forge trailer once (an `--amend` does not
+stack another), and leaves an empty message empty so git aborts instead of committing a bare
+trailer.
+
 ### What is deliberately NOT nagged about
 
 - Files the user dirtied themselves. The tracker only knows paths that went through Forge's write

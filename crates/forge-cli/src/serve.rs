@@ -1403,6 +1403,19 @@ pub(crate) async fn start_session(
                 "resume cannot create a new worktree; it restores the session's recorded workspace",
             ));
         }
+        if state
+            .store
+            .is_session_local_read_only(session_id)
+            .unwrap_or(false)
+        {
+            return Err(StartSessionError::coded(
+                StatusCode::CONFLICT,
+                "session_open_in_terminal",
+                "session is open in a terminal; resuming it here would put two drivers on one \
+                 session — close it there first"
+                    .to_string(),
+            ));
+        }
         // Store read failures below are classified `session_store_unreadable`: the session may be
         // fine, but the store itself could not answer — the remedy is repairing store access, not
         // restoring a workspace or choosing another session.
@@ -1793,6 +1806,9 @@ async fn archive_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
+    if let Some(refusal) = reject_if_open_in_terminal(&state, &id, "archived").await {
+        return refusal;
+    }
     let handle = state.registry.remove(&id).await;
     let worktree = if let Some(handle) = &handle {
         handle.worktree.clone()
@@ -1888,6 +1904,9 @@ async fn delete_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
+    if let Some(refusal) = reject_if_open_in_terminal(&state, &id, "deleted").await {
+        return refusal;
+    }
     if state.registry.get(&id).await.is_some() {
         return err_response(
             axum::http::StatusCode::CONFLICT,
@@ -2574,6 +2593,34 @@ struct WsParams {
     session: String,
     #[serde(default)]
     rev: u64,
+}
+
+/// A session open in a terminal TUI is owned by that process: it keeps writing to the session
+/// row, so archiving or deleting it from here would pull the rows out from under a live writer
+/// (a delete lost the whole history and the TUI then re-created a stub with only what it sent
+/// afterwards). Gated the same way the WS input path is, but only when the daemon is not itself
+/// driving the session.
+async fn reject_if_open_in_terminal(
+    state: &DaemonState,
+    session_id: &str,
+    verb: &str,
+) -> Option<Response> {
+    if state.registry.get(session_id).await.is_some() {
+        return None;
+    }
+    state
+        .store
+        .is_session_local_read_only(session_id)
+        .unwrap_or(false)
+        .then(|| {
+            err_response(
+                axum::http::StatusCode::CONFLICT,
+                &format!(
+                    "session is open in a terminal and cannot be {verb} from here; \
+                     close it there first"
+                ),
+            )
+        })
 }
 
 /// Defense in depth for the WS input path: a terminal-local session is never in the daemon's
@@ -5421,6 +5468,91 @@ pub(crate) mod tests {
         past.shutdown();
         running.shutdown();
         std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session open in a terminal TUI belongs to that process: archiving or deleting it from the
+    /// daemon pulled the rows out from under a live writer (the delete lost the whole history),
+    /// and resuming it put a second driver on the same session.
+    #[tokio::test]
+    async fn a_terminal_open_session_cannot_be_archived_deleted_or_resumed_by_the_daemon() {
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let dir =
+            std::env::temp_dir().join(format!("forge-serve-local-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = store
+            .create_session(&dir.display().to_string(), "default")
+            .unwrap();
+        store
+            .add_message(
+                &id,
+                0,
+                forge_types::Role::User,
+                "typed in the terminal",
+                None,
+            )
+            .unwrap();
+        store.set_session_local_live(&id, true).unwrap();
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+
+        let resp = router
+            .clone()
+            .oneshot(
+                axum::http::Request::post(format!("/tok/api/sessions/{id}/archive"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CONFLICT);
+        assert!(
+            !store.session_archived(&id).unwrap(),
+            "archive must not have happened"
+        );
+
+        let resp = router
+            .clone()
+            .oneshot(
+                axum::http::Request::delete(format!("/tok/api/sessions/{id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(
+            store.load_messages(&id).unwrap().len(),
+            1,
+            "history untouched"
+        );
+
+        let resp = router
+            .oneshot(
+                axum::http::Request::post("/tok/api/sessions")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "resume": id }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CONFLICT);
+        let body = json_body(resp).await;
+        assert_eq!(body["code"], "session_open_in_terminal", "{body}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

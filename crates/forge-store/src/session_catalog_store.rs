@@ -440,6 +440,21 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the durable `daemon_live` flag is set for `session_id` (a daemon driver owned it
+    /// when the flag was last written; the flag outlives a daemon that died uncleanly).
+    pub fn session_daemon_live(&self, session_id: &str) -> Result<bool> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT daemon_live FROM session WHERE id = ?1",
+                [session_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+            != 0)
+    }
+
     /// Mark whether a session belongs to the daemon's live fleet.
     ///
     /// Set when `forge serve` starts or resumes a session, cleared when it is closed or archived,

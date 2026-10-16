@@ -42,8 +42,30 @@ pub(crate) fn memory_cmd(cmd: Option<MemoryCmd>, global: bool) -> Result<()> {
         }
         Some(MemoryCmd::Add { text, kind }) => {
             let text = text.join(" ");
-            let id = store.add_memory(&scope, &kind, &text, "manual")?;
-            println!("remembered ({}) [{}]: {}", short(&id), kind, text);
+            if text.trim().is_empty() {
+                anyhow::bail!("nothing to remember: the memory text is empty");
+            }
+            // Memories are injected into later prompts, so a credential typed here would be
+            // replayed to a model in every session of the project.
+            let masked = forge_core::redact::Redactor::from_environment().redact(&text);
+            if masked != text {
+                eprintln!("note: credential-shaped text was masked before saving");
+            }
+            let added = store.add_memory_outcome(&scope, &kind, &masked, "manual")?;
+            if added.duplicate {
+                println!(
+                    "already remembered ({}): {}  (salience bumped)",
+                    short(&added.id),
+                    added.text
+                );
+            } else {
+                println!(
+                    "remembered ({}) [{}]: {}",
+                    short(&added.id),
+                    kind,
+                    added.text
+                );
+            }
         }
         Some(MemoryCmd::Search { query }) => {
             let hits = store.search_memories(&scope, &query.join(" "), 20)?;
@@ -64,7 +86,7 @@ pub(crate) fn memory_cmd(cmd: Option<MemoryCmd>, global: bool) -> Result<()> {
                 .map(|m| m.id);
             match full {
                 Some(full) if store.delete_memory(&full)? => println!("removed {}", short(&full)),
-                _ => println!("no memory matching '{id}' in the {where_} scope"),
+                _ => anyhow::bail!("no memory matching '{id}' in the {where_} scope"),
             }
         }
         Some(MemoryCmd::Clear) => {

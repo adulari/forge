@@ -74,7 +74,7 @@ pub use handoff_types::{
 };
 pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
 pub use maintenance::MaintenanceReport;
-pub use memory::Memory;
+pub use memory::{Memory, MemoryAdded};
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use usage_prefix_store::{CacheModelStats, UsagePrefix};
 pub use usage_store::ModelUsageRow;

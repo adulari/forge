@@ -50,3 +50,11 @@ passphrase like `password=correcthorse` is masked only if it is a configured sec
 - `crates/forge-cli/src/cli/commands/replay.rs` — `forge replay` wiring and `--no-redact`.
 - `crates/forge-cli/src/cli/commands/run/export.rs` — `/export`.
 - `crates/forge-cli/src/anywhere/share.rs` — encrypted replay shares.
+
+## Memories
+
+A stored memory is injected into every later prompt of its project, so it is masked on the way in:
+`forge memory add` and the end-of-turn auto-extraction run the text through the same
+`Redactor` (known secrets plus credential shapes) before it is persisted. A manual add prints
+`note: credential-shaped text was masked before saving`; a memory that arrives masked reads
+`token [redacted] here` and is replayed that way.

@@ -268,6 +268,7 @@ impl Store {
             Visibility::Llm,
             forge_types::MessageKind::Nudge,
         )
+        .map(|(id, _)| id)
     }
 
     /// One page of a session's user-facing transcript, NEWEST first — the remote-control
@@ -583,7 +584,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.tool_calls_json,
-                    u.input_tokens, u.output_tokens, u.cost_usd
+                    u.input_tokens, u.output_tokens, u.cost_usd, m.visibility
              FROM message m LEFT JOIN usage u ON u.message_id = m.id
              WHERE m.session_id = ?1 AND m.active = 1 ORDER BY m.seq",
         )?;
@@ -593,26 +594,77 @@ impl Store {
             let seq: i64 = row.get(0)?;
             let tool_calls =
                 parse_tool_calls_with_diagnostic(session_id, Some(seq), tool_calls_json.as_deref());
-            Ok(ReplayEntry {
-                seq,
-                role: parse_role_with_diagnostic(session_id, Some(seq), &role),
-                content: row.get(2)?,
-                model: row.get(3)?,
-                created_at: row.get(4)?,
-                tool_calls,
-                input_tokens: row.get(6)?,
-                output_tokens: row.get(7)?,
-                cost_usd: row.get(8)?,
-            })
+            let visibility: String = row.get(9)?;
+            Ok((
+                ReplayEntry {
+                    seq,
+                    role: parse_role_with_diagnostic(session_id, Some(seq), &role),
+                    content: row.get(2)?,
+                    model: row.get(3)?,
+                    created_at: row.get(4)?,
+                    tool_calls,
+                    input_tokens: row.get(6)?,
+                    output_tokens: row.get(7)?,
+                    cost_usd: row.get(8)?,
+                },
+                visibility,
+            ))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        // A finished turn stores its answer twice: the provider-continuity `llm_only` row (which
+        // carries the usage) and the published `ui` copy. Replay is one entry per answer, so the
+        // published copy is dropped when it repeats the row right before it.
+        let mut out: Vec<ReplayEntry> = Vec::new();
+        for item in rows {
+            let (entry, visibility) = item.map_err(StoreError::from)?;
+            let published_twin = visibility == "ui"
+                && entry.role == Role::Assistant
+                && out.last().is_some_and(|prev| {
+                    prev.role == Role::Assistant && prev.content.trim() == entry.content.trim()
+                });
+            if !published_twin {
+                out.push(entry);
+            }
+        }
+        Ok(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse_role_with_diagnostic, parse_tool_calls_with_diagnostic, Role, Store};
+
+    /// A finished turn stores its answer twice (provider-continuity `llm_only` row + the published
+    /// `ui` copy); replay must show one entry per answer, with the usage row's model attached.
+    #[test]
+    fn replay_shows_a_published_answer_once() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp", "default").unwrap();
+        store
+            .add_message(&session, 0, Role::User, "hello", None)
+            .unwrap();
+        store
+            .add_llm_only_message_full(
+                &session,
+                1,
+                Role::Assistant,
+                "hi there",
+                Some("m-1"),
+                &[],
+                None,
+            )
+            .unwrap();
+        store
+            .add_ui_note(&session, 2, Role::Assistant, "hi there")
+            .unwrap();
+        // A genuinely different UI note after it still shows.
+        store
+            .add_ui_note(&session, 3, Role::Assistant, "something else")
+            .unwrap();
+        let entries = store.load_replay(&session).unwrap();
+        let contents: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
+        assert_eq!(contents, ["hello", "hi there", "something else"]);
+        assert_eq!(entries[1].model.as_deref(), Some("m-1"));
+    }
 
     #[test]
     fn unknown_role_keeps_the_transcript_row_readable_as_user() {

@@ -23,23 +23,15 @@ impl Session {
             let first_active = self.store.min_active_seq(&self.id)?.unwrap_or(0);
             if db_seq <= first_active {
                 self.store.uncompact_session_store(&self.id)?;
-                self.reload_full_context()?;
             }
         }
-        // DB seq → transcript INDEX. Deactivation/snapshot work in DB seq; transcript ops in index.
-        let offset = self.seq - self.transcript.len() as i64;
-        let idx = (db_seq - offset).max(0) as usize;
-        // The message AT the boundary is the user prompt of the rewound-to turn; capture it before
-        // truncation so the UI can re-offer it for editing/resubmitting.
-        let rewound_prompt = self
-            .transcript
-            .get(idx)
-            .filter(|m| m.role == Role::User)
-            .map(|m| m.content.clone());
+        // The message AT the boundary is the user prompt of the rewound-to turn; read it before
+        // deactivation so the UI can re-offer it for editing/resubmitting.
+        let rewound_prompt = self.store.user_prompt_at(&self.id, db_seq)?;
         let mut restore = snapshot::RestoreReport::default();
         // Turns are keyed by their user-message seq. Restore every snapshotted turn at/after the
         // boundary, newest first so an earlier turn's blob (pre-turn bytes) wins the final state.
-        for seq in (db_seq..self.seq).rev() {
+        for seq in snapshot::turn_seqs_from(&self.checkpoint_root, &self.id, db_seq) {
             match snapshot::restore_turn(&self.checkpoint_root, &self.id, seq) {
                 Ok(r) => {
                     restore.restored.extend(r.restored);
@@ -53,13 +45,37 @@ impl Session {
             }
         }
         self.store.deactivate_messages_from(&self.id, db_seq)?;
-        self.transcript.truncate(idx);
-        self.seq = db_seq;
+        // The model-facing transcript carries no DB seqs, and the DB seq space runs ahead of it
+        // (usage anchor rows, UI notes, compaction), so truncating by index could not be right.
+        // Rebuild it from the store instead: exactly what a fresh resume of this session sees.
+        self.reload_transcript_from_store()?;
         self.after_history_rewrite();
         Ok(RewindOutcome {
             restore,
             rewound_prompt,
         })
+    }
+
+    /// Replace the in-memory transcript with the session's active rows and move `seq` past every
+    /// row ever written (rewound rows stay in the table, so their seqs must not be reused).
+    fn reload_transcript_from_store(&mut self) -> Result<(), CoreError> {
+        let stored = self.store.load_messages(&self.id)?;
+        self.seq = self.store.next_seq_for_session(&self.id)?;
+        self.transcript = stored
+            .into_iter()
+            .map(|m| Message {
+                reasoning: None,
+                provider_items: m.provider_items,
+                role: m.role,
+                content: m.content,
+                tool_calls: m.tool_calls,
+                tool_call_id: m.tool_call_id,
+                images: Vec::new(),
+                visibility: m.visibility,
+                kind: m.kind,
+            })
+            .collect();
+        Ok(())
     }
 
     /// Re-derive every piece of session state that describes the transcript, after the transcript
@@ -75,12 +91,12 @@ impl Session {
         self.lsp_baselines.clear();
         self.pending_images.clear();
         self.steer.clear();
-        let offset = self.seq - self.transcript.len() as i64;
         self.current_turn_seq = self
-            .transcript
-            .iter()
-            .rposition(Message::is_real_user)
-            .map_or(-1, |i| i as i64 + offset);
+            .store
+            .last_real_user_seq(&self.id, None)
+            .ok()
+            .flatten()
+            .unwrap_or(-1);
         self.whitehot_guidance_injected = self
             .transcript
             .iter()
@@ -94,33 +110,24 @@ impl Session {
     /// that prompt and everything after it. `Ok(None)` if there's nothing to undo.
     pub fn undo(&mut self) -> Result<Option<RewindOutcome>, CoreError> {
         // Use current_turn_seq — the DB seq of the real user message that started this turn —
-        // rather than rposition(Role::User). The autofix stage injects synthetic Role::User
-        // messages AFTER the real prompt (to feed lint/test failures back to the model); rposition
-        // would land on the synthetic message, making rewind_to start the snapshot search too high
-        // and miss the snapshot stored at current_turn_seq (causing restored: [] on undo).
-        //
-        // transcript_idx = db_seq - offset  (offset = self.seq - len absorbs compaction gaps so
-        // the mapping stays valid after resume). Sentinel -1 means no turn has run yet.
+        // rather than the last user-role transcript message. The autofix stage injects synthetic
+        // Role::User messages AFTER the real prompt (to feed lint/test failures back to the
+        // model); landing on one would start the snapshot search too high and miss the snapshot
+        // stored at current_turn_seq (causing restored: [] on undo). Sentinel -1 means no turn
+        // has run yet.
         if self.current_turn_seq < 0 {
             return Ok(None);
         }
-        let offset = self.seq - self.transcript.len() as i64;
-        let turn_idx = (self.current_turn_seq - offset).max(0) as usize;
-        if self
-            .transcript
-            .get(turn_idx)
-            .filter(|m| m.role == Role::User)
-            .is_none()
-        {
+        let turn_seq = self.current_turn_seq;
+        if self.store.user_prompt_at(&self.id, turn_seq)?.is_none() {
             return Ok(None);
         }
         // Locate the previous turn's user message before rewinding so chained undos work.
-        let prev_turn_seq = self.transcript[..turn_idx]
-            .iter()
-            .rposition(Message::is_real_user)
-            .map(|p| p as i64 + offset)
+        let prev_turn_seq = self
+            .store
+            .last_real_user_seq(&self.id, Some(turn_seq))?
             .unwrap_or(-1);
-        let outcome = self.rewind_to(self.current_turn_seq)?;
+        let outcome = self.rewind_to(turn_seq)?;
         self.current_turn_seq = prev_turn_seq;
         Ok(Some(outcome))
     }
@@ -155,7 +162,10 @@ impl Session {
 
     /// Save a conversation checkpoint at the current boundary. `label` None = an auto checkpoint.
     pub fn checkpoint(&mut self, label: Option<&str>) -> Result<(), CoreError> {
-        self.store.add_checkpoint(&self.id, label, self.seq)?;
+        // The DB's next seq, not `self.seq`: side-call anchor rows push the DB ahead of the
+        // in-memory counter, and rewind deactivates by DB seq.
+        let seq = self.store.next_seq_for_session(&self.id)?;
+        self.store.add_checkpoint(&self.id, label, seq)?;
         Ok(())
     }
 
@@ -352,6 +362,7 @@ impl Session {
         let body = read_project_agents_md(self.workspace.root());
         self.set_agents_md(body);
         self.presenter.emit(PresenterEvent::SessionStarted { id });
+        self.emit_session_totals(true);
         Ok(())
     }
 
@@ -406,6 +417,7 @@ impl Session {
         self.presenter.emit(PresenterEvent::SessionStarted {
             id: session_id.to_string(),
         });
+        self.emit_session_totals(true);
         // Re-show the restored task list so the resumed session's progress is visible.
         if !self.tasks.is_empty() {
             self.presenter

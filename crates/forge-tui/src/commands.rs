@@ -1068,135 +1068,7 @@ pub fn arg_values(name: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// What an open [`Picker`] is selecting, so the render loop knows what `Enter` does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerKind {
-    /// Pick a past session to resume (`/sessions`, `/resume`).
-    Sessions,
-    /// Pick a checkpoint to rewind to (`/checkpoints`).
-    Checkpoints,
-    /// Pick the operating mode / temper (`/mode`).
-    Tempers,
-    /// Pick the Assay action: analysis-only vs full cleanup (`/assay`).
-    AssayChoice,
-    /// Browse available models (`/models`): a provider list that drills into per-provider models.
-    Models,
-    /// On resuming a previously-compacted session: continue with the compacted context, or reload
-    /// the full original history into the model's view.
-    ResumeMode,
-    /// Pick what part of an assistant response to copy (`/copy` when the response has code blocks):
-    /// the full response or an individual fenced block. Enter → clipboard, `w` → write to a file.
-    /// Each row's `id` is the index into [`App::copy_candidates`](crate::App::copy_candidates).
-    CopyBlocks,
-    /// Flat ranked model picker for `/model` (bare): "mesh (auto)" first, then all known models
-    /// sorted by tier (subscription → frontier → paid → free). Enter pins the selected model;
-    /// selecting "mesh" clears the pin. Esc closes without changing anything.
-    ModelPin,
-    /// Step two of pinning: the rated effort rungs of ONE model, best value first and marked.
-    ///
-    /// Only opened for a model whose ladder has more than one rated rung — for anything else the
-    /// list would be a single row restating the pin. Each row's `id` is `provider::model@rung`, so
-    /// the loop pins the exact pair without carrying extra state between the two steps.
-    ModelRung,
-    /// Pick the winning candidate from a finished `/duel` run (docs/features/duel.md). Each row's
-    /// `id` is the candidate's worktree branch. Enter merges the winner back and discards the
-    /// rest; Esc discards every candidate (no merge, no routing-learning record).
-    Duel,
-}
-
-/// One row in an interactive picker: an opaque `id` the loop acts on, plus two display strings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PickerRow {
-    /// What the loop resolves on Enter (a session id, or a checkpoint boundary seq as a string).
-    pub id: String,
-    pub title: String,
-    pub subtitle: String,
-}
-
-/// A full-width, animated, filterable selection list (RFC session-management-and-commands).
-/// Reused for `/sessions`, `/resume`, and `/checkpoints` — the loop populates `rows` from the
-/// store, then drives it with the same keys as the command palette. Filter narrows as you type.
-#[derive(Debug, Clone, Default)]
-pub struct Picker {
-    pub open: bool,
-    pub kind: Option<PickerKind>,
-    rows: Vec<PickerRow>,
-    pub query: String,
-    pub selected: usize,
-    pub anim: f32,
-    /// A one-line title shown above the list (e.g. "resume a session").
-    pub heading: String,
-}
-
-impl Picker {
-    pub fn open_with(&mut self, kind: PickerKind, heading: &str, rows: Vec<PickerRow>) {
-        self.open = true;
-        self.kind = Some(kind);
-        self.rows = rows;
-        self.heading = heading.to_string();
-        self.query.clear();
-        self.selected = 0;
-        self.anim = 0.0;
-    }
-
-    pub fn close(&mut self) {
-        self.open = false;
-        self.kind = None;
-        self.rows.clear();
-        self.query.clear();
-        self.heading.clear();
-        self.selected = 0;
-        self.anim = 0.0;
-    }
-
-    /// Rows matching the current query (case-insensitive substring over id/title/subtitle).
-    pub fn matches(&self) -> Vec<&PickerRow> {
-        if self.query.is_empty() {
-            return self.rows.iter().collect();
-        }
-        let q = self.query.to_lowercase();
-        self.rows
-            .iter()
-            .filter(|r| {
-                r.id.to_lowercase().contains(&q)
-                    || r.title.to_lowercase().contains(&q)
-                    || r.subtitle.to_lowercase().contains(&q)
-            })
-            .collect()
-    }
-
-    pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub fn move_down(&mut self) {
-        let n = self.matches().len();
-        if n > 0 {
-            self.selected = (self.selected + 1).min(n - 1);
-        }
-    }
-
-    /// Re-clamp the selection after the filtered list shrinks.
-    pub fn clamp(&mut self) {
-        let n = self.matches().len();
-        if n == 0 {
-            self.selected = 0;
-        } else if self.selected >= n {
-            self.selected = n - 1;
-        }
-    }
-
-    /// The selected row, if any (after filtering).
-    pub fn selected_row(&self) -> Option<&PickerRow> {
-        self.matches().into_iter().nth(self.selected)
-    }
-
-    pub fn tick_anim(&mut self) {
-        if self.open && self.anim < 1.0 {
-            self.anim = (self.anim + 0.34).min(1.0);
-        }
-    }
-}
+pub use crate::picker::{Picker, PickerKind, PickerRow};
 
 #[cfg(test)]
 mod tests {
@@ -1942,5 +1814,73 @@ mod tests {
             p.tick_anim();
         }
         assert_eq!(p.anim, 1.0);
+    }
+
+    fn numbered_rows(n: usize) -> Vec<PickerRow> {
+        (0..n)
+            .map(|i| PickerRow {
+                id: i.to_string(),
+                title: format!("prompt number {i}"),
+                subtitle: format!("#{i} · {}m ago", i % 60),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn picker_jump_keys_move_the_selection() {
+        let mut p = Picker::default();
+        p.open_with(PickerKind::Checkpoints, "rewind", numbered_rows(100));
+        p.end();
+        assert_eq!(p.selected, 99);
+        p.page_up(10);
+        assert_eq!(p.selected, 89);
+        p.home();
+        assert_eq!(p.selected, 0);
+        p.page_down(10);
+        assert_eq!(p.selected, 10);
+        p.page_down(1000);
+        assert_eq!(p.selected, 99, "a page past the end stops on the last row");
+        p.query = "number 7".into();
+        p.clamp();
+        p.end();
+        assert_eq!(p.selected_row().unwrap().id, "79");
+    }
+
+    #[test]
+    fn picker_stays_fast_with_thousands_of_rows() {
+        let mut p = Picker::default();
+        p.open_with(PickerKind::Checkpoints, "rewind", numbered_rows(20_000));
+        let start = std::time::Instant::now();
+        for _ in 0..200 {
+            p.move_down();
+            let _ = p.selected_row();
+            let _ = p.matches().len();
+        }
+        p.query = "number 19999".into();
+        for _ in 0..50 {
+            p.clamp();
+            assert_eq!(p.matches().len(), 1);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "20k-row picker took {elapsed:?} for 250 interactions"
+        );
+    }
+
+    #[test]
+    fn extended_rows_are_filterable_and_resettable() {
+        let mut p = Picker::default();
+        p.open_with(PickerKind::Sessions, "resume", numbered_rows(3));
+        p.extend_rows(vec![PickerRow {
+            id: "hit".into(),
+            title: "other".into(),
+            subtitle: "match: alpha body".into(),
+        }]);
+        p.query = "alpha".into();
+        assert_eq!(p.matches().len(), 1);
+        p.reset_to_base();
+        assert_eq!(p.matches().len(), 0);
+        assert_eq!(p.base_len(), 3);
     }
 }

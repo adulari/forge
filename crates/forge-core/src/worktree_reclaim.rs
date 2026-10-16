@@ -338,7 +338,7 @@ pub struct OwnerRecord {
 /// killed before `Drop` could run. Best-effort — failing to write it must never fail the worktree.
 pub fn record_ownership(repo_root: &Path, id: &str, path: &Path, branch: &str) {
     let dir = owners_dir(repo_root);
-    if std::fs::create_dir_all(&dir).is_err() {
+    if crate::ensure_dir_git_ignored(&dir).is_err() {
         return;
     }
     let created_at = SystemTime::now()

@@ -5148,6 +5148,39 @@ mod tests {
     }
 
     #[test]
+    fn remote_overlay_carries_a_window_of_a_huge_picker_not_every_row() {
+        let rows: Vec<crate::commands::PickerRow> = (0..5_000)
+            .map(|i| crate::commands::PickerRow {
+                id: i.to_string(),
+                title: format!("prompt {i}"),
+                subtitle: format!("#{i}"),
+            })
+            .collect();
+        let mut app = App::default();
+        app.picker
+            .open_with(crate::commands::PickerKind::Checkpoints, "rewind", rows);
+        let o = app.remote_overlay().unwrap();
+        assert_eq!(
+            o.rows.len(),
+            200,
+            "a snapshot never carries all 5,000 checkpoints"
+        );
+        assert_eq!(o.rows[0].id, "0");
+        assert!(
+            o.body.as_deref().unwrap().contains("of 5000"),
+            "{:?}",
+            o.body
+        );
+
+        app.picker.end();
+        let o = app.remote_overlay().unwrap();
+        assert_eq!(o.rows.len(), 200);
+        assert_eq!(o.rows.last().unwrap().id, "4999");
+        assert!(o.rows[o.selected].selected, "`selected` indexes the window");
+        assert_eq!(o.rows[o.selected].id, "4999");
+    }
+
+    #[test]
     fn remote_overlay_projects_the_palette() {
         let mut app = App::default();
         app.palette.open_with("mod");

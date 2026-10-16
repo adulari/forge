@@ -121,7 +121,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             };
             chat(mock, mode, resume_mode, plain, fullscreen, model).await
         }
-        Command::Sessions => sessions(),
+        Command::Sessions {
+            archived,
+            all,
+            unarchive,
+        } => sessions(archived, all, unarchive.as_deref()),
         Command::Replay {
             ids,
             json,

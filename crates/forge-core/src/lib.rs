@@ -28,7 +28,20 @@ use forge_types::{Presenter, PresenterEvent};
 
 mod adaptive_effort;
 mod build_command;
+pub mod git_attribution;
 mod memory_scope;
+
+/// Create `dir` and keep it out of the user's `git status`: a `*` ignore file inside the directory
+/// ignores everything under it, itself included, so nothing the user owns is edited. Never
+/// overwrites an ignore file that is already there.
+pub fn ensure_dir_git_ignored(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(ignore, "*\n")?;
+    }
+    Ok(())
+}
 use build_command::is_env_setup_command;
 mod catalog_feed;
 mod local_evidence;
@@ -1817,6 +1830,8 @@ pub struct Session {
     /// user message is persisted so the refresh await can't reopen the abort-before-persist
     /// window). `None` outside a git repo.
     cached_git_branch: Option<String>,
+    /// Commit-hook install state and the model last written for it (`git_attribution`).
+    attribution: git_attribution::AttributionState,
     /// The project `AGENTS.md` body the pinned block carries on every request. Read at
     /// construction (sync, off the async executor) and kept current by `agents_md_fingerprint`
     /// below; `None` when no file exists.
@@ -1850,11 +1865,17 @@ pub struct Session {
     compact_timeout: std::time::Duration,
 }
 
-/// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
-/// Returns `None` for a detached HEAD (a raw commit hash) or anything unexpected.
+/// Parse `.git/HEAD` contents into what the model is told about the checkout: the branch
+/// (`ref: refs/heads/<branch>` → `<branch>`), or `(detached HEAD at <short sha>)` for a raw commit
+/// hash. A detached HEAD used to read as "no repository", so the branch line vanished exactly when
+/// the checkout was in its least ordinary state. `None` for anything unexpected.
 fn parse_git_head(head: &str) -> Option<String> {
-    head.strip_prefix("ref: refs/heads/")
-        .map(|b| b.trim().to_string())
+    let head = head.trim();
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        return Some(branch.trim().to_string());
+    }
+    (head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| format!("(detached HEAD at {})", &head[..7]))
 }
 
 /// Read + parse the current git branch synchronously. Used only at session construction (one-time
@@ -3150,7 +3171,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 }
             }
         }
-        let seq = self.next_seq();
+        let mut seq = self.next_seq();
+        if !resume_absorbed {
+            // The row can land past `seq` (a side-call usage anchor took it, or another writer
+            // raced us). Rewind checkpoints and snapshot dirs are keyed by the row's REAL seq.
+            let (_, landed) =
+                self.store
+                    .add_message_returning_seq(&self.id, seq, Role::User, prompt, None)?;
+            if landed >= self.seq {
+                self.seq = landed + 1;
+            }
+            seq = landed;
+        }
         self.current_turn_seq = seq;
         self.task_scope = Some(TaskScope::for_turn(
             prompt,
@@ -3163,8 +3195,6 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             seq as u64,
         ));
         if !resume_absorbed {
-            self.store
-                .add_message(&self.id, seq, Role::User, prompt, None)?;
             // Attach any images queued for this turn (vision). They ride on the in-memory transcript
             // for the provider call; the persisted row stays text-only (images are transient input).
             let images = std::mem::take(&mut self.pending_images);
@@ -4971,6 +5001,12 @@ mod tests {
 
     #[path = "commit_nudge.rs"]
     mod commit_nudge_tests;
+
+    #[path = "rewind_seq_space.rs"]
+    mod rewind_seq_space_tests;
+
+    #[path = "tool_marks.rs"]
+    mod tool_marks_tests;
 
     #[path = "session_worktree.rs"]
     mod session_worktree_tests;
@@ -16564,13 +16600,15 @@ mod tests {
             .unwrap();
         session.checkpoint(Some("after first turn")).unwrap();
         let boundary = session.checkpoints().unwrap()[0].seq;
+        let after_one = store.load_messages(&id).unwrap().len();
         session.run_turn("check the manifest again").await.unwrap();
         let after_two = store.load_messages(&id).unwrap().len();
 
         session.rewind_to(boundary).unwrap();
         let after_rewind = store.load_messages(&id).unwrap().len();
+        // Not `== boundary`: the DB seq space also holds usage anchor rows that are never active.
         assert!(
-            after_rewind < after_two && after_rewind == boundary as usize,
+            after_rewind < after_two && after_rewind == after_one,
             "rewind drops the second turn back to the checkpoint boundary"
         );
     }

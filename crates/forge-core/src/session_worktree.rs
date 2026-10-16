@@ -166,18 +166,24 @@ impl Session {
     }
 }
 
-/// The file holding a checkout's `HEAD`: `.git/HEAD`, or for a linked worktree (whose `.git` is
-/// a `gitdir:` pointer file) the `HEAD` in its private git directory.
+/// The file holding a checkout's `HEAD`: `.git/HEAD`, or for a linked worktree or submodule
+/// (whose `.git` is a `gitdir:` pointer file) the `HEAD` in its private git directory. Walks up
+/// from `root`, so a workspace that is a subdirectory of the repository resolves it too; with no
+/// repository above, the path under `root` (which does not exist) is returned.
 pub(crate) fn git_head_file(root: &std::path::Path) -> std::path::PathBuf {
-    let dot_git = root.join(".git");
-    if dot_git.is_file() {
-        if let Some(gitdir) = std::fs::read_to_string(&dot_git)
-            .ok()
-            .as_deref()
-            .and_then(|t| t.lines().find_map(|l| l.strip_prefix("gitdir:")))
-        {
-            return root.join(gitdir.trim()).join("HEAD");
+    for top in root.ancestors() {
+        let dot_git = top.join(".git");
+        if dot_git.is_file() {
+            if let Some(gitdir) = std::fs::read_to_string(&dot_git)
+                .ok()
+                .as_deref()
+                .and_then(|t| t.lines().find_map(|l| l.strip_prefix("gitdir:")))
+            {
+                return top.join(gitdir.trim()).join("HEAD");
+            }
+        } else if dot_git.is_dir() {
+            return dot_git.join("HEAD");
         }
     }
-    dot_git.join("HEAD")
+    root.join(".git").join("HEAD")
 }

@@ -215,3 +215,49 @@ fn the_system_preamble_follows_the_commit_policy() {
     assert!(wording(forge_config::CommitPolicy::End).contains("commit once"));
     assert!(wording(forge_config::CommitPolicy::Never).contains("Never run `git commit`"));
 }
+
+#[tokio::test]
+async fn every_reminder_in_a_long_turn_reaches_the_request_even_for_one_unchanged_file() {
+    // 25 writes of the SAME file at every-10: reminders are due at edit 10 and 20. The request view
+    // drops an exact repeat of a system message, and the two used to be byte-identical.
+    let (_dir, mut session) = repo_session(25, 10);
+    session.run_turn("take notes").await.unwrap();
+    assert_eq!(git_notes(&session).len(), 2, "two reminders were issued");
+    let (view, _) = crate::system_context::normalize_system_context(session.transcript.clone(), 0);
+    let sent = view
+        .iter()
+        .filter(|m| m.role == Role::System && m.content.starts_with("[git]"))
+        .count();
+    assert_eq!(sent, 2, "both reminders must reach the model");
+}
+
+#[tokio::test]
+async fn a_headless_session_installs_the_hook_the_prompt_promises_and_names_the_model() {
+    // The system prompt tells the model "a Co-Authored-By trailer is added automatically by a git
+    // hook" on every surface; only the TUI used to install one, so headless and daemon sessions
+    // committed with no trailer at all.
+    let (dir, mut session) = repo_session(1, 0);
+    session.config.git.coauthor = true;
+    session.run_turn("take notes").await.unwrap();
+    let hook = dir.path().join(".git/hooks/prepare-commit-msg");
+    let body =
+        std::fs::read_to_string(&hook).expect("the hook is installed before the first request");
+    assert!(body.contains("Installed by Forge"), "{body}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".git/forge-model")).unwrap(),
+        "claude-cli::opus"
+    );
+    git(dir.path(), &["add", "notes.md"]);
+    git(dir.path(), &["commit", "-q", "-m", "feat: notes"]);
+    let log = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%B"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&log.stdout)
+            .contains("Co-Authored-By: Forge (claude-cli::opus) <forge@adulari.dev>"),
+        "{}",
+        String::from_utf8_lossy(&log.stdout)
+    );
+}

@@ -369,10 +369,7 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
         std::fs::create_dir_all(&managed).map_err(|e| format!("worktree create: {e}"))?;
         // Keeps the nested checkouts out of the main checkout's `git status`, the way the
         // checkpoint and evidence directories already are, without editing the user's ignores.
-        let ignore = managed.join(".gitignore");
-        if !ignore.exists() {
-            let _ = std::fs::write(ignore, "*\n");
-        }
+        let _ = crate::ensure_dir_git_ignored(&managed);
     }
     let path_arg = path.display().to_string();
     let exists = git(

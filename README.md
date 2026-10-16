@@ -883,7 +883,7 @@ families. This server is opt-in and independent of the companion-app daemon. See
 ### 🌳 Sessions, replay, and counterfactual forks
 
 ```bash
-forge sessions                              # flat history
+forge sessions                              # flat history (--archived, --all, --unarchive <id>)
 forge replay abc123                         # transcript; --json to export
 forge replay abc123 def456                  # aligned turn-by-turn diff
 forge replay abc123 --rerun                 # rerun with today's mesh
@@ -907,6 +907,7 @@ forge models --probe     # recheck only benched/excluded models (cheap)
 forge models --clear     # forget all benched/rate-limited marks
 forge memory             # list this project's auto-memories
 forge memory add "use 4-space indent" --kind decision
+forge memory add --global "prefer rebase over merge"   # recalled in every project
 forge mesh "<task>"      # explain how a task would route
 ```
 

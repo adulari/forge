@@ -3,6 +3,9 @@
 use super::*;
 use crate::app::{mesh_pace_suffix, SubagentSnapshot};
 
+/// Rows of an open picker carried in one remote snapshot.
+const PICKER_WINDOW: usize = 200;
+
 impl App {
     /// Build a [`remote::Snapshot`]-shaped view of the live state, for the remote-control WS to
     /// broadcast. Plain fields only (no ratatui types), so `forge-tui` needn't depend on the
@@ -305,11 +308,20 @@ impl App {
             .kind
             .map(picker_kind_wire)
             .unwrap_or("picker:unknown");
-        let rows = self
+        // A window around the selection, not every row: a session with thousands of checkpoints
+        // would otherwise serialize all of them into every snapshot frame sent to the app.
+        let matches = self.picker.matches();
+        let total = matches.len();
+        let start = self
             .picker
-            .matches()
+            .selected
+            .saturating_sub(PICKER_WINDOW / 2)
+            .min(total.saturating_sub(PICKER_WINDOW));
+        let rows = matches
             .into_iter()
             .enumerate()
+            .skip(start)
+            .take(PICKER_WINDOW)
             .map(|(i, r)| OverlayRowSnapshot {
                 id: r.id.clone(),
                 label: r.title.clone(),
@@ -322,10 +334,16 @@ impl App {
             kind: kind.to_string(),
             title: self.picker.heading.clone(),
             rows,
-            selected: self.picker.selected,
+            selected: self.picker.selected - start.min(self.picker.selected),
             filter: Some(self.picker.query.clone()),
             free_text: false,
-            body: None,
+            body: (total > PICKER_WINDOW).then(|| {
+                format!(
+                    "showing {}-{} of {total}; type to filter",
+                    start + 1,
+                    (start + PICKER_WINDOW).min(total)
+                )
+            }),
         }
     }
 
