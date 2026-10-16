@@ -52,7 +52,7 @@ mod render;
 pub mod select;
 mod stream_json;
 pub mod throughput;
-pub use json_result::JsonResultPresenter;
+pub use json_result::{error_result_line, JsonResultPresenter};
 pub use stream_json::StreamJsonPresenter;
 mod surface;
 mod transcript;

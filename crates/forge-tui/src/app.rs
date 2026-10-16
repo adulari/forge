@@ -2879,8 +2879,15 @@ impl App {
 
     /// Scroll the full-screen transcript up by `rows` (toward the top); pauses auto-follow.
     pub fn transcript_scroll_up(&mut self, rows: usize) {
+        // While following, `transcript_scroll` is a sentinel (usize::MAX/2, or 0 after a clear), not
+        // the row on screen: scrolling up from it did nothing or jumped to the top. Start from the
+        // row the last frame actually rendered at.
+        let base = match self.transcript_geom.get() {
+            Some(g) if self.transcript_follow || self.transcript_scroll > g.scroll => g.scroll,
+            _ => self.transcript_scroll,
+        };
         self.transcript_follow = false;
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(rows);
+        self.transcript_scroll = base.saturating_sub(rows);
     }
 
     /// Scroll the full-screen transcript down by `rows`; resumes follow at the bottom.

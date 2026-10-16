@@ -97,14 +97,7 @@ impl Session {
         // Restore the permission mode that was active when the session was last saved.
         let mut config = config;
         if let Ok(stored_mode) = store.session_mode(session_id) {
-            let parsed = match stored_mode.as_str() {
-                "Default" => Some(PermissionMode::Default),
-                "AcceptEdits" => Some(PermissionMode::AcceptEdits),
-                "Bypass" => Some(PermissionMode::Bypass),
-                "Plan" => Some(PermissionMode::Plan),
-                "Auto" => Some(PermissionMode::Auto),
-                _ => PermissionMode::from_label(&stored_mode),
-            };
+            let parsed = parse_stored_mode(&stored_mode);
             if let Some(m) = parsed {
                 config.permission_mode = m;
             }
@@ -309,5 +302,17 @@ impl Session {
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
         s
+    }
+}
+
+/// A session's stored permission-mode string back into the enum (legacy debug names and labels).
+pub(crate) fn parse_stored_mode(stored: &str) -> Option<PermissionMode> {
+    match stored {
+        "Default" => Some(PermissionMode::Default),
+        "AcceptEdits" => Some(PermissionMode::AcceptEdits),
+        "Bypass" => Some(PermissionMode::Bypass),
+        "Plan" => Some(PermissionMode::Plan),
+        "Auto" => Some(PermissionMode::Auto),
+        _ => PermissionMode::from_label(stored),
     }
 }

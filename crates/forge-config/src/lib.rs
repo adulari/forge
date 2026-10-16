@@ -3318,6 +3318,35 @@ fn accumulate_permission_rules(
     }
 }
 
+/// Replace `path` with `contents` via a synced temp file and rename, so a crash, a full disk or
+/// an interrupt leaves the previous file intact instead of a truncated, unparsable config.
+pub(crate) fn write_atomic(
+    path: impl AsRef<std::path::Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = path.as_ref();
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = target.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(&target) {
+            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        }
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// The project layer of `.forge/config.toml`: as written when the project is trusted, otherwise
 /// only its safe subset ([`project_trust::sanitize_untrusted`]), plus what was dropped.
 fn project_layer(path: &Path, trusted: bool) -> Option<(toml::Table, Vec<String>)> {
@@ -3372,7 +3401,8 @@ pub fn load() -> Result<Config, ConfigError> {
         let text = toml::to_string(&table).map_err(|e| ConfigError::Write(e.to_string()))?;
         fig = fig.merge(Toml::string(&text));
     }
-    fig = fig.merge(Env::prefixed("FORGE_").split("__"));
+    // `FORGE_TELEMETRY=0` is the telemetry opt-out flag (read in forge-cli), not a `[telemetry]` table.
+    fig = fig.merge(Env::prefixed("FORGE_").ignore(&["telemetry"]).split("__"));
 
     let mut config: Config = fig.extract()?;
     accumulate_permission_rules(&mut config, user_config.as_deref(), project_has_rules);
@@ -3565,7 +3595,7 @@ fn write_anywhere_settings_at(
         }
     }
     let rendered = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(path, rendered).map_err(|e| ConfigError::Write(e.to_string()))
+    write_atomic(path, rendered).map_err(|e| ConfigError::Write(e.to_string()))
 }
 
 fn write_settings_at(
@@ -3601,7 +3631,7 @@ fn write_settings_at(
     }
 
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
 }
 
@@ -3617,7 +3647,7 @@ pub fn write_self_mcp(enabled: bool) -> Result<PathBuf, ConfigError> {
         .unwrap_or_default();
     root.insert("self_mcp".to_string(), toml::Value::Boolean(enabled));
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(path)
 }
 
@@ -3633,7 +3663,7 @@ pub fn write_statusline_config(cfg: &StatuslineConfig) -> Result<PathBuf, Config
     let val = toml::Value::try_from(cfg).map_err(|e| ConfigError::Write(e.to_string()))?;
     root.insert("statusline".to_string(), val);
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(path)
 }
 
@@ -3654,7 +3684,7 @@ pub fn write_permission_mode(permission: PermissionMode) -> Result<PathBuf, Conf
         toml::Value::String(perm_str.to_string()),
     );
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(path)
 }
 
@@ -3690,7 +3720,7 @@ pub fn write_keybind(action: &str, combo: &KeyCombo) -> Result<PathBuf, ConfigEr
         }
     }
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(path)
 }
 
@@ -5310,6 +5340,19 @@ auto = "local"
             c.model_for(TaskTier::Trivial),
             c.model_for(TaskTier::Standard)
         );
+    }
+
+    #[test]
+    fn forge_telemetry_env_does_not_break_config_load() {
+        let fig = Figment::from(Serialized::defaults(Config::default())).merge(
+            Env::prefixed("FORGE_TEST_TEL_")
+                .ignore(&["telemetry"])
+                .split("__"),
+        );
+        // Mirrors load(): the ignore list must keep a scalar `TELEMETRY` from hitting the table.
+        std::env::set_var("FORGE_TEST_TEL_TELEMETRY", "0");
+        assert!(fig.extract::<Config>().is_ok());
+        std::env::remove_var("FORGE_TEST_TEL_TELEMETRY");
     }
 
     #[test]

@@ -1355,6 +1355,13 @@ impl Store {
             ConnSource::Memory => None,
         };
         let manager = SqliteManager { source };
+        // Fail fast on an unopenable file (read-only directory, bad path): otherwise r2d2 retries
+        // for its 30 s connection timeout, logging an error per attempt.
+        if let Some(path) = &db_path {
+            drop(r2d2::ManageConnection::connect(&manager).map_err(|e| {
+                StoreError::Pool(format!("cannot open session store {}: {e}", path.display()))
+            })?);
+        }
         let builder = r2d2::Pool::builder().test_on_check_out(false);
         // A small pool lets WAL reads run concurrently instead of serializing behind a single mutex
         // (the TUI run loop, subagents, and the lattice indexer all touch the store). An in-memory

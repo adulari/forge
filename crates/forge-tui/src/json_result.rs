@@ -32,6 +32,19 @@ pub(crate) fn result_subtype(stop_reason: StopReason) -> &'static str {
     }
 }
 
+/// The terminal `result` line for a run that failed before (or without) the presenter's `Done`:
+/// a machine consumer must see `is_error: true`, not an empty stdout it cannot tell from a crash.
+pub fn error_result_line(message: &str) -> String {
+    let value = serde_json::json!({
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true,
+        "result": message,
+        "stop_reason": "error",
+    });
+    value.to_string()
+}
+
 impl Default for JsonResultPresenter {
     fn default() -> Self {
         Self::with_writer(Box::new(std::io::stdout()))
@@ -275,5 +288,15 @@ mod tests {
         assert_eq!(out[0]["is_error"], true);
         assert_eq!(out[0]["subtype"], "error_during_execution");
         assert_eq!(out[0]["result"], "provider down");
+    }
+}
+
+#[cfg(test)]
+mod error_line_tests {
+    #[test]
+    fn error_result_is_a_parseable_error_object() {
+        let v: serde_json::Value = serde_json::from_str(&super::error_result_line("boom")).unwrap();
+        assert_eq!(v["is_error"], true);
+        assert_eq!(v["result"], "boom");
     }
 }

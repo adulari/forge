@@ -370,7 +370,7 @@ fn config_checks() -> Vec<Check> {
     // Data dir writable (the session store lives here).
     match forge_config::data_dir() {
         Some(d) => {
-            let writable = std::fs::create_dir_all(&d).is_ok();
+            let writable = std::fs::create_dir_all(&d).is_ok() && forge_config::dir_is_writable(&d);
             out.push(check(
                 if writable { Status::Ok } else { Status::Fail },
                 "data dir",

@@ -16,6 +16,7 @@ pub(crate) async fn run(
     no_publish_to_fleet: bool,
     usage_json: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    let prompt = with_piped_stdin(prompt)?;
     if prompt.trim().is_empty() {
         anyhow::bail!("empty prompt — usage: forge run \"<your task>\"");
     }
@@ -77,7 +78,13 @@ pub(crate) async fn run(
         } else {
             Box::new(forge_tui::StreamJsonPresenter::new())
         };
-        let mut session = build_session_with(presenter, mock, mode, resume, pin, true).await?;
+        let mut session = match build_session_with(presenter, mock, mode, resume, pin, true).await {
+            Ok(session) => session,
+            Err(e) => {
+                println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+                return Err(e);
+            }
+        };
         let before = session.session_usage_detail();
         if output_format == OutputFormat::Json {
             // A resumed session's restored totals arrive before routing; the presenter keeps
@@ -95,7 +102,13 @@ pub(crate) async fn run(
             let turn = session.run_turn_with(&prompt, &guidance, tier);
             tokio::pin!(turn);
             tokio::select! {
-                r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
+                r = &mut turn => match r.context("running agent turn") {
+                    Ok(outcome) => fail_if_incomplete(outcome),
+                    Err(e) => {
+                        println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+                        Err(e)
+                    }
+                },
                 _ = tokio::signal::ctrl_c() => Ok(()),
             }
         };
@@ -167,6 +180,41 @@ pub(crate) async fn run(
     let written = write_usage(&session, &before);
     result?;
     written
+}
+
+/// `cat file | forge run "summarize"` (like `claude -p`): piped stdin is appended to the prompt, or
+/// is the prompt when none was given. A terminal stdin is never read.
+fn with_piped_stdin(prompt: String) -> Result<String> {
+    use std::io::{IsTerminal, Read};
+    if std::io::stdin().is_terminal() {
+        return Ok(prompt);
+    }
+    let mut piped = String::new();
+    std::io::stdin()
+        .read_to_string(&mut piped)
+        .context("reading piped stdin")?;
+    Ok(combine_prompt_and_stdin(prompt, &piped))
+}
+
+fn combine_prompt_and_stdin(prompt: String, piped: &str) -> String {
+    let piped = piped.trim_end();
+    match (prompt.trim().is_empty(), piped.is_empty()) {
+        (_, true) => prompt,
+        (true, false) => piped.to_string(),
+        (false, false) => format!("{prompt}\n\n{piped}"),
+    }
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::combine_prompt_and_stdin as combine;
+
+    #[test]
+    fn stdin_becomes_or_extends_the_prompt() {
+        assert_eq!(combine(String::new(), "data\n"), "data");
+        assert_eq!(combine("sum".into(), "data\n"), "sum\n\ndata");
+        assert_eq!(combine("sum".into(), ""), "sum");
+    }
 }
 
 /// A headless one-shot run is unattended: a turn that stopped with tracked tasks still open has

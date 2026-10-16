@@ -218,6 +218,10 @@ pub(crate) fn copy_catalog_assets(
             "{}.md",
             cmd.name.replace(':', std::path::MAIN_SEPARATOR_STR)
         );
+        if !safe_relative(&rel) {
+            counts.skipped_commands += 1;
+            continue;
+        }
         let dest = cmd_dst.join(rel);
         if dest.exists() {
             counts.skipped_commands += 1;
@@ -244,6 +248,10 @@ pub(crate) fn copy_catalog_assets(
         if matches!(skill.scope, forge_skills::Scope::Builtin) {
             continue;
         }
+        if !safe_relative(&skill.name) || skill.name.contains(['/', '\\']) {
+            counts.skipped_skills += 1;
+            continue;
+        }
         let dest = skill_dst.join(&skill.name);
         if dest.exists() {
             counts.skipped_skills += 1;
@@ -254,6 +262,15 @@ pub(crate) fn copy_catalog_assets(
         counts.copied_skills += 1;
     }
     Ok(counts)
+}
+
+/// A name from imported frontmatter is hostile input: only plain relative components may become
+/// part of a destination path (no `..`, no absolute or prefixed paths).
+fn safe_relative(name: &str) -> bool {
+    !name.is_empty()
+        && std::path::Path::new(name)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 /// Import Cursor AI rules (`~/.cursor/rules/*.mdc`) as Forge commands.
@@ -621,5 +638,20 @@ mod settings_import_tests {
     fn count_cc_hooks_is_zero_with_no_hooks_key() {
         let v: serde_json::Value = serde_json::from_str(r#"{ "permissions": {} }"#).unwrap();
         assert_eq!(count_cc_hooks(&[v]), 0);
+    }
+}
+
+#[cfg(test)]
+mod safe_relative_tests {
+    use super::safe_relative;
+
+    #[test]
+    fn rejects_traversal_and_absolute_names() {
+        for bad in ["", "../../evil.md", "/tmp/abs.md", "a/../../b.md", ".."] {
+            assert!(!safe_relative(bad), "{bad}");
+        }
+        for ok in ["commit.md", "git/commit.md", "skill"] {
+            assert!(safe_relative(ok), "{ok}");
+        }
     }
 }
