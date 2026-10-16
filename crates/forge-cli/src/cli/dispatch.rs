@@ -198,7 +198,9 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 .await
             }
             BenchCmd::Recall {
+                scenario,
                 model,
+                compact_cap,
                 mock,
                 turns_scale,
                 skip_resume,
@@ -208,7 +210,9 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 price_out,
             } => {
                 bench::run_recall(bench::RecallOptions {
+                    scenario,
                     model,
+                    compact_cap,
                     mock,
                     turns_scale,
                     skip_resume,

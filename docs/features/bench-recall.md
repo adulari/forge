@@ -5,8 +5,9 @@ can lose things the user said an hour ago. `forge bench recall` measures how muc
 deterministic scoring and no judge model.
 
 ```
-forge bench recall [--model provider::model] [--turns-scale N] [--skip-resume]
-                   [--keep-workdir] [--json] [--price-in USD --price-out USD] [--mock]
+forge bench recall [--scenario standard|hard] [--model provider::model] [--compact-cap TOKENS]
+                   [--turns-scale N] [--skip-resume] [--keep-workdir] [--json]
+                   [--price-in USD --price-out USD] [--mock]
 ```
 
 The default model is `inferhub::glm-5.3-flash`. `--mock` uses the offline provider: it exercises
@@ -27,16 +28,20 @@ the plumbing in seconds, but a mock answers nothing, so its recall is meaningles
 3. **Compacts twice**, by calling `Session::compact(false)`, which is exactly what `/compact`
    runs: once mid-scenario and once near the end. Facts planted between the two compactions
    ("late" facts) test a summary of a summary.
-4. **Probes.** One question per planted fact, asked as an ordinary user turn that forbids tools
-   ("answer from our conversation so far"), plus two behavior probes that ask for work and inspect
-   what the model did: a function added to `src/parser.rs` must contain no `.unwrap()`, and a
-   commit must start with the prefix the user demanded.
-5. **Resumes.** The session is dropped and rebuilt from the store (`Session::resume`), and the
-   same probes run again.
-
-Each probe is independent: the workspace is snapshotted first, then the turn is undone (`/undo`)
-and the workspace restored afterwards, so neither a question, its answer nor a stray edit is
-visible to the next probe or to the resume.
+4. **Checkpoints** the store and the workspace as the scenario left them, then probes in two
+   phases. One question per planted fact, asked as an ordinary user turn that forbids tools
+   ("answer from our conversation so far"), plus work probes that inspect what the model did: a
+   function added to `src/parser.rs` must contain no `.unwrap()`, and a commit must start with the
+   prefix the user demanded.
+   - **after-compaction** runs the probes in sequence on the live session. There is no way to
+     rewind it between probes: `/undo` after a compaction reloads the whole uncompacted history
+     (observed on 2026-10-16, see the baseline report), so an undone probe would quietly hand the
+     next one the full transcript. An earlier answer can therefore leak into a later probe, and a
+     compaction can fire while probing; both are reported.
+   - **after-resume** gives every probe its own session, resumed from the checkpoint with
+     `Session::resume` and discarded afterwards (the store files are restored from the checkpoint
+     before each one). This phase is isolated and is the cleaner number.
+   The workspace goes back to the checkpoint after every probe in both phases.
 
 ## Fact categories
 
@@ -50,21 +55,48 @@ visible to the next probe or to the resume.
 | `pending` | two TODOs the user said not to do yet | what they are |
 | `number` | a port, a latency target, a benchmark budget | the number |
 | `behavior` | the unwrap rule and the commit prefix | the file or commit the model produced |
+| `tool_result` | (hard) a value only ever visible in a file the model read or in command output | the value |
+| `work_state` | (hard) "which files have you changed and what is left?" | every file in the real git history since the baseline commit is named; every pending item is named |
+| `task_list` | (hard) three `update_tasks` tasks, two later marked done | the open one is named, the done ones are not |
 
 Scoring is a regex match (case-insensitive, every `all` pattern must match and no `none` pattern
 may). A memory question that used tools anyway (for example by re-reading a file) is counted and
 flagged in the report, because its score may be inflated.
+
+## The hard scenario (`--scenario hard`)
+
+The standard scenario sits near the ceiling: a capable model keeps 94% of it. The hard one is built
+to look like the real complaint, forgetting in a long session, worst after compaction:
+
+- **Auto-compaction under pressure.** The temp config carries `[compact_cap]` of 24,000 tokens
+  for the pinned model (`--compact-cap` changes it), so the real auto-compact, floor-prune and
+  window-trim path fires repeatedly, not only the two manual `/compact`s. The report counts auto
+  against manual compactions and names the model that wrote each summary (read from the session's
+  "compacted N -> M (summary via model)" note); a compaction that changed nothing, or that fired
+  while probing, is counted separately.
+- **About 40 turns with large tool outputs**: whole-file `read_file` reads of generated files
+  (a 400-row table, a 700-line log, notes, tables), a 220-line command output, so pruning cuts
+  results before they are summarized.
+- **Facts at varied depths**: early, mid-session and late, plus values that exist only in a tool
+  result (a quota on row 233 of the table, a checksum on line 137 of a command's output).
+- **An `AGENTS.md` rule** (every new function needs a doc comment starting `Forge:`), read at
+  session start and probed by a work task after the compactions, and **a mid-session
+  correction** (4 spaces, later "use tabs"), probed by a work task that checks the file for tabs.
+- **Work state**: the reply to "which files have you changed and what is left?" is scored against
+  the real `git` history (every changed file named, every planted pending item named).
+- **A task list**: `update_tasks` with three tasks, two later marked done; the probe asks which
+  are still open.
 
 ## Reading the output
 
 The table has one row per category with `passed/total pct` after compaction and after resume, a
 total, early-versus-late rows, the message counts of each compaction, and the token and cost
 totals. `--json` prints the same as one JSON object on stdout (per-probe results included, with the
-text the matcher saw); progress always goes to stderr. `--keep-workdir` keeps the temp workspace
-and prints its path.
+text the matcher saw); progress always goes to stderr. `--keep-workdir` keeps the temp workspace,
+store and config and prints their paths.
 
 `--turns-scale N` multiplies the number of filler tool-work turns (below 1 it truncates, above 1 it
-cycles extra reads); the planted turns never change. `--skip-resume` stops after the first probe
+cycles extra reads); turns that state a fact never change. `--skip-resume` stops after the live
 phase.
 
 Cost is whatever the store recorded for the run. Models the catalog cannot price record zero, so
@@ -78,18 +110,19 @@ and known-bad sample. The unit tests run every probe's samples through the score
 accepts the wrong answer or rejects the right one fails CI.
 
 Keep planted values out of the fixture (`fixture.rs`): the fixture test fails if a planted string
-appears in a file the model can read.
+appears in a file the model can read. Values that are meant to be tool-result-only (the hard
+scenario's quota and checksum) are tested to appear exactly once.
 
 ## Baselines
 
-[recall-baseline-2026-10](../benchmarks/recall-baseline-2026-10.md) holds the first run, on the
-behavior before the compaction rework. Headline numbers belong to the recorded model, commit and
+[recall-baseline-2026-10](../benchmarks/recall-baseline-2026-10.md) holds the runs on the
+behavior before the compaction rework (standard and hard). Headline numbers belong to the recorded model, commit and
 date.
 
 ## Code
 
 - `crates/forge-cli/src/bench/recall.rs`: options and the run.
-- `crates/forge-cli/src/bench/recall/scenario.rs`: the data.
+- `crates/forge-cli/src/bench/recall/scenario.rs`, `scenario/hard.rs`: the data.
 - `crates/forge-cli/src/bench/recall/driver.rs`: the turn/compaction/probe loop over a `Subject`
   trait (a scripted fake in the tests, a real `Session` live).
 - `crates/forge-cli/src/bench/recall/live.rs`: the isolated environment and the live subject.

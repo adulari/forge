@@ -1,11 +1,14 @@
 //! The throwaway repo the recall scenario works in: a tiny header-parser crate plus bulk data
 //! files whose only job is to make the model read enough text for the context to grow.
 //! Nothing in it states a planted fact (port, rule, file name), so an answer cannot be read
-//! back off disk, except the ones the scenario itself edits in.
+//! back off disk, except the ones the scenario itself edits in. The hard fixture adds an
+//! AGENTS.md rule, much larger generated files, and two values that exist only in a tool result.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
+
+use super::scenario::FixtureKind;
 
 const CARGO_TOML: &str =
     "[package]\nname = \"hdrparse\"\nversion = \"0.4.1\"\nedition = \"2021\"\n\n[dependencies]\n";
@@ -101,6 +104,47 @@ const SERVER_RS: &str = "use crate::config::Config;\nuse crate::parser::{parse_h
 
 const CHECK_SH: &str = "#!/usr/bin/env bash\nif ! grep -q 'MAX_HEADER_BYTES: usize = 16384' src/limits.rs; then\n  echo \"ERROR E-4172: header length limit too small: MAX_HEADER_BYTES (8192) rejects valid 12 KiB cookies\" >&2\n  exit 1\nfi\necho \"check ok\"\n";
 
+const AGENTS_MD: &str = "# Project rules\n\n- Every new function needs a doc comment whose first line starts with `Forge:`, for example `/// Forge: parses one header line.`\n- Do not add dependencies without asking.\n";
+
+const RUN_CHECKS_SH: &str = "#!/usr/bin/env bash\nfor i in $(seq 1 220); do\n  n=$(printf '%03d' \"$i\")\n  if [ \"$i\" -eq 137 ]; then\n    echo \"FAIL case_$n: checksum mismatch expected=0xBEEF42 got=0xC0FFEE\"\n  else\n    echo \"ok case_$n (0.0$((i % 9 + 1))s)\"\n  fi\ndone\necho \"summary: 219 passed, 1 failed\"\nexit 1\n";
+
+/// 400 rows; the quota of `eu-west-9` (row 233) appears nowhere else.
+fn region_table() -> String {
+    (0..400)
+        .map(|i| {
+            if i == 233 {
+                "eu-west-9,quota=7311,tier=premium\n".to_string()
+            } else {
+                format!(
+                    "region-{i:03},quota={},tier={}\n",
+                    (i * 97 + 13) % 6000 + 1000,
+                    ["standard", "premium", "trial"][i % 3]
+                )
+            }
+        })
+        .collect()
+}
+
+/// 700 log lines, about 12k tokens.
+fn events_log() -> String {
+    let levels = ["INFO", "INFO", "WARN", "INFO", "ERROR", "INFO"];
+    (0..700)
+        .map(|i| {
+            format!(
+                "2026-10-{:02} {:02}:{:02}:{:02} level={} component=svc-{} msg=\"handled request {} in {} ms\"\n",
+                i % 28 + 1,
+                i % 12 + 10,
+                i % 60,
+                (i * 7) % 60,
+                levels[i % levels.len()],
+                i % 11,
+                i,
+                (i * 13) % 250
+            )
+        })
+        .collect()
+}
+
 fn status_codes() -> String {
     (0..300)
         .map(|i| {
@@ -130,8 +174,8 @@ fn tables() -> String {
         .collect()
 }
 
-fn files() -> Vec<(&'static str, String)> {
-    vec![
+fn files(kind: FixtureKind) -> Vec<(&'static str, String)> {
+    let mut files = vec![
         ("Cargo.toml", CARGO_TOML.into()),
         ("README.md", README.into()),
         (".gitignore", "target/\n.forge/\n".into()),
@@ -145,7 +189,16 @@ fn files() -> Vec<(&'static str, String)> {
         ("scripts/check.sh", CHECK_SH.into()),
         ("data/status_codes.txt", status_codes()),
         ("docs/NOTES.md", notes()),
-    ]
+    ];
+    if kind == FixtureKind::Hard {
+        files.extend([
+            ("AGENTS.md", AGENTS_MD.to_string()),
+            ("scripts/run_checks.sh", RUN_CHECKS_SH.to_string()),
+            ("data/region_table.csv", region_table()),
+            ("data/events.log", events_log()),
+        ]);
+    }
+    files
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<()> {
@@ -154,8 +207,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<()> {
 
 /// Write the fixture into `dir` and make it a git repo with one baseline commit, so the
 /// "commit your changes" probe has something to commit onto.
-pub(super) fn create(dir: &Path) -> Result<()> {
-    for (rel, body) in files() {
+pub(super) fn create(dir: &Path, kind: FixtureKind) -> Result<()> {
+    for (rel, body) in files(kind) {
         let path = dir.join(rel);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -175,22 +228,30 @@ pub(super) fn create(dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    const PLANTED: [&str; 8] = [
+        "47123",
+        "settings.toml",
+        "JIRA-123",
+        "validate_header_len",
+        "retry_budget",
+        "next_token",
+        "03:15",
+        "0.4.2",
+    ];
+
     #[test]
-    fn the_fixture_builds_a_committed_repo_without_stating_any_planted_fact() {
-        let tmp = tempfile::tempdir().unwrap();
-        create(tmp.path()).unwrap();
-        assert!(tmp.path().join("src/parser.rs").is_file());
-        let log = crate::bench::run_git(tmp.path(), &["log", "--format=%s"]).unwrap();
-        assert_eq!(log.trim(), "baseline");
-        for (rel, body) in files() {
-            for planted in [
-                "47123",
-                "settings.toml",
-                "JIRA-123",
-                "validate_header_len",
-                "next_token",
-            ] {
-                assert!(!body.contains(planted), "{rel} must not contain {planted}");
+    fn the_fixtures_build_committed_repos_without_stating_any_planted_fact() {
+        for kind in [FixtureKind::Standard, FixtureKind::Hard] {
+            let tmp = tempfile::tempdir().unwrap();
+            create(tmp.path(), kind).unwrap();
+            assert!(tmp.path().join("src/parser.rs").is_file());
+            let log = crate::bench::run_git(tmp.path(), &["log", "--format=%s"]).unwrap();
+            assert_eq!(log.trim(), "baseline");
+            for (rel, body) in files(kind) {
+                for planted in PLANTED {
+                    // The standard fixture's Cargo.toml predates the 0.4.2 bump; 0.4.1 is fine.
+                    assert!(!body.contains(planted), "{rel} must not contain {planted}");
+                }
             }
         }
         assert!(
@@ -198,5 +259,29 @@ mod tests {
             "the baseline parser obeys its own rule"
         );
         assert!(status_codes().contains("0042,STATUS_0042"));
+    }
+
+    #[test]
+    fn the_hard_fixture_holds_the_agents_rule_and_the_tool_only_values_exactly_once() {
+        let hard = files(FixtureKind::Hard);
+        let standard = files(FixtureKind::Standard);
+        assert!(standard.iter().all(|(rel, _)| *rel != "AGENTS.md"));
+        let all: String = hard.iter().map(|(_, b)| b.as_str()).collect();
+        assert!(AGENTS_MD.contains("Forge:"));
+        assert_eq!(
+            all.matches("7311").count(),
+            1,
+            "the eu-west-9 quota is unique"
+        );
+        assert_eq!(all.matches("BEEF42").count(), 1);
+        assert!(region_table().lines().count() == 400);
+        let big: usize = ["data/region_table.csv", "data/events.log"]
+            .iter()
+            .map(|name| hard.iter().find(|(r, _)| r == name).unwrap().1.len())
+            .sum();
+        assert!(
+            big > 60_000,
+            "bulk files must be large enough to stress pruning: {big}"
+        );
     }
 }

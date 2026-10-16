@@ -1,0 +1,655 @@
+{
+  "scenario": "hard",
+  "compact_cap": 24000,
+  "model": "inferhub::glm-5.3-flash",
+  "turns_scale": 1.0,
+  "scenario_turns": 38,
+  "failed_turns": 0,
+  "compactions": [
+    {
+      "label": "mid-scenario",
+      "messages_before": 24,
+      "messages_after": 20
+    },
+    {
+      "label": "near-end",
+      "messages_before": 33,
+      "messages_after": 7
+    }
+  ],
+  "compaction_stats": {
+    "auto": 5,
+    "manual": 2,
+    "during_probes": 0,
+    "thin_summary_warnings": 0,
+    "summary_models": {
+      "gemini::gemini-2.5-flash": 5,
+      "inferhub::glm-5.3-flash": 2
+    }
+  },
+  "compaction_events": [
+    {
+      "auto": true,
+      "messages_before": 106,
+      "messages_after": 7,
+      "summary_model": "gemini::gemini-2.5-flash"
+    },
+    {
+      "auto": true,
+      "messages_before": 42,
+      "messages_after": 7,
+      "summary_model": "gemini::gemini-2.5-flash"
+    },
+    {
+      "auto": true,
+      "messages_before": 25,
+      "messages_after": 7,
+      "summary_model": "gemini::gemini-2.5-flash"
+    },
+    {
+      "auto": false,
+      "messages_before": 24,
+      "messages_after": 20,
+      "summary_model": "gemini::gemini-2.5-flash"
+    },
+    {
+      "auto": true,
+      "messages_before": 170,
+      "messages_after": 7,
+      "summary_model": "gemini::gemini-2.5-flash"
+    },
+    {
+      "auto": true,
+      "messages_before": 60,
+      "messages_after": 10,
+      "summary_model": "inferhub::glm-5.3-flash"
+    },
+    {
+      "auto": false,
+      "messages_before": 33,
+      "messages_after": 7,
+      "summary_model": "inferhub::glm-5.3-flash"
+    }
+  ],
+  "resumed": true,
+  "after_compaction": {
+    "total": {
+      "passed": 12,
+      "total": 24
+    },
+    "by_category": {
+      "constraint": {
+        "passed": 0,
+        "total": 2
+      },
+      "correction": {
+        "passed": 1,
+        "total": 2
+      },
+      "decision": {
+        "passed": 1,
+        "total": 2
+      },
+      "location": {
+        "passed": 1,
+        "total": 2
+      },
+      "error_fix": {
+        "passed": 1,
+        "total": 2
+      },
+      "pending": {
+        "passed": 3,
+        "total": 3
+      },
+      "number": {
+        "passed": 1,
+        "total": 3
+      },
+      "behavior": {
+        "passed": 1,
+        "total": 3
+      },
+      "tool_result": {
+        "passed": 1,
+        "total": 2
+      },
+      "work_state": {
+        "passed": 1,
+        "total": 2
+      },
+      "task_list": {
+        "passed": 1,
+        "total": 1
+      }
+    },
+    "by_zone": {
+      "plant": {
+        "passed": 4,
+        "total": 14
+      },
+      "work": {
+        "passed": 1,
+        "total": 2
+      },
+      "late": {
+        "passed": 7,
+        "total": 8
+      }
+    },
+    "tool_assisted": 0
+  },
+  "after_resume": {
+    "total": {
+      "passed": 12,
+      "total": 24
+    },
+    "by_category": {
+      "constraint": {
+        "passed": 0,
+        "total": 2
+      },
+      "correction": {
+        "passed": 1,
+        "total": 2
+      },
+      "decision": {
+        "passed": 1,
+        "total": 2
+      },
+      "location": {
+        "passed": 1,
+        "total": 2
+      },
+      "error_fix": {
+        "passed": 1,
+        "total": 2
+      },
+      "pending": {
+        "passed": 2,
+        "total": 3
+      },
+      "number": {
+        "passed": 1,
+        "total": 3
+      },
+      "behavior": {
+        "passed": 2,
+        "total": 3
+      },
+      "tool_result": {
+        "passed": 1,
+        "total": 2
+      },
+      "work_state": {
+        "passed": 1,
+        "total": 2
+      },
+      "task_list": {
+        "passed": 1,
+        "total": 1
+      }
+    },
+    "by_zone": {
+      "plant": {
+        "passed": 4,
+        "total": 14
+      },
+      "work": {
+        "passed": 1,
+        "total": 2
+      },
+      "late": {
+        "passed": 7,
+        "total": 8
+      }
+    },
+    "tool_assisted": 0
+  },
+  "usage": {
+    "input_tokens": 3376328,
+    "output_tokens": 48196,
+    "cached_input_tokens": 2842740,
+    "reasoning_tokens": 19103,
+    "model_calls": 291,
+    "tool_calls": 122,
+    "cost_usd": 0.07105905669999982
+  },
+  "wall_secs": 2485.836631567,
+  "session_id": "37aeee60-6050-45ca-8cf5-3d1379fb2714",
+  "workdir": "/tmp/forge-recall-ws-IAvoY6",
+  "probes": [
+    {
+      "id": "commit_prefix",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "Our conversation never established a repo-specific commit prefix requirement — no prefix was agreed with you. By my default convention I've been using, commit messages start with a conventional-commit...",
+      "tool_calls": 0
+    },
+    {
+      "id": "data_readonly",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "You never said any directory must never be edited — no such instruction appears anywhere in our conversation. The only standing restrictions we've discussed are the tabs-not-spaces preference for new ...",
+      "tool_calls": 0
+    },
+    {
+      "id": "backoff_decision",
+      "category": "decision",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "We didn't decide a retry policy together; what exists is the code in `src/limits.rs`, where `retry_budget` caps retries at 5 (a hard safety cap so a failing peer can't be retried indefinitely), and th...",
+      "tool_calls": 0
+    },
+    {
+      "id": "added_function",
+      "category": "location",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "You never asked me to add a function to a file in our conversation so far. The closest similar request was to add an empty-header regression test, which went into `tests/header_empty.rs` (alongside th...",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_code",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "`scripts/check.sh` never printed an error code — it passed every time we ran it. The failure came from the other script, `scripts/run_checks.sh`, which printed `FAIL case_137: checksum mismatch expect...",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_fix_value",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "We raised `MAX_HEADER_BYTES` in `src/limits.rs` from 8192 to 16384, which fixed the `ERROR E-4172: header length limit too small (8192 vs 12 KiB cookies)` failure with the valid 12 KiB cookie case.",
+      "tool_calls": 0
+    },
+    {
+      "id": "staging_port",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "You never mentioned a staging server or a port in our conversation — the only port-related thing we discussed was the task to mark \"port lexer fixtures\" done, which was about porting fixtures, not a n...",
+      "tool_calls": 0
+    },
+    {
+      "id": "latency_target",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "You never mentioned a p99 latency target in our conversation — no latency number of any kind came up. The changelog section in docs/NOTES.md stays open only because you explicitly deferred it.",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_test",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You never deferred a test — the only \"later, not now\" item was the changelog section in docs/NOTES.md. The empty-header regression test in tests/header_empty.rs was implemented immediately, and the st...",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_version",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You had me bump the crate to version 0.4.2 in Cargo.toml, which is done (along with the empty-header regression test). The changelog section in docs/NOTES.md stays open only because you deferred it, a...",
+      "tool_calls": 0
+    },
+    {
+      "id": "config_filename",
+      "category": "correction",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "No config file name was ever decided in our conversation — the only config-related item is the existing `src/config.rs` module, which I read but never saw a filename requirement about.",
+      "tool_calls": 0
+    },
+    {
+      "id": "region_quota",
+      "category": "tool_result",
+      "zone": "work",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "No region table was ever read in our conversation — the only tables file we touched was `src/tables.rs`, which contains 160 u16 constants like `TABLE_ENTRY_159`, not regions or quotas.",
+      "tool_calls": 0
+    },
+    {
+      "id": "check_output",
+      "category": "tool_result",
+      "zone": "work",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "The `scripts/run_checks.sh` failure printed `FAIL case_137: checksum mismatch expected=0xBEEF42 got=0xC0FFEE`, so it expected `0xBEEF42`. That case is still unfixed.",
+      "tool_calls": 0
+    },
+    {
+      "id": "indent_override",
+      "category": "correction",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "Tabs, not spaces — you set that as a standing preference for all new Rust code, and I applied it to the TAB-indented test functions in `tests/header_empty.rs`.",
+      "tool_calls": 0
+    },
+    {
+      "id": "tasks_open",
+      "category": "task_list",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "write migration notes\nadd changelog section to docs/NOTES.md",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_changelog",
+      "category": "pending",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You deferred adding a changelog section to `docs/NOTES.md` — you said to do it later, not now, so it's still pending on the task list.",
+      "tool_calls": 0
+    },
+    {
+      "id": "rollout_window",
+      "category": "number",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "You noted a production rollout window at 03:15 UTC, and instructed that no changes should be made before then (read-only lookups are fine; current time is still before the window).",
+      "tool_calls": 0
+    },
+    {
+      "id": "ascii_decision",
+      "category": "decision",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "We decided the lexer stays ASCII-only: a non-ASCII byte in a header must be rejected with an error rather than passed through as a Word token (which is what `src/lexer.rs` currently does). That decisi...",
+      "tool_calls": 0
+    },
+    {
+      "id": "renamed_helper",
+      "category": "location",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "`tok_next` was renamed to `next_token` in `src/lexer.rs`, including all 5 call sites (e.g. `src/parser.rs`), landing in commit `6257eae` with no remaining occurrences of the old name.",
+      "tool_calls": 0
+    },
+    {
+      "id": "work_state_files",
+      "category": "work_state",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "missing 1 of 6: src/parser.rs | reply: Files changed so far: `src/limits.rs` (MAX_HEADER_BYTES 8192→16384), `src/lexer.rs` (`tok_next`→`next_token` rename), `Cargo.toml` (version ...",
+      "tool_calls": 0
+    },
+    {
+      "id": "work_state_pending",
+      "category": "work_state",
+      "zone": "late",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "all 3 pending item(s) named | reply: Files changed so far: `src/limits.rs` (MAX_HEADER_BYTES 8192→16384), `src/lexer.rs` (`tok_next`→`next_token` rename), `Cargo.toml` (version ...",
+      "tool_calls": 0
+    },
+    {
+      "id": "obey_agents_doc_rule",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "file violates the rule | reply: Implemented and committed (`c99bdd0`): `pub fn retry_after_secs(raw: &str) -> Option<u32>` in `src/server.rs:9` trims th...",
+      "tool_calls": 6
+    },
+    {
+      "id": "obey_latest_indent",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": true,
+      "observed": "file ok | reply: Created `src/digits.rs` with `count_digits` (counts bytes where `is_ascii_digit()`, TAB-indented per your preference), w...",
+      "tool_calls": 3
+    },
+    {
+      "id": "obey_commit_prefix",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_compaction",
+      "passed": false,
+      "observed": "commit: fix: raise MAX_HEADER_BYTES to 16384 for 12 KiB cookie headers",
+      "tool_calls": 3
+    },
+    {
+      "id": "commit_prefix",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "Every commit message must start with a conventional-commit type prefix — one of `feat`, `fix`, `refactor`, `docs`, `test`, or `chore` (e.g. `fix: reject non-ASCII header bytes`). This applies to commi...",
+      "tool_calls": 0
+    },
+    {
+      "id": "data_readonly",
+      "category": "constraint",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "Nothing in our conversation so far records any directory you said must never be edited or a reason for it — the standing constraints I have are only the ones you gave directly (tabs for new Rust code,...",
+      "tool_calls": 0
+    },
+    {
+      "id": "backoff_decision",
+      "category": "decision",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "We decided on a bounded retry budget implemented in `src/limits.rs`, where `retry_budget` caps retries at 5, so a request can be retried at most five times before giving up. The rationale was to keep ...",
+      "tool_calls": 0
+    },
+    {
+      "id": "added_function",
+      "category": "location",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "From our conversation, you never explicitly asked me to add a brand-new function — the closest things were renaming `tok_next` to `next_token` in `src/lexer.rs` (done) and deciding that `next_token` i...",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_code",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "`scripts/check.sh` didn't print an error when we ran it — it passed; the failure we saw came from `scripts/run_checks.sh`, which printed `FAIL case_137: checksum mismatch expected=0xBEEF42 got=0xC0FFE...",
+      "tool_calls": 0
+    },
+    {
+      "id": "error_fix_value",
+      "category": "error_fix",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "We raised `MAX_HEADER_BYTES` in `src/limits.rs` from 8192 to **16384** to fix error E-4172 (12 KiB cookie headers exceeded the old limit).",
+      "tool_calls": 0
+    },
+    {
+      "id": "staging_port",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "I don't have a staging-server port in our conversation — the only staging-related detail I noted was a rollout window of 03:15 UTC, not a port number. The task list is unaffected by this question, and...",
+      "tool_calls": 0
+    },
+    {
+      "id": "latency_target",
+      "category": "number",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "You never mentioned a p99 latency target in our conversation — the only latency-adjacent items were the retry budget and the 03:15 UTC rollout window, so I can't quote a target without making it up. N...",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_test",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "No test was deferred with a \"later, not now\" instruction as far as our conversation shows — the only item you explicitly deferred was adding a changelog section to `docs/NOTES.md`, which isn't a test....",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_version",
+      "category": "pending",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You said to bump the crate to **0.4.2** once the limits change landed — that bump is already applied to Cargo.toml and marked done on the task list, so I'm leaving the list unchanged. (FYI, the task l...",
+      "tool_calls": 0
+    },
+    {
+      "id": "config_filename",
+      "category": "correction",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "I don't have that on record: our conversation only noted that `src/config.rs` exists (336 bytes) but never covered which config file name the loader reads, so I can't answer this from memory. (The que...",
+      "tool_calls": 0
+    },
+    {
+      "id": "region_quota",
+      "category": "tool_result",
+      "zone": "work",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "No region table or eu-west-9 quota ever came up in our conversation — the only tables we discussed were src/tables.rs (numeric constants) and data/status_codes.txt, so I can't give you that quota. Als...",
+      "tool_calls": 0
+    },
+    {
+      "id": "check_output",
+      "category": "tool_result",
+      "zone": "work",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "Case_137 expected checksum 0xBEEF42, but run_checks.sh reported it got 0xC0FFEE instead — that failure is still unfixed. (No tools used, and your message doesn't change the task list, so it stays as-i...",
+      "tool_calls": 0
+    },
+    {
+      "id": "indent_override",
+      "category": "correction",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You asked that all new Rust code use TABS for indentation, not spaces.",
+      "tool_calls": 0
+    },
+    {
+      "id": "tasks_open",
+      "category": "task_list",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "Still open: \"write migration notes\" and \"add changelog section to docs/NOTES.md\" (the changelog one is deferred at your request, the migration-notes one is pending as well).",
+      "tool_calls": 0
+    },
+    {
+      "id": "pending_changelog",
+      "category": "pending",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You deferred adding a changelog section to `docs/NOTES.md` — you said not now, just keep it on the task list, and it's still pending until you lift that.",
+      "tool_calls": 0
+    },
+    {
+      "id": "rollout_window",
+      "category": "number",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "You said the production rollout window is **03:15 UTC**, and I'm holding off on any code changes until then (it's currently 02:57 +02:00). No task-list changes from this message.",
+      "tool_calls": 0
+    },
+    {
+      "id": "ascii_decision",
+      "category": "decision",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "We decided the lexer stays ASCII-only: any non-ASCII byte in a header should be rejected with an error rather than accepted as part of a `Word` token, to keep the parser strict and the behavior predic...",
+      "tool_calls": 0
+    },
+    {
+      "id": "renamed_helper",
+      "category": "location",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "`tok_next` was renamed to `next_token`, done in `src/lexer.rs` (function definition) plus all its call sites, notably `src/parser.rs`. The task list is unaffected by this recall question, so it stays ...",
+      "tool_calls": 0
+    },
+    {
+      "id": "work_state_files",
+      "category": "work_state",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "missing 2 of 6: src/limits.rs, src/parser.rs | reply: Files changed so far: `src/lexer.rs` (renamed `tok_next` → `next_token`), `src/lib.rs` (new), `Cargo.toml` (version 0.4.2 + `[lib]` target),...",
+      "tool_calls": 0
+    },
+    {
+      "id": "work_state_pending",
+      "category": "work_state",
+      "zone": "late",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "all 3 pending item(s) named | reply: Files changed so far: `src/lexer.rs` (renamed `tok_next` → `next_token`), `src/lib.rs` (new), `Cargo.toml` (version 0.4.2 + `[lib]` target),...",
+      "tool_calls": 0
+    },
+    {
+      "id": "obey_agents_doc_rule",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "file ok | reply: Added `retry_after_secs` to `src/server.rs:10` (trim + `u32` parse, `None` on negatives/overflow/garbage) with a tab-ind...",
+      "tool_calls": 9
+    },
+    {
+      "id": "obey_latest_indent",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": true,
+      "observed": "file ok | reply: Created `src/digits.rs` with `count_digits` (tab-indented, `Forge:` doc comment, plus two unit tests) and registered it ...",
+      "tool_calls": 6
+    },
+    {
+      "id": "obey_commit_prefix",
+      "category": "behavior",
+      "zone": "plant",
+      "phase": "after_resume",
+      "passed": false,
+      "observed": "commit: fix: raise header byte limit to 16 KiB and add retry_budget cap",
+      "tool_calls": 3
+    }
+  ]
+}

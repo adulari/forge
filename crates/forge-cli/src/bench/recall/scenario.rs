@@ -8,6 +8,8 @@
 
 use serde::Serialize;
 
+mod hard;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum Category {
@@ -19,6 +21,12 @@ pub(super) enum Category {
     Pending,
     Number,
     Behavior,
+    /// A value that was only ever visible in a tool result (a file read, command output).
+    ToolResult,
+    /// "Which files have you changed and what is left?", scored against the real git state.
+    WorkState,
+    /// The `update_tasks` list and which tasks are still open.
+    TaskList,
 }
 
 impl Category {
@@ -32,6 +40,9 @@ impl Category {
             Self::Pending => "pending",
             Self::Number => "number",
             Self::Behavior => "behavior",
+            Self::ToolResult => "tool_result",
+            Self::WorkState => "work_state",
+            Self::TaskList => "task_list",
         }
     }
 }
@@ -47,13 +58,16 @@ pub(super) enum Zone {
     Late,
     /// Tool work that pushes the late facts out of the kept tail before compaction #2.
     Wrap,
+    /// Not a user turn: the prompt is the label of a manual compaction at this point.
+    Marker,
 }
 
 impl Zone {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Plant => "early",
-            Self::Work | Self::Wrap => "filler",
+            Self::Work | Self::Wrap => "work",
+            Self::Marker => "marker",
             Self::Late => "late",
         }
     }
@@ -78,6 +92,9 @@ pub(super) enum Check {
     },
     /// The model was asked to commit; a new commit must exist and its subject must match.
     CommitSubject(Matcher),
+    /// "Which files have you changed and what is left?" Two verdicts: every file in the actual
+    /// `git status` is named in the reply, and every pending matcher hits.
+    WorkState { pending: &'static [Matcher] },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,7 +140,7 @@ pub(super) const ASK_PREFIX: &str =
     "Memory check, answer from our conversation so far. Do not use \
 any tools and do not open any files. Reply in one or two sentences. ";
 
-pub(super) static SCENARIO: &[Turn] = &[
+pub(super) static STANDARD_TURNS: &[Turn] = &[
     Turn {
         zone: Zone::Plant,
         prompt: "We are working on hdrparse, a small HTTP header parser crate in this directory. \
@@ -322,6 +339,7 @@ in src/server.rs and confirm in one sentence.",
         "Search the repo for the word TODO (grep -rn) and tell me how many matching lines there \
 are. One sentence.",
     ),
+    turn(Zone::Marker, "mid-scenario"),
     Turn {
         zone: Zone::Late,
         prompt: "New rule from here on: every new public function needs a `# Errors` section in \
@@ -374,11 +392,12 @@ headers. Do not change anything, just confirm in one sentence.",
         Zone::Wrap,
         "Read docs/NOTES.md and src/tables.rs and tell me which of the two is longer. One sentence.",
     ),
+    turn(Zone::Marker, "near-end"),
 ];
 
 /// Probes that need the model to do work; run after the question probes so a stray edit cannot
 /// leak into an answer.
-pub(super) static BEHAVIOR_PROBES: &[Probe] = &[
+pub(super) static STANDARD_BEHAVIOR: &[Probe] = &[
     Probe {
         id: "obey_unwrap_rule",
         category: Category::Behavior,
@@ -408,24 +427,69 @@ src/parser.rs that parses a Content-Length header value. Confirm in one sentence
 ];
 
 /// Filler turns for `--turns-scale` above 1: cycled with a pass number appended.
-pub(super) static EXTRA_WORK: &[&str] = &[
+pub(super) static STANDARD_EXTRAS: &[&str] = &[
     "Read src/lexer.rs and count its `fn` items. One sentence.",
     "Read src/config.rs and name its first struct. One sentence.",
     "Read src/limits.rs and tell me every constant it defines. One sentence.",
     "Read README.md and quote its first line. One sentence.",
 ];
 
-pub(super) fn all_probes() -> impl Iterator<Item = &'static Probe> {
-    SCENARIO
-        .iter()
-        .flat_map(|t| t.probes.iter())
-        .chain(BEHAVIOR_PROBES.iter())
+/// Which scenario `--scenario` selects.
+pub(super) struct Scenario {
+    pub name: &'static str,
+    pub turns: &'static [Turn],
+    /// Probes that need the model to do work; run after the question probes.
+    pub behavior: &'static [Probe],
+    /// Filler for `--turns-scale` above 1, cycled with a pass number appended.
+    pub extras: &'static [&'static str],
+    pub fixture: FixtureKind,
+    /// Auto-compaction ceiling (tokens) written into the temp config, so the real auto path fires
+    /// under pressure; `None` leaves the model's own ceiling.
+    pub compact_cap: Option<u64>,
 }
 
-/// The zone of the turn that states `probe_id`; behavior probes belong to no turn and read as early.
-pub(super) fn zone_of(probe_id: &str) -> Zone {
-    SCENARIO
-        .iter()
-        .find(|t| t.probes.iter().any(|p| p.id == probe_id))
-        .map_or(Zone::Plant, |t| t.zone)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FixtureKind {
+    Standard,
+    Hard,
+}
+
+pub(super) static STANDARD: Scenario = Scenario {
+    name: "standard",
+    turns: STANDARD_TURNS,
+    behavior: STANDARD_BEHAVIOR,
+    extras: STANDARD_EXTRAS,
+    fixture: FixtureKind::Standard,
+    compact_cap: None,
+};
+
+pub(super) static HARD: Scenario = Scenario {
+    name: "hard",
+    turns: hard::HARD_TURNS,
+    behavior: hard::HARD_BEHAVIOR,
+    extras: hard::HARD_EXTRAS,
+    fixture: FixtureKind::Hard,
+    compact_cap: Some(24_000),
+};
+
+impl Scenario {
+    pub(super) fn by_name(name: &str) -> Option<&'static Scenario> {
+        [&STANDARD, &HARD].into_iter().find(|s| s.name == name)
+    }
+
+    pub(super) fn probes(&self) -> impl Iterator<Item = &'static Probe> {
+        self.turns
+            .iter()
+            .flat_map(|t| t.probes.iter())
+            .chain(self.behavior.iter())
+    }
+
+    /// The zone of the turn that states `probe_id`; behavior probes belong to no turn and read as
+    /// early.
+    pub(super) fn zone_of(&self, probe_id: &str) -> Zone {
+        self.turns
+            .iter()
+            .find(|t| t.probes.iter().any(|p| p.id == probe_id))
+            .map_or(Zone::Plant, |t| t.zone)
+    }
 }

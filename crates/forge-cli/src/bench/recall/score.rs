@@ -140,13 +140,70 @@ pub(super) struct CompactionRecord {
     pub error: Option<String>,
 }
 
+/// One compaction the session itself reported (manual or automatic), as seen through its events.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(super) struct CompactionEvent {
+    pub auto: bool,
+    pub messages_before: usize,
+    pub messages_after: usize,
+    /// The model that wrote the summary, from the session's "summary via <model>" note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_model: Option<String>,
+}
+
+/// Every compaction event of a run, plus the summaries the session rejected as too thin.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(super) struct CompactionLog {
+    pub events: Vec<CompactionEvent>,
+    pub thin_summary_warnings: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub(super) struct CompactionStats {
+    pub auto: usize,
+    pub manual: usize,
+    /// Compactions that fired while the probes ran (they change what later probes see).
+    pub during_probes: usize,
+    pub thin_summary_warnings: usize,
+    pub summary_models: BTreeMap<String, usize>,
+}
+
+impl CompactionStats {
+    /// `events` is the whole log; the first `scenario_events` of them happened before the probes.
+    pub(super) fn from_log(log: &CompactionLog, scenario_events: usize) -> Self {
+        let mut stats = Self {
+            thin_summary_warnings: log.thin_summary_warnings,
+            during_probes: log.events.len().saturating_sub(scenario_events),
+            ..Self::default()
+        };
+        for event in log.events.iter().take(scenario_events) {
+            if event.auto {
+                stats.auto += 1;
+            } else {
+                stats.manual += 1;
+            }
+        }
+        for event in &log.events {
+            let model = event.summary_model.as_deref().unwrap_or("unknown");
+            *stats.summary_models.entry(model.to_string()).or_default() += 1;
+        }
+        stats
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct Report {
+    pub scenario: String,
+    /// The auto-compaction ceiling the run used, in tokens; absent when the model's own applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_cap: Option<u64>,
     pub model: String,
     pub turns_scale: f64,
     pub scenario_turns: usize,
     pub failed_turns: usize,
     pub compactions: Vec<CompactionRecord>,
+    pub compaction_stats: CompactionStats,
+    pub compaction_events: Vec<CompactionEvent>,
     pub resumed: bool,
     pub after_compaction: PhaseScore,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,7 +218,7 @@ pub(super) struct Report {
 
 #[cfg(test)]
 mod tests {
-    use super::super::scenario::all_probes;
+    use super::super::scenario::{Check, HARD, STANDARD};
     use super::*;
 
     fn result(id: &str, category: Category, phase: Phase, passed: bool, tools: u64) -> ProbeResult {
@@ -260,19 +317,54 @@ mod tests {
 
     #[test]
     fn every_probe_matcher_compiles_and_separates_its_good_and_bad_sample() {
-        use super::super::scenario::Check;
-        for p in all_probes() {
-            let matcher = match p.check {
-                Check::Answer(m) | Check::CommitSubject(m) => m,
-                Check::File { matcher, .. } => matcher,
-            };
-            assert!(
-                matcher.patterns_compile(),
-                "{}: pattern does not compile",
-                p.id
-            );
-            assert!(matcher.accepts(p.good), "{}: good sample rejected", p.id);
-            assert!(!matcher.accepts(p.bad), "{}: bad sample accepted", p.id);
+        for scenario in [&STANDARD, &HARD] {
+            for p in scenario.probes() {
+                let matchers: Vec<Matcher> = match p.check {
+                    Check::Answer(m) | Check::CommitSubject(m) => vec![m],
+                    Check::File { matcher, .. } => vec![matcher],
+                    Check::WorkState { pending } => {
+                        // The file half is checked against git in the driver tests; the pending
+                        // half is a plain matcher list that the good sample satisfies.
+                        assert!(pending.iter().all(|m| m.patterns_compile()), "{}", p.id);
+                        assert!(pending.iter().all(|m| m.accepts(p.good)), "{}: good", p.id);
+                        assert!(!pending.iter().all(|m| m.accepts(p.bad)), "{}: bad", p.id);
+                        continue;
+                    }
+                };
+                for matcher in matchers {
+                    assert!(
+                        matcher.patterns_compile(),
+                        "{}: pattern does not compile",
+                        p.id
+                    );
+                    assert!(matcher.accepts(p.good), "{}: good sample rejected", p.id);
+                    assert!(!matcher.accepts(p.bad), "{}: bad sample accepted", p.id);
+                }
+            }
         }
+    }
+
+    #[test]
+    fn compaction_stats_split_auto_from_manual_and_count_summary_models() {
+        let event = |auto, model: Option<&str>| CompactionEvent {
+            auto,
+            messages_before: 30,
+            messages_after: 8,
+            summary_model: model.map(String::from),
+        };
+        let log = CompactionLog {
+            events: vec![
+                event(true, Some("m1")),
+                event(true, Some("m1")),
+                event(false, Some("m2")),
+                event(true, None),
+            ],
+            thin_summary_warnings: 1,
+        };
+        let stats = CompactionStats::from_log(&log, 3);
+        assert_eq!((stats.auto, stats.manual, stats.during_probes), (2, 1, 1));
+        assert_eq!(stats.summary_models["m1"], 2);
+        assert_eq!(stats.summary_models["unknown"], 1);
+        assert_eq!(stats.thin_summary_warnings, 1);
     }
 }

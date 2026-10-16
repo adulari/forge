@@ -90,9 +90,18 @@ pub(crate) enum BenchCmd {
     /// store, then probed one question per fact and scored by regex. Runs in a throwaway
     /// workspace, store and config (docs/benchmarks/recall-baseline-2026-10.md).
     Recall {
+        /// `standard` (23 turns, manual compaction only) or `hard` (about 40 turns with large tool
+        /// outputs under a low auto-compaction ceiling, facts only in tool results, an AGENTS.md
+        /// rule, an overridden instruction, a work-state and a task-list probe).
+        #[arg(long, default_value = "standard", value_parser = ["standard", "hard"])]
+        scenario: String,
         /// Model to pin (provider::model). Defaults to `inferhub::glm-5.3-flash`.
         #[arg(long)]
         model: Option<String>,
+        /// Auto-compaction ceiling in tokens for the pinned model (the hard scenario defaults to
+        /// 24000; `0` leaves the model's own ceiling).
+        #[arg(long)]
+        compact_cap: Option<u64>,
         /// Use the offline mock provider: exercises the plumbing, recall is meaningless.
         #[arg(long)]
         mock: bool,
@@ -102,7 +111,7 @@ pub(crate) enum BenchCmd {
         /// Stop after the post-compaction probes; do not resume and probe again.
         #[arg(long)]
         skip_resume: bool,
-        /// Keep the temp workspace and print its path.
+        /// Keep the temp workspace, store and config and print their paths.
         #[arg(long)]
         keep_workdir: bool,
         /// Print the report as JSON on stdout instead of the table.

@@ -150,3 +150,44 @@ fn bench_recall_runs_the_scenario_end_to_end_against_the_mock_provider() {
         "the bench uses its own temp config, never the caller's"
     );
 }
+
+#[test]
+fn bench_recall_hard_scenario_runs_against_the_mock_and_reports_compaction_stats() {
+    let tmp = tempfile::tempdir().expect("temp workspace");
+    let output = forge(tmp.path())
+        .args([
+            "bench",
+            "recall",
+            "--scenario",
+            "hard",
+            "--mock",
+            "--json",
+            "--skip-resume",
+            "--turns-scale",
+            "0",
+        ])
+        .output()
+        .expect("spawn forge");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "forge failed: {stderr}");
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert_eq!(v["scenario"], "hard");
+    assert!(v.get("after_resume").is_none());
+    assert_eq!(v["compaction_stats"]["manual"], 2, "{v}");
+    assert!(v["compaction_stats"]["auto"].is_u64(), "{v}");
+    let ids: Vec<&str> = v["probes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "work_state_files",
+        "work_state_pending",
+        "region_quota",
+        "tasks_open",
+        "obey_agents_doc_rule",
+    ] {
+        assert!(ids.contains(&expected), "{expected} missing from {ids:?}");
+    }
+}

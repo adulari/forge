@@ -20,12 +20,17 @@ mod score;
 
 use driver::Subject;
 use live::{IsolatedEnv, LiveSubject, Price};
-use score::{score_phase, Phase, Report};
+use scenario::Scenario;
+use score::{score_phase, CompactionStats, Phase, Report};
 
 pub(crate) const DEFAULT_MODEL: &str = "inferhub::glm-5.3-flash";
 
 pub(crate) struct RecallOptions {
+    /// `standard` or `hard`.
+    pub scenario: String,
     pub model: Option<String>,
+    /// Auto-compaction ceiling in tokens for the pinned model; overrides the scenario's own.
+    pub compact_cap: Option<u64>,
     /// Offline deterministic provider: exercises the plumbing, recall is meaningless.
     pub mock: bool,
     pub turns_scale: f64,
@@ -37,6 +42,9 @@ pub(crate) struct RecallOptions {
 }
 
 pub(crate) async fn run_recall(opts: RecallOptions) -> Result<()> {
+    let scenario = Scenario::by_name(&opts.scenario)
+        .with_context(|| format!("unknown scenario '{}' (standard or hard)", opts.scenario))?;
+    let compact_cap = opts.compact_cap.or(scenario.compact_cap).filter(|c| *c > 0);
     let model = (!opts.mock).then(|| opts.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()));
     let price = match (opts.price_in_per_mtok, opts.price_out_per_mtok) {
         (Some(input_per_mtok), Some(output_per_mtok)) => Some(Price {
@@ -52,24 +60,29 @@ pub(crate) async fn run_recall(opts: RecallOptions) -> Result<()> {
     );
 
     let started = Instant::now();
-    let _env = IsolatedEnv::enter(model.as_deref(), price)?;
+    let mut env = IsolatedEnv::enter(model.as_deref(), price, compact_cap)?;
     let workspace = tempfile::Builder::new()
         .prefix("forge-recall-ws-")
         .tempdir()
         .context("creating the bench workspace")?;
     let workdir = std::fs::canonicalize(workspace.path())?;
-    fixture::create(&workdir)?;
+    fixture::create(&workdir, scenario.fixture)?;
 
     let mut subject = LiveSubject::start(&workdir, model.clone(), opts.mock).await?;
-    let outcome = driver::run(&mut subject, opts.turns_scale, opts.skip_resume).await?;
+    let outcome = driver::run(&mut subject, scenario, opts.turns_scale, opts.skip_resume).await?;
 
+    let log = subject.compaction_log();
     let kept = opts.keep_workdir.then(|| workspace.keep());
     let report = Report {
+        scenario: scenario.name.to_string(),
+        compact_cap: compact_cap.filter(|_| !opts.mock),
         model: model.unwrap_or_else(|| "mock".into()),
         turns_scale: opts.turns_scale,
         scenario_turns: outcome.scenario_turns,
         failed_turns: outcome.failed_turns,
         compactions: outcome.compactions,
+        compaction_stats: CompactionStats::from_log(&log, outcome.scenario_events),
+        compaction_events: log.events,
         resumed: outcome.resumed,
         after_compaction: score_phase(&outcome.probes, Phase::AfterCompaction),
         after_resume: outcome
@@ -88,6 +101,9 @@ pub(crate) async fn run_recall(opts: RecallOptions) -> Result<()> {
     }
     if let Some(dir) = &report.workdir {
         eprintln!("workspace kept at {dir}");
+        if let Some(env_dir) = env.keep() {
+            eprintln!("store (forge.db) and config kept at {}", env_dir.display());
+        }
     }
     Ok(())
 }
