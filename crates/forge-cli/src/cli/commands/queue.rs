@@ -213,7 +213,9 @@ fn run_queue_cmd(
             }
             match run_shadow_pass(&t, &repo_root, &forge_exe, mock) {
                 Ok((Some(shadow_model), won)) => {
-                    let _ = store.record_duel_outcome(&repo_key, &shadow_model, won, &t.task);
+                    if model.as_deref() != Some(shadow_model.as_str()) {
+                        let _ = store.record_duel_outcome(&repo_key, &shadow_model, won, &t.task);
+                    }
                     println!(
                         "  ⇄ shadow: {} {}",
                         shadow_model,
@@ -239,6 +241,9 @@ fn run_queue_cmd(
     );
     println!("{line}");
     notify_desktop("Forge autopilot finished", &line);
+    if !finished.is_empty() && finished.iter().all(|(s, _)| s != "done" && s != "gated") {
+        anyhow::bail!("every queued task failed");
+    }
     Ok(())
 }
 

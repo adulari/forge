@@ -76,7 +76,7 @@ pub(crate) fn probe(root: &Path) -> Option<RepoStatus> {
             "status",
             "--porcelain=v1",
             "--branch",
-            "--untracked-files=normal",
+            "--untracked-files=all",
         ])
         .current_dir(root)
         .output()

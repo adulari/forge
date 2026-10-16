@@ -46,8 +46,13 @@ pub(crate) async fn dispatch_heartbeat(
             match s.store.user_heartbeat(&sid) {
                 Ok(Some(hb)) => {
                     let remaining = (hb.next_due_at - now).max(0);
+                    let next = if hb.status == "active" {
+                        format!("next in ~{remaining}s")
+                    } else {
+                        "no countdown while not active".to_string()
+                    };
                     app.note(&format!(
-                        "◷ heartbeat: every {} — {} — next in ~{remaining}s — \"{}\"",
+                        "◷ heartbeat: every {} — {} — {next} — \"{}\"",
                         forge_core::heartbeat::format_heartbeat_interval(hb.interval_secs),
                         hb.status,
                         hb.prompt
