@@ -127,6 +127,19 @@ fn lang(language: tree_sitter::Language, tags: &str) -> Option<TagsConfiguration
     TagsConfiguration::new(language, tags, "").ok()
 }
 
+/// The typescript crate's own tags query only adds TS-specific captures (interfaces, signatures,
+/// abstract classes); functions, classes and methods come from the JavaScript query, so both are
+/// compiled together. Enums and type aliases have no tag in either.
+fn ts_tags_query() -> String {
+    format!(
+        "{}\n{}\n{}",
+        tree_sitter_javascript::TAGS_QUERY,
+        tree_sitter_typescript::TAGS_QUERY,
+        "(enum_declaration name: (identifier) @name) @definition.class\n\
+         (type_alias_declaration name: (type_identifier) @name) @definition.type"
+    )
+}
+
 thread_local! {
     // `TagsConfiguration` is not `Sync`, so the compiled-query registry is cached per thread
     // rather than in a global static. Build cost (query compilation) is paid once per thread.
@@ -171,7 +184,7 @@ fn build_registry() -> Registry {
                 "typescript",
                 lang(
                     tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                    tree_sitter_typescript::TAGS_QUERY,
+                    &ts_tags_query(),
                 ),
                 &["ts", "mts", "cts"],
             ),
@@ -179,7 +192,7 @@ fn build_registry() -> Registry {
                 "tsx",
                 lang(
                     tree_sitter_typescript::LANGUAGE_TSX.into(),
-                    tree_sitter_typescript::TAGS_QUERY,
+                    &ts_tags_query(),
                 ),
                 &["tsx"],
             ),
@@ -486,6 +499,32 @@ mod tests {
 
     fn def<'a>(p: &'a Parsed, name: &str) -> &'a Def {
         p.defs.iter().find(|d| d.name == name).expect("def present")
+    }
+
+    #[test]
+    fn typescript_and_tsx_index_functions_classes_methods_enums_and_aliases() {
+        let ts =
+            "function plainFn() {}\nexport function exportedFn(a: number): number { return a; }\n\
+                  const arrowFn = (x: number) => x;\nclass Widget { grow() {} }\n\
+                  interface I { a: number }\ntype T = string;\nenum E { A }\n";
+        let p = extract("v.ts", ts);
+        for name in ["plainFn", "exportedFn", "Widget", "grow", "I", "T", "E"] {
+            assert!(
+                p.defs.iter().any(|d| d.name == name),
+                "{name} in {:?}",
+                p.defs
+            );
+        }
+        let tsx =
+            "export function Comp() { return <div/>; }\nclass K { render() { return <p/>; } }\n";
+        let p = extract("x.tsx", tsx);
+        for name in ["Comp", "K", "render"] {
+            assert!(
+                p.defs.iter().any(|d| d.name == name),
+                "{name} in {:?}",
+                p.defs
+            );
+        }
     }
 
     #[test]

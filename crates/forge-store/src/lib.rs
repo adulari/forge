@@ -1273,8 +1273,15 @@ pub(crate) fn append_sync_revision(
         return Ok(());
     }
     let (revision, logical_clock) = conn.query_row(
-        "SELECT COALESCE(MAX(revision), 0) + 1, COALESCE(MAX(logical_clock), 0) + 1
-         FROM sync_journal WHERE record_kind = ?1 AND stable_id = ?2",
+        // A record adopted from another device has no local journal row but already holds
+        // remote revisions: restarting at 1 collides with the service's copy (HTTP 409).
+        "SELECT MAX(COALESCE(j.revision, 0), COALESCE(m.logical_clock, 0)) + 1,
+                MAX(COALESCE(j.logical_clock, 0), COALESCE(m.logical_clock, 0)) + 1
+         FROM (SELECT 1) AS one
+         LEFT JOIN (SELECT MAX(revision) AS revision, MAX(logical_clock) AS logical_clock
+                    FROM sync_journal WHERE record_kind = ?1 AND stable_id = ?2) AS j ON 1 = 1
+         LEFT JOIN (SELECT logical_clock FROM anywhere_sync_materialized
+                    WHERE record_kind = ?1 AND stable_id = ?2) AS m ON 1 = 1",
         (record_kind, stable_id),
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     )?;

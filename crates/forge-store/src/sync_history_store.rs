@@ -153,7 +153,7 @@ impl Store {
                         transaction.execute(
                             "INSERT INTO session
                              (id, title, cwd, permission_mode, archived, view_snapshot)
-                             VALUES (?1, ?2, ?3, 'accept_edits', ?4, ?5)",
+                             VALUES (?1, ?2, ?3, 'default', ?4, ?5)",
                             rusqlite::params![
                                 payload.id,
                                 payload.title,

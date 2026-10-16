@@ -1134,42 +1134,65 @@ async fn anywhere_supervisor(
     app: Router,
     token: String,
 ) {
-    while !*enabled.borrow() {
-        tokio::select! {
-            changed = enabled.changed() => {
-                if changed.is_err() { return; }
+    let config_enabled = || forge_config::load().is_ok_and(|config| config.anywhere.enabled);
+    let mut first = true;
+    loop {
+        // Wait for Anywhere to be on: the enable signal, or the config flipping (LAN daemons are
+        // never signalled). The very first pass honours the initial channel value.
+        while !(first && *enabled.borrow()) {
+            if config_enabled() {
+                break;
             }
-            () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                if forge_config::load().is_ok_and(|config| config.anywhere.enabled) {
+            tokio::select! {
+                changed = enabled.changed() => {
+                    if changed.is_err() { return; }
+                    if *enabled.borrow() && config_enabled() { break; }
+                }
+                () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+        }
+        first = false;
+        let listener = match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await
+        {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!(
+                    "⚠ Forge Anywhere connector disabled for this run — local/direct Forge is unaffected: {error}"
+                );
+                return;
+            }
+        };
+        let port = match listener.local_addr() {
+            Ok(address) => address.port(),
+            Err(error) => {
+                eprintln!("⚠ Forge Anywhere local bridge address unavailable: {error}");
+                return;
+            }
+        };
+        let bridge_app = app.clone();
+        let _bridge = AbortTask(tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, bridge_app).await {
+                eprintln!(
+                    "⚠ Forge Anywhere local bridge stopped — local/direct Forge is unaffected: {error}"
+                );
+            }
+        }));
+        let _connector = AbortTask(crate::anywhere::spawn_connector(format!(
+            "http://127.0.0.1:{port}/{token}"
+        )));
+        // Run until disabled (config flips off) or re-enabled (a fresh `anywhere enable` may carry
+        // a new host id): dropping the guards closes the relay sockets, and the loop restarts.
+        loop {
+            tokio::select! {
+                changed = enabled.changed() => {
+                    if changed.is_err() { return; }
                     break;
                 }
+                () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    if !config_enabled() { break; }
+                }
             }
         }
-    }
-    match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
-        Ok(listener) => {
-            let port = match listener.local_addr() {
-                Ok(address) => address.port(),
-                Err(error) => {
-                    eprintln!("⚠ Forge Anywhere local bridge address unavailable: {error}");
-                    return;
-                }
-            };
-            let _bridge = AbortTask(tokio::spawn(async move {
-                if let Err(error) = axum::serve(listener, app).await {
-                    eprintln!(
-                        "⚠ Forge Anywhere local bridge stopped — local/direct Forge is unaffected: {error}"
-                    );
-                }
-            }));
-            let _connector = AbortTask(
-                crate::anywhere::spawn_connector(format!("http://127.0.0.1:{port}/{token}")),
-            );
-            std::future::pending::<()>().await;
-        }
-        Err(error) => eprintln!(
-            "⚠ Forge Anywhere connector disabled for this run — local/direct Forge is unaffected: {error}"
-        ),
     }
 }
 
@@ -1847,7 +1870,12 @@ async fn archive_session(
     if let Some(wt) = worktree {
         // Best-effort snapshot: uncommitted edits land on the session's branch so nothing is
         // lost; the worktree + branch stay in place for a manual review/merge.
-        let _ = forge_core::worktree::commit_worktree(std::path::Path::new(&wt));
+        if let Err(error) = forge_core::worktree::commit_worktree(std::path::Path::new(&wt)) {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("snapshotting the session worktree failed: {error}"),
+            );
+        }
     }
     if let Err(error) = state.store.archive_session(&id) {
         return err_response(

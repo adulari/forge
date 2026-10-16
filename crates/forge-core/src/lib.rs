@@ -110,6 +110,7 @@ mod model_request;
 mod model_response;
 mod model_stream;
 mod model_tools;
+mod model_wait;
 mod narration_dedupe;
 mod nudge_policy;
 mod orchestration;
@@ -9090,6 +9091,16 @@ mod tests {
         );
         assert_eq!(s.tasks.len(), 1, "Build activates the approved plan");
         assert_eq!(s.store.tasks(s.id()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancelling_a_plan_on_a_resumed_session_never_escalates_to_accept_edits() {
+        let mut s = scripted_session("Cancel", Arc::new(Mutex::new(0)));
+        s.set_temper(PermissionMode::Plan);
+        s.pre_plan_mode = None;
+
+        assert_eq!(s.resolve_plan_approval(&one_step_plan()), None);
+        assert_eq!(s.mode, PermissionMode::Default);
     }
 
     #[test]

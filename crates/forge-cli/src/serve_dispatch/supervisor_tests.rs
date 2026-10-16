@@ -602,3 +602,29 @@ fn a_transcript_with_no_assistant_text_has_no_final_reply() {
         ""
     );
 }
+
+#[test]
+fn a_restored_idle_worker_is_redriven_once_after_the_grace_period() {
+    let mut trackers = Trackers::new();
+    let start = Instant::now();
+    let d = running_one();
+    let idle = live(&[("s1", obs(1, 0, false))]);
+    observe(&d, &idle, &mut trackers, start);
+    assert!(restart_orphans(&d, &idle, &mut trackers, start).is_empty());
+    assert!(restart_orphans(&d, &idle, &mut trackers, start + Duration::from_secs(29)).is_empty());
+    assert_eq!(
+        restart_orphans(&d, &idle, &mut trackers, start + RESTART_IDLE_GRACE),
+        vec!["s1".to_string()]
+    );
+    assert!(restart_orphans(&d, &idle, &mut trackers, start + Duration::from_secs(90)).is_empty());
+}
+
+#[test]
+fn a_busy_worker_is_never_redriven() {
+    let mut trackers = Trackers::new();
+    let start = Instant::now();
+    let d = running_one();
+    let busy = live(&[("s1", obs(1, 0, true))]);
+    observe(&d, &busy, &mut trackers, start);
+    assert!(restart_orphans(&d, &busy, &mut trackers, start + Duration::from_secs(300)).is_empty());
+}

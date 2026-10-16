@@ -115,12 +115,10 @@ impl Session {
     }
 
     /// Leave read-only planning through the approval flow. New sessions restore the exact mode that
-    /// entered Plan; a resumed/legacy Plan session has no in-memory predecessor and uses Auto-edit.
-    pub(crate) fn restore_pre_plan_temper(&mut self) -> PermissionMode {
-        let mode = self
-            .pre_plan_mode
-            .take()
-            .unwrap_or(PermissionMode::AcceptEdits);
+    /// entered Plan; a resumed/legacy Plan session has no in-memory predecessor and uses `fallback`: Auto-edit when
+    /// building an approved plan, Ask when cancelling (a cancel must never escalate).
+    pub(crate) fn restore_pre_plan_temper(&mut self, fallback: PermissionMode) -> PermissionMode {
+        let mode = self.pre_plan_mode.take().unwrap_or(fallback);
         self.set_temper(mode)
     }
 
@@ -160,7 +158,7 @@ impl Session {
             },
             forge_types::QChoice {
                 label: "Cancel".into(),
-                description: "Discard the plan; stay in planning mode".into(),
+                description: "Discard the plan and restore the previous permissions".into(),
             },
         ];
         let ans = self.presenter.ask(&q, &opts, true);
@@ -170,7 +168,9 @@ impl Session {
             || a.eq_ignore_ascii_case("yes")
         {
             self.activate_plan_tasks(plan);
-            let label = self.restore_pre_plan_temper().label();
+            let label = self
+                .restore_pre_plan_temper(PermissionMode::AcceptEdits)
+                .label();
             self.presenter
                 .emit(PresenterEvent::Temper(label.to_string()));
             self.presenter.emit(PresenterEvent::Warning(format!(
@@ -182,7 +182,9 @@ impl Session {
             || a.eq_ignore_ascii_case("Cancel")
             || a.eq_ignore_ascii_case("no")
         {
-            let label = self.restore_pre_plan_temper().label();
+            let label = self
+                .restore_pre_plan_temper(PermissionMode::Default)
+                .label();
             self.presenter
                 .emit(PresenterEvent::Temper(label.to_string()));
             self.presenter.emit(PresenterEvent::Warning(format!(

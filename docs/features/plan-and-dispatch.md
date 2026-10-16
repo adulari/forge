@@ -395,3 +395,7 @@ on `mock:` prefixes (`mock:write`, `mock:tasks`) so each worker's mock turn does
 observable without a real model. `forge board --mock` is not a thing; run the board against the
 same `FORGE_DB`/daemon instead — `forge board` (it talks to whatever daemon `forge attach`'s
 discovery finds).
+
+## Restart and shutdown
+
+While the daemon drains for shutdown the supervisor does nothing: queued items stay queued and workers leaving the registry are not marked ended. After a restart, a RUNNING item whose restored worker stays idle for 30 s without a turn is sent a continue prompt once.

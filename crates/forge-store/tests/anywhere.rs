@@ -967,7 +967,8 @@ fn entirely_remote_session_materializes_in_dependency_order_with_local_safety_fi
     assert_eq!(summary.applied, 2);
     assert_eq!(
         store.session_mode("remote-only-session").unwrap(),
-        "accept_edits"
+        "default",
+        "a synced-in session must ask before editing, never inherit accept_edits"
     );
     assert_ne!(
         store.session_cwd("remote-only-session").unwrap().as_deref(),
@@ -1210,4 +1211,38 @@ fn reapplying_the_sync_flag_does_not_wait_for_another_writer() {
     writer.execute_batch("ROLLBACK").unwrap();
     drop(writer);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_local_edit_of_an_adopted_session_continues_the_remote_revision() {
+    let store = Store::open_in_memory().expect("open store");
+    store
+        .stage_remote_sync_record(&remote_history(
+            1,
+            "session",
+            "adopted",
+            8,
+            serde_json::json!({
+                "id": "adopted",
+                "title": "Remote",
+                "cwd": "/remote",
+                "permission_mode": "default",
+                "archived": false,
+                "view_snapshot": null
+            }),
+        ))
+        .expect("stage");
+    store
+        .apply_staged_history_records([0x80; 16], 10)
+        .expect("apply");
+    store.set_sync_journal_enabled(true).expect("enable sync");
+    store.set_session_title("adopted", "Local").expect("rename");
+    let pending = store.pending_sync_journal(10).expect("pending");
+    let revision = pending
+        .iter()
+        .filter(|e| e.stable_id == "adopted")
+        .map(|e| e.revision)
+        .max()
+        .expect("a journaled revision");
+    assert!(revision > 8, "restarted at {revision} under the remote's 8");
 }

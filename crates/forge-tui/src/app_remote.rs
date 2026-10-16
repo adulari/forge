@@ -33,7 +33,7 @@ impl App {
             cost_usd: self.cost_usd,
             context_tokens: self.context_tokens,
             context_limit: self.context_limit,
-            streaming: self.streaming.clone(),
+            streaming: streaming_tail(&self.streaming).to_string(),
             transcript: self
                 .recent_transcript
                 .iter()
@@ -671,6 +671,21 @@ pub struct DiffSnapshot {
     pub skipped_files: usize,
 }
 
+/// Longest in-flight partial line a remote frame carries. Every frame is a full snapshot, so an
+/// unbounded newline-free reply would make wire cost per token grow with the reply's length.
+const REMOTE_STREAMING_TAIL_BYTES: usize = 2048;
+
+fn streaming_tail(text: &str) -> &str {
+    if text.len() <= REMOTE_STREAMING_TAIL_BYTES {
+        return text;
+    }
+    let mut start = text.len() - REMOTE_STREAMING_TAIL_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
 /// A plain-data view of the live state, produced by [`App::remote_snapshot`] and mapped into the
 /// `remote::Snapshot` JSON by the render loop. Defined here (in forge-tui) so the pure render
 /// crate owns the projection without depending on the server module.
@@ -753,4 +768,18 @@ pub enum TranscriptKind {
     /// A harness-injected user-role message that is not a job exit; `meta` is the subtype
     /// (`wakeup`, `heartbeat`, `peer`).
     HarnessNotice,
+}
+
+#[cfg(test)]
+mod streaming_tail_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_partial_line_is_capped_on_a_char_boundary() {
+        let long = "é".repeat(5000);
+        let tail = streaming_tail(&long);
+        assert!(tail.len() <= REMOTE_STREAMING_TAIL_BYTES);
+        assert!(tail.chars().all(|c| c == 'é'));
+        assert_eq!(streaming_tail("short"), "short");
+    }
 }

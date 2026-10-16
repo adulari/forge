@@ -22,6 +22,12 @@ const MIN_PASS_GAP: Duration = Duration::from_millis(100);
 /// A running item whose session has no live handle this long is `stopped`. A merge's respawn
 /// window is far shorter; an archived or crashed session never comes back.
 pub(super) const MISSING_GRACE: Duration = Duration::from_secs(10);
+/// A restored RUNNING worker that stays idle with no turn this long was cut off by a daemon
+/// restart (its counter restarted at 0 and nothing will ever drive it): it is told to continue.
+pub(super) const RESTART_IDLE_GRACE: Duration = Duration::from_secs(30);
+/// The prompt a restart-orphaned worker is re-driven with.
+const RESTART_CONTINUE: &str =
+    "The daemon restarted while you were working on your dispatched task. Continue it from where you left off and finish it.";
 /// Finished dispatches still watched, so a worker the user prompts again updates its item.
 const RECENT_DISPATCHES: usize = 50;
 
@@ -54,6 +60,8 @@ pub(super) struct Tracker {
     handle_key: usize,
     baseline: u64,
     missing_since: Option<Instant>,
+    idle_since: Option<Instant>,
+    nudged: bool,
     /// Whether `handle_key`/`baseline` came from a real observation. A tracker is recreated whenever
     /// the supervisor lost it (a failed store read, a dispatch leaving the recent window); seeding
     /// it from the worker's CURRENT counter is what stops a turn that was already reported from
@@ -154,6 +162,41 @@ pub(super) fn observe(
         }
     }
     changes
+}
+
+/// Sessions of RUNNING items whose restored worker sits idle having never run a turn since the
+/// daemon started: each is returned once, to be re-driven.
+pub(super) fn restart_orphans(
+    row: &DispatchRow,
+    live: &HashMap<String, Observation>,
+    trackers: &mut Trackers,
+    now: Instant,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in &row.items {
+        let (Some(session_id), true) = (
+            item.session_id.as_deref(),
+            item.status == item_status::RUNNING,
+        ) else {
+            continue;
+        };
+        let (Some(obs), Some(tracker)) = (
+            live.get(session_id),
+            trackers.get_mut(&(row.id.clone(), item.idx)),
+        ) else {
+            continue;
+        };
+        if obs.busy || obs.waiting || obs.turns_finished > 0 || tracker.nudged {
+            tracker.idle_since = None;
+            continue;
+        }
+        let since = *tracker.idle_since.get_or_insert(now);
+        if now.duration_since(since) >= RESTART_IDLE_GRACE {
+            tracker.nudged = true;
+            out.push(session_id.to_string());
+        }
+    }
+    out
 }
 
 /// Whether a running dispatch just reached the end: every item terminal.
@@ -323,6 +366,11 @@ pub(crate) async fn run_supervisor(state: Arc<DaemonState>) {
 }
 
 async fn supervise(state: &DaemonState, trackers: &mut Trackers) {
+    // Drain freezes dispatch state: a worker leaving the registry mid-shutdown is not "ended" and
+    // queued items must not start into a registry that refuses sessions; restart resumes them.
+    if state.registry.is_draining() {
+        return;
+    }
     let mut ids = BTreeSet::new();
     let mut reads_ok = true;
     let active = state.store.active_dispatches();
@@ -364,6 +412,11 @@ async fn supervise_one(state: &DaemonState, id: &str, trackers: &mut Trackers) {
     let live = live_observations(state, &row).await;
     let changes = observe(&row, &live, trackers, Instant::now());
     let mut changed = false;
+    if row.status == dispatch_status::RUNNING {
+        for session_id in restart_orphans(&row, &live, trackers, Instant::now()) {
+            send_to_coordinator(&state.store, &state.registry, &session_id, RESTART_CONTINUE).await;
+        }
+    }
     for c in &changes {
         changed |= state
             .store

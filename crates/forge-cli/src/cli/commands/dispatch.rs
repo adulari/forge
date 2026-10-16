@@ -279,6 +279,13 @@ pub(crate) async fn dispatch_cmd(
                     .await?,
             )?;
             println!("{}", merge_text(&report));
+            if let Some(stopped) = &report.stopped_at {
+                anyhow::bail!(
+                    "dispatch merge stopped at item {}: {}",
+                    stopped.index,
+                    stopped.reason
+                );
+            }
         }
     }
     Ok(())

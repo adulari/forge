@@ -159,9 +159,9 @@ pub(super) async fn request_provider_response(
         // Auto-routed completions reserve a model before dispatch so independent sessions
         // can distribute across the fallback chain. Explicit pins deliberately bypass this
         // scheduler: their existing pin outage/failover policy remains authoritative.
-        let reservation = (!explicit_pin)
-            .then(|| session.store.try_reserve_model(active_model))
-            .flatten();
+        let only = chain.len() == 0 && deferred_held.is_empty();
+        let reservation =
+            crate::model_wait::reserve(&session.store, active_model, explicit_pin, only).await;
         let reserved = reservation.is_some();
         // Pre-dispatch key backstop: a model can reach here with NO provider key via a path
         // that isn't key-filtered (the last-resort fallback, or an architect editor/planner
