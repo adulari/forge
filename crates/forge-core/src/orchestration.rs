@@ -487,11 +487,6 @@ impl Session {
                 "workflow name '{name}' must be a plain filename with no path separators"
             )));
         }
-        if !workflows_dir.join(format!("{name}.js")).is_file() {
-            return Err(CoreError::Precondition(format!(
-                "no saved workflow named '{name}' in .forge/workflows (see /workflow list)"
-            )));
-        }
 
         // Same Started/Finished bracket as the `run_workflow` tool path, carrying the saved name.
         self.presenter.emit(PresenterEvent::WorkflowStarted {
