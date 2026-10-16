@@ -171,6 +171,7 @@ fn main() {
     // Before the runtime (and so before any second thread): `set_var` is only sound while this is
     // the sole thread. Logged later, once tracing exists.
     let login_path_added = login_path::hydrate_for_daemon();
+    exit_quietly_on_broken_pipe();
     alloc_policy::init();
     #[cfg(unix)]
     // SAFETY: single-threaded here; ignoring SIGXFSZ turns an `ulimit -f` overrun into an ordinary
@@ -183,6 +184,24 @@ fn main() {
         .build()
         .expect("build the tokio runtime")
         .block_on(run_cli(login_path_added));
+}
+
+/// `forge run | head` closes stdout early; `println!` then panics. Exit like other Unix CLIs
+/// (128 + SIGPIPE) instead of printing a panic and exiting 101.
+fn exit_quietly_on_broken_pipe() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let text = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        if text.contains("failed printing to std") && text.contains("Broken pipe") {
+            std::process::exit(141);
+        }
+        default_hook(info);
+    }));
 }
 
 async fn run_cli(login_path_added: Vec<String>) {
@@ -259,7 +278,11 @@ fn print_top_level_error(e: &anyhow::Error) {
     if !causes.is_empty() {
         msg.push_str(&format!("  ({})", causes.join(": ")));
     }
-    eprintln!("\x1b[31m✖ error:\x1b[0m {msg}");
+    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        eprintln!("\x1b[31m✖ error:\x1b[0m {msg}");
+    } else {
+        eprintln!("error: {msg}");
+    }
     eprintln!("  → {}", error_next_step(e));
 }
 

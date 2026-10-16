@@ -679,11 +679,13 @@ impl Session {
                                 continue;
                             }
                             ContinueNudge::BlockedStop => {
+                                self.turn_unfinished_tasks = open_titles.clone();
                                 self.presenter.emit(PresenterEvent::Warning(
                                     nudge_policy::blocked_warning(continue_nudges, unfinished),
                                 ));
                             }
                             ContinueNudge::GoallessStop => {
+                                self.turn_unfinished_tasks = open_titles.clone();
                                 // Tools kept running but nothing finished — the "goalless work"
                                 // loop. Hand it back to the user rather than spend the whole step
                                 // budget spinning (the direct path used to fall through silently).

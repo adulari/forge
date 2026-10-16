@@ -573,7 +573,7 @@ pub(crate) async fn plugin_cmd(cmd: PluginCmd) -> Result<()> {
             if marketplace::remove_plugin(&plugin)? {
                 println!("✓ removed plugin '{plugin}'");
             } else {
-                println!(
+                anyhow::bail!(
                     "plugin '{plugin}' not found. Use `forge plugin list` to see installed plugins."
                 );
             }

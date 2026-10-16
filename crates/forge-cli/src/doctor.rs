@@ -419,6 +419,27 @@ fn provider_checks() -> (Vec<Check>, bool) {
         ));
     }
 
+    // User-defined `[[providers.custom]]` endpoints and the env var holding their key.
+    if let Ok(cfg) = forge_config::load() {
+        for provider in &cfg.providers.custom {
+            let name = format!("{} provider", provider.namespace);
+            match provider.api_key_env.as_deref().filter(|v| !v.is_empty()) {
+                Some(var) if std::env::var(var).map_or(true, |v| v.is_empty()) => {
+                    out.push(check(
+                        Status::Warn,
+                        &name,
+                        &format!("env var {var} is not set"),
+                        Some("export it, or remove `api_key_env` for a keyless server"),
+                    ));
+                }
+                _ => {
+                    usable = true;
+                    out.push(check(Status::Ok, &name, &provider.base_url, None));
+                }
+            }
+        }
+    }
+
     // Subscription CLI bridges.
     for k in forge_provider::CliKind::all() {
         let avail = k.available();

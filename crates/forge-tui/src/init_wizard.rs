@@ -417,7 +417,25 @@ fn render(f: &mut Frame, state: &State) {
         finish_style,
     )));
 
-    f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), pad(inner));
+    let body = pad(inner);
+    let scroll = scroll_offset(&lines, body.height);
+    f.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Left)
+            .scroll((scroll, 0)),
+        body,
+    );
+}
+
+/// First visible line so the selected row (the one carrying the `▸` marker) stays on screen.
+fn scroll_offset(lines: &[Line], height: u16) -> u16 {
+    let selected = lines
+        .iter()
+        .position(|l| l.spans.iter().any(|s| s.content.contains('▸')));
+    match selected {
+        Some(i) if i >= usize::from(height) => (i + 1 - usize::from(height)) as u16,
+        _ => 0,
+    }
 }
 
 fn section(title: &str, color: Color) -> Line<'static> {
@@ -647,5 +665,18 @@ mod tests {
             s.move_down();
         }
         assert!(matches!(s.focused(), Row::Finish));
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn selected_row_below_the_fold_scrolls_into_view() {
+        let mut lines: Vec<Line> = (0..30).map(|_| Line::from("  row")).collect();
+        lines[25] = Line::from("▸ Finish setup");
+        assert_eq!(scroll_offset(&lines, 10), 16);
+        assert_eq!(scroll_offset(&lines, 40), 0);
     }
 }

@@ -57,7 +57,6 @@ fn export(dest: &Path, include_keys: bool, include_sessions: bool) -> Result<()>
             config_dir.display()
         );
     }
-    let data_dir = forge_config::data_dir();
 
     // Stage files into a temp dir, then pack into the archive.
     let staging = std::env::temp_dir().join(format!("forge-migrate-stage-{}", now_secs()));
@@ -76,7 +75,7 @@ fn export(dest: &Path, include_keys: bool, include_sessions: bool) -> Result<()>
 
     // 2. Model metadata (health/context/pricing) — always, history-free.
     let mut metadata_rows = 0usize;
-    let db_path = data_dir.as_ref().map(|d| d.join(DB_FILE));
+    let db_path = crate::doctor::doctor_store_path();
     if let Some(db) = db_path.as_ref().filter(|p| p.exists()) {
         match forge_store::Store::open(db).and_then(|s| s.export_portable_metadata()) {
             Ok(json) => {
@@ -190,6 +189,16 @@ fn import_from_dir(src: &Path, force: bool) -> Result<()> {
     let cfg_in = src.join(CONFIG_SUBDIR);
     if cfg_in.exists() {
         fs::create_dir_all(&config_dir)?;
+        let live_cfg = config_dir.join("config.toml");
+        let incoming_cfg = cfg_in.join("config.toml");
+        if live_cfg.is_file()
+            && incoming_cfg.is_file()
+            && fs::read(&live_cfg)? != fs::read(&incoming_cfg)?
+        {
+            let backup = config_dir.join(format!("config.toml.bak-{}", now_secs()));
+            fs::copy(&live_cfg, &backup)?;
+            println!("  ⚠ existing config.toml backed up to {}", backup.display());
+        }
         copy_dir_all(&cfg_in, &config_dir)
             .with_context(|| format!("restoring config into {}", config_dir.display()))?;
         println!(
@@ -206,7 +215,7 @@ fn import_from_dir(src: &Path, force: bool) -> Result<()> {
 
     let data_dir = forge_config::data_dir().context("no data directory on this system")?;
     fs::create_dir_all(&data_dir)?;
-    let target_db = data_dir.join(DB_FILE);
+    let target_db = crate::doctor::doctor_store_path().unwrap_or_else(|| data_dir.join(DB_FILE));
 
     // 2. Full session db — never clobber existing history without --force.
     let bundle_db = src.join(DB_FILE);
@@ -326,6 +335,13 @@ fn pack_bundle(stage_root: &Path, archive_path: &Path) -> Result<()> {
         .with_context(|| format!("packing {}", stage_root.display()))?;
     let gz = builder.into_inner().context("finalizing tar archive")?;
     gz.finish().context("flushing gzip stream")?;
+    // The bundle can hold plaintext keys and the whole session db.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(archive_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", archive_path.display()))?;
+    }
     Ok(())
 }
 

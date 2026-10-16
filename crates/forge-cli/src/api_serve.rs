@@ -134,7 +134,7 @@ pub(crate) async fn api_serve_cmd(
     let app = api_router(state);
     let listener = tokio::net::TcpListener::bind((host.as_str(), port))
         .await
-        .with_context(|| format!("binding {host}:{port} — is another server on that port?"))?;
+        .with_context(|| format!("binding {host}:{port} — is the host valid and the port free?"))?;
     let addr = listener.local_addr()?;
 
     println!("⚒ forge api — OpenAI-compatible endpoint backed by the mesh");
@@ -143,9 +143,11 @@ pub(crate) async fn api_serve_cmd(
     println!(
         "  auth:       {}",
         if api_key.is_some() {
-            "Bearer <FORGE_API_KEY> required"
+            "Bearer API key required"
+        } else if addr.ip().is_loopback() {
+            "open (loopback only)"
         } else {
-            "open (loopback / trusted network only)"
+            "OPEN on a non-loopback address — anyone who can reach it can spend your quota; pass --api-key"
         }
     );
     println!("  models:     GET http://{addr}/v1/models  ·  use \"auto\" to let the mesh route");
@@ -215,7 +217,10 @@ fn check_auth(state: &ApiState, headers: &HeaderMap) -> Option<Response> {
     let presented = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(|v| {
+            let (scheme, token) = v.split_once(' ')?;
+            scheme.eq_ignore_ascii_case("bearer").then_some(token)
+        })
         .map(str::trim);
     if presented == Some(expected) {
         None

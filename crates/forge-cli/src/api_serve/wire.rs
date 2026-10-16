@@ -165,7 +165,8 @@ pub(super) fn to_forge_messages(msgs: &[IncomingMessage]) -> Result<Vec<Message>
                 "system" | "developer" => Role::System,
                 "assistant" => Role::Assistant,
                 "tool" => Role::Tool,
-                _ => Role::User,
+                "user" => Role::User,
+                other => return Err(format!("unsupported message role '{other}'")),
             };
             if !images.is_empty() && role != Role::User {
                 return Err("image content parts are only supported on user messages".into());

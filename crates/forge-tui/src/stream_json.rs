@@ -143,7 +143,7 @@ impl Presenter for StreamJsonPresenter {
             } => self.line(serde_json::json!({
                 "type": "result", "subtype": crate::json_result::result_subtype(stop_reason),
                 "is_error": stop_reason != StopReason::FinalAnswer, "session_id": sid,
-                "result": final_text, "stop_reason": format!("{stop_reason:?}")
+                "result": final_text, "stop_reason": stop_reason.as_str()
             })),
             // Other events are not part of the CC stream-json surface; intentionally ignored.
             _ => {}

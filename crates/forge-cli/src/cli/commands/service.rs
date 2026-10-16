@@ -265,6 +265,9 @@ pub(crate) struct ServiceStatus {
 }
 
 fn systemd_user_dir() -> Result<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Ok(std::path::PathBuf::from(xdg).join("systemd/user"));
+    }
     let home =
         forge_config::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?;
     Ok(home.join(".config/systemd/user"))

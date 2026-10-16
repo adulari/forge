@@ -7,6 +7,19 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- Headless/setup/security leftovers (ML-G03-G10): SIGINT during `forge run` exits 130 with an error
+  result in json/stream-json; a direct-path stop with unfinished tasks now exits non-zero as
+  `tasks_unfinished`; stream-json carries snake_case `stop_reason` and `tool_use` ids matched by
+  `tool_use_id`; flat `*.md` marketplace skills install as loadable `<name>/SKILL.md`;
+  `plugin remove` of an unknown pack fails; `migrate` backs up a differing config.toml, writes the
+  bundle 0600 and honours `FORGE_DB`; `skill from-session` skips disabled/keyless models; `send`
+  explains a 404 as wrong token or old daemon; cancelling `forge setup` skips the local-LLM step and
+  the wizard scrolls to the selected row; unreadable config disables telemetry; systemd units honour
+  `XDG_CONFIG_HOME`; a catalog reload supersedes a refresh stuck retrying a down provider; broken
+  pipes exit quietly, non-UTF-8 args no longer panic, no ANSI in piped errors or non-TTY heartbeats;
+  `forge api` accepts any `Bearer` casing, rejects unknown roles and warns on open non-loopback
+  binds; `assay --yes` combines with `--max-cost`; doctor lists custom providers and missing key
+  env vars; a new `forge.db` is created 0600.
 
 - **Reliability batch 2 (attach, signals, store hygiene).** `forge attach` reconnects with backoff when the connection drops and exits non-zero if it cannot; the full-screen TUI restores the terminal on SIGTERM/SIGHUP; `forge run` treats SIGTERM like Ctrl-C and exits 130 on an interrupted turn instead of reporting success; a model bench written while the clock ran ahead is ignored once the clock is corrected, and benches expired for over a week are pruned by maintenance; a session stuck `agent_active` after `kill -9` stops being exempt from retention a week past the horizon; `forge sessions | head` no longer panics; exceeding `ulimit -f` is an ordinary write error instead of SIGXFSZ; a locked store no longer costs five seconds per configured context window; a corrupt `serve-state.json` no longer breaks `forge anywhere status`/`doctor`; an idle TUI wakes about 20 times a second instead of 60 (`crates/forge-cli/src/attach.rs`, `crates/forge-tui/src/driver.rs`, `crates/forge-store/src/model_health_store.rs`).
 - **Daemon and remote-client fixes (batch ML-G04).** A failed turn now reports `last_turn_outcome: failed` instead of success; `POST /api/sessions` with an unknown model returns 400, an idle `interrupt` returns `interrupted:false`, `fork` rejects an `at_seq` outside the session's history, `GET /api/history` returns 404 for an unknown session, workspace routes return 400 for a NUL byte, and git stage/unstage treat paths literally (no pathspec magic). A fleet `steer` is delivered ahead of queued follow-ups. `forge attach` errors no longer print the daemon token and explain the `--lan` HTTPS mismatch; `forge mcp` says when servers exist but none is enabled; `dispatch list/show` progress ignores skipped and cancelled items. The PWA labels final answers as forge (not "note"), hides Archive on terminal sessions, and keeps a push-enable error visible. docs/features/remote-control.md names protocol 10 (`crates/forge-cli/src/serve.rs`, `serve_git.rs`, `serve_workspace.rs`, `attach.rs`, `remote_assets/app.js`, `crates/forge-core/src/lib.rs`, `steer.rs`).

@@ -1333,9 +1333,37 @@ pub(crate) fn append_session_snapshot(conn: &Connection, session_id: &str) -> Re
     )
 }
 
+/// The store holds transcripts and tool output: create it owner-only. SQLite gives the `-wal` and
+/// `-shm` files the main file's mode, so fixing the main file covers all three. Best effort.
+#[cfg(unix)]
+fn restrict_db_permissions(path: &Path) {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if let Some(parent) = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty() && !p.exists())
+    {
+        if std::fs::create_dir_all(parent).is_ok() {
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    if path.exists() {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    } else {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path);
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_db_permissions(_path: &Path) {}
+
 impl Store {
     /// Open (creating if needed) a database file and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        restrict_db_permissions(path.as_ref());
         Self::build(ConnSource::File(path.as_ref().to_path_buf()))
     }
 
@@ -6103,6 +6131,17 @@ mod tests {
     /// open an already-migrated database at all while a long lattice write held the single WAL
     /// writer — it failed with "database is locked" instead of just reading. Opening must now
     /// succeed with another connection sitting in an exclusive write transaction the whole time.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_database_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_db_path();
+        let store = Store::open(&path).unwrap();
+        store.create_session("/tmp", "default").unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+    }
+
     #[test]
     fn opening_a_current_database_succeeds_while_another_writer_holds_the_lock() {
         let path = temp_db_path();

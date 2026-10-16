@@ -43,6 +43,51 @@ fn run_stream_json_completes_a_real_mock_turn() {
 }
 
 #[test]
+fn run_with_unfinished_tasks_fails_with_a_snake_case_stop_reason() {
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let store = workspace.path().join("forge.db");
+    let output = Command::new(env!("CARGO_BIN_EXE_forge"))
+        .args([
+            "run",
+            "mock:tasks track the work",
+            "--mock",
+            "--no-publish-to-fleet",
+            "--output-format",
+            "stream-json",
+        ])
+        .current_dir(workspace.path())
+        .env("FORGE_DB", &store)
+        .output()
+        .expect("spawn forge run");
+    assert!(!output.status.success(), "unfinished tasks must not exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result = stdout
+        .lines()
+        .find(|line| line.contains("\"type\":\"result\""))
+        .expect("a result event");
+    assert!(
+        result.contains("\"stop_reason\":\"tasks_unfinished\""),
+        "{result}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_store_is_not_world_readable() {
+    use std::os::unix::fs::PermissionsExt;
+    let workspace = tempfile::tempdir().expect("temporary workspace");
+    let store = workspace.path().join("forge.db");
+    Command::new(env!("CARGO_BIN_EXE_forge"))
+        .args(["run", "hi", "--mock", "--no-publish-to-fleet"])
+        .current_dir(workspace.path())
+        .env("FORGE_DB", &store)
+        .output()
+        .expect("spawn forge run");
+    let mode = std::fs::metadata(&store).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
 fn chat_plain_completes_a_real_mock_turn_and_exits() {
     let workspace = tempfile::tempdir().expect("temporary workspace");
     let store = workspace.path().join("forge.db");
