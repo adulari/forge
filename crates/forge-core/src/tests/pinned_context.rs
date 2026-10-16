@@ -738,3 +738,104 @@ fn merge_recalled_reserves_room_for_global_memories_without_wasting_slots() {
     let both = crate::pinned_context::merge_recalled(vec![mem("x")], vec![mem("x")], 6);
     assert_eq!(ids(both), ["x"]);
 }
+
+fn words(n: usize) -> String {
+    (0..n).map(|i| format!("w{i} ")).collect()
+}
+
+fn small_window_session(
+    store: &Arc<Store>,
+    dir: &std::path::Path,
+    provider: &Arc<Recorder>,
+    window: u32,
+    cap: u64,
+) -> Session {
+    let mut config = quiet_config();
+    config.mesh.compact_cap_tokens = cap;
+    config.mesh.context_windows.insert("m::x".into(), window);
+    let mut session = start(store, dir, provider, config);
+    session.pin_model(Some("m::x".into()));
+    session
+}
+
+#[tokio::test]
+async fn a_compaction_with_large_restored_files_lands_under_a_small_trigger() {
+    for (window, cap) in [
+        (1_000_000u32, 24_000u64),
+        (32_000, 217_600),
+        (64_000, 24_000),
+    ] {
+        let dir = workspace(Some("always run the tests"));
+        for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            std::fs::write(dir.join(name), words(5_000)).unwrap();
+            assert!(std::fs::metadata(dir.join(name)).unwrap().len() > 20_000);
+        }
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let provider = Arc::new(Recorder::default());
+        let mut session = small_window_session(&store, &dir, &provider, window, cap);
+        for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            session.note_file_use(name);
+        }
+        fill(&mut session, 12);
+        let trigger = session.effective_compaction_trigger(None);
+        assert!(trigger <= 25_600, "{window}/{cap}: {trigger}");
+        session.compact(true).await.unwrap();
+        let after = session.context_pressure_tokens();
+        assert!(
+            after <= trigger / 2 + trigger / 20,
+            "{window}/{cap}: {after} tokens left of a {trigger} trigger"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[tokio::test]
+async fn a_big_window_still_restores_its_files_in_full() {
+    let dir = workspace(None);
+    std::fs::write(dir.join("a.rs"), words(5_000)).unwrap();
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let provider = Arc::new(Recorder::default());
+    let mut session = small_window_session(&store, &dir, &provider, 1_000_000, 10_000_000);
+    session.note_file_use("a.rs");
+    fill(&mut session, 12);
+    session.compact(true).await.unwrap();
+    let note = session.transcript.last().expect("the note");
+    assert_eq!(note.kind, MessageKind::FilesRestored);
+    assert!(note.content.contains("w4999"), "whole file restored");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn auto_compaction_waits_for_regrowth_instead_of_compacting_back_to_back() {
+    let dir = workspace(None);
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let provider = Arc::new(Recorder::default());
+    let mut session = small_window_session(&store, &dir, &provider, 200_000, 24_000);
+    let trigger = session.effective_compaction_trigger(None);
+    assert_eq!(trigger, 24_000);
+    fill(&mut session, 10);
+    session.transcript.push(Message::user(words(12_000)));
+    session.transcript.push(Message::assistant("ok"));
+    let size = session.context_pressure_tokens();
+    assert!(size > trigger, "{size}");
+
+    session
+        .compact_guard
+        .note_compaction(&session.id, size - 500);
+    let epoch = session.history_epoch;
+    session.auto_compact_if_needed("m::x").await;
+    assert_eq!(
+        session.history_epoch, epoch,
+        "no regrowth, no second summary"
+    );
+
+    session
+        .compact_guard
+        .note_compaction(&session.id, size.saturating_sub(trigger / 4 + 1));
+    session.auto_compact_if_needed("m::x").await;
+    assert!(
+        session.history_epoch > epoch,
+        "regrown by a quarter of the trigger"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -90,7 +90,7 @@ pub(crate) fn render_restored_paths(paths: &[String]) -> String {
 
 impl Session {
     /// The model the session is on, for the decisions that depend on it outside a request.
-    fn session_model_hint(&self) -> Option<String> {
+    pub(crate) fn session_model_hint(&self) -> Option<String> {
         self.pinned_model()
             .and_then(|set| set.first().cloned())
             .or_else(|| self.route_affinity.as_ref().map(|a| a.model.clone()))
@@ -98,18 +98,26 @@ impl Session {
     }
 
     /// Tokens the restored files may add: [`RESTORE_TOTAL_TOKENS`], but never more than a quarter
-    /// of the window the session runs in, since the note stays in every later request.
-    fn restore_budget(&self) -> usize {
+    /// of the window the session runs in (the note stays in every later request) and never more
+    /// than what is left under the compaction's target, so restoring cannot put the context back
+    /// over the trigger the compaction just got it under.
+    fn restore_budget(&self, budget: &crate::compaction_budget::CompactionBudget) -> usize {
         let window = self.session_model_hint().map_or(
             forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW as usize,
             |model| self.effective_context_window(&model) as usize,
         );
-        RESTORE_TOTAL_TOKENS.min(window / 4)
+        budget.restore_room(
+            self.context_pressure_tokens(),
+            RESTORE_TOTAL_TOKENS.min(window / 4),
+        )
     }
 
     /// Append the restored-files note after a compaction. Nothing is added when no recent file is
     /// left on disk.
-    pub(crate) fn restore_recent_files(&mut self) -> Result<(), CoreError> {
+    pub(crate) fn restore_recent_files(
+        &mut self,
+        budget: &crate::compaction_budget::CompactionBudget,
+    ) -> Result<(), CoreError> {
         let root = self.workspace.root().to_path_buf();
         let bridged = self
             .session_model_hint()
@@ -124,7 +132,7 @@ impl Session {
                 .collect();
             (!paths.is_empty()).then(|| render_restored_paths(&paths))
         } else {
-            let files = pick_restorable(&candidates, &root, self.restore_budget());
+            let files = pick_restorable(&candidates, &root, self.restore_budget(budget));
             (!files.is_empty()).then(|| render_restored(&files))
         };
         match note {

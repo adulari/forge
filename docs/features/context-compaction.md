@@ -148,6 +148,24 @@ messages, so a compaction folded them into the summary and nothing restored them
   the in-memory tail. The summarizer input leaves such notes out, and only the newest one is sent
   after a later compaction, so copies do not accumulate (`file_restore.rs`, `recent_files.rs`).
 
+### Post-compaction budget and thrash guard
+
+Every part a compaction adds back is budgeted from the effective trigger, the number auto-compaction
+compares against (the `[compact_cap]` / free-model cap / 80% of the window, or the room the window
+leaves for a request when that is smaller), and capped at the old ceilings. The shares of the
+trigger are 18% summary, 14% kept tool rounds and 8% verbatim user messages, with the standing
+pinned block taken off first and the total aimed at 50% of the trigger. Restored files get only
+what remains under that target. When room is tight the parts give way in this order: restored
+files, verbatim older messages, kept rounds, summary. A summary below its old ceiling is told its
+size and is cut (middle dropped) at 1.5x it. A big window keeps the old ceilings unchanged.
+
+After a compaction the session remembers the size it left. Auto-compaction does not fire again
+until the context has grown by 25% of the trigger past that size. If what is left (the pinned
+block and the irreducible tail) already fills the trigger, bulky tool results are clipped instead
+of summarizing again, and one notice says so (`compaction_budget.rs`, `compaction_headroom.rs`).
+`RUST_LOG=forge_agent_core=info` logs the summarizer chain and why a candidate was skipped or
+failed.
+
 **Deferred**
 - Protecting specific messages; configurable keep-count; summary-of-summaries; restoring the
   invoked skill/command guidance and the orchestration/harness one-shots (still stored messages
