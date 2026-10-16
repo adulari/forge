@@ -268,6 +268,17 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a session that never received a message (the placeholder a `--resume` picker starts
+    /// before the person chooses another session). Returns whether a row was removed.
+    pub fn delete_session_if_empty(&self, session_id: &str) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "DELETE FROM session WHERE id = ?1 AND agent_active = 0 AND parent_session_id IS NULL
+             AND NOT EXISTS (SELECT 1 FROM message m WHERE m.session_id = ?1)",
+            [session_id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Permanently delete a persisted session, its subagent descendants, and session-scoped
     /// artifacts. Queue history is retained but detached from the deleted session.
     ///

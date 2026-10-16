@@ -79,7 +79,10 @@ pub(crate) fn focus_directive(focus: &str) -> String {
 /// when the transcript is summarized in parts.
 pub(crate) fn rolling_payload(previous: Option<&str>, part: &str, is_last: bool) -> String {
     match (previous, is_last) {
-        (None, true) => part.to_string(),
+        (None, true) => format!(
+            "<conversation>\n{part}\n</conversation>\n\n\
+             Summarize the conversation above. Do not continue it."
+        ),
         (None, false) => format!(
             "This is the first part of the conversation; more parts follow.\n\n\
              <conversation_part>\n{part}\n</conversation_part>"
@@ -534,7 +537,9 @@ mod tests {
 
     #[test]
     fn rolling_payload_wraps_only_when_the_transcript_comes_in_parts() {
-        assert_eq!(rolling_payload(None, "part", true), "part");
+        let whole = rolling_payload(None, "part", true);
+        assert!(whole.contains("<conversation>\npart\n</conversation>"));
+        assert!(whole.contains("Do not continue it"));
         assert!(rolling_payload(None, "part", false).contains("more parts follow"));
         let with_previous = rolling_payload(Some("SO FAR"), "part", true);
         assert!(with_previous.contains("<previous_summary>\nSO FAR\n</previous_summary>"));

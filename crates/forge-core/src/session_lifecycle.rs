@@ -135,6 +135,16 @@ impl Session {
         session.subagent_pin_free = subagent_pin_free;
         // Last, so the notice lands after the restored transcript (append-only, cache-friendly).
         session.reconcile_host_on_resume();
+        // Seed the context gauge and totals from the store so a restored session does not report
+        // an empty gauge until its next model call.
+        session.refresh_gauge_after_history_change_from_hint();
+        if session.store.take_unclean_exit(session_id).unwrap_or(false) {
+            session.presenter.emit(PresenterEvent::Warning(
+                "the previous run of this session ended without a clean exit (killed or crashed); \
+                 its last turn may be incomplete"
+                    .to_string(),
+            ));
+        }
         Ok(session)
     }
 
@@ -292,6 +302,7 @@ impl Session {
             last_turn_contract: turn_contract::TurnContract::default(),
             detached_registry: crate::subagent::DetachedRegistry::new(),
             turns_since_refine: 0,
+            idle_nudge_carry: (0, 0),
             host_guard: Default::default(),
             compact_directive: None,
             compact_timeout: crate::compaction_run::COMPACT_CALL_TIMEOUT,

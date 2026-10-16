@@ -1904,6 +1904,8 @@ pub struct Session {
     /// Completed turns since the last Continual Harness refinement (refinement.rs). Drives
     /// `harness.auto_refine = "turns"`; reset whenever [`Session::refine`] runs, manual or auto.
     turns_since_refine: u32,
+    /// `(unanswered continue-nudges, tasks done)` carried across turns; see `model_loop`.
+    idle_nudge_carry: (usize, usize),
     /// Stale-path guard armed when the session moved hosts (host_move.rs).
     host_guard: host_move::HostGuard,
     /// One-shot extra instruction for the next compaction (`/reground`, `/compact <focus>`).
@@ -1937,18 +1939,23 @@ fn current_git_branch(root: &std::path::Path) -> Option<String> {
 /// Instruction files in precedence order: the project's Forge files, the Claude Code
 /// `CLAUDE.md` convention, then the user-global files. The first non-empty one is injected.
 fn agents_md_candidates(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    #[allow(unused_mut)]
     let mut paths = vec![
         root.join(".forge/AGENTS.md"),
         root.join("AGENTS.md"),
         root.join("CLAUDE.md"),
         root.join(".claude/CLAUDE.md"),
     ];
-    if let Some(config) = forge_config::config_dir() {
-        paths.push(config.join("AGENTS.md"));
-    }
-    if let Some(home) = forge_config::home_dir() {
-        paths.push(home.join(".forge/AGENTS.md"));
-        paths.push(home.join(".claude/CLAUDE.md"));
+    // Unit tests must not read the developer's real user-global instruction files.
+    #[cfg(not(test))]
+    {
+        if let Some(config) = forge_config::config_dir() {
+            paths.push(config.join("AGENTS.md"));
+        }
+        if let Some(home) = forge_config::home_dir() {
+            paths.push(home.join(".forge/AGENTS.md"));
+            paths.push(home.join(".claude/CLAUDE.md"));
+        }
     }
     paths
 }

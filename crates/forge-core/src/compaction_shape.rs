@@ -6,6 +6,8 @@ use crate::context_pipeline::message_tokens;
 
 /// Rendered transcript size above which a summary must say something substantial.
 const THIN_SUMMARY_INPUT_CHARS: usize = 20_000;
+/// Smaller transcripts still need the sectioned structure once they exceed this.
+const STRUCTURE_INPUT_CHARS: usize = 3_000;
 /// Least a summary of a transcript that size may be. 189 chars once stood in for 240K tokens.
 const THIN_SUMMARY_MIN_CHARS: usize = 600;
 
@@ -16,9 +18,9 @@ pub(crate) fn summary_too_thin(summary: &str, entries: &[String]) -> bool {
     let summary = summary.trim();
     let input: usize = entries.iter().map(String::len).sum();
     summary.is_empty()
-        || (input > THIN_SUMMARY_INPUT_CHARS
-            && (summary.chars().count() < THIN_SUMMARY_MIN_CHARS
-                || !crate::compaction_summary::has_summary_structure(summary)))
+        || (input > THIN_SUMMARY_INPUT_CHARS && summary.chars().count() < THIN_SUMMARY_MIN_CHARS)
+        || (input > STRUCTURE_INPUT_CHARS
+            && !crate::compaction_summary::has_summary_structure(summary))
 }
 
 /// Where an auto-compaction should leave the transcript, as a share of the trigger that fired it.

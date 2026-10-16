@@ -636,8 +636,12 @@ pub(crate) async fn picker_accept(
             drop(store);
             let (items, compacted, view) = {
                 let mut s = session.lock().await;
+                let left_behind = s.id().to_string();
                 s.reset_resumed(&row.id)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+                if left_behind != row.id {
+                    let _ = open_store().map(|st| st.delete_session_if_empty(&left_behind));
+                }
                 (
                     s.replay_items_tail(super::REPLAY_TAIL_MESSAGES).0,
                     s.was_compacted(),

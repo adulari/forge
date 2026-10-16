@@ -2449,12 +2449,18 @@ impl App {
                         s.flush.push(TextLine::default());
                     });
                 }
+                ReplayItem::Tool { name, args } if self.fullscreen => {
+                    // Same card the live turn showed, instead of a raw JSON line.
+                    self.open_tool_card(LineOrigin::tool_call(name), name.clone(), args.clone());
+                }
                 ReplayItem::Tool { name, args } => {
                     self.tag_flush(LineOrigin::tool_call(name), |s| {
                         s.flush
                             .push(tool_start_line(name, args, s.last_width.get()));
                     });
                 }
+                ReplayItem::ToolResult { name, ok, summary }
+                    if self.fullscreen && self.close_tool_card(name, *ok, summary, None) => {}
                 ReplayItem::ToolResult { name, ok, summary } => {
                     self.tag_flush(LineOrigin::tool_result(name, *ok), |s| {
                         s.flush
@@ -5436,6 +5442,27 @@ mod tests {
             text.trim_end(),
             "  ⚙ job 3429249 ✓ exited 0 · /tmp/batch.sh > /tmp/batch_result.log 2>&1"
         );
+    }
+
+    #[test]
+    fn a_resumed_fullscreen_transcript_shows_tool_cards_not_raw_json() {
+        let mut app = App {
+            fullscreen: true,
+            ..App::default()
+        };
+        app.replay_history(&[
+            ReplayItem::Tool {
+                name: "read_file".into(),
+                args: r#"{"path":"a.rs"}"#.into(),
+            },
+            ReplayItem::ToolResult {
+                name: "read_file".into(),
+                ok: true,
+                summary: "12 lines".into(),
+            },
+        ]);
+        assert_eq!(app.tool_cards.len(), 1);
+        assert_eq!(app.tool_cards[0].status, CardStatus::Ok);
     }
 
     #[test]

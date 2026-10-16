@@ -2206,6 +2206,40 @@ mod tests {
     }
 
     #[test]
+    fn delete_session_if_empty_only_removes_sessions_without_messages() {
+        let store = Store::open_in_memory().unwrap();
+        let empty = store.create_session("/tmp/e", "Default").unwrap();
+        let used = store.create_session("/tmp/u", "Default").unwrap();
+        store.add_message(&used, 1, Role::User, "hi", None).unwrap();
+        assert!(store.delete_session_if_empty(&empty).unwrap());
+        assert!(!store.delete_session_if_empty(&used).unwrap());
+        assert!(store.session_cwd(&empty).unwrap().is_none());
+        assert!(store.session_cwd(&used).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_stale_local_live_flag_is_reported_as_an_unclean_exit_once() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp/unclean", "Default").unwrap();
+        assert!(!store.take_unclean_exit(&sid).unwrap());
+        store.set_session_local_live(&sid, true).unwrap();
+        assert!(
+            !store.take_unclean_exit(&sid).unwrap(),
+            "fresh heartbeat is a live process"
+        );
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET local_last_seen = strftime('%s','now') - ?2 WHERE id = ?1",
+                rusqlite::params![sid, LOCAL_PRESENCE_STALE_SECS + 1],
+            )
+            .unwrap();
+        assert!(store.take_unclean_exit(&sid).unwrap());
+        assert!(!store.take_unclean_exit(&sid).unwrap());
+    }
+
+    #[test]
     fn local_presence_touch_is_a_no_op_for_a_session_that_was_never_marked_live() {
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/tmp/never-live", "Default").unwrap();

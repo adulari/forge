@@ -320,6 +320,21 @@ impl Session {
         Some(self.base_context_window(&model))
     }
 
+    /// Re-emit the context gauge for the last model that ran, after a manual compact or uncompact
+    /// changed the transcript outside the turn loop. No-op before any model has run.
+    pub(crate) fn refresh_gauge_after_history_change_from_hint(&mut self) {
+        if self.gauge_model.is_none() {
+            self.gauge_model = self.session_model_hint();
+        }
+        self.refresh_gauge_after_history_change();
+    }
+
+    pub(crate) fn refresh_gauge_after_history_change(&mut self) {
+        if let Some(model) = self.gauge_model.clone() {
+            self.emit_context_gauge(&model);
+        }
+    }
+
     /// Emit a [`Cost`](PresenterEvent::Cost) event reflecting the CURRENT transcript size as the
     /// live context fill, so the statusline gauge + compaction band update right away (e.g. right
     /// after auto-compaction) rather than waiting for the next model call's real input-token count
@@ -468,6 +483,7 @@ impl Session {
         self.presenter.emit(PresenterEvent::Warning(format!(
             "restored full history: {before} messages → {after} (compaction undone)"
         )));
+        self.refresh_gauge_after_history_change();
         Ok((before, after))
     }
 }

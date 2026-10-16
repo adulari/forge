@@ -3218,21 +3218,23 @@ pub(crate) async fn run_chat_tui(
                         // `//foo` escapes to a literal prompt `/foo`; a bare `/cmd` typed without
                         // the palette still dispatches as a command; everything else is a prompt.
                         if let Some(rest) = line.strip_prefix("//") {
-                            let (hooks, hook_workspace, hook_runner) = {
+                            let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
                                     s.llm_hook_runner().await,
+                                    s.id().to_string(),
                                 )
                             };
                             let escaped = format!("/{rest}");
                             match forge_core::hooks_llm::with_runner(
                                 hook_runner,
-                                forge_core::hooks::run_prompt_hooks_in(
+                                forge_core::hooks::run_prompt_hooks_for(
                                     &hooks,
                                     &escaped,
                                     Some(&hook_workspace),
+                                    &hook_sid,
                                 ),
                             )
                             .await
@@ -3462,20 +3464,22 @@ pub(crate) async fn run_chat_tui(
                                 }
                             }
                         } else {
-                            let (hooks, hook_workspace, hook_runner) = {
+                            let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
                                     s.llm_hook_runner().await,
+                                    s.id().to_string(),
                                 )
                             };
                             match forge_core::hooks_llm::with_runner(
                                 hook_runner,
-                                forge_core::hooks::run_prompt_hooks_in(
+                                forge_core::hooks::run_prompt_hooks_for(
                                     &hooks,
                                     &line,
                                     Some(&hook_workspace),
+                                    &hook_sid,
                                 ),
                             )
                             .await
@@ -3739,21 +3743,23 @@ pub(crate) async fn run_chat_tui(
                                 ));
                             }
                         } else if let Some(rest) = text.strip_prefix("//") {
-                            let (hooks, hook_workspace, hook_runner) = {
+                            let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
                                     s.llm_hook_runner().await,
+                                    s.id().to_string(),
                                 )
                             };
                             let escaped = format!("/{rest}");
                             if let Ok(prompt) = forge_core::hooks_llm::with_runner(
                                 hook_runner,
-                                forge_core::hooks::run_prompt_hooks_in(
+                                forge_core::hooks::run_prompt_hooks_for(
                                     &hooks,
                                     &escaped,
                                     Some(&hook_workspace),
+                                    &hook_sid,
                                 ),
                             )
                             .await
@@ -3980,20 +3986,22 @@ pub(crate) async fn run_chat_tui(
                             } else {
                                 prepend_attach_mentions(&mut remote_attach_mentions, text)
                             };
-                            let (hooks, hook_workspace, hook_runner) = {
+                            let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
                                     s.llm_hook_runner().await,
+                                    s.id().to_string(),
                                 )
                             };
                             if let Ok(prompt) = forge_core::hooks_llm::with_runner(
                                 hook_runner,
-                                forge_core::hooks::run_prompt_hooks_in(
+                                forge_core::hooks::run_prompt_hooks_for(
                                     &hooks,
                                     &text,
                                     Some(&hook_workspace),
+                                    &hook_sid,
                                 ),
                             )
                             .await
