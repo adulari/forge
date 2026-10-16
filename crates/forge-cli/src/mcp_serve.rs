@@ -84,12 +84,14 @@ use bridge_budget::*;
 
 mod auto_classify;
 mod permission_relay;
+use hook_payload::bridge_hook_payload;
 use permission_relay::gate;
 #[cfg(test)]
 use permission_relay::gate_decision;
 
 mod dispatch;
 mod fleet;
+mod hook_payload;
 
 mod subagents;
 use subagents::SubagentSupport;
@@ -772,22 +774,6 @@ impl ForgeMcp {
         }
         tools
     }
-}
-
-/// The stdin payload a hook sees for a bridged call: the same fields the direct path sends
-/// (`cwd`, `session_id`) so one hook script works on both.
-fn bridge_hook_payload(name: &str, args: &Value, result: Option<(&str, bool)>) -> String {
-    let mut payload = serde_json::json!({
-        "tool": name,
-        "args": args,
-        "cwd": std::env::current_dir().ok().map(|cwd| cwd.display().to_string()),
-        "session_id": std::env::var(forge_core::snapshot::ENV_SESSION).unwrap_or_default(),
-    });
-    if let Some((out, ok)) = result {
-        payload["result"] = Value::from(out);
-        payload["ok"] = Value::from(ok);
-    }
-    payload.to_string()
 }
 
 /// Bridge hosts (claude, codex) start this server in whatever cwd they were given, and a host that
