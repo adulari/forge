@@ -119,7 +119,6 @@ pub(super) async fn create(session: &str, destination: &str) -> Result<()> {
         return Err(error).context("freeze source session for handoff");
     }
     let prepared = async {
-        // Fail on an unusable workspace before the live driver is stopped.
         let repository = repository_root(Path::new(&local.cwd))?;
         archive_source_session(&local.id).await?;
         let stopped_checkpoints = store
@@ -820,12 +819,10 @@ pub(super) async fn capsule_worker_loop() {
             Ok(()) => last_error.clear(),
             Err(error) => {
                 let message = format!("{error:#}");
-                let fingerprint = super::connector::error_fingerprint(&message);
-                if fingerprint != last_error {
+                if super::connector::is_new_error(&mut last_error, &message) {
                     eprintln!(
                         "⚠ Forge Anywhere handoff receiver unavailable — local/direct Forge is unaffected: {message}"
                     );
-                    last_error = fingerprint;
                 }
             }
         }

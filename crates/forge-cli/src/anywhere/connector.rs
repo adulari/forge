@@ -291,6 +291,14 @@ pub(super) fn error_fingerprint(message: &str) -> String {
     out
 }
 
+/// Whether `message` differs from the last reported error (by fingerprint); records it if so.
+pub(super) fn is_new_error(last: &mut String, message: &str) -> bool {
+    let fingerprint = error_fingerprint(message);
+    let changed = fingerprint != *last;
+    *last = fingerprint;
+    changed
+}
+
 async fn command_worker_loop(local_base_url: &str) {
     let worker_id = hex::encode(rand::random::<[u8; 16]>());
     let mut last_error = String::new();

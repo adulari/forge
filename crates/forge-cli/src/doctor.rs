@@ -126,11 +126,7 @@ pub async fn run() -> anyhow::Result<usize> {
     sections.push(("Model health", crate::doctor_health::model_health_checks()));
     sections.push(("Background daemon", daemon));
     sections.push(("Forge Anywhere", crate::doctor_health::anywhere_checks()));
-    if let Ok(config) = forge_config::load() {
-        if config.lsp.enabled {
-            sections.push(("Language servers", lsp_checks(&config.lsp)));
-        }
-    }
+    sections.extend(crate::doctor_health::lsp_section());
     sections.push(("Local LLM (Ollama)", ollama_checks()));
     sections.push(("Session store", store_checks()));
     // Worktree build artifacts are the quietest way to lose a machine: 76 registered worktrees
@@ -312,29 +308,6 @@ fn store_check_at(path: &std::path::Path) -> Check {
             check(Status::Fail, "session store", detail, fix)
         }
     }
-}
-
-fn lsp_checks(config: &forge_config::LspConfig) -> Vec<Check> {
-    let missing = forge_lsp::LspRegistry::from_config(config).missing_servers();
-    if missing.is_empty() {
-        return vec![check(
-            Status::Ok,
-            "lsp",
-            "every known language server binary is on PATH",
-            None,
-        )];
-    }
-    missing
-        .into_iter()
-        .map(|(lang, command)| {
-            check(
-                Status::Warn,
-                &format!("lsp {lang}"),
-                format!("`{command}` not found on PATH; {lang} diagnostics are skipped silently"),
-                Some("install it, or point [lsp.servers.<lang>] at the right binary"),
-            )
-        })
-        .collect()
 }
 
 fn config_checks() -> Vec<Check> {
