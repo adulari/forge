@@ -267,18 +267,28 @@ fn install_from(
                 installed.push(name);
             }
         } else if from.extension().and_then(|e| e.to_str()) == Some("md") {
-            let dest = skills_dir.join(&name);
-            if dest.exists() && !may_replace(&name) {
-                skipped.push(name);
+            // The catalog only loads `<name>/SKILL.md`, so a flat `<name>.md` is installed as a
+            // bundle. Only files with frontmatter are skills (README/CHANGELOG are not), and a
+            // root `SKILL.md` has no name of its own, so it is left out rather than colliding.
+            let stem = name.trim_end_matches(".md").to_string();
+            let Ok(raw) = std::fs::read_to_string(&from) else {
+                continue;
+            };
+            if !raw.trim_start().starts_with("---") || name == "SKILL.md" {
                 continue;
             }
-            if let Ok(raw) = std::fs::read_to_string(&from) {
-                let content = forge_skills::normalize_skill_content(
-                    &raw.replace("~/.claude/", "~/.config/forge/"),
-                );
-                if std::fs::write(&dest, content).is_ok() {
-                    installed.push(name);
-                }
+            let dest_dir = skills_dir.join(&stem);
+            if dest_dir.exists() && !may_replace(&stem) {
+                skipped.push(stem);
+                continue;
+            }
+            let content = forge_skills::normalize_skill_content(
+                &raw.replace("~/.claude/", "~/.config/forge/"),
+            );
+            if std::fs::create_dir_all(&dest_dir).is_ok()
+                && std::fs::write(dest_dir.join("SKILL.md"), content).is_ok()
+            {
+                installed.push(stem);
             }
         }
     }
@@ -538,21 +548,26 @@ mod tests {
     fn update_never_replaces_a_skill_the_pack_does_not_own() {
         let root = tmp("owned-root");
         let skills = tmp("owned-skills");
-        for dir in [&root, &skills] {
+        for dir in [&root, &skills, &skills.join("mine"), &skills.join("theirs")] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        std::fs::write(root.join("mine.md"), "PLUGIN-BODY").unwrap();
-        std::fs::write(root.join("theirs.md"), "PLUGIN-NEW").unwrap();
-        std::fs::write(skills.join("mine.md"), "HANDWRITTEN-BODY").unwrap();
-        std::fs::write(skills.join("theirs.md"), "OLD").unwrap();
+        std::fs::write(root.join("mine.md"), "---\nname: mine\n---\nPLUGIN-BODY").unwrap();
+        std::fs::write(root.join("theirs.md"), "---\nname: theirs\n---\nPLUGIN-NEW").unwrap();
+        std::fs::write(root.join("README.md"), "# not a skill").unwrap();
+        std::fs::write(skills.join("mine/SKILL.md"), "HANDWRITTEN-BODY").unwrap();
+        std::fs::write(skills.join("theirs/SKILL.md"), "OLD").unwrap();
 
         let mut skipped = Vec::new();
-        let owned = vec!["theirs.md".to_string()];
+        let owned = vec!["theirs".to_string()];
         let written = install_from(&root, &skills, Some(&owned), &mut skipped).unwrap();
-        assert_eq!(written, vec!["theirs.md".to_string()]);
-        assert_eq!(skipped, vec!["mine.md".to_string()]);
+        assert_eq!(written, vec!["theirs".to_string()]);
+        assert_eq!(skipped, vec!["mine".to_string()]);
+        assert!(std::fs::read_to_string(skills.join("theirs/SKILL.md"))
+            .unwrap()
+            .contains("PLUGIN-NEW"));
+        assert!(!skills.join("README").exists());
         assert_eq!(
-            std::fs::read_to_string(skills.join("mine.md")).unwrap(),
+            std::fs::read_to_string(skills.join("mine/SKILL.md")).unwrap(),
             "HANDWRITTEN-BODY"
         );
 

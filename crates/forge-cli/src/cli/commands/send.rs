@@ -41,7 +41,9 @@ pub(crate) async fn send_cmd(
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if status == reqwest::StatusCode::NOT_FOUND {
-        bail!("the running daemon predates session messaging — restart `forge serve`");
+        bail!(
+            "the daemon answered 404 — the token is wrong (check --token / FORGE_TOKEN) or the daemon predates session messaging (restart `forge serve`)"
+        );
     }
     if !status.is_success() {
         let detail = serde_json::from_str::<serde_json::Value>(&body)

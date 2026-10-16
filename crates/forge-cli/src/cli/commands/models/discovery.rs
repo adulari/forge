@@ -167,8 +167,9 @@ pub(crate) fn spawn_catalog_refresh(config: &forge_config::Config) {
         return;
     }
     let config = config.clone();
+    let mut generation = super::watch::supersede_running_refresh();
     tokio::spawn(async move {
-        discover_until_keyed_providers_answer(
+        let refresh = discover_until_keyed_providers_answer(
             &DISCOVERY_RETRY_BACKOFF,
             DISCOVERY_RETRY_STEADY,
             DISCOVERY_RETRY_STEADY_ROUNDS,
@@ -180,9 +181,12 @@ pub(crate) fn spawn_catalog_refresh(config: &forge_config::Config) {
                     publish_live(catalog);
                 }
             },
-        )
-        .await;
-        end_catalog_refresh();
+        );
+        // A newer refresh takes over this slot; it, not this task, releases it.
+        tokio::select! {
+            () = refresh => end_catalog_refresh(),
+            _ = generation.changed() => {}
+        }
     });
 }
 

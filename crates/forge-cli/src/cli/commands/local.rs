@@ -481,7 +481,7 @@ pub(crate) fn non_interactive_message(invoked_as: &str) -> String {
 /// `forge init`: interactive first-run setup. Walks the key-based providers (offering to store a
 /// key for each), then each installed CLI bridge (asking which subscription plan backs it), and
 /// writes the plans to the user config. Keys go to the OS keyring, never the config (ADR-0007).
-pub(crate) fn init(invoked_as: &str) -> Result<()> {
+pub(crate) fn init(invoked_as: &str) -> Result<bool> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!(non_interactive_message(invoked_as));
@@ -492,7 +492,7 @@ pub(crate) fn init(invoked_as: &str) -> Result<()> {
             .context("running the setup wizard")?;
     if outcome.cancelled {
         println!("Setup cancelled — run `{invoked_as}` anytime.");
-        return Ok(());
+        return Ok(false);
     }
     let path = apply_wizard_outcome(&outcome)?;
     println!("✓ Setup saved to {}", path.display());
@@ -502,14 +502,15 @@ pub(crate) fn init(invoked_as: &str) -> Result<()> {
         outcome.plans.len()
     );
     println!("  The mesh routes across these by task tier + cost. Try `forge models`.");
-    Ok(())
+    Ok(true)
 }
 
 /// `forge setup`: the full guided flow — the provider/plan wizard ([`init`]), then an optional
 /// local-LLM step. Used by `forge setup`, `forge init`, and the first-run prompt.
 pub(crate) fn setup(invoked_as: &str) -> Result<()> {
-    init(invoked_as)?;
-    offer_local_setup();
+    if init(invoked_as)? {
+        offer_local_setup();
+    }
     Ok(())
 }
 

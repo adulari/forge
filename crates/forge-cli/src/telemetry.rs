@@ -220,7 +220,7 @@ fn is_enabled() -> bool {
     }
     forge_config::load()
         .map(|config| config.telemetry.enabled)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn env_truthy(name: &str) -> bool {

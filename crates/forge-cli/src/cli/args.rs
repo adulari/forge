@@ -229,7 +229,7 @@ pub(crate) enum AssayCmd {
         #[arg(long, value_name = "USD")]
         max_cost: Option<f64>,
         /// Skip the --max-cost guard and run even if the estimate exceeds the cap.
-        #[arg(long, conflicts_with = "max_cost")]
+        #[arg(long)]
         yes: bool,
     },
 }
@@ -962,13 +962,13 @@ pub(crate) enum VoiceOp {
 
 #[derive(Subcommand)]
 pub(crate) enum MigrateCmd {
-    /// Write the install into a bundle directory DEST (config + skills + MCP + model metadata).
+    /// Write the install into a DEST.tar.gz bundle (config + skills + MCP + model metadata).
     ///
     /// Examples:
     ///   forge migrate export ./forge-bundle
     ///   forge migrate export ./forge-bundle --include-keys --include-sessions
     Export {
-        /// Destination directory for the bundle (created if missing).
+        /// Destination path; `.tar.gz` is appended when missing.
         dest: std::path::PathBuf,
         /// Also bundle API keys — WRITTEN IN PLAINTEXT. Move + delete the bundle carefully.
         #[arg(long)]
@@ -977,7 +977,7 @@ pub(crate) enum MigrateCmd {
         #[arg(long)]
         include_sessions: bool,
     },
-    /// Restore an install from a bundle directory SRC produced by `export`.
+    /// Restore an install from a bundle (.tar.gz or directory) SRC produced by `export`.
     ///
     /// Example:  forge migrate import ./forge-bundle
     Import {

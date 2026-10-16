@@ -79,7 +79,9 @@ pub fn is_daemon_invocation(args: &[String]) -> bool {
 /// entries added, for logging once tracing is up.
 #[cfg(unix)]
 pub fn hydrate_for_daemon() -> Vec<String> {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args_os()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
     if !is_daemon_invocation(&args)
         || std::io::stdout().is_terminal()
         || std::env::var_os("FORGE_NO_LOGIN_PATH").is_some_and(|v| v == "1")

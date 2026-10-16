@@ -484,6 +484,8 @@ pub(crate) async fn skill_from_session(
         .ranked_for(forge_types::TaskTier::Trivial, &pricing, 5)
         .into_iter()
         .filter(|m| !benched.is_benched(m))
+        .filter(|m| !forge_config::is_model_disabled(m, &config.mesh.disabled))
+        .filter(|m| forge_config::has_api_key(forge_config::provider_of(m)))
         .filter(|m| forge_mesh::privacy::allows(&config, m))
         .collect();
     if trivial_models.is_empty() {

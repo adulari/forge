@@ -101,6 +101,7 @@ pub(crate) async fn run(
             // them as a baseline so `usage` reports this invocation, as `claude -p` does.
             session.emit_restored_totals();
         }
+        let mut interrupted = false;
         let result = if let Some(spec) = goal_spec {
             let cwd = std::env::current_dir().unwrap_or_default();
             let end = run_goal_headless(&mut session, spec, &guidance, &cwd, async {
@@ -119,12 +120,20 @@ pub(crate) async fn run(
                         Err(e)
                     }
                 },
-                _ = tokio::signal::ctrl_c() => Ok(()),
+                _ = interrupt_signal() => {
+                    println!("{}", forge_tui::error_result_line("interrupted"));
+                    interrupted = true;
+                    Ok(())
+                },
             }
         };
         let written = write_usage(&session, &before);
         result?;
-        return written;
+        written?;
+        if interrupted {
+            std::process::exit(130);
+        }
+        return Ok(());
     }
 
     if tui && goal_spec.is_some() {
@@ -149,7 +158,7 @@ pub(crate) async fn run(
 
     // Headless heartbeat: a long model call streams nothing until the first token, so tick
     // "working… Ns" to stderr to show the turn is alive. Skipped for `--mock` (instant).
-    let heartbeat = (!mock).then(|| {
+    let heartbeat = (!mock && std::io::IsTerminal::is_terminal(&std::io::stderr())).then(|| {
         tokio::spawn(async {
             let start = std::time::Instant::now();
             let mut iv = tokio::time::interval(std::time::Duration::from_secs(2));

@@ -208,14 +208,15 @@ static LAST_PROVIDER_SET: Mutex<Option<String>> = Mutex::new(None);
 static OWN_CACHE_WRITE: Mutex<Option<SystemTime>> = Mutex::new(None);
 
 /// Begin a background refresh: reload provider config and keys, rediscover, persist and publish.
-/// `false` when another refresh already holds the single-flight slot (nothing was started; the
-/// caller may ask again). Returns immediately; discovery runs on its own task under the
+/// Supersedes a refresh still retrying a down provider. Always starts one. Returns immediately; discovery runs on its own task under the
 /// per-provider budgets of [`discover_catalog_with_status`], and a keyed provider that is down is
 /// retried with backoff, publishing each round, exactly like the startup refresh.
 fn start_refresh(reason: Reason) -> bool {
-    if !try_begin_catalog_refresh() {
-        return false;
-    }
+    // A refresh that is still retrying a down provider (up to ~30 min) must not block adoption of
+    // a newer config: take over its slot instead of declining. The superseded task stops without
+    // releasing the slot, which the new task now owns.
+    let _ = try_begin_catalog_refresh();
+    let mut generation = supersede_running_refresh();
     tokio::spawn(async move {
         let provider_set_changed = tokio::task::spawn_blocking(reload_providers)
             .await
@@ -226,7 +227,7 @@ fn start_refresh(reason: Reason) -> bool {
             provider_set_changed,
             "refreshing the model catalog"
         );
-        refresh_with(
+        let refresh = refresh_with(
             provider_set_changed,
             || discover_catalog_with_status(&config),
             |catalog, changed| {
@@ -239,11 +240,25 @@ fn start_refresh(reason: Reason) -> bool {
                     Signals::read().catalog;
                 publish_live(catalog);
             },
-        )
-        .await;
-        end_catalog_refresh();
+        );
+        tokio::select! {
+            () = refresh => end_catalog_refresh(),
+            _ = generation.changed() => {}
+        }
     });
     true
+}
+
+/// Stop any running refresh and return a receiver that fires when THIS one is superseded in turn.
+pub(super) fn supersede_running_refresh() -> tokio::sync::watch::Receiver<u64> {
+    refresh_generation().send_modify(|g| *g += 1);
+    refresh_generation().subscribe()
+}
+
+/// Bumped by every refresh start; a running refresh whose snapshot goes stale stops.
+fn refresh_generation() -> &'static tokio::sync::watch::Sender<u64> {
+    static GEN: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> = std::sync::OnceLock::new();
+    GEN.get_or_init(|| tokio::sync::watch::channel(0).0)
 }
 
 /// Ask for a refresh now (the Ctrl-R reload). Idempotent while one is running.
