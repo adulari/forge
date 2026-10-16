@@ -502,15 +502,22 @@ impl Store {
                     } else {
                         transaction.execute(
                             "INSERT INTO usage
-                             (id, message_id, input_tokens, cached_input_tokens, output_tokens, cost_usd)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                             (id, message_id, input_tokens, cached_input_tokens, output_tokens, cost_usd,
+                              provider, model, created_at, cache_write_tokens, reasoning_tokens)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                                     COALESCE(?9, strftime('%s','now')), ?10, ?11)",
                             rusqlite::params![
                                 payload.id,
                                 payload.message_id,
                                 payload.input_tokens,
                                 payload.cached_input_tokens,
                                 payload.output_tokens,
-                                payload.cost_usd
+                                payload.cost_usd,
+                                payload.provider,
+                                payload.model,
+                                payload.created_at,
+                                payload.cache_write_tokens,
+                                payload.reasoning_tokens
                             ],
                         )?;
                         transaction.execute(

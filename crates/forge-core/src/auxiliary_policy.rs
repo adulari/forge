@@ -318,15 +318,17 @@ prompt text, nothing else.";
             None => {
                 let mut on_event = |_: StreamEvent| {};
                 let completion_opts = Session::auxiliary_completion_options(&id, "recap");
-                let r = match provider
-                    .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(error) => {
+                // Best-effort and inline (headless exit waits on it): a slow model must not hold
+                // the process open, so give up after a short bound.
+                let call =
+                    provider.complete_with(&model, &messages, &[], &completion_opts, &mut on_event);
+                let r = match tokio::time::timeout(std::time::Duration::from_secs(20), call).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(error)) => {
                         record_model_failure_in(&store, &model, &error, cooldown);
                         return;
                     }
+                    Err(_) => return,
                 };
                 {
                     if let Err(error) = store.record_side_call_usage_for(

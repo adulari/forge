@@ -32,7 +32,14 @@ pub(super) fn classify_genai_error(err: &genai::Error) -> ProviderError {
                     .or_else(|| parse_retry_after_body(body));
                 classify_status(status.as_u16(), err.to_string(), body, retry_after)
             }
-            other => ProviderError::Unavailable(short(&other.to_string())),
+            other => {
+                let note = forge_config::headroom_route()
+                    .map(|proxy| {
+                        format!(" (routed via the Headroom proxy at {proxy} — is it running?)")
+                    })
+                    .unwrap_or_default();
+                ProviderError::Unavailable(format!("{}{note}", short(&other.to_string())))
+            }
         },
         // Streaming path: genai gives no typed HTTP status, only a string. Prefer a STRUCTURED read
         // when the cause is (or embeds) a JSON error body — classify on `error.code`/`error.status`/
@@ -267,6 +274,8 @@ pub(super) fn is_capability_failure(text: &str) -> bool {
     const MARKERS: &[&str] = &[
         // OpenRouter: no provider endpoint exposes tool use for this model.
         "no endpoints found that support tool use",
+        // A gateway that cannot speak the wire protocol we chose for this model (400).
+        "does not support this protocol",
         // OpenRouter / generic: feature explicitly unsupported.
         "does not support feature: function-calling",
         // MiniMax (via opencode_go): rejects our tool payload outright.

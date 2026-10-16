@@ -247,6 +247,10 @@ pub(crate) fn side_call_model(
         Some(first) => first,
         None => routed.model.clone(),
     };
+    // `credit_mode = strict` means free/subscription only: a pin set must not smuggle a paid
+    // model in through the side-call chain.
+    let strict_pricing = (config.mesh.credit_mode == forge_types::CreditMode::Strict)
+        .then(|| forge_mesh::pricing::Pricing::from_config(config));
     // A side call that already failed permanently (model_not_found, auth, 402) is benched in the
     // shared store; without this filter the same doomed call repeated every turn.
     config
@@ -256,6 +260,12 @@ pub(crate) fn side_call_model(
         .filter(|m| crate::auxiliary_candidates::usable_for_side_call(m, health, catalog))
         .filter(|m| forge_mesh::privacy::allows(config, m))
         .filter(|m| !forge_config::is_model_disabled(m, &config.mesh.disabled))
+        .filter(|m| {
+            strict_pricing.as_ref().is_none_or(|p| {
+                forge_mesh::catalog::is_subscription(m)
+                    || forge_mesh::catalog::is_free(m, p.estimated_cost(m), false)
+            })
+        })
         .find(|m| forge_config::has_api_key(forge_config::provider_of(m)))
         .unwrap_or(own)
 }

@@ -89,6 +89,9 @@ impl Store {
                 "output_tokens": usage.output_tokens,
                 "cached_input_tokens": usage.cached_input_tokens,
                 "cost_usd": usage.cost_usd,
+                "created_at": tx.query_row("SELECT CAST(strftime('%s','now') AS INTEGER)", [], |r| r.get::<_, i64>(0))?,
+                "cache_write_tokens": usage.cache_write_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
             }))?;
             append_sync_revision(&tx, "usage", &id, SyncJournalOperation::Upsert, &payload)?;
             append_session_snapshot(&tx, session_id)?;

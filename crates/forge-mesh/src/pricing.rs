@@ -201,6 +201,11 @@ impl Pricing {
                 return reported;
             }
         }
+        // Flat-rate ChatGPT plan: the bundled codex rows exist so ROUTING can rank these models
+        // (`estimated_cost`), not to bill a per-token figure the plan never charges.
+        if model.starts_with("codex-cli::") || model.starts_with("codex-oauth::") {
+            return 0.0;
+        }
         let Some(rate) = self.rates.get(model) else {
             return 0.0;
         };
@@ -837,5 +842,22 @@ mod tests {
             None,
             "an untracked model has no notional price, never a fabricated zero"
         );
+    }
+
+    #[test]
+    fn codex_plan_turns_are_not_billed_in_usd_but_still_rank_by_price() {
+        let pricing = Pricing::from_config(&forge_config::Config::default());
+        let usage = forge_types::Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Default::default()
+        };
+        for id in ["codex-cli::gpt-5.6-sol", "codex-oauth::gpt-5.6-sol"] {
+            assert_eq!(pricing.cost_for_usage(id, &usage), 0.0, "{id}");
+            assert!(
+                pricing.estimated_cost(id) > 0.0,
+                "{id} must keep its routing rate"
+            );
+        }
     }
 }

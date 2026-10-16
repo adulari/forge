@@ -63,7 +63,7 @@ pub enum ConfigError {
     Load(Box<figment::Error>),
     #[error("no API key found for provider '{0}' (set {1} or run `forge auth {0}`)")]
     MissingKey(String, String),
-    #[error("keyring error: {0}")]
+    #[error("secret store error: {0}")]
     Keyring(String),
     #[error("no per-user config directory available on this platform")]
     NoConfigDir,
@@ -3838,6 +3838,7 @@ pub fn append_allow_rule_in(
 
 // ----------------------------------------------------------------------------------------------
 mod editor;
+mod endpoint_check;
 mod provider_registry;
 mod provider_reload;
 pub use editor::*;
@@ -5888,6 +5889,40 @@ reason = "no privilege escalation"
             label: None,
         };
         assert!(bad_url.into_runtime().is_err());
+        for bad in [
+            "http:///v1",
+            "http://user:secret@host/v1",
+            "http://host:notaport/v1",
+            "http://ho st/v1",
+        ] {
+            let c = CustomProviderConfig {
+                pricing_stat: None,
+                namespace: "x".into(),
+                base_url: bad.into(),
+                api_key_env: None,
+                free: false,
+                models: vec![],
+                label: None,
+            };
+            let err = c.into_runtime().unwrap_err();
+            assert!(!err.contains("secret"), "must not echo credentials: {err}");
+        }
+        for ok in [
+            "http://localhost:1234/v1",
+            "https://api.example.com/v1",
+            "http://[::1]:8080",
+        ] {
+            let c = CustomProviderConfig {
+                pricing_stat: None,
+                namespace: "x".into(),
+                base_url: ok.into(),
+                api_key_env: None,
+                free: false,
+                models: vec![],
+                label: None,
+            };
+            assert!(c.into_runtime().is_ok(), "{ok}");
+        }
     }
 
     #[test]

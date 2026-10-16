@@ -270,7 +270,13 @@ pub(crate) async fn build_session_with_self_mcp(
     // so blocking bought a 15 s stall AND a worse decision. Only a completely absent catalog
     // falls back to the seeds, and then it says so — here and in every routing rationale.
     let catalog = if !mock && config.mesh.auto_discover {
-        let cached = read_cached_catalog();
+        let mut cached = read_cached_catalog();
+        if cached.is_none() {
+            // No catalog at all: the seed fallback can pick a disabled/unreachable provider, and a
+            // one-shot run exits before a detached refresh lands. Wait (bounded) just this once.
+            crate::cli::commands::models::first_run_discovery(&config).await;
+            cached = read_cached_catalog();
+        }
         if cached.is_none() {
             presenter.emit(forge_tui::PresenterEvent::Warning(
                 "no model catalog yet: built-in seed candidates for this session — discovery is \

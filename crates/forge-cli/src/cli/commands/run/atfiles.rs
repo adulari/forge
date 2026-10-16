@@ -221,6 +221,23 @@ pub(crate) async fn attach_at_images(
     }
 }
 
+/// Headless counterpart of [`attach_at_images`]: the image files named by `@path` mentions, loaded
+/// for `Session::attach_images`. Failures are reported on stderr, never dropped silently.
+pub(crate) fn at_image_attachments(prompt: &str) -> Vec<forge_types::ImageAttachment> {
+    let mut out = Vec::new();
+    for (_, resolved) in resolved_at_paths(prompt, None) {
+        if !is_image_file(&resolved) {
+            continue;
+        }
+        match crate::image_input::load_image_file(&resolved.to_string_lossy()) {
+            Ok((att, _)) if !out.contains(&att) => out.push(att),
+            Ok(_) => {}
+            Err(e) => eprintln!("skipped image mention: {e}"),
+        }
+    }
+    out
+}
+
 fn expand_at_files_impl(
     prompt: &str,
     workspace: Option<&std::path::Path>,
@@ -318,6 +335,20 @@ mod tests {
         attach_at_images(prompt, Some(directory.path()), &session, &mut app).await;
         attach_at_images(prompt, Some(directory.path()), &session, &mut app).await;
         assert_eq!(session.lock().await.take_pending_images().len(), 1);
+    }
+
+    #[test]
+    fn headless_image_mentions_become_attachments() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let file = directory.path().join("shot.png");
+        std::fs::write(&file, png.into_inner()).unwrap();
+        let prompt = format!("look at @{} and @{}", file.display(), file.display());
+        assert_eq!(at_image_attachments(&prompt).len(), 1, "deduplicated");
+        assert!(at_image_attachments("no mentions here").is_empty());
     }
 
     #[test]

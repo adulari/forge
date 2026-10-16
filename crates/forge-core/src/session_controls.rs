@@ -99,6 +99,11 @@ impl Session {
         Ok(())
     }
 
+    /// Whether the latest turn was refused by a spend cap before any model call.
+    pub fn budget_refused_last_turn(&self) -> bool {
+        self.turn_budget_refused
+    }
+
     /// Queue images to attach to the next user turn (vision input). Consumed when that turn's user
     /// message is built; a turn with no images behaves exactly as before.
     pub fn attach_images(&mut self, images: Vec<forge_types::ImageAttachment>) {

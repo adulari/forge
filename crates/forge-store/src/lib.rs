@@ -837,6 +837,18 @@ struct RemoteUsagePayload {
     cached_input_tokens: Option<i64>,
     output_tokens: i64,
     cost_usd: f64,
+    /// Optional on the wire: older peers omit them, and the row then keeps the receive-time
+    /// default / NULL exactly as before.
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    created_at: Option<i64>,
+    #[serde(default)]
+    cache_write_tokens: Option<i64>,
+    #[serde(default)]
+    reasoning_tokens: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize)]

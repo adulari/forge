@@ -103,8 +103,8 @@ mod watch;
 pub(crate) use discovery::pricing_with_fetched_rates;
 pub(crate) use discovery::publish_live;
 pub(crate) use discovery::{
-    discover_catalog, discover_catalog_with_status, invalidate_catalog_cache, live_catalog,
-    load_cached_catalog, load_cached_catalog_aged, read_cached_catalog, save_catalog,
+    discover_catalog, discover_catalog_with_status, first_run_discovery, invalidate_catalog_cache,
+    live_catalog, load_cached_catalog, load_cached_catalog_aged, read_cached_catalog, save_catalog,
     spawn_catalog_refresh, startup_refresh_due, DiscoveryStatusKind, ProviderDiscoveryStatus,
 };
 pub(crate) use watch::{

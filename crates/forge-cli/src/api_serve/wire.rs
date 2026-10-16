@@ -45,6 +45,15 @@ pub(super) struct ChatCompletionRequest {
     /// Forwarded to the provider's JSON mode so a caller asking for JSON actually gets JSON.
     #[serde(default)]
     pub(super) response_format: Option<serde_json::Value>,
+    /// Output ceiling (`max_completion_tokens` is the newer spelling of `max_tokens`).
+    #[serde(default)]
+    pub(super) max_tokens: Option<u32>,
+    #[serde(default)]
+    pub(super) max_completion_tokens: Option<u32>,
+    /// Number of choices. Forge answers with exactly one, so anything above 1 is refused rather
+    /// than silently returning fewer than asked.
+    #[serde(default)]
+    pub(super) n: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
