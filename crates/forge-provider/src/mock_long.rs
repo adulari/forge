@@ -30,7 +30,11 @@ pub(crate) fn mode_for(lowercased_prompt: &str) -> Option<LongMode> {
 }
 
 fn env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok()?.parse().ok().filter(|n| *n > 0)
+    env_usize_or_zero(name).filter(|n| *n > 0)
+}
+
+fn env_usize_or_zero(name: &str) -> Option<usize> {
+    std::env::var(name).ok()?.parse().ok()
 }
 
 /// Deterministic markdown of roughly `tokens` tokens: headings, prose with inline markup, bullet
@@ -90,7 +94,7 @@ pub(crate) async fn stream_long(mode: LongMode, on_event: &mut EventSink<'_>) ->
         LongMode::Paced => (
             CHARS_PER_TOKEN,
             Duration::from_micros(
-                env_usize("FORGE_MOCK_TOKEN_DELAY_US")
+                env_usize_or_zero("FORGE_MOCK_TOKEN_DELAY_US")
                     .map_or(DEFAULT_TOKEN_DELAY_US, |us| us as u64),
             ),
         ),

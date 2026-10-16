@@ -709,3 +709,18 @@ mod review_answer_tests {
         assert_eq!(answer_after_review("Plain.".into(), None, None), "Plain.");
     }
 }
+
+#[cfg(test)]
+mod shell_failed_tests {
+    use super::shell_command_failed;
+
+    #[test]
+    fn background_start_is_not_a_failure() {
+        assert!(!shell_command_failed(
+            "shell: started background job 1 (pid 42)\n  log: x"
+        ));
+        assert!(!shell_command_failed("shell: exit 0"));
+        assert!(shell_command_failed("shell: exit 2"));
+        assert!(shell_command_failed("shell: failed to start x"));
+    }
+}

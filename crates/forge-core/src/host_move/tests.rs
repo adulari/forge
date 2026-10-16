@@ -109,7 +109,13 @@ fn another_machine_gets_a_notice_with_a_remote_based_path_map() {
 fn a_moved_cwd_on_the_same_machine_is_a_move() {
     let (_tmp, root) = here();
     std::fs::create_dir_all(root.join("new")).unwrap();
-    let current = HostFingerprint::capture(&root.join("new"));
+    let current = HostFingerprint {
+        // Pin home and repo root so the result does not depend on whether TMPDIR sits under a
+        // real $HOME that is itself a git checkout (capture walks up to the nearest `.git`).
+        home: None,
+        repo_root: None,
+        ..HostFingerprint::capture(&root.join("new"))
+    };
     let previous = HostFingerprint {
         cwd: root.join("old").display().to_string(),
         repo_root: None,
