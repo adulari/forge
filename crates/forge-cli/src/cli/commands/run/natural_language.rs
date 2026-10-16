@@ -76,7 +76,7 @@ instructions.\n\
     let hook_runner = session.llm_hook_runner().await;
     let query = match forge_core::hooks_llm::with_runner(
         hook_runner,
-        forge_core::hooks::run_prompt_hooks_in(&hooks, &query, Some(&workspace)),
+        forge_core::hooks::run_prompt_hooks_for(&hooks, &query, Some(&workspace), &sid),
     )
     .await
     {

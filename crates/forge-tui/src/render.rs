@@ -308,6 +308,13 @@ fn severity_color(sev: forge_types::Severity) -> Color {
 /// its transport, and tool/resource/prompt counts (mcp-client.md §5.7).
 pub fn mcp_status_lines(servers: &[forge_types::McpServerLine]) -> Vec<Line<'static>> {
     if servers.is_empty() {
+        let project = std::path::Path::new(".forge/mcp.toml");
+        if let Some(problem) = forge_config::mcp_toml_problem(project) {
+            return vec![Line::from(Span::styled(
+                format!("  ⚠ .forge/mcp.toml is ignored: {problem}"),
+                Style::default().fg(WARNYEL),
+            ))];
+        }
         return vec![Line::from(Span::styled(
             "  ◈ no MCP servers configured — declare them in .forge/mcp.toml (or `forge mcp import`)"
                 .to_string(),

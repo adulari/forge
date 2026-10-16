@@ -755,7 +755,7 @@ impl Session {
         // tool result is already final; post hooks only surface notes, they don't change it.
         if !self.config.hooks.is_empty() {
             let payload =
-                serde_json::json!({ "tool": call.name, "args": call.args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id })
+                serde_json::json!({ "tool": call.name, "args": effective_args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id })
                     .to_string();
             let runner = self.llm_hook_runner().await;
 

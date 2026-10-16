@@ -828,6 +828,13 @@ pub fn forge_tool_from_cc(cc_tool: &str) -> &str {
         .unwrap_or(cc_tool)
 }
 
+/// Claude Code treats a hook matcher as a regex. A matcher of plain names joined by `|` keeps its
+/// exact-name meaning; anything with another regex metacharacter (`.*`, `^Read$`, `mcp__.*`) is
+/// compiled and searched.
+fn is_regex_matcher(pattern: &str) -> bool {
+    pattern.chars().any(|c| ".*+?^$()[]{}\\".contains(c)) && pattern.trim() != "*"
+}
+
 impl HookConfig {
     /// Whether this hook applies to `tool_name`. Native hooks use Forge's exact/comma-separated
     /// matcher; CC-compat hooks treat the matcher as a `|`-separated CC matcher tested against both
@@ -838,6 +845,12 @@ impl HookConfig {
             Some(pattern) => {
                 if self.cc_compat {
                     let alias = cc_tool_alias(tool_name);
+                    if is_regex_matcher(pattern) {
+                        return regex::RegexBuilder::new(pattern)
+                            .case_insensitive(true)
+                            .build()
+                            .is_ok_and(|re| re.is_match(tool_name) || re.is_match(alias));
+                    }
                     pattern.split('|').map(str::trim).any(|m| {
                         m == "*"
                             || m.eq_ignore_ascii_case(tool_name)
@@ -3192,6 +3205,15 @@ fn merge_mcp_servers(destination: &mut Vec<McpServerConfig>, incoming: Vec<McpSe
     }
 }
 
+/// Why the MCP file at `path` would be ignored, or `None` when it is absent or parses. The
+/// loader only logs a malformed file, so a listing that shows "no servers" uses this to say why.
+pub fn mcp_toml_problem(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str::<McpConfig>(&text)
+        .err()
+        .map(|error| error.message().to_string())
+}
+
 fn merge_mcp_toml(config: &mut McpConfig, path: &std::path::Path) {
     if let Ok(text) = std::fs::read_to_string(path) {
         let has_allow = toml::from_str::<toml::Value>(&text)
@@ -4952,6 +4974,16 @@ auto = "local"
         assert!(pre.matches("edit_file"), "Edit alias");
         assert!(pre.matches("write_file"), "Write alias");
         assert!(!pre.matches("shell"), "Bash not in matcher");
+        let regex_hook = |matcher: &str| HookConfig {
+            matcher: Some(matcher.into()),
+            ..pre.clone()
+        };
+        assert!(regex_hook(".*").matches("read_file"));
+        assert!(regex_hook("Rea.*").matches("read_file"));
+        assert!(regex_hook("^Read$").matches("read_file"));
+        assert!(!regex_hook("^Read$").matches("shell"));
+        assert!(regex_hook("mcp__.*").matches("mcp__github__get_issue"));
+        assert!(!regex_hook("mcp__.*").matches("read_file"));
         let note = hooks
             .iter()
             .find(|h| h.event == HookEvent::Notification)
@@ -6149,5 +6181,24 @@ deployments = ["gpt-4o"]
             configured.mesh.classifier_model.as_deref(),
             Some("cerebras::gpt-oss-120b")
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_toml_problem_tests {
+    use super::mcp_toml_problem;
+
+    #[test]
+    fn a_malformed_mcp_file_reports_why_and_a_good_or_absent_one_is_silent() {
+        let dir = std::env::temp_dir().join(format!("forge-mcp-problem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad.toml");
+        std::fs::write(&bad, "[[servers]]\nname = \"x\"\ncommand = \"python3\"\n").unwrap();
+        assert!(mcp_toml_problem(&bad).unwrap().contains("transport"));
+        let good = dir.join("good.toml");
+        std::fs::write(&good, "").unwrap();
+        assert_eq!(mcp_toml_problem(&good), None);
+        assert_eq!(mcp_toml_problem(&dir.join("absent.toml")), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

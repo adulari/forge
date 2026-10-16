@@ -71,7 +71,12 @@ pub(crate) async fn chat(
                 let hook_runner = session.llm_hook_runner().await;
                 let task = match forge_core::hooks_llm::with_runner(
                     hook_runner,
-                    forge_core::hooks::run_prompt_hooks_in(&hooks, &task, Some(&hook_workspace)),
+                    forge_core::hooks::run_prompt_hooks_for(
+                        &hooks,
+                        &task,
+                        Some(&hook_workspace),
+                        session.id(),
+                    ),
                 )
                 .await
                 {

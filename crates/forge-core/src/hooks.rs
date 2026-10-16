@@ -206,9 +206,20 @@ pub async fn run_prompt_hooks_in(
     prompt: &str,
     cwd: Option<&std::path::Path>,
 ) -> Result<String, String> {
+    run_prompt_hooks_for(hooks, prompt, cwd, "").await
+}
+
+/// [`run_prompt_hooks_in`] that also tells the hook which session the prompt belongs to.
+pub async fn run_prompt_hooks_for(
+    hooks: &[HookConfig],
+    prompt: &str,
+    cwd: Option<&std::path::Path>,
+    session_id: &str,
+) -> Result<String, String> {
     let payload = serde_json::json!({
         "prompt": prompt,
         "cwd": cwd.map(|cwd| cwd.display().to_string()),
+        "session_id": (!session_id.is_empty()).then_some(session_id),
     })
     .to_string();
     let mut current = prompt.to_string();
@@ -220,7 +231,7 @@ pub async fn run_prompt_hooks_in(
             // CC UserPromptSubmit: a block decision / exit-2 blocks the turn; otherwise stdout (and
             // `additionalContext`) is APPENDED as extra context (CC semantics — it doesn't replace
             // the prompt the way a native prompt hook does).
-            let cc_payload = to_cc_payload(&payload, HookEvent::UserPromptSubmit, "");
+            let cc_payload = to_cc_payload(&payload, HookEvent::UserPromptSubmit, session_id);
             match run_one(h, &cc_payload).await {
                 Ok((code, stdout, stderr)) => {
                     let out = parse_cc_output(code, &stdout, &stderr);

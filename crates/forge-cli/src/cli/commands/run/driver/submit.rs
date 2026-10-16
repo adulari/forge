@@ -256,18 +256,24 @@ impl DriverState {
         }
         self.prompt_history.record(trimmed);
         if let Some(rest) = line.strip_prefix("//") {
-            let (hooks, hook_workspace, hook_runner) = {
+            let (hooks, hook_workspace, hook_runner, hook_session) = {
                 let mut s = self.session.lock().await;
                 (
                     s.hooks().to_vec(),
                     s.workspace_root().to_path_buf(),
                     s.llm_hook_runner().await,
+                    s.id().to_string(),
                 )
             };
             let escaped = format!("/{rest}");
             match forge_core::hooks_llm::with_runner(
                 hook_runner,
-                forge_core::hooks::run_prompt_hooks_in(&hooks, &escaped, Some(&hook_workspace)),
+                forge_core::hooks::run_prompt_hooks_for(
+                    &hooks,
+                    &escaped,
+                    Some(&hook_workspace),
+                    &hook_session,
+                ),
             )
             .await
             {
@@ -302,17 +308,23 @@ impl DriverState {
             Some(mut mentions) => prepend_attach_mentions(&mut mentions, line),
             None => prepend_attach_mentions(&mut self.pending_mentions, line),
         };
-        let (hooks, hook_workspace, hook_runner) = {
+        let (hooks, hook_workspace, hook_runner, hook_session) = {
             let mut s = self.session.lock().await;
             (
                 s.hooks().to_vec(),
                 s.workspace_root().to_path_buf(),
                 s.llm_hook_runner().await,
+                s.id().to_string(),
             )
         };
         match forge_core::hooks_llm::with_runner(
             hook_runner,
-            forge_core::hooks::run_prompt_hooks_in(&hooks, &line, Some(&hook_workspace)),
+            forge_core::hooks::run_prompt_hooks_for(
+                &hooks,
+                &line,
+                Some(&hook_workspace),
+                &hook_session,
+            ),
         )
         .await
         {
