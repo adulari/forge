@@ -75,6 +75,7 @@ mod doctor;
 mod doctor_daemon;
 mod doctor_environment;
 mod doctor_health;
+mod doctor_providers;
 mod first_run;
 mod fleet_peers;
 mod image_input;
