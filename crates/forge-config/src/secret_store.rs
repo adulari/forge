@@ -582,6 +582,33 @@ fn write_map(map: &BTreeMap<String, String>) -> Result<(), ConfigError> {
     write_private(&path, &body)
 }
 
+/// Serialize read-modify-write of `secrets.enc` across processes (two `forge auth` runs, the
+/// daemon): an exclusive `flock` on a sibling lock file, polled for up to 10s. Best effort — if the
+/// lock cannot be taken the write proceeds unlocked, as before.
+#[cfg(not(feature = "test-secrets"))]
+fn with_store_lock<T>(f: impl FnOnce() -> Result<T, ConfigError>) -> Result<T, ConfigError> {
+    #[cfg(unix)]
+    let _guard = secrets_path().and_then(|p| {
+        use std::os::fd::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(p.with_extension("enc.lock"))
+            .ok()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // SAFETY: the descriptor is owned by `file` for the duration of each call.
+        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        Some(file)
+    });
+    f()
+}
+
 #[cfg(not(feature = "test-secrets"))]
 fn file_set(key: &str, value: &str) -> Result<(), ConfigError> {
     let cipher = cipher()?;
@@ -594,9 +621,11 @@ fn file_set(key: &str, value: &str) -> Result<(), ConfigError> {
     let mut blob = nonce_bytes.to_vec();
     blob.extend_from_slice(&ct);
     let encoded = base64::engine::general_purpose::STANDARD.encode(blob);
-    let mut map = read_map_strict()?;
-    map.insert(key.to_string(), encoded);
-    write_map(&map)
+    with_store_lock(|| {
+        let mut map = read_map_strict()?;
+        map.insert(key.to_string(), encoded);
+        write_map(&map)
+    })
 }
 
 #[cfg(not(feature = "test-secrets"))]
@@ -616,12 +645,14 @@ fn file_get(key: &str) -> Option<String> {
 
 #[cfg(not(feature = "test-secrets"))]
 fn file_delete(key: &str) -> Result<bool, ConfigError> {
-    let mut map = read_map_strict()?;
-    if map.remove(key).is_some() {
-        write_map(&map)?;
-        return Ok(true);
-    }
-    Ok(false)
+    with_store_lock(|| {
+        let mut map = read_map_strict()?;
+        if map.remove(key).is_some() {
+            write_map(&map)?;
+            return Ok(true);
+        }
+        Ok(false)
+    })
 }
 
 // =============================================================================================

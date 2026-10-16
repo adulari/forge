@@ -104,7 +104,7 @@ pub(crate) mod loop_progress;
 mod lsp_delta;
 mod lsp_hints;
 mod mid_intent;
-pub(crate) mod model_failure_record;
+pub mod model_failure_record;
 mod model_health_notice;
 mod model_loop;
 mod model_request;
@@ -1847,6 +1847,9 @@ pub struct Session {
     /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
     /// turn is recorded as `TasksUnfinished` instead of a clean final answer.
     turn_unfinished_tasks: Vec<String>,
+    /// The latest turn was refused by a spend cap before any model call; a `/goal` driver reads
+    /// it to stop instead of re-driving refused turns.
+    turn_budget_refused: bool,
     /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
     /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
@@ -2850,6 +2853,7 @@ impl Session {
             min_context_tokens: Some(self.routing_min_context()),
         };
         let status = budget.status();
+        self.turn_budget_refused = false;
 
         // Hard stop: once a cap is exceeded, refuse the call before any provider request
         // (the cap is never silently exceeded). Overridable per process via
@@ -2874,6 +2878,7 @@ impl Session {
                 final_text: msg.clone(),
                 stop_reason: StopReason::BudgetExhausted,
             });
+            self.turn_budget_refused = true;
             return Ok(LoopOutcome::budget_exhausted(msg));
         }
 
@@ -2890,6 +2895,7 @@ impl Session {
                 final_text: msg.clone(),
                 stop_reason: StopReason::BudgetExhausted,
             });
+            self.turn_budget_refused = true;
             return Ok(LoopOutcome::budget_exhausted(msg));
         }
 
@@ -4354,9 +4360,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         if detach_post_turn_work {
             self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
         }
-        self.generate_recap(prompt, &final_text, &recap_tasks_before)
-            .await;
-        self.generate_suggestion(prompt, &final_text).await;
+        // A tripped session spend cap ends the turn; optional side calls must not keep spending.
+        let spend_ok = self.session_spend_refusal().is_none();
+        if spend_ok {
+            self.generate_recap(prompt, &final_text, &recap_tasks_before)
+                .await;
+            self.generate_suggestion(prompt, &final_text).await;
+        }
         // Continual Harness auto-refine gate (`harness.auto_refine = "turns"`, refinement.rs).
         // Runs inline (unlike recap/suggestion) rather than detaching onto the presenter's sink:
         // it mutates durable harness state and its own presenter note should land in order with
@@ -4365,7 +4375,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // One-shot/headless mode must await memory persistence before the process exits. In the
         // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
         // the completed answer and input become usable immediately while persistence finishes.
-        if let Some(handle) = self.capture_memories(prompt, &final_text).await {
+        if let Some(handle) = if spend_ok {
+            self.capture_memories(prompt, &final_text).await
+        } else {
+            None
+        } {
             if detach_post_turn_work {
                 drop(handle);
             } else {

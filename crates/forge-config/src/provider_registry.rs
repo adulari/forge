@@ -1,6 +1,7 @@
 //! Provider credentials, discovery, and runtime custom-provider registry.
 
 use super::*;
+use crate::endpoint_check::{check_env_var_name, endpoint_shape_error, is_reserved_namespace};
 
 /// Providers that authenticate with an API key, paired with the environment variable the
 /// genai client reads for that provider. The env var names must match genai's
@@ -117,6 +118,7 @@ impl AzureConfig {
                 "azure endpoint '{endpoint}' must start with http(s)://"
             ));
         }
+        endpoint_shape_error("azure endpoint", &endpoint, true)?;
         let api_version = self
             .api_version
             .map(|s| s.trim().to_string())
@@ -507,6 +509,7 @@ impl CustomProviderConfig {
                 self.base_url
             ));
         }
+        endpoint_shape_error("base_url", &endpoint, false)?;
         let env_var = self
             .api_key_env
             .map(|s| s.trim().to_string())
@@ -545,11 +548,9 @@ fn add_custom_provider_at(
     path: &std::path::Path,
     p: &CustomProviderConfig,
 ) -> Result<(), ConfigError> {
-    // Validate the entry (and that it doesn't collide with a native/built-in provider).
     let rp = p.clone().into_runtime().map_err(ConfigError::Write)?;
-    let ns = rp.namespace.as_str();
-    let reserved = ns == "ollama" || ns.ends_with("-cli") || ns.ends_with("-oauth");
-    if reserved
+    check_env_var_name(Some(&rp.env_var)).map_err(ConfigError::Write)?;
+    if is_reserved_namespace(&rp.namespace)
         || PROVIDER_ENV_VARS.iter().any(|(n, _)| *n == rp.namespace)
         || CUSTOM_OPENAI_PROVIDERS
             .iter()
@@ -732,6 +733,7 @@ fn remove_azure_provider_at(path: &std::path::Path) -> Result<bool, ConfigError>
 fn add_azure_provider_at(path: &std::path::Path, cfg: &AzureConfig) -> Result<(), ConfigError> {
     // Validate (resource/endpoint present + well-formed) before touching the file.
     cfg.clone().into_provider().map_err(ConfigError::Write)?;
+    check_env_var_name(cfg.api_key_env.as_deref()).map_err(ConfigError::Write)?;
 
     let mut root: toml::Table = std::fs::read_to_string(path)
         .ok()

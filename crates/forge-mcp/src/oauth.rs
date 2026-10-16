@@ -423,6 +423,15 @@ pub async fn resolve_oauth_token_async(server_name: &str) -> Result<String, Stri
         return Ok(tokens.access_token.clone());
     }
 
+    // Cross-process single flight: a rotating refresh token spent twice fails `invalid_grant` for
+    // the loser although the winner already stored fresh tokens.
+    let _lock = refresh_flock(server_name).await;
+    let fresh = |t: &OAuthTokens| !t.is_expired(now, 60);
+    let tokens = match forge_config::load_oauth_tokens(server_name) {
+        Some(t) if fresh(&t) => return Ok(t.access_token),
+        Some(t) => t,
+        None => tokens,
+    };
     let client = crate::transport::bundled_client_builder()
         .build()
         .map_err(|e| format!("http client for '{server_name}': {e}"))?;
@@ -430,12 +439,52 @@ pub async fn resolve_oauth_token_async(server_name: &str) -> Result<String, Stri
     // refresh authenticates; public PKCE clients have no secret and pass `None`.
     let client_secret = load_registered_client_for_id(server_name, &tokens.client_id)
         .and_then(|client| client.client_secret);
-    let new_tokens = refresh_token(&client, &tokens, client_secret.as_deref())
-        .await
-        .map_err(|e| format!("token refresh for '{server_name}' failed: {e}"))?;
+    let new_tokens = match refresh_token(&client, &tokens, client_secret.as_deref()).await {
+        Ok(t) => t,
+        Err(e) => {
+            // A peer that raced us may have rotated the token: adopt what it stored.
+            return match forge_config::load_oauth_tokens(server_name) {
+                Some(t) if fresh(&t) => Ok(t.access_token),
+                _ => Err(format!("token refresh for '{server_name}' failed: {e}")),
+            };
+        }
+    };
     forge_config::store_oauth_tokens(server_name, &new_tokens)
         .map_err(|e| format!("storing refreshed tokens: {e}"))?;
     Ok(new_tokens.access_token)
+}
+
+/// Exclusive advisory lock serializing refreshes of `server_name` across processes; `None` when it
+/// cannot be taken within 30s (the caller then proceeds and relies on adopt-after-reject).
+#[cfg(unix)]
+async fn refresh_flock(server_name: &str) -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let safe: String = server_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let dir = forge_config::data_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("mcp-oauth-{safe}.lock")))
+        .ok()?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    // SAFETY: the descriptor is owned by `file` for the duration of each call.
+    while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Some(file)
+}
+
+#[cfg(not(unix))]
+async fn refresh_flock(_server_name: &str) -> Option<std::fs::File> {
+    None
 }
 
 /// Parse `access_token`, `refresh_token`, `expires_in`, from a token-endpoint JSON response.

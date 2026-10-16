@@ -272,6 +272,8 @@ pub(crate) struct GoalTurnFacts {
     done: usize,
     total: usize,
     said_complete: bool,
+    /// The turn was refused by a spend cap: re-driving it can only be refused again.
+    budget_refused: bool,
     /// Gates check the checkout the session is working in, which a `worktree enter` moves away
     /// from the directory Forge was launched in.
     root: std::path::PathBuf,
@@ -288,6 +290,7 @@ impl GoalTurnFacts {
                 .count(),
             total: tasks.len(),
             said_complete: is_goal_complete_marker(s.last_assistant_text()),
+            budget_refused: s.budget_refused_last_turn(),
             root: if root.as_os_str().is_empty() {
                 cwd.to_path_buf()
             } else {
@@ -314,6 +317,12 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
     gs.eval.evaluating = false;
     let verdict = gs.eval.slot.lock().unwrap().take();
     let tokens = std::mem::take(&mut gs.eval.pending_tokens);
+    if facts.budget_refused {
+        return GoalStep::Stop {
+            reason: "🎯 goal stopped — budget cap reached".to_string(),
+            met: false,
+        };
+    }
     let decision = next_goal_decision(
         gs,
         facts.said_complete,

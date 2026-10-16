@@ -396,6 +396,32 @@ impl XaiOauthProvider {
         if !tokens.is_expired(now_unix(), REFRESH_SKEW_SECS) {
             return Ok(tokens.access_token);
         }
+        // Serialize with the daemon / CLI runs / mcp-serve children: the refresh token rotates, so
+        // a second concurrent spend gets `invalid_grant`. Whoever is second reloads the keyring.
+        let _lock = match (&self.accounts, forge_config::data_dir()) {
+            (AccountSource::Keyring, Some(dir)) => {
+                crate::refresh_lock::acquire(
+                    &dir.join("xai-oauth-refresh.lock"),
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+            }
+            _ => None,
+        };
+        let reload = || match account_id {
+            Some(id) => {
+                provider_oauth::load_provider_oauth_account_tokens(XAI_OAUTH_KEYRING_PROVIDER, id)
+            }
+            None => provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER),
+        };
+        let tokens = if _lock.is_some() {
+            reload().unwrap_or(tokens)
+        } else {
+            tokens
+        };
+        if !tokens.is_expired(now_unix(), REFRESH_SKEW_SECS) {
+            return Ok(tokens.access_token);
+        }
         let Some(refresh_token) = tokens.refresh_token.clone() else {
             return Err(ProviderError::Auth(
                 "xAI OAuth session expired and has no refresh token — run `forge auth xai-oauth` to \
@@ -406,6 +432,11 @@ impl XaiOauthProvider {
         let refreshed = refresh_tokens(&self.http, &refresh_token)
             .await
             .map_err(|e| {
+                // A dropped connection or timeout says nothing about the session: don't tell the
+                // user to sign in again.
+                if e.downcast_ref::<reqwest::Error>().is_some() {
+                    return ProviderError::Unavailable(format!("xAI OAuth token refresh: {e}"));
+                }
                 ProviderError::Auth(format!(
                 "xAI OAuth token refresh failed: {e} — run `forge auth xai-oauth` to sign in again"
             ))

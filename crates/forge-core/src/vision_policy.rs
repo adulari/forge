@@ -101,8 +101,25 @@ impl Session {
                 context,
             )
             .await;
+        // A `--model` session's router is itself pinned, so it answers with the same text-only
+        // model: look for a vision-capable one among the configured and discovered models.
+        let mut routed = routed;
         if routed.unroutable || !forge_mesh::catalog::supports_vision(&routed.model) {
-            return (decision, false);
+            let tiers = [TaskTier::Complex, TaskTier::Standard, TaskTier::Trivial];
+            let configured = tiers.iter().flat_map(|t| self.config.candidates_for(*t));
+            let discovered = self.catalog.iter().flat_map(|c| c.models().iter().cloned());
+            let Some(model) = configured.chain(discovered).find(|m| {
+                forge_mesh::catalog::supports_vision(m)
+                    && !forge_config::is_model_disabled(m, &self.config.mesh.disabled)
+                    && forge_config::has_api_key(forge_config::provider_of(m))
+                    && forge_mesh::privacy::allows(&self.config, m)
+            }) else {
+                return (decision, false);
+            };
+            routed.model = model;
+            routed.unroutable = false;
+            routed.pinned = false;
+            routed.fallbacks.clear();
         }
         self.presenter.emit(PresenterEvent::Warning(format!(
             "{} can't read images; routed this request to {} (mesh.vision_fallback = \"switch\")",

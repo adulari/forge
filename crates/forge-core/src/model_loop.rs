@@ -483,9 +483,13 @@ impl Session {
                     if self.config.mesh.verify_completeness
                         && !completeness_checked
                         && mutations_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
-                        && (turn_start_tree.is_none()
-                            || crate::completeness::worktree_fingerprint(self.workspace_root())
-                                != turn_start_tree)
+                        && (if turn_start_tree.is_none() {
+                            // No fingerprint (unborn HEAD, non-git dir): only an actual edit counts.
+                            self.edits_this_turn > 0
+                        } else {
+                            crate::completeness::worktree_fingerprint(self.workspace_root())
+                                != turn_start_tree
+                        })
                         && self.review_warranted(&resp.content)
                     {
                         completeness_checked = true;

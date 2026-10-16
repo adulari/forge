@@ -190,6 +190,17 @@ pub(crate) fn spawn_catalog_refresh(config: &forge_config::Config) {
     });
 }
 
+/// First-ever run (no cached catalog): discover inline, bounded, and persist, so the first turn
+/// routes from the real catalog instead of the built-in seeds.
+pub(crate) async fn first_run_discovery(config: &forge_config::Config) {
+    let bound = std::time::Duration::from_secs(12);
+    if let Ok((catalog, _)) =
+        tokio::time::timeout(bound, discover_catalog_with_status(config)).await
+    {
+        save_catalog(&catalog);
+    }
+}
+
 /// Persist `catalog` to disk for the next startup to load instantly.
 ///
 /// Clobber guard: a refresh that lost most of the catalog — a daemon spawned without the

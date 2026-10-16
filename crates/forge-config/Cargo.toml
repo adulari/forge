@@ -18,6 +18,7 @@ default = []
 test-secrets = []
 
 [dependencies]
+libc.workspace = true
 forge-types.workspace = true
 forge-skills.workspace = true
 serde.workspace = true

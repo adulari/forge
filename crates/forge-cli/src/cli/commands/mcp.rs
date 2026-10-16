@@ -285,7 +285,7 @@ pub(crate) fn mcp_logout(server: &str, account: Option<&str>) -> Result<()> {
         Some(id) => match forge_config::remove_oauth_account(server, id) {
             Ok(true) => println!("✓ OAuth account '{id}' for '{server}' removed from the keyring."),
             Ok(false) => println!("no stored OAuth account '{id}' found for '{server}'."),
-            Err(e) => anyhow::bail!("keyring error: {e}"),
+            Err(e) => anyhow::bail!("secret store error: {e}"),
         },
         None => match forge_config::clear_oauth_tokens(server) {
             Ok(true) => println!("✓ OAuth tokens for '{server}' removed from the keyring."),

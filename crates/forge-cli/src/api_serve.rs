@@ -311,6 +311,13 @@ async fn chat_completions(
         Err(msg) => return openai_error(StatusCode::NOT_FOUND, "model_not_found", &msg),
     };
     let effort = req.reasoning_effort.as_deref().and_then(EffortLevel::parse);
+    if req.n.is_some_and(|n| n > 1) {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "n > 1 is not supported: Forge returns exactly one choice",
+        );
+    }
     let opts = CompletionOptions {
         frequency_penalty: None,
         presence_penalty: None,
@@ -318,7 +325,10 @@ async fn chat_completions(
         temperature: req.temperature,
         checkpoint: None,
         prompt_cache_key: Some(prompt_cache_key),
-        max_output_tokens: None,
+        max_output_tokens: req
+            .max_completion_tokens
+            .or(req.max_tokens)
+            .filter(|n| *n > 0),
         reuse_response_chain: false,
         response_chain_prefix_tokens: 0,
         response_format: parse_response_format(&req.response_format),
@@ -415,11 +425,19 @@ async fn run_completion(
                     rationale: format!("routed to {model}"),
                 })
             }
-            Err(e) if e.is_retryable() => {
+            Err(e) => {
+                if let Some(store) = state.readiness_store.as_deref() {
+                    let cooldown =
+                        std::time::Duration::from_secs(state.config.mesh.failover_cooldown_secs);
+                    forge_core::model_failure_record::record_model_failure_in(
+                        store, model, &e, cooldown,
+                    );
+                }
+                if !e.is_retryable() {
+                    return Err(format!("{model}: {e}"));
+                }
                 last_err = format!("{model}: {e}");
-                continue;
             }
-            Err(e) => return Err(format!("{model}: {e}")),
         }
     }
     Err(last_err)

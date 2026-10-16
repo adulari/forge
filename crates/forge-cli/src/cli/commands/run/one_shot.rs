@@ -38,6 +38,11 @@ pub(crate) async fn run(
     };
     let mut guidance = system;
     guidance.extend(command_guidance);
+    let at_images = if goal_spec.is_none() {
+        super::atfiles::at_image_attachments(&prompt)
+    } else {
+        Vec::new()
+    };
     if goal_spec.is_none() {
         let (file_blocks, included, skipped) = expand_at_files(&prompt);
         if !included.is_empty() && !output_format.is_machine() {
@@ -95,6 +100,7 @@ pub(crate) async fn run(
                 return Err(e);
             }
         };
+        session.attach_images(at_images.clone());
         let before = session.session_usage_detail();
         if output_format == OutputFormat::Json {
             // A resumed session's restored totals arrive before routing; the presenter keeps
@@ -140,6 +146,7 @@ pub(crate) async fn run(
         anyhow::bail!("`forge run --tui` does not run /goal as a loop — use `forge chat`");
     }
     let mut session = build_session(mock, mode, tui, resume, pin).await?;
+    session.attach_images(at_images);
     let before = session.session_usage_detail();
 
     // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.

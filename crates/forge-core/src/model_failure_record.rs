@@ -4,7 +4,7 @@ use super::compaction_policy::{model_health_reason, record_auth_failure_in};
 
 /// Store-level body of [`Session::record_model_failure`], free so a detached side-call task that
 /// owns only an `Arc<Store>` records failures through the SAME classifier as the main path.
-pub(crate) fn record_model_failure_in(
+pub fn record_model_failure_in(
     store: &forge_store::Store,
     model: &str,
     err: &forge_provider::ProviderError,
