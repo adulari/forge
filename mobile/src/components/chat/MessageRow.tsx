@@ -215,6 +215,8 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
       <View style={styles.row}>
       <Pressable
         onLongPress={onLongPress ? handleLongPress : undefined}
+        // One merged node would hand TalkBack the whole answer as a single item; let the text blocks be focusable instead.
+        accessible={IS_WEB ? undefined : false}
         {...webContextMenu}
         // The row has no onPress — this Pressable exists purely to host long-press (native +
         // touch-web) and right-click (desktop web, via webContextMenu above) message actions.

@@ -28,6 +28,9 @@ export class PairingPollRateLimitError extends Error {
   }
 }
 
+// Phone and service clocks are rarely identical to the second.
+const PAIRING_CLOCK_SKEW_MS = 30_000;
+
 export function parsePairingChallenge(value: string, serviceUrl: string, now = Date.now()): PairingChallenge {
   let encoded = value.trim();
   if (encoded.startsWith("forge-anywhere://pair?")) encoded = new URL(encoded).searchParams.get("challenge") ?? "";
@@ -38,7 +41,7 @@ export function parsePairingChallenge(value: string, serviceUrl: string, now = D
   if (challenge.version !== 1 || !isOpaque32(challenge.pairing_id)
     || !/^[A-Za-z0-9_-]{43}$/.test(challenge.exchange_public_key)
     || challenge.service_origin !== expectedOrigin) throw new Error("Pairing challenge is invalid for this service");
-  if (!Number.isSafeInteger(challenge.expires_at_ms) || challenge.expires_at_ms <= now || challenge.expires_at_ms > now + 10 * 60_000) throw new Error("Pairing challenge has expired");
+  if (!Number.isSafeInteger(challenge.expires_at_ms) || challenge.expires_at_ms <= now - PAIRING_CLOCK_SKEW_MS || challenge.expires_at_ms > now + 10 * 60_000 + PAIRING_CLOCK_SKEW_MS) throw new Error("Pairing challenge has expired");
   return challenge;
 }
 

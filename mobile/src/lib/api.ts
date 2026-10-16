@@ -691,6 +691,22 @@ function qs(params: Record<string, string | number | undefined>): string {
   return `?${search.toString()}`;
 }
 
+/** Rejects a 200 whose body is not the expected top-level shape (version skew, a proxy error
+ * page), so it never reaches components or the persisted query cache. */
+async function expectArray<T>(p: Promise<T[]>, what: string): Promise<T[]> {
+  const body: unknown = await p;
+  if (!Array.isArray(body)) throw new ApiError(502, `unexpected ${what} response from server`, body);
+  return body as T[];
+}
+
+async function expectObject<T>(p: Promise<T>, what: string): Promise<T> {
+  const body: unknown = await p;
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new ApiError(502, `unexpected ${what} response from server`, body);
+  }
+  return body as T;
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints (§1.2)
 // ---------------------------------------------------------------------------
@@ -700,11 +716,11 @@ export function forkSession(baseUrl: string, id: string, body: ForkSessionReques
 }
 
 export function getSessions(baseUrl: string): Promise<SessionRow[]> {
-  return request(baseUrl, "/api/sessions");
+  return expectArray(request(baseUrl, "/api/sessions"), "sessions");
 }
 
 export function getProjects(baseUrl: string): Promise<ProjectCatalog> {
-  return request(baseUrl, "/api/projects");
+  return expectObject(request(baseUrl, "/api/projects"), "projects");
 }
 
 export function browseProjects(baseUrl: string, path?: string): Promise<BrowseProjectsResponse> {
@@ -735,7 +751,7 @@ export function setSessionPermissionMode(
 }
 
 export function getSessionTree(baseUrl: string): Promise<SessionTreeRow[]> {
-  return request(baseUrl, "/api/sessions/tree");
+  return expectArray(request(baseUrl, "/api/sessions/tree"), "session tree");
 }
 
 export function getPastSessions(
@@ -795,7 +811,7 @@ export function discardSession(
 }
 
 export function getSkills(baseUrl: string): Promise<SkillRow[]> {
-  return request(baseUrl, "/api/skills");
+  return expectArray(request(baseUrl, "/api/skills"), "skills");
 }
 
 export function getWorkflows(baseUrl: string, session?: string): Promise<WorkflowRow[]> {
@@ -872,12 +888,12 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
   });
 }
 
-export function getHooks(baseUrl: string): Promise<HookRow[]> { return request(baseUrl, "/api/hooks"); }
-export function getPlans(baseUrl: string): Promise<PlanRow[]> { return request(baseUrl, "/api/plans"); }
+export function getHooks(baseUrl: string): Promise<HookRow[]> { return expectArray(request(baseUrl, "/api/hooks"), "hooks"); }
+export function getPlans(baseUrl: string): Promise<PlanRow[]> { return expectArray(request(baseUrl, "/api/plans"), "plans"); }
 
 export function createMcpServer(baseUrl: string, body: CreateMcpServerRequest): Promise<McpResponse> { return request(baseUrl, "/api/mcp", { method: "POST", body: JSON.stringify(body) }); }
 
-export function getMcp(baseUrl: string): Promise<McpResponse> { return request(baseUrl, "/api/mcp"); }
+export function getMcp(baseUrl: string): Promise<McpResponse> { return expectObject(request(baseUrl, "/api/mcp"), "mcp"); }
 
 export function updateMcpServer(baseUrl: string, body: UpdateMcpServerRequest): Promise<McpResponse> {
   return request(baseUrl, "/api/mcp", { method: "PATCH", body: JSON.stringify(body) });
@@ -917,7 +933,7 @@ export function createGitBranch(
 }
 
 export function getGitStatus(baseUrl: string, session: string): Promise<GitStatusResponse> {
-  return request(baseUrl, `/api/git/status${qs({ session })}`);
+  return expectObject(request(baseUrl, `/api/git/status${qs({ session })}`), "git status");
 }
 
 /** `staged` picks which side of the index is diffed: `true` = index vs HEAD, `false` = working
@@ -946,7 +962,7 @@ export function commitStaged(baseUrl: string, body: GitCommitRequest): Promise<G
 }
 
 export function getSessionDiff(baseUrl: string, id: string): Promise<SessionDiffResponse> {
-  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/diff`);
+  return expectObject(request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/diff`), "diff");
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,9 +1054,9 @@ export function getHistory(
   params: { session: string; before?: number; limit?: number; include_tools?: boolean },
 ): Promise<HistoryRow[]> {
   const { include_tools, ...page } = params;
-  return request(
-    baseUrl,
-    `/api/history${qs({ ...page, include_tools: include_tools ? 1 : undefined })}`,
+  return expectArray(
+    request<HistoryRow[]>(baseUrl, `/api/history${qs({ ...page, include_tools: include_tools ? 1 : undefined })}`),
+    "history",
   );
 }
 
@@ -1095,7 +1111,7 @@ export async function getNotices(baseUrl: string, after = 0): Promise<NoticesRes
 
 /** Bounded aggregate diagnostics; deliberately excludes secrets, paths, prompts, and logs. */
 export function getDiagnostics(baseUrl: string): Promise<DiagnosticsResponse> {
-  return request(baseUrl, "/api/diagnostics");
+  return expectObject(request(baseUrl, "/api/diagnostics"), "diagnostics");
 }
 
 /** 503 (`ApiError.status === 503`) when the daemon has no VAPID key configured. */

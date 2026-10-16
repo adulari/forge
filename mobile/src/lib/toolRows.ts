@@ -78,7 +78,8 @@ export function formatArgs(argsJson: string): string {
  * rendered verbatim — falls back to the bare tool name (never the raw args) if nothing
  * recognizable is found or the blob doesn't parse.
  */
-export function summarizeToolLine(rawLine: string): string {
+export function summarizeToolLine(rawLine: string | undefined): string {
+  if (!rawLine) return "";
   const line = rawLine.replace(/^↳\s*/, "").trim();
   const braceIdx = line.indexOf("{");
   if (braceIdx === -1) return line;
@@ -94,6 +95,7 @@ export function summarizeToolLine(rawLine: string): string {
 export function resultFailed(result: string | null): boolean {
   if (!result) return false;
   const head = result.slice(0, 400);
+  if (/\bpermission denied\b/i.test(head)) return true;
   return /\b(failed|error)\b/i.test(head) && !/\bpassed\b/i.test(head);
 }
 

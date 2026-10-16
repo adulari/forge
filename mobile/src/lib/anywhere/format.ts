@@ -23,7 +23,8 @@ export function normalizeEntitlementState(value?: string): AnywhereAccount["enti
  */
 export function daysUntilIso(iso: string | null | undefined, nowMs: number = Date.now()): number | undefined {
   if (!iso) return undefined;
-  const deadline = Date.parse(iso);
+  // The service publishes epoch seconds as a numeric string; Date.parse reads that as garbage.
+  const deadline = /^\d{9,11}$/.test(iso.trim()) ? Number(iso) * 1000 : Date.parse(iso);
   if (!Number.isFinite(deadline)) return undefined;
   return Math.max(0, Math.ceil((deadline - nowMs) / (24 * 60 * 60 * 1000)));
 }

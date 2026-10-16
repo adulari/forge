@@ -152,6 +152,7 @@ export default function Root({ children }: { children: React.ReactNode }) {
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
+        <title>Forge</title>
         <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
         {/* Kills pinch/double-tap zoom + page mis-scaling; viewport-fit=cover enables
             safe-area insets; interactive-widget=resizes-content keeps the layout (not

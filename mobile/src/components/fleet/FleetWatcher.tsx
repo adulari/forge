@@ -1,5 +1,6 @@
 import { AppState, type AppStateStatus } from "react-native";
 import { useEffect, useRef } from "react";
+import { usePathname } from "expo-router";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { useToast } from "../ds/ToastHost";
@@ -22,6 +23,8 @@ export function FleetWatcher() {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
   const toast = useToast();
+  const pathname = usePathname();
+  const viewedId = /^\/session\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const previous = useRef<Map<string, SessionRow>>(new Map());
   const foreground = useRef(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -92,8 +95,8 @@ export function FleetWatcher() {
     const next = new Map(data.map((row) => [row.id, row]));
     const old = previous.current;
     if (old.size > 0) {
-      const waiting = data.some((row) => row.waiting && !old.get(row.id)?.waiting);
-      const finished = data.some((row) => !row.busy && old.get(row.id)?.busy);
+      const waiting = data.some((row) => row.id !== viewedId && row.waiting && !old.get(row.id)?.waiting);
+      const finished = data.some((row) => row.id !== viewedId && !row.busy && old.get(row.id)?.busy);
       if ((waiting || finished) && !timer.current) {
         timer.current = setTimeout(() => {
           timer.current = null;
@@ -107,7 +110,7 @@ export function FleetWatcher() {
       }
     }
     previous.current = next;
-  }, [data, toast]);
+  }, [data, toast, viewedId]);
 
   return null;
 }

@@ -12,9 +12,10 @@ const challenge = (expires: number) => base64Url(new TextEncoder().encode(JSON.s
 
 it("accepts a same-service short-lived QR challenge", () => expect(parsePairingChallenge(challenge(101_000), "https://app.example", 100_000).pairing_id).toBe(pairingId));
 it("rejects expired and overlong QR challenges", () => {
-  expect(() => parsePairingChallenge(challenge(99_999), "https://app.example", 100_000)).toThrow("expired");
-  expect(() => parsePairingChallenge(challenge(701_000), "https://app.example", 100_000)).toThrow("expired");
+  expect(() => parsePairingChallenge(challenge(60_000), "https://app.example", 100_000)).toThrow("expired");
+  expect(() => parsePairingChallenge(challenge(800_000), "https://app.example", 100_000)).toThrow("expired");
 });
+it("tolerates a phone clock slightly ahead of the service", () => expect(parsePairingChallenge(challenge(90_000), "https://app.example", 100_000).pairing_id).toBe(pairingId));
 it("gates services without a pairing API explicitly", async () => expect(await pairingCapability("https://app.example", "token", async () => new Response(null, { status: 404 }))).toEqual({ supported: false, message: expect.stringContaining("not enabled") }));
 
 it("exposes the service retry budget instead of turning a pairing 429 into a terminal failure", async () => {

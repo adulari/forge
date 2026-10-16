@@ -229,7 +229,7 @@ export default function SessionTreeScreen() {
                             <View style={[styles.dot, { backgroundColor: onPath ? tokens.accent : tokens.ink3 }]} />
                           )}
                           <Text style={[typeScale.bodyBold, styles.rowTitle, { color: onPath || isSelected ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>{titleFor(node)}</Text>
-                          {live ? <Text style={[styles.mono, { color: tokens.accent }]}>{live === "busy" ? "current" : "waiting"}</Text> : <Text style={[styles.mono, { color: onPath ? tokens.accent : tokens.ink4 }]}>{shortId(node.id)}</Text>}
+                          {live ? <Text style={[styles.mono, { color: tokens.accent }]}>{live === "busy" ? (node.id === currentNode?.id ? "current" : "busy") : "waiting"}</Text> : <Text style={[styles.mono, { color: onPath ? tokens.accent : tokens.ink4 }]}>{shortId(node.id)}</Text>}
                         </View>
                         <Text style={[styles.mono, tabularNums, styles.rowMeta, { color: tokens.ink4 }]} numberOfLines={1}>
                           {relation} · {formatRelativeTime(node.created_at * 1000)}{session?.worktree ? ` · wt ${worktreeSeg(session.worktree)}` : ""}

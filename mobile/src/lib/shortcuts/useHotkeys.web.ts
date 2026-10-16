@@ -41,7 +41,9 @@ function ensureListener(): void {
       e.preventDefault();
       entry.handler();
     }
-  });
+    // Capture phase: react-native-web's TextInput stops keydown propagation, so a bubble
+    // listener never sees Mod/Alt combos typed while the composer is focused.
+  }, true);
 }
 
 /**

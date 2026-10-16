@@ -55,6 +55,7 @@ export function Switch({ value, onValueChange, disabled = false, accessibilityLa
       testID={testID}
       accessibilityRole="switch"
       accessibilityState={{ checked: value, disabled }}
+      aria-checked={value}
       accessibilityLabel={accessibilityLabel}
       style={[styles.hit, { opacity: disabled ? 0.4 : 1, borderColor: focused ? tokens.accent : "transparent" }, style]}
     >

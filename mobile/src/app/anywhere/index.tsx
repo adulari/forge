@@ -377,7 +377,7 @@ function ReadyCenter() {
             ) : null}
           </View>
           <Text style={[typeScale.monoMeta, styles.syncCaption, { color: tokens.ink3 }]}>
-            {`${login ? `@${login}` : "signed in"} · relay connected`}
+            {login ? `@${login}` : "signed in"}
           </Text>
         </View>
         <Button label="Refresh" variant="ghost" icon={<RefreshCw size={16} color={tokens.ink2} />} onPress={() => void Promise.all([anywhere.refresh(), anywhere.refreshPendingApprovals(true)])} />

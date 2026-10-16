@@ -33,6 +33,7 @@ import {
   type DetectedServeState,
 } from "../lib/desktopServe";
 import { haptics } from "../lib/haptics";
+import { takePendingRoute } from "../lib/pendingRoute";
 import { goBackOr } from "../lib/nav";
 import { isTauri } from "../lib/platform";
 import { useTokens } from "../theme/ThemeProvider";
@@ -163,7 +164,8 @@ export default function ConnectScreen() {
             toast.show(`added ${added.name}`, { tone: "success" });
             goBackOr("/(tabs)/settings");
           } else {
-            router.replace("/(tabs)");
+            const back = takePendingRoute();
+            router.replace((back ?? "/(tabs)") as never);
           }
         } catch {
           if (attempt !== attemptRef.current) return;
