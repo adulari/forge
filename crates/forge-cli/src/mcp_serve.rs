@@ -84,12 +84,14 @@ use bridge_budget::*;
 
 mod auto_classify;
 mod permission_relay;
+use hook_payload::bridge_hook_payload;
 use permission_relay::gate;
 #[cfg(test)]
 use permission_relay::gate_decision;
 
 mod dispatch;
 mod fleet;
+mod hook_payload;
 
 mod subagents;
 use subagents::SubagentSupport;
@@ -447,9 +449,11 @@ impl ForgeMcp {
         };
 
         // PreToolUse hooks (hooks.md): fire before the permission gate so user hooks can block
-        // calls on the CLI-bridge path the same way they do on the direct path.
+        // or rewrite calls on the CLI-bridge path the same way they do on the direct path.
+        let mut args = args;
+        let mut note_prefix = String::new();
         if !self.config.hooks.is_empty() {
-            let payload = serde_json::json!({ "tool": name, "args": args }).to_string();
+            let payload = bridge_hook_payload(&name, &args, None);
             let outcome = hooks::run_hooks(
                 &self.config.hooks,
                 forge_config::HookEvent::PreToolUse,
@@ -461,6 +465,12 @@ impl ForgeMcp {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "blocked by hook: {reason}"
                 ))]));
+            }
+            if let Some(rewritten) = outcome.rewritten_args {
+                args = rewritten;
+            }
+            for ctx in outcome.injected_context {
+                note_prefix.push_str(&format!("[hook context] {ctx}\n"));
             }
         }
 
@@ -542,11 +552,8 @@ impl ForgeMcp {
 
         // PostToolUse hooks (hooks.md): observe the completed call. Notes are surfaced as a
         // prefix on the result the bridge model sees (no presenter available on this path).
-        let mut note_prefix = String::new();
         if !self.config.hooks.is_empty() {
-            let payload =
-                serde_json::json!({ "tool": name, "args": args, "result": out, "ok": ok })
-                    .to_string();
+            let payload = bridge_hook_payload(&name, &args, Some((&out, ok)));
             let outcome = hooks::run_hooks(
                 &self.config.hooks,
                 forge_config::HookEvent::PostToolUse,
@@ -556,6 +563,9 @@ impl ForgeMcp {
             .await;
             for note in outcome.notes {
                 note_prefix.push_str(&format!("[hook note] {note}\n"));
+            }
+            for ctx in outcome.injected_context {
+                note_prefix.push_str(&format!("[hook context] {ctx}\n"));
             }
         }
 
@@ -588,7 +598,7 @@ impl ForgeMcp {
 
         // PreToolUse: block, or rewrite the args before the gate + dispatch.
         if !self.config.hooks.is_empty() {
-            let payload = serde_json::json!({ "tool": name, "args": effective_args }).to_string();
+            let payload = bridge_hook_payload(name, &effective_args, None);
             let outcome = hooks::run_hooks(
                 &self.config.hooks,
                 forge_config::HookEvent::PreToolUse,
@@ -607,6 +617,9 @@ impl ForgeMcp {
             if let Some(rewritten) = outcome.rewritten_args {
                 effective_args = rewritten;
             }
+            for ctx in outcome.injected_context {
+                note_prefix.push_str(&format!("[hook context] {ctx}\n"));
+            }
         }
 
         let mode = self.effective_mode();
@@ -618,10 +631,7 @@ impl ForgeMcp {
 
         // PostToolUse: observe; notes are prefixed onto the bridge model's result text.
         if !self.config.hooks.is_empty() {
-            let payload = serde_json::json!({
-                "tool": name, "args": effective_args, "result": out.text, "ok": out.ok
-            })
-            .to_string();
+            let payload = bridge_hook_payload(name, &effective_args, Some((&out.text, out.ok)));
             let outcome = hooks::run_hooks(
                 &self.config.hooks,
                 forge_config::HookEvent::PostToolUse,
@@ -631,6 +641,9 @@ impl ForgeMcp {
             .await;
             for note in outcome.notes {
                 note_prefix.push_str(&format!("[hook note] {note}\n"));
+            }
+            for ctx in outcome.injected_context {
+                note_prefix.push_str(&format!("[hook context] {ctx}\n"));
             }
         }
 
@@ -1010,6 +1023,29 @@ fn bearer_ok(header: Option<&str>, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_hook_payload_carries_cwd_and_the_result_for_post_hooks() {
+        let pre: Value = serde_json::from_str(&bridge_hook_payload(
+            "read_file",
+            &serde_json::json!({"path": "a"}),
+            None,
+        ))
+        .unwrap();
+        assert!(pre["cwd"].is_string());
+        assert!(pre.get("session_id").is_some());
+        assert!(pre.get("result").is_none());
+        let post: Value = serde_json::from_str(&bridge_hook_payload(
+            "read_file",
+            &serde_json::json!({"path": "a"}),
+            Some(("out", true)),
+        ))
+        .unwrap();
+        assert_eq!(
+            (post["result"].as_str(), post["ok"].as_bool()),
+            (Some("out"), Some(true))
+        );
+    }
 
     #[test]
     fn tools_list_result_carries_ttl_and_cache_scope() {

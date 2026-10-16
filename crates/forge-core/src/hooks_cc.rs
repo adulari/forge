@@ -148,7 +148,11 @@ pub(crate) fn to_cc_payload(forge_payload: &str, event: HookEvent, session_id: &
         obj.insert("tool_name".into(), forge_config::cc_tool_alias(tool).into());
     }
     if let Some(args) = v.get("args") {
-        let input = forge_args_to_cc(tool.unwrap_or(""), args);
+        let mut input = forge_args_to_cc(tool.unwrap_or(""), args);
+        // `cwd` is Forge's own injection (it is already a top-level field), not a tool argument.
+        if let Some(map) = input.as_object_mut() {
+            map.remove("cwd");
+        }
         obj.insert("tool_input".into(), input);
     }
     if let Some(result) = v.get("result") {
@@ -264,6 +268,21 @@ fn non_blank(v: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_input_drops_forges_injected_cwd() {
+        let payload =
+            json!({"tool": "read_file", "args": {"cwd": "/w", "path": "a.rs"}, "cwd": "/w"});
+        let cc: Value = serde_json::from_str(&to_cc_payload(
+            &payload.to_string(),
+            HookEvent::PreToolUse,
+            "s1",
+        ))
+        .unwrap();
+        assert_eq!(cc["tool_input"].get("cwd"), None);
+        assert_eq!(cc["tool_input"]["file_path"], "a.rs");
+        assert_eq!(cc["session_id"], "s1");
+    }
 
     #[test]
     fn rtk_style_output_yields_updated_input_without_a_note() {
