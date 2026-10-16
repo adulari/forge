@@ -830,8 +830,8 @@ pub fn forge_tool_from_cc(cc_tool: &str) -> &str {
 
 /// Claude Code treats a hook matcher as a regex. A matcher of plain names joined by `|` keeps its
 /// exact-name meaning; anything with another regex metacharacter (`.*`, `^Read$`, `mcp__.*`) is
-/// compiled and searched.
-fn is_regex_matcher(pattern: &str) -> bool {
+/// compiled and searched by `forge_core::hooks` (this crate has no regex dependency).
+pub fn is_regex_matcher(pattern: &str) -> bool {
     pattern.chars().any(|c| ".*+?^$()[]{}\\".contains(c)) && pattern.trim() != "*"
 }
 
@@ -845,12 +845,6 @@ impl HookConfig {
             Some(pattern) => {
                 if self.cc_compat {
                     let alias = cc_tool_alias(tool_name);
-                    if is_regex_matcher(pattern) {
-                        return regex::RegexBuilder::new(pattern)
-                            .case_insensitive(true)
-                            .build()
-                            .is_ok_and(|re| re.is_match(tool_name) || re.is_match(alias));
-                    }
                     pattern.split('|').map(str::trim).any(|m| {
                         m == "*"
                             || m.eq_ignore_ascii_case(tool_name)
@@ -4974,16 +4968,6 @@ auto = "local"
         assert!(pre.matches("edit_file"), "Edit alias");
         assert!(pre.matches("write_file"), "Write alias");
         assert!(!pre.matches("shell"), "Bash not in matcher");
-        let regex_hook = |matcher: &str| HookConfig {
-            matcher: Some(matcher.into()),
-            ..pre.clone()
-        };
-        assert!(regex_hook(".*").matches("read_file"));
-        assert!(regex_hook("Rea.*").matches("read_file"));
-        assert!(regex_hook("^Read$").matches("read_file"));
-        assert!(!regex_hook("^Read$").matches("shell"));
-        assert!(regex_hook("mcp__.*").matches("mcp__github__get_issue"));
-        assert!(!regex_hook("mcp__.*").matches("read_file"));
         let note = hooks
             .iter()
             .find(|h| h.event == HookEvent::Notification)

@@ -87,6 +87,22 @@ fn parse_hook_directive(stdout: &str, event: HookEvent) -> HookDirective {
     }
 }
 
+/// Whether `h` applies to `tool`. Claude Code treats a matcher as a regex, so a CC-compat hook with
+/// regex syntax (`.*`, `Rea.*`, `^Read$`, `mcp__.*`) is searched case-insensitively against the
+/// Forge name and its CC alias; every other matcher keeps [`HookConfig::matches`] semantics.
+pub(crate) fn hook_applies(h: &HookConfig, tool: &str) -> bool {
+    match h.matcher.as_deref() {
+        Some(pattern) if h.cc_compat && forge_config::is_regex_matcher(pattern) => {
+            let alias = forge_config::cc_tool_alias(tool);
+            regex::RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .is_ok_and(|re| re.is_match(tool) || re.is_match(alias))
+        }
+        _ => h.matches(tool),
+    }
+}
+
 /// Run one CC-compat hook and fold its decision into `outcome`. Returns `true` if the call should
 /// be blocked + short-circuited (PreToolUse only; PostToolUse downgrades a block to a note).
 /// `updatedInput` replaces the tool's args (PreToolUse), translated from Claude-Code names.
@@ -139,7 +155,10 @@ pub async fn run_hooks(
 ) -> HookOutcome {
     let mut outcome = HookOutcome::default();
     let payload = payload.to_string();
-    for h in hooks.iter().filter(|h| h.event == event && h.matches(tool)) {
+    for h in hooks
+        .iter()
+        .filter(|h| h.event == event && hook_applies(h, tool))
+    {
         if h.cc_compat {
             if run_cc_hook(h, event, tool, &payload, &mut outcome).await {
                 break;
@@ -429,7 +448,7 @@ pub async fn run_permission_hooks(
     let mut outcome = PermissionHookOutcome::default();
     for h in hooks
         .iter()
-        .filter(|h| h.event == HookEvent::PermissionRequest && h.matches(tool))
+        .filter(|h| h.event == HookEvent::PermissionRequest && hook_applies(h, tool))
     {
         let sent = if h.cc_compat {
             to_cc_payload(payload, HookEvent::PermissionRequest, "")
@@ -641,6 +660,22 @@ async fn run_command(h: &HookConfig, payload: &str) -> Result<(i32, String, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cc_regex_matchers_fire() {
+        let hook = |matcher: &str| {
+            let settings = serde_json::json!({"PreToolUse": [{"matcher": matcher,
+                "hooks": [{"type": "command", "command": "true"}]}]});
+            forge_config::cc_hooks_from_settings(&settings).remove(0)
+        };
+        assert!(hook_applies(&hook(".*"), "read_file"));
+        assert!(hook_applies(&hook("Rea.*"), "read_file"));
+        assert!(hook_applies(&hook("^Read$"), "read_file"));
+        assert!(!hook_applies(&hook("^Read$"), "shell"));
+        assert!(hook_applies(&hook("mcp__.*"), "mcp__github__get_issue"));
+        assert!(!hook_applies(&hook("mcp__.*"), "read_file"));
+        assert!(hook_applies(&hook("Read|Grep"), "read_file"));
+    }
 
     fn hook(event: HookEvent, command: &str) -> HookConfig {
         HookConfig {
