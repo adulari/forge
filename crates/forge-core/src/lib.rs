@@ -3007,9 +3007,9 @@ impl Session {
             self.transcript.push(Message::system(&msg).ui_only());
             self.presenter.emit(PresenterEvent::Done {
                 final_text: msg.clone(),
-                stop_reason: StopReason::FinalAnswer,
+                stop_reason: StopReason::NoOutput,
             });
-            return Ok(LoopOutcome::final_answer(msg));
+            return Ok(LoopOutcome::no_output(msg));
         }
 
         self.presenter.emit(PresenterEvent::Routing {

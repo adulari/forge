@@ -23,11 +23,32 @@ impl Store {
              VALUES (?1, ?2, ?3, 0, ?4, ?5)",
             (&new_id, &cwd, &mode, src, at_seq),
         )?;
-        {
-            let mut read = tx.prepare(
-                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility, nudge \
-                 FROM message WHERE session_id = ?1 AND active = 1 AND seq < ?2 ORDER BY seq",
+        // Compaction deactivates old rows and keeps their gist in `session_compaction`. A fork at
+        // or after the compacted region carries that summary with the active tail; a fork INSIDE it
+        // (the summary would describe turns after the fork point) takes the verbatim old rows.
+        let max_compacted: Option<i64> = tx.query_row(
+            "SELECT MAX(seq) FROM message WHERE session_id = ?1 AND compacted = 1",
+            [src],
+            |r| r.get(0),
+        )?;
+        let inside_compacted = max_compacted.is_some_and(|m| at_seq <= m);
+        if !inside_compacted {
+            tx.execute(
+                "INSERT INTO session_compaction (session_id, summary) \
+                 SELECT ?2, summary FROM session_compaction WHERE session_id = ?1",
+                (src, &new_id),
             )?;
+        }
+        let row_filter = if inside_compacted {
+            "(active = 1 OR compacted = 1)"
+        } else {
+            "active = 1"
+        };
+        {
+            let mut read = tx.prepare(&format!(
+                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility, nudge \
+                 FROM message WHERE session_id = ?1 AND {row_filter} AND seq < ?2 ORDER BY seq"
+            ))?;
             let mut write = tx.prepare(
                 "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility, nudge) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -113,5 +134,48 @@ impl Store {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(StoreError::from)
+    }
+}
+
+#[cfg(test)]
+mod compacted_fork_tests {
+    use super::*;
+    use forge_types::Role;
+
+    fn compacted_session(store: &Store) -> String {
+        let id = store.create_session("/tmp", "Default").unwrap();
+        for (seq, role) in [
+            (0, Role::User),
+            (1, Role::Assistant),
+            (2, Role::User),
+            (3, Role::Assistant),
+            (4, Role::User),
+            (5, Role::Assistant),
+        ] {
+            store
+                .add_message(&id, seq, role, &format!("m{seq}"), None)
+                .unwrap();
+        }
+        store.compact_session_store(&id, "the summary", 2).unwrap();
+        id
+    }
+
+    #[test]
+    fn fork_after_compaction_keeps_the_summary() {
+        let store = Store::open_in_memory().unwrap();
+        let src = compacted_session(&store);
+        let fork = store.fork_session(&src, 5).unwrap();
+        let loaded = store.load_messages(&fork).unwrap();
+        assert!(loaded.iter().any(|m| m.content.contains("the summary")));
+    }
+
+    #[test]
+    fn fork_inside_the_compacted_region_takes_verbatim_rows_without_the_summary() {
+        let store = Store::open_in_memory().unwrap();
+        let src = compacted_session(&store);
+        let fork = store.fork_session(&src, 3).unwrap();
+        let loaded = store.load_messages(&fork).unwrap();
+        assert!(!loaded.iter().any(|m| m.content.contains("the summary")));
+        assert!(loaded.iter().any(|m| m.content == "m2"));
     }
 }

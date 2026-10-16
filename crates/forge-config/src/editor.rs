@@ -515,7 +515,7 @@ pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(),
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid value for {path}: {e}")))?;
 
-    std::fs::write(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    crate::write_atomic(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
 }
 
@@ -595,7 +595,7 @@ fn set_model_disabled_at(
             ConfigError::Write(format!("invalid config after editing mesh.disabled: {e}"))
         })?;
 
-    std::fs::write(file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    crate::write_atomic(file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(true)
 }
 
@@ -611,7 +611,7 @@ pub fn reset_config_value(scope: ConfigScope, path: &str) -> Result<(), ConfigEr
         .merge(Toml::string(&body))
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid config after reset of {path}: {e}")))?;
-    std::fs::write(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    crate::write_atomic(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
 }
 
@@ -746,7 +746,7 @@ fn write_subscriptions_at(
         mesh_t.insert("subscriptions".to_string(), toml::Value::Table(sub_t));
     }
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
 }
 

@@ -397,6 +397,30 @@ impl Session {
             .collect();
         self.transition_workspace(workspace)?;
         self.id = session_id.to_string();
+        // Same restore as `Session::resume`: the picker/`/resume` path used to come back at the
+        // launch mode and routing instead of the session's own.
+        if let Some(mode) = self
+            .store
+            .session_mode(session_id)
+            .ok()
+            .and_then(|stored| crate::session_lifecycle::parse_stored_mode(&stored))
+        {
+            self.set_mode(mode);
+        }
+        let stored_effort = self
+            .store
+            .session_pinned_effort(session_id)
+            .ok()
+            .flatten()
+            .and_then(|stored| EffortLevel::parse(&stored));
+        self.set_effort(stored_effort);
+        let stored_pin = self.store.session_pinned_model(session_id).ok().flatten();
+        self.pin_model(stored_pin);
+        self.subagent_pin_free = self
+            .store
+            .session_subagent_pin_free(session_id)
+            .ok()
+            .flatten();
         self.forget_context_shape();
         self.frozen_cache_key = None;
         self.tasks = match self.store.tasks(session_id) {

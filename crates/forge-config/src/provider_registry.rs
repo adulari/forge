@@ -626,7 +626,7 @@ fn add_custom_provider_at(
         .merge(Toml::string(&body))
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid config after add: {e}")))?;
-    std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
 }
 
@@ -642,7 +642,9 @@ fn remove_custom_provider_at(path: &std::path::Path, namespace: &str) -> Result<
     let Some(text) = std::fs::read_to_string(path).ok() else {
         return Ok(false);
     };
-    let mut root: toml::Table = text.parse().unwrap_or_default();
+    let mut root: toml::Table = text
+        .parse()
+        .map_err(|e| ConfigError::Write(format!("config.toml is not valid TOML: {e}")))?;
     let mut removed = false;
     if let Some(arr) = root
         .get_mut("providers")
@@ -656,7 +658,7 @@ fn remove_custom_provider_at(path: &std::path::Path, namespace: &str) -> Result<
     }
     if removed {
         let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-        std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+        crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     }
     Ok(removed)
 }
@@ -704,7 +706,9 @@ fn remove_azure_provider_at(path: &std::path::Path) -> Result<bool, ConfigError>
     let Some(text) = std::fs::read_to_string(path).ok() else {
         return Ok(false);
     };
-    let mut root: toml::Table = text.parse().unwrap_or_default();
+    let mut root: toml::Table = text
+        .parse()
+        .map_err(|e| ConfigError::Write(format!("config.toml is not valid TOML: {e}")))?;
     let removed = root
         .get_mut("providers")
         .and_then(toml::Value::as_table_mut)
@@ -715,7 +719,7 @@ fn remove_azure_provider_at(path: &std::path::Path) -> Result<bool, ConfigError>
             .merge(Toml::string(&body))
             .extract::<Config>()
             .map_err(|e| ConfigError::Write(format!("invalid config after Azure removal: {e}")))?;
-        std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+        crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     }
     Ok(removed)
 }
@@ -773,7 +777,7 @@ fn add_azure_provider_at(path: &std::path::Path, cfg: &AzureConfig) -> Result<()
         .merge(Toml::string(&body))
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid config after azure add: {e}")))?;
-    std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
 }
 
@@ -812,5 +816,29 @@ pub(crate) mod test_support {
 
     pub(crate) fn build_custom_registry(runtime: &[RuntimeCustomProvider]) -> Vec<CustomProvider> {
         super::build_custom_registry(runtime)
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    #[test]
+    fn write_atomic_replaces_content_and_leaves_no_temp_file() {
+        let dir = tempfile_dir();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        crate::write_atomic(&path, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn tempfile_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("forge-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
