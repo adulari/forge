@@ -124,12 +124,17 @@ impl Store {
                     // could cascade-delete a session the user is actively typing into, taking its
                     // whole transcript, usage and tool-call audit with it. ensure_session can
                     // restore the bare parent row afterwards but NOT the history.
-                    "SELECT id FROM session WHERE updated_at < ?1 AND agent_active = 0 \
+                    // A `kill -9`'d `forge mcp agent` never clears its flag; once a session is a
+                    // week past the horizon the flag is a leftover, not a live agent.
+                    "SELECT id FROM session WHERE updated_at < ?1 \
+                     AND (agent_active = 0 OR updated_at < ?3) \
                      AND local_live = 0 AND daemon_live = 0 \
                      ORDER BY updated_at LIMIT ?2",
                 )?;
                 let v = stmt
-                    .query_map((cutoff, max_sessions as i64), |r| r.get::<_, String>(0))?
+                    .query_map((cutoff, max_sessions as i64, cutoff - 7 * 86_400), |r| {
+                        r.get::<_, String>(0)
+                    })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 v
             };

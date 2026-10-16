@@ -234,6 +234,43 @@ pub fn install_panic_restore() {
     });
 }
 
+/// SIGTERM / SIGHUP (a `kill`, a closing terminal window, a supervisor stop) would otherwise end
+/// the process with the terminal still in raw/mouse mode. Restore it, then exit with the
+/// conventional 128+signal status. Needs a tokio runtime; without one it is a no-op.
+fn install_terminate_restore() {
+    #[cfg(unix)]
+    {
+        use std::sync::Once;
+        use tokio::signal::unix::{signal, SignalKind};
+        static HANDLER: Once = Once::new();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        HANDLER.call_once(|| {
+            handle.spawn(async {
+                let (Ok(mut term), Ok(mut hup)) = (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::hangup()),
+                ) else {
+                    return;
+                };
+                let code = tokio::select! {
+                    _ = term.recv() => 143,
+                    _ = hup.recv() => 129,
+                };
+                let _ = disable_raw_mode();
+                let _ = crossterm::execute!(
+                    io::stdout(),
+                    DisableMouseCapture,
+                    LeaveAlternateScreen,
+                    crossterm::cursor::Show
+                );
+                std::process::exit(code);
+            });
+        });
+    }
+}
+
 impl Tui {
     pub fn new(
         fullscreen: bool,
@@ -244,6 +281,7 @@ impl Tui {
         // it before the panic prints — otherwise a panic would leave the shell wedged (no echo,
         // Ctrl-C inert). `Drop` covers the normal/unwind path; this covers the print itself.
         install_panic_restore();
+        install_terminate_restore();
         enable_raw_mode()?;
         crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         // Mouse reporting only matters in full-screen mode (it routes the wheel to us as scroll
@@ -526,6 +564,10 @@ pub fn frame_wait(input_handled: bool, dirty: bool, busy: bool) -> Option<Durati
         None
     } else if dirty && !busy {
         Some(Duration::from_millis(3))
+    } else if !dirty && !busy {
+        // Nothing to paint and no turn running: wake ~20x/s instead of ~60x (input still ends the
+        // wait early), so an idle session costs next to no CPU.
+        Some(Duration::from_millis(50))
     } else {
         Some(Duration::from_millis(16))
     }
@@ -582,7 +624,7 @@ mod tests {
         );
         assert_eq!(
             frame_wait(false, false, false),
-            Some(Duration::from_millis(16))
+            Some(Duration::from_millis(50))
         );
     }
 

@@ -56,6 +56,7 @@ impl Store {
             report.pruned += 1;
             std::thread::sleep(MAINTENANCE_YIELD);
         }
+        let _ = self.prune_expired_model_health(chrono::Utc::now().timestamp());
         Ok(report)
     }
 

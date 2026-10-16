@@ -47,10 +47,20 @@ const AUTH_UNCONFIRMED_BENCH_SECS: i64 = 5 * 60;
 /// — a capability exclusion or a rate-limit bench is an observation this release did not change,
 /// and those stay visible.
 fn not_superseded_auth() -> String {
+    // The second clause drops rows written while this machine's clock ran ahead: once the clock is
+    // corrected their `updated_at` sits in the future, and trusting their `cooldown_until` would
+    // keep a healthy model benched for the whole skew.
     format!(
-        "NOT (reason LIKE '%{AUTH_REASON}%' AND cooldown_until - updated_at > {AUTH_EXCLUSION_SECS})"
+        "NOT (reason LIKE '%{AUTH_REASON}%' AND cooldown_until - updated_at > {AUTH_EXCLUSION_SECS}) \
+         AND updated_at <= CAST(strftime('%s','now') AS INTEGER) + {CLOCK_SKEW_SLACK_SECS}"
     )
 }
+
+/// How far ahead of the current clock a bench's `updated_at` may be before it is distrusted.
+const CLOCK_SKEW_SLACK_SECS: i64 = 300;
+
+/// Benches that ended more than this long ago are removed by maintenance.
+const EXPIRED_ROW_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 impl Store {
     // --- Model health / failover (docs/features/mesh-routing.md) ---
@@ -87,6 +97,15 @@ impl Store {
             (model, cooldown_until, reason, updated_at),
         )?;
         Ok(())
+    }
+
+    /// Delete benches that ended more than a week before `now`; nothing else removes them (each
+    /// key keeps one row until it is benched again). Returns the number removed.
+    pub fn prune_expired_model_health(&self, now: i64) -> Result<usize> {
+        Ok(self.lock()?.execute(
+            "DELETE FROM model_health WHERE cooldown_until < ?1",
+            [now - EXPIRED_ROW_RETENTION_SECS],
+        )?)
     }
 
     /// Bench a model for `cooldown` from now (convenience over [`bench_model`] that owns the
@@ -464,6 +483,35 @@ mod tests {
 
     fn now() -> i64 {
         chrono::Utc::now().timestamp()
+    }
+
+    #[test]
+    fn a_bench_written_under_a_fast_clock_is_ignored_and_expired_rows_are_pruned() {
+        let store = Store::open_in_memory().unwrap();
+        let t = now();
+        store
+            .bench_model_at("skewed", t + 86_400 * 2, "rate limited", t + 86_400)
+            .unwrap();
+        store
+            .bench_model_at("fresh", t + 60, "rate limited", t)
+            .unwrap();
+        let benched = store.benched_models(t).unwrap();
+        assert!(!benched.is_benched("skewed"));
+        assert!(benched.is_benched("fresh"));
+        store
+            .bench_model_at("old", t - 86_400 * 30, "rate limited", t - 86_400 * 31)
+            .unwrap();
+        assert_eq!(store.prune_expired_model_health(t).unwrap(), 1);
+        let n: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM model_health WHERE model='old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     /// The naming trap. Provider rows are keyed `__forge_provider__::<name>`, so a diagnostic that

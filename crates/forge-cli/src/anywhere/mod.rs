@@ -1292,7 +1292,7 @@ fn connector_activation(has_discovery_state: bool, probe_succeeded: bool) -> Con
 }
 
 async fn ensure_managed_connector() -> Result<&'static str> {
-    if let Some(serve) = crate::serve::read_state()? {
+    if let Some(serve) = crate::serve::read_state().ok().flatten() {
         if serve.exposure == "lan" && serve.process_is_alive() {
             // LAN listeners use a self-signed TLS certificate, so the local CLI intentionally
             // does not bypass certificate validation to hit the trigger endpoint. The daemon's
@@ -1511,7 +1511,9 @@ async fn doctor() -> Result<()> {
 }
 
 fn current_link_health() -> Result<LinkHealth> {
-    let daemon_pid = crate::serve::read_state()?
+    let daemon_pid = crate::serve::read_state()
+        .ok()
+        .flatten()
         .filter(crate::serve::ServeState::process_is_alive)
         .map(|state| state.pid);
     Ok(LinkStateStore::platform()?
