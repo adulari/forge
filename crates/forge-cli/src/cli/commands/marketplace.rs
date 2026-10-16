@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 mod registry;
 pub(crate) use registry::{
     add_marketplace_at, installed_path, load_installed_at, load_marketplaces_at, marketplaces_path,
-    record_installed_at, remove_installed_entry, remove_marketplace_at, skills_dir, InstalledEntry,
+    record_installed_at, remove_marketplace_at, remove_plugin, skills_dir, InstalledEntry,
     Marketplaces,
 };
 

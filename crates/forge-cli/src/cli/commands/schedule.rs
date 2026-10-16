@@ -347,7 +347,7 @@ mod tests {
             Some("openai::gpt-4o"),
             "/usr/local/bin/forge",
         );
-        assert!(unit.contains("WorkingDirectory=\"/home/user/proj\""));
+        assert!(unit.contains("WorkingDirectory=/home/user/proj"));
         assert!(unit.contains("\"check the deploy\""));
         assert!(unit.contains("\"/usr/local/bin/forge\" run"));
         assert!(unit.contains("--mode \"bypass\""));

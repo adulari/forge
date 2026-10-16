@@ -45,6 +45,7 @@ fn classifier_candidates(config: &forge_config::Config, mock: bool) -> Vec<Strin
         .map(str::trim)
         .filter(|model| {
             !model.is_empty()
+                && !forge_config::is_model_disabled(model, &config.mesh.disabled)
                 && (mock || forge_config::has_api_key(forge_config::provider_of(model)))
                 && forge_mesh::privacy::allows(config, model)
         })

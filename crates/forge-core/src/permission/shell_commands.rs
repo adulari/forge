@@ -454,10 +454,12 @@ fn read_substitution(chars: &[char], i: usize) -> Option<(String, usize)> {
         }
         return None; // unterminated — treat as an ordinary character
     }
-    if chars[i] != '$' || chars.get(i + 1) != Some(&'(') {
+    // `<( … )` / `>( … )` process substitution runs its body as a command exactly like `$( … )`.
+    let process = matches!(chars[i], '<' | '>');
+    if !(chars[i] == '$' || process) || chars.get(i + 1) != Some(&'(') {
         return None;
     }
-    let arithmetic = chars.get(i + 2) == Some(&'(');
+    let arithmetic = !process && chars.get(i + 2) == Some(&'(');
     let mut depth = 0usize;
     let mut inner = String::new();
     let mut j = i + 1;
@@ -588,5 +590,12 @@ mod tests {
         assert_eq!(segs("echo \"x\ny\""), vec!["echo \"x\ny\""]);
         assert_eq!(segs("echo $(a; b) c"), vec!["echo $(a; b) c"]);
         assert_eq!(segs("a; b && c | d"), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn process_substitution_bodies_are_vetted_like_command_substitution() {
+        assert_eq!(command_substitutions("echo <(touch a)"), vec!["touch a"]);
+        assert_eq!(command_substitutions("echo >(touch b)"), vec!["touch b"]);
+        assert!(command_substitutions("echo '<(touch c)'").is_empty());
     }
 }

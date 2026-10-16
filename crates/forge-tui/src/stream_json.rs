@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use forge_types::SideEffect;
+use forge_types::{SideEffect, StopReason};
 
 use crate::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, NO_ANSWER};
 
@@ -125,7 +125,8 @@ impl Presenter for StreamJsonPresenter {
                 final_text,
                 stop_reason,
             } => self.line(serde_json::json!({
-                "type": "result", "subtype": "success", "session_id": sid,
+                "type": "result", "subtype": crate::json_result::result_subtype(stop_reason),
+                "is_error": stop_reason != StopReason::FinalAnswer, "session_id": sid,
                 "result": final_text, "stop_reason": format!("{stop_reason:?}")
             })),
             // Other events are not part of the CC stream-json surface; intentionally ignored.

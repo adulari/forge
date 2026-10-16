@@ -429,7 +429,10 @@ pub(super) fn classify_status(
         return ProviderError::NoModelAccess(message);
     }
     match code {
-        429 => ProviderError::RateLimited {
+        // 413 is how a tokens-per-minute cap (groq) or a small gateway body limit reports an
+        // over-size request. Filing it under the non-failover `Request` catch-all ended the turn on
+        // the first model while healthy fallbacks sat unused.
+        429 | 413 => ProviderError::RateLimited {
             message,
             retry_after: retry_after.filter(|_| !exhausted),
         },

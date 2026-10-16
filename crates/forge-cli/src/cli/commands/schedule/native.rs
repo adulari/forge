@@ -88,7 +88,9 @@ pub(super) fn render_systemd_service(
     format!(
         "[Unit]\nDescription=Forge scheduled task {id}\n\n\
          [Service]\nType=oneshot\nWorkingDirectory={}\nExecStart={exec}\n",
-        quote_unit_arg(cwd)
+        // WorkingDirectory= is a bare path, not a command line: systemd does not unquote it, so a
+        // quoted value is "not absolute" and the whole unit is refused. Only `%` specifiers apply.
+        cwd.replace('%', "%%")
     )
 }
 

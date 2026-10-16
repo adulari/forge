@@ -2529,6 +2529,16 @@ mod tests {
     }
 
     #[test]
+    fn http_413_fails_over_like_a_rate_limit() {
+        let body = r#"{"error":{"message":"Request too large for model","type":"tokens","code":"rate_limit_exceeded"}}"#;
+        let status = classify_status(413, "HTTP error".into(), body, None);
+        assert!(
+            matches!(status, ProviderError::RateLimited { .. }),
+            "{status:?}"
+        );
+    }
+
+    #[test]
     fn a_bedrock_inference_profile_blip_is_retried_not_fatal() {
         let body = r#"{"message":"Inference Profile ARN not found"}"#;
         let status = classify_status(404, "HTTP error".into(), body, None);

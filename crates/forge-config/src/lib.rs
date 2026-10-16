@@ -1892,7 +1892,7 @@ pub struct MeshConfig {
     pub prefer_subscription: bool,
     /// Daily spend cap in USD across all sessions (FR-5). `daily_cap_usd` is the preferred
     /// key; `daily_budget_usd` is kept as a backward-compatible alias.
-    #[serde(alias = "daily_cap_usd")]
+    #[serde(alias = "daily_cap_usd", skip_serializing_if = "Option::is_none")]
     pub daily_budget_usd: Option<f64>,
     /// Monthly spend cap in USD across all sessions. Absent = unlimited.
     #[serde(default)]
@@ -3066,6 +3066,9 @@ impl Config {
             .or_else(|| self.mesh.models.get(TaskTier::Standard.as_str()))
             .map(OneOrMany::all)
             .unwrap_or_default()
+            .into_iter()
+            .filter(|m| !is_model_disabled(m, &self.mesh.disabled))
+            .collect()
     }
 
     /// The full ordered rule set the broker resolves against: built-in safety denies first,
@@ -4522,6 +4525,26 @@ enabled = false
         mesh.max_output_tokens = 12_345;
         mesh.credit_mode = CreditMode::Strict;
         assert_eq!(mesh.effective_max_output_tokens(), 12_345);
+    }
+
+    #[test]
+    fn daily_cap_usd_alias_loads_over_serialized_defaults() {
+        let config: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[mesh]\ndaily_cap_usd = 1.5"))
+            .extract()
+            .unwrap();
+        assert_eq!(config.mesh.daily_budget_usd, Some(1.5));
+    }
+
+    #[test]
+    fn disabled_models_are_not_tier_candidates() {
+        let mut config = Config::default();
+        config.mesh.models.insert(
+            "trivial".into(),
+            OneOrMany::Many(vec!["groq::a".into(), "fka::b".into()]),
+        );
+        config.mesh.disabled = vec!["groq".into()];
+        assert_eq!(config.candidates_for(TaskTier::Trivial), vec!["fka::b"]);
     }
 
     #[test]

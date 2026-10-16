@@ -530,27 +530,13 @@ pub(crate) async fn plugin_cmd(cmd: PluginCmd) -> Result<()> {
             }
         }
         PluginCmd::Remove { plugin } => {
-            // Remove the on-disk skill (dir or file) AND its lockfile entry, so a later `update`
-            // doesn't resurrect it.
-            marketplace::remove_installed_entry(&plugin)?;
-            if let Some(dir) = forge_config::config_dir() {
-                let skill_dir = dir.join("skills").join(&plugin);
-                let skill_file = dir.join("skills").join(format!("{plugin}.md"));
-                if skill_dir.exists() {
-                    std::fs::remove_dir_all(&skill_dir)
-                        .with_context(|| format!("removing {}", skill_dir.display()))?;
-                    println!("✓ removed plugin '{plugin}'");
-                    return Ok(());
-                } else if skill_file.exists() {
-                    std::fs::remove_file(&skill_file)
-                        .with_context(|| format!("removing {}", skill_file.display()))?;
-                    println!("✓ removed plugin '{plugin}'");
-                    return Ok(());
-                }
+            if marketplace::remove_plugin(&plugin)? {
+                println!("✓ removed plugin '{plugin}'");
+            } else {
+                println!(
+                    "plugin '{plugin}' not found. Use `forge plugin list` to see installed plugins."
+                );
             }
-            println!(
-                "plugin '{plugin}' not found. Use `forge plugin list` to see installed plugins."
-            );
         }
     }
     Ok(())

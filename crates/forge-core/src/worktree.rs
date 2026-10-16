@@ -227,6 +227,20 @@ pub fn commit_worktree(worktree_path: &Path) -> Result<bool, WorktreeError> {
 /// `Ok(MergeReport { conflicted_files })` with the list. Hard I/O or spawn failures are `Err`.
 /// Uncommitted worktree edits are invisible to this diff — run [`commit_worktree`] first.
 pub fn merge_worktree_back(repo_root: &Path, branch: &str) -> Result<MergeReport, WorktreeError> {
+    // `git diff` prints repo-root-relative paths and `git apply` run from a subdirectory silently
+    // skips paths outside it (exit 0), dropping the child's work. Always run from the toplevel.
+    let toplevel = Command::new("git")
+        .args([
+            "-C",
+            repo_root.to_str().unwrap_or("."),
+            "rev-parse",
+            "--show-toplevel",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+    let repo_root = toplevel.as_deref().unwrap_or(repo_root);
     // Produce the diff between HEAD and the branch tip.
     let diff_out = Command::new("git")
         .args([
@@ -633,6 +647,50 @@ mod tests {
         )
         .ok();
         run_git(&repo, &["branch", "-D", branch], "branch -D").ok();
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn merge_worktree_back_from_a_subdirectory_still_lands_the_change() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo();
+        let sub = repo.join("sub").join("dir");
+        std::fs::create_dir_all(&sub).unwrap();
+        let wt_path = repo.join(".forge").join("worktrees").join("sub-test");
+        let branch = "forge/subagent/sub-test";
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                branch,
+                "HEAD",
+            ],
+            "worktree add",
+        )
+        .unwrap();
+        std::fs::write(wt_path.join("top.txt"), "child\n").unwrap();
+        run_git(&wt_path, &["add", "top.txt"], "add").unwrap();
+        run_git(&wt_path, &["config", "user.email", "t@forge.local"], "cfg").unwrap();
+        run_git(&wt_path, &["config", "user.name", "T"], "cfg").unwrap();
+        run_git(&wt_path, &["commit", "-m", "c", "--no-gpg-sign"], "commit").unwrap();
+
+        merge_worktree_back(&sub, branch).unwrap();
+        assert!(
+            repo.join("top.txt").exists(),
+            "change must reach the working tree"
+        );
+
+        run_git(
+            &repo,
+            &["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+            "worktree remove",
+        )
+        .ok();
         std::fs::remove_dir_all(&repo).ok();
     }
 

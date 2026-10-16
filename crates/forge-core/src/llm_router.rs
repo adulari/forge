@@ -339,6 +339,27 @@ impl Router for LlmRouter {
         .await
     }
 
+    /// `/duel` ranks distinct-provider alternatives by tier, which the heuristic router already
+    /// does. Without this override the trait default returned a single route whenever the (default)
+    /// LLM classifier was active, so every duel failed with "only one usable model".
+    async fn route_candidates(
+        &self,
+        prompt: &str,
+        has_images: bool,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+        n: usize,
+    ) -> Vec<RoutingDecision> {
+        self.fallback
+            .route_candidates(
+                prompt, has_images, budget, health, quota, effort, project, n,
+            )
+            .await
+    }
+
     /// A pin needs no classification: the model is already chosen. Without this override the
     /// trait default silently dropped the pin and ran full mesh classification, so a pinned
     /// session routed to an unrelated model on EVERY turn and was only rescued downstream by the

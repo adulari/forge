@@ -24,6 +24,14 @@ pub struct JsonResultPresenter {
     last_error: Option<String>,
 }
 
+pub(crate) fn result_subtype(stop_reason: StopReason) -> &'static str {
+    match stop_reason {
+        StopReason::FinalAnswer => "success",
+        StopReason::MaxSteps => "error_max_turns",
+        _ => "error_during_execution",
+    }
+}
+
 impl Default for JsonResultPresenter {
     fn default() -> Self {
         Self::with_writer(Box::new(std::io::stdout()))
@@ -51,11 +59,7 @@ impl JsonResultPresenter {
     }
 
     fn finish(&mut self, final_text: &str, stop_reason: StopReason) {
-        let subtype = match stop_reason {
-            StopReason::FinalAnswer => "success",
-            StopReason::MaxSteps => "error_max_turns",
-            _ => "error_during_execution",
-        };
+        let subtype = result_subtype(stop_reason);
         let is_error = stop_reason != StopReason::FinalAnswer;
         let result = if final_text.trim().is_empty() {
             self.last_error.clone().unwrap_or_default()

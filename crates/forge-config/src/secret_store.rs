@@ -511,11 +511,18 @@ fn write_private(path: &PathBuf, bytes: &[u8]) -> Result<(), ConfigError> {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
+    // Write beside the target and rename over it: truncating in place leaves a corrupt file if the
+    // process dies mid-write.
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
     let mut f = opts
-        .open(path)
+        .open(&tmp)
         .map_err(|e| ConfigError::Keyring(e.to_string()))?;
     f.write_all(bytes)
+        .and_then(|()| f.sync_all())
         .map_err(|e| ConfigError::Keyring(e.to_string()))?;
+    std::fs::rename(&tmp, path).map_err(|e| ConfigError::Keyring(e.to_string()))?;
     Ok(())
 }
 
@@ -531,6 +538,28 @@ fn read_map() -> BTreeMap<String, String> {
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
+}
+
+/// Like [`read_map`] but an unreadable or corrupt store is an error, never "empty": the write
+/// paths rebuild the file from this map, so treating garbage as empty destroyed every other key.
+#[cfg(not(feature = "test-secrets"))]
+fn read_map_strict() -> Result<BTreeMap<String, String>, ConfigError> {
+    let Some(path) = secrets_path() else {
+        return Ok(BTreeMap::new());
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+            ConfigError::Keyring(format!(
+                "{} is corrupt ({e}); refusing to overwrite it. Move it aside to start over",
+                path.display()
+            ))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(ConfigError::Keyring(format!(
+            "reading {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 #[cfg(not(feature = "test-secrets"))]
@@ -555,7 +584,7 @@ fn file_set(key: &str, value: &str) -> Result<(), ConfigError> {
     let mut blob = nonce_bytes.to_vec();
     blob.extend_from_slice(&ct);
     let encoded = base64::engine::general_purpose::STANDARD.encode(blob);
-    let mut map = read_map();
+    let mut map = read_map_strict()?;
     map.insert(key.to_string(), encoded);
     write_map(&map)
 }
@@ -577,7 +606,7 @@ fn file_get(key: &str) -> Option<String> {
 
 #[cfg(not(feature = "test-secrets"))]
 fn file_delete(key: &str) -> Result<bool, ConfigError> {
-    let mut map = read_map();
+    let mut map = read_map_strict()?;
     if map.remove(key).is_some() {
         write_map(&map)?;
         return Ok(true);
