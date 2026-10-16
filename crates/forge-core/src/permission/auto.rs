@@ -46,13 +46,14 @@ pub fn auto_risk(
         SideEffect::External => AutoVerdict::Risky("calls an external (MCP) tool".into()),
         SideEffect::Network => risky(network_risk(args)),
         SideEffect::Write => {
-            let Some(path) = forge_types::extract_path_arg(args) else {
-                return AutoVerdict::Safe;
-            };
-            risky(
+            let mut paths = forge_types::all_path_args(args);
+            if let Some(cwd) = args.get("cwd").and_then(Value::as_str) {
+                paths.push(cwd.to_string());
+            }
+            risky(paths.iter().find_map(|path| {
                 outside_workspace(path, ws.as_deref())
-                    .then(|| format!("writes outside the workspace: {path}")),
-            )
+                    .then(|| format!("writes outside the workspace: {path}"))
+            }))
         }
         SideEffect::Shell => {
             if !is_shell_tool(tool_name) {
@@ -629,6 +630,24 @@ mod tests {
             &json!({ "command": cmd }),
             Some(Path::new(WS)),
         )
+    }
+
+    #[test]
+    fn apply_patch_targets_outside_the_workspace_are_risky() {
+        let call =
+            |args: Value| auto_risk(SideEffect::Write, "apply_patch", &args, Some(Path::new(WS)));
+        let envelope = "*** Begin Patch\n*** Add File: ../out/x.txt\n+x\n*** End Patch";
+        assert!(matches!(
+            call(json!({ "patch": envelope })),
+            AutoVerdict::Risky(_)
+        ));
+        let diff = "--- /dev/null\n+++ b/y.txt\n@@ -0,0 +1 @@\n+x\n";
+        assert!(matches!(
+            call(json!({ "patch": diff, "cwd": "../out" })),
+            AutoVerdict::Risky(_)
+        ));
+        let inside = "*** Begin Patch\n*** Add File: src/x.txt\n+x\n*** End Patch";
+        assert_eq!(call(json!({ "patch": inside })), AutoVerdict::Safe);
     }
 
     fn risky(cmd: &str) {

@@ -450,6 +450,7 @@ async fn run_command_inner(
         }
     };
     let pgid = child.id().map(|id| id as i32);
+    let mut abort_guard = GroupKillOnDrop(pgid);
     let Some(stdout) = child.stdout.take() else {
         return (
             "shell: failed to capture stdout pipe".to_string(),
@@ -495,6 +496,8 @@ async fn run_command_inner(
                 )
             }
         };
+
+    abort_guard.0 = None;
 
     // On the normal-exit path the shell (`sh -c`) can exit while a backgrounded grandchild keeps
     // the stdout/stderr pipes open (e.g. `(sleep 30 &) ; echo done`). Kill the whole process group
@@ -784,6 +787,16 @@ fn put_in_own_process_group(cmd: &mut Command) {
 /// open. Unlike [`terminate`] there is no SIGTERM/grace step (the main child has already exited and
 /// been reaped) and no `child.wait()` — this just nukes leaked descendants. A no-such-group error
 /// (the common case: nothing leaked) is harmless and swallowed. No-op on non-Unix.
+/// Aborting a turn drops the run future; `kill_on_drop` then kills only the direct `sh`, orphaning
+/// its children. This kills the whole group on that path; cleared once the wait completes.
+struct GroupKillOnDrop(Option<i32>);
+
+impl Drop for GroupKillOnDrop {
+    fn drop(&mut self) {
+        kill_process_group(self.0);
+    }
+}
+
 fn kill_process_group(pgid: Option<i32>) {
     #[cfg(unix)]
     if let Some(pg) = pgid {
@@ -859,6 +872,28 @@ fn signal_process_group(pgid: i32, signal: libc::c_int) -> Result<(), std::io::E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_a_running_command_kills_its_grandchildren() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let tool = ShellTool::in_workspace(dir.path());
+        let cmd = format!("sleep 313 & echo $! > {}; wait", pidfile.display());
+        let args = serde_json::json!({ "command": cmd });
+        let _ = tokio::time::timeout(Duration::from_millis(700), tool.run(&args)).await;
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive = unsafe { libc::kill(pid, 0) } == 0
+            && !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|s| s.contains(") Z"))
+                .unwrap_or(true);
+        assert!(!alive, "grandchild {pid} survived the drop");
+    }
 
     #[cfg(unix)]
     #[tokio::test]

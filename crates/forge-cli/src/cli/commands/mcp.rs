@@ -548,6 +548,9 @@ pub(crate) fn open_browser(url: &str) -> Result<(), String> {
     {
         std::process::Command::new("open")
             .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -555,6 +558,9 @@ pub(crate) fn open_browser(url: &str) -> Result<(), String> {
     {
         std::process::Command::new("cmd")
             .args(["/C", "start", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| e.to_string())?;
     }
@@ -564,7 +570,14 @@ pub(crate) fn open_browser(url: &str) -> Result<(), String> {
         let browsers = ["xdg-open", "sensible-browser", "wslview"];
         let mut launched = false;
         for b in browsers {
-            if std::process::Command::new(b).arg(url).spawn().is_ok() {
+            if std::process::Command::new(b)
+                .arg(url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .is_ok()
+            {
                 launched = true;
                 break;
             }

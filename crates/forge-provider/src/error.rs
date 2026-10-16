@@ -114,6 +114,10 @@ impl ProviderError {
             "input is too large",
             "exceeds the maximum",
             "string too long",
+            "request too large",
+            "reduce your message size",
+            "payload too large",
+            "entity too large",
         ]
         .iter()
         .any(|k| m.contains(k))
@@ -128,6 +132,25 @@ impl ProviderError {
             Self::Request(_) => "request error",
             Self::Capability(_) => "unsupported (no tool calling / unaffordable)",
             Self::NoModelAccess(_) => "not available on this account",
+        }
+    }
+}
+
+#[cfg(test)]
+mod overflow_413_tests {
+    use super::*;
+
+    #[test]
+    fn request_too_large_counts_as_context_overflow() {
+        for m in [
+            "Request too large for model: Limit 8000, Requested 8598",
+            "please reduce your message size and try again",
+            "413 Payload Too Large",
+        ] {
+            assert!(
+                ProviderError::Request(m.into()).is_context_overflow(),
+                "{m}"
+            );
         }
     }
 }

@@ -732,7 +732,8 @@ impl Renderer {
                     Style::default().fg(TOOLCYAN).bg(CODEBG),
                 ));
             }
-            Event::SoftBreak => self.push_text(" "),
+            Event::SoftBreak if self.table.is_some() => self.push_text(" "),
+            Event::SoftBreak => self.flush_line(),
             Event::HardBreak if self.table.is_some() => self.push_text(" "),
             Event::HardBreak => self.flush_line(),
             Event::Rule => {
@@ -811,6 +812,15 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter())
             .any(|s| s.content.contains(needle) && s.style.add_modifier.contains(m))
+    }
+
+    #[test]
+    fn soft_breaks_keep_their_line_breaks() {
+        let out = markdown_to_lines("one\ntwo\nthree\n\n1\n2\n3\n");
+        let t = text_of(&out);
+        for l in ["one", "two", "three", "1", "2", "3"] {
+            assert!(t.lines().any(|x| x.trim() == l), "{l} on its own line: {t}");
+        }
     }
 
     #[test]

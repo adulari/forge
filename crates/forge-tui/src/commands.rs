@@ -734,8 +734,12 @@ pub fn parse_command(line: &str) -> CommandAction {
                 RemoteMode::Anywhere
             } else if has_flag(&arg, "--local") {
                 RemoteMode::Local
-            } else {
+            } else if has_flag(&arg, "--lan") || !arg.split_whitespace().any(|t| t.starts_with('-'))
+            {
                 RemoteMode::Lan
+            } else {
+                // A mistyped flag must not silently bind 0.0.0.0.
+                return CommandAction::Unknown(format!("remote {arg}"));
             };
             CommandAction::Remote { mode }
         }
@@ -1536,6 +1540,10 @@ mod tests {
                 mode: RemoteMode::Lan
             }
         );
+        assert!(matches!(
+            parse_command("/remote --lcoal"),
+            CommandAction::Unknown(_)
+        ));
         // `--anywhere` (and `-a`) pipe through a public tunnel.
         assert_eq!(
             parse_command("/remote --anywhere"),

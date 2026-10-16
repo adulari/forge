@@ -437,6 +437,9 @@ pub(super) fn classify_status(
             retry_after: retry_after.filter(|_| !exhausted),
         },
         401 | 403 => ProviderError::Auth(message),
+        413 if !message.to_lowercase().contains("too large") => {
+            ProviderError::Request(format!("request too large (413): {message}"))
+        }
         500..=599 => ProviderError::Unavailable(message),
         _ => ProviderError::Request(message),
     }

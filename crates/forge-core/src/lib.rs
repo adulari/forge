@@ -2569,6 +2569,16 @@ impl Session {
             "mcp",
             "database",
             "query",
+            "rename",
+            "replace",
+            "add ",
+            "update",
+            "remove",
+            "change",
+            "summarize",
+            "readme",
+            "everywhere",
+            "across",
         ]
         .iter()
         .any(|intent| prompt.contains(intent))
@@ -6286,6 +6296,13 @@ mod tests {
             TaskTier::Standard,
             "Reply exactly: daemon-stability-check. Do not use tools."
         ));
+        for p in [
+            "rename UserAccount to Member everywhere",
+            "add pagination to list_items in app/service.py",
+            "summarize README.md",
+        ] {
+            assert!(Session::should_advertise_tools(TaskTier::Trivial, p), "{p}");
+        }
     }
 
     /// Provider that always calls `mcp_call { name: "test__echo", arguments: { "msg": "hi" } }`.
