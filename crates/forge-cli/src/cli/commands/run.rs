@@ -1738,9 +1738,9 @@ pub(crate) async fn run_chat_tui(
                         let refreshing =
                             !mock && crate::cli::commands::models::refresh_catalog_now();
                         app.note(if refreshing {
-                            "✓ config reloaded (tier override cleared); refreshing the model catalog"
+                            "✓ reloaded keybinds, tier override and model catalog (hooks, statusline, MCP, mesh and skills need a restart)"
                         } else {
-                            "✓ config reloaded (tier override cleared)"
+                            "✓ reloaded keybinds and tier override (hooks, statusline, MCP, mesh and skills need a restart)"
                         });
                     } else {
                         app.note("⚠ config reload failed");

@@ -513,10 +513,20 @@ pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(),
     Figment::from(Serialized::defaults(Config::default()))
         .merge(Toml::string(&body))
         .extract::<Config>()
-        .map_err(|e| ConfigError::Write(format!("invalid value for {path}: {e}")))?;
+        .map_err(|e| ConfigError::Write(format!("invalid value for {path}: {}", brief(&e))))?;
 
     std::fs::write(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
+}
+
+/// A figment error without its "for key ... in TOML source string" tail, which names internal
+/// layers and means nothing to a person editing one setting.
+fn brief(error: &figment::Error) -> String {
+    let text = error.to_string();
+    match text.find(" for key ") {
+        Some(at) => text[..at].to_string(),
+        None => text,
+    }
 }
 
 /// Add or remove one entry in `[mesh] disabled`, the list the mesh uses to exclude a model or a
@@ -792,6 +802,17 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_value_does_not_leak_figment_internals() {
+        let error = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("permission_mode = \"nonsense\""))
+            .extract::<Config>()
+            .expect_err("nonsense is not a permission mode");
+        let text = brief(&error);
+        assert!(!text.contains("TOML source string"), "{text}");
+        assert!(!text.contains("for key"), "{text}");
+    }
 
     #[test]
     fn missing_edit_file_starts_with_an_empty_table() {

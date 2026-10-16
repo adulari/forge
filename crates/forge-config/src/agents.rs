@@ -42,11 +42,16 @@ pub struct AgentDef {
 }
 
 /// Merge every agent-definition directory a user might keep, lowest precedence first:
-/// `~/.claude/agents`, `~/.forge/agents`, `<project>/.claude/agents`, then `agents_dir`
+/// `~/.claude/agents`, `~/.forge/agents`, `<config>/forge/agents`, `<project>/.claude/agents`, then `agents_dir`
 /// (relative to `project_root` unless absolute). A later definition replaces an earlier one with
 /// the same name, so a project file overrides a personal one.
 pub fn load_agents_layered(project_root: &Path, agents_dir: &str) -> HashMap<String, AgentDef> {
-    let dirs = layer_dirs(crate::home_dir().as_deref(), project_root, agents_dir);
+    let dirs = layer_dirs(
+        crate::home_dir().as_deref(),
+        crate::config_dir().as_deref(),
+        project_root,
+        agents_dir,
+    );
     let mut out = HashMap::new();
     for dir in dirs {
         out.extend(load_agents(&dir));
@@ -56,6 +61,7 @@ pub fn load_agents_layered(project_root: &Path, agents_dir: &str) -> HashMap<Str
 
 fn layer_dirs(
     home: Option<&Path>,
+    config_dir: Option<&Path>,
     project_root: &Path,
     agents_dir: &str,
 ) -> Vec<std::path::PathBuf> {
@@ -63,6 +69,10 @@ fn layer_dirs(
     if let Some(home) = home {
         dirs.push(home.join(".claude/agents"));
         dirs.push(home.join(".forge/agents"));
+    }
+    // `forge import claude` and `forge skill import` write user-scope agents here.
+    if let Some(config_dir) = config_dir {
+        dirs.push(config_dir.join("agents"));
     }
     dirs.push(project_root.join(".claude/agents"));
     dirs.push(project_root.join(agents_dir));
@@ -322,6 +332,8 @@ mod tests {
         };
         write(&home.join(".claude/agents"), "shared", "home-claude");
         write(&home.join(".claude/agents"), "personal", "only-home");
+        let cfg = tmp.join("cfg");
+        write(&cfg.join("agents"), "imported", "from config dir");
         write(&proj.join(".claude/agents"), "shared", "project-claude");
         write(&proj.join(".forge/agents"), "shared", "project-forge");
         write(
@@ -330,11 +342,12 @@ mod tests {
             "from claude dir",
         );
         let mut out = HashMap::new();
-        for dir in layer_dirs(Some(&home), &proj, ".forge/agents") {
+        for dir in layer_dirs(Some(&home), Some(&cfg), &proj, ".forge/agents") {
             out.extend(load_agents(&dir));
         }
         assert_eq!(out["shared"].description, "project-forge");
         assert_eq!(out["personal"].description, "only-home");
+        assert_eq!(out["imported"].description, "from config dir");
         assert_eq!(out["claude-only"].description, "from claude dir");
         std::fs::remove_dir_all(&tmp).ok();
     }

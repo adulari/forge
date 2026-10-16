@@ -55,7 +55,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `scroll_down` | PageDown | Scroll transcript down |
 | `help` | F1 | Show keybind reference overlay |
 | `checkpoint` | Ctrl-S | Save session checkpoint (`/checkpoint`) |
-| `reload` | Alt-R | Hot-reload config (incl. keybinds) |
+| `reload` | Alt-R | Reload keybinds, the tier override and the model catalog (hooks, statusline, MCP, mesh and skills need a restart) |
 
 ## 3. Implementation
 

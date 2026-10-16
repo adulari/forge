@@ -45,7 +45,11 @@ pub fn normalize_skill_content(content: &str) -> String {
     s = replace_inline_binaries(s);
 
     // Phase 3: binary replacement inside fenced code blocks (word-boundary match)
-    replace_in_fenced_blocks(&s)
+    let s = replace_in_fenced_blocks(&s);
+
+    // Phase 4: `claude -p` / `codex exec` are headless runs; Forge spells that `forge run`.
+    s.replace("forge -p ", "forge run ")
+        .replace("forge exec ", "forge run ")
 }
 
 /// Replace binary names in inline code contexts: backtick spans and shell-prompt prefixes.
@@ -163,6 +167,12 @@ fn replace_word(text: &str, from: &str, to: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_invocations_map_to_forge_run() {
+        let out = normalize_skill_content("Run `claude -p \"hi\"` or `codex exec \"x\"`.");
+        assert_eq!(out, "Run `forge run \"hi\"` or `forge run \"x\"`.");
+    }
 
     #[test]
     fn path_in_code_block_replaced() {

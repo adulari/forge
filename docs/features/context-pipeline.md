@@ -89,7 +89,7 @@ the model see?" was answered in more places.
   rule: only the newest copy is ever sent, because a new one appears together with a compaction,
   which rewrote the prompt anyway.
 - **Standing context is pinned, not injected** (`pinned_context.rs`). The project instructions
-  (`.forge/AGENTS.md` / `AGENTS.md`), the memories recalled for the session, the active goal, the
+  (first non-empty of `.forge/AGENTS.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, then the user-global `<config>/forge/AGENTS.md`, `~/.forge/AGENTS.md`, `~/.claude/CLAUDE.md`), the memories recalled for the session, the active goal, the
   approved plan and the task list used to be ordinary system messages injected once, so a
   compaction folded them into the summary and nothing put them back. They are now one system
   message of kind `Pinned`, built fresh for every request (`Session::pinned_context_message`) and
