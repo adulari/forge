@@ -2211,10 +2211,12 @@ impl App {
         let Some(form) = self.form.as_mut() else {
             return RemoteAnswer::Invalid;
         };
+        let is_plan_approval = form.question().text.starts_with("Build this plan?");
         if let Some(answers) = crate::parse_structured_answers(text) {
             form.apply_structured(&answers);
             let answers = form.answers();
             self.finish_form(Some(&answers));
+            self.drop_cancelled_plan(is_plan_approval, &answers);
             return RemoteAnswer::Complete(answers);
         }
         if !form.apply_text(text) {
@@ -2227,7 +2229,20 @@ impl App {
         }
         let answers = form.answers();
         self.finish_form(Some(&answers));
+        self.drop_cancelled_plan(is_plan_approval, &answers);
         RemoteAnswer::Complete(answers)
+    }
+
+    /// A discarded plan must not stay in the remote snapshot (and `GET /api/plans`) as if it were
+    /// still pending or being built.
+    fn drop_cancelled_plan(&mut self, is_plan_approval: bool, answers: &[forge_types::Answer]) {
+        if is_plan_approval
+            && answers
+                .first()
+                .is_some_and(|a| a.summary().eq_ignore_ascii_case("cancel"))
+        {
+            self.plan = None;
+        }
     }
 
     /// Try to resolve a submitted line against a single active question, returning the answer
@@ -5097,6 +5112,34 @@ mod tests {
         assert!(app.remote_snapshot().plan.is_some());
         // …and clears when the NEXT user prompt starts a new turn.
         app.submit_user("another task");
+        assert!(app.remote_snapshot().plan.is_none());
+    }
+
+    #[test]
+    fn cancelling_the_plan_question_clears_the_remote_plan_card() {
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::PlanProposed(
+            forge_types::PlanProposal {
+                title: "t".into(),
+                steps: vec![forge_types::PlanStep {
+                    title: "one".into(),
+                    detail: String::new(),
+                }],
+                notes: None,
+            },
+        ));
+        let options = vec![
+            QChoice {
+                label: "Build it".into(),
+                description: String::new(),
+            },
+            QChoice {
+                label: "Cancel".into(),
+                description: String::new(),
+            },
+        ];
+        app.set_question("Build this plan?", &options, true);
+        assert_eq!(app.resolve_question("2").as_deref(), Some("Cancel"));
         assert!(app.remote_snapshot().plan.is_none());
     }
 

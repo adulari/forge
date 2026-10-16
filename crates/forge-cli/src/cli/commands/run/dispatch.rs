@@ -305,6 +305,10 @@ pub(crate) async fn dispatch_command(
             // `/model <partial>` → open the animated ModelPin picker pre-filtered.
             if model_id.contains("::") {
                 let model_id = forge_provider::normalize_model_id(&model_id).into_owned();
+                if let Err(e) = super::session::ensure_pin_providers_known(&model_id) {
+                    app.note(&format!("⚠ {e}"));
+                    return Ok(DispatchOutcome::Handled);
+                }
                 let rung = {
                     let mut s = session.lock().await;
                     s.pin_model(Some(model_id.clone()));

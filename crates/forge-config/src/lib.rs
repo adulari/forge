@@ -3706,18 +3706,41 @@ pub fn write_permission_mode(permission: PermissionMode) -> Result<PathBuf, Conf
     let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
     std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
     let path = dir.join("config.toml");
-    let mut root: toml::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
-    let perm_str = permission.key();
-    root.insert(
-        "permission_mode".to_string(),
-        toml::Value::String(perm_str.to_string()),
-    );
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let body = set_top_level_permission_mode(&existing, permission.key());
     write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(path)
+}
+
+/// Set the top-level `permission_mode` key by editing the text, so comments, ordering and every
+/// other key survive (a parse-and-reserialize drops all comments).
+fn set_top_level_permission_mode(existing: &str, mode: &str) -> String {
+    let line = format!("permission_mode = \"{mode}\"");
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+    let mut in_table = false;
+    for raw in existing.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with('[') {
+            in_table = true;
+        }
+        let is_key = !in_table
+            && trimmed
+                .strip_prefix("permission_mode")
+                .is_some_and(|rest| rest.trim_start().starts_with('='));
+        if is_key && !replaced {
+            out.push(line.clone());
+            replaced = true;
+        } else {
+            out.push(raw.to_string());
+        }
+    }
+    if !replaced {
+        out.insert(0, line);
+    }
+    let mut body = out.join("\n");
+    body.push('\n');
+    body
 }
 
 /// Persist a single keybind to `[keybinds.binds]` in the user config TOML, preserving all other keys.
@@ -4296,6 +4319,21 @@ pub fn inject_provider_keys() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_mode_edit_keeps_comments_and_other_keys() {
+        let before =
+            "# my notes\npermission_mode = \"default\" # inline\n[mesh]\npermission_mode = \"x\"\n";
+        let after = set_top_level_permission_mode(before, "accept-edits");
+        assert_eq!(
+            after,
+            "# my notes\npermission_mode = \"accept-edits\"\n[mesh]\npermission_mode = \"x\"\n"
+        );
+        assert_eq!(
+            set_top_level_permission_mode("# c\n[a]\nk = 1\n", "default"),
+            "permission_mode = \"default\"\n# c\n[a]\nk = 1\n"
+        );
+    }
 
     /// Every wave-1 config addition (cache floor, cross-session cache key, harness profile,
     /// privacy, preview) must deserialize, from a config file holding only the two required keys,

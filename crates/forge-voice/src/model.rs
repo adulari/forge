@@ -89,6 +89,13 @@ pub async fn ensure_model(
     if tokio::fs::try_exists(&final_path).await.unwrap_or(false) {
         return Ok(final_path);
     }
+    // One download at a time per process: concurrent first-use requests would truncate each
+    // other's `.part` file and the loser's rename would fail with ENOENT.
+    static DOWNLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _download = DOWNLOAD_LOCK.lock().await;
+    if tokio::fs::try_exists(&final_path).await.unwrap_or(false) {
+        return Ok(final_path);
+    }
     tokio::fs::create_dir_all(dir).await?;
 
     let client = bundled_client_builder()

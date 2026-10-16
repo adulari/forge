@@ -467,11 +467,13 @@ impl BoardApp {
     // -------------------------------------------------------------- composer
 
     pub(crate) fn open_composer(&mut self, mode: ComposerMode, target: &str, prefill: &str) {
+        let replace_on_type = matches!(mode, ComposerMode::Model) && !prefill.is_empty();
         self.composer = Some(Composer {
             mode,
             target: target.to_string(),
             text: prefill.to_string(),
             cursor: prefill.chars().count(),
+            replace_on_type,
         });
         self.focus = Focus::Composer;
     }

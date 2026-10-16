@@ -98,6 +98,7 @@ impl DispatchForm {
                 target: String::new(),
                 text: String::new(),
                 cursor: 0,
+                replace_on_type: false,
             },
             field: FormField::Prompt,
             worktree: true,

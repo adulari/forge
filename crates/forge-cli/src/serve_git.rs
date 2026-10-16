@@ -655,6 +655,43 @@ pub(crate) async fn git_commit(
 /// it forked from. Same machinery `POST /api/sessions/{id}/merge` uses to decide what to apply
 /// ([`worktree_repo_and_branch`] + `git merge-base HEAD <branch>`), but read-only: the diff is
 /// taken IN the worktree so uncommitted edits are included without committing anything.
+/// Unified new-file diffs for the untracked, non-ignored files of `dir` (capped), without touching
+/// the index. `git diff --no-index` exits 1 when the files differ, so the status is not checked.
+fn untracked_as_new_file_diffs(dir: &Path) -> String {
+    const MAX_FILES: usize = 200;
+    const MAX_BYTES: u64 = 1024 * 1024;
+    let Ok(listing) = git_raw(dir, &["ls-files", "--others", "--exclude-standard", "-z"]) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for rel in String::from_utf8_lossy(&listing)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .take(MAX_FILES)
+    {
+        if std::fs::metadata(dir.join(rel)).is_ok_and(|m| !m.is_file() || m.len() > MAX_BYTES) {
+            continue;
+        }
+        let Ok(output) = std::process::Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                rel,
+            ])
+            .output()
+        else {
+            continue;
+        };
+        out.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    out
+}
+
 pub(crate) async fn session_diff(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
@@ -689,6 +726,9 @@ pub(crate) async fn session_diff(
             ],
         )?)
         .into_owned();
+        // `git diff` never lists untracked files, but the merge brings them in: add them as
+        // new-file diffs so the pre-merge view shows everything that will land.
+        let raw = raw + &untracked_as_new_file_diffs(Path::new(&worktree));
         Ok(SessionDiffResponse {
             base,
             branch,
@@ -877,6 +917,16 @@ mod tests {
             files[0].hunks.is_empty(),
             "a pure rename has no content diff"
         );
+    }
+
+    #[test]
+    fn untracked_files_appear_as_new_file_diffs() {
+        let dir = repo_with(&[("a.txt", "a\n")]);
+        std::fs::write(dir.path().join("fresh.txt"), "hello\nworld\n").unwrap();
+        let files = parse_unified_diff(&untracked_as_new_file_diffs(dir.path()));
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "fresh.txt");
+        assert_eq!(files[0].kind, "created");
     }
 
     #[test]

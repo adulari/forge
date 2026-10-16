@@ -778,11 +778,18 @@ pub(crate) async fn serve_cmd(
 
     println!("⚒ forge serve — multi-session daemon");
     println!("  listening on {addr} (stable port; sessions survive disconnects)");
-    println!("  connect: {url}");
-    if let Some(qr) = remote::qr_lines(&url) {
-        for line in qr {
-            println!("{line}");
+    // The token is the credential: only a terminal gets it. Under `forge service` stdout is the
+    // systemd journal, which other users and log shippers can read.
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        println!("  connect: {url}");
+        if let Some(qr) = remote::qr_lines(&url) {
+            for line in qr {
+                println!("{line}");
+            }
         }
+    } else {
+        println!("  connect: {}", redact_token(&url, &token));
+        println!("  (token not printed: stdout is not a terminal; it is stored in the config dir's serve-token file)");
     }
     if anywhere {
         println!("  ⚠ anyone with the link can drive these sessions — the token is the only gate");
@@ -1683,6 +1690,10 @@ pub(crate) async fn start_session(
         .store
         .set_session_daemon_live(&handle.session_id, true);
     Ok(handle)
+}
+
+fn redact_token(url: &str, token: &str) -> String {
+    url.replace(token, "<token>")
 }
 
 #[derive(serde::Deserialize)]
@@ -3095,6 +3106,12 @@ async fn upload(
         .join(".forge")
         .join("uploads")
         .join(remote::sanitize_upload_name(&handle.session_id));
+    // Keep uploads out of the user's `git status` / broad staging without editing their ignores.
+    let _ = forge_core::ensure_dir_git_ignored(
+        &std::path::Path::new(&handle.cwd)
+            .join(".forge")
+            .join("uploads"),
+    );
     let mut stored: Vec<serde_json::Value> = Vec::new();
     loop {
         let field = match multipart.next_field().await {

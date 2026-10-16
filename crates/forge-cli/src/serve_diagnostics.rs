@@ -122,10 +122,15 @@ fn bounded_line(bytes: &[u8]) -> String {
 }
 
 fn host_probe() -> HostProbe {
-    let mut system = System::new_all();
-    system.refresh_all();
+    // Only what the response reports: a full `new_all()` walks every process on the host.
+    let mut system = System::new();
+    system.refresh_memory();
+    system.refresh_cpu_all();
     let load = System::load_average();
     let pid = sysinfo::get_current_pid().ok();
+    if let Some(pid) = pid {
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+    }
     let process = pid.and_then(|pid| system.process(pid));
     let resources = ResourceDiagnostics {
         process_memory_bytes: process.map_or(0, sysinfo::Process::memory),
@@ -160,6 +165,27 @@ fn host_probe() -> HostProbe {
     }
 }
 
+async fn database_check(state: &Arc<DaemonState>) -> DiagnosticCheck {
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || store.session_exists("diagnostics-probe")).await {
+        Ok(Ok(_)) => {
+            DiagnosticCheck::ok("database", "Session database", "open and answering queries")
+        }
+        Ok(Err(error)) => DiagnosticCheck::warn(
+            "database",
+            "Session database",
+            format!("query failed: {error}"),
+            "check disk space and permissions on the forge data directory, then restart the daemon",
+        ),
+        Err(_) => DiagnosticCheck::warn(
+            "database",
+            "Session database",
+            "the database probe did not complete",
+            "restart the daemon",
+        ),
+    }
+}
+
 pub(crate) async fn diagnostics(
     State(state): State<Arc<DaemonState>>,
 ) -> axum::Json<DiagnosticsResponse> {
@@ -182,11 +208,7 @@ pub(crate) async fn diagnostics(
     let (terminals, terminal_clients) = state.terminals.diagnostic_counts().await;
 
     let mut checks = vec![
-        DiagnosticCheck::ok(
-            "database",
-            "Session database",
-            "open and migrated to this daemon build",
-        ),
+        database_check(&state).await,
         DiagnosticCheck::ok(
             "terminal",
             "Terminal runtime",

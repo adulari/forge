@@ -1263,6 +1263,20 @@ fn m_prefills_the_current_model() {
 }
 
 #[test]
+fn typing_over_the_model_prefill_replaces_it() {
+    let mut a = app();
+    a.apply(BoardEvent::Fleet(vec![FleetRow {
+        model: "opencode::muse".into(),
+        ..row("s1")
+    }]));
+    a.select("s1");
+    handle_key(&mut a, key(KeyCode::Char('m')));
+    handle_key(&mut a, key(KeyCode::Char('x')));
+    handle_key(&mut a, key(KeyCode::Char('y')));
+    assert_eq!(a.composer.as_ref().unwrap().text, "xy");
+}
+
+#[test]
 fn m_with_empty_submit_clears_the_model_pin() {
     let mut a = app_with_selected("s1");
     handle_key(&mut a, key(KeyCode::Char('m')));
