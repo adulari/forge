@@ -516,6 +516,7 @@ pub(crate) async fn discover_catalog_with_status(
             // `routable`, not `available`: a bridge whose CLI is installed but has no login
             // contributes only failover hops that cannot succeed — on a keyless install that was
             // three CLIs and ~3.5 minutes before the one correct message appeared.
+            .filter(|k| !forge_config::is_model_disabled(k.prefix(), &config.mesh.disabled))
             .filter(|k| k.routable())
             .map(|k| async move {
                 let prefix = k.prefix();

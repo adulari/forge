@@ -173,7 +173,15 @@ pub(crate) async fn run(
 /// NOT done the job, and exiting 0 makes an orchestrator (or a human reading `$?`) treat it as if
 /// it had. Turn it into a process failure carrying the harness's ERROR line.
 fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
-    if outcome.stop_reason == forge_types::StopReason::TasksUnfinished {
+    use forge_types::StopReason;
+    if matches!(
+        outcome.stop_reason,
+        StopReason::TasksUnfinished
+            | StopReason::MaxSteps
+            | StopReason::BudgetExhausted
+            | StopReason::NoOutput
+            | StopReason::DaemonShutdown
+    ) {
         anyhow::bail!(outcome.text);
     }
     Ok(())

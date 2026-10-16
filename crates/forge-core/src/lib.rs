@@ -1129,8 +1129,13 @@ impl TaskScope {
         !matches!(
             tool,
             "write_file"
+                | "append_file"
                 | "edit_file"
+                | "multi_edit"
                 | "delete_file"
+                | "move_file"
+                | "copy_file"
+                | "notebook_edit"
                 | "apply_patch"
                 | "shell"
                 | "spawn_agents"
@@ -2957,9 +2962,9 @@ impl Session {
             self.transcript.push(Message::system(&msg).ui_only());
             self.presenter.emit(PresenterEvent::Done {
                 final_text: msg.clone(),
-                stop_reason: StopReason::FinalAnswer,
+                stop_reason: StopReason::NoOutput,
             });
-            return Ok(LoopOutcome::final_answer(msg));
+            return Ok(LoopOutcome::no_output(msg));
         }
         let routed_model = decision.model.clone();
         self.note_harness_model(&routed_model);
@@ -7704,6 +7709,10 @@ mod tests {
         );
         for tool in [
             "write_file",
+            "append_file",
+            "multi_edit",
+            "notebook_edit",
+            "move_file",
             "shell",
             "spawn_agents",
             "run_workflow",

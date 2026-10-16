@@ -144,9 +144,59 @@ pub(crate) fn remove_installed_at(path: &Path, name: &str) -> Result<bool> {
     Ok(existed)
 }
 
-/// Drop a pack from the default lockfile.
-pub(crate) fn remove_installed_entry(name: &str) -> Result<bool> {
-    remove_installed_at(&installed_path()?, name)
+/// A name that is exactly one ordinary path component: never absolute, never `..`, no separators.
+fn is_plain_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) && !name.contains(['/', '\\'])
+}
+
+fn remove_skill_entry(skills_dir: &Path, name: &str) -> Result<bool> {
+    if !is_plain_name(name) {
+        return Ok(false);
+    }
+    let exact = skills_dir.join(name);
+    let with_ext = skills_dir.join(format!("{name}.md"));
+    if exact.is_dir() {
+        std::fs::remove_dir_all(&exact).with_context(|| format!("removing {}", exact.display()))?;
+        Ok(true)
+    } else if exact.is_file() {
+        std::fs::remove_file(&exact).with_context(|| format!("removing {}", exact.display()))?;
+        Ok(true)
+    } else if with_ext.is_file() {
+        std::fs::remove_file(&with_ext)
+            .with_context(|| format!("removing {}", with_ext.display()))?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// `forge plugin remove`: resolve `name` as a pack in the lockfile (deleting exactly the skill
+/// entries it recorded) or, failing that, as a single skill name. A path-like name is rejected,
+/// so the argument can never address anything outside `skills_dir`.
+pub(crate) fn remove_plugin_at(skills_dir: &Path, lock_path: &Path, name: &str) -> Result<bool> {
+    anyhow::ensure!(
+        is_plain_name(name),
+        "'{name}' is not a plugin name; use a name from `forge plugin list`"
+    );
+    let lock = load_installed_at(lock_path)?;
+    let mut removed = false;
+    if let Some(entry) = lock.skills.get(name) {
+        for file in &entry.files {
+            removed |= remove_skill_entry(skills_dir, file)?;
+        }
+    }
+    removed |= remove_skill_entry(skills_dir, name)?;
+    let dropped = remove_installed_at(lock_path, name)?;
+    Ok(removed || dropped)
+}
+
+/// Remove a plugin from the default skills dir and lockfile.
+pub(crate) fn remove_plugin(name: &str) -> Result<bool> {
+    remove_plugin_at(&skills_dir()?, &installed_path()?, name)
 }
 
 // ---------------------------------------------------------------------------
@@ -164,4 +214,38 @@ pub(crate) fn installed_path() -> Result<PathBuf> {
 }
 pub(crate) fn skills_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join("skills"))
+}
+
+#[cfg(test)]
+mod remove_tests {
+    use super::*;
+
+    #[test]
+    fn removes_a_pack_by_name_and_rejects_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path().join("skills");
+        std::fs::create_dir_all(skills.join("a")).unwrap();
+        std::fs::write(skills.join("b.md"), "x").unwrap();
+        let lock = tmp.path().join("installed-skills.toml");
+        record_installed_at(
+            &lock,
+            "pack",
+            InstalledEntry {
+                source: "file:///x".into(),
+                marketplace: None,
+                subdir: None,
+                git_ref: None,
+                files: vec!["a".into(), "b.md".into()],
+            },
+        )
+        .unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::create_dir_all(victim.join("sub")).unwrap();
+        assert!(remove_plugin_at(&skills, &lock, victim.to_str().unwrap()).is_err());
+        assert!(remove_plugin_at(&skills, &lock, "../victim").is_err());
+        assert!(victim.join("sub").exists());
+        assert!(remove_plugin_at(&skills, &lock, "pack").unwrap());
+        assert!(!skills.join("a").exists() && !skills.join("b.md").exists());
+        assert!(load_installed_at(&lock).unwrap().skills.is_empty());
+    }
 }
