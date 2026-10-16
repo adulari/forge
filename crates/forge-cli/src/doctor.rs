@@ -420,7 +420,6 @@ fn provider_checks() -> (Vec<Check>, bool) {
     }
 
     usable |= crate::doctor_providers::custom_provider_checks(&mut out);
-
     // Subscription CLI bridges.
     for k in forge_provider::CliKind::all() {
         let avail = k.available();
