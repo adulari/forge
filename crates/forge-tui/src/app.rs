@@ -4820,7 +4820,7 @@ mod tests {
         };
         for i in 0..3 {
             app.submit_user(&format!("prompt {i}"));
-            app.apply(PresenterEvent::AssistantText("a\nb\nc\nd".into()));
+            app.apply(PresenterEvent::AssistantText("a b c d".into()));
             let _ = app.drain_flush();
         }
         // Render once (tail) so the geometry exists; the view is at the bottom.

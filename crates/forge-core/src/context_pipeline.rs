@@ -143,6 +143,32 @@ pub(crate) fn to_llm_floored_counted(
     (normalize_tool_pairs(fitted).messages, dropped)
 }
 
+const INTERRUPTED_TURN_MARKER: &str =
+    "[the user interrupted this turn before a reply was recorded]";
+
+/// An interrupted text turn persists nothing for the cancelled reply, so the next request would
+/// carry two user messages in a row and the model could not tell the first was cancelled. Insert a
+/// marker, in the view only, before a user message whose previous conversational message is also
+/// a user message.
+pub(crate) fn mark_interrupted_user_turns(messages: Vec<Message>) -> Vec<Message> {
+    let mut out = Vec::with_capacity(messages.len());
+    let mut last_conversational = None;
+    for m in messages {
+        match m.role {
+            Role::User => {
+                if last_conversational == Some(Role::User) {
+                    out.push(Message::assistant(INTERRUPTED_TURN_MARKER));
+                }
+                last_conversational = Some(Role::User);
+            }
+            Role::System => {}
+            r => last_conversational = Some(r),
+        }
+        out.push(m);
+    }
+    out
+}
+
 const INTERRUPTED_TOOL_RESULT: &str = "error: tool call interrupted before a result was recorded";
 const MAX_TOOL_CALL_ID_LEN: usize = 256;
 
@@ -744,6 +770,31 @@ pub(crate) fn clamp_chars(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_user_messages_in_a_row_get_an_interruption_marker() {
+        let msgs = vec![
+            Message::user("first"),
+            Message::system("reminder"),
+            Message::user("second"),
+            Message::assistant("ok"),
+            Message::user("third"),
+        ];
+        let out = super::mark_interrupted_user_turns(msgs);
+        let roles: Vec<_> = out.iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            [
+                Role::User,
+                Role::System,
+                Role::Assistant,
+                Role::User,
+                Role::Assistant,
+                Role::User
+            ]
+        );
+        assert!(out[2].content.contains("interrupted"));
+    }
+
     use super::*;
 
     /// The structural half of loop prevention. A model conditions on its context, so a request

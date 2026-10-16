@@ -31,7 +31,10 @@ pub(crate) async fn export_cmd(
     let short = &id[..id.len().min(8)];
     let path = path_arg.unwrap_or_else(|| default_export_path(&id));
     let html = crate::replay::render_html(short, &entries);
-    std::fs::write(&path, html).with_context(|| format!("writing {path}"))?;
+    if let Err(e) = std::fs::write(&path, html) {
+        app.note(&format!("● export failed: could not write {path}: {e}"));
+        return Ok(DispatchOutcome::Handled);
+    }
     app.note(&format!("✓ exported session {short} to {path}"));
     Ok(DispatchOutcome::Handled)
 }

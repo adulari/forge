@@ -1918,6 +1918,22 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
             v.extend(["**/.ssh/**", "/etc/**"]);
             v
         }),
+        // The other file-mutating tools carry paths in the same places and need the same floor.
+        deny("append_file", &{
+            let mut v = secrets.to_vec();
+            v.extend(["**/.ssh/**", "/etc/**"]);
+            v
+        }),
+        deny("multi_edit", &{
+            let mut v = secrets.to_vec();
+            v.extend(["**/.ssh/**", "/etc/**"]);
+            v
+        }),
+        deny("apply_patch", &{
+            let mut v = secrets.to_vec();
+            v.extend(["**/.ssh/**", "/etc/**"]);
+            v
+        }),
         // delete_file had no deny rules at all — a model could delete .env, SSH keys, etc.
         deny("delete_file", &{
             let mut v = secrets.to_vec();

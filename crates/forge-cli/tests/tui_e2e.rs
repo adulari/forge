@@ -170,7 +170,8 @@ fn tui_autocheckpoints_then_undo_picker_rewinds_over_a_pty() {
         ("say hi\r", 2500),
         ("/undo\r", 800),
         ("\r", 800),
-        ("\x1b", 0),
+        // Idle Esc only arms the rewind picker; /quit is what exits.
+        ("/quit\r", 0),
     ]);
     assert!(clean, "clean exit, no panic: {plain}");
     assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");

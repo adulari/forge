@@ -217,3 +217,5 @@ mechanism; no change to `permission::decide`.
 - [ ] Statusline shows the themed temper; SHIFT+TAB note appears in scrollback.
 - [ ] Switch persisted to the session row.
 - [ ] fmt + clippy `-D warnings` + full workspace green.
+
+The secret denylist judges every path a call names: `paths[]`, `edits[].path`, the targets inside an `apply_patch` body, and the symlink-resolved target of each. Auto temper applies the same set (plus `cwd`) when deciding whether a write leaves the workspace.

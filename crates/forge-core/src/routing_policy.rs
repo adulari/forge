@@ -308,7 +308,7 @@ impl Session {
             floor,
             &mut trim,
         );
-        out.extend(view);
+        out.extend(crate::context_pipeline::mark_interrupted_user_turns(view));
         self.trim_watch.last.set(dropped);
         self.store_trim(floor, trim);
         out

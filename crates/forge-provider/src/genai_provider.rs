@@ -1562,6 +1562,9 @@ impl GenAiProvider {
                 // progress; forward a content-free heartbeat so forge-core's independent idle
                 // watchdog does not mistake a long, healthy tool argument for a dead stream.
                 ChatStreamEvent::ToolCallChunk(c) => on_event(tool_chunks.observe(&c.tool_call)),
+                // genai yields Start when the stream is first polled, before the server has sent a
+                // byte; counting it as activity disarmed the first-event deadline entirely.
+                ChatStreamEvent::Start => {}
                 _ => on_event(StreamEvent::ProviderActivity),
             }
         }

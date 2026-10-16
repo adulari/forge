@@ -321,8 +321,8 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
     // Path tools: match against the path arg and its normalized variants. The target path is read
     // via the centralized `extract_path_arg` (not just the literal `"path"` key), so a write tool
     // that names its arg `file_path`/`target` is still subject to the secret denylist and path rules.
-    if let Some(path) = forge_types::extract_path_arg(args) {
-        let candidates = path_candidates(path);
+    for path in forge_types::all_path_args(args) {
+        let candidates = path_candidates(&path);
         if rule
             .patterns
             .iter()
@@ -407,6 +407,21 @@ fn path_candidates(path: &str) -> Vec<String> {
     let cleaned = lexical_clean(&expanded);
     if !out.contains(&cleaned) {
         out.push(cleaned);
+    }
+    // A symlink named innocently can point at a secret: judge the resolved target too. For a
+    // not-yet-existing file, resolve its directory.
+    let p = std::path::Path::new(&expanded);
+    let resolved = std::fs::canonicalize(p).ok().or_else(|| {
+        let parent = p
+            .parent()
+            .filter(|d| !d.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        Some(std::fs::canonicalize(parent).ok()?.join(p.file_name()?))
+    });
+    if let Some(r) = resolved.and_then(|r| r.to_str().map(String::from)) {
+        if !out.contains(&r) {
+            out.push(r);
+        }
     }
     out
 }
@@ -827,6 +842,46 @@ mod tests {
             Deny,
             "ordinary source must remain readable"
         );
+    }
+
+    #[test]
+    fn secret_denylist_sees_batched_paths_patches_and_symlinks() {
+        let rules = forge_config::builtin_deny_rules();
+        let deny_call = |tool: &str, side, args: Value| {
+            decide(PermissionMode::Bypass, side, tool, &args, &rules) == Deny
+        };
+        assert!(deny_call(
+            "read_file",
+            SideEffect::ReadOnly,
+            json!({ "paths": ["ok.txt", ".env"] })
+        ));
+        assert!(deny_call(
+            "append_file",
+            SideEffect::Write,
+            json!({ "path": ".env", "content": "x" })
+        ));
+        assert!(deny_call(
+            "multi_edit",
+            SideEffect::Write,
+            json!({ "edits": [{ "path": ".env" }] })
+        ));
+        assert!(deny_call(
+            "apply_patch",
+            SideEffect::Write,
+            json!({ "patch": "*** Begin Patch\n*** Add File: .ssh/id_rsa\n+x\n*** End Patch" })
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "T=1").unwrap();
+        let link = dir.path().join("innocent.txt");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join(".env"), &link).unwrap();
+            assert!(deny_call(
+                "read_file",
+                SideEffect::ReadOnly,
+                json!({ "path": link.to_str().unwrap() })
+            ));
+        }
     }
 
     #[test]

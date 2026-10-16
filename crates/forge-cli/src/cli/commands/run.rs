@@ -2021,6 +2021,7 @@ pub(crate) async fn run_chat_tui(
                                 app.input_cursor = app.input.len();
                             }
                             app.palette.query = name;
+                            app.palette.selected = 0;
                             app.palette.clamp();
                         }
                     }
