@@ -37,21 +37,45 @@ impl Session {
     /// `tools.extra_roots` entry. Auto-edit trusts edits to the project, not to the whole disk,
     /// so such a write asks there instead of passing silently.
     pub(crate) fn writes_beyond_workspace(&self, args: &serde_json::Value) -> bool {
-        let root = self.workspace.root();
-        let configured: Vec<std::path::PathBuf> = self
-            .config
-            .tools
-            .extra_roots
-            .iter()
-            .map(std::path::Path::new)
-            .filter(|path| path.is_absolute())
-            .map(normalize_workspace_target)
-            .collect();
-        let own = normalize_workspace_target(root);
-        forge_tools::path_arg_targets(args, root)
-            .iter()
-            .any(|target| {
-                !target.starts_with(&own) && !configured.iter().any(|r| target.starts_with(r))
-            })
+        writes_beyond_workspace(args, self.workspace.root(), &self.config.tools.extra_roots)
+    }
+}
+
+/// [`Session::writes_beyond_workspace`] without a session: shared with the CLI bridge's
+/// `mcp-serve`, whose Auto-edit gate must ask for the same writes the direct path asks for.
+pub fn writes_beyond_workspace(
+    args: &serde_json::Value,
+    root: &std::path::Path,
+    extra_roots: &[String],
+) -> bool {
+    let configured: Vec<std::path::PathBuf> = extra_roots
+        .iter()
+        .map(std::path::Path::new)
+        .filter(|path| path.is_absolute())
+        .map(normalize_workspace_target)
+        .collect();
+    let own = normalize_workspace_target(root);
+    forge_tools::path_arg_targets(args, root)
+        .iter()
+        .any(|target| {
+            !target.starts_with(&own) && !configured.iter().any(|r| target.starts_with(r))
+        })
+}
+
+/// Auto-edit's write rule on any surface: an allowed write that lands beyond the workspace asks.
+pub fn accept_edits_write_gate(
+    decision: forge_types::PermissionDecision,
+    mode: forge_types::PermissionMode,
+    side_effect: forge_types::SideEffect,
+    beyond_workspace: impl FnOnce() -> bool,
+) -> forge_types::PermissionDecision {
+    if decision == forge_types::PermissionDecision::Allow
+        && mode == forge_types::PermissionMode::AcceptEdits
+        && side_effect == forge_types::SideEffect::Write
+        && beyond_workspace()
+    {
+        forge_types::PermissionDecision::Ask
+    } else {
+        decision
     }
 }

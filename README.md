@@ -484,11 +484,19 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 
 **🔒 Safety**
 - Permission broker with per-tool rules and four tempers (Read-only / Ask / Auto-edit / Full)
-- `Auto-edit` (`accept-edits`) auto-approves file writes while still asking before shell commands;
-  `Full` (`bypass`) removes ordinary prompts, but the unoverridable denylist still blocks
-  catastrophic operations (`rm -rf /`, `.env` reads, pipe-to-shell)
+- `Auto-edit` (`accept-edits`) auto-approves workspace edits and ordinary shell commands, and asks
+  before writes beyond the workspace and shell that deletes, moves or writes outside it, touches a
+  raw disk or pipes into a shell; `Full` (`bypass`) removes ordinary prompts, but the
+  unoverridable safety floor still blocks catastrophic operations in every temper (any spelling of
+  a recursive delete of `~`, `$HOME` or `/`, `.env` reads, pipe-to-shell)
+- `sudo`, `su`, `doas`, `pkexec`, `run0` and `passwd` never run from a tool call, in any temper:
+  Forge has no terminal to answer a password prompt and each failure counts toward the account
+  lockout, so the model is told to hand the exact command to you instead
+- [Project trust](docs/features/project-trust.md): a cloned repo's `.forge/` hooks, MCP servers,
+  temper and allow rules stay inert until you run `forge trust` (restrictive settings still apply)
 - Answering `a` (always) at a prompt allows that tool immediately and writes a project allow rule
-  to `.forge/config.toml`, so future turns and sessions reuse the choice
+  to `.forge/config.toml` (or, in an untrusted project, to your own config directory), so future
+  turns and sessions reuse the choice
 - Diff preview before every write; shadow file snapshots; `/undo` with file restore
 - Per-turn checkpoints; full audit trail of tool calls, routing, and permission outcomes
 - Workspace isolation binds every session, provider bridge, tool, checkpoint, and post-check to the

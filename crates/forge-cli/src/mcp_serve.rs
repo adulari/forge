@@ -478,6 +478,31 @@ impl ForgeMcp {
                 &self.tasks_store,
             )
             .await;
+        // Auto-edit asks for writes beyond the workspace on the direct path; the bridge must too.
+        let decision =
+            forge_core::accept_edits_write_gate(decision, mode, tool.side_effect(), || {
+                std::env::current_dir().is_ok_and(|cwd| {
+                    forge_core::writes_beyond_workspace(&args, &cwd, &self.config.tools.extra_roots)
+                })
+            });
+        if decision == PermissionDecision::Deny {
+            if let Some(note) = permission::denial_note(&name, &args) {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(note)]));
+            }
+        }
+        // PermissionRequest hooks answer for the user here too (CC parity on the bridge path).
+        let (decision, args) = match permission_relay::permission_hooks(
+            &self.config.hooks,
+            &self.rules,
+            (&name, tool.side_effect(), mode),
+            decision,
+            args,
+        )
+        .await
+        {
+            Ok(settled) => settled,
+            Err(refusal) => return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)])),
+        };
         if let Err(refusal) = gate(decision, &name, tool.side_effect(), mode).await {
             return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
@@ -1261,8 +1286,11 @@ mod tests {
     ) -> forge_config::HookConfig {
         forge_config::HookConfig {
             event,
+            kind: Default::default(),
             matcher: Some(matcher.to_string()),
             command: command.to_string(),
+            prompt: None,
+            model: None,
             timeout_secs: 10,
             cc_compat: false,
         }

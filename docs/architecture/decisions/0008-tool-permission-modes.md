@@ -29,7 +29,11 @@ It resolves a decision from two layers:
 
 1. **Mode** (session-level posture, switchable at runtime and as a configured default):
    - `default` — ask before any side effect (file write/edit, shell).
-   - `accept-edits` — auto-allow file writes/edits; still ask for shell commands.
+   - `accept-edits` — auto-allow workspace edits and ordinary shell commands; ask for writes beyond the
+  workspace and for shell that deletes, moves or writes outside it (amended 2026-10; the original
+  "still ask for shell" never matched the code, which allowed every shell command).
+- In every mode, including `bypass`, a structural floor refuses catastrophic deletes of home/root
+  and privilege escalation (`sudo` and friends), see `docs/features/temper-modes.md`.
    - `bypass` — auto-allow all tool actions (explicit, deliberate opt-in).
    - `plan` — read-only; deny all side effects (planning/analysis sessions).
 2. **Rules** (per-tool / per-project allow | ask | deny) that refine the mode, with an

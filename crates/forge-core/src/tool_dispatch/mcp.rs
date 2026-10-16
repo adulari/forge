@@ -34,11 +34,16 @@ impl Session {
                 "tool": call.name, "args": effective_args, "cwd": self.workspace.display(), "session_id": self.id
             })
             .to_string();
-            let outcome = hooks::run_hooks(
-                &self.config.hooks,
-                forge_config::HookEvent::PreToolUse,
-                &call.name,
-                &payload,
+            let runner = self.llm_hook_runner().await;
+
+            let outcome = crate::hooks_llm::with_runner(
+                runner,
+                hooks::run_hooks(
+                    &self.config.hooks,
+                    forge_config::HookEvent::PreToolUse,
+                    &call.name,
+                    &payload,
+                ),
             )
             .await;
             for n in outcome.notes {
@@ -179,11 +184,16 @@ impl Session {
                 "tool": call.name, "args": effective_args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id
             })
             .to_string();
-            let outcome = hooks::run_hooks(
-                &self.config.hooks,
-                forge_config::HookEvent::PostToolUse,
-                &call.name,
-                &payload,
+            let runner = self.llm_hook_runner().await;
+
+            let outcome = crate::hooks_llm::with_runner(
+                runner,
+                hooks::run_hooks(
+                    &self.config.hooks,
+                    forge_config::HookEvent::PostToolUse,
+                    &call.name,
+                    &payload,
+                ),
             )
             .await;
             for n in outcome.notes {

@@ -70,9 +70,12 @@ fn rpc(
 
 /// Seed a project skill in a throwaway cwd, spawn `forge mcp-serve` there, and complete the MCP
 /// handshake. `trust_project` writes `.forge/config.toml` with `[commands] trust_project = true`
-/// so the project-trust gate admits the seeded skill; without it the gate must withhold it.
+/// so the skill gate admits the seeded skill; without it the gate must withhold it. That setting
+/// only counts in a trusted project (project-trust.md), so `trusted` marks the project trusted for
+/// the child process.
 fn spawn_bridge(
     trust_project: bool,
+    trusted: bool,
 ) -> (
     tempfile::TempDir,
     ChildGuard,
@@ -100,6 +103,7 @@ fn spawn_bridge(
             .current_dir(dir.path())
             // Isolate the store from the developer's real per-user DB (see open_store).
             .env("FORGE_DB", dir.path().join("forge.db"))
+            .env("FORGE_TRUST_PROJECT", if trusted { "1" } else { "0" })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -128,7 +132,7 @@ fn spawn_bridge(
 
 #[test]
 fn bridge_advertises_and_serves_use_skill() {
-    let (_dir, _child, mut stdin, reader) = spawn_bridge(true);
+    let (_dir, _child, mut stdin, reader) = spawn_bridge(true, true);
 
     // use_skill must be advertised to the bridged model.
     let tools = rpc(
@@ -166,7 +170,14 @@ fn bridge_advertises_and_serves_use_skill() {
 
 #[test]
 fn bridge_withholds_untrusted_project_skill() {
-    let (_dir, _child, mut stdin, reader) = spawn_bridge(false);
+    // Neither a skill gate opt-in nor a project that grants itself one may expose the skill.
+    for (opt_in, trusted) in [(false, true), (true, false)] {
+        assert_withheld(opt_in, trusted);
+    }
+}
+
+fn assert_withheld(opt_in: bool, trusted: bool) {
+    let (_dir, _child, mut stdin, reader) = spawn_bridge(opt_in, trusted);
 
     let call = rpc(
         &mut stdin,

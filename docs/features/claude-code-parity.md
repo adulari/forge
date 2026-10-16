@@ -45,9 +45,10 @@ Codex turns receive the same prompt, since system messages are flattened into th
 
 ## Auto permission mode (`--mode auto`)
 
-Forge already had Tempers (Read-only / Ask / Auto-edit / Full). **Auto-edit** auto-approves edits
+Forge already had Tempers (Read-only / Ask / Auto-edit / Full). **Auto-edit** auto-approved edits
 *and* shell, relying on the builtin deny rules alone, so there was no "proceed unless risky"
-posture. The new **Auto** temper (`PermissionMode::Auto`, key `auto`) fills it:
+posture. (Auto-edit has since been narrowed: it asks for shell that deletes, moves or writes outside
+the workspace, see temper-modes.md.) The new **Auto** temper (`PermissionMode::Auto`, key `auto`) fills it:
 
 | call | outcome |
 | --- | --- |

@@ -223,11 +223,12 @@ figures are now measured on the same stack and can be compared.
 
 actions the user expects to be auto-approved.
 
-**What we know (verified in code):** `permission::decide_mode` for `AcceptEdits` auto-allows
-`Write` side effects and **gates `Shell` with a prompt by design**; read-only never prompts. The
-`ask_user` virtual tool always prompts regardless of temper (it's a question to the user, not a
-side effect). So a turn that runs shell commands or calls `ask_user` will still prompt in
-auto-edit — that part is expected.
+**What we know (verified in code):** `AcceptEdits` auto-allows `Write` side effects inside the
+workspace and ordinary shell commands; it asks for writes beyond the workspace and for shell that
+deletes, moves or writes outside it (`permission/auto.rs`, `accept_edits_risk`). Read-only never
+prompts. The `ask_user` virtual tool always prompts regardless of temper (it's a question to the
+user, not a side effect). So a turn that runs such a shell command or calls `ask_user` will still
+prompt in auto-edit — that part is expected.
 
 **Verified (file edits do NOT prompt):** the end-to-end test
 `auto_edit_allows_file_writes_without_prompting` (forge-core) drives a live `AcceptEdits` session

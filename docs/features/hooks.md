@@ -73,7 +73,8 @@ See "Claude Code compatibility" below. In short: `Stop` hooks can keep the agent
 ## Claude Code compatibility
 
 Hooks loaded from a Claude-Code-shaped `settings.json` (Forge's own `<config dir>/settings.json` and
-`./.forge/settings.json`) run in `cc_compat` mode: they get the CC stdin payload (`session_id`,
+`./.forge/settings.json`; project hooks only once the project is trusted, see
+[project-trust.md](project-trust.md)) run in `cc_compat` mode: they get the CC stdin payload (`session_id`,
 `cwd`, `hook_event_name`, `tool_name`, `tool_input`, ...), start in the project directory with
 `CLAUDE_PROJECT_DIR` set, and their output is read with CC rules (exit 2 blocks, stderr is the
 reason). Bring your existing hooks over with `forge import claude --hooks` (opt-in; replaces only
@@ -87,9 +88,39 @@ the `hooks` key of the destination file, so it is safe to re-run). Matchers use 
 | `SessionStart` | Plain stdout and `hookSpecificOutput.additionalContext` are added to the model's context as a system message. Native (non-CC) hooks still just print. `source` is always `startup` (no resume/clear/compact distinction yet). |
 | `UserPromptSubmit` | `additionalContext` and plain stdout are appended to the prompt; `decision:"block"` / exit 2 blocks the turn. Forge appends to the prompt text (so it is visible in the transcript); CC keeps it out of sight. `sessionTitle` and `suppressOriginalPrompt` are ignored. |
 | `PreToolUse` | `permissionDecision:"deny"` or exit 2 blocks. `updatedInput` replaces the tool arguments (CC argument names are translated: `Bash` `command`/`timeout` ms/`run_in_background`, `Edit`/`Write`/`Read` `file_path`, `old_string`, `new_string`), before Forge's permission check, workspace-path validation and schema validation. `permissionDecision:"allow"` does NOT skip Forge's permission gate; `ask`/`defer` are ignored. `additionalContext` becomes a model hint. This is what `rtk hook claude` emits. |
-| `PostToolUse` | `additionalContext` becomes a model hint. A block degrades to a note. |
+| `PostToolUse` | `additionalContext` becomes a model hint. A block (exit 2 / `decision:"block"`) is shown to the user and, as in CC, its reason is fed to the model (the tool already ran). |
+| `PermissionRequest` | Fires when a tool call would ask the user (the temper or an ask rule resolved to Ask). `hookSpecificOutput.decision.behavior: "allow"` approves it (an `updatedInput` replaces the arguments, re-checked against the workspace, the safety floor and deny rules); `"deny"` refuses it with `message` for the model, and `interrupt: true` also tells the model to stop the turn (Forge has no hard interrupt from a tool call). Exit 2 denies; no answer shows the prompt as usual. A deny from any hook wins over another's allow. Native hooks may print `{"action":"allow"}` / `{"action":"deny","reason":…}` and a non-zero exit denies. Unlike CC, it also fires in headless runs (where the prompt would otherwise be an automatic denial) and on the CLI bridge (`mcp-serve`). |
 
-Not implemented: `type: "prompt" | "agent" | "http"` hooks (skipped at load), `async`, `if`,
+### `prompt` and `agent` hooks
+
+Besides `type: "command"`, a hook can ask a model (`hooks_llm.rs`), in a CC `settings.json` or as a
+native `[[hooks]]` entry with `type = "prompt"` / `"agent"`:
+
+```json
+{"hooks": {"Stop": [{"hooks": [
+  {"type": "prompt", "prompt": "Did the agent finish everything the user asked? $ARGUMENTS"},
+  {"type": "agent", "prompt": "Check that the tests in tests/ cover the change. $ARGUMENTS", "timeout": 120}
+]}]}}
+```
+
+- `prompt` sends the instruction, with `$ARGUMENTS` replaced by the event's JSON (appended when the
+  placeholder is absent), to the session's cheap side-call model (the auto-mode classifier's), or
+  to `model` when the hook sets one.
+- `agent` does the same through a read-only subagent: `read_file`, `search`, `glob` and `list_dir`,
+  confined to the workspace, for up to 50 tool turns.
+- The model must answer `{"ok": true}` or `{"ok": false, "reason": "…"}` (CC's older
+  `{"decision":"approve"|"block"}` is accepted). `ok: false` behaves exactly like a command hook
+  exiting 2 with `reason` on stderr: it blocks a `PreToolUse` call or a `UserPromptSubmit`, keeps a
+  `Stop`/`SubagentStop` going, denies a `PermissionRequest`, and feeds a `PostToolUse` reason back.
+  `ok: true` lets the event proceed (and approves a `PermissionRequest`).
+- Timeouts default to 30 s (`prompt`) and 60 s (`agent`) in a CC `settings.json`, 30 s natively; a
+  timeout, provider error or unparseable answer is reported as a hook error and does not block.
+- Model hooks run where a session exists: the TUI, plain chat, `forge run`, `forge nl` and
+  daemon-hosted sessions. On the CLI bridge (`mcp-serve`) and for `SessionStart`/`SessionEnd`
+  they are skipped with a `hook error` note rather than guessed.
+- Usage is recorded as a `hook` side call.
+
+Not implemented: `type: "http"` hooks (skipped at load), `async`, `if`,
 `transcript_path` (always empty: Forge keeps its transcript in its store), `PostToolBatch`,
 `TaskCompleted` and the other newer CC events. `forge run "<prompt>"` (one-shot) does not fire
 `SessionStart` or `UserPromptSubmit`; the TUI, plain chat and daemon-hosted sessions do.

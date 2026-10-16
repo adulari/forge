@@ -58,6 +58,7 @@ mod silence_guard;
 mod workspace_policy;
 pub use btw_policy::{busy_asker, BtwAsker};
 pub use goal_evaluator::{GoalEvalRequest, GoalVerdict};
+pub use workspace_policy::{accept_edits_write_gate, writes_beyond_workspace};
 mod cache_instrument;
 pub mod capsule;
 pub(crate) mod clock;
@@ -91,6 +92,7 @@ mod harness_profile;
 pub mod heartbeat;
 pub mod hooks;
 mod hooks_cc;
+pub mod hooks_llm;
 pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
 mod file_restore;
@@ -5034,6 +5036,9 @@ mod tests {
     #[path = "plan_shell.rs"]
     mod plan_shell_tests;
 
+    #[path = "security_floor.rs"]
+    mod security_floor_tests;
+
     #[path = "worktree_scope.rs"]
     mod worktree_scope_tests;
 
@@ -6957,8 +6962,11 @@ mod tests {
         config.mesh.auto_memory = false;
         config.hooks = vec![forge_config::HookConfig {
             event: forge_config::HookEvent::Stop,
+            kind: Default::default(),
             matcher: None,
             command: command.into(),
+            prompt: None,
+            model: None,
             timeout_secs: 10,
             cc_compat: false,
         }];
@@ -10828,9 +10836,12 @@ mod tests {
             permission_mode: forge_types::PermissionMode::Bypass,
             hooks: vec![forge_config::HookConfig {
                 event: forge_config::HookEvent::PreToolUse,
+                kind: Default::default(),
                 matcher: Some("list_dir".into()),
                 #[cfg(not(windows))]
                 command: "echo blocked-by-test 1>&2; exit 1".into(),
+                prompt: None,
+                model: None,
                 #[cfg(windows)]
                 command: "echo blocked-by-test 1>&2 & exit /b 1".into(),
                 timeout_secs: 10,
@@ -18075,15 +18086,21 @@ mod tests {
             hooks: vec![
                 forge_config::HookConfig {
                     event: forge_config::HookEvent::PreToolUse,
+                    kind: Default::default(),
                     matcher: Some("list_dir".into()),
                     command: command.clone(),
+                    prompt: None,
+                    model: None,
                     timeout_secs: 10,
                     cc_compat: false,
                 },
                 forge_config::HookConfig {
                     event: forge_config::HookEvent::PostToolUse,
+                    kind: Default::default(),
                     matcher: Some("list_dir".into()),
                     command,
+                    prompt: None,
+                    model: None,
                     timeout_secs: 10,
                     cc_compat: false,
                 },

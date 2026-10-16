@@ -277,8 +277,11 @@ async fn hook_context_from_an_inner_call_is_visible_to_the_script_and_delivered_
     let config = Config {
         hooks: vec![forge_config::HookConfig {
             event: forge_config::HookEvent::PostToolUse,
+            kind: Default::default(),
             matcher: Some("write_file".into()),
             command: r#"echo '{"action":"inject","context":"HOOK-CONTEXT-7"}'"#.into(),
+            prompt: None,
+            model: None,
             timeout_secs: 10,
             cc_compat: false,
         }],
@@ -313,8 +316,11 @@ async fn a_hint_the_script_returned_is_not_delivered_a_second_time() {
     let config = Config {
         hooks: vec![forge_config::HookConfig {
             event: forge_config::HookEvent::PostToolUse,
+            kind: Default::default(),
             matcher: Some("write_file".into()),
             command: r#"echo '{"action":"inject","context":"HOOK-CONTEXT-8"}'"#.into(),
+            prompt: None,
+            model: None,
             timeout_secs: 10,
             cc_compat: false,
         }],

@@ -35,6 +35,54 @@ pub(super) async fn gate(
     }
 }
 
+/// Run the `PermissionRequest` hooks for a bridged call that would ask. Returns the settled
+/// decision and the (possibly rewritten) arguments, or the refusal text the model reads.
+pub(super) async fn permission_hooks(
+    hooks: &[forge_config::HookConfig],
+    rules: &[PermissionRule],
+    (tool, side_effect, mode): (&str, forge_types::SideEffect, PermissionMode),
+    decision: PermissionDecision,
+    args: Value,
+) -> Result<(PermissionDecision, Value), String> {
+    if decision != PermissionDecision::Ask
+        || !hooks
+            .iter()
+            .any(|h| h.event == forge_config::HookEvent::PermissionRequest)
+    {
+        return Ok((decision, args));
+    }
+    let payload = serde_json::json!({ "tool": tool, "args": args, "permission_mode": mode.key() })
+        .to_string();
+    let outcome = hooks::run_permission_hooks(hooks, tool, &payload).await;
+    match outcome.decision {
+        Some(hooks::PermissionHookDecision::Allow { updated_input }) => {
+            let args = match updated_input {
+                None => args,
+                Some(new_args) => {
+                    if permission::decide(
+                        PermissionMode::Bypass,
+                        side_effect,
+                        tool,
+                        &new_args,
+                        rules,
+                    ) == PermissionDecision::Deny
+                    {
+                        return Err(permission::denial_note(tool, &new_args).unwrap_or_else(
+                            || "rewritten input is denied by a permission rule".to_string(),
+                        ));
+                    }
+                    new_args
+                }
+            };
+            Ok((PermissionDecision::Allow, args))
+        }
+        Some(hooks::PermissionHookDecision::Deny { message, .. }) => {
+            Err(format!("denied by PermissionRequest hook: {message}"))
+        }
+        None => Ok((decision, args)),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum RelayAnswer {
     Allowed,

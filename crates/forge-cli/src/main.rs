@@ -202,6 +202,7 @@ async fn run_cli(login_path_added: Vec<String>) {
         }
         open_pr_hooks::install(config.as_ref());
     }
+    cli::commands::trust::startup_trust_gate(&command);
     push_tool::install_local_sink();
     let telemetry_run = telemetry::start(&command);
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {

@@ -515,7 +515,12 @@ impl Session {
             }
             other => serde_json::json!({ "cwd": self.workspace.display(), "fields": other }),
         };
-        let outcome = hooks::run_lifecycle_hooks(&self.config.hooks, event, &self.id, fields).await;
+        let runner = self.llm_hook_runner().await;
+        let outcome = crate::hooks_llm::with_runner(
+            runner,
+            hooks::run_lifecycle_hooks(&self.config.hooks, event, &self.id, fields),
+        )
+        .await;
         for n in &outcome.notes {
             self.presenter.emit(PresenterEvent::Warning(n.clone()));
         }

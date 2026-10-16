@@ -32,7 +32,7 @@ names stay stable). Temper is a **display + UX layer** plus runtime switching. C
 |---------------|--------------|-----------|---------------------|
 | `plan` | **Read-only** | Investigate & propose, **no** side effects (hard contract). | yes |
 | `default` | **Ask** | Ask before each side effect. | yes |
-| `accept-edits` | **Auto-edit** | Auto-apply file edits; still ask for shell. | yes |
+| `accept-edits` | **Auto-edit** | Auto-apply workspace edits and ordinary shell; ask for writes beyond the workspace and for shell that deletes, moves or writes outside it (see "Auto-edit and shell"). | yes |
 | `auto` | **Auto** | Proceed on safe calls, ask on risky or unrecognised ones (see "Auto mode classification"). | yes |
 | `bypass` | **Full** | All permission guards off (the unoverridable safety denylist still applies). | **no — explicit opt-in only** |
 
@@ -63,7 +63,49 @@ still redirected into the worktree.
 safety, since `shell` was never confined, while pushing models to write files through `cat >` and
 heredocs instead of the reviewable file tools.
 
+### Auto-edit and shell
+
+Auto-edit used to allow every shell command, so `rm -fr ~` or `rm -rf "$HOME"` ran unprompted in
+the default temper while these docs said it asked. It now runs ordinary commands (builds, tests,
+git, in-workspace deletes such as `rm -rf target`) without a prompt and asks, with the reason in an
+`auto-edit asks: ...` warning, when a line (`permission/auto.rs`, `accept_edits_risk`):
+
+- deletes recursively or forcibly outside the workspace (`rm -rf ../x`, `rm -rf $VAR`, `xargs rm -rf`,
+  or any relative delete after `cd` leaves the workspace), or `find … -delete`s there;
+- copies, moves, links, touches, `tee`s, `sed -i`s or redirects (`>`/`>>`) to a path outside the
+  workspace (`/tmp` and `$TMPDIR` are scratch and never count);
+- touches a raw disk (`dd of=`, `mkfs`, `wipefs`, `fdisk`, …), pipes into a shell, or runs inline
+  interpreter code that deletes files (`python -c 'shutil.rmtree(…)'`).
+
+The CLI bridge (`mcp-serve`) applies the same rule, and also asks for file-tool writes beyond the
+workspace exactly like the direct path (it used to allow them).
+
+### Safety floor (every temper, Full included)
+
+Before any temper or rule is consulted, the broker refuses two classes of shell line
+(`permission/catastrophic.rs`); no allow rule, project setting or `bypass` overrides them:
+
+- **Catastrophic deletes.** A recursive delete, move-away, wipe or recursive permission change of
+  the home directory, `/`, or a top-level system directory, in any spelling: flag order (`rm -fr`,
+  `rm -r -f`, `--recursive --force`), `--`, `~/`, `~/*`, `$HOME`, `"${HOME}"`, an absolute `rm`
+  path, `timeout`/`nice`/`command`/`env` wrappers, `bash -c`/`eval` bodies, `X=~; rm -rf $X`,
+  `cd ~ && rm -rf .`, `find ~ -delete`, `echo ~ | xargs rm -rf`, `mv ~ elsewhere`,
+  `rsync --delete … ~/`, and inline `shutil.rmtree(os.path.expanduser("~"))`. The literal globs in
+  the builtin denylist stay as a second layer.
+- **Privilege escalation.** `sudo`, `su`, `doas`, `pkexec`, `run0`, `passwd`, `sudoedit`, wherever
+  they appear in the line. Forge runs commands without a terminal, so these can only fail, and
+  PAM records each failure toward `pam_faillock`'s lockout (three lock the account, screen unlock
+  included). The tool result tells the model to stop and hand the exact command to the user, and
+  the user sees a `refused ... needs root` warning.
+
+The floor is a guard against accidents and lazy attacks, not a sandbox: indirection it cannot see
+(a script written to disk and then run, `eval "$(curl …)"`) still needs `shell.sandbox` or a
+container.
+
 ### Auto mode classification
+
+`auto` resolves symlinks when it decides whether a write leaves the workspace, so a link inside the
+repo that points elsewhere (including one the model just made with `ln -s`) counts as outside.
 
 `auto` sorts every shell command three ways (`permission/auto.rs`, `permission/auto_safe.rs`):
 

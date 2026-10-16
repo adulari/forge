@@ -256,13 +256,20 @@ impl DriverState {
         }
         self.prompt_history.record(trimmed);
         if let Some(rest) = line.strip_prefix("//") {
-            let (hooks, hook_workspace) = {
-                let s = self.session.lock().await;
-                (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+            let (hooks, hook_workspace, hook_runner) = {
+                let mut s = self.session.lock().await;
+                (
+                    s.hooks().to_vec(),
+                    s.workspace_root().to_path_buf(),
+                    s.llm_hook_runner().await,
+                )
             };
             let escaped = format!("/{rest}");
-            match forge_core::hooks::run_prompt_hooks_in(&hooks, &escaped, Some(&hook_workspace))
-                .await
+            match forge_core::hooks_llm::with_runner(
+                hook_runner,
+                forge_core::hooks::run_prompt_hooks_in(&hooks, &escaped, Some(&hook_workspace)),
+            )
+            .await
             {
                 Err(reason) => self
                     .app
@@ -295,11 +302,20 @@ impl DriverState {
             Some(mut mentions) => prepend_attach_mentions(&mut mentions, line),
             None => prepend_attach_mentions(&mut self.pending_mentions, line),
         };
-        let (hooks, hook_workspace) = {
-            let s = self.session.lock().await;
-            (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+        let (hooks, hook_workspace, hook_runner) = {
+            let mut s = self.session.lock().await;
+            (
+                s.hooks().to_vec(),
+                s.workspace_root().to_path_buf(),
+                s.llm_hook_runner().await,
+            )
         };
-        match forge_core::hooks::run_prompt_hooks_in(&hooks, &line, Some(&hook_workspace)).await {
+        match forge_core::hooks_llm::with_runner(
+            hook_runner,
+            forge_core::hooks::run_prompt_hooks_in(&hooks, &line, Some(&hook_workspace)),
+        )
+        .await
+        {
             Err(reason) => self
                 .app
                 .note(&format!("⎇ prompt blocked by hook: {reason}")),

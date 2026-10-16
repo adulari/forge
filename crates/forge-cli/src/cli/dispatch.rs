@@ -321,6 +321,9 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Scoreboard => scoreboard_cmd(),
         Command::Stats { cmd } => stats_cmd(cmd),
         Command::Tour { demo } => tour_cmd(demo),
+        Command::Trust { path, revoke, list } => {
+            crate::cli::commands::trust::trust_cmd(path, revoke, list)
+        }
         Command::Voice { op } => voice_cmd(op).await,
     }
 }

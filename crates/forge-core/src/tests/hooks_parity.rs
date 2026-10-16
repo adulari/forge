@@ -6,8 +6,11 @@ use super::*;
 fn cc_hook(event: forge_config::HookEvent, command: &str) -> forge_config::HookConfig {
     forge_config::HookConfig {
         event,
+        kind: Default::default(),
         matcher: None,
         command: command.into(),
+        prompt: None,
+        model: None,
         timeout_secs: 10,
         cc_compat: true,
     }

@@ -208,8 +208,12 @@ impl Session {
     }
 
     fn warn_auto_asks(&mut self, why: &str) {
+        let label = match self.mode {
+            forge_types::PermissionMode::AcceptEdits => "auto-edit asks",
+            _ => "auto mode asks",
+        };
         self.presenter
-            .emit(PresenterEvent::Warning(format!("auto mode asks: {why}")));
+            .emit(PresenterEvent::Warning(format!("{label}: {why}")));
     }
 
     async fn ask_classifier(&mut self, command: &str) -> Result<Classified, String> {
