@@ -260,7 +260,6 @@ fn picker_view(app: &App) -> View {
                 meta,
                 meta_style: Some(styles::ok()),
                 marks: match_positions(&row.title, &p.query),
-                ..Row::default()
             })
         })
         .collect();
@@ -325,13 +324,34 @@ pub(crate) fn attached_height(app: &App, main: Rect) -> u16 {
         .min(main.height)
 }
 
+/// Width of a centered modal: the whole row on a narrow terminal (so no chat shows through at
+/// its left edge), otherwise at most 100 cells with a margin.
+fn modal_width(total: u16) -> u16 {
+    if total <= 90 {
+        total
+    } else {
+        (total - 2).min(100)
+    }
+}
+
+fn modal_rect(area: Rect, preferred_height: u16) -> Rect {
+    let width = modal_width(area.width);
+    let height = preferred_height.min(area.height.saturating_sub(1)).max(1);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 /// The command center: a centered modal over the dimmed chat, searchable, with group tabs.
 pub(crate) fn render_command_center(frame: &mut Frame, area: Rect, app: &App) {
     if !app.command_center.open || area.width < 28 || area.height < 8 {
         return;
     }
     surface::dim_backdrop(frame, area);
-    let box_area = surface::modal_area(area, 100, 24);
+    let box_area = modal_rect(area, 24);
     list_view::render(frame, box_area, &center_view(app));
 }
 
@@ -358,7 +378,7 @@ pub(crate) fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
         return; // degenerate viewport: nothing to draw, never clamp(1, 0).
     }
     let view = picker_view(app);
-    let width = area.width.saturating_sub(2).min(100);
+    let width = modal_width(area.width);
     let height = view.desired_height(usize::MAX / 2).max(12).min(area.height);
     let rect = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,

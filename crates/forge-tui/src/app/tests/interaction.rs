@@ -1282,4 +1282,31 @@ mod blocks {
         let trimmed = row.trim_end_matches(['│', ' ']);
         assert!(trimmed.ends_with("● current"), "{row}");
     }
+
+    #[test]
+    fn a_modal_at_80_columns_leaves_no_chat_showing_at_its_left_edge() {
+        let mut app = App {
+            fullscreen: true,
+            ..App::default()
+        };
+        app.apply(crate::PresenterEvent::Warning(
+            "a warning line to bleed through".into(),
+        ));
+        app.command_center.open();
+        let rows = screen_rows(&app, 80, 24);
+        let top = rows
+            .iter()
+            .position(|r| r.starts_with('╭'))
+            .expect("modal frame");
+        for row in &rows[top..top + 8] {
+            assert!(
+                row.starts_with('│') || row.starts_with('╭'),
+                "bleed at col 0: {row:?}"
+            );
+            assert!(
+                row.trim_end().ends_with(['│', '╮']),
+                "bleed at the right edge: {row:?}"
+            );
+        }
+    }
 }
