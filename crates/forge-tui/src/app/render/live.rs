@@ -185,12 +185,13 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     render_btw_overlay(frame, app);
     render_voice_overlay(frame, app);
     crate::config_editor::render_config_overlay(frame, &app.config_editor);
-    // A modal never covers the composer: it gets the rows between the header and the composer.
+    // A modal never covers the header or the composer: it gets the rows between them.
     let modal_region = Rect {
+        y: main_area.y,
         height: if composer_h > 0 {
-            composer_area.y.saturating_sub(full.y)
+            composer_area.y.saturating_sub(main_area.y)
         } else {
-            full.height.saturating_sub(status_h)
+            full.height.saturating_sub(status_h + main_area.y - full.y)
         },
         ..full
     };
