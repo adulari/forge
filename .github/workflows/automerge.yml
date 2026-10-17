@@ -4,7 +4,8 @@ name: auto-enable-squash-automerge
 # itself once the branch-protection "CI" check goes green — no manual "merge" click. Squash is the
 # repo's only allowed merge method, so this always squashes. Auto-merge only fires AFTER required
 # checks + rulesets pass, so this never merges anything unreviewed-by-CI; marking a PR draft opts it
-# out (the ready_for_review event re-arms it). Dependabot PRs are left alone.
+# out (the ready_for_review event re-arms it). Dependabot PRs are left alone. Only authors with
+# write access or higher get auto-merge: triage/read collaborators' PRs wait for a manual merge.
 
 on:
   pull_request_target:
@@ -23,7 +24,17 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     steps:
+      - name: Check author can push
+        id: perm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          perm=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$AUTHOR/permission" --jq .permission)
+          echo "author $AUTHOR has $perm"
+          case "$perm" in admin|maintain|write) echo "ok=true" >> "$GITHUB_OUTPUT" ;; esac
       - name: Enable squash auto-merge
+        if: steps.perm.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
