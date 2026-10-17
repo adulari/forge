@@ -29,8 +29,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::{
     client, decode_base64_array, decode_hex_array, decode_response, ensure_access_token,
-    idempotency_key, now_ms, refresh_account_epoch, send_json, CommandJournalEntry,
-    CommandJournalState, DeviceList, LocalState, StateStore,
+    ensure_access_token_at, idempotency_key, now_ms, refresh_account_epoch, send_json,
+    CommandJournalEntry, CommandJournalState, DeviceList, LocalState, StateStore,
 };
 
 /// What this host ACCEPTS inline from a controller. Permissive on purpose — an app on an older
@@ -65,6 +65,9 @@ const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
 const RELAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const RELAY_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 const CONNECTED_LOG_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Floor between mid-connection device-key refreshes, so a revoked device that keeps sending
+/// cannot turn every envelope into a token refresh plus a `/v1/devices` round trip.
+const DEVICE_KEY_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(10);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const COMMAND_WORKER_LEASE_MS: u64 = 2 * 60 * 1000;
 const COMMAND_JOURNAL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -383,6 +386,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
     let identity = identity_from_state(&state)?;
     let http = client()?;
     let mut devices = active_device_keys(&http, &service_url, &access_token).await?;
+    let mut last_device_key_refresh: Option<Instant> = None;
     let ticket: RelayTicketResponse = send_json(
         http.post(format!("{service_url}/v1/relay/tickets"))
             .bearer_auth(&access_token)
@@ -445,20 +449,28 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                         // A device enrolled after this connection opened is not in the cached
                         // key set yet: refresh once and retry, and only discard this envelope
                         // (never the whole relay connection) if the sender is still unknown.
-                        if matches!(&handled, Err(error) if error.is::<UnknownSenderDevice>()) {
-                            if let Ok(fresh) = active_device_keys(&http, &service_url, &access_token).await {
-                                devices = fresh;
-                                handled = handle_relay_envelope(
-                                    &store,
-                                    &identity,
-                                    &devices,
-                                    local_base_url,
-                                    bytes.as_ref(),
-                                    &mut streams,
-                                    &local_events_tx,
-                                    &blobs,
-                                    &mut relay_write,
-                                ).await;
+                        let refresh_due = last_device_key_refresh
+                            .is_none_or(|at| at.elapsed() >= DEVICE_KEY_REFRESH_MIN_INTERVAL);
+                        if refresh_due && matches!(&handled, Err(error) if error.is::<UnknownSenderDevice>()) {
+                            last_device_key_refresh = Some(Instant::now());
+                            match refresh_device_keys(&store, &http, &service_url).await {
+                                Ok(fresh) => {
+                                    devices = fresh;
+                                    handled = handle_relay_envelope(
+                                        &store,
+                                        &identity,
+                                        &devices,
+                                        local_base_url,
+                                        bytes.as_ref(),
+                                        &mut streams,
+                                        &local_events_tx,
+                                        &blobs,
+                                        &mut relay_write,
+                                    ).await;
+                                }
+                                Err(error) => {
+                                    eprintln!("⚠ Forge Anywhere could not refresh device keys: {error:#}");
+                                }
                             }
                         }
                         let handled = match handled {
@@ -1402,6 +1414,20 @@ async fn active_device_keys(
     Ok(keys)
 }
 
+/// Re-fetch device signing keys during a live relay connection. The token the connection was
+/// opened with expires within minutes while the relay stays up for hours, so the refresh renews it
+/// from the store first. With the connect-time token every refresh was rejected, the error was
+/// dropped, and a newly enrolled device had all its envelopes discarded until a reconnect.
+async fn refresh_device_keys(
+    store: &StateStore,
+    http: &Client,
+    service_url: &str,
+) -> Result<HashMap<[u8; 16], VerifyingKey>> {
+    let mut state = store.load()?;
+    let access_token = ensure_access_token_at(store, &mut state, service_url).await?;
+    active_device_keys(http, service_url, &access_token).await
+}
+
 fn identity_from_state(state: &LocalState) -> Result<Identity> {
     let data_key_epochs = state
         .data_key_epochs
@@ -1579,6 +1605,70 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn a_mid_connection_key_refresh_uses_the_current_access_token() {
+        // The relay outlives the token it connected with. A device enrolled hours later must be
+        // looked up with the token the store holds now; the service rejects anything else, the
+        // way it rejected the connect-time token that left a new iPhone discarded until restart.
+        let signer = SigningKey::from_bytes(&[9; 32]);
+        let device_id = "093cda5c4d32cbd161a0dc4abbc224ba";
+        let public_key = URL_SAFE_NO_PAD.encode(signer.verifying_key().to_bytes());
+        let app = axum::Router::new().route(
+            "/v1/devices",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let public_key = public_key.clone();
+                async move {
+                    let bearer = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok());
+                    if bearer != Some("Bearer current-access") {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({
+                                "version": 1,
+                                "error": { "code": "unauthorized", "message": "a valid access token is required" }
+                            })),
+                        );
+                    }
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({ "devices": [{
+                            "id": device_id,
+                            "name": "Forge on iPhone",
+                            "created_at": "1792252459",
+                            "signing_public_key": public_key,
+                        }]})),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let service_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let store = StateStore {
+            path: directory.path().join("state.json"),
+        };
+        store
+            .update(|state| {
+                state.version = super::super::STATE_VERSION;
+                state.access_token = Some("current-access".into());
+                state.refresh_token = Some("refresh".into());
+                state.access_expires_at_ms = Some(now_ms() + 3_600_000);
+                Ok(())
+            })
+            .unwrap();
+
+        let keys = refresh_device_keys(&store, &client().unwrap(), &service_url)
+            .await
+            .expect("refresh with the token the store holds now");
+
+        let id = decode_hex_array::<16>(device_id, "device id").unwrap();
+        assert_eq!(keys.get(&id), Some(&signer.verifying_key()));
+    }
 
     #[test]
     fn a_route_this_host_predates_still_yields_its_request_id() {
