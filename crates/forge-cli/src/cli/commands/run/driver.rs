@@ -412,7 +412,9 @@ async fn drive_session(
     let catalog: std::sync::Arc<forge_skills::Catalog> = {
         let s = session.lock().await;
         s.skills().cloned().unwrap_or_else(|| {
-            std::sync::Arc::new(forge_skills::Catalog::load(&forge_config::command_sources()))
+            std::sync::Arc::new(forge_skills::Catalog::load(
+                &forge_config::command_sources_in(std::path::Path::new(&cwd)),
+            ))
         })
     };
     app.palette.extra = catalog
@@ -454,10 +456,12 @@ async fn drive_session(
         let (items, _) = s.replay_items_tail(super::REPLAY_TAIL_MESSAGES);
         if !items.is_empty() {
             app.replay_history(&items);
+            let restored = s.restored_turn_state();
+            app.seed_restored_turn_state(restored.last_stop_reason, restored.model);
         }
     }
 
-    let auto_setup = forge_config::load()
+    let auto_setup = forge_config::load_in(std::path::Path::new(&cwd))
         .map(|config| config.project.auto_initialize)
         .unwrap_or(false)
         && !forge_config::project_initialization(std::path::Path::new(&cwd)).initialized
@@ -986,6 +990,7 @@ impl DriverState {
                     max_minutes,
                 ));
                 self.app.note("↻ loop started — Stop to interrupt");
+                arm_run_budget(&self.session, self.loop_state.as_ref().map(|s| &s.budget));
                 self.turn_handle = Some(spawn_turn_with(
                     prompt,
                     vec![LOOP_GUIDANCE.to_string()],
@@ -1015,6 +1020,7 @@ impl DriverState {
                 ));
                 self.app
                     .note("🎯 goal running autonomously — Stop to interrupt");
+                arm_run_budget(&self.session, self.goal_state.as_ref().map(|s| &s.budget));
                 self.turn_handle = Some(spawn_turn_with(
                     prompt,
                     vec![GOAL_GUIDANCE.to_string()],
@@ -1687,6 +1693,79 @@ mod tests {
             })
         ));
         state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_goal_sent_to_the_daemon_is_parsed_and_run_like_the_tui_does() {
+        let mut state = test_driver_state().await;
+
+        state
+            .submit_line(
+                "/goal ship the thing --max-tokens 5000 --max-minutes 3".into(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let gs = state.goal_state.as_ref().expect("/goal started a goal run");
+        assert_eq!(gs.goal, "ship the thing");
+        assert_eq!(gs.budget.max_tokens, Some(5000));
+        assert_eq!(
+            gs.budget.max_elapsed,
+            Some(std::time::Duration::from_secs(180))
+        );
+        assert!(state.busy, "the first goal turn is running");
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_submitted_prompt_titles_the_session_from_what_the_user_typed() {
+        let mut state = test_driver_state().await;
+
+        state
+            .submit_line("  explain   the\nparser  ".into(), None)
+            .await
+            .unwrap();
+
+        let (store, id) = {
+            let s = state.session.lock().await;
+            (s.store.clone(), s.id().to_string())
+        };
+        assert_eq!(
+            store.session_title(&id).unwrap().as_deref(),
+            Some("explain the parser")
+        );
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn mock_mode_usage_is_attributed_to_the_mock_provider() {
+        let state = test_driver_state().await;
+        let (store, id) = {
+            let s = state.session.lock().await;
+            (s.store.clone(), s.id().to_string())
+        };
+        state
+            .session
+            .lock()
+            .await
+            .run_turn("hello mock")
+            .await
+            .unwrap();
+        let rows = store.usage_by_provider_for_session(&id).unwrap();
+        assert!(!rows.is_empty(), "the mock turn recorded usage");
+        let providers: Vec<_> = rows.iter().map(|r| r.provider.as_str()).collect();
+        assert!(
+            providers.iter().all(|p| *p == "mock"),
+            "mock usage must not be filed under a real provider: {providers:?}"
+        );
+        let by_model = store.session_usage_by_model(&id).unwrap();
+        assert!(
+            by_model
+                .iter()
+                .all(|m| m.model.as_deref().is_some_and(|m| m.starts_with("mock::"))),
+            "{by_model:?}"
+        );
     }
 
     #[tokio::test]

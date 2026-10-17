@@ -737,6 +737,8 @@ pub(crate) async fn run_chat_tui(
         if !items.is_empty() {
             let sid8: String = s.session_id().chars().take(8).collect();
             app.replay_history(&items);
+            let restored = s.restored_turn_state();
+            app.seed_restored_turn_state(restored.last_stop_reason, restored.model);
             let label = if total > REPLAY_TAIL_MESSAGES {
                 format!(
                     "— resumed session {sid8} (showing the last {REPLAY_TAIL_MESSAGES} of {total} messages) —"
@@ -2211,6 +2213,7 @@ pub(crate) async fn run_chat_tui(
                                 loop_state =
                                     Some(LoopState::new(turn_gen, gates, max_tokens, max_minutes));
                                 app.note("↻ loop started — Esc to stop");
+                                arm_run_budget(&session, loop_state.as_ref().map(|s| &s.budget));
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
                                     vec![LOOP_GUIDANCE.to_string()],
@@ -2239,6 +2242,7 @@ pub(crate) async fn run_chat_tui(
                                     max_minutes,
                                 ));
                                 app.note("🎯 goal started — Esc to stop");
+                                arm_run_budget(&session, goal_state.as_ref().map(|s| &s.budget));
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
                                     vec![GOAL_GUIDANCE.to_string()],
@@ -3275,6 +3279,7 @@ pub(crate) async fn run_chat_tui(
                         if let Some(rest) = line.strip_prefix("//") {
                             let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
+                                s.name_from_prompt(&line);
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
@@ -3432,6 +3437,10 @@ pub(crate) async fn run_chat_tui(
                                         max_minutes,
                                     ));
                                     app.note("↻ loop started — Esc to stop");
+                                    arm_run_budget(
+                                        &session,
+                                        loop_state.as_ref().map(|s| &s.budget),
+                                    );
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
                                         vec![LOOP_GUIDANCE.to_string()],
@@ -3460,6 +3469,10 @@ pub(crate) async fn run_chat_tui(
                                         max_minutes,
                                     ));
                                     app.note("🎯 goal started — Esc to stop");
+                                    arm_run_budget(
+                                        &session,
+                                        goal_state.as_ref().map(|s| &s.budget),
+                                    );
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
                                         vec![GOAL_GUIDANCE.to_string()],
@@ -3521,6 +3534,7 @@ pub(crate) async fn run_chat_tui(
                         } else {
                             let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
+                                s.name_from_prompt(&line);
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
@@ -3815,6 +3829,7 @@ pub(crate) async fn run_chat_tui(
                         } else if let Some(rest) = text.strip_prefix("//") {
                             let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
+                                s.name_from_prompt(&text);
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
@@ -3958,6 +3973,10 @@ pub(crate) async fn run_chat_tui(
                                         max_minutes,
                                     ));
                                     app.note("↻ loop started — Esc to stop");
+                                    arm_run_budget(
+                                        &session,
+                                        loop_state.as_ref().map(|s| &s.budget),
+                                    );
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
                                         vec![LOOP_GUIDANCE.to_string()],
@@ -3986,6 +4005,10 @@ pub(crate) async fn run_chat_tui(
                                         max_minutes,
                                     ));
                                     app.note("🎯 goal started — Esc to stop");
+                                    arm_run_budget(
+                                        &session,
+                                        goal_state.as_ref().map(|s| &s.budget),
+                                    );
                                     turn_handle = Some(spawn_turn_with(
                                         prompt,
                                         vec![GOAL_GUIDANCE.to_string()],
@@ -4058,6 +4081,7 @@ pub(crate) async fn run_chat_tui(
                             };
                             let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
+                                s.name_from_prompt(&text);
                                 (
                                     s.hooks().to_vec(),
                                     s.workspace_root().to_path_buf(),
@@ -4384,6 +4408,7 @@ pub(crate) async fn run_chat_tui(
                                 ls.iter += 1;
                                 ls.gen = turn_gen;
                                 loop_state = Some(ls);
+                                arm_run_budget(&session, loop_state.as_ref().map(|s| &s.budget));
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
                                     vec![LOOP_GUIDANCE.to_string()],
@@ -4404,6 +4429,7 @@ pub(crate) async fn run_chat_tui(
                                 ls.iter += 1;
                                 ls.gen = turn_gen;
                                 loop_state = Some(ls);
+                                arm_run_budget(&session, loop_state.as_ref().map(|s| &s.budget));
                                 turn_handle = Some(spawn_turn_with(
                                     prompt,
                                     vec![LOOP_GUIDANCE.to_string()],

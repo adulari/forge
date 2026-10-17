@@ -34,8 +34,14 @@
 **Budgets**
 - `--max-tokens N` and `--max-minutes N` cap accumulated input+output tokens and wall-clock
   elapsed for the whole `/loop`/`/goal` run. Checked between iterations (including between gate
-  retries); reaching either stops the run with `◆`/`🎯 ... stopped — token/time budget exhausted`
-  — never success.
+  retries) AND inside a turn: before each iteration the driver arms the session with what is left
+  (`Session::set_run_budget`, for the next turn only, so it cannot outlive the run), and the step
+  loop checks it before every model call and after every response (`run_budget.rs`). A spent
+  budget ends the turn through the same hard-guard latch as the spend and token ceilings (work is
+  preserved, no re-drive restarts the loop, stop reason `budget_exhausted`) and the run stops with
+  `◆`/`🎯 ... stopped — token/time budget exhausted` — never success. A CLI-bridge turn is one long
+  provider call, so for a bridge the check lands at its completion boundaries. The goal evaluator
+  is not called for a turn the budget cut short.
 - Unset (the default) means unbounded, identical to today's behavior.
 
 **Non-goals**

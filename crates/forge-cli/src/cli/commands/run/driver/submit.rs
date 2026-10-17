@@ -283,6 +283,7 @@ impl DriverState {
         if let Some(rest) = line.strip_prefix("//") {
             let (hooks, hook_workspace, hook_runner, hook_session) = {
                 let mut s = self.session.lock().await;
+                s.name_from_prompt(&line);
                 (
                     s.hooks().to_vec(),
                     s.workspace_root().to_path_buf(),
@@ -335,6 +336,7 @@ impl DriverState {
         };
         let (hooks, hook_workspace, hook_runner, hook_session) = {
             let mut s = self.session.lock().await;
+            s.name_from_prompt(&line);
             (
                 s.hooks().to_vec(),
                 s.workspace_root().to_path_buf(),

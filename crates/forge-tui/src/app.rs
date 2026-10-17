@@ -2484,6 +2484,29 @@ impl App {
     /// FULL conversation reappears — user turns, assistant text, AND the tool calls/results between
     /// them — instead of a sparse user-only echo. User turns echo like live input; assistant turns
     /// render markdown under the `⚒ forge` header; tool activity renders exactly like it did live.
+    /// Seed what a resumed session reports before its next turn ends: how the last turn ended and
+    /// the model it last ran on. Without it the remote snapshot showed no outcome and a `—` model
+    /// until a new turn completed. Never overwrites a value a live turn already set, and leaves
+    /// `turns_finished` alone (it counts this process's turns; see `Session::restored_turn_state`).
+    pub fn seed_restored_turn_state(
+        &mut self,
+        last_stop_reason: Option<forge_types::StopReason>,
+        model: Option<String>,
+    ) {
+        if self.last_stop_reason.is_none() {
+            self.last_stop_reason = last_stop_reason;
+        }
+        if self.routing.is_none() {
+            if let Some(model) = model {
+                self.routing = Some(RoutingView {
+                    tier: String::new(),
+                    model,
+                    rationale: "restored from the previous run".to_string(),
+                });
+            }
+        }
+    }
+
     pub fn replay_history(&mut self, items: &[ReplayItem]) {
         for item in items {
             match item {
@@ -6145,6 +6168,42 @@ mod tests {
         );
         let hint = statusline_hint(&app);
         assert!(hint.contains("⏎ select"), "picker hint: {hint}");
+    }
+
+    #[test]
+    fn restored_turn_state_seeds_outcome_and_model_but_not_the_turn_count() {
+        let mut app = App::default();
+        app.seed_restored_turn_state(
+            Some(forge_types::StopReason::FinalAnswer),
+            Some("ollama::qwen3".into()),
+        );
+        let snap = app.remote_snapshot();
+        assert_eq!(
+            snap.last_stop_reason,
+            Some(forge_types::StopReason::FinalAnswer)
+        );
+        assert_eq!(snap.model, "ollama::qwen3");
+        assert_eq!(app.turns_finished, 0, "the count is per-process");
+
+        // A value a live turn already set is never overwritten by a late seed.
+        let mut live = App {
+            last_stop_reason: Some(forge_types::StopReason::MaxSteps),
+            routing: Some(RoutingView {
+                tier: "standard".into(),
+                model: "groq::live".into(),
+                rationale: String::new(),
+            }),
+            ..Default::default()
+        };
+        live.seed_restored_turn_state(
+            Some(forge_types::StopReason::FinalAnswer),
+            Some("ollama::old".into()),
+        );
+        assert_eq!(
+            live.last_stop_reason,
+            Some(forge_types::StopReason::MaxSteps)
+        );
+        assert_eq!(live.remote_snapshot().model, "groq::live");
     }
 
     #[test]

@@ -57,6 +57,7 @@ mod sync_journal;
 mod sync_store;
 mod task_store;
 mod transcript_read_store;
+mod usage_attribution;
 mod usage_prefix_store;
 mod usage_store;
 
@@ -384,6 +385,7 @@ pub struct Store {
     pool: r2d2::Pool<SqliteManager>,
     reservation_store_id: String,
     db_path: Option<std::path::PathBuf>,
+    usage_attribution: usage_attribution::UsageAttribution,
 }
 
 /// SQL fragment: derives a usage row's provider from its message model (aliased `m`).
@@ -1474,6 +1476,7 @@ impl Store {
             pool,
             reservation_store_id,
             db_path,
+            usage_attribution: Default::default(),
         })
     }
 
@@ -6999,6 +7002,15 @@ mod tests {
             Some("/repo/.forge/worktrees/abc")
         );
         assert_eq!(store.session_title(&sid).unwrap(), None);
+        assert!(store
+            .set_session_title_if_unset(&sid, "fix the parser")
+            .unwrap());
+        assert!(
+            !store
+                .set_session_title_if_unset(&sid, "later hook context")
+                .unwrap(),
+            "the first title wins"
+        );
         store.set_session_title(&sid, "fix the parser").unwrap();
         assert_eq!(
             store.session_title(&sid).unwrap().as_deref(),

@@ -274,6 +274,8 @@ pub(crate) struct GoalTurnFacts {
     said_complete: bool,
     /// The turn was refused by a spend cap: re-driving it can only be refused again.
     budget_refused: bool,
+    /// The run's own `--max-tokens`/`--max-minutes` ended the turn mid-flight.
+    run_budget_hit: bool,
     /// Gates check the checkout the session is working in, which a `worktree enter` moves away
     /// from the directory Forge was launched in.
     root: std::path::PathBuf,
@@ -291,6 +293,7 @@ impl GoalTurnFacts {
             total: tasks.len(),
             said_complete: is_goal_complete_marker(s.last_assistant_text()),
             budget_refused: s.budget_refused_last_turn(),
+            run_budget_hit: s.run_budget_hit_last_turn(),
             root: if root.as_os_str().is_empty() {
                 cwd.to_path_buf()
             } else {
@@ -320,6 +323,21 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
     if facts.budget_refused {
         return GoalStep::Stop {
             reason: "🎯 goal stopped — budget cap reached".to_string(),
+            met: false,
+        };
+    }
+    if facts.run_budget_hit {
+        let reason = if gs
+            .budget
+            .max_elapsed
+            .is_some_and(|max| gs.budget.started_at.elapsed() >= max)
+        {
+            "🎯 goal stopped — time budget exhausted"
+        } else {
+            "🎯 goal stopped — token budget exhausted"
+        };
+        return GoalStep::Stop {
+            reason: reason.to_string(),
             met: false,
         };
     }
@@ -355,7 +373,9 @@ pub(crate) async fn advance_goal(
 ) -> GoalNext {
     if !gs.eval.evaluating {
         gs.eval.pending_tokens = app.turn_in + app.turn_out;
-        if session.lock().await.goal_evaluator_enabled() {
+        let s = session.lock().await;
+        if s.goal_evaluator_enabled() && !s.run_budget_hit_last_turn() {
+            drop(s);
             gs.eval.evaluating = true;
             gs.eval.slot.lock().unwrap().take();
             return GoalNext::Evaluate(gs.eval_request());
@@ -421,6 +441,7 @@ pub(crate) fn launch_goal_step(
         GoalNext::Continue(prompt) => steer(app).unwrap_or(prompt),
     };
     gs.iter += 1;
+    arm_run_budget(session, Some(&gs.budget));
     let handle = spawn_turn_with(
         prompt.clone(),
         vec![GOAL_GUIDANCE.to_string()],

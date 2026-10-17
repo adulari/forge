@@ -74,6 +74,7 @@ impl Store {
                 pool: self.pool.clone(),
                 reservation_store_id: self.reservation_store_id.clone(),
                 db_path: self.db_path.clone(),
+                usage_attribution: self.usage_attribution.clone(),
             };
             let _ = std::thread::Builder::new()
                 .name("forge-store-maintenance".into())

@@ -265,6 +265,24 @@ impl Store {
         })
     }
 
+    /// Name a session only if it has no title yet. Returns whether this call named it.
+    pub fn set_session_title_if_unset(&self, session_id: &str, title: &str) -> Result<bool> {
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let changed = tx.execute(
+                "UPDATE session SET title = ?2 \
+                 WHERE id = ?1 AND (title IS NULL OR title = '')",
+                (session_id, title),
+            )? == 1;
+            if changed {
+                append_session_snapshot(&tx, session_id)?;
+            }
+            tx.commit()?;
+            Ok(changed)
+        })
+    }
+
     /// `(id, title)` of `parent_id`'s child sessions, oldest first — the address book
     /// `send_to_agent` resolves against (title = the agent name recorded at spawn).
     pub fn named_child_sessions(&self, parent_id: &str) -> Result<Vec<(String, Option<String>)>> {
@@ -420,6 +438,8 @@ impl Store {
         visibility: Visibility,
         kind: forge_types::MessageKind,
     ) -> Result<(String, i64)> {
+        let attributed = self.attributed_model(session_id, model);
+        let model = attributed.as_deref().or(model);
         let id = forge_types::new_id();
         let mut landed = seq;
         let tool_calls_json = if tool_calls.is_empty() {

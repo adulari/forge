@@ -137,8 +137,44 @@ async fn a_token_budget_that_is_spent_ends_not_met() {
         panic!("a spent budget is not a met goal");
     };
     assert!(reason.contains("token budget"), "{reason}");
-    assert_eq!(h.evaluations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        h.evaluations.load(Ordering::SeqCst),
+        0,
+        "the turn was stopped inside the loop, so no evaluator call is spent on it"
+    );
     assert!(GoalRunEnd::NotMet(reason).into_result().is_err());
+}
+
+#[tokio::test]
+async fn a_time_budget_that_is_spent_stops_the_turn_before_any_model_call() {
+    let mut h = harness(|_| verdict_json(false, &["more".to_string()]));
+    let end = run(
+        &mut h,
+        GoalRunSpec {
+            max_minutes: Some(0),
+            ..spec(&[], None)
+        },
+    )
+    .await;
+    let GoalRunEnd::NotMet(reason) = end else {
+        panic!("a spent budget is not a met goal");
+    };
+    assert!(reason.contains("time budget exhausted"), "{reason}");
+    assert_eq!(h.evaluations.load(Ordering::SeqCst), 0);
+    assert!(
+        h.session.run_budget_hit_last_turn(),
+        "the session, not just the driver, ended the turn"
+    );
+}
+
+#[test]
+fn remaining_budget_subtracts_what_earlier_turns_used() {
+    let mut budget = AutonomyBudget::new(Some(1_000), Some(2));
+    budget.tokens_used = 400;
+    let left = budget.remaining().unwrap();
+    assert_eq!(left.tokens_remaining, Some(600));
+    assert!(left.deadline.is_some());
+    assert!(AutonomyBudget::new(None, None).remaining().is_none());
 }
 
 #[tokio::test]

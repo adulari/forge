@@ -428,11 +428,16 @@ fn levenshtein(a: &str, b: &str) -> usize {
 /// [`load`] reads (user config dir + project `./.forge/config.toml`). Shared by the loader's own
 /// warning and `forge anywhere doctor`, so both name the same typo the same way.
 pub fn anywhere_config_warnings() -> Vec<String> {
+    anywhere_config_warnings_in(std::path::Path::new("."))
+}
+
+/// [`anywhere_config_warnings`] for the project rooted at `root`.
+pub fn anywhere_config_warnings_in(root: &std::path::Path) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(dir) = config_dir() {
         paths.push(dir.join("config.toml"));
     }
-    paths.push(PathBuf::from("./.forge/config.toml"));
+    paths.push(root.join(".forge/config.toml"));
     let mut warnings = Vec::new();
     for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -3165,6 +3170,11 @@ impl Config {
 /// skills}`, present only when a config dir resolves) then project scope (`./.forge/{commands,
 /// skills}`). Project wins on a name collision (see `forge_skills::Catalog`).
 pub fn command_sources() -> forge_skills::Sources {
+    command_sources_in(std::path::Path::new("."))
+}
+
+/// [`command_sources`] with the project scope rooted at `root` (a daemon session's workspace).
+pub fn command_sources_in(root: &std::path::Path) -> forge_skills::Sources {
     use forge_skills::{Scope, ScopedDir};
     let mut commands = Vec::new();
     let mut skills = Vec::new();
@@ -3180,11 +3190,11 @@ pub fn command_sources() -> forge_skills::Sources {
     }
     commands.push(ScopedDir {
         scope: Scope::Project,
-        path: PathBuf::from("./.forge/commands"),
+        path: root.join(".forge/commands"),
     });
     skills.push(ScopedDir {
         scope: Scope::Project,
-        path: PathBuf::from("./.forge/skills"),
+        path: root.join(".forge/skills"),
     });
     forge_skills::Sources { commands, skills }
 }
@@ -3409,6 +3419,15 @@ fn has_permission_rules(table: &toml::Table) -> bool {
 /// built-in defaults -> user config -> project `./.forge/config.toml` -> `FORGE_*` env.
 /// An untrusted project contributes only its safe subset (docs/features/project-trust.md).
 pub fn load() -> Result<Config, ConfigError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    load_in(&cwd)
+}
+
+/// [`load`] for a project rooted at `root` rather than the process's cwd. A daemon hosts sessions
+/// for many workspaces from one process whose own cwd is unrelated to any of them, so its project
+/// config, trust decision, `.forge/mcp.toml` and `.forge/settings.json` hooks must all be resolved
+/// against the SESSION's workspace root.
+pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
     let mut fig = Figment::from(Serialized::defaults(Config::default()));
 
     // `file_exact`, not `file`: figment's `file` searches every parent directory, so a stray
@@ -3418,8 +3437,9 @@ pub fn load() -> Result<Config, ConfigError> {
     if let Some(path) = user_config.as_ref().filter(|p| p.is_file()) {
         fig = fig.merge(Toml::file_exact(path));
     }
-    let project_config = std::path::Path::new("./.forge/config.toml");
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_config_buf = root.join(".forge/config.toml");
+    let project_config = project_config_buf.as_path();
+    let cwd = root.to_path_buf();
     let trusted = project_trust::is_trusted(&cwd);
     let mut ignored = Vec::new();
     let mut project_has_rules = false;
@@ -3453,7 +3473,8 @@ pub fn load() -> Result<Config, ConfigError> {
     if let Some(dir) = config_dir() {
         merge_mcp_toml(&mut config.mcp, &dir.join("mcp.toml"));
     }
-    let project_mcp = std::path::Path::new("./.forge/mcp.toml");
+    let project_mcp_buf = root.join(".forge/mcp.toml");
+    let project_mcp = project_mcp_buf.as_path();
     if trusted {
         merge_mcp_toml(&mut config.mcp, project_mcp);
     } else if project_mcp.is_file() && !load_mcp_toml(project_mcp).servers.is_empty() {
@@ -3467,7 +3488,7 @@ pub fn load() -> Result<Config, ConfigError> {
     if let Some(dir) = config_dir() {
         cc_paths.push(dir.join("settings.json"));
     }
-    let project_settings = PathBuf::from("./.forge/settings.json");
+    let project_settings = root.join(".forge/settings.json");
     cc_paths.push(project_settings.clone());
     for path in cc_paths {
         if let Ok(text) = std::fs::read_to_string(&path) {
@@ -3496,7 +3517,7 @@ pub fn load() -> Result<Config, ConfigError> {
     if let Some(dir) = config_dir() {
         model_config_paths.push(dir.join("config.toml"));
     }
-    model_config_paths.push(PathBuf::from("./.forge/config.toml"));
+    model_config_paths.push(root.join(".forge/config.toml"));
     for path in model_config_paths {
         if let Ok(text) = std::fs::read_to_string(&path) {
             for tier in configured_model_tiers(&text) {
@@ -3511,7 +3532,7 @@ pub fn load() -> Result<Config, ConfigError> {
     // an unrecognized key with no error, so the connector just stays off (#5). `forge anywhere
     // doctor` surfaces the same warnings on request; this is the passive path for anyone who never
     // runs doctor.
-    for warning in anywhere_config_warnings() {
+    for warning in anywhere_config_warnings_in(root) {
         tracing::warn!("{warning}");
     }
 
@@ -5688,6 +5709,45 @@ reason = "no privilege escalation"
         assert!(config.hooks.iter().any(|h| h.command.contains("M3")));
         assert!(config.mcp.servers.iter().any(|s| s.name == "evil"));
         assert_eq!(project_trust::untrusted_notice(), None);
+    }
+
+    #[test]
+    fn load_in_resolves_project_config_and_hooks_against_the_session_root_not_the_cwd() {
+        let process_cwd = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _cwd_guard = test_cwd_guard(process_cwd.path());
+        let _store = TrustStoreGuard::new();
+        std::fs::create_dir_all(project.path().join(".forge")).unwrap();
+        std::fs::write(
+            project.path().join(".forge/config.toml"),
+            "[[hooks]]\nevent = \"pre_tool_use\"\ncommand = \"echo NATIVE\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".forge/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo FROMCC"}]}]}}"#,
+        )
+        .unwrap();
+        project_trust::trust(project.path()).unwrap();
+
+        let hosted = load_in(project.path()).unwrap();
+        assert!(hosted.hooks.iter().any(|h| h.command.contains("NATIVE")));
+        assert!(hosted.hooks.iter().any(|h| h.command.contains("FROMCC")));
+
+        let from_daemon_cwd = load().unwrap();
+        assert!(
+            from_daemon_cwd
+                .hooks
+                .iter()
+                .all(|h| !h.command.contains("NATIVE")),
+            "the process cwd is not the project"
+        );
+
+        let sources = command_sources_in(project.path());
+        assert!(sources
+            .commands
+            .iter()
+            .any(|d| d.path == project.path().join(".forge/commands")));
     }
 
     #[test]

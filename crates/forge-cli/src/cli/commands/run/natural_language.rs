@@ -73,6 +73,7 @@ instructions.\n\
     for c in &context {
         session.inject_hook_context(c);
     }
+    session.name_from_prompt(&query);
     let hook_runner = session.llm_hook_runner().await;
     let query = match forge_core::hooks_llm::with_runner(
         hook_runner,

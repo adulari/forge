@@ -50,6 +50,8 @@ impl Store {
     ) -> Result<()> {
         let id = forge_types::new_id();
         let model = model.map(str::trim).filter(|m| !m.is_empty());
+        let attributed = self.attributed_model(session_id, model);
+        let model = attributed.as_deref().or(model);
         let provider = model.and_then(|m| m.split_once("::")).map(|(ns, _)| ns);
         with_busy_retry(|| {
             let mut conn = self.lock()?;

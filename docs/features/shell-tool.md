@@ -513,6 +513,13 @@ Hard-denied command (cannot be allowed, shown even in bypass):
 - States: `running → (completed | killed | timed_out | failed)`. `shell_poll` is the only way the
   model learns a background job finished; the TUI shows a compact "bg job <id> running/done" line.
 - On Forge shutdown, all background process groups are killed (no orphans).
+- **Bridge teardown.** Every foreground command runs in a process group of its own, so a
+  `claude-cli`/`codex-cli` turn that ends or is aborted — whose group kill SIGKILLs the bridge and
+  its `forge mcp-serve` without any cleanup — used to orphan the command in flight. Before it kills
+  the bridge's group, Forge now walks the process tree under the bridge (`proc_tree.rs`, `/proc`
+  on Linux) and kills every descendant still in the bridge's session, including those per-command
+  groups. A `shell{background:true}` job is spawned with `setsid`, sits in a session of its own, and
+  is deliberately left running.
 - Backpressure: ring buffer drops oldest output when full and sets a `dropped: true` flag surfaced in
   `shell_poll`.
 

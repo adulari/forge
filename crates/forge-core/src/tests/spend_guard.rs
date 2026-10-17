@@ -235,3 +235,72 @@ async fn side_calls_are_priced_into_the_session_total() {
         "1,000 input tokens at $1.00/1k must reach the session total, got {cost}"
     );
 }
+
+#[tokio::test]
+async fn a_run_token_budget_ends_the_turn_mid_loop() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = priced_config();
+    config.mesh.max_steps = 12;
+    config.mesh.max_steps_unattended = 12;
+    config.mesh.budget.turn_cap_usd = 0.0;
+    config.mesh.budget.session_cap_usd = 0.0;
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, events) = session_with(&store, provider, config);
+    // 1,000 input tokens per call: the third call crosses 2,500.
+    session.set_run_budget(Some(crate::RunBudget {
+        tokens_remaining: Some(2_500),
+        deadline: None,
+    }));
+
+    let outcome = session.run_turn("keep reading").await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(loop_steps(&events), 3, "stopped inside the turn, not at 12");
+    assert_eq!(outcome.stop_reason, StopReason::BudgetExhausted);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        PresenterEvent::Warning(w) if w.contains("token budget exhausted mid-turn")
+    )));
+}
+
+#[tokio::test]
+async fn a_run_deadline_stops_the_loop_before_the_next_call() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = priced_config();
+    config.mesh.max_steps = 12;
+    config.mesh.max_steps_unattended = 12;
+    config.mesh.budget.turn_cap_usd = 0.0;
+    config.mesh.budget.session_cap_usd = 0.0;
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, events) = session_with(&store, provider, config);
+    session.set_run_budget(Some(crate::RunBudget {
+        tokens_remaining: None,
+        deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+    }));
+
+    let outcome = session.run_turn("keep reading").await.unwrap();
+
+    assert_eq!(loop_steps(&events.lock().unwrap()), 0, "no model call made");
+    assert_eq!(outcome.stop_reason, StopReason::BudgetExhausted);
+}
+
+#[tokio::test]
+async fn a_run_budget_binds_only_the_turn_it_was_armed_for() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = priced_config();
+    config.mesh.max_steps = 4;
+    config.mesh.max_steps_unattended = 4;
+    config.mesh.budget.turn_cap_usd = 0.0;
+    config.mesh.budget.session_cap_usd = 0.0;
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, events) = session_with(&store, provider, config);
+    session.set_run_budget(Some(crate::RunBudget {
+        tokens_remaining: Some(1),
+        deadline: None,
+    }));
+    session.run_turn("first").await.unwrap();
+    let outcome = session.run_turn("second").await.unwrap();
+
+    assert_ne!(outcome.stop_reason, StopReason::BudgetExhausted);
+    assert!(loop_steps(&events.lock().unwrap()) >= 4);
+}

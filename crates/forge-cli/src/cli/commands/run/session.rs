@@ -145,7 +145,38 @@ pub(crate) async fn build_session_with_self_mcp(
     forge_config::inject_search_keys();
     clock.mark("inject keyring keys");
 
-    let mut config = forge_config::load().context("loading configuration")?;
+    // A resumed session moved from another host may record a cwd that does not exist here.
+    let relocated = match (session_cwd, resume.as_deref()) {
+        (Some(cwd), Some(prefix)) if !std::path::Path::new(cwd).exists() => {
+            let full = resolve_session(&store, prefix)?;
+            Some(forge_core::host_move::resolve_resume_cwd(
+                &store, &full, cwd,
+            ))
+        }
+        _ => None,
+    };
+    let session_cwd = relocated.as_deref().or(session_cwd);
+    let workspace_root = match session_cwd {
+        Some(cwd) => std::path::PathBuf::from(cwd)
+            .canonicalize()
+            .with_context(|| format!("resolving session workspace {cwd}"))?,
+        None if resume.is_some() => {
+            let prefix = resume.as_deref().expect("resume checked above");
+            let full = resolve_session(&store, prefix)?;
+            let cwd = store
+                .session_cwd(&full)?
+                .ok_or_else(|| anyhow::anyhow!("resumed session has no workspace"))?;
+            let cwd = forge_core::host_move::resolve_resume_cwd(&store, &full, &cwd);
+            std::path::PathBuf::from(cwd)
+                .canonicalize()
+                .context("resumed session workspace is unavailable")?
+        }
+        None => std::env::current_dir()?,
+    };
+    let workspace_cwd = workspace_root.display().to_string();
+    // Project config, trust, hooks and `.mcp` are resolved against THIS session's workspace, not
+    // the process cwd: a daemon hosts sessions for many workspaces from one unrelated cwd.
+    let mut config = forge_config::load_in(&workspace_root).context("loading configuration")?;
     clock.mark("config load");
     // Headroom proxy routing for direct-API calls and the claude bridge (token-savings.md).
     // `auto` probes loopback once (~1 ms, refused instantly when nothing listens); the decision
@@ -342,35 +373,6 @@ pub(crate) async fn build_session_with_self_mcp(
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
     let ctx_windows = store.all_model_contexts().unwrap_or_default();
     clock.mark("calibration + context windows");
-    // A resumed session moved from another host may record a cwd that does not exist here.
-    let relocated = match (session_cwd, resume.as_deref()) {
-        (Some(cwd), Some(prefix)) if !std::path::Path::new(cwd).exists() => {
-            let full = resolve_session(&store, prefix)?;
-            Some(forge_core::host_move::resolve_resume_cwd(
-                &store, &full, cwd,
-            ))
-        }
-        _ => None,
-    };
-    let session_cwd = relocated.as_deref().or(session_cwd);
-    let workspace_root = match session_cwd {
-        Some(cwd) => std::path::PathBuf::from(cwd)
-            .canonicalize()
-            .with_context(|| format!("resolving session workspace {cwd}"))?,
-        None if resume.is_some() => {
-            let prefix = resume.as_deref().expect("resume checked above");
-            let full = resolve_session(&store, prefix)?;
-            let cwd = store
-                .session_cwd(&full)?
-                .ok_or_else(|| anyhow::anyhow!("resumed session has no workspace"))?;
-            let cwd = forge_core::host_move::resolve_resume_cwd(&store, &full, &cwd);
-            std::path::PathBuf::from(cwd)
-                .canonicalize()
-                .context("resumed session workspace is unavailable")?
-        }
-        None => std::env::current_dir()?,
-    };
-    let workspace_cwd = workspace_root.display().to_string();
     let repo_key = workspace_cwd.clone();
     let repo_boosts = store.duel_boosts(&repo_key).unwrap_or_default();
     // OpenCode Go requires `x-opencode-session`: one STABLE id per conversation (enforced from
@@ -484,6 +486,13 @@ pub(crate) async fn build_session_with_self_mcp(
         .context("starting session")?,
     };
     clock.mark("tools + lattice + session start");
+    if mock {
+        // The router still names a real seed model; the mock provider answers regardless, so file
+        // this session's usage under the provider that actually ran.
+        session
+            .store
+            .attribute_session_usage_to(session.session_id(), "mock");
+    }
     if let Some(update_rx) = lattice_update_rx {
         session.set_lattice_update(Some(update_rx));
     }
@@ -555,7 +564,8 @@ pub(crate) async fn build_session_with_self_mcp(
 
     // Attach the command/skill catalog so the model can discover + load Forge's own skills via
     // the `use_skill` tool (instead of hunting ~/.claude). Cheap, sync, pure.
-    let skill_catalog = forge_skills::Catalog::load(&forge_config::command_sources());
+    let skill_catalog =
+        forge_skills::Catalog::load(&forge_config::command_sources_in(&workspace_root));
     session.set_skills(Some(std::sync::Arc::new(skill_catalog)));
 
     // Connect external MCP servers (mcp-client.md). Skipped for the offline mock. Per-server

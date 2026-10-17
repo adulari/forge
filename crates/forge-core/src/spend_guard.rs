@@ -64,10 +64,15 @@ impl Session {
     /// The first hard guard a just-recorded model call trips: the dollar guards, then the
     /// per-turn input-token ceiling. `Some` is the final text of the turn that must end now.
     pub(crate) fn hard_guard_after_call(&mut self, call_usd: f64) -> Option<String> {
-        self.spend_guard_after_call(call_usd).or_else(|| {
-            self.turn_input_ceiling_hit()
-                .then(|| self.abort_for_token_ceiling())
-        })
+        self.spend_guard_after_call(call_usd)
+            .or_else(|| {
+                self.turn_input_ceiling_hit()
+                    .then(|| self.abort_for_token_ceiling())
+            })
+            .or_else(|| {
+                let hit = self.run_budget_tripped()?;
+                Some(self.abort_for_run_budget(hit))
+            })
     }
 
     /// Charge one recorded model call to the turn and check both guards. Returns the final text

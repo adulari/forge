@@ -60,6 +60,39 @@ impl AutonomyBudget {
     }
 }
 
+impl AutonomyBudget {
+    /// What is left of this run's budget, in the form the session enforces INSIDE a turn. `None`
+    /// when the run is unbounded.
+    pub(crate) fn remaining(&self) -> Option<forge_core::RunBudget> {
+        if self.max_tokens.is_none() && self.max_elapsed.is_none() {
+            return None;
+        }
+        Some(forge_core::RunBudget {
+            tokens_remaining: self
+                .max_tokens
+                .map(|max| max.saturating_sub(self.tokens_used)),
+            deadline: self.max_elapsed.map(|max| self.started_at + max),
+        })
+    }
+}
+
+/// Arm the session's in-turn budget for the turn about to be spawned (`/goal`/`/loop`
+/// `--max-tokens`/`--max-minutes` used to be checked only BETWEEN turns, so one long turn could
+/// overshoot either ceiling). Armed for the next turn only, so it cannot outlive the run. The
+/// session is idle whenever a turn is about to be spawned; a contended lock just skips the arming
+/// and leaves the between-turn check as the backstop.
+pub(crate) fn arm_run_budget(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    budget: Option<&AutonomyBudget>,
+) {
+    let Some(remaining) = budget.and_then(AutonomyBudget::remaining) else {
+        return;
+    };
+    if let Ok(mut s) = session.try_lock() {
+        s.set_run_budget(Some(remaining));
+    }
+}
+
 /// Which ceiling a budget check tripped — shared by the loop/goal-flavored wrappers below so the
 /// exceeded-check itself stays written once.
 enum BudgetExceeded {

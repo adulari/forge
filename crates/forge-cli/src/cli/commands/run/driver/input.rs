@@ -511,6 +511,7 @@ impl DriverState {
                         ls.iter += 1;
                         ls.gen = self.turn_gen;
                         self.loop_state = Some(ls);
+                        arm_run_budget(&self.session, self.loop_state.as_ref().map(|s| &s.budget));
                         self.turn_handle = Some(spawn_turn_with(
                             prompt,
                             vec![LOOP_GUIDANCE.to_string()],
@@ -532,6 +533,7 @@ impl DriverState {
                         ls.iter += 1;
                         ls.gen = self.turn_gen;
                         self.loop_state = Some(ls);
+                        arm_run_budget(&self.session, self.loop_state.as_ref().map(|s| &s.budget));
                         self.turn_handle = Some(spawn_turn_with(
                             prompt,
                             vec![LOOP_GUIDANCE.to_string()],

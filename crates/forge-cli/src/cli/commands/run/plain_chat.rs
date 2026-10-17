@@ -67,6 +67,7 @@ pub(crate) async fn chat(
             ChatAction::Quit => break,
             ChatAction::Skip => continue,
             ChatAction::Run(task) => {
+                session.name_from_prompt(&task);
                 let hooks = session.hooks().to_vec();
                 let hook_workspace = session.workspace_root().to_path_buf();
                 let hook_runner = session.llm_hook_runner().await;
