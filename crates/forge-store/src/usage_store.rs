@@ -134,6 +134,8 @@ impl Store {
         model: Option<&str>,
         usage: &Usage,
     ) -> Result<()> {
+        let attributed = self.attributed_model(session_id, model);
+        let model = attributed.as_deref().or(model);
         let provider = model.and_then(|m| m.split_once("::")).map(|(p, _)| p);
         let msg_id = forge_types::new_id();
         let usage_id = forge_types::new_id();

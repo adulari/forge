@@ -51,6 +51,14 @@ Trust is stored in `<config dir>/trusted-projects.json`, which a repository cann
 the directory and everything below it, and a linked git worktree inherits the trust of its main
 checkout (so daemon sessions in `.forge/worktrees/*` behave like the repo they came from).
 
+## Daemon-hosted sessions
+
+`forge_config::load_in(root)` is `load()` for an explicit project root, and `command_sources_in(root)`
+is the same for project commands/skills. A session builds its configuration from ITS workspace root
+(including `forge serve` sessions, whose process cwd is unrelated to any workspace): the project
+`.forge/config.toml`, the trust decision, `.forge/mcp.toml` and the `.forge/settings.json` hooks all
+resolve against that root, not the daemon's cwd.
+
 ## "Always allow" answers
 
 Answering `a` (always) at a permission prompt normally appends an allow rule to the project's

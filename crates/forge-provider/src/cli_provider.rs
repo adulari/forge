@@ -2739,6 +2739,7 @@ fn finish_persistent_turn(binary: &str, turn: TurnData) -> Result<ModelResponse,
 
 mod images;
 mod live;
+mod proc_tree;
 use live::*;
 
 impl CliProvider {
@@ -3235,8 +3236,10 @@ async fn terminate(child: &mut Child, pgid: Option<i32>) {
     #[cfg(unix)]
     {
         if let Some(pg) = pgid {
+            let orphans = proc_tree::Descendants::snapshot(Some(pg));
             unsafe { libc::kill(-pg, libc::SIGTERM) };
             tokio::time::sleep(KILL_GRACE).await;
+            orphans.kill();
             unsafe { libc::kill(-pg, libc::SIGKILL) };
         }
         let _ = child.wait().await;
@@ -3296,6 +3299,7 @@ impl Drop for GroupKillGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         if let Some(pg) = self.pgid {
+            proc_tree::Descendants::snapshot(Some(pg)).kill();
             unsafe { libc::kill(-pg, libc::SIGKILL) };
         }
     }

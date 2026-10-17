@@ -558,7 +558,17 @@ outcome — `"success"` or `"failed"` — plus the precise
 [`StopReason`](../../crates/forge-types/src/lib.rs) behind it. Additive and optional: a `null`
 means no turn has finished yet (and a `read_only` local-presence row never reports one). The
 producing side is the session core, which classifies a turn with no assistant content and no
-successful mutating tool call as `StopReason::NoOutput` rather than a final answer.
+successful mutating tool call as `StopReason::NoOutput` rather than a final answer. A RESUMED
+session seeds `last_stop_reason`/`last_turn_outcome` (`final_answer`, only when its newest
+model-visible message is a final assistant reply; otherwise `null`) and the `model` label (the pin,
+else the last routed model) from the store, so they are not empty until the first new turn.
+`turns_finished` is deliberately NOT seeded: it counts this process's turns, and the dispatch
+supervisor compares it with its own baseline to notice a worker finishing and to re-drive a
+restored worker that has not run since the daemon started.
+
+A session with no title is titled from what the user typed (`Session::name_from_prompt`, called
+before `UserPromptSubmit` hooks run), not from the stored first message, which carries whatever
+context a hook appended or replaced.
 
 **Structured diff card (`Snapshot.diff`).** Reuses exactly what the TUI already computes:
 the write-tool `preview()` `FileDiff` emitted as `PresenterEvent::Diff` *before* the

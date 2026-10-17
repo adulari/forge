@@ -128,9 +128,13 @@ mod refinement;
 mod replay;
 mod review_gate;
 mod routing_policy;
+pub mod run_budget;
+pub use run_budget::RunBudget;
+pub use session_restore::RestoredTurnState;
 mod session_controls;
 mod session_history;
 mod session_lifecycle;
+mod session_restore;
 mod session_usage_detail;
 mod session_virtual_tools;
 mod session_worktree;
@@ -1839,6 +1843,11 @@ pub struct Session {
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
     /// counters and defeat them.
     turn_hard_guard_abort: bool,
+    /// What remains of an autonomous run's token/time budget, enforced inside the turn
+    /// (`run_budget.rs`), and whether it ended the active turn.
+    run_budget: Option<RunBudget>,
+    run_budget_next: Option<RunBudget>,
+    turn_run_budget_hit: bool,
     /// The harness profile of the model currently driving the turn (harness_profile.rs).
     harness_profile: forge_config::HarnessProfile,
     /// The empty-reply nudge is spent until the model makes tool progress again (empty_reply.rs).
@@ -2820,6 +2829,7 @@ impl Session {
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
         let resume_absorbed = std::mem::take(&mut self.resume_absorbed);
+        self.run_budget = self.run_budget_next.take();
         self.refresh_btw_asker();
         self.poll_lattice_background();
         self.adaptive_effort.begin_turn();
@@ -3209,6 +3219,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_output_tokens = 0;
         self.turn_billable_input_tokens = 0;
         self.turn_hard_guard_abort = false;
+        self.turn_run_budget_hit = false;
         self.empty_reply_nudged = false;
         self.trim_watch.begin_turn();
         self.spend.begin_turn();
@@ -4332,7 +4343,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && self.mutations_this_turn == 0
             && !presented_plan
             && !hard_guard_abort;
-        let stop_reason = if produced_nothing {
+        let stop_reason = if self.turn_run_budget_hit {
+            StopReason::BudgetExhausted
+        } else if produced_nothing {
             // A loop-guard halt has already told the user what happened and that nothing is lost;
             // a second, crash-sounding Error on top of it would bury that. The recorded outcome
             // stays `NoOutput` either way, so `forge status` still does not call it a success.

@@ -19,9 +19,16 @@ impl Session {
     /// A hard guard already ended this turn, so every later re-drive (nudge, verification,
     /// autofix) must refuse to start a fresh loop rather than reset the counters that stopped it.
     pub(crate) fn hard_guard_short_circuit(
-        &self,
+        &mut self,
         active_model: String,
     ) -> Option<ModelLoopOutcome> {
+        // A run budget that ran out between model calls (or before the first one) ends the turn
+        // here; one that runs out DURING a call is caught right after it, by `hard_guard_after_call`.
+        if !self.turn_hard_guard_abort {
+            if let Some(hit) = self.run_budget_tripped() {
+                self.abort_for_run_budget(hit);
+            }
+        }
         if !self.turn_hard_guard_abort {
             return None;
         }

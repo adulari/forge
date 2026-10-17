@@ -524,6 +524,7 @@ impl Drop for LiveSession {
         #[cfg(unix)]
         if let Some(pg) = self.pgid {
             // SIGKILL the group (negative pid). ESRCH (already reaped by `teardown`) is harmless.
+            super::proc_tree::Descendants::snapshot(Some(pg)).kill();
             unsafe { libc::kill(-pg, libc::SIGKILL) };
         }
     }

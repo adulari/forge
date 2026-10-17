@@ -89,6 +89,7 @@ pub(crate) async fn run_goal_headless(
     tokio::pin!(interrupted);
     loop {
         let before = total_tokens(session);
+        session.set_run_budget(gs.budget.remaining());
         let turn = session.run_turn_with(
             &prompt,
             &turn_guidance,
@@ -101,7 +102,7 @@ pub(crate) async fn run_goal_headless(
         drop(outcome);
         gs.eval.pending_tokens = total_tokens(session).saturating_sub(before);
         gs.eval.slot.lock().unwrap().take();
-        if session.goal_evaluator_enabled() {
+        if session.goal_evaluator_enabled() && !session.run_budget_hit_last_turn() {
             let request = gs.eval_request();
             let verdict = tokio::select! {
                 v = session.evaluate_goal(&request) => v,
