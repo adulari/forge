@@ -20,6 +20,32 @@ pub(crate) fn load_at_files() -> Vec<String> {
     out
 }
 
+/// Paths git reports as changed (staged, unstaged or untracked), for the picker's `modified` mark.
+/// Empty outside a repository; one cheap `git status` per picker open.
+fn load_modified_files() -> Vec<String> {
+    let Ok(out) = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.len() > 3)
+        .map(|l| {
+            let path = &l[3..];
+            path.rsplit(" -> ")
+                .next()
+                .unwrap_or(path)
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect()
+}
+
 /// Recursive file walk for [`load_at_files`]: up to `depth` levels under `base`, files only,
 /// skipping dot-entries, with `/`-normalized paths relative to `base`. Bounded so a giant tree can't
 /// stall completion.
@@ -64,6 +90,7 @@ pub(crate) fn sync_at_picker_to_at_token(app: &mut forge_tui::App) {
         } else {
             let files = load_at_files();
             app.at_picker.open_with(&tok.query, files);
+            app.at_picker.set_modified(load_modified_files());
         }
     } else {
         app.at_picker.close();

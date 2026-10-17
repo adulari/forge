@@ -135,48 +135,41 @@ pub fn resolve_action(keybinds: &KeybindsConfig, ev: &KeyEvent) -> Option<KeyKin
     None
 }
 
-/// Human-readable description of a `KeyCombo` for the configurator UI.
+/// The canonical spelling of a `KeyCombo`, used by Help, hints, lists and the configurator:
+/// `Ctrl+K`, `Ctrl+Shift+K`, `Alt+M`, `Shift+Tab`, `Ctrl+↑`, `PgUp`, `F1`. Modifiers come in
+/// the order Ctrl, Alt, Shift; single letters are upper-case.
 pub fn combo_display(combo: &KeyCombo) -> String {
-    let mut parts = Vec::new();
+    let mut parts: Vec<String> = Vec::new();
     if combo.ctrl {
-        parts.push("Ctrl");
+        parts.push("Ctrl".into());
     }
     if combo.alt {
-        parts.push("Alt");
+        parts.push("Alt".into());
     }
     if combo.shift {
-        parts.push("Shift");
+        parts.push("Shift".into());
     }
-    let key_label = match combo.key.as_str() {
-        "up" => "↑",
-        "down" => "↓",
-        "left" => "←",
-        "right" => "→",
-        "pageup" => "PgUp",
-        "pagedown" => "PgDn",
-        "enter" => "Enter",
-        "esc" => "Esc",
-        "backspace" => "Bksp",
-        "delete" => "Del",
-        "tab" => "Tab",
-        "home" => "Home",
-        "end" => "End",
-        "f1" => "F1",
-        "f2" => "F2",
-        "f3" => "F3",
-        "f4" => "F4",
-        "f5" => "F5",
-        "f6" => "F6",
-        "f7" => "F7",
-        "f8" => "F8",
-        "f9" => "F9",
-        "f10" => "F10",
-        "f11" => "F11",
-        "f12" => "F12",
-        s => s,
+    let key = match combo.key.as_str() {
+        "up" => "↑".to_string(),
+        "down" => "↓".to_string(),
+        "left" => "←".to_string(),
+        "right" => "→".to_string(),
+        "pageup" => "PgUp".to_string(),
+        "pagedown" => "PgDn".to_string(),
+        "enter" => "Enter".to_string(),
+        "esc" => "Esc".to_string(),
+        "backspace" => "Backspace".to_string(),
+        "delete" => "Del".to_string(),
+        "tab" => "Tab".to_string(),
+        "home" => "Home".to_string(),
+        "end" => "End".to_string(),
+        s if s.len() > 1 && s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+            s.to_uppercase()
+        }
+        s => s.to_uppercase(),
     };
-    parts.push(key_label);
-    parts.join("-")
+    parts.push(key);
+    parts.join("+")
 }
 
 /// Try to parse a raw key event into a `KeyCombo`. Returns `None` for unrepresentable events.
@@ -282,7 +275,7 @@ mod tests {
         assert_eq!(combo.key, "k");
         assert!(combo.ctrl && !combo.alt && !combo.shift);
         assert!(matches(&combo, &e));
-        assert_eq!(combo_display(&combo), "Ctrl-k");
+        assert_eq!(combo_display(&combo), "Ctrl+K");
     }
 }
 

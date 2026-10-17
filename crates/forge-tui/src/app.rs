@@ -1303,6 +1303,7 @@ impl App {
                 self.turn_activity.tool_calls += 1;
                 self.set_turn_activity(TurnPhase::RunningTool, format!("executing {name}"));
                 let origin = LineOrigin::tool_call(&name);
+                self.interaction_ui.note_tool_call(&name, &args);
                 if self.fullscreen {
                     self.open_tool_card(origin, name, args);
                 } else {
@@ -3536,6 +3537,9 @@ mod screen_select;
 mod steer_esc_tests;
 pub use output_view::{page_file, OutputAction, OutputView};
 mod tool_cards;
+/// The shared list component, for the takeover screens outside `app` (Help, select).
+pub(crate) use render::chrome::hint as chrome_hint;
+pub(crate) use render::list_view;
 pub(crate) use render::{human, mesh_pace_suffix, model_short, needs_phase_header};
 pub use render::{
     input_box_height, input_cursor_up, render_live, render_mesh_overlay, render_usage_overlay,

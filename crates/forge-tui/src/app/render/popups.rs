@@ -1,276 +1,374 @@
+//! The composer's completion popups (slash palette, `@file` picker) and the modal lists (command
+//! center, session/model/checkpoint/mode pickers). All of them are views over one list component
+//! (`list_view`): the same frame, caret, match highlight, key hints and detail line.
+
+use super::chrome::{hint, Hint};
+use super::list_view::{self, match_positions, Filter, Item, Row, View};
 use super::*;
+use crate::commands::{command_action, COMMANDS, COMMAND_GROUPS};
+use crate::keybinds::combo_display;
+use crate::picker::PickerKind;
+use crate::theme::glyphs::g;
 use crate::theme::{color, styles};
 
-/// Centered, searchable entry point for the complete command and skill catalogue. It is rendered
-/// over the chat rather than replacing it, preserving users' place in the current conversation.
+/// List rows a completion popup shows before it scrolls (its detail line comes on top).
+const POPUP_LIST_ROWS: usize = 8;
+
+/// Marker the CLI appends to a skill's description so the palette can tag it.
+const SKILL_SUFFIX: &str = "(skill)";
+
+fn key_for(app: &App, name: &str) -> String {
+    command_action(name)
+        .and_then(|action| app.keybinds.binds.get(action))
+        .map(combo_display)
+        .unwrap_or_default()
+}
+
+/// A palette/command-center row: `/name`, one-line description, shortcut or `skill`/`command` tag.
+fn command_row(app: &App, name: &str, desc: &str, query: &str) -> Row {
+    let builtin = COMMANDS.iter().any(|c| c.name == name);
+    let trimmed = desc.trim_end();
+    let is_skill = trimmed.ends_with(SKILL_SUFFIX);
+    let desc = if is_skill {
+        trimmed
+            .trim_end_matches(SKILL_SUFFIX)
+            .trim_end()
+            .to_string()
+    } else {
+        desc.to_string()
+    };
+    let meta = if builtin {
+        key_for(app, name)
+    } else if is_skill {
+        "skill".to_string()
+    } else {
+        "command".to_string()
+    };
+    Row {
+        label: format!("/{name}"),
+        label_style: Some(styles::user()),
+        desc,
+        meta,
+        marks: match_positions(name, query)
+            .into_iter()
+            .map(|i| i + 1)
+            .collect(),
+        ..Row::default()
+    }
+}
+
+/// A description without the CLI's `(skill)` marker (the row shows it as a tag instead).
+fn clean_desc(desc: &str) -> &str {
+    let trimmed = desc.trim_end();
+    trimmed
+        .strip_suffix(SKILL_SUFFIX)
+        .map_or(desc, |rest| rest.trim_end())
+}
+
+fn usage_detail(usage: &str, desc: &str) -> Option<Vec<Span<'static>>> {
+    let desc = clean_desc(desc);
+    if !usage.is_empty() {
+        return Some(vec![
+            Span::styled("usage  ", styles::muted()),
+            Span::styled(usage.to_string(), styles::fg()),
+        ]);
+    }
+    (!desc.is_empty()).then(|| vec![Span::styled(desc.to_string(), styles::muted())])
+}
+
+fn palette_view(app: &App) -> View {
+    let entries = app.palette.matches();
+    let recents = app.palette.recent_count();
+    let n = entries.len();
+    let detail = entries
+        .get(app.palette.selected)
+        .and_then(|e| usage_detail(&e.usage, &e.desc));
+    let query = app.palette.query.as_str();
+    View {
+        title: if query.is_empty() {
+            "Commands".to_string()
+        } else {
+            format!("/{query}")
+        },
+        context: match (query.is_empty(), recents) {
+            (true, 0) => format!("{n}"),
+            (true, _) => format!("{n} {} recent first", g().sep),
+            (false, _) => format!("{n} match{}", if n == 1 { "" } else { "es" }),
+        },
+        items: entries
+            .iter()
+            .map(|e| Item::Row(command_row(app, &e.name, &e.desc, query)))
+            .collect(),
+        selected: app.palette.selected,
+        detail,
+        empty: "no commands match".to_string(),
+        ..View::default()
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        "item"
+    } else {
+        "items"
+    }
+}
+
+fn at_view(app: &App) -> View {
+    let entries = app.at_picker.entries();
+    let query = app.at_picker.query.as_str();
+    let items = entries
+        .iter()
+        .map(|e| {
+            let meta = if e.modified {
+                if e.is_dir {
+                    format!("modified {} {} {}", g().sep, e.items, plural(e.items))
+                } else {
+                    "modified".to_string()
+                }
+            } else if e.is_dir {
+                format!("dir {} {} {}", g().sep, e.items, plural(e.items))
+            } else {
+                String::new()
+            };
+            let base = e.path.trim_end_matches('/');
+            let from = base.len() - base.rsplit('/').next().map_or(0, str::len);
+            let name = &e.path[from..];
+            let marks = match_positions(name, query.rsplit('/').next().unwrap_or(query))
+                .into_iter()
+                .map(|i| i + base[..from].chars().count())
+                .collect();
+            Item::Row(Row {
+                label: e.path.clone(),
+                label_style: Some(if e.is_dir {
+                    styles::fg()
+                } else {
+                    styles::user()
+                }),
+                meta,
+                meta_style: e.modified.then(styles::warn),
+                marks,
+                ..Row::default()
+            })
+        })
+        .collect::<Vec<_>>();
+    let n = items.len();
+    View {
+        title: "@ files".to_string(),
+        context: if query.contains('/') || query.is_empty() {
+            format!("{n}")
+        } else {
+            format!("{n} {} fuzzy", g().sep)
+        },
+        items,
+        selected: app.at_picker.selected,
+        empty: "no files match".to_string(),
+        more_hint: "type to narrow",
+        ..View::default()
+    }
+}
+
+fn center_view(app: &App) -> View {
+    let entries = app.command_center.matches(&app.palette.extra);
+    let query = app.command_center.query.as_str();
+    let mut items = Vec::with_capacity(entries.len() + 8);
+    let mut last: Option<&str> = None;
+    for e in &entries {
+        if query.is_empty() && last != Some(e.category) {
+            items.push(Item::Header(e.category.to_string()));
+            last = Some(e.category);
+        }
+        items.push(Item::Row(command_row(app, &e.name, &e.desc, query)));
+    }
+    let detail = entries
+        .get(app.command_center.selected)
+        .and_then(|e| usage_detail(&e.usage, &e.desc));
+    let open_key = app
+        .keybinds
+        .binds
+        .get("command_center")
+        .map(combo_display)
+        .unwrap_or_default();
+    View {
+        title: "Command center".to_string(),
+        context: open_key,
+        filter: Some(Filter {
+            label: "search",
+            query: query.to_string(),
+            placeholder: "commands, skills, settings",
+        }),
+        tabs: Some((
+            COMMAND_GROUPS.iter().map(|g| g.to_string()).collect(),
+            app.command_center.group,
+        )),
+        items,
+        selected: app.command_center.selected,
+        detail,
+        footer: vec![
+            hint("↑↓", "move"),
+            hint("Tab", "group"),
+            hint("Enter", "open"),
+            hint("Esc", "close"),
+        ],
+        empty: "No commands or skills match.".to_string(),
+        padded: true,
+        ..View::default()
+    }
+}
+
+/// What Enter does on the selected row of a picker, shown on the detail line.
+fn picker_enter_text(kind: Option<PickerKind>) -> &'static str {
+    match kind {
+        Some(PickerKind::Sessions) => "Enter resume this session",
+        Some(PickerKind::Checkpoints) => "Enter rewind to this point",
+        Some(PickerKind::Tempers) => "Enter switch to this mode",
+        Some(PickerKind::Models) => "Enter open this provider or pin this model",
+        Some(PickerKind::ModelPin) | Some(PickerKind::ModelRung) => "Enter pin for this session",
+        Some(PickerKind::CopyBlocks) => "Enter copy to the clipboard, w write to a file",
+        Some(PickerKind::Duel) => "Enter merge this candidate, Esc discard all",
+        _ => "Enter select",
+    }
+}
+
+fn picker_view(app: &App) -> View {
+    let p = &app.picker;
+    let matches = p.matches();
+    let tempers = p.kind == Some(PickerKind::Tempers);
+    let models = p.kind == Some(PickerKind::Models);
+    let model_pin = p.kind == Some(PickerKind::ModelPin);
+    let items: Vec<Item> = matches
+        .iter()
+        .map(|row| {
+            let style = if tempers {
+                styles::temper(&row.title)
+            } else if models {
+                Style::default().fg(models_row_color(row))
+            } else if model_pin {
+                Style::default().fg(model_pin_row_color(row, app.tick))
+            } else {
+                styles::fg()
+            };
+            // A trailing `● current` marker is metadata: it belongs at the right edge.
+            let (desc, meta) = match row.subtitle.rsplit_once("   ● ") {
+                Some((desc, tag)) => (desc.to_string(), format!("● {tag}")),
+                None => (row.subtitle.clone(), String::new()),
+            };
+            Item::Row(Row {
+                label: row.title.clone(),
+                label_style: Some(style),
+                desc,
+                meta,
+                meta_style: Some(styles::ok()),
+                marks: match_positions(&row.title, &p.query),
+                ..Row::default()
+            })
+        })
+        .collect();
+    let detail = matches.get(p.selected).map(|row| {
+        let mut spans = vec![Span::styled(picker_enter_text(p.kind), styles::muted())];
+        if !row.subtitle.is_empty() && row.subtitle.chars().count() > 60 {
+            spans = vec![Span::styled(row.subtitle.clone(), styles::muted())];
+        }
+        spans
+    });
+    let mut footer = vec![hint("↑↓", "move"), hint("Enter", "select")];
+    if p.kind == Some(PickerKind::Sessions) {
+        footer.insert(0, hint("Tab", "archived"));
+    }
+    if p.kind == Some(PickerKind::Sessions) {
+        footer.insert(1, hint("Del", "archive"));
+    }
+    footer.push(hint("Esc", "close"));
+    // Headings carry their own key hints (`resume a session · Tab archived · …`); the frame's
+    // footer shows those, so the title keeps only its first part.
+    let title = p
+        .heading
+        .split(" · ")
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    View {
+        title,
+        context: if matches.is_empty() {
+            "0".to_string()
+        } else {
+            format!("{} of {}", p.selected + 1, matches.len())
+        },
+        filter: Some(Filter {
+            label: "filter",
+            query: p.query.clone(),
+            placeholder: "type to filter",
+        }),
+        items,
+        selected: p.selected,
+        detail,
+        footer,
+        empty: "no matches".to_string(),
+        padded: true,
+        ..View::default()
+    }
+}
+
+/// Rows the completion popup above the composer takes out of `main`: its content, capped, and
+/// never more than the region leaves after a few transcript rows.
+pub(crate) fn attached_height(app: &App, main: Rect) -> u16 {
+    let view = if app.palette.open {
+        palette_view(app)
+    } else {
+        at_view(app)
+    };
+    let detail_rows = if view.detail.is_some() { 2 } else { 0 };
+    let want = view.desired_height(POPUP_LIST_ROWS + detail_rows);
+    let keep = if app.fullscreen { 3 } else { 2 };
+    want.min(main.height.saturating_sub(keep).max(main.height.min(4)))
+        .min(main.height)
+}
+
+/// The command center: a centered modal over the dimmed chat, searchable, with group tabs.
 pub(crate) fn render_command_center(frame: &mut Frame, area: Rect, app: &App) {
     if !app.command_center.open || area.width < 28 || area.height < 8 {
         return;
     }
-
-    let box_area = surface::modal_area(area, 92, 18);
-    let inner = surface::render_panel(
-        frame,
-        box_area,
-        surface::title("Command center", surface::SurfaceTone::Accent),
-        None,
-        surface::SurfaceTone::Accent,
-    );
-    let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(inner);
-
-    let query = if app.command_center.query.is_empty() {
-        "Search commands, skills, settings...".to_string()
-    } else {
-        app.command_center.query.clone()
-    };
-    let query_style = if app.command_center.query.is_empty() {
-        styles::muted()
-    } else {
-        styles::fg()
-    };
-    frame.render_widget(
-        Paragraph::new(TextLine::from(vec![
-            Span::styled("  > ", styles::brand().bold()),
-            Span::styled(query, query_style),
-        ])),
-        rows[0],
-    );
-
-    let entries = app.command_center.matches(&app.palette.extra);
-    let visible = rows[1].height as usize;
-    let start = app
-        .command_center
-        .selected
-        .saturating_sub(visible.saturating_sub(1));
-    let mut previous_category: Option<&str> = None;
-    let mut lines = Vec::with_capacity(visible);
-    for (index, entry) in entries.iter().enumerate().skip(start).take(visible) {
-        if previous_category != Some(entry.category) {
-            if lines.len() >= visible {
-                break;
-            }
-            lines.push(TextLine::from(Span::styled(
-                format!("  {}", entry.category),
-                styles::muted().add_modifier(Modifier::BOLD),
-            )));
-            previous_category = Some(entry.category);
-        }
-        if lines.len() >= visible {
-            break;
-        }
-        let selected = index == app.command_center.selected;
-        let marker = if selected { "› " } else { "  " };
-        let command_style = if selected {
-            styles::selected_row().bold()
-        } else {
-            styles::muted()
-        };
-        let desc_style = if selected {
-            styles::selected_row()
-        } else {
-            styles::muted()
-        };
-        lines.push(TextLine::from(vec![
-            Span::styled(format!("{marker}/{:<18}", entry.name), command_style),
-            Span::styled(entry.desc.clone(), desc_style),
-        ]));
-    }
-    if lines.is_empty() {
-        lines.push(TextLine::from(Span::styled(
-            "  No commands or skills match.",
-            styles::muted(),
-        )));
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), rows[1]);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            "↑/↓ select  Enter open  Esc close",
-            styles::muted(),
-        )),
-        rows[2],
-    );
+    surface::dim_backdrop(frame, area);
+    let box_area = surface::modal_area(area, 100, 24);
+    list_view::render(frame, box_area, &center_view(app));
 }
 
-/// The inline slash-command palette: a scrolling window of filtered commands, selected row
-/// highlighted, revealed by an ease-in animation (RFC session-management-and-commands).
+/// The slash-command palette: a framed list attached to the composer.
 pub(crate) fn render_palette(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
-        return; // degenerate viewport (e.g. 0-height terminal) — nothing to draw, never clamp(1,0).
-    }
-    let matches = app.palette.matches();
-    if matches.is_empty() {
-        frame.render_widget(
-            Paragraph::new(TextLine::from(Span::styled(
-                "  no commands match",
-                styles::muted(),
-            ))),
-            area,
-        );
         return;
     }
-    let h = area.height as usize;
-    // Ease-in reveal: rows appear over the first few frames after opening.
-    let revealed = ((app.palette.anim * h as f32).ceil() as usize).clamp(1, h);
-    // Scroll so the selected row stays visible within the window.
-    let start = app.palette.selected.saturating_sub(h.saturating_sub(1));
-    let lines: Vec<TextLine> = matches
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(revealed)
-        .map(|(i, c)| {
-            let selected = i == app.palette.selected;
-            let marker = if selected { "▸ " } else { "  " };
-            let name_style = if selected {
-                styles::user().bold()
-            } else {
-                styles::user()
-            };
-            let mut spans = vec![
-                Span::styled(format!("  {marker}/{}", c.name), name_style),
-                Span::styled(format!("  {}", c.desc), styles::muted()),
-            ];
-            // Inline usage/arg hint on the highlighted row so non-obvious args (`/assay`,
-            // `/replay`, `/model`, and fixed-enum args like `/effort [low|…]`) are discoverable.
-            if selected && !c.usage.is_empty() {
-                spans.push(Span::styled(format!("   {}", c.usage), styles::muted()));
-                // Best-effort enum-value completion candidates for fixed-arg commands.
-                let values = crate::commands::arg_values(&c.name);
-                if !values.is_empty() {
-                    spans.push(Span::styled(
-                        format!("   ⇥ {}", values.join(" · ")),
-                        styles::muted(),
-                    ));
-                }
-            }
-            TextLine::from(spans)
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+    list_view::render(frame, area, &palette_view(app));
 }
 
-/// The `@path` file-path picker: a scrolling, filter-narrowed list of files, revealed by the
-/// same ease-in animation as the command palette.
+/// The `@path` picker: a framed list attached to the composer.
 pub(crate) fn render_at_path_picker(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
         return;
     }
-    let matches = app.at_picker.matches();
-    if matches.is_empty() {
-        frame.render_widget(
-            Paragraph::new(TextLine::from(Span::styled(
-                "  no files match",
-                styles::muted(),
-            ))),
-            area,
-        );
-        return;
-    }
-    let h = area.height as usize;
-    let revealed = ((app.at_picker.anim * h as f32).ceil() as usize).clamp(1, h);
-    let start = app.at_picker.selected.saturating_sub(h.saturating_sub(1));
-    let lines: Vec<TextLine> = matches
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(revealed)
-        .map(|(i, path)| {
-            let selected = i == app.at_picker.selected;
-            let marker = if selected { "▸ " } else { "  " };
-            let style = if selected {
-                styles::muted().bold()
-            } else {
-                styles::user()
-            };
-            TextLine::from(Span::styled(format!("  {marker}@{path}"), style))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+    list_view::render(frame, area, &at_view(app));
 }
 
-/// The interactive session/checkpoint picker: a heading + a scrolling, filter-narrowed window of
-/// rows, the selected one highlighted, revealed by the same ease-in as the palette. Constrained
+/// The session/checkpoint/model/mode picker: a centered modal over the dimmed chat. Constrained
 /// to the (fixed-height) inline live region, so it scrolls rather than growing.
 pub(crate) fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 {
-        return; // degenerate viewport — never clamp(1, 0).
+        return; // degenerate viewport: nothing to draw, never clamp(1, 0).
     }
-    let p = &app.picker;
-    let matches = p.matches();
-    let h = area.height as usize;
-    let mut lines: Vec<TextLine> = Vec::with_capacity(h);
-
-    // Heading: title · live filter (or hint) · position.
-    let mut head = vec![Span::styled(
-        format!("  {} ", p.heading),
-        styles::user().bold(),
-    )];
-    if p.query.is_empty() {
-        head.push(Span::styled("(type to filter)", styles::muted()));
-    } else {
-        head.push(Span::styled(format!("/{}", p.query), styles::user()));
-    }
-    if !matches.is_empty() {
-        head.push(Span::styled(
-            format!("  {}/{}", p.selected + 1, matches.len()),
-            styles::muted(),
-        ));
-    }
-    lines.push(TextLine::from(head));
-
-    if matches.is_empty() {
-        lines.push(TextLine::from(Span::styled(
-            "  no matches",
-            styles::muted(),
-        )));
-        frame.render_widget(Paragraph::new(lines), area);
-        return;
-    }
-
-    let list_h = h.saturating_sub(1); // rows below the heading
-    let revealed = ((p.anim * list_h as f32).ceil() as usize).clamp(1, list_h.max(1));
-    let start = p.selected.saturating_sub(list_h.saturating_sub(1));
-    let tempers = p.kind == Some(crate::commands::PickerKind::Tempers);
-    let models = p.kind == Some(crate::commands::PickerKind::Models);
-    let model_pin = p.kind == Some(crate::commands::PickerKind::ModelPin);
-    let tick = app.tick;
-    for (i, row) in matches.iter().enumerate().skip(start).take(revealed) {
-        let selected = i == p.selected;
-        let marker = if selected { "▸ " } else { "  " };
-        // Color rows by kind: tempers by posture, models browser by category, model-pin picker
-        // by tier with the "mesh" row animated (cycles accent colors).
-        let base = if tempers {
-            styles::temper_color(&row.title)
-        } else if models {
-            models_row_color(row)
-        } else if model_pin {
-            model_pin_row_color(row, tick)
-        } else {
-            color::user()
-        };
-        let title_style = if selected {
-            Style::default().fg(base).bold()
-        } else {
-            Style::default().fg(base)
-        };
-        // ModelPin: add a tier badge between title and subtitle for at-a-glance scanning.
-        let subtitle_str = if model_pin {
-            truncate(&row.subtitle, 52)
-        } else {
-            truncate(&row.subtitle, 44)
-        };
-        lines.push(TextLine::from(vec![
-            Span::styled(format!("  {marker}{}", row.title), title_style),
-            Span::styled(format!("  {subtitle_str}"), styles::muted()),
-        ]));
-    }
-    frame.render_widget(Paragraph::new(lines), area);
+    let view = picker_view(app);
+    let width = area.width.saturating_sub(2).min(100);
+    let height = view.desired_height(usize::MAX / 2).max(12).min(area.height);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 3,
+        width,
+        height,
+    };
+    list_view::render(frame, rect, &view);
 }
+
 /// Colour a `/models` browser row: provider rows blue; model rows by category (subscription=green,
 /// frontier=brand, free=blue, paid=yellow). Provider vs model is told apart by the `::` in `id`.
 pub(crate) fn models_row_color(row: &crate::commands::PickerRow) -> Color {
@@ -316,9 +414,16 @@ pub(crate) fn model_pin_row_color(row: &crate::commands::PickerRow, tick: usize)
 }
 
 /// Composer hints while a popup owns the keyboard. `None` when no popup is open.
-pub(crate) fn hints(app: &App) -> Option<Vec<super::chrome::Hint>> {
-    use super::chrome::hint;
-    if app.command_center.open || app.picker.open {
+pub(crate) fn hints(app: &App) -> Option<Vec<Hint>> {
+    if app.command_center.open {
+        return Some(vec![
+            hint("↑↓", "move"),
+            hint("Enter", "open"),
+            hint("Esc", "close"),
+            hint("?", "keys"),
+        ]);
+    }
+    if app.picker.open {
         return Some(vec![
             hint("↑↓", "move"),
             hint("Enter", "select"),
@@ -327,12 +432,20 @@ pub(crate) fn hints(app: &App) -> Option<Vec<super::chrome::Hint>> {
             hint("?", "keys"),
         ]);
     }
-    if app.palette.open || app.at_picker.open {
-        let verb = if app.palette.open { "run" } else { "insert" };
+    if app.palette.open {
         return Some(vec![
             hint("↑↓", "move"),
-            hint("Enter", verb),
+            hint("Enter", "run"),
             hint("Tab", "complete"),
+            hint("Esc", "close"),
+            hint("?", "keys"),
+        ]);
+    }
+    if app.at_picker.open {
+        return Some(vec![
+            hint("↑↓", "move"),
+            hint("Enter", "insert"),
+            hint("Tab", "into dir"),
             hint("Esc", "close"),
             hint("?", "keys"),
         ]);

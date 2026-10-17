@@ -168,6 +168,7 @@ pub(crate) async fn dispatch_command(
     assay_scope: &mut forge_types::AssayScope,
 ) -> Result<DispatchOutcome> {
     use forge_tui::CommandAction;
+    app.note_command_used(line);
     let action = forge_tui::parse_command(line);
     // Commands that need the session lock (held by the running turn) are queued by the input
     // surfaces before dispatch (`busy_commands::route_busy_line`); this guards direct callers.
@@ -181,13 +182,12 @@ pub(crate) async fn dispatch_command(
     match action {
         CommandAction::Help | CommandAction::Keys => match tui.as_mut() {
             Some(tui) => {
-                let bindings = app.keybinds.clone();
                 let tab = if matches!(action, CommandAction::Help) {
                     forge_tui::HelpTab::Commands
                 } else {
                     forge_tui::HelpTab::Keybinds
                 };
-                let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings, tab));
+                app.open_help(tui, tab);
             }
             None => app.note("⌨ /help is host-only (a fullscreen reference viewer)"),
         },

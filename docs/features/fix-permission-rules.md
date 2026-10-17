@@ -377,16 +377,26 @@ warning, never silently dropped. Importer lives in the config/migration layer
 
 ### 5.7 TUI prompt mockup
 
-Current prompt (`tui.rs:98`): `allow {tool} ({side_effect:?})?`. New:
+The prompt is a decision block that replaces the composer while it waits (see
+[tui-interaction.md](tui-interaction.md)): a warn-coloured `┃` rail, the exact action as its
+title, a subject row (what changes, or the full shell command), and three numbered choices with
+the legacy keys on the right. The old `allow {tool} ({side_effect:?})?` string is still what
+`App::prompt` holds for the remote protocol.
 
 ```
-┌ permission ─────────────────────────────────────────────────┐
-│ shell  cargo run --release                                   │
-│ matched: ask  rule "shell: *"  (no specific rule)            │
-│                                                              │
-│ [y] allow once   [a] always allow   [n] deny                 │
-└──────────────────────────────────────────────────────────────┘
+ ┃ Allow Shell to run this command?                                    Ask mode
+ ┃  cargo run --release
+ ┃
+ ┃ ❯ 1  Allow once                                                   y  Enter
+ ┃   2  Always allow shell here (saved to .forge/config.toml)               a
+ ┃   3  Deny                                                           n  Esc
+ ╰───────────── ↑↓ choose · Enter confirm · 1-3 pick · Ctrl+T show diff · ? keys ─
 ```
+
+`y`, `a`, `n`, `Enter` and `Esc` keep their meanings; digits pick directly; arrows move the focus
+and `Enter` confirms the focused choice (it starts on "Allow once"). Any other key is ignored
+instead of denying the tool, so a stray arrow press can no longer reject a write. The "matched
+rule" line is a planned addition and is not drawn yet.
 
 For a deny that *blocked* (no prompt, shown as a notice in the stream, not a question):
 

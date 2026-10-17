@@ -213,23 +213,7 @@ impl DriverState {
                 KeyKind::Esc => self.app.at_picker.close(),
                 KeyKind::Up => self.app.at_picker.move_up(),
                 KeyKind::Down => self.app.at_picker.move_down(),
-                KeyKind::Tab | KeyKind::Enter => {
-                    if let Some(path) = self.app.at_picker.selected_path() {
-                        if let Some(tok) = forge_tui::at_token_at(
-                            &self.app.input,
-                            self.app.input_cursor.min(self.app.input.len()),
-                        ) {
-                            self.app
-                                .input
-                                .replace_range(tok.start..tok.end, &format!("@{path} "));
-                            self.app.input_cursor = self.app.input.len();
-                        } else {
-                            self.app.input = format!("@{path} ");
-                            self.app.input_cursor = self.app.input.len();
-                        }
-                    }
-                    self.app.at_picker.close();
-                }
+                KeyKind::Tab | KeyKind::Enter => self.app.accept_at_path(),
                 KeyKind::Char(c) => {
                     self.app.input.push(c);
                     sync_at_picker_to_at_token(&mut self.app);

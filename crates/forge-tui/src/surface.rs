@@ -84,6 +84,12 @@ pub(crate) fn take_panels() -> Vec<Rect> {
     PANELS.with(|p| std::mem::take(&mut *p.borrow_mut()))
 }
 
+/// Record a framed surface drawn outside this module (the shared list view) so panel-aware
+/// consumers of [`take_panels`] see it.
+pub(crate) fn note_panel(area: Rect) {
+    PANELS.with(|p| p.borrow_mut().push(area));
+}
+
 /// Clear and frame a surface, returning the usable content rectangle.
 pub(crate) fn render_panel(
     frame: &mut Frame,

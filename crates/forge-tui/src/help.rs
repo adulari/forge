@@ -1,46 +1,49 @@
-//! Read-only fullscreen command and keyboard-reference viewer.
+//! The Help takeover: one screen with Commands, Keys and Mouse sections and a search field.
+//!
+//! One row per command (its usage shows on the detail line for the selected row), the keys table
+//! generated from the same registry the keybind configurator edits plus the fixed keys, one
+//! canonical spelling everywhere. At 120 columns and wider, commands and keys sit side by side.
+//! Enter on a command inserts it into the composer.
 
-use crate::theme::styles;
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use forge_config::KeybindsConfig;
 use ratatui::backend::CrosstermBackend;
-use ratatui::style::Modifier;
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::layout::Rect;
+use ratatui::text::Span;
 use ratatui::Terminal;
 
-use crate::commands::COMMANDS;
+use crate::app::list_view::{self, match_positions, Filter, Item, Row, View};
+use crate::commands::{command_action, COMMANDS};
 use crate::keybind_configurator::{action_desc, all_actions};
 use crate::keybinds::combo_display;
-use crate::surface::{self};
+use crate::surface::{self, SurfaceTone};
+use crate::theme::glyphs::g;
+use crate::theme::styles;
 
-/// The reference page opened initially. Both pages remain one Tab press away from the other.
+/// The section opened initially; `Tab` cycles through all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HelpTab {
     Commands,
     Keybinds,
+    Mouse,
 }
 
 impl HelpTab {
-    fn toggle(self) -> Self {
-        match self {
-            Self::Commands => Self::Keybinds,
-            Self::Keybinds => Self::Commands,
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Commands => "Commands",
-            Self::Keybinds => "Keyboard shortcuts",
+    fn next(self, back: bool) -> Self {
+        match (self, back) {
+            (Self::Commands, false) | (Self::Mouse, true) => Self::Keybinds,
+            (Self::Keybinds, false) | (Self::Commands, true) => Self::Mouse,
+            (Self::Mouse, false) | (Self::Keybinds, true) => Self::Commands,
         }
     }
 }
+
+const SECTIONS: [&str; 3] = ["Commands", "Keys", "Mouse"];
 
 const GROUP_ORDER: [&str; 5] = [
     "Session",
@@ -52,201 +55,511 @@ const GROUP_ORDER: [&str; 5] = [
 
 fn command_group(name: &str) -> &'static str {
     match name {
-        "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline"
+        "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline" | "status"
         | "heartbeat" => "Session",
         "sessions" | "replay" | "resume" | "new" | "undo" | "checkpoint" | "checkpoints"
-        | "compact" | "uncompact" | "reground" | "refine" => "History",
+        | "compact" | "uncompact" | "reground" | "refine" | "rewind" | "clear" | "export"
+        | "btw" => "History",
         "model" | "models" | "usage" | "mesh" | "duel" | "subagents" => "Models & routing",
-        "plan" | "execute" | "goal" | "pr" | "loop" | "workflow" | "assay" | "lattice" => "Work",
+        "plan" | "execute" | "goal" | "pr" | "loop" | "workflow" | "assay" | "lattice"
+        | "commit" | "dispatch" => "Work",
         _ => "Project & tools",
     }
 }
 
-fn command_reference_lines() -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        "Start with a plain request. Use / only when you need a specific control.",
-        styles::muted(),
-    ))];
-    let mut previous_group = None;
-    let group_rank = |group: &str| {
-        GROUP_ORDER
-            .iter()
-            .position(|g| *g == group)
-            .unwrap_or(GROUP_ORDER.len())
-    };
-    let mut ordered: Vec<_> = COMMANDS.iter().collect();
-    ordered.sort_by_key(|command| group_rank(command_group(command.name)));
-    for command in ordered {
-        let group = command_group(command.name);
-        if previous_group != Some(group) {
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                group,
-                styles::user().add_modifier(Modifier::BOLD),
-            )));
-            previous_group = Some(group);
-        }
-        lines.push(Line::from(vec![
-            Span::styled(format!("  /{:<14}", command.name), styles::fg()),
-            Span::styled(command.desc, styles::muted()),
-        ]));
-        let basic_usage = format!("/{}", command.name);
-        if command.usage != basic_usage {
-            lines.push(Line::from(Span::styled(
-                format!("      {}", command.usage),
-                styles::muted(),
-            )));
-        }
-    }
-    lines
+/// Keys that are not rebindable, in canonical spelling.
+const FIXED_KEYS: [(&str, &str); 12] = [
+    ("Enter", "Send the message (queues it while a turn runs)"),
+    ("Tab", "Accept the suggestion or the selected completion"),
+    ("Esc", "Stop the turn, or close what is open"),
+    ("Esc Esc", "Rewind to an earlier message (idle)"),
+    ("Ctrl+T", "Expand or collapse the latest tool call"),
+    ("Ctrl+O", "Show or hide task and agent details"),
+    ("Ctrl+J", "Insert a newline (also Shift+Enter, Alt+Enter)"),
+    ("Ctrl+A", "Start of line (Ctrl+E end of line)"),
+    (
+        "Ctrl+W",
+        "Delete the word before the cursor (Ctrl+U the line)",
+    ),
+    ("Alt+B", "Move by word (Alt+F forward, also Alt+←, Alt+→)"),
+    ("Shift+Tab", "Cycle the mode"),
+    (
+        "Ctrl+Home",
+        "Jump to the previous message (Ctrl+End the bottom)",
+    ),
+];
+
+const MOUSE_ROWS: [(&str, &str); 4] = [
+    ("Wheel", "Scroll the transcript"),
+    (
+        "Click",
+        "A tool call: expand or collapse its output (same as Ctrl+T)",
+    ),
+    ("Drag", "Select text; releasing the button copies it"),
+    (
+        "Click",
+        "The jump bar: go to the latest or the previous message",
+    ),
+];
+
+/// What a key did to the help screen.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HelpOutcome {
+    Open,
+    Close,
+    /// Insert this text into the composer and close.
+    Insert(String),
 }
 
-fn keybind_reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        "F1 or ? opens this page. Change bindings with /keys, then Ctrl+K if you need an action.",
-        styles::muted(),
-    ))];
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "Keyboard shortcuts",
-        styles::user().add_modifier(Modifier::BOLD),
-    )));
-    lines.extend(all_actions().into_iter().map(|action| {
-        let combo = keybinds
+pub(crate) struct HelpState {
+    keybinds: KeybindsConfig,
+    pub tab: HelpTab,
+    pub query: String,
+    pub selected: usize,
+}
+
+fn matches_query(query: &str, parts: &[&str]) -> bool {
+    let q = query.trim().trim_start_matches('/').to_lowercase();
+    q.is_empty() || parts.iter().any(|p| p.to_lowercase().contains(&q))
+}
+
+impl HelpState {
+    pub fn new(keybinds: &KeybindsConfig, tab: HelpTab) -> Self {
+        Self {
+            keybinds: keybinds.clone(),
+            tab,
+            query: String::new(),
+            selected: 0,
+        }
+    }
+
+    fn key_label(&self, action: &str) -> String {
+        self.keybinds
             .binds
             .get(action)
             .map(combo_display)
-            .unwrap_or_else(|| "(unset)".to_string());
-        Line::from(vec![
-            Span::styled(format!("  {:<22}", combo), styles::fg()),
-            Span::styled(action_desc(action), styles::muted()),
+            .unwrap_or_else(|| "(unset)".to_string())
+    }
+
+    /// Command rows, grouped when nothing is being searched. Enter inserts the second element.
+    fn command_items(&self) -> (Vec<Item>, Vec<String>) {
+        let mut ordered: Vec<_> = COMMANDS.iter().collect();
+        let rank = |name: &str| {
+            GROUP_ORDER
+                .iter()
+                .position(|g| *g == command_group(name))
+                .unwrap_or(GROUP_ORDER.len())
+        };
+        let q = self.query.trim().trim_start_matches('/').to_lowercase();
+        // Grouped when browsing; best match first (prefix before substring) when searching.
+        ordered.sort_by_key(|c| {
+            if q.is_empty() {
+                (rank(c.name), 0)
+            } else {
+                (0, usize::from(!c.name.starts_with(&q)))
+            }
+        });
+        let mut items = Vec::new();
+        let mut inserts = Vec::new();
+        let mut last = "";
+        for c in ordered {
+            if !matches_query(&self.query, &[c.name, c.desc]) {
+                continue;
+            }
+            let group = command_group(c.name);
+            if self.query.is_empty() && group != last {
+                items.push(Item::Header(group.to_string()));
+                last = group;
+            }
+            items.push(Item::Row(Row {
+                label: format!("/{}", c.name),
+                label_style: Some(styles::user()),
+                desc: c.desc.to_string(),
+                meta: command_action(c.name)
+                    .and_then(|a| self.keybinds.binds.get(a))
+                    .map(combo_display)
+                    .unwrap_or_default(),
+                marks: match_positions(c.name, &self.query)
+                    .into_iter()
+                    .map(|i| i + 1)
+                    .collect(),
+                ..Row::default()
+            }));
+            let args = c.usage.contains('<') || c.usage.contains('[');
+            inserts.push(format!("/{}{}", c.name, if args { " " } else { "" }));
+        }
+        (items, inserts)
+    }
+
+    fn key_items(&self) -> Vec<Item> {
+        let mut items = Vec::new();
+        let mut actions: Vec<Row> = Vec::new();
+        for action in all_actions() {
+            let desc = action_desc(action);
+            let label = self.key_label(action);
+            if !matches_query(&self.query, &[&label, desc]) {
+                continue;
+            }
+            actions.push(Row {
+                label,
+                label_style: Some(styles::key_chip()),
+                desc: desc.to_string(),
+                ..Row::default()
+            });
+        }
+        let fixed: Vec<Row> = FIXED_KEYS
+            .iter()
+            .filter(|(k, d)| matches_query(&self.query, &[k, d]))
+            .map(|(k, d)| Row {
+                label: k.to_string(),
+                label_style: Some(styles::key_chip()),
+                desc: d.to_string(),
+                ..Row::default()
+            })
+            .collect();
+        if !actions.is_empty() {
+            items.push(Item::Header("Shortcuts you can change".to_string()));
+            items.extend(actions.into_iter().map(Item::Row));
+        }
+        if !fixed.is_empty() {
+            items.push(Item::Header("Fixed keys".to_string()));
+            items.extend(fixed.into_iter().map(Item::Row));
+        }
+        items
+    }
+
+    fn mouse_items(&self) -> Vec<Item> {
+        MOUSE_ROWS
+            .iter()
+            .filter(|(k, d)| matches_query(&self.query, &[k, d]))
+            .map(|(k, d)| {
+                Item::Row(Row {
+                    label: k.to_string(),
+                    label_style: Some(styles::key_chip()),
+                    desc: d.to_string(),
+                    ..Row::default()
+                })
+            })
+            .collect()
+    }
+
+    fn selectable_rows(&self) -> usize {
+        match self.tab {
+            HelpTab::Commands => self.command_items().1.len(),
+            HelpTab::Keybinds => self
+                .key_items()
+                .iter()
+                .filter(|i| matches!(i, Item::Row(_)))
+                .count(),
+            HelpTab::Mouse => self.mouse_items().len(),
+        }
+    }
+
+    pub fn key(&mut self, code: KeyCode, mods: KeyModifiers) -> HelpOutcome {
+        let last = self.selectable_rows().saturating_sub(1);
+        match code {
+            KeyCode::Esc => return HelpOutcome::Close,
+            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => {
+                return HelpOutcome::Close
+            }
+            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down => self.selected = (self.selected + 1).min(last),
+            KeyCode::PageUp => self.selected = self.selected.saturating_sub(8),
+            KeyCode::PageDown => self.selected = (self.selected + 8).min(last),
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = last,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.tab = self.tab.next(code == KeyCode::BackTab);
+                self.selected = 0;
+            }
+            KeyCode::Enter if self.tab == HelpTab::Commands => {
+                if let Some(text) = self.command_items().1.get(self.selected) {
+                    return HelpOutcome::Insert(text.clone());
+                }
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+                self.selected = 0;
+            }
+            KeyCode::Char(c) if !c.is_control() && !mods.contains(KeyModifiers::CONTROL) => {
+                self.query.push(c);
+                self.selected = 0;
+            }
+            _ => {}
+        }
+        HelpOutcome::Open
+    }
+
+    fn selected_detail(&self) -> Option<Vec<Span<'static>>> {
+        if self.tab != HelpTab::Commands {
+            return None;
+        }
+        let (_, inserts) = self.command_items();
+        let name = inserts
+            .get(self.selected)?
+            .trim()
+            .trim_start_matches('/')
+            .to_string();
+        let c = COMMANDS.iter().find(|c| c.name == name)?;
+        Some(vec![
+            Span::styled("usage  ", styles::muted()),
+            Span::styled(c.usage.to_string(), styles::fg()),
         ])
-    }));
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "Fixed keys (not rebindable)",
-        styles::user().add_modifier(Modifier::BOLD),
-    )));
-    for (key, desc) in [
-        ("Ctrl+T", "Expand/collapse the latest tool call"),
-        ("Ctrl+O", "Toggle subagent detail"),
-        ("Ctrl+J / Shift+Enter / Alt+Enter", "Insert a newline"),
-        ("Ctrl+A / Ctrl+E", "Start / end of line"),
-        ("Ctrl+W / Ctrl+U", "Delete word back / line back"),
-        ("Alt+B / Alt+F, Alt+Left / Alt+Right", "Move by word"),
-        ("Alt+Backspace", "Delete word back"),
-        ("Shift+Tab", "Cycle temper"),
-    ] {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {key:<22}"), styles::fg()),
-            Span::styled(desc, styles::muted()),
-        ]));
     }
-    lines
+
+    /// The frames to draw for `width` columns: one list, or commands beside keys when wide.
+    pub fn views(&self, width: u16) -> Vec<View> {
+        let help_key = self.key_label("help");
+        let footer = vec![
+            crate::app::chrome_hint("Tab", "section"),
+            crate::app::chrome_hint("↑↓", "move"),
+            crate::app::chrome_hint("type", "to search"),
+            crate::app::chrome_hint("Enter", "insert"),
+            crate::app::chrome_hint("Esc", "close"),
+        ];
+        let tabs = (
+            SECTIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            match self.tab {
+                HelpTab::Commands => 0,
+                HelpTab::Keybinds => 1,
+                HelpTab::Mouse => 2,
+            },
+        );
+        let filter = Filter {
+            label: "search",
+            query: self.query.clone(),
+            placeholder: "type to filter",
+        };
+        let wide = width >= 120 && self.tab != HelpTab::Mouse;
+        let base = |title: &str, items: Vec<Item>, selected: usize| View {
+            title: title.to_string(),
+            items,
+            selected,
+            padded: true,
+            tone: SurfaceTone::Tool,
+            empty: "nothing matches".to_string(),
+            more_hint: "",
+            ..View::default()
+        };
+        if wide {
+            let commands_focus = self.tab == HelpTab::Commands;
+            let mut left = base(
+                "Help",
+                self.command_items().0,
+                if commands_focus {
+                    self.selected
+                } else {
+                    usize::MAX
+                },
+            );
+            left.context = format!("{help_key} {} ?", g().sep);
+            left.filter = Some(filter);
+            left.tabs = Some(tabs);
+            left.detail = self.selected_detail();
+            left.footer = footer;
+            let right = base(
+                "Keys",
+                self.key_items(),
+                if commands_focus {
+                    usize::MAX
+                } else {
+                    self.selected
+                },
+            );
+            return vec![left, right];
+        }
+        let (title, items) = match self.tab {
+            HelpTab::Commands => ("Help", self.command_items().0),
+            HelpTab::Keybinds => ("Help", self.key_items()),
+            HelpTab::Mouse => ("Help", self.mouse_items()),
+        };
+        let mut view = base(title, items, self.selected);
+        view.context = format!("{help_key} {} ?", g().sep);
+        view.filter = Some(filter);
+        view.tabs = Some(tabs);
+        view.detail = self.selected_detail();
+        view.footer = footer;
+        vec![view]
+    }
 }
 
-fn reference_lines(keybinds: &KeybindsConfig, tab: HelpTab) -> Vec<Line<'static>> {
-    match tab {
-        HelpTab::Commands => command_reference_lines(),
-        HelpTab::Keybinds => keybind_reference_lines(keybinds),
+fn draw(frame: &mut ratatui::Frame, state: &HelpState) {
+    let area = frame.area();
+    surface::render_backdrop(frame, area);
+    let views = state.views(area.width);
+    match views.as_slice() {
+        [one] => {
+            list_view::render(frame, area, one);
+        }
+        [left, right] => {
+            let half = area.width / 2;
+            list_view::render(
+                frame,
+                Rect {
+                    width: half,
+                    ..area
+                },
+                left,
+            );
+            list_view::render(
+                frame,
+                Rect {
+                    x: area.x + half,
+                    width: area.width - half,
+                    ..area
+                },
+                right,
+            );
+        }
+        _ => {}
     }
 }
 
-/// Run the read-only command and keyboard reference viewer.
-pub fn run_help(keybinds: &KeybindsConfig, initial_tab: HelpTab) -> io::Result<()> {
+/// Run the Help takeover. `Ok(Some(text))` is a command the user chose to insert.
+pub fn run_help_pick(
+    keybinds: &KeybindsConfig,
+    initial_tab: HelpTab,
+) -> io::Result<Option<String>> {
     enable_raw_mode()?;
     crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
-    let mut tab = initial_tab;
-    let mut scroll = 0u16;
-    loop {
-        terminal.draw(|frame| {
-            let area = frame.area();
-            surface::render_backdrop(frame, area);
-            let inner = surface::render_panel(
-                frame,
-                area,
-                surface::title(tab.title(), surface::SurfaceTone::Accent),
-                Some(surface::hint(
-                    "Tab switch · ↑/↓ scroll · PgUp/PgDn page · Esc/q close",
-                )),
-                surface::SurfaceTone::Accent,
-            );
-            frame.render_widget(
-                Paragraph::new(Text::from(reference_lines(keybinds, tab)))
-                    .wrap(Wrap { trim: true })
-                    .scroll((scroll, 0)),
-                inner,
-            );
-        })?;
+    let mut state = HelpState::new(keybinds, initial_tab);
+    let picked = loop {
+        terminal.draw(|frame| draw(frame, &state))?;
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Release {
                 continue;
             }
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => break,
-                KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
-                KeyCode::PageUp => scroll = scroll.saturating_sub(10),
-                KeyCode::PageDown => scroll = scroll.saturating_add(10),
-                KeyCode::Tab | KeyCode::BackTab => {
-                    tab = tab.toggle();
-                    scroll = 0;
-                }
-                _ => {}
+            match state.key(key.code, key.modifiers) {
+                HelpOutcome::Open => {}
+                HelpOutcome::Close => break None,
+                HelpOutcome::Insert(text) => break Some(text),
             }
         }
-    }
+    };
     disable_raw_mode()?;
     crossterm::execute!(io::stdout(), LeaveAlternateScreen)?;
-    Ok(())
+    Ok(picked)
+}
+
+/// Run the Help takeover, discarding any insertion (kept for callers without a composer).
+pub fn run_help(keybinds: &KeybindsConfig, initial_tab: HelpTab) -> io::Result<()> {
+    run_help_pick(keybinds, initial_tab).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
 
-    #[test]
-    fn command_reference_includes_registry_commands() {
-        let lines = reference_lines(&KeybindsConfig::default(), HelpTab::Commands);
-        let text = lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains("/help"));
-        assert!(text.contains("/assay [--diff"));
-        assert!(text.contains("Models & routing"));
+    fn state(tab: HelpTab) -> HelpState {
+        HelpState::new(&KeybindsConfig::default(), tab)
     }
 
-    #[test]
-    fn keybind_reference_includes_configured_combos() {
-        let lines = reference_lines(&KeybindsConfig::default(), HelpTab::Keybinds);
-        let text = lines
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains("F1"));
+    fn rows_of(view: &View) -> Vec<String> {
+        view.rows().map(|r| r.label.clone()).collect()
     }
 
-    #[test]
-    fn each_command_group_heading_appears_once() {
-        let text: Vec<String> = command_reference_lines()
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
+    fn screen(state: &HelpState, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, state)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
                     .collect::<String>()
             })
-            .collect();
-        for group in GROUP_ORDER {
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn every_registered_command_has_a_help_row() {
+        let s = state(HelpTab::Commands);
+        let rows = rows_of(&s.views(80)[0]);
+        for c in COMMANDS {
             assert!(
-                text.iter().filter(|l| l.as_str() == group).count() <= 1,
-                "{group} repeated"
+                rows.contains(&format!("/{}", c.name)),
+                "/{} missing",
+                c.name
             );
         }
+    }
+
+    #[test]
+    fn every_bound_action_is_listed_once_with_its_canonical_label() {
+        let s = state(HelpTab::Keybinds);
+        let rows = rows_of(&s.views(80)[0]);
+        let defaults = KeybindsConfig::default();
+        for action in all_actions() {
+            let combo = defaults.binds.get(action).expect("default bind");
+            let label = combo_display(combo);
+            let count = rows.iter().filter(|r| **r == label).count();
+            assert!(count >= 1, "{action} ({label}) missing");
+        }
+        for (key, _) in FIXED_KEYS {
+            assert!(rows.contains(&key.to_string()), "{key} missing");
+        }
+        assert!(
+            rows.iter()
+                .all(|r| !r.contains('-') || r.contains('/') || r.len() < 2),
+            "no Ctrl-c spellings: {rows:?}"
+        );
+        assert!(rows.contains(&"Ctrl+K".to_string()) && rows.contains(&"Alt+M".to_string()));
+    }
+
+    #[test]
+    fn search_filters_and_enter_inserts_the_command() {
+        let mut s = state(HelpTab::Commands);
+        for c in "compa".chars() {
+            s.key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        let rows = rows_of(&s.views(80)[0]);
+        assert_eq!(rows[0], "/compact", "prefix match first: {rows:?}");
+        match s.key(KeyCode::Enter, KeyModifiers::NONE) {
+            HelpOutcome::Insert(text) => assert_eq!(text.trim(), "/compact"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(s.key(KeyCode::Esc, KeyModifiers::NONE), HelpOutcome::Close);
+    }
+
+    #[test]
+    fn a_command_that_takes_arguments_is_inserted_with_a_trailing_space() {
+        let mut s = state(HelpTab::Commands);
+        for c in "loop".chars() {
+            s.key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        match s.key(KeyCode::Enter, KeyModifiers::NONE) {
+            HelpOutcome::Insert(text) => assert!(text.starts_with("/loop"), "{text}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_cycles_the_three_sections_and_wide_screens_show_two_columns() {
+        let mut s = state(HelpTab::Commands);
+        s.key(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(s.tab, HelpTab::Keybinds);
+        s.key(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(s.tab, HelpTab::Mouse);
+        assert_eq!(s.views(160).len(), 1, "mouse is a single column");
+        s.key(KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(s.tab, HelpTab::Commands);
+        assert_eq!(s.views(80).len(), 1);
+        assert_eq!(s.views(160).len(), 2);
+        let wide = screen(&s, 160, 36);
+        assert!(wide.contains("/help") && wide.contains("Ctrl+K"), "{wide}");
+    }
+
+    #[test]
+    fn the_80x24_screen_has_sections_search_and_a_usage_line() {
+        let s = state(HelpTab::Commands);
+        let out = screen(&s, 80, 24);
+        assert!(out.contains("Commands") && out.contains("Keys") && out.contains("Mouse"));
+        assert!(out.contains("search"), "{out}");
+        assert!(out.contains("usage  /"), "{out}");
+        assert!(out.contains("Esc close"), "{out}");
     }
 }

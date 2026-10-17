@@ -412,7 +412,7 @@ const PULSE_SECS: u64 = 5;
 /// The border colour: while the app waits for you it alternates warn and muted once a second for
 /// the first five seconds (a held decision should catch the eye), then stays warn; otherwise it
 /// is the mode colour. Reduced motion never pulses.
-fn border_style(app: &App) -> Style {
+pub(crate) fn border_style(app: &App) -> Style {
     if app.prompt.is_some() || app.awaiting_question() {
         let since = app.waiting_since.get().unwrap_or_else(|| {
             app.waiting_since.set(Some(app.tick));
