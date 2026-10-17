@@ -146,3 +146,7 @@ The mobile native marketing/build version is independent from Forge's CLI/deskto
 OTA can be labeled with the Forge release it carries (for example, `Forge v2.6.3`) while targeting
 the currently installed mobile fingerprint. Bump the mobile native version and run Xcode Cloud
 only when the native layer changes; do not force a native build for every CLI/desktop release.
+
+## Workflow action pins
+
+The actions in `eas-update.yml` are pinned by commit SHA and bumped by Dependabot (for example `actions/setup-node` 7.1.0). A pin bump changes only the runner steps, never the app fingerprint, so it does not affect which installed builds receive an OTA.

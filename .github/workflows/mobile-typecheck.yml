@@ -85,7 +85,7 @@ jobs:
         working-directory: .
         run: python3 scripts/test-mobile-parity.py
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "20"
           cache: npm
@@ -160,7 +160,10 @@ jobs:
       # concerns VariantStrIter, which Forge never calls; keep every other vulnerability blocking
       # while upstream completes its GTK dependency migration. Unmaintained GTK3 warnings remain
       # visible without failing because Tauri/Wry still require that stack on Linux.
-      - run: cargo audit --file mobile/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429
+      # RUSTSEC-2026-0367/0368/0369 (zip extract() symlink/SUID handling, fixed only in zip 9): zip 4.6.1 is
+      # pulled by the Tauri updater/bundler and no release moves off it yet; Forge never calls extract() on
+      # untrusted archives. Recheck when Tauri bumps zip.
+      - run: cargo audit --file mobile/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429 --ignore RUSTSEC-2026-0367 --ignore RUSTSEC-2026-0368 --ignore RUSTSEC-2026-0369
       - name: Bound persistent build cache
         if: always()
         run: bash scripts/ci/trim-runner-cache.sh
