@@ -831,8 +831,8 @@ fn brackets_walk_the_tabs_including_dispatch_only_on_dispatch_cards() {
 fn a_coordinator_card_says_what_its_dispatch_is_doing() {
     let cases = [
         (dispatch_with("planning", Vec::new()), "splitting the work…"),
-        (proposed(), "split ready · 3 sessions to review"),
-        (running(), "1/3 done · 1 running · 1 waiting"),
+        (proposed(), "split ready · 3 sessions"),
+        (running(), "1/3 done · 1 running"),
         (dispatch_with("cancelled", Vec::new()), "cancelled"),
     ];
     for (d, want) in cases {

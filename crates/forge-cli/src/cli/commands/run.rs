@@ -3253,6 +3253,8 @@ pub(crate) async fn run_chat_tui(
                     }
                     _ => {}
                 }
+            } else if app.welcome_key(&key) {
+                dirty = true;
             } else if prompt_history.handle_key(&key, &mut app.input, &mut app.input_cursor) {
                 // ↑ on the first row (or ↓) browses prompt history; ↑ on a lower row of a
                 // multiline draft just moves the cursor.
