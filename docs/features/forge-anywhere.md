@@ -90,6 +90,11 @@ Ed25519 signing keys. Payloads use XChaCha20-Poly1305 with a signed, authenticat
 Every key epoch is wrapped separately to authorized devices and to the recovery secret. The
 service enforces unique sender/epoch/sequence tuples to reject replay, but cannot decrypt payloads.
 
+A host loads the enrolled devices' signing keys when its relay connects. An envelope from a device
+enrolled after that triggers one key refresh (at most every 10 s) that renews the access token from
+the state file first, so a newly paired phone is accepted on a relay that has been up for hours; a
+refresh failure is logged rather than silently keeping the stale key set.
+
 Sequence state is persisted in blocks, not per envelope. The host reserves outbound sequences 256
 at a time under the state-file lock and the phone 1024 at a time in the keychain, then hands them
 out from memory; a crash skips the unused tail and never reuses a number. The phone's inbound replay
