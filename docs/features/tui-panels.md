@@ -95,3 +95,7 @@ a caret, label, muted description and a value in one grammar (`○ not set`, `�
 list with its source and key path last. `←→` still change enum values, so sections move with
 `PgUp`/`PgDn`. `forge setup` uses the same frame, `❯` rows, `●●○○○` step dots and labels the
 recommended choice (`(recommended)`).
+
+## Polish pass
+
+Plan-card rows carry wrap marks (`copy_mark::hang` plus prose) instead of being pre-wrapped, so they re-wrap at the live width and hang under the step text. The shared list view sizes its shortcut column from the visible window, and the config editor sizes its label column from the visible rows.

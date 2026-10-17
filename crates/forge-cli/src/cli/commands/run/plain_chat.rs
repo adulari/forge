@@ -45,7 +45,12 @@ pub(crate) async fn chat(
     )
     .await?;
     if std::io::stdin().is_terminal() {
-        println!("forge chat — type a task and press enter; /quit to exit");
+        println!(
+            "{}",
+            forge_tui::theme::glyphs::normalise(
+                "forge chat — type a task and press enter; /quit to exit"
+            )
+        );
     }
     {
         let sid = session.session_id().to_string();
@@ -84,7 +89,12 @@ pub(crate) async fn chat(
                 {
                     Ok(t) => t,
                     Err(reason) => {
-                        eprintln!("⎇ prompt blocked by hook: {reason}");
+                        eprintln!(
+                            "{}",
+                            forge_tui::theme::glyphs::normalise(&format!(
+                                "⎇ prompt blocked by hook: {reason}"
+                            ))
+                        );
                         continue;
                     }
                 };

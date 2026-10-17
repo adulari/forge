@@ -5,10 +5,7 @@ use crate::theme::styles;
 use ratatui::style::Style;
 use ratatui::text::{Line as TextLine, Span};
 
-use crate::app::lines::turn::wrap_words;
-
-/// Widest a plan row wraps; the step text hangs under its own first word.
-const MEASURE: usize = 84;
+use crate::copy_mark;
 
 /// Render a proposed plan (the `present_plan` tool) as a titled block: a `PLAN` label with the
 /// title and step count, numbered steps whose wrapped text hangs under the step title, muted
@@ -74,23 +71,19 @@ pub(crate) fn plan_card_lines(plan: &forge_types::PlanProposal) -> Vec<TextLine<
     out
 }
 
-/// A row whose first line starts with `lead` and whose wrapped continuation hangs at `hang`.
+/// A row that starts with `lead`. The wrap pass breaks it at the live width and hangs the
+/// continuation rows at the end of `lead`, so a narrow terminal never leaves a flush-left orphan.
 fn push_wrapped(
     out: &mut Vec<TextLine<'static>>,
     lead: Span<'static>,
-    hang: usize,
+    _hang: usize,
     text: &str,
     style: Style,
 ) {
-    for (i, chunk) in wrap_words(text, MEASURE.saturating_sub(hang).max(20))
-        .into_iter()
-        .enumerate()
-    {
-        let start = if i == 0 {
-            lead.clone()
-        } else {
-            Span::raw(" ".repeat(hang))
-        };
-        out.push(TextLine::from(vec![start, Span::styled(chunk, style)]));
-    }
+    let lead = Span::styled(lead.content, copy_mark::hang(lead.style));
+    out.push(TextLine::from(vec![
+        Span::styled("", copy_mark::prose(Style::default())),
+        lead,
+        Span::styled(text.to_string(), style),
+    ]));
 }
