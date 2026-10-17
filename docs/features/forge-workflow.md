@@ -187,3 +187,9 @@ process access from inside it. `workflow(name)` is additionally sandboxed to
 `agent()` call is exactly as privileged as a `spawn_agents` child — read-only tools by default,
 `Ask` resolves to `Deny`, no recursive `spawn_agents`/`run_workflow` access unless under the
 configured depth cap.
+
+## Workflow view layout
+
+The takeover is a header row, a phase checklist with nested agent rows, a `LOG` section and a hint
+row; backgrounded it is one band row (`Ctrl+O view`). The scrollback record uses the notice grammar.
+See `docs/features/tui-panels.md`.

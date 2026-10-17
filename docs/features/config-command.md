@@ -60,3 +60,8 @@ Loading reports a wrongly-typed value with its location (`invalid configuration:
 
 `forge doctor` also decrypts every entry of `secrets.enc` (`secret_health.rs`) and fails with the
 damaged entries or missing/mismatched `secret.key` named; it never creates or repairs either file.
+
+## Presentation (Forgeline)
+
+The `/config` editor is a two-pane `Settings` takeover from 120 columns and `forge setup` uses step
+dots and labels the recommended choice. See `docs/features/tui-panels.md`.

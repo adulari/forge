@@ -769,7 +769,7 @@ fn a_backgrounded_live_workflow_shows_the_status_band_until_it_finishes() {
     let out = screen_wh(&app, 100, LIVE_H);
     assert!(out.contains("workflow"), "band names the run: {out:?}");
     assert!(
-        out.contains("^O view"),
+        out.contains("Ctrl+O view"),
         "band offers the reopen key: {out:?}"
     );
     app.apply(PresenterEvent::SubagentResult {

@@ -4,15 +4,7 @@
 //! source for the selected row. State, input handling, and rendering live here (no `forge-config`
 //! dependency); the I/O shell feeds it rows and performs the validated writes via [`ConfigAction`].
 
-use crate::theme::{color, styles};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line as TextLine, Span};
-use ratatui::widgets::Paragraph;
-use ratatui::Frame;
-
 use crate::app::KeyKind;
-use crate::surface::{self};
-use forge_types::truncate_ellipsis as truncate;
 
 /// The editing control a row uses.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -133,6 +125,53 @@ impl ConfigEditor {
             .collect()
     }
 
+    /// Sections (groups) holding at least one match, in first-seen order, with their match counts.
+    pub fn sections(&self) -> Vec<(String, usize)> {
+        let mut out: Vec<(String, usize)> = Vec::new();
+        for i in self.matches() {
+            let group = &self.rows[i].group;
+            match out.iter_mut().find(|(g, _)| g == group) {
+                Some((_, n)) => *n += 1,
+                None => out.push((group.clone(), 1)),
+            }
+        }
+        out
+    }
+
+    /// Index into [`Self::sections`] of the section the selected row lives in.
+    pub fn section_index(&self) -> usize {
+        let Some(row) = self.selected_row() else {
+            return 0;
+        };
+        self.sections()
+            .iter()
+            .position(|(g, _)| g == &row.group)
+            .unwrap_or(0)
+    }
+
+    /// Move the selection to the first row of the next (or previous) section, wrapping.
+    fn jump_section(&mut self, forward: bool) {
+        let sections = self.sections();
+        if sections.len() < 2 {
+            return;
+        }
+        let n = sections.len();
+        let cur = self.section_index();
+        let target = if forward {
+            (cur + 1) % n
+        } else {
+            (cur + n - 1) % n
+        };
+        let group = &sections[target].0;
+        if let Some(pos) = self
+            .matches()
+            .iter()
+            .position(|&i| &self.rows[i].group == group)
+        {
+            self.selected = pos;
+        }
+    }
+
     pub fn selected_row(&self) -> Option<&SettingRow> {
         let m = self.matches();
         m.get(self.selected).map(|&i| &self.rows[i])
@@ -197,6 +236,11 @@ impl ConfigEditor {
             KeyKind::Tab => {
                 self.project_scope = !self.project_scope;
                 ConfigAction::Reload
+            }
+            // Section jumps: the settings list is long, and `←→` already change enum values.
+            KeyKind::PageDown | KeyKind::PageUp => {
+                self.jump_section(matches!(key, KeyKind::PageDown));
+                ConfigAction::None
             }
             // Del resets the selected setting to its default (not secrets or read-only sections).
             KeyKind::DeleteForward => match self.selected_row() {
@@ -275,246 +319,8 @@ fn fuzzy_subseq(needle: &str, haystack: &str) -> bool {
     true
 }
 
-/// A rendered line of the editor body: a section header, or a setting row (by row index).
-enum Disp {
-    Header(String),
-    Row(usize),
-}
-
-/// Build the interleaved display list (section headers + the filtered rows under them).
-fn display_items(ed: &ConfigEditor, matches: &[usize]) -> Vec<Disp> {
-    let mut items = Vec::new();
-    let mut last_group = String::new();
-    for &ri in matches {
-        let g = &ed.rows[ri].group;
-        if g != &last_group {
-            items.push(Disp::Header(g.clone()));
-            last_group = g.clone();
-        }
-        items.push(Disp::Row(ri));
-    }
-    items
-}
-
-/// Render the value control for a row: `[● on]`/`[○ off]`, `‹ value ›`, masked secret, or the value.
-fn value_span(r: &SettingRow, sel: bool) -> Span<'static> {
-    let style = Style::default().fg(if sel { color::ok() } else { color::fg_muted() });
-    match &r.kind {
-        RowKind::Bool => {
-            let on = r.value == "true";
-            Span::styled(
-                if on {
-                    "[● on]".to_string()
-                } else {
-                    "[○ off]".to_string()
-                },
-                Style::default().fg(if on { color::ok() } else { color::fg_muted() }),
-            )
-        }
-        RowKind::Enum(_) => Span::styled(format!("‹ {} ›", r.value), style),
-        RowKind::Secret => Span::styled(r.value.clone(), style),
-        RowKind::ReadOnly => Span::styled(
-            "↵ edit in $EDITOR".to_string(),
-            Style::default().fg(if sel {
-                color::warn()
-            } else {
-                color::fg_muted()
-            }),
-        ),
-        _ => {
-            let v = if r.value.is_empty() {
-                "—".to_string()
-            } else {
-                truncate(&r.value, 30)
-            };
-            Span::styled(v, style)
-        }
-    }
-}
-
-/// Render the editor as a full-frame overlay (called last, on top of everything).
-pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
-    if !ed.open {
-        return;
-    }
-    let frame_area = frame.area();
-    if frame_area.height < 8 || frame_area.width < 24 {
-        return;
-    }
-    let area = surface::render_panel(
-        frame,
-        frame_area,
-        surface::title("Config", surface::SurfaceTone::Accent),
-        Some(surface::hint("Esc close")),
-        surface::SurfaceTone::Accent,
-    );
-    let w = area.width as usize;
-    let h = area.height as usize;
-    let matches = ed.matches();
-    let scope = if ed.project_scope { "project" } else { "user" };
-
-    let mut lines: Vec<TextLine> = Vec::with_capacity(h);
-    lines.push(TextLine::from(vec![
-        Span::styled("  ◈ config  ", styles::user().bold()),
-        Span::styled(format!("writing to {scope} scope"), styles::user()),
-        Span::styled("  ·  Tab switch", styles::faint()),
-    ]));
-    lines.push(TextLine::from(vec![
-        Span::styled("  search ", styles::muted()),
-        Span::styled(
-            if ed.filter.is_empty() {
-                "(type to filter)".to_string()
-            } else {
-                ed.filter.clone()
-            },
-            Style::default().fg(if ed.filter.is_empty() {
-                color::fg_faint()
-            } else {
-                color::user()
-            }),
-        ),
-        Span::styled(format!("   {} settings", matches.len()), styles::faint()),
-    ]));
-    lines.push(TextLine::default());
-
-    // Body: interleave headers + rows; window around the selected row. Reserve 3 header + 4 footer.
-    let items = display_items(ed, &matches);
-    let sel_disp = items
-        .iter()
-        .position(|d| matches!(d, Disp::Row(ri) if matches.get(ed.selected) == Some(ri)))
-        .unwrap_or(0);
-    let body_h = h.saturating_sub(7).max(1);
-    let start = sel_disp
-        .saturating_sub(body_h / 2)
-        .min(items.len().saturating_sub(body_h));
-    let label_col = w.saturating_sub(40).clamp(14, 40);
-    for d in items.iter().skip(start).take(body_h) {
-        match d {
-            Disp::Header(g) => lines.push(TextLine::from(Span::styled(
-                format!("  {g}"),
-                styles::user().add_modifier(Modifier::BOLD),
-            ))),
-            Disp::Row(ri) => {
-                let r = &ed.rows[*ri];
-                let sel = matches.get(ed.selected) == Some(ri);
-                let marker = if sel { "▸" } else { " " };
-                let editing_here = sel && ed.editing.is_some();
-                let value = if editing_here {
-                    let buf = ed.editing.as_deref().unwrap_or("");
-                    let shown = if r.is_secret() {
-                        "•".repeat(buf.chars().count())
-                    } else {
-                        buf.to_string()
-                    };
-                    Span::styled(
-                        format!("{shown}▌"),
-                        styles::user().add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    value_span(r, sel)
-                };
-                let label_style = if sel {
-                    styles::user().bold()
-                } else {
-                    styles::user()
-                };
-                let mods = if r.modified {
-                    Span::styled(" ●", styles::warn())
-                } else {
-                    Span::raw("")
-                };
-                lines.push(TextLine::from(vec![
-                    Span::styled(format!("    {marker} "), label_style),
-                    Span::styled(
-                        format!(
-                            "{:<width$}",
-                            truncate(&r.label, label_col),
-                            width = label_col
-                        ),
-                        label_style,
-                    ),
-                    Span::raw("  "),
-                    value,
-                    mods,
-                ]));
-            }
-        }
-    }
-    while lines.len() < h.saturating_sub(4) {
-        lines.push(TextLine::default());
-    }
-
-    // Detail line: the selected setting's identity (type · default · source).
-    if let Some(r) = ed.selected_row() {
-        let kind = match &r.kind {
-            RowKind::Bool => "on/off".to_string(),
-            RowKind::Int => "number".to_string(),
-            RowKind::Float => "number".to_string(),
-            RowKind::Enum(o) => format!("one of: {}", o.join(" / ")),
-            RowKind::Secret => "secret (keyring)".to_string(),
-            RowKind::Text => "text".to_string(),
-            RowKind::ReadOnly => "section (↵ to edit in $EDITOR)".to_string(),
-        };
-        let dflt = if r.is_secret() {
-            String::new()
-        } else {
-            format!(
-                " · default: {}",
-                if r.default.is_empty() {
-                    "—"
-                } else {
-                    &r.default
-                }
-            )
-        };
-        lines.push(TextLine::from(Span::styled(
-            format!(
-                "  {} · {kind}{dflt} · source: {}",
-                truncate(&r.path, w.saturating_sub(40).max(10)),
-                r.source
-            ),
-            styles::faint(),
-        )));
-        let help = r.help.clone().unwrap_or_default();
-        lines.push(TextLine::from(Span::styled(
-            format!("  {}", truncate(&help, w.saturating_sub(4))),
-            styles::user(),
-        )));
-    } else {
-        lines.push(TextLine::default());
-        lines.push(TextLine::default());
-    }
-
-    // Status (last save/reset result).
-    if let Some(s) = &ed.status {
-        let color = if s.starts_with('✓') {
-            color::ok()
-        } else {
-            color::err()
-        };
-        lines.push(TextLine::from(Span::styled(
-            format!("  {}", truncate(s, w.saturating_sub(4))),
-            Style::default().fg(color),
-        )));
-    } else {
-        lines.push(TextLine::default());
-    }
-
-    // Key hints — context-sensitive.
-    let hint = if ed.editing.is_some() {
-        "  type a value · Enter save · Esc cancel"
-    } else {
-        match ed.selected_row().map(|r| &r.kind) {
-            Some(RowKind::Bool) => "  Enter toggle · Del reset · Tab scope · Esc close",
-            Some(RowKind::Enum(_)) => "  ←/→ change · Del reset · Tab scope · Esc close",
-            Some(RowKind::ReadOnly) => "  Enter edit in $EDITOR · Tab scope · Esc close",
-            _ => "  Enter edit · Del reset · Tab scope · Esc close",
-        }
-    };
-    lines.push(TextLine::from(Span::styled(hint, styles::faint())));
-
-    frame.render_widget(Paragraph::new(lines), area);
-}
+mod render;
+pub use render::render_config_overlay;
 
 #[cfg(test)]
 mod tests {
@@ -650,5 +456,131 @@ mod tests {
         assert_eq!(e.matches().len(), 1);
         e.filter = "full".into(); // matches the label
         assert_eq!(e.matches().len(), 1);
+    }
+
+    fn sample_rows() -> Vec<SettingRow> {
+        vec![
+            SettingRow {
+                path: "key.anthropic".into(),
+                label: "Anthropic".into(),
+                group: "Providers & keys".into(),
+                help: Some("API key for Anthropic, stored in the OS keyring. Enter to set.".into()),
+                kind: RowKind::Secret,
+                value: "○ not set".into(),
+                source: "keyring".into(),
+                ..Default::default()
+            },
+            SettingRow {
+                path: "key.groq".into(),
+                label: "Groq".into(),
+                group: "Providers & keys".into(),
+                kind: RowKind::Secret,
+                value: "● set".into(),
+                source: "keyring".into(),
+                ..Default::default()
+            },
+            SettingRow {
+                path: "tui.theme".into(),
+                label: "Theme".into(),
+                group: "Interface".into(),
+                help: Some("Colour theme: auto follows the terminal.".into()),
+                kind: RowKind::Enum(vec!["auto".into(), "dark".into(), "light".into()]),
+                value: "auto".into(),
+                default: "auto".into(),
+                source: "default".into(),
+                ..Default::default()
+            },
+            brow("tui.reduce_motion", "Reduce motion", "Interface", "true"),
+        ]
+    }
+
+    fn draw(ed: &ConfigEditor, w: u16, h: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render_config_overlay(f, ed)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn two_panes_from_120_columns_with_sections_counts_and_one_value_grammar() {
+        let ed = ed_with(sample_rows());
+        let text = draw(&ed, 140, 24).join("\n");
+        assert!(
+            text.contains("Settings") && text.contains("4 settings"),
+            "{text}"
+        );
+        assert!(
+            text.contains("❯ Providers & keys") && text.contains("Interface"),
+            "{text}"
+        );
+        assert!(
+            text.contains("scope:  User") || text.contains("scope: "),
+            "{text}"
+        );
+        assert!(
+            text.contains("○ not set") && text.contains("✓ keyring"),
+            "{text}"
+        );
+        assert!(
+            text.contains("API key for Anthropic"),
+            "description column: {text}"
+        );
+        let help = text
+            .lines()
+            .find(|l| l.contains("source: keyring"))
+            .expect("help line");
+        assert!(
+            help.trim_end()
+                .trim_end_matches(['│', ' '])
+                .ends_with("key.anthropic"),
+            "key path last: {help}"
+        );
+        assert!(
+            !text.contains("Theme"),
+            "only the current section's rows: {text}"
+        );
+    }
+
+    #[test]
+    fn single_pane_below_120_columns_names_the_section_and_pages_between_them() {
+        let mut ed = ed_with(sample_rows());
+        let text = draw(&ed, 80, 24).join("\n");
+        assert!(
+            text.contains("PROVIDERS & KEYS") && text.contains("section 1/2"),
+            "{text}"
+        );
+        ed.handle_key(KeyKind::PageDown);
+        assert_eq!(
+            ed.selected_row().unwrap().path,
+            "tui.theme",
+            "jumped to the next section"
+        );
+        let text = draw(&ed, 80, 24).join("\n");
+        assert!(
+            text.contains("INTERFACE") && text.contains("section 2/2"),
+            "{text}"
+        );
+        assert!(text.contains("‹ auto ›") && text.contains("● on"), "{text}");
+        assert!(text.contains("tui.theme"), "{text}");
+        ed.handle_key(KeyKind::PageUp);
+        assert_eq!(ed.selected_row().unwrap().path, "key.anthropic");
+    }
+
+    #[test]
+    fn interface_section_lists_the_theme_settings_and_fits_the_inline_region() {
+        let mut ed = ed_with(sample_rows());
+        ed.handle_key(KeyKind::PageDown);
+        let rows = draw(&ed, 80, 14);
+        let text = rows.join("\n");
+        assert!(
+            text.contains("Theme") && text.contains("Reduce motion"),
+            "{text}"
+        );
+        assert_eq!(rows.len(), 14);
+        ed.filter = "zzz".into();
+        assert!(draw(&ed, 80, 14).join("\n").contains("No settings match"));
     }
 }

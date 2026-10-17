@@ -41,8 +41,13 @@ answered with the conversation in view:
 - **`/btw <question>`** (alias **`/side`**) — routes one cheap trivial-tier model call through the
   mesh (mirrors `/compact`'s `TaskTier::Trivial` routing and `auxiliary_policy.rs`'s existing
   "side call" shape: recap, suggest, memory-capture, shell-diagnose) and renders the answer as a
-  side-note card (`◈ btw …`) in the TUI scrollback — visually and structurally distinct from an
-  assistant message.
+  side-note card in the TUI — visually and structurally distinct from an assistant message. The
+  card is a titled frame (`btw`, `side question · not saved`, at most 84 cells wide, centred): the
+  question in bold, then the answer rendered as markdown and scrollable (`↑↓`, `PgUp`/`PgDn`,
+  clamped to the answer's end), with the model and cost in the footer border (`llama3.2 · <$0.01 ·
+  ↑↓ scroll · Esc close`). While the call runs the body shows `⠹ asking <model>…`. Esc, Enter and
+  Space close it. Padding inside the frame is marked as decoration, so a mouse drag copies the text
+  and not the margins.
 - **Never persisted, never joins history.** `Session::ask_btw` (`crates/forge-core/src/
   btw_policy.rs`) calls `self.provider.complete_with(...)` directly. It never pushes to
   `self.transcript` and never calls `self.store.add_message` or `record_side_call_usage` — not

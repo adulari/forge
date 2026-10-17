@@ -291,7 +291,14 @@ fn cursor_marker(app: &BoardApp, pos: usize) -> (&'static str, Style) {
     } else {
         color::fg_muted()
     };
-    ("▸ ", Style::default().fg(color).bold())
+    (
+        if crate::theme::glyphs::g().unicode {
+            "❯ "
+        } else {
+            "> "
+        },
+        Style::default().fg(color).bold(),
+    )
 }
 
 fn text_line(prefix: &str, text: &str, style: Style, width: usize) -> Line<'static> {
@@ -603,7 +610,7 @@ fn item_detail(app: &BoardApp, d: &DispatchInfo, item: &DispatchItemInfo) -> (St
         let doing = c
             .current_task
             .as_ref()
-            .map(|t| format!("▸ {t}"))
+            .map(|t| format!("{} {t}", crate::theme::glyphs::g().task_active))
             .or_else(|| c.last_line.clone())
             .unwrap_or_else(|| c.health.label().to_string());
         let age = fmt_age(app.now.saturating_sub(c.last_activity));

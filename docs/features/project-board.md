@@ -340,3 +340,9 @@ full history.
 - Re-pinning the model is a prompt-injected `/model` command, not a typed field — a session whose
   `/model` command has been renamed or removed by a future change would silently stop working
   from the board without a compile-time signal.
+
+## Glyphs
+
+The board uses the Forgeline glyph set: `✦ board` in the header, `◉` for the task in progress,
+`⑂` for a worktree, `✗`/`▲` for danger and warning signals, and `❯` for the focused form row and
+dispatch cursor. All colours come from the theme tokens.

@@ -185,7 +185,18 @@ fn field_row(
         Hit::Form(FormHit::Field(field)),
     );
     let mut row = Row::at(inner.x, y);
-    row.add(if focused { " ▸ " } else { "   " }, styles::user().bold());
+    row.add(
+        if focused {
+            if crate::theme::glyphs::g().unicode {
+                " ❯ "
+            } else {
+                " > "
+            }
+        } else {
+            "   "
+        },
+        styles::brand().bold(),
+    );
     let label = match field {
         FormField::Worktree => "Worktrees",
         FormField::Mode => "Sessions may",

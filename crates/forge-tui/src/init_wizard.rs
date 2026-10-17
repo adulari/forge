@@ -3,7 +3,8 @@
 //! bridge. Pure [`State`] + transitions are unit-tested; [`run`] is the thin terminal I/O shell.
 //! Keys are returned to the caller to store in the OS keyring — never written to disk here.
 
-use crate::theme::{color, styles};
+use crate::theme::glyphs::g;
+use crate::theme::styles;
 use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
@@ -14,8 +15,8 @@ use crossterm::terminal::{
 };
 use forge_types::{CreditMode, PermissionMode};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
@@ -320,23 +321,86 @@ fn run_loop(input: WizardInput) -> io::Result<WizardOutcome> {
     }
 }
 
+/// The wizard's sections in order, as step-dot labels: providers, search (when offered), bridges
+/// (when any are installed), settings, and the final Finish.
+fn steps(state: &State) -> Vec<&'static str> {
+    let mut out = vec!["providers"];
+    if !state.input.search.is_empty() {
+        out.push("search");
+    }
+    if !state.input.bridges.is_empty() {
+        out.push("bridges");
+    }
+    out.push("settings");
+    out.push("done");
+    out
+}
+
+/// Index into [`steps`] of the section the focused row belongs to.
+fn step_of(state: &State) -> usize {
+    let label = match state.focused() {
+        Row::Provider(_) => "providers",
+        Row::Search(_) => "search",
+        Row::Bridge(_) => "bridges",
+        Row::Permission | Row::CreditMode => "settings",
+        Row::Finish => "done",
+    };
+    steps(state).iter().position(|s| *s == label).unwrap_or(0)
+}
+
+/// `●●○○○  providers · search · settings · done`: filled up to and including the current step.
+fn step_dots(state: &State) -> Line<'static> {
+    let glyphs = g();
+    let labels = steps(state);
+    let current = step_of(state);
+    let (filled, empty) = if glyphs.unicode {
+        ("●", "○")
+    } else {
+        ("*", "o")
+    };
+    let mut spans = vec![Span::raw("  ")];
+    for i in 0..labels.len() {
+        let on = i <= current;
+        spans.push(Span::styled(
+            if on { filled } else { empty },
+            if on { styles::brand() } else { styles::faint() },
+        ));
+    }
+    spans.push(Span::styled(
+        format!("  {}", labels.join(&format!(" {} ", glyphs.sep))),
+        styles::faint(),
+    ));
+    Line::from(spans)
+}
+
 fn render(f: &mut Frame, state: &State) {
     let area = f.area();
-    let inner = surface::render_panel(
+    let steps = steps(state);
+    let body = crate::overlays::padded_panel(
         f,
         area,
-        surface::title("◈ Forge setup", surface::SurfaceTone::Accent),
-        None,
+        surface::title("Forge setup", surface::SurfaceTone::Accent),
+        Some(Span::styled(
+            format!(" step {} of {} ", step_of(state) + 1, steps.len()),
+            styles::faint(),
+        )),
+        Some(Span::styled(
+            format!(
+                " {} move {sep} Enter edit/cycle {sep} 1-9 pick {sep} Esc cancel ",
+                g().up_down,
+                sep = g().sep
+            ),
+            styles::faint(),
+        )),
         surface::SurfaceTone::Accent,
     );
+    if body.height < 3 || body.width < 20 {
+        return;
+    }
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "Enable providers (Enter to type a key, masked) · pick your bridge plan · then Finish.",
-        styles::muted(),
-    )));
-    lines.push(Line::from(Span::styled(
-        "↑/↓ move · Enter edit/cycle · digits pick a plan · Esc cancel",
+        "Enable providers (Enter to type a key, masked), pick your bridge plan, then Finish.",
         styles::muted(),
     )));
     lines.push(Line::from(""));
@@ -345,7 +409,7 @@ fn render(f: &mut Frame, state: &State) {
     // Reveal rows progressively with the open animation.
     let revealed = ((state.anim * rows.len() as f32).ceil() as usize).clamp(1, rows.len());
 
-    lines.push(section("Providers", color::user()));
+    lines.push(section("PROVIDERS"));
     for (vi, row) in rows.iter().enumerate().take(revealed) {
         if let Row::Provider(i) = row {
             let p = &state.input.providers[*i];
@@ -359,7 +423,7 @@ fn render(f: &mut Frame, state: &State) {
     }
     if !state.input.search.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section("Search (web_search key)", color::warn()));
+        lines.push(section("SEARCH (web_search key)"));
         for (vi, row) in rows.iter().enumerate().take(revealed) {
             if let Row::Search(i) = row {
                 let p = &state.input.search[*i];
@@ -374,7 +438,7 @@ fn render(f: &mut Frame, state: &State) {
     }
     if !state.input.bridges.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section("Subscription bridges", color::fg_muted()));
+        lines.push(section("SUBSCRIPTION BRIDGES"));
         for (vi, row) in rows.iter().enumerate().take(revealed) {
             if let Row::Bridge(i) = row {
                 lines.push(bridge_line(state, *i, vi == state.cursor));
@@ -382,7 +446,7 @@ fn render(f: &mut Frame, state: &State) {
         }
     }
     lines.push(Line::from(""));
-    lines.push(section("Settings", color::warn()));
+    lines.push(section("SETTINGS"));
     for (vi, row) in rows.iter().enumerate().take(revealed) {
         match row {
             Row::Permission => lines.push(cycle_line(
@@ -392,6 +456,9 @@ fn render(f: &mut Frame, state: &State) {
                     .map(|m| (m.label(), m.description()))
                     .collect::<Vec<_>>(),
                 state.perm_idx,
+                PermissionMode::all()
+                    .iter()
+                    .position(|m| *m == PermissionMode::default()),
                 vi == state.cursor,
             )),
             Row::CreditMode => lines.push(cycle_line(
@@ -401,6 +468,9 @@ fn render(f: &mut Frame, state: &State) {
                     .map(|m| (m.label(), m.description()))
                     .collect::<Vec<_>>(),
                 state.credit_idx,
+                CreditMode::all()
+                    .iter()
+                    .position(|m| *m == CreditMode::default()),
                 vi == state.cursor,
             )),
             _ => {}
@@ -408,84 +478,116 @@ fn render(f: &mut Frame, state: &State) {
     }
     lines.push(Line::from(""));
     let finish_selected = matches!(state.focused(), Row::Finish);
-    let finish_style = if finish_selected {
-        styles::ok().add_modifier(Modifier::BOLD)
-    } else {
-        styles::ok()
-    };
-    lines.push(Line::from(Span::styled(
-        format!("{} Finish setup", marker(finish_selected)),
-        finish_style,
-    )));
+    lines.push(selectable(
+        vec![
+            Span::styled(format!("{} ", g().ok), styles::ok()),
+            Span::styled("Finish setup", styles::ok().add_modifier(Modifier::BOLD)),
+        ],
+        finish_selected,
+        body.width as usize,
+    ));
 
-    let body = pad(inner);
-    let scroll = scroll_offset(&lines, body.height);
+    // The step dots sit on the last row, outside the scrolling list.
+    let dots_h = 2u16.min(body.height.saturating_sub(1));
+    let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(dots_h)]).split(body);
+    let scroll = scroll_offset(&lines, parts[0].height);
     f.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Left)
             .scroll((scroll, 0)),
-        body,
+        parts[0],
     );
+    if dots_h > 0 {
+        f.render_widget(
+            Paragraph::new(vec![Line::from(""), step_dots(state)]),
+            parts[1],
+        );
+    }
 }
 
-/// First visible line so the selected row (the one carrying the `▸` marker) stays on screen.
+/// First visible line so the selected row (the one carrying the `❯` caret) stays on screen.
 fn scroll_offset(lines: &[Line], height: u16) -> u16 {
+    let caret = g().prompt;
     let selected = lines
         .iter()
-        .position(|l| l.spans.iter().any(|s| s.content.contains('▸')));
+        .position(|l| l.spans.iter().any(|s| s.content.contains(caret)));
     match selected {
         Some(i) if i >= usize::from(height) => (i + 1 - usize::from(height)) as u16,
         _ => 0,
     }
 }
 
-fn section(title: &str, color: Color) -> Line<'static> {
+fn section(title: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("  {title}"),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
+        styles::muted().add_modifier(Modifier::BOLD),
     ))
 }
 
-fn marker(selected: bool) -> &'static str {
+fn caret(selected: bool) -> Span<'static> {
+    Span::styled(
+        format!(" {} ", if selected { g().prompt } else { " " }),
+        if selected {
+            styles::brand()
+        } else {
+            styles::faint()
+        },
+    )
+}
+
+/// A row with the raised fill and `❯` caret when focused, padded to `width`.
+fn selectable(spans: Vec<Span<'static>>, selected: bool, width: usize) -> Line<'static> {
+    let mut out = vec![caret(selected)];
+    out.extend(spans);
     if selected {
-        "▸"
-    } else {
-        " "
+        let fill = styles::selected_row();
+        let used: usize = out.iter().map(|s| s.content.chars().count()).sum();
+        for span in &mut out {
+            span.style = span.style.patch(fill);
+        }
+        out.push(Span::styled(" ".repeat(width.saturating_sub(used)), fill));
     }
+    Line::from(out)
 }
 
 /// Render one key field (a provider or a search provider) — they look identical.
 fn key_line(p: &ProviderItem, key: &str, selected: bool, state_editing: bool) -> Line<'static> {
     let editing = selected && state_editing;
-    let value = if editing {
-        format!("{}▌", "•".repeat(key.len()))
+    let glyphs = g();
+    let (value, value_style) = if editing {
+        (
+            format!("{}{}", "•".repeat(key.len()), glyphs.caret),
+            styles::brand().bold(),
+        )
     } else if !key.is_empty() {
-        format!("{} set", "•".repeat(key.len().min(8)))
+        (
+            format!("{} {} set", glyphs.ok, "•".repeat(key.len().min(8))),
+            styles::ok(),
+        )
     } else if p.had_key {
-        "[already configured]".to_string()
+        (format!("{} configured", glyphs.ok), styles::ok())
     } else {
-        "(Enter to add a key)".to_string()
+        (
+            format!("{} Enter to add a key", glyphs.task_open),
+            styles::faint(),
+        )
     };
-    let name_color = if selected {
-        color::brand()
-    } else {
-        color::user()
-    };
-    let val_color = if editing {
-        color::warn()
-    } else if !key.is_empty() || p.had_key {
-        color::ok()
-    } else {
-        color::fg_muted()
-    };
-    Line::from(vec![
-        Span::styled(
-            format!("  {} {:<14}", marker(selected), p.id),
-            Style::default().fg(name_color),
-        ),
-        Span::styled(format!("{:<42} ", p.label), styles::muted()),
-        Span::styled(value, Style::default().fg(val_color)),
-    ])
+    selectable(
+        vec![
+            Span::styled(
+                format!("{:<14}", p.id),
+                if selected {
+                    styles::fg().bold()
+                } else {
+                    styles::fg()
+                },
+            ),
+            Span::styled(format!("{:<40} ", p.label), styles::muted()),
+            Span::styled(value, value_style),
+        ],
+        selected,
+        200,
+    )
 }
 
 fn bridge_line(state: &State, i: usize, selected: bool) -> Line<'static> {
@@ -497,69 +599,78 @@ fn bridge_line(state: &State, i: usize, selected: bool) -> Line<'static> {
         .plans
         .iter()
         .enumerate()
-        .map(|(n, (label, _))| format!("{})_{}", n + 1, label).replace('_', " "))
+        .map(|(n, (label, _))| format!("{} {label}", n + 1))
         .collect::<Vec<_>>()
-        .join("  ");
-    let name_color = if selected {
-        color::brand()
-    } else {
-        color::fg_muted()
-    };
-    Line::from(vec![
-        Span::styled(
-            format!("  {} {:<12}", marker(selected), b.prefix),
-            Style::default().fg(name_color),
-        ),
-        Span::styled(
-            format!("{:<14}", chosen),
-            styles::ok().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(opts, styles::muted()),
-    ])
+        .join("   ");
+    selectable(
+        vec![
+            Span::styled(
+                format!("{:<12}", b.prefix),
+                if selected {
+                    styles::fg().bold()
+                } else {
+                    styles::fg()
+                },
+            ),
+            Span::styled(
+                format!("{chosen:<14}"),
+                styles::ok().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(opts, styles::muted()),
+        ],
+        selected,
+        200,
+    )
 }
 
-/// Render a cycling picker row (Enter/digit cycles through options).
+/// Render a cycling picker row (Enter/digit cycles through options). The recommended option is
+/// labelled, not just pre-selected.
 fn cycle_line(
     name: &'static str,
     options: Vec<(&'static str, &'static str)>,
     sel: usize,
+    recommended: Option<usize>,
     selected: bool,
 ) -> Line<'static> {
-    let chosen = options[sel.min(options.len() - 1)].0;
-    let desc = options[sel.min(options.len() - 1)].1;
+    let idx = sel.min(options.len() - 1);
+    let (chosen, desc) = options[idx];
+    let tag = if recommended == Some(idx) {
+        " (recommended)"
+    } else {
+        ""
+    };
     let opts = options
         .iter()
         .enumerate()
-        .map(|(n, (label, _))| format!("{}){}", n + 1, label))
+        .map(|(n, (label, _))| {
+            format!(
+                "{} {label}{}",
+                n + 1,
+                if recommended == Some(n) { "*" } else { "" }
+            )
+        })
         .collect::<Vec<_>>()
-        .join("  ");
-    let name_color = if selected {
-        color::brand()
-    } else {
-        color::warn()
-    };
-    Line::from(vec![
-        Span::styled(
-            format!("  {} {:<14}", marker(selected), name),
-            Style::default().fg(name_color),
-        ),
-        Span::styled(
-            format!("{:<14}", chosen),
-            styles::ok().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!("{:<38} ", desc), styles::muted()),
-        Span::styled(opts, styles::muted()),
-    ])
-}
-
-/// Inset the content one column/row inside the border.
-fn pad(area: Rect) -> Rect {
-    Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(1),
-    }
+        .join("   ");
+    selectable(
+        vec![
+            Span::styled(
+                format!("{name:<14}"),
+                if selected {
+                    styles::fg().bold()
+                } else {
+                    styles::fg()
+                },
+            ),
+            Span::styled(
+                format!("{chosen}{tag:<14}"),
+                styles::ok().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {desc}  "), styles::muted()),
+            Span::styled(opts, styles::faint()),
+        ],
+        selected,
+        200,
+    )
 }
 
 #[cfg(test)]
@@ -682,13 +793,92 @@ mod tests {
 }
 
 #[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    fn draw(state: &State, w: u16, h: u16) -> Vec<String> {
+        use ratatui::backend::TestBackend;
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(f, state)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn state() -> State {
+        let mut s = State::new(WizardInput {
+            providers: vec![ProviderItem {
+                id: "anthropic".into(),
+                label: "Claude API".into(),
+                had_key: true,
+            }],
+            search: vec![],
+            bridges: vec![BridgeItem {
+                prefix: "claude-cli".into(),
+                plans: vec![("Pro".into(), "pro".into())],
+            }],
+            current_permission: PermissionMode::default(),
+            current_credit_mode: CreditMode::default(),
+        });
+        s.anim = 1.0;
+        s
+    }
+
+    #[test]
+    fn the_wizard_uses_the_frame_step_dots_and_labels_the_recommended_choice() {
+        let mut s = state();
+        let text = draw(&s, 100, 30).join("\n");
+        assert!(text.contains("Forge setup"), "{text}");
+        assert!(text.contains("step 1 of 4"), "{text}");
+        assert!(
+            text.contains("●○○○") && text.contains("providers · bridges · settings · done"),
+            "{text}"
+        );
+        assert!(
+            text.contains("❯ anthropic"),
+            "caret on the focused row: {text}"
+        );
+        assert!(
+            text.contains("(recommended)"),
+            "default choice is labelled: {text}"
+        );
+        assert!(text.contains("configured"), "{text}");
+        // Moving into the settings advances the dots.
+        for _ in 0..2 {
+            s.move_down();
+        }
+        let text = draw(&s, 100, 30).join("\n");
+        assert!(
+            text.contains("step 3 of 4") && text.contains("●●●○"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_wizard_fits_80x24_and_keeps_the_focused_row_visible() {
+        let mut s = state();
+        for _ in 0..4 {
+            s.move_down();
+        }
+        let rows = draw(&s, 80, 14);
+        assert_eq!(rows.len(), 14);
+        let text = rows.join("\n");
+        assert!(
+            text.contains("Finish setup"),
+            "scrolled to the focused row: {text}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod scroll_tests {
     use super::*;
 
     #[test]
     fn selected_row_below_the_fold_scrolls_into_view() {
         let mut lines: Vec<Line> = (0..30).map(|_| Line::from("  row")).collect();
-        lines[25] = Line::from("▸ Finish setup");
+        lines[25] = Line::from("❯ Finish setup");
         assert_eq!(scroll_offset(&lines, 10), 16);
         assert_eq!(scroll_offset(&lines, 40), 0);
     }

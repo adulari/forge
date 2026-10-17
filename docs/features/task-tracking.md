@@ -54,3 +54,9 @@ This matters because a bridge-only setup (no direct API keys) would otherwise ne
   codex calls `mcp__forge__update_tasks` repeatedly (pending→in_progress→done), visible in the
   TUI, persisted to the store.
 - `cargo test --workspace` + `clippy --workspace --all-targets -D warnings` green.
+
+## TUI presentation
+
+The tasks band shows `Tasks d/n` and the task in progress on one row; `Ctrl+O` opens the list with
+per-task elapsed times, and on terminals 150 columns or wider it becomes a right rail. See
+`docs/features/tui-panels.md`.

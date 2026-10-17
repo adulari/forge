@@ -408,3 +408,9 @@ that builds the specs, a synthesis system prompt, and a report renderer — no n
 - [ ] Edge-case table behaviours covered by tests where feasible (storm/cap, runaway cost, all-fail).
 - [ ] `cargo fmt` + `clippy -D warnings` clean; verified live in the TUI against a real provider with a 3+-way fan-out.
 - [ ] Assay-readiness note: the primitive exposes everything Assay needs (specs in, results out, tree rendered) — confirmed by a throwaway 3-file read-only fan-out preset.
+
+## TUI presentation
+
+Subagent batches print as a `◆ Agents` group with faint `├`/`└` branches and a count footer; the
+live list sits in the tasks and agents band (`Ctrl+O`), or the details rail from 150 columns. See
+`docs/features/tui-panels.md`.
