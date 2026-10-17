@@ -166,7 +166,7 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     }
     if wf_band_h > 0 {
         frame.render_widget(
-            Paragraph::new(crate::workflow_view::workflow_band_line(app)),
+            Paragraph::new(crate::workflow_view::workflow_band_line(app, wf_area.width)),
             wf_area,
         );
     }

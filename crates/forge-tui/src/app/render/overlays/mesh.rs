@@ -61,7 +61,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     } else {
         format!("{} Model routing", g().spin(o.anim_tick as usize))
     };
-    let inner = super::pad::padded_panel(
+    let inner = crate::overlays::padded_panel(
         f,
         inspector,
         surface::title(title, surface::SurfaceTone::Tool),

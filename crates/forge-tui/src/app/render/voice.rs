@@ -40,7 +40,7 @@ pub fn render_voice_overlay(f: &mut Frame, app: &App) {
         VoicePhase::Transcribing => "please wait".to_string(),
         VoicePhase::Error(_) => "any key dismiss".to_string(),
     };
-    let inner = super::overlays::padded_panel(
+    let inner = crate::overlays::padded_panel(
         f,
         card,
         surface::title(title, tone),

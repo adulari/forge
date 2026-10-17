@@ -7,7 +7,6 @@ use ratatui::text::{Line as TextLine, Span};
 use unicode_width::UnicodeWidthStr;
 
 use super::super::span_fit::fit_spans;
-use crate::app::render::fmt_dur;
 use crate::app::App;
 
 pub(crate) fn spans_width(spans: &[Span<'_>]) -> usize {
@@ -32,19 +31,8 @@ pub(crate) fn aligned(
     TextLine::from(spans)
 }
 
-/// A duration for a counter: `41s`, `2m 10s`, `1h 05m`.
-pub(crate) fn fmt_elapsed(d: Duration) -> String {
-    let secs = d.as_secs();
-    if (60..3600).contains(&secs) {
-        format!("{}m {:02}s", secs / 60, secs % 60)
-    } else if secs >= 3600 {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
-    } else {
-        fmt_dur(secs)
-    }
-}
-
 pub(crate) use crate::overlays::fmt_cost;
+pub(crate) use crate::overlays::fmt_elapsed;
 
 /// Start and finish times observed for tasks and agents, keyed by a stable label. The protocol
 /// carries no timestamps for either, so the clock starts when the panel first sees the item

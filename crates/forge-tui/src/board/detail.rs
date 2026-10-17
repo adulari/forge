@@ -462,7 +462,12 @@ fn overview(
         out.push(Line::from(""));
         out.push(w::heading("in progress", width));
         for t in in_progress {
-            out.push(w::bullet("▸", &t.title, color::user(), width));
+            out.push(w::bullet(
+                crate::theme::glyphs::g().task_active,
+                &t.title,
+                color::brand(),
+                width,
+            ));
         }
     }
     if let Some(s) = snap {
@@ -589,7 +594,7 @@ fn tasks(snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'static>> {
     for t in &s.tasks {
         let (glyph, color, bold) = match t.status.as_str() {
             "done" => ("✓", color::ok(), false),
-            "in_progress" => ("▸", color::user(), true),
+            "in_progress" => (crate::theme::glyphs::g().task_active, color::brand(), true),
             _ => ("○", color::fg_muted(), false),
         };
         let mut fit = w::Fit::new(width);
@@ -639,7 +644,12 @@ fn tasks(snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'static>> {
             width,
         ));
         for p in wf.phases.iter().take(8) {
-            out.push(w::bullet("▸", p, color::user(), width));
+            out.push(w::bullet(
+                crate::theme::glyphs::g().group,
+                p,
+                color::user(),
+                width,
+            ));
         }
         for l in wf.logs.iter().rev().take(5).rev() {
             out.push(w::bullet("·", l, color::fg_muted(), width));

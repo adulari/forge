@@ -110,7 +110,10 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
     let t = app.totals();
     let x0 = area.x + 1;
     let mut row = w::Row::at(x0, area.y);
-    row.add("⚒ forge board", styles::brand().bold());
+    row.add(
+        format!("{} board", crate::theme::glyphs::g().brand),
+        styles::brand().bold(),
+    );
     row.sep();
     let label = match app.project_filter.as_deref() {
         Some(p) => format!("▾ {}", w::clip_cells(p, 24)),
@@ -539,11 +542,17 @@ fn draw_card(
         l1.add(format!(" {tier} "), styles::faint());
     }
     if card.worktree.is_some() {
-        l1.add(" ⎇", styles::user());
+        l1.add(
+            format!(" {}", crate::theme::glyphs::g().branch),
+            styles::user(),
+        );
     }
     if compact {
         if let Some(task) = &card.current_task {
-            l1.add("  ▸ ", styles::user());
+            l1.add(
+                format!("  {} ", crate::theme::glyphs::g().task_active),
+                styles::brand(),
+            );
             l1.add(task.clone(), styles::fg());
         }
     } else if app.project_filter.is_none() {
@@ -581,16 +590,25 @@ fn line_two(card: &Card, signal: Option<&super::model::Signal>, width: usize) ->
     let mut fit = w::Fit::new(width);
     match signal {
         Some(s) if s.level == SignalLevel::Danger => {
-            fit.add("! ", styles::err().bold());
+            fit.add(
+                format!("{} ", crate::theme::glyphs::g().fail),
+                styles::err().bold(),
+            );
             fit.add(s.text.clone(), styles::err());
         }
         Some(s) => {
-            fit.add("▲ ", styles::warn().bold());
+            fit.add(
+                format!("{} ", crate::theme::glyphs::g().warn),
+                styles::warn().bold(),
+            );
             fit.add(s.text.clone(), styles::warn());
         }
         None => match &card.current_task {
             Some(task) => {
-                fit.add("▸ ", styles::user().bold());
+                fit.add(
+                    format!("{} ", crate::theme::glyphs::g().task_active),
+                    styles::brand().bold(),
+                );
                 fit.add(task.clone(), styles::fg());
             }
             None => fit.add(card.health.label(), styles::muted()),
@@ -883,7 +901,7 @@ mod tests {
     fn the_header_counts_and_the_keybar_are_drawn() {
         let mut app = busy_app();
         let s = screen(&mut app, 160, 40);
-        assert!(s.contains("forge board"), "{s}");
+        assert!(s.contains("✦ board"), "{s}");
         assert!(s.contains("1 needs you"), "{s}");
         assert!(s.contains("1 working"), "{s}");
         assert!(s.contains("all projects"), "{s}");

@@ -2,8 +2,6 @@ use super::*;
 use crate::theme::styles;
 
 mod btw;
-mod pad;
-pub(in crate::app::render) use pad::padded_panel;
 mod usage;
 pub use btw::render_btw_overlay;
 pub use usage::render_usage_overlay;

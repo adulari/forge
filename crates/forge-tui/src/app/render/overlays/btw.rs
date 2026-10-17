@@ -6,7 +6,7 @@ use crate::theme::glyphs::g;
 
 /// Widest the card grows, border included.
 const MAX_WIDTH: u16 = 84;
-use super::pad::{PAD_X, PAD_Y};
+use crate::overlays::{PAD_X, PAD_Y};
 
 /// Rows a line takes when wrapped to `width` cells.
 fn wrapped_rows(line: &TextLine<'_>, width: usize) -> usize {
@@ -102,7 +102,7 @@ pub fn render_btw_overlay(f: &mut Frame, app: &App) {
     } else {
         "Esc close".to_string()
     };
-    let body = super::pad::padded_panel(
+    let body = crate::overlays::padded_panel(
         f,
         card_area,
         surface::title("btw", surface::SurfaceTone::Accent),

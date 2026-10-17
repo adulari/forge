@@ -217,10 +217,10 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     }
     let area = f.area();
     let width = area.width.saturating_sub(4).clamp(10, 100).min(area.width);
-    let text_w = width.saturating_sub(2 + super::pad::PAD_X * 2) as usize;
+    let text_w = width.saturating_sub(2 + crate::overlays::PAD_X * 2) as usize;
     let lines = usage_lines(&app.usage_overlay, text_w);
     let height = (lines.len() as u16)
-        .saturating_add(2 + super::pad::PAD_Y * 2)
+        .saturating_add(2 + crate::overlays::PAD_Y * 2)
         .min(area.height.saturating_sub(2).max(5));
     let card = surface::modal_area(area, width, height);
     let title = if app.usage_overlay.loading {
@@ -231,7 +231,7 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     } else {
         "Usage".to_string()
     };
-    let body = super::pad::padded_panel(
+    let body = crate::overlays::padded_panel(
         f,
         card,
         surface::title(title, surface::SurfaceTone::Accent),

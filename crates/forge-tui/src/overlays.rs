@@ -218,3 +218,60 @@ pub(crate) fn fmt_cost(usd: f64) -> String {
         format!("${usd:.2}")
     }
 }
+
+/// A duration for a counter: `41s`, `2m 10s`, `1h 05m`.
+pub(crate) fn fmt_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Padding inside the frame: rows top and bottom, cells left and right.
+pub(crate) const PAD_Y: u16 = 1;
+pub(crate) const PAD_X: u16 = 2;
+
+/// Clear and frame `area` and return the padded body rectangle.
+pub(crate) fn padded_panel(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    title: ratatui::text::Span<'static>,
+    context: Option<ratatui::text::Span<'static>>,
+    footer: Option<ratatui::text::Span<'static>>,
+    tone: crate::surface::SurfaceTone,
+) -> ratatui::layout::Rect {
+    let inner = crate::surface::render_panel_with_context(f, area, title, context, footer, tone);
+    let decor = crate::copy_mark::decor(ratatui::style::Style::default());
+    for pad in [
+        ratatui::layout::Rect {
+            height: PAD_Y.min(inner.height),
+            ..inner
+        },
+        ratatui::layout::Rect {
+            y: inner.y + inner.height.saturating_sub(PAD_Y),
+            height: PAD_Y.min(inner.height),
+            ..inner
+        },
+        ratatui::layout::Rect {
+            width: PAD_X.min(inner.width),
+            ..inner
+        },
+        ratatui::layout::Rect {
+            x: inner.x + inner.width.saturating_sub(PAD_X),
+            width: PAD_X.min(inner.width),
+            ..inner
+        },
+    ] {
+        f.buffer_mut().set_style(pad, decor);
+    }
+    ratatui::layout::Rect {
+        x: inner.x + PAD_X,
+        y: inner.y + PAD_Y,
+        width: inner.width.saturating_sub(PAD_X * 2),
+        height: inner.height.saturating_sub(PAD_Y * 2),
+    }
+}

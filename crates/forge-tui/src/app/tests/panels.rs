@@ -936,8 +936,11 @@ fn the_workflow_view_renders_name_phases_rows_totals_and_narration() {
     app.apply(PresenterEvent::WorkflowLog("halfway there".into()));
     app.workflow.anim_tick = 1_000; // reveal settled — everything visible
     let out = screen_wh(&app, 100, 24);
-    assert!(out.contains("workflow 'audit'"), "header: {out:?}");
-    assert!(out.contains("research"), "phase tree: {out:?}");
+    assert!(
+        out.contains("workflow") && out.contains("audit"),
+        "header: {out:?}"
+    );
+    assert!(out.contains("1  research"), "phase checklist: {out:?}");
     assert!(out.contains("1/2 agents"), "totals: {out:?}");
     assert!(out.contains("1 running"), "running count: {out:?}");
     assert!(out.contains("halfway there"), "narration feed: {out:?}");
@@ -1198,5 +1201,90 @@ fn btw_scroll_stops_at_the_end_of_the_answer() {
     assert!(
         text.contains("line 59"),
         "the last line is reachable: {text}"
+    );
+}
+
+#[test]
+fn workflow_view_is_a_header_phase_checklist_nested_agents_log_and_hint_row() {
+    let mut app = App::default();
+    app.apply(PresenterEvent::WorkflowStarted {
+        name: Some("review-and-fix".into()),
+    });
+    app.apply(PresenterEvent::WorkflowPhase {
+        title: "Survey".into(),
+    });
+    app.apply(PresenterEvent::SubagentStart {
+        id: "s1".into(),
+        agent: "scout".into(),
+        task: "survey".into(),
+        model: Some("anthropic::opus".into()),
+        phase: Some("Survey".into()),
+    });
+    app.apply(PresenterEvent::SubagentResult {
+        id: "s1".into(),
+        agent: "scout".into(),
+        ok: true,
+        summary: "ok".into(),
+        cost_usd: 0.06,
+    });
+    app.apply(PresenterEvent::WorkflowPhase {
+        title: "Fix".into(),
+    });
+    app.apply(PresenterEvent::SubagentStart {
+        id: "f1".into(),
+        agent: "builder-a".into(),
+        task: "fix it".into(),
+        model: Some("moonshot::kimi-k3".into()),
+        phase: Some("Fix".into()),
+    });
+    app.apply(PresenterEvent::SubagentProgress {
+        id: "f1".into(),
+        snippet: "editing src/upload.rs".into(),
+    });
+    app.apply(PresenterEvent::WorkflowLog(
+        "builder-a: running cargo test".into(),
+    ));
+    app.workflow.anim_tick = 1_000;
+    app.workflow.selected = 1;
+    let rows = screen_rows(&app, 100, 24);
+    let text = rows.join("\n");
+    assert!(
+        rows[0].contains("✦ workflow") && rows[0].contains("review-and-fix"),
+        "{text}"
+    );
+    assert!(
+        rows[0].contains("phase 2") && rows[0].contains("Esc background"),
+        "{text}"
+    );
+    assert!(
+        text.contains("✓ 1  Survey") && text.contains("1 agent"),
+        "{text}"
+    );
+    assert!(
+        text.contains("◉ 2  Fix") && text.contains("running"),
+        "{text}"
+    );
+    let selected = rows.iter().find(|r| r.contains("builder-a")).unwrap();
+    assert!(
+        selected.contains("❯")
+            && selected.contains("kimi-k3")
+            && selected.contains("editing src/upload.rs"),
+        "{selected}"
+    );
+    let nested = rows.iter().find(|r| r.contains("scout")).unwrap();
+    assert!(
+        !nested.contains('❯') && nested.contains("$0.06"),
+        "{nested}"
+    );
+    assert!(
+        text.contains("LOG") && text.contains("running cargo test"),
+        "{text}"
+    );
+    let last = rows.last().unwrap();
+    assert!(
+        last.contains("select agent")
+            && last.contains("Enter zoom")
+            && last.contains("Ctrl+C stop"),
+        "{last}"
     );
 }
