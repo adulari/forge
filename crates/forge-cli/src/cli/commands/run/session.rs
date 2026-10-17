@@ -157,6 +157,7 @@ pub(crate) async fn build_session_with_self_mcp(
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
+    super::claude_flags::apply(&mut config);
     // Capture the MCP config before `config` is moved into the Session; connect after the session
     // is built so its presenter can show the connection status.
     let mut mcp_config = config.mcp.clone();

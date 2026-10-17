@@ -1058,7 +1058,11 @@ impl McpManager {
                 name: c.name.clone(),
                 status: c.status.word().to_string(),
                 transport: c.transport_label.to_string(),
-                tools: c.tools.len(),
+                tools: c
+                    .tools
+                    .iter()
+                    .filter(|t| self.config.tool_allowed(&t.qualified))
+                    .count(),
                 resources: c.resources.len(),
                 prompts: c.prompts.len(),
                 detail: match &c.status {
@@ -1085,6 +1089,7 @@ impl McpManager {
             .map(|c| {
                 c.tools
                     .iter()
+                    .filter(|t| self.config.tool_allowed(&t.qualified))
                     .map(|t| (t.qualified.clone(), one_line(&t.description)))
                     .collect()
             })
@@ -1252,6 +1257,25 @@ mod tests {
         assert!(mgr.knows_tool(MCP_CALL));
         // Server tools are reached via mcp_call, never routed by their own name.
         assert!(!mgr.knows_tool("test__echo"));
+    }
+
+    #[tokio::test]
+    async fn tool_listing_honours_the_tool_allowlist() {
+        let config = McpConfig {
+            allow: forge_config::McpAllowlist {
+                servers: Vec::new(),
+                tools: vec!["test__echo".into()],
+            },
+            ..McpConfig::default()
+        };
+        let mgr = manager_with_test_server(config).await;
+        let tools = mgr.tool_lines("test");
+        assert_eq!(
+            tools.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>(),
+            vec!["test__echo"],
+            "a denied tool must not be listed"
+        );
+        assert_eq!(mgr.status_lines()[0].tools, 1);
     }
 
     #[tokio::test]

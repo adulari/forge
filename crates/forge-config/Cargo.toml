@@ -27,6 +27,8 @@ thiserror.workspace = true
 tracing.workspace = true
 figment = { version = "0.10", features = ["toml", "env"] }
 toml = "1.1"
+toml_edit = "0.25"
+serde_ignored = "0.1"
 directories = "6"
 # Linux: the Secret Service backend (gnome-keyring/KWallet) persists to disk — unlike the
 # `linux-native` keyutils backend, which is wiped on logout/reboot (the "keyring keeps resetting"

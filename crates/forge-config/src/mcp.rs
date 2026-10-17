@@ -671,8 +671,16 @@ pub fn write_mcp_toml(path: &Path, config: &McpConfig) -> Result<(), ConfigError
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ConfigError::Write(e.to_string()))?;
     }
-    let body = toml::to_string_pretty(config).map_err(|e| ConfigError::Write(e.to_string()))?;
-    std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))
+    let mut doc = crate::toml_write::load_doc(path)?;
+    let toml::Value::Table(table) =
+        toml::Value::try_from(config).map_err(|e| ConfigError::Write(e.to_string()))?
+    else {
+        return Err(ConfigError::Write(
+            "MCP config must serialize to a table".into(),
+        ));
+    };
+    crate::toml_write::sync_table(doc.as_table_mut(), &table);
+    crate::toml_write::save_doc(path, &doc)
 }
 
 #[cfg(test)]

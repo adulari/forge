@@ -187,8 +187,36 @@ fn main() {
         .block_on(run_cli(login_path_added));
 }
 
+/// How a failed write to stdout/stderr ends the process, from the text of the panic `print!` raises.
+#[derive(Debug, PartialEq, Eq)]
+enum StdioFailure {
+    /// The reader went away (`forge mcp tools | head`): exit like other Unix CLIs, silently.
+    BrokenPipe,
+    /// Anything else (`> /dev/full`, a closed descriptor): one line instead of a panic report.
+    Other(String),
+}
+
+fn classify_stdio_panic(text: &str) -> Option<StdioFailure> {
+    let detail = text.split_once("failed printing to std")?.1;
+    Some(if detail.contains("Broken pipe") {
+        StdioFailure::BrokenPipe
+    } else {
+        StdioFailure::Other(format!("failed writing to std{detail}"))
+    })
+}
+
+/// Whether `error` is, at any depth, a write to a reader that has gone away.
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
 /// `forge run | head` closes stdout early; `println!` then panics. Exit like other Unix CLIs
-/// (128 + SIGPIPE) instead of printing a panic and exiting 101.
+/// (128 + SIGPIPE) instead of printing a panic and exiting 101. Installed here rather than by
+/// resetting SIGPIPE so the daemon and chat keep ignoring the signal.
 fn exit_quietly_on_broken_pipe() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -198,10 +226,16 @@ fn exit_quietly_on_broken_pipe() {
             .map(String::as_str)
             .or_else(|| info.payload().downcast_ref::<&str>().copied())
             .unwrap_or_default();
-        if text.contains("failed printing to std") && text.contains("Broken pipe") {
-            std::process::exit(141);
+        match classify_stdio_panic(text) {
+            Some(StdioFailure::BrokenPipe) => std::process::exit(141),
+            Some(StdioFailure::Other(message)) => {
+                use std::io::Write as _;
+                // stderr may be the broken stream, so this write cannot be allowed to panic.
+                let _ = writeln!(std::io::stderr(), "error: {message}");
+                std::process::exit(1);
+            }
+            None => default_hook(info),
         }
-        default_hook(info);
     }));
 }
 
@@ -240,6 +274,9 @@ async fn run_cli(login_path_added: Vec<String>) {
     let result = cli::dispatch::dispatch(command).await;
     telemetry::finish(telemetry_run, result.is_ok());
     if let Err(e) = result {
+        if is_broken_pipe(&e) {
+            std::process::exit(141);
+        }
         print_top_level_error(&e);
         std::process::exit(exit_code_for(&e));
     }
@@ -379,5 +416,35 @@ mod error_hint_tests {
         let other = anyhow::anyhow!("something unrelated broke");
         assert!(error_next_step(&other).contains("RUST_LOG=debug"));
         assert_eq!(exit_code_for(&other), 1);
+    }
+}
+
+#[cfg(test)]
+mod stdio_failure_tests {
+    use super::{classify_stdio_panic, is_broken_pipe, StdioFailure};
+
+    #[test]
+    fn a_closed_reader_is_a_quiet_exit_and_other_write_failures_are_one_line() {
+        assert_eq!(
+            classify_stdio_panic("failed printing to stdout: Broken pipe (os error 32)"),
+            Some(StdioFailure::BrokenPipe)
+        );
+        assert_eq!(
+            classify_stdio_panic(
+                "failed printing to stdout: No space left on device (os error 28)"
+            ),
+            Some(StdioFailure::Other(
+                "failed writing to stdout: No space left on device (os error 28)".into()
+            ))
+        );
+        assert_eq!(classify_stdio_panic("index out of bounds"), None);
+    }
+
+    #[test]
+    fn a_broken_pipe_is_found_anywhere_in_the_error_chain() {
+        let io = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        let wrapped = anyhow::Error::new(io).context("writing the listing");
+        assert!(is_broken_pipe(&wrapped));
+        assert!(!is_broken_pipe(&anyhow::anyhow!("unrelated")));
     }
 }

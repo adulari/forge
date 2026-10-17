@@ -110,3 +110,30 @@ launching one. It opens its own tab, never adopts or closes yours (only `/json/c
 persistent profile for you to log into once. Details, safety model and the Chrome 136 default-profile
 restriction: [browser.md](browser.md#attach-to-your-logged-in-browser). Still not built: reading
 cookies out of your everyday profile, or bridging Claude's Chrome extension over native messaging.
+
+## `claude -p` flags on `forge run`
+
+`forge run` accepts the `claude -p` flags that map cleanly, so scripts written for Claude Code run
+unchanged (`crates/forge-cli/src/cli/args/claude_compat.rs`, applied by `run/claude_flags.rs`):
+
+| Flag | Effect |
+|---|---|
+| `-p`, `--print`, `--verbose`, `--input-format text` | accepted; `forge run` is already headless and its event stream is always complete |
+| `--output-format text\|json\|stream-json` | as before |
+| `--append-system-prompt`, `--continue`, `--resume`, `--model` | as before |
+| `--permission-mode default\|acceptEdits\|bypassPermissions\|plan` | same as `--mode`; conflicts with it |
+| `--dangerously-skip-permissions` | same as `--mode bypass` |
+| `--max-turns N` | caps model steps for the run (`mesh.max_steps` and `max_steps_unattended`) |
+| `--allowedTools`, `--disallowedTools` | `"Bash(git log:*) Read"` becomes `[[permissions.rules]]` on `shell` / `read_file` (`:*` becomes ` *`); deny wins; space- or comma-separated, repeat the flag for more |
+
+Not supported, and rejected by clap rather than ignored: `--system-prompt` (Forge's own prompt is
+not replaceable), `--input-format stream-json`, `--session-id`, `--fork-session`, `--add-dir`,
+`--mcp-config`, `--settings`, `--fallback-model`, `--max-budget-usd`.
+`--allowedTools a b c` with several space-separated arguments is not accepted: pass one quoted
+string or repeat the flag.
+
+## Output streams
+
+A write to a closed stdout (`forge mcp tools | head`) exits 141 quietly; any other stdout/stderr
+write failure (`> /dev/full`) prints one `error:` line and exits 1. Neither changes how the daemon
+handles SIGPIPE.

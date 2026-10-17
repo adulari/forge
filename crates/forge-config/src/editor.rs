@@ -501,22 +501,20 @@ pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(),
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ConfigError::Write(e.to_string()))?;
     }
-    let mut root = read_edit_table(&file)?;
+    let mut doc = crate::toml_write::load_doc(&file)?;
 
     match coerced {
-        Some(v) => set_dotted(&mut root, path, v),
-        None => remove_dotted(&mut root, path), // empty → clear the optional
+        Some(v) => crate::toml_write::set_dotted(&mut doc, path, &v),
+        None => crate::toml_write::remove_dotted(&mut doc, path), // empty → clear the optional
     }
 
     // Validate: the file must still extract to a Config layered over the defaults.
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
     Figment::from(Serialized::defaults(Config::default()))
-        .merge(Toml::string(&body))
+        .merge(Toml::string(&doc.to_string()))
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid value for {path}: {}", brief(&e))))?;
 
-    crate::write_atomic(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
-    Ok(())
+    crate::toml_write::save_doc(&file, &doc)
 }
 
 /// A figment error without its "for key ... in TOML source string" tail, which names internal
@@ -561,7 +559,7 @@ pub fn set_model_disabled(
 /// The body of [`set_model_disabled`], addressed by file rather than by scope so it is testable
 /// without changing the process's working directory — `ConfigScope::Project` resolves to a
 /// relative path, and a chdir would race every other test in the binary.
-fn set_model_disabled_at(
+pub(crate) fn set_model_disabled_at(
     file: &std::path::Path,
     entry: &str,
     disabled: bool,
@@ -569,9 +567,9 @@ fn set_model_disabled_at(
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ConfigError::Write(e.to_string()))?;
     }
-    let mut root = read_edit_table(file)?;
+    let mut doc = crate::toml_write::load_doc(file)?;
 
-    let mut entries: Vec<String> = root
+    let mut entries: Vec<String> = doc
         .get("mesh")
         .and_then(|mesh| mesh.get("disabled"))
         .and_then(|value| value.as_array())
@@ -591,21 +589,20 @@ fn set_model_disabled_at(
         (false, true) => entries.retain(|e| e.trim() != entry),
     }
 
-    set_dotted(
-        &mut root,
+    crate::toml_write::set_dotted(
+        &mut doc,
         "mesh.disabled",
-        toml::Value::Array(entries.into_iter().map(toml::Value::String).collect()),
+        &toml::Value::Array(entries.into_iter().map(toml::Value::String).collect()),
     );
 
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
     Figment::from(Serialized::defaults(Config::default()))
-        .merge(Toml::string(&body))
+        .merge(Toml::string(&doc.to_string()))
         .extract::<Config>()
         .map_err(|e| {
             ConfigError::Write(format!("invalid config after editing mesh.disabled: {e}"))
         })?;
 
-    crate::write_atomic(file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    crate::toml_write::save_doc(file, &doc)?;
     Ok(true)
 }
 
@@ -614,17 +611,16 @@ fn set_model_disabled_at(
 /// command to erase the setting from every layer. No-op if absent. The remaining file is validated.
 pub fn reset_config_value(scope: ConfigScope, path: &str) -> Result<(), ConfigError> {
     let file = scope_path(scope)?;
-    let mut root = read_edit_table(&file)?;
-    remove_dotted(&mut root, path);
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let mut doc = crate::toml_write::load_doc(&file)?;
+    crate::toml_write::remove_dotted(&mut doc, path);
     Figment::from(Serialized::defaults(Config::default()))
-        .merge(Toml::string(&body))
+        .merge(Toml::string(&doc.to_string()))
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid config after reset of {path}: {e}")))?;
-    crate::write_atomic(&file, body).map_err(|e| ConfigError::Write(e.to_string()))?;
-    Ok(())
+    crate::toml_write::save_doc(&file, &doc)
 }
 
+#[cfg(test)]
 fn read_edit_table(path: &std::path::Path) -> Result<toml::Table, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -691,33 +687,6 @@ fn coerce_value(
     }
 }
 
-fn set_dotted(root: &mut toml::Table, path: &str, val: toml::Value) {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut cur = root;
-    for p in &parts[..parts.len() - 1] {
-        let entry = cur
-            .entry(p.to_string())
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        if !entry.is_table() {
-            *entry = toml::Value::Table(toml::Table::new());
-        }
-        cur = entry.as_table_mut().unwrap();
-    }
-    cur.insert(parts[parts.len() - 1].to_string(), val);
-}
-
-fn remove_dotted(root: &mut toml::Table, path: &str) {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut cur = root;
-    for p in &parts[..parts.len() - 1] {
-        match cur.get_mut(*p).and_then(|v| v.as_table_mut()) {
-            Some(t) => cur = t,
-            None => return,
-        }
-    }
-    cur.remove(parts[parts.len() - 1]);
-}
-
 /// Persist the CLI-bridge subscription plans into the user `config.toml`, preserving every other
 /// key already in the file (`forge init`). Returns the path written. Set `[mesh.subscriptions]`
 /// without disturbing the rest of the config — secrets are NEVER written here (keys go to the
@@ -737,27 +706,16 @@ fn write_subscriptions_at(
     path: &std::path::Path,
     subs: &HashMap<String, String>,
 ) -> Result<(), ConfigError> {
-    let mut root: toml::Table = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
-
-    let mesh = root
-        .entry("mesh".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if !mesh.is_table() {
-        *mesh = toml::Value::Table(toml::Table::new());
+    let mut doc = crate::toml_write::load_doc(path)?;
+    let mut subscriptions = toml::Table::new();
+    for (k, v) in subs {
+        subscriptions.insert(k.clone(), toml::Value::String(v.clone()));
     }
-    if let toml::Value::Table(mesh_t) = mesh {
-        let sub_t: toml::Table = subs
-            .iter()
-            .map(|(k, v)| (k.clone(), toml::Value::String(v.clone())))
-            .collect();
-        mesh_t.insert("subscriptions".to_string(), toml::Value::Table(sub_t));
-    }
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
-    Ok(())
+    crate::toml_write::sync_table(
+        crate::toml_write::table_at(&mut doc, &["mesh", "subscriptions"]),
+        &subscriptions,
+    );
+    crate::toml_write::save_doc(path, &doc)
 }
 
 #[cfg(test)]
@@ -788,14 +746,6 @@ pub(crate) mod test_support {
         subs: &HashMap<String, String>,
     ) -> Result<(), ConfigError> {
         super::write_subscriptions_at(path, subs)
-    }
-
-    pub(crate) fn set_dotted(root: &mut toml::Table, path: &str, value: toml::Value) {
-        super::set_dotted(root, path, value);
-    }
-
-    pub(crate) fn remove_dotted(root: &mut toml::Table, path: &str) {
-        super::remove_dotted(root, path);
     }
 }
 

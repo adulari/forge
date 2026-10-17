@@ -20,7 +20,10 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             publish_to_fleet,
             no_publish_to_fleet,
             usage_json,
+            claude,
         } => {
+            let mode = claude.effective_mode(mode);
+            crate::cli::commands::run::claude_flags::install(&claude);
             // Unified continuity with `chat`: --continue / --resume <id> / bare --resume (picker).
             // The picker needs the interactive TUI, so treat the headless run as "plain".
             let store = open_store()?;
