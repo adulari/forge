@@ -293,6 +293,8 @@ pub(crate) struct StreamCache {
     wrapped_committed: usize,
     /// Finished blocks were left untaken by the last refresh (a burst is being caught up on).
     catching_up: bool,
+    /// When set, every row carries the turn rail of this kind (the transcript's streaming edge).
+    rail: Option<crate::theme::styles::RailKind>,
     tail_rows: Vec<Line<'static>>,
 }
 
@@ -307,17 +309,22 @@ impl StreamCache {
         self.len
     }
 
+    /// Put the turn rail in front of every row from the next refresh on.
+    pub(crate) fn set_rail(&mut self, rail: Option<crate::theme::styles::RailKind>) {
+        if self.rail != rail {
+            self.rail = rail;
+            self.width = 0;
+            self.committed_rows.clear();
+            self.wrapped_committed = 0;
+        }
+    }
+
     /// Rows to show: finished rows, plus the open block. A trailing blank row is hidden while
     /// there is no open block so the cursor sits on the last line of text.
     fn finished_rows(&self) -> usize {
         let mut n = self.committed_rows.len();
         if self.tail_rows.is_empty() {
-            while n > 0
-                && self.committed_rows[n - 1]
-                    .spans
-                    .iter()
-                    .all(|s| s.content.is_empty())
-            {
+            while n > 0 && crate::copy_mark::is_blank_row(&self.committed_rows[n - 1]) {
                 n -= 1;
             }
         }
@@ -371,8 +378,8 @@ impl StreamCache {
         self.catching_up = self.md.advance_within(text, COMMIT_SLICE_BYTES);
         let committed = self.md.committed_lines();
         if self.wrapped_committed < committed.len() {
-            self.committed_rows
-                .extend(wrap_lines(&committed[self.wrapped_committed..], wrap_width));
+            let fresh = self.railed(&committed[self.wrapped_committed..]);
+            self.committed_rows.extend(wrap_lines(&fresh, wrap_width));
             self.wrapped_committed = committed.len();
         }
         let rest = &text[self.md.committed_bytes().min(text.len())..];
@@ -381,11 +388,19 @@ impl StreamCache {
         } else {
             self.md.tail_lines(text)
         };
+        let tail = self.railed(&tail);
         self.tail_rows = wrap_lines(&tail, wrap_width);
         self.rev = rev;
         self.len = text.len();
         self.width = width;
         self.rendered_at = Some(std::time::Instant::now());
+    }
+
+    fn railed(&self, lines: &[Line<'static>]) -> Vec<Line<'static>> {
+        match self.rail {
+            Some(kind) => crate::app::rail_lines(lines.to_vec(), kind),
+            None => lines.to_vec(),
+        }
     }
 
     /// The finished reply's lines, reusing every block already rendered. Consumes the cache.

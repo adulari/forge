@@ -1,34 +1,40 @@
 //! Pure rendering helpers: turn model output into styled ratatui [`Line`]s. Free of terminal
 //! I/O so it's unit-testable on strings: `markdown_to_lines` (markdown → styled lines),
-//! `highlight_code` (syntect syntax highlighting), and `diff_to_lines`/`diff_to_plain`
-//! (a `similar`-based unified diff for review-before-apply).
+//! `highlight_code` (syntect syntax highlighting), and the diff, report and table renderers in
+//! the submodules.
 //!
 //! `pulldown-cmark` is *total* (it degrades malformed markdown to literal text and never
 //! panics), so this renderer never drops content or crashes on bad input.
+//!
+//! Rows carry wrap marks (`copy_mark`): prose rows wrap at the reading measure and hang under
+//! their list marker, and the turn rail the transcript puts in front repeats on every wrapped
+//! row. Nothing here knows the terminal width.
 
-use crate::theme::{color, styles};
+use crate::copy_mark;
+use crate::theme::{glyphs::g, styles, t};
 use std::sync::OnceLock;
 
-use forge_types::{DiffKind, FileDiff};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use similar::{ChangeTag, TextDiff};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
+mod code;
+mod diff;
+mod reports;
 mod stream;
 mod table;
+pub use diff::{
+    diff_file_snapshot, diff_rows, diff_stat, diff_to_lines, diff_to_plain,
+    REMOTE_DIFF_MAX_HUNK_LINES,
+};
+pub use reports::{assay_report_lines, assay_report_plain, mcp_status_lines};
 pub use stream::prewarm_highlighter;
 pub(crate) use stream::StreamCache;
 use table::{clip_spans, TableBuild, TABLE_CELL_MAX};
 
-use crate::copy_mark;
-
-/// Cap on rendered changed lines before truncating (keeps a huge diff from flooding scrollback).
-const MAX_DIFF_LINES: usize = 500;
-
-/// The base indent every rendered line carries (matches the plain `body_line` convention).
+/// Base indent of the report renderers (the markdown renderer has none: the rail is the margin).
 const INDENT: &str = "  ";
 
 /// Bundled syntaxes + theme, loaded once. The cost is paid at most once per process and
@@ -36,7 +42,7 @@ const INDENT: &str = "  ";
 fn highlighter() -> &'static (SyntaxSet, Theme) {
     static DARK: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
     static LIGHT: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
-    let (cell, name) = match crate::theme::t().mode {
+    let (cell, name) = match t().mode {
         crate::theme::Mode::Dark => (&DARK, "base16-ocean.dark"),
         crate::theme::Mode::Light => (&LIGHT, "InspiredGitHub"),
     };
@@ -63,7 +69,7 @@ fn highlighted_spans(
             .into_iter()
             .map(|(st, text)| {
                 let fg = st.foreground;
-                let mut style = if crate::theme::t().tier == crate::theme::ColorTier::Mono {
+                let mut style = if t().tier == crate::theme::ColorTier::Mono {
                     Style::default()
                 } else {
                     Style::default().fg(crate::theme::rgb(fg.r, fg.g, fg.b))
@@ -96,403 +102,6 @@ pub fn highlight_code(lang: &str, lines: &[String]) -> Vec<Vec<Span<'static>>> {
         .collect()
 }
 
-fn diff_header(diff: &FileDiff) -> String {
-    let kind = match diff.kind {
-        DiffKind::Created => "new file",
-        DiffKind::Modified => "modified",
-        DiffKind::Deleted => "deleted",
-    };
-    format!("{INDENT}✎ {} ({kind})", diff.path)
-}
-
-/// Render a proposed file change as a styled unified diff (path header, `@@` hunks, `+`/`-`/
-/// context gutters, syntax-highlighted bodies). Binary targets show a one-line summary.
-pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
-    let mut out = vec![Line::from(Span::styled(
-        diff_header(diff),
-        styles::brand().add_modifier(Modifier::BOLD),
-    ))];
-
-    if diff.binary {
-        let o = diff.old.as_ref().map(|s| s.len()).unwrap_or(0);
-        let n = diff.new.as_ref().map(|s| s.len()).unwrap_or(0);
-        out.push(Line::from(Span::styled(
-            format!("{INDENT}binary file ({o} → {n} bytes)"),
-            styles::muted(),
-        )));
-        return out;
-    }
-
-    let old = diff.old.as_deref().unwrap_or("");
-    let new = diff.new.as_deref().unwrap_or("");
-    let lang = diff.lang.as_deref().unwrap_or("");
-    let (ss, theme) = highlighter();
-    let syntax = (!lang.is_empty())
-        .then(|| ss.find_syntax_by_token(lang))
-        .flatten()
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let mut highlighter = HighlightLines::new(syntax, theme);
-    let td = TextDiff::from_lines(old, new);
-    // The +/-/space marker is content of a diff; only the indent and the gap after it are decoration.
-    let gutter = |sym: &str, c: Color| {
-        [
-            Span::styled(INDENT, copy_mark::decor(Style::default())),
-            Span::styled(sym.to_string(), Style::default().fg(c)),
-            Span::styled(" ", copy_mark::decor(Style::default())),
-        ]
-    };
-    let mut emitted = 0usize;
-
-    for group in td.grouped_ops(3) {
-        let (Some(first), Some(last)) = (group.first(), group.last()) else {
-            continue;
-        };
-        let os = first.old_range().start;
-        let oe = last.old_range().end;
-        let ns = first.new_range().start;
-        let ne = last.new_range().end;
-        out.push(Line::from(Span::styled(
-            format!(
-                "{INDENT}@@ -{},{} +{},{} @@",
-                os + 1,
-                oe - os,
-                ns + 1,
-                ne - ns
-            ),
-            styles::muted(),
-        )));
-        for op in group {
-            for change in td.iter_changes(&op) {
-                if emitted >= MAX_DIFF_LINES {
-                    out.push(Line::from(Span::styled(
-                        format!("{INDENT}… (diff truncated — full change in the tool result)"),
-                        styles::muted(),
-                    )));
-                    return out;
-                }
-                emitted += 1;
-                let text = change.value().trim_end_matches('\n').to_string();
-                let (sym, color) = match change.tag() {
-                    ChangeTag::Delete => ("-", color::err()),
-                    ChangeTag::Insert => ("+", color::ok()),
-                    ChangeTag::Equal => (" ", color::fg_muted()),
-                };
-                let mut line = gutter(sym, color).to_vec();
-                // highlight the body; context/added stay readable, deletions tinted red.
-                let body = highlighted_spans(&mut highlighter, ss, &text);
-                if change.tag() == ChangeTag::Delete {
-                    let joined: String = body.into_iter().map(|s| s.content.into_owned()).collect();
-                    line.push(Span::styled(joined, styles::err()));
-                } else {
-                    line.extend(body);
-                }
-                out.push(Line::from(line));
-            }
-        }
-    }
-    if emitted == 0 {
-        out.push(Line::from(Span::styled(
-            format!("{INDENT}(no textual changes)"),
-            styles::muted(),
-        )));
-    }
-    out
-}
-
-/// Cap on hunk lines carried per file in the remote diff projection ([`diff_file_snapshot`]).
-/// A phone card previews the change; anything beyond shows as "+N more lines" and the full
-/// content stays host-side (the TUI renders up to [`MAX_DIFF_LINES`]).
-pub const REMOTE_DIFF_MAX_HUNK_LINES: usize = 40;
-
-/// Project one [`FileDiff`] into the plain-data shape the remote snapshot carries — the SAME
-/// `similar`-computed hunks `diff_to_lines` renders locally (grouped ops, 3 context lines),
-/// minus the styling: hunk headers keep the `@@ -a,b +c,d @@` old/new line spans, body lines
-/// keep their `+`/`-`/` ` gutter as the first character. `adds`/`dels` count the WHOLE change
-/// (not just the carried lines); lines beyond `max_lines` are dropped into `skipped_lines` so
-/// the page can say "+N more".
-pub fn diff_file_snapshot(diff: &FileDiff, max_lines: usize) -> crate::DiffFileSnapshot {
-    let kind = match diff.kind {
-        DiffKind::Created => "created",
-        DiffKind::Modified => "modified",
-        DiffKind::Deleted => "deleted",
-    };
-    let mut snap = crate::DiffFileSnapshot {
-        path: diff.path.clone(),
-        kind: kind.to_string(),
-        binary: diff.binary,
-        adds: 0,
-        dels: 0,
-        hunks: Vec::new(),
-        skipped_lines: 0,
-    };
-    if diff.binary {
-        return snap;
-    }
-    let td = TextDiff::from_lines(
-        diff.old.as_deref().unwrap_or(""),
-        diff.new.as_deref().unwrap_or(""),
-    );
-    let mut emitted = 0usize;
-    for group in td.grouped_ops(3) {
-        let (Some(first), Some(last)) = (group.first(), group.last()) else {
-            continue;
-        };
-        let os = first.old_range().start;
-        let oe = last.old_range().end;
-        let ns = first.new_range().start;
-        let ne = last.new_range().end;
-        let mut lines: Vec<String> = Vec::new();
-        for op in &group {
-            for change in td.iter_changes(op) {
-                let sym = match change.tag() {
-                    ChangeTag::Delete => {
-                        snap.dels += 1;
-                        '-'
-                    }
-                    ChangeTag::Insert => {
-                        snap.adds += 1;
-                        '+'
-                    }
-                    ChangeTag::Equal => ' ',
-                };
-                if emitted < max_lines {
-                    let text = change.value().trim_end_matches('\n');
-                    lines.push(format!("{sym}{text}"));
-                    emitted += 1;
-                } else {
-                    snap.skipped_lines += 1;
-                }
-            }
-        }
-        if !lines.is_empty() {
-            snap.hunks.push(crate::DiffHunkSnapshot {
-                header: format!("@@ -{},{} +{},{} @@", os + 1, oe - os, ns + 1, ne - ns),
-                lines,
-            });
-        }
-    }
-    snap
-}
-
-/// Plain unified-diff text (no ANSI) for the headless/piped path.
-pub fn diff_to_plain(diff: &FileDiff) -> String {
-    let mut s = format!("{}\n", diff_header(diff).trim_start());
-    if diff.binary {
-        s.push_str("  binary file (not shown)\n");
-        return s;
-    }
-    let td = TextDiff::from_lines(
-        diff.old.as_deref().unwrap_or(""),
-        diff.new.as_deref().unwrap_or(""),
-    );
-    for change in td.iter_all_changes() {
-        let sym = match change.tag() {
-            ChangeTag::Delete => "-",
-            ChangeTag::Insert => "+",
-            ChangeTag::Equal => " ",
-        };
-        s.push_str(&format!("{sym} {}", change.value()));
-    }
-    if !s.ends_with('\n') {
-        s.push('\n');
-    }
-    s
-}
-
-/// Color for a finding's severity (most→least): critical=red, high=orange, medium=yellow, low=dim.
-fn severity_color(sev: forge_types::Severity) -> Color {
-    use forge_types::Severity;
-    match sev {
-        Severity::Critical => color::err(),
-        Severity::High => color::brand(),
-        Severity::Medium => color::warn(),
-        Severity::Low => color::fg_muted(),
-    }
-}
-
-/// Render the MCP server listing (`/mcp`) as styled scrollback lines: a status glyph per server,
-/// its transport, and tool/resource/prompt counts (mcp-client.md §5.7).
-pub fn mcp_status_lines(servers: &[forge_types::McpServerLine]) -> Vec<Line<'static>> {
-    if servers.is_empty() {
-        let project = std::path::Path::new(".forge/mcp.toml");
-        if let Some(problem) = forge_config::mcp_toml_problem(project) {
-            return vec![Line::from(Span::styled(
-                format!("  ⚠ .forge/mcp.toml is ignored: {problem}"),
-                styles::warn(),
-            ))];
-        }
-        return vec![Line::from(Span::styled(
-            "  ◈ no MCP servers configured — declare them in .forge/mcp.toml (or `forge mcp import`)"
-                .to_string(),
-            styles::muted(),
-        ))];
-    }
-    let mut out = vec![Line::from(Span::styled(
-        format!("  ◈ MCP servers  ({} configured)", servers.len()),
-        styles::user().add_modifier(Modifier::BOLD),
-    ))];
-    for s in servers {
-        let (glyph, color) = match s.status.as_str() {
-            "connected" => ("●", color::ok()),
-            "slow" => ("●", color::warn()),
-            "reconnecting" => ("↻", color::warn()),
-            "failed" | "unauthorized" => ("○", color::err()),
-            _ => ("○", color::fg_muted()), // disabled / unknown
-        };
-        let mut spans = vec![
-            Span::styled(format!("    {glyph} "), Style::default().fg(color)),
-            Span::styled(
-                format!("{:<12}", s.name),
-                styles::fg().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:<13}{:<6}", s.status, s.transport),
-                Style::default().fg(color),
-            ),
-            Span::styled(
-                format!(
-                    "{} tools · {} resources · {} prompts",
-                    s.tools, s.resources, s.prompts
-                ),
-                styles::muted(),
-            ),
-        ];
-        if let Some(detail) = &s.detail {
-            spans.push(Span::styled(format!("   {detail}"), styles::err()));
-        }
-        out.push(Line::from(spans));
-    }
-    out.push(Line::from(Span::styled(
-        "    tools load on demand — the model finds them with tool_search or mcp_search_tools."
-            .to_string(),
-        styles::muted(),
-    )));
-    out
-}
-
-/// Render an [`AssayReport`](forge_types::AssayReport) as styled lines for the TUI scrollback:
-/// a colored summary header, then each ranked finding with severity-colored gutter, location,
-/// title, why, and suggested fix.
-pub fn assay_report_lines(r: &forge_types::AssayReport) -> Vec<Line<'static>> {
-    let [crit, high, med, low] = r.severity_counts();
-    let id8: String = r.run_id.chars().take(8).collect();
-    let mut out = vec![
-        Line::from(Span::styled(
-            format!(
-                "{INDENT}◈ ASSAY REPORT  run {id8}  scope: {}",
-                r.scope.label()
-            ),
-            styles::brand().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                format!("{INDENT}{} findings  ", r.findings.len()),
-                styles::fg(),
-            ),
-            Span::styled(format!("{crit} crit "), styles::err()),
-            Span::styled(format!("{high} high "), styles::brand()),
-            Span::styled(format!("{med} med "), styles::warn()),
-            Span::styled(format!("{low} low"), styles::muted()),
-            Span::styled(format!("  ·  ${:.4}", r.cost_usd), styles::ok()),
-        ]),
-    ];
-    if !r.skipped_lenses.is_empty() {
-        let sk: Vec<String> = r
-            .skipped_lenses
-            .iter()
-            .map(|(l, why)| format!("{l} ({why})"))
-            .collect();
-        out.push(Line::from(Span::styled(
-            format!("{INDENT}skipped: {}", sk.join(", ")),
-            styles::muted(),
-        )));
-    }
-    if r.findings.is_empty() {
-        out.push(Line::from(Span::styled(
-            format!("{INDENT}no findings — clean, or the scope had no analyzable source."),
-            styles::muted(),
-        )));
-        return out;
-    }
-    for (i, f) in r.findings.iter().enumerate() {
-        let color = severity_color(f.severity);
-        let loc = match f.line {
-            Some(l) => format!("{}:{l}", f.file),
-            None => f.file.clone(),
-        };
-        out.push(Line::from(vec![
-            Span::styled(format!("{INDENT}{:>2}. ", i + 1), styles::muted()),
-            Span::styled(
-                format!("{} ", f.severity.as_str().to_uppercase()),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{} ", f.category.as_str()), styles::fg()),
-            Span::styled(loc, styles::muted()),
-        ]));
-        out.push(Line::from(Span::styled(
-            format!("{INDENT}    {}", f.title),
-            styles::fg(),
-        )));
-        if !f.suggested_fix.is_empty() {
-            out.push(Line::from(Span::styled(
-                format!(
-                    "{INDENT}    fix: {} ({})",
-                    f.suggested_fix,
-                    f.effort.as_str()
-                ),
-                styles::muted(),
-            )));
-        }
-    }
-    out
-}
-
-/// Plain (no-ANSI) rendering of an assay report, for the headless/piped presenter.
-pub fn assay_report_plain(r: &forge_types::AssayReport) -> String {
-    let [crit, high, med, low] = r.severity_counts();
-    let id8: String = r.run_id.chars().take(8).collect();
-    let mut s = format!("\n◈ ASSAY REPORT  run {id8}  scope: {}\n", r.scope.label());
-    s.push_str(&format!(
-        "{} findings · {crit} critical · {high} high · {med} medium · {low} low · ${:.4}\n",
-        r.findings.len(),
-        r.cost_usd
-    ));
-    if !r.skipped_lenses.is_empty() {
-        let sk: Vec<String> = r
-            .skipped_lenses
-            .iter()
-            .map(|(l, why)| format!("{l} ({why})"))
-            .collect();
-        s.push_str(&format!("skipped: {}\n", sk.join(", ")));
-    }
-    if r.findings.is_empty() {
-        s.push_str("no findings — clean, or the scope had no analyzable source.\n");
-        return s;
-    }
-    for (i, f) in r.findings.iter().enumerate() {
-        let loc = match f.line {
-            Some(l) => format!("{}:{l}", f.file),
-            None => f.file.clone(),
-        };
-        s.push_str(&format!(
-            "{:>2}. [{} · {}] {} — {loc}\n    {}\n",
-            i + 1,
-            f.severity.as_str().to_uppercase(),
-            f.confidence.as_str(),
-            f.category.as_str(),
-            f.title,
-        ));
-        if !f.suggested_fix.is_empty() {
-            s.push_str(&format!(
-                "    fix: {} ({})\n",
-                f.suggested_fix,
-                f.effort.as_str()
-            ));
-        }
-    }
-    s
-}
-
 /// Render a markdown document to styled lines, indented to match the conversation body.
 pub fn markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     let mut r = Renderer::default();
@@ -501,7 +110,6 @@ pub fn markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     }
     r.finish()
 }
-
 // Without ENABLE_TABLES a GFM table is just a paragraph: its rows are joined by soft breaks into
 // one long line of pipes — the "broken table" every model-written comparison used to render as.
 // Strikethrough is enabled so `~~x~~` does not leak tildes either.
@@ -515,7 +123,7 @@ struct Renderer {
     cur: Vec<Span<'static>>,
     bold: u32,
     italic: u32,
-    heading: bool,
+    heading: Option<HeadingLevel>,
     /// list markers stack: None = bullet, Some(n) = next ordered number
     lists: Vec<Option<u64>>,
     quote: u32,
@@ -524,13 +132,27 @@ struct Renderer {
     /// when Some, we're inside a table: cells are collected and laid out on `TagEnd::Table`.
     table: Option<TableBuild>,
     strike: u32,
+    /// Cells a wrapped row of the current list item indents by (nested indent plus marker).
+    item_hang: usize,
+    /// True between an item's marker and its first text, so a loose item's paragraph start does
+    /// not flush the bare marker as a row of its own.
+    marker_pending: bool,
+    /// The open link: its target and the text shown for it.
+    link: Option<(String, String)>,
 }
 
 impl Renderer {
     fn style(&self) -> Style {
         let mut s = styles::fg();
-        if self.heading {
-            s = s.patch(styles::brand()).add_modifier(Modifier::BOLD);
+        match self.heading {
+            Some(HeadingLevel::H1 | HeadingLevel::H2 | HeadingLevel::H3) => {
+                s = s.add_modifier(Modifier::BOLD)
+            }
+            Some(_) => s = styles::muted().add_modifier(Modifier::BOLD),
+            None => {}
+        }
+        if self.quote > 0 {
+            s = styles::muted().add_modifier(Modifier::ITALIC);
         }
         if self.bold > 0 {
             s = s.add_modifier(Modifier::BOLD);
@@ -541,16 +163,34 @@ impl Renderer {
         if self.strike > 0 {
             s = s.add_modifier(Modifier::CROSSED_OUT);
         }
+        if self.link.is_some() {
+            s = s.patch(styles::user()).add_modifier(Modifier::UNDERLINED);
+        }
         s
     }
 
+    /// The nested-list indent of a line.
     fn indent_prefix(&self) -> String {
-        // base indent + 2 spaces per nested list level + a quote bar.
-        let mut p = String::from(INDENT);
-        for _ in 0..self.lists.len().saturating_sub(1) {
-            p.push_str("  ");
+        "  ".repeat(self.lists.len().saturating_sub(1))
+    }
+
+    /// Open a prose row: the (possibly empty) indent flags it as prose so it wraps at the
+    /// measure, the item's hang keeps continuation rows under the text, and a quote bar repeats.
+    fn open_row(&mut self) {
+        let indent = self.indent_prefix();
+        self.cur
+            .push(Span::styled(indent, copy_mark::prose(Style::default())));
+        if self.item_hang > 0 && !self.lists.is_empty() {
+            self.cur.push(Span::styled(
+                " ".repeat(self.item_hang.saturating_sub(self.cur[0].content.len())),
+                copy_mark::hang(copy_mark::prose(Style::default())),
+            ));
         }
-        p
+        if self.quote > 0 {
+            let bar = if g().unicode { "▏ " } else { "| " };
+            self.cur
+                .push(Span::styled(bar, copy_mark::repeat(styles::line())));
+        }
     }
 
     fn push_text(&mut self, text: &str) {
@@ -560,14 +200,18 @@ impl Renderer {
             return;
         }
         if self.cur.is_empty() {
-            // start the line with its indent (+ quote bar if quoted).
-            self.cur.push(Span::raw(self.indent_prefix()));
-            if self.quote > 0 {
-                self.cur
-                    .push(Span::styled("▏ ", copy_mark::decor(styles::muted())));
-            }
+            self.open_row();
         }
-        self.cur.push(Span::styled(text.to_string(), self.style()));
+        self.marker_pending = false;
+        let text = if self.heading == Some(HeadingLevel::H1) {
+            text.to_uppercase()
+        } else {
+            text.to_string()
+        };
+        if let Some((_, shown)) = self.link.as_mut() {
+            shown.push_str(&text);
+        }
+        self.cur.push(Span::styled(text, style));
     }
 
     fn flush_line(&mut self) {
@@ -577,10 +221,29 @@ impl Renderer {
     }
 
     fn blank(&mut self) {
-        // collapse consecutive blanks
-        if self.lines.last().map(|l| l.spans.is_empty()) != Some(true) {
+        // No blank at the very start (the row under a turn label is text), and consecutive
+        // blanks collapse.
+        if self.lines.last().is_some_and(|l| !l.spans.is_empty()) {
             self.lines.push(Line::default());
         }
+    }
+
+    /// Cells of the text on the open row, past the indent.
+    fn cur_text_width(&self) -> usize {
+        self.cur
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum()
+    }
+
+    fn inline_code(&self, c: &str) -> Span<'static> {
+        // Where no background is painted the code needs its backticks to read as code.
+        let text = if t().paints_backgrounds() {
+            c.to_string()
+        } else {
+            format!("`{c}`")
+        };
+        Span::styled(text, styles::user().patch(styles::surface()))
     }
 
     fn event(&mut self, ev: Event<'_>) {
@@ -609,23 +272,42 @@ impl Renderer {
         }
 
         match ev {
-            Event::Start(Tag::Heading { .. }) => {
+            Event::Start(Tag::Heading { level, .. }) => {
                 self.flush_line();
                 self.blank();
-                self.heading = true;
+                self.heading = Some(level);
             }
             Event::End(TagEnd::Heading(level)) => {
+                let width = self.cur_text_width();
                 self.flush_line();
-                if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) {
-                    self.lines.push(Line::from(Span::styled(
-                        format!("{INDENT}{}", "─".repeat(44)),
-                        styles::muted(),
-                    )));
+                let dash = |heavy: bool| match (g().unicode, heavy) {
+                    (true, true) => "━",
+                    (true, false) => "─",
+                    (false, _) => "-",
+                };
+                match level {
+                    HeadingLevel::H1 => {
+                        self.lines.push(Line::from(vec![
+                            Span::styled(String::new(), copy_mark::prose(Style::default())),
+                            Span::styled(dash(true).repeat(width.clamp(1, 40)), styles::brand()),
+                        ]));
+                        self.blank();
+                    }
+                    HeadingLevel::H2 => {
+                        self.lines.push(Line::from(vec![
+                            Span::styled(String::new(), copy_mark::prose(Style::default())),
+                            Span::styled(dash(false).repeat(width.max(1)), styles::line()),
+                        ]));
+                    }
+                    _ => {}
                 }
-                self.heading = false;
-                self.blank();
+                self.heading = None;
             }
-            Event::Start(Tag::Paragraph) => self.flush_line(),
+            Event::Start(Tag::Paragraph) => {
+                if !self.marker_pending {
+                    self.flush_line();
+                }
+            }
             Event::End(TagEnd::Paragraph) => {
                 self.flush_line();
                 if self.lists.is_empty() {
@@ -645,28 +327,53 @@ impl Renderer {
                 self.quote = self.quote.saturating_sub(1);
                 self.blank();
             }
-            Event::Start(Tag::List(first)) => self.lists.push(first),
+            Event::Start(Tag::List(first)) => {
+                self.flush_line();
+                self.lists.push(first);
+            }
             Event::End(TagEnd::List(_)) => {
                 self.lists.pop();
+                self.item_hang = 0;
                 if self.lists.is_empty() {
                     self.blank();
                 }
             }
             Event::Start(Tag::Item) => {
                 self.flush_line();
-                // emit the marker as the start of this line.
-                self.cur.push(Span::raw(self.indent_prefix()));
+                let indent = self.indent_prefix();
+                let depth = self.lists.len();
                 let marker = match self.lists.last_mut() {
                     Some(Some(n)) => {
                         let m = format!("{n}. ");
                         *n += 1;
                         m
                     }
-                    _ => "• ".to_string(),
+                    _ => {
+                        let bullet = match (g().unicode, depth) {
+                            (true, 0 | 1) => "•",
+                            (true, 2) => "◦",
+                            (true, _) => "▪",
+                            (false, 0 | 1) => "*",
+                            (false, 2) => "-",
+                            (false, _) => "+",
+                        };
+                        format!("{bullet} ")
+                    }
                 };
-                self.cur.push(Span::styled(marker, styles::user()));
+                self.item_hang =
+                    indent.len() + unicode_width::UnicodeWidthStr::width(marker.as_str());
+                self.cur
+                    .push(Span::styled(indent, copy_mark::prose(Style::default())));
+                self.cur.push(Span::styled(
+                    marker,
+                    copy_mark::hang(copy_mark::prose(styles::user())),
+                ));
+                self.marker_pending = true;
             }
-            Event::End(TagEnd::Item) => self.flush_line(),
+            Event::End(TagEnd::Item) => {
+                self.flush_line();
+                self.marker_pending = false;
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 self.flush_line();
                 let lang = match kind {
@@ -677,10 +384,22 @@ impl Renderer {
                 };
                 self.code = Some((lang, vec![String::new()]));
             }
-            Event::Start(Tag::Link { .. }) => {} // text rendered inline; URL appended on end
-            Event::End(TagEnd::Link) => {}
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                self.link = Some((dest_url.to_string(), String::new()));
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some((url, shown)) = self.link.take() {
+                    let same = url.trim_end_matches('/') == shown.trim_end_matches('/')
+                        || url.strip_prefix("mailto:") == Some(shown.as_str());
+                    if !url.is_empty() && !same && self.table.is_none() {
+                        self.cur
+                            .push(Span::styled(format!(" ({url})"), styles::faint()));
+                    }
+                }
+            }
             Event::Start(Tag::Table(_)) => {
                 self.flush_line();
+                self.blank();
                 self.table = Some(TableBuild::default());
             }
             Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => {
@@ -717,21 +436,18 @@ impl Renderer {
             Event::End(TagEnd::Strikethrough) => self.strike = self.strike.saturating_sub(1),
             Event::Text(t) => self.push_text(&t),
             Event::Code(c) if self.table.is_some() => {
+                let span = self.inline_code(&c);
                 if let Some(table) = self.table.as_mut() {
-                    table.cell.push(Span::styled(
-                        c.to_string(),
-                        styles::muted().patch(styles::surface()),
-                    ));
+                    table.cell.push(span);
                 }
             }
             Event::Code(c) => {
                 if self.cur.is_empty() {
-                    self.cur.push(Span::raw(self.indent_prefix()));
+                    self.open_row();
                 }
-                self.cur.push(Span::styled(
-                    c.to_string(),
-                    styles::muted().patch(styles::surface()),
-                ));
+                self.marker_pending = false;
+                let span = self.inline_code(&c);
+                self.cur.push(span);
             }
             Event::SoftBreak if self.table.is_some() => self.push_text(" "),
             Event::SoftBreak => self.flush_line(),
@@ -740,10 +456,11 @@ impl Renderer {
             Event::Rule => {
                 self.flush_line();
                 self.blank();
-                self.lines.push(Line::from(Span::styled(
-                    format!("{INDENT}{}", "─".repeat(48)),
-                    styles::muted(),
-                )));
+                let dash = if g().unicode { "─" } else { "-" };
+                self.lines.push(Line::from(vec![
+                    Span::styled(String::new(), copy_mark::prose(Style::default())),
+                    Span::styled(dash.repeat(40), styles::line()),
+                ]));
                 self.blank();
             }
             _ => {}
@@ -751,33 +468,13 @@ impl Renderer {
     }
 
     fn render_table(&mut self, table: TableBuild) {
-        let indent = self.indent_prefix();
-        self.lines.extend(table::layout(table, &indent));
+        self.lines.extend(table::layout(table));
     }
 
     fn render_code_block(&mut self, lang: &str, code: &[String]) {
-        // Trim a trailing empty line that the fence parser commonly leaves.
-        let mut lines: &[String] = code;
-        while matches!(lines.last(), Some(l) if l.is_empty()) {
-            lines = &lines[..lines.len() - 1];
-        }
-        let frame = copy_mark::frame_row(styles::muted());
-        let gutter = copy_mark::decor(styles::muted());
-        let label = if lang.is_empty() { "text" } else { lang };
-        let bar = "─".repeat(48usize.saturating_sub(label.len() + 2));
-        self.lines.push(Line::from(Span::styled(
-            format!("{INDENT}┌ {label} {bar}"),
-            frame,
-        )));
-        for spans in highlight_code(lang, lines) {
-            let mut line = vec![Span::styled(format!("{INDENT}│ "), gutter)];
-            line.extend(spans);
-            self.lines.push(Line::from(line));
-        }
-        self.lines.push(Line::from(Span::styled(
-            format!("{INDENT}└{}", "─".repeat(48)),
-            frame,
-        )));
+        self.blank();
+        self.lines.extend(code::code_block(lang, code));
+        self.blank();
     }
 
     fn finish(mut self) -> Vec<Line<'static>> {
@@ -815,6 +512,18 @@ mod tests {
             .any(|s| s.content.contains(needle) && s.style.add_modifier.contains(m))
     }
 
+    fn scoped_tier<R>(tier: crate::theme::ColorTier, f: impl FnOnce() -> R) -> R {
+        crate::theme::scoped(
+            crate::theme::Theme::new(
+                tier,
+                crate::theme::Mode::Dark,
+                crate::theme::GlyphTier::Unicode,
+                crate::theme::Motion::Full,
+            ),
+            f,
+        )
+    }
+
     #[test]
     fn soft_breaks_keep_their_line_breaks() {
         let out = markdown_to_lines("one\ntwo\nthree\n\n1\n2\n3\n");
@@ -825,21 +534,22 @@ mod tests {
     }
 
     #[test]
-    fn gfm_table_renders_as_aligned_rows_not_one_line_of_pipes() {
+    fn gfm_table_has_a_bold_header_a_rule_and_no_grid() {
         let md = "Intro:\n\n| Field | App | Status |\n|---|---|---|\n| f1 wall-clock | `ctx` | ✓ |\n| f20 queue | 80 entries | **fixed** |\n\nAfter.\n";
         let out = markdown_to_lines(md);
         let t = text_of(&out);
-        let rows: Vec<&str> = t.lines().filter(|l| l.contains('│')).collect();
-        assert_eq!(rows.len(), 3, "header + 2 body rows, one per line: {t}");
+        assert!(!t.contains('│') && !t.contains('┼'), "no grid: {t}");
         assert!(!t.contains("|---"), "separator row is not literal: {t}");
-        assert!(t.contains("─┼─"), "header rule drawn: {t}");
-        // Every row's column separators line up: same byte offset of the first '│'.
-        let first: Vec<usize> = rows.iter().map(|r| r.find('│').unwrap()).collect();
-        assert!(
-            first.iter().all(|&x| x == first[0]),
-            "columns aligned: {rows:?}"
-        );
-        assert!(t.contains("f1 wall-clock") && t.contains("80 entries"));
+        let header = t.lines().find(|l| l.contains("Field")).unwrap();
+        let rule = t.lines().find(|l| l.starts_with('─')).expect("header rule");
+        assert!(rule.contains("─  ─"), "a rule per column: {rule:?}");
+        assert!(has_modifier(&out, "Field", Modifier::BOLD), "bold header");
+        // Columns line up: every row puts the second column at the same offset.
+        let col = header.find("App").unwrap();
+        for row in ["ctx", "80 entries"] {
+            let r = t.lines().find(|l| l.contains(row)).unwrap();
+            assert_eq!(r.find(row), Some(col), "aligned: {t}");
+        }
         assert!(
             has_modifier(&out, "fixed", Modifier::BOLD),
             "styling survives inside cells"
@@ -848,6 +558,22 @@ mod tests {
             t.contains("Intro:") && t.contains("After."),
             "surrounding text intact"
         );
+    }
+
+    #[test]
+    fn numeric_columns_are_right_aligned() {
+        let out = markdown_to_lines(
+            "| stage | cost |\n|---|---|\n| parse | 86 us |\n| wrap | 1,258 us |\n",
+        );
+        let t = text_of(&out);
+        let parse = t.lines().find(|l| l.contains("parse")).unwrap();
+        let wrap = t.lines().find(|l| l.contains("wrap")).unwrap();
+        assert_eq!(parse.width(), wrap.width(), "right edges meet: {t}");
+        assert!(
+            parse.ends_with("86 us") && wrap.ends_with("1,258 us"),
+            "{t}"
+        );
+        assert!(parse.contains("   86 us"), "padded on the left: {parse:?}");
     }
 
     #[test]
@@ -882,22 +608,61 @@ mod tests {
     }
 
     #[test]
-    fn bold_and_inline_code_strip_markup() {
-        let out = markdown_to_lines("step **one** and `two`\n");
-        let t = text_of(&out);
-        assert!(t.contains("one") && t.contains("two"));
-        assert!(
-            !t.contains("**") && !t.contains('`'),
-            "markup stripped: {t:?}"
+    fn heading_levels_get_distinct_treatments() {
+        let t = text_of(&markdown_to_lines(
+            "# Big title\n\n## Mid title\n\n### Small\n\n#### Tiny\n",
+        ));
+        assert!(t.contains("BIG TITLE"), "H1 is uppercase: {t}");
+        assert!(t.contains("━━"), "H1 has the heavy rule: {t}");
+        let mid = t.lines().position(|l| l.contains("Mid title")).unwrap();
+        assert_eq!(
+            t.lines().nth(mid + 1).unwrap().trim(),
+            "─".repeat("Mid title".len()),
+            "H2 rule is as wide as the title: {t}"
         );
-        assert!(has_modifier(&out, "one", Modifier::BOLD), "bold applied");
+        let small = t.lines().position(|l| l.contains("Small")).unwrap();
+        assert!(
+            !t.lines().nth(small + 1).unwrap().contains('─'),
+            "H3 has no rule"
+        );
+        let out = markdown_to_lines("#### Tiny\n");
+        assert!(
+            out[0]
+                .spans
+                .iter()
+                .any(|s| s.content == "Tiny" && s.style.fg == styles::muted().fg),
+            "H4 is muted: {out:?}"
+        );
     }
 
     #[test]
-    fn bullet_list_gets_markers() {
-        let out = markdown_to_lines("- alpha\n- beta\n");
+    fn bold_and_inline_code_strip_markup_where_backgrounds_paint() {
+        scoped_tier(crate::theme::ColorTier::TrueColor, || {
+            let out = markdown_to_lines("step **one** and `two`\n");
+            let t = text_of(&out);
+            assert!(t.contains("one") && t.contains("two"));
+            assert!(
+                !t.contains("**") && !t.contains('`'),
+                "markup stripped: {t:?}"
+            );
+            assert!(has_modifier(&out, "one", Modifier::BOLD), "bold applied");
+        });
+    }
+
+    #[test]
+    fn inline_code_keeps_its_backticks_without_backgrounds() {
+        scoped_tier(crate::theme::ColorTier::Ansi16, || {
+            let t = text_of(&markdown_to_lines("run `cargo test` now\n"));
+            assert!(t.contains("`cargo test`"), "{t}");
+        });
+    }
+
+    #[test]
+    fn bullet_list_gets_markers_by_depth() {
+        let out = markdown_to_lines("- alpha\n  - inner\n    - deep\n- beta\n");
         let t = text_of(&out);
         assert!(t.contains("• alpha"), "bullet marker: {t:?}");
+        assert!(t.contains("◦ inner") && t.contains("▪ deep"), "{t:?}");
         assert!(t.contains("• beta"));
         assert!(!t.contains("- alpha"));
     }
@@ -910,12 +675,92 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_is_framed_and_verbatim() {
-        let out = markdown_to_lines("```rust\nlet x = 1;\n```\n");
-        let t = text_of(&out);
-        assert!(t.contains("let x = 1;"), "code preserved verbatim: {t:?}");
-        assert!(t.contains('┌') && t.contains('└'), "code block framed");
-        assert!(!t.contains("```"), "fence markers not shown");
+    fn a_wrapped_list_item_hangs_under_its_text() {
+        let rows = crate::transcript::wrap_lines(
+            &markdown_to_lines("- alpha beta gamma delta epsilon zeta eta theta\n"),
+            24,
+        );
+        let t = text_of(&rows);
+        let second = t.lines().nth(1).expect("wrapped");
+        assert!(
+            second.starts_with("  ") && !second.starts_with("   "),
+            "hangs at the text: {t:?}"
+        );
+        assert!(second.trim_start().starts_with(|c: char| c.is_alphabetic()));
+    }
+
+    #[test]
+    fn prose_wraps_at_the_reading_measure_not_the_terminal_width() {
+        let words = "word ".repeat(60);
+        let rows = crate::transcript::wrap_lines(&markdown_to_lines(&words), 200);
+        let widest = rows
+            .iter()
+            .map(|r| r.spans.iter().map(|s| s.content.width()).sum::<usize>())
+            .max()
+            .unwrap();
+        assert!(widest <= 100, "prose stays readable: {widest}");
+        assert!(
+            rows.len() >= 3,
+            "wrapped well before 200 cells: {}",
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn fenced_code_block_is_a_band_with_a_header_and_verbatim_code() {
+        scoped_tier(crate::theme::ColorTier::TrueColor, || {
+            let out = markdown_to_lines("```rust\nlet x = 1;\n```\n");
+            let t = text_of(&out);
+            assert!(t.contains("let x = 1;"), "code preserved verbatim: {t:?}");
+            assert!(
+                t.contains("rust") && t.contains("/copy"),
+                "header row: {t:?}"
+            );
+            assert!(!t.contains('┌') && !t.contains('└'), "no open frame");
+            assert!(!t.contains("```"), "fence markers not shown");
+            assert!(
+                out.iter().any(|l| l.style.bg.is_some()),
+                "rows carry the surface band"
+            );
+        });
+    }
+
+    #[test]
+    fn code_blocks_get_line_numbers_only_past_five_rows() {
+        scoped_tier(crate::theme::ColorTier::TrueColor, || {
+            let short = text_of(&markdown_to_lines("```\na\nb\nc\n```\n"));
+            assert!(
+                !short.contains(" 1  a"),
+                "no numbers on a short block: {short:?}"
+            );
+            let long = text_of(&markdown_to_lines("```\na\nb\nc\nd\ne\nf\ng\n```\n"));
+            assert!(long.contains(" 1  a") && long.contains(" 7  g"), "{long:?}");
+        });
+    }
+
+    #[test]
+    fn code_blocks_use_a_rule_instead_of_a_band_on_sixteen_colours() {
+        scoped_tier(crate::theme::ColorTier::Ansi16, || {
+            let out = markdown_to_lines("```\nx\n```\n");
+            assert!(out.iter().all(|l| l.style.bg.is_none()), "no background");
+            assert!(text_of(&out).contains("│ x"), "rule beside the code");
+        });
+    }
+
+    #[test]
+    fn blockquote_is_italic_muted_behind_an_inner_rule() {
+        let out = markdown_to_lines("> a quoted line\n");
+        assert!(text_of(&out).contains("▏ a quoted line"));
+        assert!(has_modifier(&out, "a quoted line", Modifier::ITALIC));
+    }
+
+    #[test]
+    fn a_link_is_underlined_and_shows_its_target_after_when_different() {
+        let out = markdown_to_lines("see [the docs](https://example.com/docs) now\n");
+        assert!(has_modifier(&out, "the docs", Modifier::UNDERLINED));
+        assert!(text_of(&out).contains("(https://example.com/docs)"));
+        let bare = text_of(&markdown_to_lines("<https://example.com>\n"));
+        assert_eq!(bare.matches("example.com").count(), 1, "{bare}");
     }
 
     #[test]
@@ -929,18 +774,20 @@ mod tests {
     #[test]
     fn plain_text_passes_through() {
         let out = markdown_to_lines("the workspace looks healthy");
-        assert_eq!(text_of(&out), "  the workspace looks healthy");
+        assert_eq!(text_of(&out), "the workspace looks healthy");
     }
 
     #[test]
     fn highlight_known_language_colors_tokens() {
-        let lines = vec!["fn main() { let x = 1; }".to_string()];
-        let spans = highlight_code("rust", &lines);
-        assert_eq!(spans.len(), 1);
-        let joined: String = spans[0].iter().map(|s| s.content.as_ref()).collect();
-        assert!(joined.contains("fn main()"), "source preserved: {joined:?}");
-        // highlighting splits the line into more than one styled span.
-        assert!(spans[0].len() > 1, "tokens are colored into multiple spans");
+        scoped_tier(crate::theme::ColorTier::TrueColor, || {
+            let lines = vec!["fn main() { let x = 1; }".to_string()];
+            let spans = highlight_code("rust", &lines);
+            assert_eq!(spans.len(), 1);
+            let joined: String = spans[0].iter().map(|s| s.content.as_ref()).collect();
+            assert!(joined.contains("fn main()"), "source preserved: {joined:?}");
+            // highlighting splits the line into more than one styled span.
+            assert!(spans[0].len() > 1, "tokens are colored into multiple spans");
+        });
     }
 
     #[test]
@@ -958,145 +805,7 @@ mod tests {
     fn fenced_block_shows_language_label() {
         let out = markdown_to_lines("```python\nprint('hi')\n```\n");
         let t = text_of(&out);
-        assert!(t.contains("python"), "language label on the fence: {t:?}");
+        assert!(t.contains("python"), "language label in the header: {t:?}");
         assert!(t.contains("print('hi')"), "code preserved");
-    }
-
-    #[test]
-    fn diff_context_lines_are_readable_not_all_dim() {
-        // Equal/context lines must render readably (syntax-highlighted body), with color::fg_muted() reserved for
-        // the gutter — not the whole line in the very-dim muted color.
-        let diff = FileDiff {
-            path: "src/a.rs".into(),
-            kind: DiffKind::Modified,
-            old: Some("fn context_anchor() {}\nlet x = 1;\n".into()),
-            new: Some("fn context_anchor() {}\nlet x = 2;\n".into()),
-            lang: Some("rust".into()),
-            binary: false,
-        };
-        let lines = diff_to_lines(&diff);
-        let ctx = lines
-            .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.contains("context_anchor")))
-            .expect("context line present");
-        // The gutter (first span) may be color::fg_muted(), but the body must carry a readable (non-color::fg_muted()) fg.
-        let body_readable = ctx
-            .spans
-            .iter()
-            .skip(1)
-            .any(|s| !s.content.trim().is_empty() && s.style.fg != Some(color::fg_muted()));
-        assert!(
-            body_readable,
-            "context body should be readable, not color::fg_muted(): {ctx:?}"
-        );
-    }
-
-    #[test]
-    fn diff_modified_has_gutters_and_hunk_header() {
-        let diff = FileDiff {
-            path: "src/a.rs".into(),
-            kind: DiffKind::Modified,
-            old: Some("let x = 1;\n".into()),
-            new: Some("let x = 2;\n".into()),
-            lang: Some("rust".into()),
-            binary: false,
-        };
-        let t = text_of(&diff_to_lines(&diff));
-        assert!(
-            t.contains("src/a.rs") && t.contains("modified"),
-            "header: {t:?}"
-        );
-        assert!(t.contains("@@"), "hunk header: {t:?}");
-        assert!(t.contains("- ") && t.contains("+ "), "+/- gutters: {t:?}");
-        assert!(
-            t.contains("x = 1") && t.contains("x = 2"),
-            "both versions shown"
-        );
-    }
-
-    #[test]
-    fn diff_created_file_is_all_additions() {
-        let diff = FileDiff {
-            path: "new.txt".into(),
-            kind: DiffKind::Created,
-            old: None,
-            new: Some("hello\nworld\n".into()),
-            lang: None,
-            binary: false,
-        };
-        let t = text_of(&diff_to_lines(&diff));
-        assert!(t.contains("new file"), "new-file header: {t:?}");
-        assert!(t.contains("+ hello") && t.contains("+ world"));
-    }
-
-    #[test]
-    fn diff_binary_shows_summary_only() {
-        let diff = FileDiff {
-            path: "img.png".into(),
-            kind: DiffKind::Modified,
-            old: Some("ab".into()),
-            new: Some("abcd".into()),
-            lang: None,
-            binary: true,
-        };
-        let t = text_of(&diff_to_lines(&diff));
-        assert!(t.contains("binary file"), "{t:?}");
-        assert!(!t.contains("@@"), "no textual diff for binary");
-    }
-
-    #[test]
-    fn assay_report_renders_summary_and_ranked_findings() {
-        use forge_types::{
-            AssayReport, AssayScope, Confidence, Effort, Finding, FindingCategory, Severity,
-        };
-        let report = AssayReport {
-            run_id: "abcdef123456".into(),
-            scope: AssayScope::Repo,
-            findings: vec![Finding {
-                id: "f1".into(),
-                category: FindingCategory::Correctness,
-                severity: Severity::Critical,
-                confidence: Confidence::High,
-                file: "core/lib.rs".into(),
-                line: Some(204),
-                title: "unwrap panics the turn".into(),
-                rationale: "a 5xx aborts the session".into(),
-                suggested_fix: "propagate via ?".into(),
-                effort: Effort::Small,
-                lens: "correctness".into(),
-                verified: true,
-            }],
-            cost_usd: 0.118,
-            skipped_lenses: vec![("design".into(), "timeout".into())],
-        };
-        let t = text_of(&assay_report_lines(&report));
-        assert!(t.contains("run abcdef12"), "short run id: {t}");
-        assert!(t.contains("1 findings"), "summary count");
-        assert!(t.contains("skipped: design (timeout)"), "degradation noted");
-        assert!(t.contains("CRITICAL") && t.contains("core/lib.rs:204"));
-        assert!(t.contains("fix: propagate via ?"));
-
-        // Plain form is ANSI-free for pipes.
-        let plain = assay_report_plain(&report);
-        assert!(!plain.contains('\u{1b}'), "no ANSI in plain report");
-        assert!(plain.contains("CRITICAL"));
-    }
-
-    #[test]
-    fn diff_to_plain_is_ansi_free_unified_text() {
-        let diff = FileDiff {
-            path: "a.txt".into(),
-            kind: DiffKind::Modified,
-            old: Some("one\ntwo\n".into()),
-            new: Some("one\nTWO\n".into()),
-            lang: None,
-            binary: false,
-        };
-        let s = diff_to_plain(&diff);
-        assert!(
-            s.contains("- two") && s.contains("+ TWO"),
-            "plain diff: {s:?}"
-        );
-        assert!(!s.contains('\u{1b}'), "no ANSI escapes");
     }
 }

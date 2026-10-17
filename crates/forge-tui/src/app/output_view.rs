@@ -352,12 +352,16 @@ impl App {
             }
             None if !self.fullscreen => {
                 let hint = format!(
-                    "    ⤢ full output kept ({}) · /output",
+                    "full output kept ({}) · /output",
                     tool_cards::size_label(output.lines, output.bytes)
                 );
+                let in_turn = self.transcript_ui.turn_open;
                 self.tag_flush(LineOrigin::tool_result(name, true), |s| {
-                    s.flush
-                        .push(TextLine::from(Span::styled(hint, styles::faint())))
+                    s.flush.extend(super::lines::notice::notice_lines(
+                        crate::theme::styles::NoticeKind::Info,
+                        in_turn,
+                        &hint,
+                    ))
                 });
             }
             None => {}
@@ -431,7 +435,7 @@ fn header_line(view: &OutputView, width: usize) -> TextLine<'static> {
     let (mark, color) = if view.ok {
         ("✓", color::ok())
     } else {
-        ("✖", color::err())
+        (crate::theme::glyphs::g().fail, color::err())
     };
     let right = if view.outcome.is_empty() {
         String::new()
@@ -446,7 +450,7 @@ fn header_line(view: &OutputView, width: usize) -> TextLine<'static> {
         .saturating_sub(4 + tool_cards::cells(&title) + tool_cards::cells(&right) + 1)
         .max(1);
     TextLine::from(vec![
-        Span::styled("  ⤢ ", styles::muted()),
+        Span::styled("  ", styles::muted()),
         Span::styled(title, styles::fg().add_modifier(Modifier::BOLD)),
         Span::raw(" ".repeat(pad)),
         Span::styled(right, Style::default().fg(color)),

@@ -1,20 +1,65 @@
 //! Scrollback line builders: turn.
 
-use crate::theme::{color, styles};
-use ratatui::style::{Color, Style};
+use crate::theme::styles::{self, NoticeKind, RailKind};
+use ratatui::style::Style;
 use ratatui::text::{Line as TextLine, Span};
 
-use crate::app::{sanitize_terminal_text, truncate, width_cap};
+use super::{notice, rail};
+use crate::app::{truncate, width_cap};
 
-pub(crate) fn header_line(label: &str, color: Color) -> TextLine<'static> {
-    TextLine::from(Span::styled(
-        format!("  {label}"),
-        Style::default().fg(color).bold(),
-    ))
+/// The `you` label row of a user turn (or `you · steer` for a message that joined a running turn).
+pub(crate) fn user_label(extra: Option<&str>) -> TextLine<'static> {
+    let label = match extra {
+        Some(e) => format!("you {} {e}", crate::theme::glyphs::g().sep),
+        None => "you".to_string(),
+    };
+    rail::label_row(
+        RailKind::User,
+        vec![Span::styled(label, styles::user().bold())],
+        Vec::new(),
+    )
 }
 
-pub(crate) fn body_line(text: &str) -> TextLine<'static> {
-    TextLine::from(format!("  {text}"))
+/// The label of a message another session sent.
+pub(crate) fn peer_label(who: &str) -> TextLine<'static> {
+    rail::label_row(
+        RailKind::User,
+        vec![Span::styled(
+            format!("peer message from {who}"),
+            styles::muted().bold(),
+        )],
+        Vec::new(),
+    )
+}
+
+/// One row of what the user typed.
+pub(crate) fn user_text(text: &str) -> TextLine<'static> {
+    rail::text_row(RailKind::User, text, styles::fg())
+}
+
+/// The assistant's label: identity on the left, the routed model and tier right-aligned.
+pub(crate) fn assistant_label(model: Option<&str>, tier: &str) -> TextLine<'static> {
+    let g = crate::theme::glyphs::g();
+    let label = vec![
+        Span::styled(g.brand, styles::brand()),
+        Span::styled(" forge", styles::fg().bold()),
+    ];
+    let right = match (model, tier.is_empty()) {
+        (Some(m), false) => format!("{m} {} {tier}", g.sep),
+        (Some(m), true) => m.to_string(),
+        (None, _) => String::new(),
+    };
+    let right = if right.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::styled(right, styles::faint())]
+    };
+    rail::label_row(rail::BAKED, label, right)
+}
+
+/// The faint footer closing a turn: elapsed, tokens, cost.
+pub(crate) fn turn_footer(facts: &str) -> TextLine<'static> {
+    rail::text_row(rail::BAKED, facts, styles::faint())
 }
 
 /// Greedy word-wrap to `width` display columns (approximated by char count, matching the rest of
@@ -69,31 +114,6 @@ pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
         lines.push(String::new());
     }
     lines
-}
-
-pub(crate) fn warning_line(msg: &str) -> TextLine<'static> {
-    let msg = sanitize_terminal_text(msg);
-    TextLine::from(Span::styled(
-        format!("  {} {msg}", crate::theme::glyphs::g().warn),
-        styles::warn(),
-    ))
-}
-
-pub(crate) fn error_line(msg: &str) -> TextLine<'static> {
-    let msg = sanitize_terminal_text(msg);
-    TextLine::from(Span::styled(
-        format!("  {} {msg}", crate::theme::glyphs::g().fail),
-        styles::err().bold(),
-    ))
-}
-
-pub(crate) fn tool_start_line(name: &str, args: &str, width: u16) -> TextLine<'static> {
-    let cap = width_cap(width, 6 + name.chars().count(), 48);
-    TextLine::from(vec![
-        Span::styled("  ↳ ", styles::muted()),
-        Span::styled(name.to_string(), styles::muted().bold()),
-        Span::styled(format!("  {}", truncate(args, cap)), styles::muted()),
-    ])
 }
 
 /// Render a symbol's scoped subgraph (the `/lattice` view) as styled scrollback lines: the
@@ -159,62 +179,76 @@ pub fn lattice_view_lines(
     out
 }
 
-pub(crate) fn lattice_line(symbols: usize, files: usize, tokens: usize) -> TextLine<'static> {
-    TextLine::from(vec![
-        Span::styled("  ⌬ lattice ", styles::muted().bold()),
-        Span::styled(
-            format!("→ injected {symbols} symbols · {files} files (~{tokens} tok)"),
-            styles::muted(),
-        ),
-    ])
+pub(crate) fn lattice_line(
+    symbols: usize,
+    files: usize,
+    tokens: usize,
+    in_turn: bool,
+) -> Vec<TextLine<'static>> {
+    notice::notice_with(
+        NoticeKind::Info,
+        in_turn,
+        vec![
+            Span::styled("lattice ", styles::muted().bold()),
+            Span::styled(
+                format!("injected {symbols} symbols · {files} files (~{tokens} tok)"),
+                styles::muted(),
+            ),
+        ],
+        &[],
+    )
 }
 
-/// A failed shell command + the model's likely-cause/fix, rendered as a header line plus one
-/// dimmed line per diagnosis line (shell-error-interceptor.md).
+/// A failed shell command + the model's likely-cause/fix: an error notice naming the command,
+/// then one muted row per diagnosis line (shell-error-interceptor.md).
 pub(crate) fn shell_diagnosis_lines(
     command: &str,
     diagnosis: &str,
     fix: Option<&str>,
     width: u16,
+    in_turn: bool,
 ) -> Vec<TextLine<'static>> {
-    let mut lines = vec![TextLine::from(vec![
-        Span::styled(
-            format!("  {} shell failed ", crate::theme::glyphs::g().fail),
-            styles::err().bold(),
-        ),
-        Span::styled(truncate(command, width_cap(width, 18, 56)), styles::muted()),
-    ])];
-    for line in diagnosis.lines() {
-        lines.push(TextLine::from(Span::styled(
-            format!("    {line}"),
-            styles::muted(),
-        )));
-    }
+    let mut details: Vec<String> = diagnosis.lines().map(str::to_string).collect();
     if let Some(fix) = fix {
-        lines.push(TextLine::from(Span::styled(
-            format!("    fix: {fix}"),
-            styles::muted(),
-        )));
+        details.push(format!("fix: {fix}"));
     }
-    lines
+    notice::notice_with(
+        NoticeKind::Err,
+        in_turn,
+        vec![
+            Span::styled("shell failed ", styles::err().bold()),
+            Span::styled(truncate(command, width_cap(width, 18, 56)), styles::muted()),
+        ],
+        &details,
+    )
 }
 
-/// A finished tool call as one scrollback row: mark, name, and a truncated summary.
-pub(crate) fn tool_result_line(
-    name: &str,
-    ok: bool,
-    summary: &str,
-    width: u16,
-) -> TextLine<'static> {
-    let (mark, color) = if ok {
-        ("  ✓ ", color::ok())
+/// The thinking block of a turn: one faint italic line when hidden, the text behind an inner
+/// rail when open.
+pub(crate) fn thinking_rows(text: &str, secs: u64, open: bool) -> Vec<TextLine<'static>> {
+    let g = crate::theme::glyphs::g();
+    let tri = if open {
+        g.disclose_open
     } else {
-        ("  ✗ ", color::err())
+        g.disclose_closed
     };
-    let cap = width_cap(width, 6 + name.chars().count(), 56);
-    TextLine::from(vec![
-        Span::styled(mark, Style::default().fg(color)),
-        Span::styled(format!("{name}  "), Style::default().fg(color)),
-        Span::styled(truncate(summary, cap), styles::muted()),
-    ])
+    let head = TextLine::from(Span::styled(
+        format!("{tri} Thought for {secs}s"),
+        styles::faint().add_modifier(ratatui::style::Modifier::ITALIC),
+    ));
+    let mut rows = vec![head];
+    if open {
+        let bar = if g.unicode { "▏ " } else { "| " };
+        for l in text.lines() {
+            rows.push(TextLine::from(vec![
+                Span::styled(String::new(), crate::copy_mark::prose(Style::default())),
+                Span::styled(bar, crate::copy_mark::repeat(styles::faint())),
+                Span::styled(
+                    l.to_string(),
+                    styles::muted().add_modifier(ratatui::style::Modifier::ITALIC),
+                ),
+            ]));
+        }
+    }
+    rows
 }

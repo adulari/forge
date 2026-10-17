@@ -566,7 +566,7 @@ fn the_remote_transcript_sees_each_call_once_with_its_outcome() {
     app.apply(PresenterEvent::ToolResult {
         name: "shell".into(),
         ok: true,
-        summary: "exit 0 in 9s".into(),
+        summary: "exit 0".into(),
         detail: None,
     });
     let _ = app.drain_flush_remote();
@@ -581,7 +581,7 @@ fn the_remote_transcript_sees_each_call_once_with_its_outcome() {
         2,
         "the running row, then the finished one: {rows:?}"
     );
-    assert!(rows[1].contains("exit 0 in 9s"), "{rows:?}");
+    assert!(rows[1].contains("exit 0"), "{rows:?}");
 }
 
 #[test]
@@ -639,15 +639,12 @@ fn remote_transcript_rows_carry_the_provenance_of_each_line() {
     assert_eq!(kind_of("it isn't there").kind, TranscriptKind::Assistant);
     assert_eq!(kind_of("retrying").kind, TranscriptKind::System);
 
-    let call = kind_of("Cargo.toml\"}");
-    assert_eq!(call.kind, TranscriptKind::Tool);
-    assert_eq!(call.tool.as_deref(), Some("read_file"));
-    assert_eq!(call.meta, None, "the call row has no outcome yet");
-
-    let result = kind_of("no such file");
+    // Inline prints one finished card per call, so the single Tool row carries the outcome.
+    let result = kind_of("Read Cargo.toml");
     assert_eq!(result.kind, TranscriptKind::Tool);
     assert_eq!(result.tool.as_deref(), Some("read_file"));
     assert_eq!(result.meta.as_deref(), Some("failed"));
+    assert!(result.text.contains("no such file"), "{}", result.text);
 }
 
 #[test]
@@ -713,4 +710,160 @@ fn restored_turn_state_seeds_outcome_and_model_but_not_the_turn_count() {
         Some(forge_types::StopReason::MaxSteps)
     );
     assert_eq!(live.remote_snapshot().model, "groq::live");
+}
+
+#[test]
+fn a_replys_transcript_rows_keep_the_shape_the_daemon_supervisor_reads() {
+    // `serve_dispatch::supervisor::final_reply` extracts a worker's answer from these rows: a
+    // `⚒ forge` assistant header (stable on the wire, whatever the terminal draws), the answer
+    // rows, then system rows (footer, notices, recap) it skips.
+    let mut app = App::default();
+    app.submit_user("do it");
+    app.apply(PresenterEvent::Routing {
+        tier: "standard".into(),
+        model: "claude-cli".into(),
+        rationale: String::new(),
+        effort: None,
+    });
+    app.apply(PresenterEvent::AssistantDelta(
+        "Done — the file is written.".into(),
+    ));
+    app.apply(PresenterEvent::AssistantDone);
+    app.apply(PresenterEvent::Done {
+        stop_reason: forge_types::StopReason::FinalAnswer,
+        final_text: String::new(),
+    });
+    let _ = app.drain_flush_remote();
+    let rows: Vec<(String, String)> = app
+        .remote_snapshot()
+        .transcript_rows
+        .iter()
+        .map(|r| (r.kind.as_str().to_string(), r.text.clone()))
+        .collect();
+    let assistant: Vec<&str> = rows
+        .iter()
+        .filter(|(k, _)| k == "assistant")
+        .map(|(_, t)| t.as_str())
+        .collect();
+    assert_eq!(
+        assistant,
+        vec!["  ⚒ forge", "  Done — the file is written."],
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|(_, t)| t.contains("0.0s")),
+        "the footer is for the terminal and never reaches the wire: {rows:?}"
+    );
+}
+
+#[test]
+fn the_remote_ring_keeps_what_was_said_and_run_not_card_bodies_or_footers() {
+    // The ring holds the last twelve rows; a turn's footer and a card's diff preview are for the
+    // terminal and must not push the notes a client is waiting for out of it.
+    let mut app = App::default();
+    app.submit_user("write it");
+    app.note("📎 included notes.txt");
+    app.apply(PresenterEvent::ToolStart {
+        name: "write_file".into(),
+        args: r#"{"path":"a.txt","content":"x"}"#.into(),
+    });
+    app.apply(PresenterEvent::Diff(forge_types::FileDiff {
+        path: "a.txt".into(),
+        kind: forge_types::DiffKind::Created,
+        old: None,
+        new: Some("l1\nl2\nl3\n".into()),
+        lang: None,
+        binary: false,
+    }));
+    app.apply(PresenterEvent::ToolResult {
+        name: "write_file".into(),
+        ok: true,
+        summary: "wrote".into(),
+        detail: None,
+    });
+    app.apply(PresenterEvent::AssistantText("Done.".into()));
+    app.apply(PresenterEvent::Done {
+        stop_reason: forge_types::StopReason::FinalAnswer,
+        final_text: String::new(),
+    });
+    let _ = app.drain_flush_remote();
+    let rows: Vec<String> = app
+        .recent_transcript
+        .iter()
+        .map(|r| r.text.clone())
+        .collect();
+    assert!(
+        rows.iter().any(|r| r.contains("📎 included notes.txt")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("l2")),
+        "diff body stays local: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("0.0s")),
+        "footer stays local: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("Write a.txt")),
+        "the card header is kept: {rows:?}"
+    );
+}
+
+#[test]
+fn a_long_prompt_line_is_one_remote_row_not_one_per_wrapped_piece() {
+    let mut app = App::default();
+    app.submit_user(&format!(
+        "see @/tmp/{}",
+        "very-long-path-segment/".repeat(3)
+    ));
+    let _ = app.drain_flush_remote();
+    let user_rows = app
+        .recent_transcript
+        .iter()
+        .filter(|r| r.kind == TranscriptKind::User)
+        .count();
+    assert_eq!(user_rows, 2, "label + one row for the one line typed");
+}
+
+#[test]
+fn a_folded_paste_still_reaches_the_phone_in_full_and_in_order() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    app.last_width.set(100);
+    let paste: String = (1..=12).map(|i| format!("pasted line {i}\n")).collect();
+    app.submit_user(&paste);
+    let _ = app.drain_flush_remote();
+    let rows: Vec<&str> = app
+        .recent_transcript
+        .iter()
+        .map(|r| r.text.trim())
+        .collect();
+    let at = |needle: &str| rows.iter().position(|r| r.contains(needle));
+    assert!(
+        at("pasted line 1").is_some() && at("pasted line 12").is_some(),
+        "{rows:?}"
+    );
+    assert!(
+        at("pasted line 6") < at("pasted line 7"),
+        "in order: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Ctrl+T")),
+        "the terminal's fold hint stays local: {rows:?}"
+    );
+}
+
+#[test]
+fn outside_full_screen_a_long_message_is_not_folded() {
+    let mut app = App::default();
+    let paste: String = (1..=12).map(|i| format!("pasted line {i}\n")).collect();
+    app.submit_user(&paste);
+    let text = drain_text_lines(&mut app);
+    assert!(
+        text.contains("pasted line 12") && !text.contains("more lines"),
+        "{text}"
+    );
 }

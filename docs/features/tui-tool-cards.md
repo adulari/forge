@@ -1,5 +1,59 @@
 # Feature: expandable tool cards in the chat transcript
 
+> **Forgeline update.** Cards now use one grammar in both display modes, sit on the turn rail,
+> carry their own diff, and fold repeated reads. Section 0 is current; sections 1-5 describe the
+> mechanics (expansion, hit-testing, full output), which are unchanged except where section 0
+> says otherwise.
+
+## 0. Forgeline card grammar
+
+```
+ ▏ ✓ Write  mock-note.txt                                       new file · +1 · 4ms ▸
+ ▏   ┊ 1 + deterministic mock output
+ ▏ ✓ Edit   src/upload.rs                                              +18 −3 · 0.2s ▸
+ ▏   ┊ ┄┄ @@ -38,7 +38,9 @@ ┄┄
+ ▏   ┊ 38   let req = build(chunk);
+ ▏   ┊ 39 − let r = send(req)?;
+ ▏   ┊ 39 + let r = retry(3, || send(req.clone()))?;
+ ▏   ┊ … 14 more lines · Ctrl+T expand
+ ▏ ✗ Run    cargo test -p upload                                      exit 101 · 41s ▸
+ ▏   ┊ test retry::gives_up_after_three ... FAILED
+ ▏ ◆ Read   4 files                                                          0.2s ▸
+```
+
+- **Status glyph, verb, target, outcome, duration.** The glyph is a braille spinner while the call
+  runs (animated at draw time over the baked row), `◇` while its permission prompt is open (the
+  right-hand text reads `awaiting approval`), `✓` / `✗` when it ends and `◆` for a folded group.
+  Verbs are humanised: `read_file` Read, `write_file` Write, `edit_file` Edit, `shell` Run,
+  `grep` Search, `glob` Find, `web_fetch` Fetch, `web_search` Web, `spawn_agents` Agents; an unknown
+  tool shows its own name. The target is decoded from the call's JSON (`headline`); raw JSON is
+  never shown, in either mode. The card measures its own duration, so a trailing ` in 132ms` in a
+  tool's summary is dropped.
+- **Diffs live in the card.** `PresenterEvent::Diff` attaches to the running call (it arrives after
+  `ToolStart`, before the permission gate). The collapsed card shows the stat (`+18 −3`, `new file
+  · +1`) and up to eight rows - a line-number gutter, a coloured sigil, a full-row tint where the
+  terminal paints backgrounds and a brighter tint on the changed words of a rewritten line - then
+  `… N more lines · Ctrl+T expand`. The separate `✎ <absolute path>` header is gone; the card shows
+  the path relative to the call's `cwd`. `render::diff_to_plain` stays ANSI-free unified text for
+  remote and export.
+- **Failures explain themselves.** A failed collapsed card prints the last three non-blank lines of
+  its output under the header.
+- **Reads fold.** A read that directly follows a finished read joins it: `◆ Read 4 files`. Expanding
+  lists each file with its outcome and time. Any other row in between ends the run.
+- **Inline prints once.** `--inline` cannot rewrite scrollback, so a call is held back while it runs
+  (the composer border shows `Running Write mock-note.txt`) and the finished card, with its short
+  diff, is printed once when the result lands. It has no triangle and no `Ctrl+T` hint, because it
+  cannot open. Full-screen keeps clicking and `Ctrl+T`.
+- **Remote.** A running row ends in `running`, which `remote_transcript_text` strips (the finished
+  row arrives as its own line); the rail and the disclosure triangle never reach the phone.
+
+The same machinery folds long **user turns** (`UserFold`): a canned command prompt (`/init`)
+becomes one labelled row, a paste longer than six rows keeps its first six and `… N more lines ·
+Ctrl+T show` (full-screen only: inline and the daemon driver show a generic message in full, because
+the scrollback scrolls natively and a phone reads the same rows). The remote transcript gets the
+hidden rows after the visible ones and never the fold hint. `Ctrl+T` opens the newest card that has a drawer, a folded turn included, so a tool
+card that is newer always wins.
+
 > One transcript row per tool call, click (or `Ctrl+T`) to open it, and a full-screen viewer for
 > everything it printed. Touches `forge-types` (`PresenterEvent::ToolResult.detail`,
 > `PresenterEvent::ToolOutput`), `forge-tools` (`Tool::run_full`), `forge-store`
@@ -145,7 +199,8 @@ closed.
 
 `crates/forge-tui/src/app/tool_cards.rs` covers the rendering (one row collapsed, full arguments
 and output when expanded, no triangle when there is nothing behind it, wrapping inside the row
-width, cwd-relative paths, malformed args, the `⤢` row and its line count). `crates/forge-tui/src/app.rs`
+width, cwd-relative paths, malformed args, the view-full-output row and its line count, the diff
+in the card, the failure tail, the read group, verbs and durations, folded user turns). `crates/forge-tui/src/app.rs`
 covers the lifecycle (one row per finished call, click toggles in place, a later card stays
 clickable after an earlier one grows, `Ctrl+T` without a mouse, same-frame completion, inline mode
 untouched, and a result with no matching start still rendering). `crates/forge-tui/src/app/output_view.rs`

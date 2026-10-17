@@ -4560,6 +4560,10 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
             }
         }
+        // A settled turn's rail cools over a couple of seconds; redraw once per step.
+        if app.tick_cooling() {
+            dirty = true;
+        }
         // Refresh shell-backed custom statusline widgets on their configured interval. Spawned
         // detached (not awaited, doesn't touch the session lock), so a slow or hanging user
         // command can never stall the render loop — a stuck one just keeps showing stale output.

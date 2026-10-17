@@ -32,10 +32,186 @@ pub(crate) fn frame_row(style: Style) -> Style {
     style.add_modifier(NO_COPY | FRAME_ROW)
 }
 
+/// The span repeats verbatim at the head of every wrapped continuation row (the turn rail, a
+/// blockquote bar). Always decoration.
+const REPEAT: Modifier = Modifier::from_bits_retain(1 << 9);
+/// Continuation rows of the line indent under the END of this span (list markers, card gutters).
+const HANG: Modifier = Modifier::from_bits_retain(1 << 10);
+/// The line is prose: it wraps at the reading measure instead of the full width.
+const PROSE: Modifier = Modifier::from_bits_retain(1 << 11);
+/// Marker span: everything after it is pushed flush against the right margin.
+const RIGHT: Modifier = Modifier::from_bits_retain(1 << 12);
+
+/// Widest a prose row may be, in content cells past the rail.
+pub(crate) const MEASURE: usize = 100;
+
+/// A decoration span that is repeated on every wrapped row of its line.
+pub(crate) fn repeat(style: Style) -> Style {
+    style.add_modifier(NO_COPY | REPEAT)
+}
+
+/// `style`, marking the end of the hanging-indent region (the text after it is the content).
+pub(crate) fn hang(style: Style) -> Style {
+    style.add_modifier(HANG)
+}
+
+/// `style` for the zero-width span that flags a line as prose.
+pub(crate) fn prose(style: Style) -> Style {
+    style.add_modifier(NO_COPY | PROSE)
+}
+
+/// The span that splits a row into a left part and a right-aligned part. Its text (two spaces)
+/// is what a plain-text flatten of the row shows between the halves.
+pub(crate) fn right_marker() -> Span<'static> {
+    Span::styled("  ", Style::default().add_modifier(NO_COPY | RIGHT))
+}
+
 pub(crate) fn has_decor(line: &Line<'_>) -> bool {
+    line.spans.iter().any(|s| {
+        s.style
+            .add_modifier
+            .intersects(NO_COPY | REPEAT | HANG | PROSE)
+    })
+}
+
+/// Whether a row shows nothing but its repeating decoration (a bare rail).
+pub(crate) fn is_blank_row(line: &Line<'_>) -> bool {
     line.spans
         .iter()
-        .any(|s| s.style.add_modifier.intersects(NO_COPY))
+        .all(|s| s.content.trim().is_empty() || s.style.add_modifier.intersects(REPEAT))
+}
+
+/// Whether a span is a repeating rail or bar (never part of what a reader copies or a phone shows).
+pub(crate) fn is_rail(span: &Span<'_>) -> bool {
+    span.style.add_modifier.intersects(REPEAT)
+}
+
+/// How a line wraps, read from the marks its spans carry.
+pub(crate) struct RowPlan {
+    /// Spans `0..prefix` are the head that continuation rows replace with `cont`.
+    pub(crate) prefix: usize,
+    pub(crate) cont: Vec<Span<'static>>,
+    pub(crate) prefix_w: usize,
+    /// Cells taken by the repeating decoration (the rail) alone.
+    pub(crate) rail_w: usize,
+    pub(crate) prose: bool,
+    /// Index of the right-alignment marker, when the line has one.
+    pub(crate) right: Option<usize>,
+}
+
+fn span_w(s: &Span<'_>) -> usize {
+    s.content
+        .chars()
+        .map(|c| UnicodeWidthChar::width(c).unwrap_or(1))
+        .sum()
+}
+
+pub(crate) fn plan(line: &Line<'_>) -> RowPlan {
+    let right = line
+        .spans
+        .iter()
+        .position(|s| s.style.add_modifier.intersects(RIGHT));
+    let end = right.unwrap_or(line.spans.len());
+    let head = line.spans[..end]
+        .iter()
+        .rposition(|s| s.style.add_modifier.intersects(REPEAT | HANG));
+    let prefix = head.map_or(0, |h| h + 1);
+    let mut cont = Vec::new();
+    let mut prefix_w = 0;
+    let mut rail_w = 0;
+    for s in &line.spans[..prefix] {
+        let w = span_w(s);
+        prefix_w += w;
+        if s.style.add_modifier.intersects(REPEAT) {
+            rail_w += w;
+            cont.push(Span::styled(s.content.to_string(), s.style));
+        } else if w > 0 {
+            cont.push(Span::styled(
+                " ".repeat(w),
+                Style::default().add_modifier(NO_COPY),
+            ));
+        }
+    }
+    RowPlan {
+        prefix,
+        cont,
+        prefix_w,
+        rail_w,
+        prose: line
+            .spans
+            .iter()
+            .any(|s| s.style.add_modifier.intersects(PROSE)),
+        right,
+    }
+}
+
+/// Lay a right-aligned line out as ONE row of exactly `width` cells: the left part, padding, the
+/// right part flush at the margin. A left part too long to leave room is cut with an ellipsis;
+/// when even that cannot fit the right part, the right part is dropped.
+pub(crate) fn fit_right(line: &Line<'_>, at: usize, width: usize) -> Line<'static> {
+    let left: Vec<Span<'static>> = line.spans[..at]
+        .iter()
+        .map(|s| Span::styled(s.content.to_string(), s.style))
+        .collect();
+    let right: Vec<Span<'static>> = line.spans[at + 1..]
+        .iter()
+        .map(|s| Span::styled(s.content.to_string(), s.style))
+        .collect();
+    let lw: usize = left.iter().map(span_w).sum();
+    let rw: usize = right.iter().map(span_w).sum();
+    let mut spans = left;
+    if lw + 2 + rw <= width {
+        spans.push(Span::styled(
+            " ".repeat(width - lw - rw),
+            Style::default().add_modifier(NO_COPY),
+        ));
+        spans.extend(right);
+    } else if rw + 6 <= width {
+        spans = cut_spans(spans, width - rw - 2);
+        let used: usize = spans.iter().map(span_w).sum();
+        spans.push(Span::styled(
+            " ".repeat(width - used - rw),
+            Style::default().add_modifier(NO_COPY),
+        ));
+        spans.extend(right);
+    } else {
+        spans = cut_spans(spans, width);
+    }
+    Line::from(spans).style(line.style)
+}
+
+/// Cut `spans` to `max` cells, ending in `…` when anything was dropped. Decoration spans are kept
+/// whole (the head of a row is never what gets cut).
+fn cut_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    let total: usize = spans.iter().map(span_w).sum();
+    if total <= max {
+        return spans;
+    }
+    let ellipsis = crate::theme::glyphs::g().ellipsis;
+    let budget = max.saturating_sub(ellipsis.chars().count());
+    let mut used = 0usize;
+    let mut out = Vec::new();
+    for span in spans {
+        let w = span_w(&span);
+        if span.style.add_modifier.intersects(NO_COPY) || used + w <= budget {
+            used += w;
+            out.push(span);
+            continue;
+        }
+        let mut kept = String::new();
+        for ch in span.content.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
+            if used + cw > budget {
+                break;
+            }
+            kept.push(ch);
+            used += cw;
+        }
+        out.push(Span::styled(kept, span.style));
+        break;
+    }
+    out.push(Span::raw(ellipsis));
+    out
 }
 
 /// The zero-width span that opens a wrapped continuation row of a framed line.
@@ -101,8 +277,18 @@ mod tests {
 
     const ALL: (usize, usize) = (0, usize::MAX);
 
+    /// Wrapped rows under a truecolor theme, where a code block is a band whose gutter is one
+    /// cell wide (no line numbers below six rows).
     fn rows(md: &str, width: usize) -> Vec<Line<'static>> {
-        wrap_lines(&markdown_to_lines(md), width)
+        crate::theme::scoped(
+            crate::theme::Theme::new(
+                crate::theme::ColorTier::TrueColor,
+                crate::theme::Mode::Dark,
+                crate::theme::GlyphTier::Unicode,
+                crate::theme::Motion::Full,
+            ),
+            || wrap_lines(&markdown_to_lines(md), width),
+        )
     }
 
     fn plain(line: &Line<'_>) -> String {
@@ -125,16 +311,19 @@ mod tests {
     #[test]
     fn whole_block_copies_exactly_the_code() {
         let r = rows("```rust\nfn main() {\n    println!(\"hi\");\n}\n```", 80);
-        assert!(plain(&r[0]).contains('┌') && plain(r.last().unwrap()).contains('└'));
+        assert!(
+            plain(&r[0]).contains("rust") && plain(&r[0]).contains("/copy"),
+            "header row"
+        );
         assert_eq!(copy_all(&r), "fn main() {\n    println!(\"hi\");\n}");
     }
 
     #[test]
     fn partial_lines_and_multi_line_ranges_cut_at_the_cell() {
         let r = rows("```\nalpha\n  bravo\ncharlie\n```", 80);
-        // Row 0 is the top edge. Cell 4 is the first code cell (indent 2 + "│ ").
-        assert_eq!(copy(&r, (1, 6), (1, 9)), "pha");
-        assert_eq!(copy(&r, (1, 6), (3, 4 + 3)), "pha\n  bravo\ncha");
+        // Row 0 is the header. Cell 1 is the first code cell (one cell of band padding).
+        assert_eq!(copy(&r, (1, 3), (1, 6)), "pha");
+        assert_eq!(copy(&r, (1, 3), (3, 1 + 3)), "pha\n  bravo\ncha");
         assert_eq!(copy(&r, (1, 0), (3, usize::MAX)), "alpha\n  bravo\ncharlie");
     }
 
@@ -142,7 +331,7 @@ mod tests {
     fn selection_starting_or_ending_on_the_frame_still_yields_only_code() {
         let r = rows("```\none\ntwo\n```", 80);
         assert_eq!(copy(&r, (0, 0), (r.len() - 1, usize::MAX)), "one\ntwo");
-        assert_eq!(copy(&r, (1, 0), (2, 3)), "one\n");
+        assert_eq!(copy(&r, (1, 0), (2, 3)), "one\ntw");
     }
 
     #[test]
@@ -169,8 +358,8 @@ mod tests {
 
     #[test]
     fn exact_width_wrap_does_not_invent_a_newline_or_lose_text() {
-        // gutter is 4 cells, wrap width 10 → a 6-cell line fills the first row exactly.
-        let r = rows("```\nabcdef\nz\n```", 10);
+        // gutter is 1 cell, wrap width 7 → a 6-cell line fills the first row exactly.
+        let r = rows("```\nabcdef\nz\n```", 7);
         assert_eq!(copy_all(&r), "abcdef\nz");
     }
 
@@ -184,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_keeps_markers_and_content_but_not_the_indent() {
+    fn diff_copies_the_code_not_the_gutter_sigil_or_separator() {
         let diff = forge_types::FileDiff {
             path: "a.rs".into(),
             kind: forge_types::DiffKind::Modified,
@@ -195,14 +384,13 @@ mod tests {
         };
         let r = wrap_lines(&crate::render::diff_to_lines(&diff), 80);
         let text = copy_all(&r);
-        assert!(text.contains("\n-old\n+new"), "{text:?}");
-        assert!(text.contains("\n keep\n"), "{text:?}");
+        assert_eq!(text, "keep\nold\nnew", "{text:?}");
     }
 
     #[test]
     fn wide_glyph_before_the_cut_does_not_shift_it() {
         let r = rows("```\n日本語abc\n```", 80);
-        // gutter 4 + three 2-cell glyphs = cell 10 is the start of "abc".
-        assert_eq!(copy(&r, (1, 10), (1, usize::MAX)), "abc");
+        // gutter 1 + three 2-cell glyphs = cell 7 is the start of "abc".
+        assert_eq!(copy(&r, (1, 7), (1, usize::MAX)), "abc");
     }
 }

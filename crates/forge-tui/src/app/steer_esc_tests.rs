@@ -68,19 +68,18 @@ fn a_steered_prompt_is_echoed_as_a_user_line() {
 fn remote_transcript_rows_drop_card_padding_and_the_running_mark() {
     let call = LineOrigin::tool_call("read_file");
     assert_eq!(
-        remote_transcript_text(
-            "  ▸ read_file  tools/frida/attach_cap.py                 ◍ running",
-            &call
-        ),
-        "▸ read_file tools/frida/attach_cap.py"
+        remote_transcript_text("⠋ Read   tools/frida/attach_cap.py          running", &call),
+        "⠋ Read tools/frida/attach_cap.py"
     );
     let done = LineOrigin::tool_result("read_file", true);
     assert_eq!(
-        remote_transcript_text(
-            "  ▸ read_file  a.py            ✓ #!/usr/bin/env python3",
-            &done
-        ),
-        "▸ read_file a.py ✓ #!/usr/bin/env python3"
+        remote_transcript_text("✓ Read   a.py            42 lines · 0.1s", &done),
+        "✓ Read a.py 42 lines · 0.1s"
+    );
+    // A finished row whose own text ends in the word is left alone.
+    assert_eq!(
+        remote_transcript_text("✓ Run    make            still running", &done),
+        "✓ Run make still running"
     );
     // Non-tool lines keep their spacing (code blocks, tables).
     assert_eq!(
