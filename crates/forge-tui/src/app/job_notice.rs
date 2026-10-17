@@ -5,13 +5,13 @@
 //! to see it as something they typed. Wherever a user row would be echoed, a message that is
 //! entirely job notices renders here instead: one header line per job, its log tail dim and
 //! indented underneath.
+use crate::theme::{color, styles};
 use ratatui::style::Style;
 use ratatui::text::{Line as TextLine, Span};
 
 use forge_types::{JobExitNotice, JobNotice};
 
 use super::{truncate, width_cap, App, LineOrigin};
-use crate::surface::{DIM, ERRRED, OKGREEN, TEXT};
 
 /// Log lines shown under a job header; the notice already carries only the tail of the log.
 const TAIL_SHOWN: usize = 4;
@@ -30,7 +30,7 @@ impl App {
                 JobNotice::Dropped(n) => {
                     self.flush.push(TextLine::from(Span::styled(
                         format!("  ⚙ {n} earlier job notice(s) dropped · `shell_job` lists them"),
-                        Style::default().fg(DIM),
+                        styles::muted(),
                     )));
                     self.seal_flush_origins(&LineOrigin::job(None));
                 }
@@ -45,7 +45,7 @@ impl App {
                     for l in exit.tail.iter().skip(skipped) {
                         self.flush.push(TextLine::from(Span::styled(
                             format!("      {}", truncate(l, width_cap(width, 8, 40))),
-                            Style::default().fg(DIM),
+                            styles::muted(),
                         )));
                     }
                     self.seal_flush_origins(&LineOrigin::job(Some("tail")));
@@ -60,23 +60,23 @@ impl App {
 
 fn job_header(exit: &JobExitNotice, width: u16) -> TextLine<'static> {
     let (mark, color) = if exit.ok() {
-        ("✓", OKGREEN)
+        ("✓", color::ok())
     } else {
-        ("✗", ERRRED)
+        ("✗", color::err())
     };
     let head = format!("job {} ", exit.pid);
     let status = format!("exited {}", exit.code);
     let reserve = 6 + head.chars().count() + status.chars().count() + 3;
     TextLine::from(vec![
-        Span::styled("  ⚙ ", Style::default().fg(DIM)),
-        Span::styled(head, Style::default().fg(TEXT)),
+        Span::styled("  ⚙ ", styles::muted()),
+        Span::styled(head, styles::fg()),
         Span::styled(format!("{mark} {status}"), Style::default().fg(color)),
         Span::styled(
             format!(
                 " · {}",
                 truncate(&exit.command, width_cap(width, reserve, 30))
             ),
-            Style::default().fg(DIM),
+            styles::muted(),
         ),
     ])
 }

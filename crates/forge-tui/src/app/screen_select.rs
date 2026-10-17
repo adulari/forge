@@ -169,7 +169,7 @@ impl App {
         for y in area.y..area.y + area.height {
             if let Some((start, end)) = Self::screen_row_cols(&sel, y, area.x + area.width) {
                 for x in start..end.min(area.x + area.width) {
-                    buf[(x, y)].set_bg(SELECT_BG);
+                    buf[(x, y)].set_style(crate::theme::styles::selection());
                 }
             }
         }

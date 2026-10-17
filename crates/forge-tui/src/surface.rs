@@ -5,25 +5,12 @@
 //! the surrounding UI reads as one coherent Forge surface.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Clear};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear};
 use ratatui::Frame;
 
-pub(crate) const ORANGE: Color = Color::Rgb(255, 138, 48);
-pub(crate) const ACCENT: Color = Color::Rgb(82, 162, 255);
-pub(crate) const DIM: Color = Color::Rgb(128, 134, 158);
-pub(crate) const VERY_DIM: Color = Color::Rgb(54, 58, 74);
-pub(crate) const TEXT: Color = Color::Rgb(208, 213, 224);
-pub(crate) const USER: Color = Color::Rgb(122, 183, 255);
-pub(crate) const OKGREEN: Color = Color::Rgb(92, 208, 122);
-pub(crate) const ERRRED: Color = Color::Rgb(243, 92, 92);
-pub(crate) const WARNYEL: Color = Color::Rgb(238, 188, 82);
-pub(crate) const TOOLCYAN: Color = Color::Rgb(75, 212, 218);
-pub(crate) const SELECT_BG: Color = Color::Rgb(40, 70, 132);
-pub(crate) const STATUS_BG: Color = Color::Rgb(14, 15, 21);
-pub(crate) const SURFACE_BG: Color = Color::Rgb(10, 12, 18);
-pub(crate) const SEPARATOR: Color = Color::Rgb(38, 42, 62);
+use crate::theme::{glyphs::g, styles};
 
 /// The semantic purpose of a framed surface. This keeps border color meaningful and consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,43 +24,54 @@ pub(crate) enum SurfaceTone {
 }
 
 impl SurfaceTone {
-    pub(crate) const fn color(self) -> Color {
-        match self {
-            Self::Brand => ORANGE,
-            Self::Accent => ACCENT,
-            Self::Tool => TOOLCYAN,
-            Self::Success => OKGREEN,
-            Self::Warning => WARNYEL,
-            Self::Danger => ERRRED,
-        }
+    /// The tone's full style (colour plus the modifiers that carry it in mono).
+    pub(crate) fn style(self) -> Style {
+        styles::tone_token(self).style()
     }
 }
 
 pub(crate) fn title(text: impl Into<String>, tone: SurfaceTone) -> Span<'static> {
-    Span::styled(
-        format!(" {} ", text.into()),
-        Style::default().fg(tone.color()).bold(),
-    )
+    Span::styled(format!(" {} ", text.into()), tone.style().bold())
 }
 
 pub(crate) fn hint(text: impl Into<String>) -> Span<'static> {
-    Span::styled(format!(" {} ", text.into()), Style::default().fg(DIM))
+    Span::styled(format!(" {} ", text.into()), styles::muted())
 }
 
+fn border_style_for(tone: SurfaceTone) -> Style {
+    styles::frame(
+        tone,
+        matches!(tone, SurfaceTone::Warning | SurfaceTone::Danger),
+    )
+}
+
+/// A framed surface: the title sits in the top border after one `─`.
 pub(crate) fn panel(title: Span<'static>, tone: SurfaceTone) -> Block<'static> {
+    let border_style = border_style_for(tone);
     Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(title)
-        .style(Style::default().bg(SURFACE_BG))
-        .border_style(Style::default().fg(tone.color()))
+        .border_set(g().border)
+        .title(Line::from(vec![
+            Span::styled(g().border.horizontal_top, border_style),
+            title,
+        ]))
+        .style(styles::surface())
+        .border_style(border_style)
 }
 
+/// A framed surface with a footer right-aligned in the bottom border, closed by one `─`.
 pub(crate) fn panel_with_footer(
     title: Span<'static>,
     footer: Span<'static>,
     tone: SurfaceTone,
 ) -> Block<'static> {
-    panel(title, tone).title_bottom(footer)
+    let border_style = border_style_for(tone);
+    panel(title, tone).title_bottom(
+        Line::from(vec![
+            footer,
+            Span::styled(g().border.horizontal_bottom, border_style),
+        ])
+        .right_aligned(),
+    )
 }
 
 thread_local! {
@@ -94,27 +92,62 @@ pub(crate) fn render_panel(
     footer: Option<Span<'static>>,
     tone: SurfaceTone,
 ) -> Rect {
+    render_panel_with_context(frame, area, title, None, footer, tone)
+}
+
+/// [`render_panel`] with a `context` (a count or the command that opened it) right-aligned in
+/// the top border.
+pub(crate) fn render_panel_with_context(
+    frame: &mut Frame,
+    area: Rect,
+    title: Span<'static>,
+    context: Option<Span<'static>>,
+    footer: Option<Span<'static>>,
+    tone: SurfaceTone,
+) -> Rect {
     // Styling a Block only changes cell style; it does not replace existing glyphs from the chat
     // underneath. Clear first so every framed surface is genuinely opaque.
     PANELS.with(|p| p.borrow_mut().push(area));
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(SURFACE_BG)),
-        area,
-    );
-    let block = match footer {
+    frame.render_widget(Block::default().style(styles::surface()), area);
+    let mut block = match footer {
         Some(footer) => panel_with_footer(title, footer, tone),
         None => panel(title, tone),
     };
+    if let Some(context) = context {
+        let border_style = border_style_for(tone);
+        block = block.title(
+            Line::from(vec![
+                context,
+                Span::styled(g().border.horizontal_top, border_style),
+            ])
+            .right_aligned(),
+        );
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
 }
 
-/// Paint an opaque full-frame backdrop before rendering a fullscreen view. This prevents the
-/// inline chat or startup art from leaking through alternate-screen help and configuration views.
+/// Clear the frame before rendering a fullscreen view so nothing from the chat leaks through
+/// alternate-screen help and configuration views. The terminal background is never painted.
 pub(crate) fn render_backdrop(frame: &mut Frame, area: Rect) {
-    frame.render_widget(Block::default().style(Style::default().bg(STATUS_BG)), area);
+    frame.render_widget(Clear, area);
+}
+
+/// Re-colour everything already drawn in `area` as faint, so the modal drawn next reads as the
+/// foreground. Cells keep their glyphs and modifiers; fills are dropped.
+pub(crate) fn dim_backdrop(frame: &mut Frame, area: Rect) {
+    let faint = styles::faint();
+    let buf = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x, y)) {
+                cell.set_style(Style::reset().patch(faint));
+                // set_style patches; the symbol stays as drawn.
+            }
+        }
+    }
 }
 
 /// A responsive centered dialog with a modest margin on terminals that have room for it.
@@ -165,8 +198,8 @@ mod tests {
 
     #[test]
     fn tone_colors_are_distinct_for_status_states() {
-        assert_ne!(SurfaceTone::Success.color(), SurfaceTone::Danger.color());
-        assert_ne!(SurfaceTone::Warning.color(), SurfaceTone::Accent.color());
+        assert_ne!(SurfaceTone::Success.style(), SurfaceTone::Danger.style());
+        assert_ne!(SurfaceTone::Warning.style(), SurfaceTone::Accent.style());
     }
 
     #[test]

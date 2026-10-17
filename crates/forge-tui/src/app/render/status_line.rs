@@ -1,261 +1,256 @@
-use super::span_fit::fit_spans;
-use super::*;
-use crate::git_location::GitHead;
-use crate::surface::{TEXT, TOOLCYAN};
+//! The status line: engine and meters on one row. Configurable widgets and the built-in turn
+//! readout sit on the left, the context gauge and mesh effort on the right. When the row is too
+//! narrow, widgets drop in a fixed order (throughput, extras, tokens, mesh, effort, tier, cost,
+//! then the model) and a faint `+N` says how many went. The gauge stays; everything dropped is
+//! listed by `/status`.
+
 use unicode_width::UnicodeWidthStr;
 
-/// Render one statusline widget into a span list, or `None` if the widget has no data to show.
-fn render_statusline_widget<'a>(
-    widget: &forge_config::StatuslineWidget,
-    app: &App,
-    w: u16,
-) -> Option<Vec<Span<'a>>> {
+use super::span_fit::fit_spans;
+use super::status_widgets::{context_gauge, fmt_cost, GaugeSize};
+use super::*;
+use crate::theme::glyphs::g;
+use crate::theme::styles;
+
+/// The order widgets are dropped in when the row is too narrow: first listed goes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Class {
+    Throughput,
+    Extras,
+    Tokens,
+    Mesh,
+    Effort,
+    Tier,
+    Cost,
+    Remote,
+    Model,
+}
+
+const DROP_ORDER: [Class; 8] = [
+    Class::Throughput,
+    Class::Extras,
+    Class::Tokens,
+    Class::Mesh,
+    Class::Effort,
+    Class::Tier,
+    Class::Cost,
+    Class::Remote,
+];
+
+struct Item {
+    class: Class,
+    /// Joined to the previous item with no gap (`model · tier`, `model ⟨med⟩`).
+    glued: bool,
+    right: bool,
+    spans: Vec<Span<'static>>,
+}
+
+impl Item {
+    fn left(class: Class, spans: Vec<Span<'static>>) -> Self {
+        Self {
+            class,
+            glued: false,
+            right: false,
+            spans,
+        }
+    }
+
+    fn glued(class: Class, spans: Vec<Span<'static>>) -> Self {
+        Self {
+            glued: true,
+            ..Self::left(class, spans)
+        }
+    }
+
+    fn right(class: Class, spans: Vec<Span<'static>>) -> Self {
+        Self {
+            right: true,
+            ..Self::left(class, spans)
+        }
+    }
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.content.width()).sum()
+}
+
+fn tokens_text(up: u64, down: u64) -> String {
+    let glyphs = g();
+    format!(
+        "{}{} {}{}",
+        glyphs.tok_up,
+        human(up),
+        glyphs.tok_down,
+        human(down)
+    )
+}
+
+/// The tier chip text for the active routing, if any.
+fn tier_text(app: &App) -> Option<String> {
+    app.routing.as_ref().map(|r| r.tier.clone())
+}
+
+/// Items for one configured widget. A widget may yield several (the model carries its tier and
+/// effort marker so each can drop on its own).
+fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> Vec<Item> {
     use forge_config::StatuslineWidget as W;
+    let glyphs = g();
+    let muted = |text: String| vec![Span::styled(text, styles::muted())];
     match widget {
         W::Model => {
-            let model = app
-                .routing
-                .as_ref()
-                .map(|r| r.model.as_str())
-                .unwrap_or("—");
-            let tier = app.routing.as_ref().map(|r| r.tier.as_str());
-            let mut spans: Vec<Span> = Vec::new();
-            if app.model_search.is_some() && w >= 40 {
-                let f = SPINNER[app.tick % SPINNER.len()];
-                let label = match &app.model_search {
-                    Some((_, true)) => "retrying model",
-                    _ => "finding a model",
-                };
-                spans.push(Span::styled(
-                    format!("{f} {label}"),
-                    Style::default().fg(WARNYEL).bg(STATUSBG),
-                ));
-                spans.push(Span::styled(
-                    "  │  ",
-                    Style::default().fg(SEPCOL).bg(STATUSBG),
-                ));
-            } else if let (Some(label), true) = (app.loading, w >= 40) {
-                let f = SPINNER[app.tick % SPINNER.len()];
-                spans.push(Span::styled(
-                    format!("{f} {label}"),
-                    Style::default().fg(ACCENT).bold().bg(STATUSBG),
-                ));
-                spans.push(Span::styled(
-                    "  │  ",
-                    Style::default().fg(SEPCOL).bg(STATUSBG),
-                ));
-            } else if app.busy && w >= 40 {
-                let f = SPINNER[app.tick % SPINNER.len()];
-                spans.push(Span::styled(
-                    format!("{f} {}", app.turn_activity.phase.label()),
-                    Style::default().fg(ACCENT).bold().bg(STATUSBG),
-                ));
-                spans.push(Span::styled(
-                    "  │  ",
-                    Style::default().fg(SEPCOL).bg(STATUSBG),
-                ));
-            }
-            if let (Some(t), true) = (tier, w >= 52) {
-                spans.push(Span::styled(
-                    format!("[{t}] "),
-                    Style::default().fg(DIM).bg(STATUSBG),
-                ));
-            }
-            // The PROVIDER is part of the answer to "what am I talking to": the same model served
-            // over codex-oauth, codex-cli and explabs is three different routes with three
-            // different costs, quotas and effort ladders. It is dimmed rather than dropped so the
-            // model name still reads as the headline. Narrow terminals fall back to the bare tail,
-            // matching the activity panel and transcript: at 80 columns the row already carries
-            // tier, cost, effort and temper, and a provider prefix would push the widgets after it
-            // off the line entirely.
+            let Some(routing) = app.routing.as_ref() else {
+                return vec![Item::left(
+                    Class::Model,
+                    vec![Span::styled("no model yet", styles::faint())],
+                )];
+            };
+            let mut head = Vec::new();
             if w >= 100 {
-                if let Some((provider, _)) = model.split_once("::") {
-                    spans.push(Span::styled(
-                        format!("{provider}::"),
-                        Style::default().fg(DIM).bg(STATUSBG),
-                    ));
+                if let Some((provider, _)) = routing.model.split_once("::") {
+                    head.push(Span::styled(format!("{provider}::"), styles::faint()));
                 }
             }
-            spans.push(Span::styled(
-                model_short(Some(model)),
-                Style::default().fg(ACCENT).bold().bg(STATUSBG),
+            head.push(Span::styled(
+                model_short(Some(&routing.model)),
+                styles::fg().bold(),
             ));
-            // The rung the MODEL runs at, glued to the model id so it reads as part of the model's
-            // identity rather than as another independent chip. `mesh_effort_chip` renders Forge's
-            // own routing effort separately — see `model_effort_marker` for why they differ.
-            // `routed_effort.or(effort)` mirrors exactly what the request sends: mesh's chosen
-            // rung when it had a measured ladder, otherwise the session pin. Reading the pin alone
-            // would show ⟨auto⟩ for a turn mesh had in fact picked a rung for.
-            if let Some((marker, style)) =
-                model_effort_marker(model, app.routed_effort.or(app.effort))
-            {
-                spans.push(Span::styled(marker, style));
+            let mut items = vec![Item::left(Class::Model, head)];
+            if let Some(tier) = tier_text(app) {
+                items.push(Item::glued(
+                    Class::Tier,
+                    vec![
+                        Span::styled(format!(" {} ", glyphs.sep), styles::faint()),
+                        Span::styled(tier, styles::muted()),
+                    ],
+                ));
             }
-            Some(spans)
+            if let Some((marker, style)) =
+                model_effort_marker(&routing.model, app.routed_effort.or(app.effort))
+            {
+                items.push(Item::glued(
+                    Class::Effort,
+                    vec![Span::raw(" "), Span::styled(marker, style)],
+                ));
+            }
+            items
         }
-        W::Tier => {
-            let tier = app.routing.as_ref().map(|r| r.tier.clone())?;
-            Some(vec![Span::styled(
-                format!("[{tier}]"),
-                Style::default().fg(DIM).bg(STATUSBG),
-            )])
-        }
+        W::Tier => tier_text(app)
+            .map(|t| vec![Item::left(Class::Tier, muted(t))])
+            .unwrap_or_default(),
         W::SessionCost => {
+            // Before any route exists there is no cost to speak of, and "untracked" would
+            // describe a model nobody picked yet.
+            if app.routing.is_none() && app.cost_usd <= 0.0 {
+                return Vec::new();
+            }
             let model_id = app.routing.as_ref().map(|r| r.model.as_str()).unwrap_or("");
             let text = cost_cell(model_id, app.cost_usd);
-            let style = if text.starts_with('$') {
-                Style::default().fg(OKGREEN).bold().bg(STATUSBG)
+            let (text, style) = if text.starts_with('$') {
+                (fmt_cost(app.cost_usd), styles::ok())
             } else {
-                Style::default().fg(DIM).bg(STATUSBG)
+                (text, styles::muted())
             };
-            Some(vec![Span::styled(format!("◈ {text}"), style)])
+            vec![Item::left(Class::Cost, vec![Span::styled(text, style)])]
         }
         W::Effort => {
-            // Rendered even when nothing is pinned. The old widget returned `None` there, so a
-            // statusline configured to show effort showed nothing at all — the most common case,
-            // and the one where a user most needs to see that mesh is choosing.
-            // Gated wider than most cells because it now renders even when unpinned, so unlike
-            // before it always costs its columns. At 80 the row is full; taking ~16 columns there
-            // would silently clip whatever the user configured after it.
-            if w < 90 {
-                return None;
-            }
-            let (label, style) = mesh_effort_chip(app.effort);
-            Some(vec![Span::styled(label, style)])
+            let (label, style) = mesh_effort_chip(app.effort, app.tick);
+            vec![Item::right(Class::Mesh, vec![Span::styled(label, style)])]
         }
-        W::Mode => {
-            if app.temper.is_empty() {
-                return None;
-            }
-            if w < 46 {
-                return None;
-            }
-            Some(vec![Span::styled(
-                format!("◆ {}", app.temper),
-                Style::default()
-                    .fg(temper_color(&app.temper))
-                    .bold()
-                    .bg(STATUSBG),
-            )])
-        }
+        // The mode lives on the composer border; `/status` lists it too.
+        W::Mode => Vec::new(),
         W::TurnElapsed => {
             if !app.busy && !app.turn_ran {
-                return None;
+                return Vec::new();
             }
-            Some(vec![Span::styled(
-                format!("⧖ {}", fmt_dur(app.turn_elapsed_secs)),
-                Style::default()
-                    .fg(if app.busy { ACCENT } else { DIM })
-                    .bg(STATUSBG),
-            )])
+            vec![Item::left(
+                Class::Extras,
+                muted(fmt_dur(app.turn_elapsed_secs)),
+            )]
         }
         W::TokensIn => {
-            if !app.busy && !app.turn_ran {
-                return None;
+            if (!app.busy && !app.turn_ran) || app.turn_in == 0 {
+                return Vec::new();
             }
-            if app.turn_in == 0 {
-                return None;
-            }
-            Some(vec![Span::styled(
-                format!("↑{}", human(app.turn_in)),
-                Style::default()
-                    .fg(if app.busy { ACCENT } else { DIM })
-                    .bg(STATUSBG),
-            )])
+            vec![Item::left(
+                Class::Tokens,
+                muted(format!("{}{}", glyphs.tok_up, human(app.turn_in))),
+            )]
         }
         W::TokensOut => {
-            if !app.busy && !app.turn_ran {
-                return None;
+            if (!app.busy && !app.turn_ran) || app.turn_out == 0 {
+                return Vec::new();
             }
-            if app.turn_out == 0 {
-                return None;
-            }
-            Some(vec![Span::styled(
-                format!("↓{}", human(app.turn_out)),
-                Style::default()
-                    .fg(if app.busy { ACCENT } else { DIM })
-                    .bg(STATUSBG),
-            )])
+            vec![Item::left(
+                Class::Tokens,
+                muted(format!("{}{}", glyphs.tok_down, human(app.turn_out))),
+            )]
         }
-        W::Throughput => {
-            let shown = app
-                .throughput
-                .display(app.busy, std::time::Instant::now())?;
-            Some(vec![Span::styled(shown.label(), throughput_style(&shown))])
-        }
+        W::Throughput => app
+            .throughput
+            .display(app.busy, std::time::Instant::now())
+            .map(|shown| {
+                vec![Item::left(
+                    Class::Throughput,
+                    vec![Span::styled(shown.label(), throughput_style(&shown))],
+                )]
+            })
+            .unwrap_or_default(),
         W::SessionTokens => {
             if app.session_in == 0 && app.session_out == 0 {
-                return None;
+                return Vec::new();
             }
-            Some(vec![Span::styled(
-                format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out)),
-                Style::default().fg(DIM).bg(STATUSBG),
-            )])
+            let sigma = if glyphs.unicode { "Σ" } else { "total" };
+            vec![Item::left(
+                Class::Extras,
+                muted(format!(
+                    "{sigma} {}",
+                    tokens_text(app.session_in, app.session_out)
+                )),
+            )]
         }
-        W::GitBranch => {
-            let branch = app.git_branch.as_deref()?;
-            Some(vec![Span::styled(
-                format!("⎇ {branch}"),
-                Style::default().fg(DIM).bg(STATUSBG),
-            )])
-        }
-        W::RepoName => {
-            let repo = app.repo_name.as_deref()?;
-            Some(vec![Span::styled(
-                format!("⚑ {repo}"),
-                Style::default().fg(DIM).bg(STATUSBG),
-            )])
-        }
-        W::QuotaClaude => {
-            let pct = app.usage_overlay.claude_5h_pct?;
-            let color = if pct >= 90.0 {
-                ERRRED
-            } else if pct >= 70.0 {
-                WARNYEL
-            } else {
-                DIM
-            };
-            Some(vec![Span::styled(
-                format!("claude {pct:.0}%"),
-                Style::default().fg(color).bg(STATUSBG),
-            )])
-        }
-        W::QuotaCodex => {
-            let pct = app.usage_overlay.codex_5h_pct?;
-            let color = if pct >= 90.0 {
-                ERRRED
-            } else if pct >= 70.0 {
-                WARNYEL
-            } else {
-                DIM
-            };
-            Some(vec![Span::styled(
-                format!("codex {pct:.0}%"),
-                Style::default().fg(color).bg(STATUSBG),
-            )])
-        }
-        W::QuotaOpencodeGo => {
-            let (window, pct) = app.usage_overlay.opencode_go_tightest_window()?;
-            let color = if pct >= 90.0 {
-                ERRRED
-            } else if pct >= 70.0 {
-                WARNYEL
-            } else {
-                DIM
-            };
-            Some(vec![Span::styled(
-                format!("go {window} {pct:.0}%"),
-                Style::default().fg(color).bg(STATUSBG),
-            )])
-        }
+        W::GitBranch => app
+            .git_branch
+            .as_deref()
+            .map(|b| {
+                vec![Item::left(
+                    Class::Extras,
+                    muted(format!("{} {b}", glyphs.branch)),
+                )]
+            })
+            .unwrap_or_default(),
+        W::RepoName => app
+            .repo_name
+            .as_deref()
+            .map(|r| vec![Item::left(Class::Extras, muted(r.to_string()))])
+            .unwrap_or_default(),
+        W::QuotaClaude => app
+            .usage_overlay
+            .claude_5h_pct
+            .map(|pct| quota_item(format!("claude {pct:.0}%"), pct))
+            .into_iter()
+            .collect(),
+        W::QuotaCodex => app
+            .usage_overlay
+            .codex_5h_pct
+            .map(|pct| quota_item(format!("codex {pct:.0}%"), pct))
+            .into_iter()
+            .collect(),
+        W::QuotaOpencodeGo => app
+            .usage_overlay
+            .opencode_go_tightest_window()
+            .map(|(window, pct)| quota_item(format!("go {window} {pct:.0}%"), pct))
+            .into_iter()
+            .collect(),
         W::QuotaPace => {
-            let p = app.quota_pace.as_ref()?;
-            let color = if p.exhaustion_warning {
-                ERRRED
+            let Some(p) = app.quota_pace.as_ref() else {
+                return Vec::new();
+            };
+            let style = if p.exhaustion_warning {
+                styles::err()
             } else if p.projected_fraction_at_reset.unwrap_or(0.0) >= 0.70 {
-                WARNYEL
+                styles::warn()
             } else {
-                DIM
+                styles::muted()
             };
             let short_window = match p.window.as_str() {
                 "five_hour" => "5h",
@@ -264,31 +259,24 @@ fn render_statusline_widget<'a>(
                 "" => "?",
                 other => other,
             };
+            let provider = p.provider.trim_end_matches("-cli");
             let text = match p.projected_fraction_at_reset {
-                Some(proj) => format!(
-                    "⏱ {} {short_window} → {:.0}%",
-                    p.provider.trim_end_matches("-cli"),
-                    proj * 100.0
-                ),
+                Some(proj) => format!("{provider} {short_window} -> {:.0}%", proj * 100.0),
                 None => format!(
-                    "⏱ {} {short_window} {:+.1}%/hr",
-                    p.provider.trim_end_matches("-cli"),
+                    "{provider} {short_window} {:+.1}%/hr",
                     p.rate_per_hour * 100.0
                 ),
             };
-            Some(vec![Span::styled(
-                text,
-                Style::default().fg(color).bg(STATUSBG),
-            )])
+            vec![Item::left(Class::Extras, vec![Span::styled(text, style)])]
         }
         W::McpStatus => {
             if app.mcp_count == 0 {
-                return None;
+                return Vec::new();
             }
-            Some(vec![Span::styled(
-                format!("⌬ {} mcp", app.mcp_count),
-                Style::default().fg(DIM).bg(STATUSBG),
-            )])
+            vec![Item::left(
+                Class::Extras,
+                muted(format!("{} mcp", app.mcp_count)),
+            )]
         }
         W::Custom {
             text,
@@ -301,433 +289,109 @@ fn render_statusline_widget<'a>(
                 .map(String::as_str)
                 .unwrap_or(text);
             if out.is_empty() {
-                return None;
+                return Vec::new();
             }
-            Some(vec![Span::styled(
-                out.to_string(),
-                Style::default().fg(DIM).bg(STATUSBG),
-            )])
+            vec![Item::left(Class::Extras, muted(out.to_string()))]
         }
         W::Custom {
             text, shell: None, ..
         } => {
             if text.is_empty() {
-                return None;
+                return Vec::new();
             }
-            Some(vec![Span::raw(text.clone())])
+            vec![Item::left(Class::Extras, vec![Span::raw(text.clone())])]
         }
     }
 }
 
-/// Context-aware right-hint for the statusline. Highest-priority state first, so the most
-/// actionable keybind for the current mode is what the user sees. Returns a `&'static str` so
-/// the render path never allocates per frame.
-pub(crate) fn statusline_hint(app: &App) -> &'static str {
-    if let Some(label) = app.loading {
-        return label;
-    }
-    if let Some(form) = &app.form {
-        if form.editing.is_some() {
-            "type · ⏎ save · esc back"
-        } else if form.len() > 1 {
-            if form.question().multi {
-                "↑↓ move · space toggle · ⏎ next · ←→ question · n note · esc dismiss"
-            } else {
-                "↑↓ move · ⏎ choose · ←→ question · o other · n note · esc dismiss"
-            }
-        } else if form.question().multi {
-            "↑↓ move · space toggle · ⏎ done · o other · n note · esc dismiss"
-        } else {
-            "↑↓ move · ⏎ choose · o other · n note · esc dismiss"
-        }
-    } else if app.command_center.open {
-        "↑↓ select · ⏎ open · esc close"
-    } else if app.palette.open {
-        "↑↓ move · ⏎ run · esc close"
-    } else if app.picker.open {
-        "↑↓ move · ⏎ select · esc close"
-    } else if app.busy {
-        "esc stop · Ctrl↑ escalate"
-    } else if app.quit_hint_active() {
-        "Press Ctrl+C again to exit"
-    } else if app.esc_hint_active() {
-        "esc again to rewind · Ctrl-C quit"
-    } else if app.done {
-        "done · esc esc rewind · Ctrl-C quit"
-    } else if app.input.is_empty() {
-        "Ctrl+K actions · / · ? keys"
+fn quota_item(text: String, pct: f64) -> Item {
+    let style = if pct >= 90.0 {
+        styles::err()
+    } else if pct >= 70.0 {
+        styles::warn()
     } else {
-        "⏎ send · ⇧⇥ temper"
-    }
+        styles::muted()
+    };
+    Item::left(Class::Extras, vec![Span::styled(text, style)])
 }
 
-/// The recovery state that must outrank routine model/cost widgets. On narrow terminals this is
-/// rendered as the whole first status row, so the next safe action is never clipped away.
-fn stop_notice(app: &App, compact: bool) -> Option<(&'static str, Color)> {
-    if !app.done {
-        return None;
-    }
-    match app.last_stop_reason {
-        Some(forge_types::StopReason::MaxSteps) => Some((
-            if compact {
-                "⚠ step limit — send continue"
-            } else {
-                "⚠ step limit — send `continue`"
-            },
-            WARNYEL,
-        )),
-        Some(forge_types::StopReason::BudgetExhausted) => Some(("✕ budget cap", ERRRED)),
-        Some(forge_types::StopReason::TasksUnfinished) => Some((
-            if compact {
-                "✕ tasks unfinished"
-            } else {
-                "✕ stopped with tasks unfinished"
-            },
-            ERRRED,
-        )),
-        Some(forge_types::StopReason::NoOutput) => Some((
-            if compact {
-                "✕ no output — turn failed"
-            } else {
-                "✕ turn produced no answer and changed nothing"
-            },
-            ERRRED,
-        )),
-        _ => None,
-    }
-}
-
-pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
-    let bg = Style::default().bg(STATUSBG);
-    let w = area.width;
-    let sep = |s: &str| Span::styled(s.to_string(), Style::default().fg(SEPCOL).bg(STATUSBG));
-    let widget_sep = || sep(&app.statusline_config.separator);
-
-    // ── Row 1 ─────────────────────────────────────────────────────────────────
-    // Build the configurable LEFT segment from the widget list.
-    let mut left_spans: Vec<Span> = vec![Span::styled(" ", bg)];
-    let mut first_widget = true;
-
+/// Every item the status row could show, in left-to-right order, before any width-driven drops.
+fn collect_items(app: &App, w: u16) -> Vec<Item> {
+    let mut items: Vec<Item> = Vec::new();
     for widget in &app.statusline_config.left {
-        if let Some(spans) = render_statusline_widget(widget, app, w) {
-            if !first_widget {
-                left_spans.push(widget_sep());
-            }
-            first_widget = false;
-            left_spans.extend(spans);
-        }
+        items.extend(widget_items(widget, app, w));
     }
-
-    // Always-shown burst indicators appended after the configured widgets.
-    // These are situational and not worth making configurable.
-    if app.remote_active && w >= 52 {
-        if !first_widget {
-            left_spans.push(widget_sep());
-        }
-        first_widget = false;
-        left_spans.push(Span::styled(
-            "◉ remote",
-            Style::default().fg(OKGREEN).bold().bg(STATUSBG),
-        ));
-    }
-    if !app.queued.is_empty() {
-        if !first_widget {
-            left_spans.push(widget_sep());
-        }
-        first_widget = false;
-        left_spans.push(Span::styled(
-            format!("⏳ {} queued", app.queued.len()),
-            Style::default().fg(WARNYEL).bold().bg(STATUSBG),
-        ));
-    }
-    let narrow_stop = w < 50 && stop_notice(app, true).is_some();
-    if let Some((label, color)) = stop_notice(app, narrow_stop) {
-        if narrow_stop {
-            // A model/cost segment is useful context; a recovery instruction is more important.
-            // Do not leave a narrow terminal with only a clipped trailing warning.
-            left_spans = vec![
-                Span::styled(" ", bg),
-                Span::styled(label, Style::default().fg(color).bold().bg(STATUSBG)),
-            ];
-        } else {
-            if !first_widget {
-                left_spans.push(widget_sep());
-            }
-            first_widget = false;
-            left_spans.push(Span::styled(
-                label,
-                Style::default().fg(color).bold().bg(STATUSBG),
-            ));
-        }
-    }
-    let _ = first_widget; // suppress unused warning
-
-    let version = concat!("v", env!("CARGO_PKG_VERSION"));
-    let hint = statusline_hint(app);
-    let row1 = Rect { height: 1, ..area };
-    if narrow_stop {
-        frame.render_widget(Paragraph::new(TextLine::from(left_spans)).style(bg), row1);
-    } else if w >= 70 {
-        let left_cells: usize = left_spans.iter().map(|s| s.content.width()).sum();
-        let budget =
-            (w as usize).saturating_sub(left_cells + version.width() + 2 + hint.width() + 3);
-        let mut right = location_spans(app, budget);
-        right.push(Span::styled(
-            format!("{version}  "),
-            Style::default().fg(DIM).bg(STATUSBG),
-        ));
-        right.push(Span::styled(hint, Style::default().fg(DIM).bg(STATUSBG)));
-        let right_len = right.iter().map(|s| s.content.width()).sum::<usize>() as u16;
-        let cols =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len)]).split(row1);
-        frame.render_widget(
-            Paragraph::new(TextLine::from(fit_spans(
-                left_spans,
-                (cols[0].width as usize).saturating_sub(1),
-            )))
-            .style(bg),
-            cols[0],
-        );
-        frame.render_widget(
-            Paragraph::new(TextLine::from(right))
-                .alignment(Alignment::Right)
-                .style(bg),
-            cols[1],
-        );
-    } else if w >= 40 {
-        // Narrow: a short hint so the longer idle hint never overruns the version string.
-        let short_hint = "/ · ? keys";
-        let right_text = format!("{version}  {short_hint}");
-        let right_len = right_text.chars().count() as u16;
-        let cols =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len)]).split(row1);
-        frame.render_widget(
-            Paragraph::new(TextLine::from(fit_spans(
-                left_spans,
-                (cols[0].width as usize).saturating_sub(1),
-            )))
-            .style(bg),
-            cols[0],
-        );
-        frame.render_widget(
-            Paragraph::new(TextLine::from(vec![
-                Span::styled(
-                    format!("{version}  "),
-                    Style::default().fg(DIM).bg(STATUSBG),
-                ),
-                Span::styled(short_hint, Style::default().fg(DIM).bg(STATUSBG)),
-            ]))
-            .alignment(Alignment::Right)
-            .style(bg),
-            cols[1],
-        );
-    } else {
-        // Too narrow: left-only, no hint (never overrun the version string).
-        frame.render_widget(Paragraph::new(TextLine::from(left_spans)).style(bg), row1);
-    }
-
-    // ── Row 2 ─────────────────────────────────────────────────────────────────
-    // Row 2: token timer, context gauge, session totals — unchanged from the original. Gated on
-    // the same signal `statusline_height` used to decide whether to reserve this row at all (NOT
-    // on raw `area.height`, which now also grows for unrelated `extra_rows` — conflating the two
-    // would make row 2 swallow the row space actually meant for the first extra row whenever the
-    // app is otherwise idle).
-    let mut next_y = area.y + 1;
-    if statusline_wants_row2(app) {
-        let row2 = Rect {
-            y: next_y,
-            height: 1,
-            ..area
-        };
-        next_y += 1;
-        let mut line2: Vec<Span> = vec![Span::styled(" ", bg)];
-        // Per-turn timer + this-turn token deltas: live (orange) while the turn runs, frozen (dim)
-        // once it ends — like the per-response readout in Claude Code / Codex.
-        let show_turn = app.busy || app.turn_ran;
-        if show_turn {
-            // CLI bridge models (agy-cli, codex-cli, claude-cli) don't report API token usage;
-            // suppress the ↑/↓ counts when both are zero to avoid showing stale "↑0 ↓0".
-            let has_token_data = app.turn_in > 0 || app.turn_out > 0;
-            let turn_label = if has_token_data {
-                if app.turn_cached_in.is_some_and(|cached| cached > 0) {
-                    format!(
-                        "⧖ {} ↑{} (↻{}) ↓{}",
-                        fmt_dur(app.turn_elapsed_secs),
-                        human(app.turn_in),
-                        human(app.turn_cached_in.unwrap_or(0)),
-                        human(app.turn_out)
-                    )
+    // The turn readout is built in, not a widget: tokens, then how fast.
+    if app.turn_ran && (app.turn_in > 0 || app.turn_out > 0) {
+        items.push(Item::left(
+            Class::Tokens,
+            vec![Span::styled(
+                tokens_text(app.turn_in, app.turn_out),
+                if app.busy {
+                    styles::user()
                 } else {
+                    styles::muted()
+                },
+            )],
+        ));
+    }
+    if let Some(shown) = app.throughput.display(app.busy, std::time::Instant::now()) {
+        items.push(Item::left(
+            Class::Throughput,
+            vec![Span::styled(shown.label(), throughput_style(&shown))],
+        ));
+    }
+    // Inline has no header, so the facts it would carry stay reachable here.
+    if !app.fullscreen {
+        if app.remote_active {
+            items.push(Item::left(
+                Class::Remote,
+                vec![Span::styled(
+                    format!("{} remote", g().live_dot),
+                    styles::ok(),
+                )],
+            ));
+        }
+        if let (Some(location), false) = (
+            &app.git_location,
+            layout_shows_location(&app.statusline_config),
+        ) {
+            let branch = match &location.head {
+                crate::git_location::GitHead::Branch(name) => name.clone(),
+                crate::git_location::GitHead::Detached(_) => location.branch_label(),
+            };
+            items.push(Item::left(
+                Class::Extras,
+                vec![Span::styled(
                     format!(
-                        "⧖ {} ↑{} ↓{}",
-                        fmt_dur(app.turn_elapsed_secs),
-                        human(app.turn_in),
-                        human(app.turn_out)
-                    )
-                }
-            } else {
-                format!("⧖ {}", fmt_dur(app.turn_elapsed_secs))
-            };
-            line2.push(Span::styled(
-                turn_label,
-                Style::default()
-                    .fg(if app.busy { ACCENT } else { DIM })
-                    .bg(STATUSBG),
-            ));
-            // Throughput sits with the turn readout rather than in its own cluster: "how much"
-            // and "how fast" are the same question, and separating them costs a divider on a row
-            // that is already the first thing to be clipped on a narrow terminal.
-            if let Some(shown) = app.throughput.display(app.busy, std::time::Instant::now()) {
-                line2.push(Span::styled(" ", bg));
-                line2.push(Span::styled(shown.label(), throughput_style(&shown)));
-            }
-        }
-        // Context gauge next — it's the most important readout, so it comes before the session
-        // totals and survives right-truncation on a narrow terminal.
-        if app.context_tokens > 0 || app.context_limit.is_some() {
-            if line2.len() > 1 {
-                line2.push(sep("  │  "));
-            }
-            line2.extend(context_gauge_spans(app.context_tokens, app.context_limit));
-        }
-        // Session running totals last (least critical — the per-turn figures are above): if the row
-        // is too narrow this is what gets clipped, not the gauge.
-        // Only show when session differs from turn delta: on the first turn turn_base_in=0 so
-        // turn_in == session_in — showing both would be identical, useless duplication.
-        let session_differs = app.session_in != app.turn_in
-            || app.session_cached_in != app.turn_cached_in
-            || app.session_out != app.turn_out;
-        if (app.session_in > 0 || app.session_out > 0) && (!show_turn || session_differs) {
-            if line2.len() > 1 {
-                line2.push(sep("  │  "));
-            }
-            // Omitted both when nothing was cached and when the provider does not report caching:
-            // the row states a cache figure only where one was actually measured.
-            let total_label = if app.session_cached_in.is_some_and(|cached| cached > 0) {
-                format!(
-                    "Σ ↑{} (↻{}) ↓{}",
-                    human(app.session_in),
-                    human(app.session_cached_in.unwrap_or(0)),
-                    human(app.session_out)
-                )
-            } else {
-                format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out))
-            };
-            line2.push(Span::styled(
-                total_label,
-                Style::default().fg(DIM).bg(STATUSBG),
+                        "{} {}",
+                        g().branch,
+                        super::header::middle_truncate(&branch, 28)
+                    ),
+                    styles::muted(),
+                )],
             ));
         }
-        frame.render_widget(Paragraph::new(TextLine::from(line2)).style(bg), row2);
     }
-
-    // ── Extra rows (user-configured) ────────────────────────────────────────────
-    // Each `extra_rows` entry is one more left-aligned row below row 1 (and row 2, if shown),
-    // using the same widget rendering + separator as row 1. `statusline_height` already reserved
-    // the space; `next_y` picks up wherever row 2 left off (or right after row 1 if row 2 didn't
-    // render this frame).
-    for row_widgets in &app.statusline_config.extra_rows {
-        let y = next_y;
-        if y >= area.y + area.height {
-            break;
-        }
-        next_y += 1;
-        let mut spans: Vec<Span> = vec![Span::styled(" ", bg)];
-        let mut first = true;
-        for widget in row_widgets {
-            if let Some(w_spans) = render_statusline_widget(widget, app, w) {
-                if !first {
-                    spans.push(widget_sep());
-                }
-                first = false;
-                spans.extend(w_spans);
-            }
-        }
-        let row = Rect {
-            y,
-            height: 1,
-            ..area
-        };
-        frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), row);
-    }
-
-    // The user's `[statusline] command` output, last so the built-in rows keep their positions.
-    if let Some(out) = super::status_widgets::command_line(app) {
-        if next_y < area.y + area.height {
-            let mut spans = vec![Span::styled(" ", bg)];
-            spans.extend(crate::ansi_line::spans(
-                out,
-                Style::default().fg(TEXT).bg(STATUSBG),
-            ));
-            let row = Rect {
-                y: next_y,
-                height: 1,
-                ..area
-            };
-            frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), row);
-        }
-    }
+    items
 }
 
-/// Where the chat is working, right-aligned beside the version: `forge ⎇ feat/x  │  `.
-///
-/// On by default rather than another opt-in widget: which repository and branch an agent is
-/// editing is the one piece of context that should never need configuring to see. It stays out
-/// when the layout already shows the branch or repository as a widget, and it is fitted to
-/// `budget` cells so it never pushes the model and cost off the row: the repository goes first,
-/// then the whole chip.
-fn location_spans(app: &App, budget: usize) -> Vec<Span<'static>> {
-    let Some(location) = &app.git_location else {
-        return Vec::new();
-    };
-    if layout_shows_location(&app.statusline_config) {
-        return Vec::new();
+fn throughput_style(shown: &crate::throughput::Throughput) -> Style {
+    use crate::throughput::{FAST_TOK_PER_SEC, SLOW_TOK_PER_SEC};
+    if !shown.live {
+        return styles::muted();
     }
-    const SEP: &str = "  │  ";
-    const GLYPH: &str = "⎇ ";
-    // A detached HEAD is worth noticing: commits made there belong to no branch.
-    let (branch, branch_color) = match &location.head {
-        GitHead::Branch(name) => (name.clone(), TOOLCYAN),
-        GitHead::Detached(_) => (location.branch_label(), WARNYEL),
-    };
-    let worktree = if location.worktree { " ⧉" } else { "" };
-    let repo = middle_truncate(&location.repo, 24);
-    for with_repo in [true, false] {
-        let repo_cells = if with_repo { repo.width() + 1 } else { 0 };
-        let room =
-            budget.saturating_sub(repo_cells + GLYPH.width() + worktree.width() + SEP.width());
-        // A branch cut shorter than this no longer says which branch it is.
-        if room < 8 {
-            continue;
-        }
-        let mut spans = Vec::with_capacity(5);
-        if with_repo {
-            spans.push(Span::styled(
-                format!("{repo} "),
-                Style::default().fg(TEXT).bg(STATUSBG),
-            ));
-        }
-        spans.push(Span::styled(GLYPH, Style::default().fg(DIM).bg(STATUSBG)));
-        spans.push(Span::styled(
-            middle_truncate(&branch, room.min(40)),
-            Style::default().fg(branch_color).bg(STATUSBG),
-        ));
-        if location.worktree {
-            spans.push(Span::styled(
-                worktree,
-                Style::default().fg(DIM).bg(STATUSBG),
-            ));
-        }
-        spans.push(Span::styled(SEP, Style::default().fg(SEPCOL).bg(STATUSBG)));
-        return spans;
+    if shown.tok_per_sec >= FAST_TOK_PER_SEC {
+        styles::ok()
+    } else if shown.tok_per_sec < SLOW_TOK_PER_SEC {
+        styles::warn()
+    } else {
+        styles::user()
     }
-    Vec::new()
 }
 
 fn layout_shows_location(config: &forge_config::StatuslineConfig) -> bool {
     use forge_config::StatuslineWidget as W;
-    // Only the left segment and the extra rows are drawn, so a branch widget configured in the
-    // center or right segment must not suppress the default location chip.
     config
         .left
         .iter()
@@ -735,125 +399,186 @@ fn layout_shows_location(config: &forge_config::StatuslineConfig) -> bool {
         .any(|widget| matches!(widget, W::GitBranch | W::RepoName))
 }
 
-/// `feat/tool-output-viewer` in 14 cells is `feat/to…viewer`: a branch is recognised by both ends.
-fn middle_truncate(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_string();
+fn join_left(items: &[&Item], gap: &str) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 && !item.glued {
+            out.push(Span::styled(gap.to_string(), styles::line()));
+        }
+        out.extend(item.spans.iter().cloned());
     }
-    if max <= 1 {
-        return "…".to_string();
-    }
-    let keep = max - 1;
-    let tail = keep / 2;
-    let head = keep - tail;
-    let head: String = chars[..head].iter().collect();
-    let tail: String = chars[chars.len() - tail..].iter().collect();
-    format!("{head}…{tail}")
+    out
 }
 
-/// Colour a throughput readout by band. A finished turn's average is always dim: it is a
-/// different measurement from the live rate (a turn is mostly tool calls, not generation) and
-/// must not read as the speed the model is running at right now.
-fn throughput_style(shown: &crate::throughput::Throughput) -> Style {
-    use crate::throughput::{FAST_TOK_PER_SEC, SLOW_TOK_PER_SEC};
-    if !shown.live {
-        return Style::default().fg(DIM).bg(STATUSBG);
-    }
-    let colour = if shown.tok_per_sec >= FAST_TOK_PER_SEC {
-        OKGREEN
-    } else if shown.tok_per_sec < SLOW_TOK_PER_SEC {
-        WARNYEL
+/// The gap between status items: two spaces, unless the user configured their own separator.
+fn gap(app: &App) -> String {
+    let configured = &app.statusline_config.separator;
+    if configured == "  │  " {
+        "  ".to_string()
     } else {
-        ACCENT
-    };
-    Style::default().fg(colour).bg(STATUSBG)
+        configured.clone()
+    }
 }
 
-#[cfg(test)]
-mod location_tests {
-    use super::*;
-    use crate::git_location::GitLocation;
+/// What fits in `width` cells: the left spans, the right spans, how many widgets were dropped.
+struct Fitted {
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    dropped: usize,
+}
 
-    fn at(head: GitHead, worktree: bool) -> App {
-        App {
-            git_location: Some(GitLocation {
-                repo: "forge".into(),
-                head,
-                worktree,
-            }),
-            ..App::default()
+fn fit_row(app: &App, width: u16) -> Fitted {
+    let gap = gap(app);
+    let items = collect_items(app, width);
+    let mut dropped_classes: Vec<Class> = Vec::new();
+    let mut dropped = 0usize;
+    let mut size = GaugeSize::Full;
+    // The gauge is always there and never dropped; only its size gives way.
+    let gauge = |size: GaugeSize| context_gauge(app.context_tokens, app.context_limit, size);
+    let margin = 2usize; // one leading space, one trailing
+    loop {
+        let left_items: Vec<&Item> = items
+            .iter()
+            .filter(|i| !i.right && !dropped_classes.contains(&i.class))
+            .collect();
+        let right_items: Vec<&Item> = items
+            .iter()
+            .filter(|i| i.right && !dropped_classes.contains(&i.class))
+            .collect();
+        let mut left = join_left(&left_items, &gap);
+        if dropped > 0 {
+            left.push(Span::styled(format!(" +{dropped}"), styles::faint()));
+        }
+        let mut right: Vec<Span<'static>> = gauge(size);
+        for item in &right_items {
+            if !right.is_empty() {
+                right.push(Span::raw("  "));
+            }
+            right.extend(item.spans.iter().cloned());
+        }
+        let need =
+            spans_width(&left) + spans_width(&right) + margin + usize::from(!right.is_empty()) * 2;
+        if need <= width as usize {
+            return Fitted {
+                left,
+                right,
+                dropped,
+            };
+        }
+        // Drop the next droppable class that is actually present.
+        let next = DROP_ORDER.iter().copied().find(|class| {
+            !dropped_classes.contains(class) && items.iter().any(|i| i.class == *class)
+        });
+        if let Some(class) = next {
+            dropped += items.iter().filter(|i| i.class == class).count();
+            dropped_classes.push(class);
+            continue;
+        }
+        if size == GaugeSize::Full {
+            size = GaugeSize::Compact;
+            continue;
+        }
+        if size == GaugeSize::Compact {
+            size = GaugeSize::Minimal;
+            continue;
+        }
+        let room = (width as usize)
+            .saturating_sub(spans_width(&right) + margin + 2)
+            .max(1);
+        return Fitted {
+            left: fit_spans(left, room),
+            right,
+            dropped,
+        };
+    }
+}
+
+/// Every configured widget rendered as a single span list (used by extra rows).
+fn widget_spans(
+    widget: &forge_config::StatuslineWidget,
+    app: &App,
+    w: u16,
+) -> Option<Vec<Span<'static>>> {
+    let items = widget_items(widget, app, w);
+    if items.is_empty() {
+        return None;
+    }
+    let mut spans = Vec::new();
+    for item in items {
+        spans.extend(item.spans);
+    }
+    Some(spans)
+}
+
+pub(crate) fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let w = area.width;
+    let row1 = Rect { height: 1, ..area };
+    let fitted = fit_row(app, w);
+    let mut left = vec![Span::raw(" ")];
+    left.extend(fitted.left);
+    let right_len = spans_width(&fitted.right) as u16;
+    if right_len == 0 {
+        frame.render_widget(Paragraph::new(TextLine::from(left)), row1);
+    } else {
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len + 1)]).split(row1);
+        frame.render_widget(Paragraph::new(TextLine::from(left)), cols[0]);
+        frame.render_widget(
+            Paragraph::new(TextLine::from(fitted.right)).alignment(Alignment::Right),
+            cols[1],
+        );
+    }
+
+    // Extra rows (user-configured): one more left-aligned row each, same widgets and separator.
+    let sep = gap(app);
+    let mut next_y = area.y + 1;
+    for row_widgets in &app.statusline_config.extra_rows {
+        if next_y >= area.y + area.height {
+            break;
+        }
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
+        let mut first = true;
+        for widget in row_widgets {
+            if let Some(w_spans) = widget_spans(widget, app, w) {
+                if !first {
+                    spans.push(Span::styled(sep.clone(), styles::line()));
+                }
+                first = false;
+                spans.extend(w_spans);
+            }
+        }
+        frame.render_widget(
+            Paragraph::new(TextLine::from(spans)),
+            Rect {
+                y: next_y,
+                height: 1,
+                ..area
+            },
+        );
+        next_y += 1;
+    }
+
+    // The user's `[statusline] command` output, last so the built-in row keeps its position.
+    if let Some(out) = super::status_widgets::command_line(app) {
+        if next_y < area.y + area.height {
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(crate::ansi_line::spans(out, styles::fg()));
+            frame.render_widget(
+                Paragraph::new(TextLine::from(spans)),
+                Rect {
+                    y: next_y,
+                    height: 1,
+                    ..area
+                },
+            );
         }
     }
+}
 
-    fn branch(name: &str) -> GitHead {
-        GitHead::Branch(name.into())
-    }
-
-    fn text(spans: &[Span]) -> String {
-        spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    #[test]
-    fn the_chip_names_the_repository_and_the_branch() {
-        let app = at(branch("feat/tool-output-viewer"), false);
-        assert_eq!(
-            text(&location_spans(&app, 80)),
-            "forge ⎇ feat/tool-output-viewer  │  "
-        );
-    }
-
-    #[test]
-    fn a_worktree_and_a_detached_head_are_marked() {
-        let app = at(branch("dev"), true);
-        assert!(text(&location_spans(&app, 80)).contains("dev ⧉"));
-        let app = at(GitHead::Detached("e50b52d".into()), false);
-        assert!(text(&location_spans(&app, 80)).contains("⎇ @e50b52d"));
-    }
-
-    #[test]
-    fn a_tight_row_drops_the_repository_before_the_branch_and_then_the_chip() {
-        let app = at(branch("feat/tool-output-viewer"), false);
-        let tight = text(&location_spans(&app, 16));
-        assert!(!tight.contains("forge"), "{tight}");
-        assert!(tight.starts_with("⎇ feat"), "{tight}");
-        assert!(location_spans(&app, 10).is_empty());
-    }
-
-    #[test]
-    fn a_layout_that_already_shows_the_branch_gets_no_second_copy() {
-        let mut app = at(branch("main"), false);
-        app.statusline_config
-            .left
-            .push(forge_config::StatuslineWidget::GitBranch);
-        assert!(location_spans(&app, 80).is_empty());
-    }
-
-    #[test]
-    fn long_names_keep_both_ends() {
-        assert_eq!(
-            middle_truncate("feat/tool-output-viewer", 14),
-            "feat/to…viewer"
-        );
-        assert_eq!(middle_truncate("main", 14), "main");
-    }
-
-    #[test]
-    fn the_full_statusline_shows_it_beside_the_version() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-        let app = at(branch("feat/tool-output-viewer"), false);
-        let mut terminal = Terminal::new(TestBackend::new(160, 2)).unwrap();
-        terminal
-            .draw(|f| render_statusline(f, f.area(), &app))
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let row: String = (0..buffer.area.width)
-            .map(|x| buffer[(x, 0)].symbol().to_string())
-            .collect();
-        assert!(
-            row.contains("forge ⎇ feat/tool-output-viewer  │  v"),
-            "{row}"
-        );
-    }
+/// How many widgets the status row dropped at `width`, for `/status` and tests.
+pub(crate) fn dropped_widgets(app: &App, width: u16) -> usize {
+    fit_row(app, width).dropped
 }

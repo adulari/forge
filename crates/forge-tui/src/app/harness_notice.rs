@@ -2,13 +2,12 @@
 //! and a user `/heartbeat` tick (see `forge_types::harness_notice`). The model gets them as user
 //! turns; the person did not type them, so they render as dim harness rows instead of "you".
 //! Long prompts are cut to a couple of lines here; the model transcript keeps the full text.
-use ratatui::style::Style;
+use crate::theme::styles;
 use ratatui::text::{Line as TextLine, Span};
 
 use forge_types::HarnessNotice;
 
 use super::{truncate, width_cap, App, LineOrigin};
-use crate::surface::DIM;
 
 /// Prompt lines shown under a wakeup/heartbeat headline, beyond the headline itself.
 const EXTRA_PROMPT_LINES: usize = 1;
@@ -31,7 +30,7 @@ impl App {
         self.seal_flush_origins(&LineOrigin::default());
         let width = self.last_width.get();
         let cap = width_cap(width, 6, 30);
-        let dim = Style::default().fg(DIM);
+        let dim = styles::muted();
         let mut rows: Vec<String> = Vec::new();
         rows.push(format!(
             "  {}",

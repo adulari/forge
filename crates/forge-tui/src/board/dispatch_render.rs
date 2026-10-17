@@ -5,13 +5,12 @@
 //! The Dispatch tab is a list with a cursor rather than a scrolling page: every row records a
 //! click target, and the view scrolls only as far as it must to keep the cursor's row on screen.
 
+use crate::theme::{color, styles};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
-
-use crate::surface::{ACCENT, DIM, ERRRED, OKGREEN, SELECT_BG, TEXT, TOOLCYAN, VERY_DIM, WARNYEL};
 
 use super::dispatch::{
     self, dispatch_status as ds, group_color, item_status as is, progress, Role,
@@ -54,33 +53,30 @@ pub(super) fn coordinator_line(app: &BoardApp, card: &Card, width: usize) -> Opt
     let mut fit = Fit::new(width);
     match d.status.as_str() {
         ds::PLANNING => {
-            fit.add(
-                format!("{} ", w::spinner(app.tick)),
-                Style::default().fg(TOOLCYAN),
-            );
-            fit.add("splitting the work…", Style::default().fg(TEXT));
+            fit.add(format!("{} ", w::spinner(app.tick)), styles::muted());
+            fit.add("splitting the work…", styles::fg());
         }
         ds::PROPOSED => {
-            fit.add("! ", Style::default().fg(ERRRED).bold());
+            fit.add("! ", styles::err().bold());
             fit.add(
                 format!("split ready · {} sessions to review", d.items.len()),
-                Style::default().fg(ERRRED),
+                styles::err(),
             );
         }
         ds::RUNNING => {
-            fit.extend(w::gauge(frac(p.finished, p.total), 4, OKGREEN));
-            fit.add(format!(" {}", running_words(&p)), Style::default().fg(TEXT));
+            fit.extend(w::gauge(frac(p.finished, p.total), 4, color::ok()));
+            fit.add(format!(" {}", running_words(&p)), styles::fg());
         }
         ds::DONE => {
             fit.add(
                 format!("all {} finished · {} ✓", p.total, p.succeeded),
-                Style::default().fg(OKGREEN),
+                styles::ok(),
             );
             if p.failed > 0 {
-                fit.add(format!(" {} ✗", p.failed), Style::default().fg(ERRRED));
+                fit.add(format!(" {} ✗", p.failed), styles::err());
             }
         }
-        _ => fit.add("cancelled", Style::default().fg(DIM)),
+        _ => fit.add("cancelled", styles::muted()),
     }
     Some(fit.line())
 }
@@ -291,9 +287,9 @@ fn cursor_marker(app: &BoardApp, pos: usize) -> (&'static str, Style) {
         return ("  ", Style::default());
     }
     let color = if app.focus == Focus::Detail {
-        ACCENT
+        color::user()
     } else {
-        DIM
+        color::fg_muted()
     };
     ("▸ ", Style::default().fg(color).bold())
 }
@@ -308,13 +304,10 @@ fn text_line(prefix: &str, text: &str, style: Style, width: usize) -> Line<'stat
 fn planning(app: &BoardApp, d: &DispatchInfo, width: usize) -> Vec<DLine> {
     let mut out = Vec::new();
     let mut fit = Fit::new(width);
-    fit.add(
-        format!("  {} ", w::spinner(app.tick)),
-        Style::default().fg(TOOLCYAN),
-    );
+    fit.add(format!("  {} ", w::spinner(app.tick)), styles::muted());
     fit.add(
         "Reading the project and splitting the work…",
-        Style::default().fg(TEXT).bold(),
+        styles::fg().bold(),
     );
     out.push(plain(fit.line()));
     out.push(plain(Line::from("")));
@@ -323,12 +316,7 @@ fn planning(app: &BoardApp, d: &DispatchInfo, width: usize) -> Vec<DLine> {
         .into_iter()
         .take(8)
     {
-        out.push(plain(text_line(
-            "    ",
-            &l,
-            Style::default().fg(TEXT),
-            width,
-        )));
+        out.push(plain(text_line("    ", &l, styles::fg(), width)));
     }
     out.push(plain(Line::from("")));
     out.push(plain(w::heading("coordinator", width)));
@@ -336,8 +324,8 @@ fn planning(app: &BoardApp, d: &DispatchInfo, width: usize) -> Vec<DLine> {
         .card(&d.coordinator_session_id)
         .and_then(|c| c.last_line.clone());
     let (text, color) = match last {
-        Some(l) => (l, DIM),
-        None => ("no output yet".to_string(), VERY_DIM),
+        Some(l) => (l, color::fg_muted()),
+        None => ("no output yet".to_string(), color::fg_faint()),
     };
     out.push(plain(w::bullet("·", &text, color, width)));
     out
@@ -360,12 +348,7 @@ fn proposal(app: &BoardApp, d: &DispatchInfo, width: usize) -> (Vec<DLine>, Vec<
         .take(6)
     {
         if !l.is_empty() {
-            out.push(plain(text_line(
-                "    ",
-                &l,
-                Style::default().fg(TEXT),
-                width,
-            )));
+            out.push(plain(text_line("    ", &l, styles::fg(), width)));
         }
     }
     out.push(plain(Line::from("")));
@@ -382,27 +365,31 @@ fn proposal(app: &BoardApp, d: &DispatchInfo, width: usize) -> (Vec<DLine>, Vec<
         fit.add(
             if ticked { "[✓]" } else { "[ ]" },
             Style::default()
-                .fg(if ticked { OKGREEN } else { DIM })
+                .fg(if ticked {
+                    color::ok()
+                } else {
+                    color::fg_muted()
+                })
                 .bold(),
         );
-        fit.add(format!(" {:>2}  ", item.index), Style::default().fg(DIM));
+        fit.add(format!(" {:>2}  ", item.index), styles::muted());
         let mut tstyle = if ticked {
-            Style::default().fg(TEXT).bold()
+            styles::fg().bold()
         } else {
-            Style::default().fg(DIM)
+            styles::muted()
         };
         if app.dispatch.cursor == pos {
-            tstyle = tstyle.bg(SELECT_BG);
+            tstyle = tstyle.patch(styles::selected_row());
         }
         let room = fit.left().saturating_sub(w::cells(&chip) + 3);
         fit.add(w::clip_cells(&item.title, room), tstyle);
-        let mut dl = row_line(fit.right(pad(chip), Style::default().fg(ACCENT)), pos);
+        let mut dl = row_line(fit.right(pad(chip), styles::user()), pos);
         dl.hits.push((2, 3, Hit::DispatchToggle(pos)));
         out.push(dl);
         if app.dispatch.expanded == Some(item.index) {
             for l in w::wrap(&item.prompt, width.saturating_sub(12)) {
                 out.push(row_line(
-                    text_line("          ", &l, Style::default().fg(TEXT), width),
+                    text_line("          ", &l, styles::fg(), width),
                     pos,
                 ));
             }
@@ -412,7 +399,11 @@ fn proposal(app: &BoardApp, d: &DispatchInfo, width: usize) -> (Vec<DLine>, Vec<
                 text_line(
                     "          ",
                     &preview,
-                    w::italic(if ticked { DIM } else { VERY_DIM }),
+                    w::italic(if ticked {
+                        color::fg_muted()
+                    } else {
+                        color::fg_faint()
+                    }),
                     width,
                 ),
                 pos,
@@ -424,7 +415,7 @@ fn proposal(app: &BoardApp, d: &DispatchInfo, width: usize) -> (Vec<DLine>, Vec<
     let mut fit = Fit::new(width);
     fit.add(
         format!("  {n} of {total} selected"),
-        Style::default().fg(if n == 0 { WARNYEL } else { TEXT }),
+        Style::default().fg(if n == 0 { color::warn() } else { color::fg() }),
     );
     fit.add(
         format!(
@@ -432,21 +423,26 @@ fn proposal(app: &BoardApp, d: &DispatchInfo, width: usize) -> (Vec<DLine>, Vec<
             d.max_running,
             if d.worktree { "on" } else { "off" }
         ),
-        Style::default().fg(DIM),
+        styles::muted(),
     );
     out.push(plain(fit.line()));
     let buttons = vec![
         (
             format!("[ y  start {n} session{} ]", if n == 1 { "" } else { "s" }),
             Button::Approve,
-            OKGREEN,
+            color::ok(),
             n > 0,
         ),
-        ("[ e  revise ]".to_string(), Button::Revise, ACCENT, true),
+        (
+            "[ e  revise ]".to_string(),
+            Button::Revise,
+            color::user(),
+            true,
+        ),
         (
             "[ n  cancel ]".to_string(),
             Button::CancelDispatch,
-            ERRRED,
+            color::err(),
             true,
         ),
     ];
@@ -467,16 +463,23 @@ fn progress_view(
             if p.failed > 0 {
                 s.push_str(&format!(" {} ✗", p.failed));
             }
-            (s, if p.failed > 0 { WARNYEL } else { OKGREEN })
+            (
+                s,
+                if p.failed > 0 {
+                    color::warn()
+                } else {
+                    color::ok()
+                },
+            )
         }
         ds::CANCELLED => {
             let mut s = format!("cancelled · {}/{} finished", p.finished, p.total);
             if p.running > 0 {
                 s.push_str(&format!(" · {} still running", p.running));
             }
-            (s, DIM)
+            (s, color::fg_muted())
         }
-        _ => (running_words(&p), OKGREEN),
+        _ => (running_words(&p), color::ok()),
     };
     let mut fit = Fit::new(width);
     fit.add("  ", Style::default());
@@ -485,13 +488,13 @@ fn progress_view(
         (width / 4).clamp(6, 20),
         color,
     ));
-    fit.add(format!("  {words}"), Style::default().fg(TEXT));
+    fit.add(format!("  {words}"), styles::fg());
     out.push(plain(fit.line()));
     if !d.worktree {
         out.push(plain(text_line(
             "  ",
             "shared directory — sessions edit the project in place",
-            Style::default().fg(VERY_DIM),
+            styles::faint(),
             width,
         )));
     }
@@ -500,7 +503,7 @@ fn progress_view(
         .take(3)
     {
         if !l.is_empty() {
-            out.push(plain(text_line("  ", &l, Style::default().fg(DIM), width)));
+            out.push(plain(text_line("  ", &l, styles::muted(), width)));
         }
     }
     out.push(plain(Line::from("")));
@@ -516,12 +519,16 @@ fn progress_view(
         let mut fit = Fit::new(width);
         fit.add(marker, mstyle);
         fit.add(glyph, Style::default().fg(gcolor).bold());
-        fit.add(format!(" {:>2}  ", item.index), Style::default().fg(DIM));
+        fit.add(format!(" {:>2}  ", item.index), styles::muted());
         let mut tstyle = Style::default()
-            .fg(if mine { group_color(&d.id) } else { TEXT })
+            .fg(if mine {
+                group_color(&d.id)
+            } else {
+                color::fg()
+            })
             .bold();
         if app.dispatch.cursor == pos {
-            tstyle = tstyle.bg(SELECT_BG);
+            tstyle = tstyle.patch(styles::selected_row());
         }
         let room = fit.left().saturating_sub(w::cells(&label) + 3);
         fit.add(w::clip_cells(&item.title, room), tstyle);
@@ -542,14 +549,14 @@ fn progress_view(
     let mut buttons = vec![(
         "[ A  merge all finished ]".to_string(),
         Button::MergeAll,
-        ACCENT,
+        color::user(),
         mergeable && d.worktree,
     )];
     if d.status == ds::RUNNING {
         buttons.push((
             "[ n  cancel remaining ]".to_string(),
             Button::CancelDispatch,
-            ERRRED,
+            color::err(),
             true,
         ));
     }
@@ -558,15 +565,15 @@ fn progress_view(
 
 fn item_glyph(status: &str, tick: u64) -> (&'static str, Color) {
     match status {
-        is::RUNNING => (w::spinner(tick), TOOLCYAN),
-        is::SUCCEEDED => ("✓", OKGREEN),
-        is::FAILED => ("✗", ERRRED),
-        is::STOPPED => ("■", WARNYEL),
-        is::CANCELLED => ("–", DIM),
-        is::SKIPPED => ("·", DIM),
-        is::MERGED => ("⇡", ACCENT),
-        is::DISCARDED => ("⌫", DIM),
-        _ => ("○", DIM),
+        is::RUNNING => (w::spinner(tick), color::fg_muted()),
+        is::SUCCEEDED => ("✓", color::ok()),
+        is::FAILED => ("✗", color::err()),
+        is::STOPPED => ("■", color::warn()),
+        is::CANCELLED => ("–", color::fg_muted()),
+        is::SKIPPED => ("·", color::fg_muted()),
+        is::MERGED => ("⇡", color::user()),
+        is::DISCARDED => ("⌫", color::fg_muted()),
+        _ => ("○", color::fg_muted()),
     }
 }
 
@@ -605,7 +612,7 @@ fn item_detail(app: &BoardApp, d: &DispatchInfo, item: &DispatchItemInfo) -> (St
             model_short(&c.model),
             fmt_cost(c.cost_usd)
         );
-        return (text, DIM);
+        return (text, color::fg_muted());
     }
     let text = match item.status.as_str() {
         is::QUEUED | is::PROPOSED => {
@@ -627,7 +634,7 @@ fn item_detail(app: &BoardApp, d: &DispatchInfo, item: &DispatchItemInfo) -> (St
             .map(|o| stop_reason_words(Some(o)))
             .unwrap_or_else(|| "no session".into()),
     };
-    (text, VERY_DIM)
+    (text, color::fg_faint())
 }
 
 fn button_rows(buttons: &[Btn], width: u16) -> u16 {
@@ -662,9 +669,12 @@ fn draw_buttons(frame: &mut Frame, area: Rect, buttons: &[Btn], hits: &mut Vec<(
             row = w::Row::at(x, y);
         }
         let style = if *enabled {
-            Style::default().fg(*color).bg(SELECT_BG).bold()
+            Style::default()
+                .fg(*color)
+                .patch(styles::selected_row())
+                .bold()
         } else {
-            Style::default().fg(VERY_DIM)
+            styles::faint()
         };
         let r = row.add(label.clone(), style);
         row.add("  ", Style::default());

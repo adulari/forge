@@ -1,6 +1,7 @@
 //! Interactive keybind configurator overlay. Runs as a fullscreen takeover (via `Tui::run_fullscreen`).
 //! The user can navigate binds, rebind individual actions, reset to defaults, and save.
 
+use crate::theme::{color, styles};
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -9,7 +10,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use ratatui::Terminal;
@@ -17,7 +18,7 @@ use ratatui::Terminal;
 use forge_config::KeybindsConfig;
 
 use crate::keybinds::{combo_display, key_event_to_combo};
-use crate::surface::{self, ACCENT, DIM, ERRRED, OKGREEN, SELECT_BG, TEXT, WARNYEL};
+use crate::surface::{self};
 
 /// Description for each action.
 pub(crate) fn action_desc(action: &str) -> &'static str {
@@ -133,22 +134,22 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                 OverlayMode::Capture { .. } => "Press the new key combination...  •  Esc cancel",
             };
             f.render_widget(
-                Paragraph::new(Span::styled(help_text, Style::default().fg(DIM))),
+                Paragraph::new(Span::styled(help_text, styles::muted())),
                 chunks[0],
             );
 
             let header = Row::new(vec![
                 Cell::from(Span::styled(
                     "Action",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    styles::user().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
                     "Binding",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    styles::user().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
                     "Description",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    styles::user().add_modifier(Modifier::BOLD),
                 )),
             ])
             .height(1);
@@ -172,9 +173,9 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
 
                     let is_selected = i == selected;
                     let row_style = if is_selected {
-                        Style::default().bg(SELECT_BG).fg(Color::White)
+                        styles::selected_row()
                     } else {
-                        Style::default().fg(TEXT)
+                        styles::fg()
                     };
 
                     let marker = if mid_turn { " >" } else { "  " };
@@ -189,9 +190,9 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                             if is_selected {
                                 row_style
                             } else if !is_default {
-                                Style::default().fg(WARNYEL)
+                                styles::warn()
                             } else {
-                                Style::default().fg(OKGREEN)
+                                styles::ok()
                             },
                         )),
                         Cell::from(Span::styled(
@@ -199,7 +200,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                             if is_selected {
                                 row_style
                             } else {
-                                Style::default().fg(DIM)
+                                styles::muted()
                             },
                         )),
                     ])
@@ -221,7 +222,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
             f.render_widget(table, chunks[1]);
 
             if let Some((msg, ok)) = &status {
-                let color = if *ok { OKGREEN } else { ERRRED };
+                let color = if *ok { color::ok() } else { color::err() };
                 f.render_widget(
                     Paragraph::new(Span::styled(msg.clone(), Style::default().fg(color))),
                     chunks[2],
@@ -236,7 +237,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                     "  No unsaved changes  •  > = mid-turn only".to_string()
                 };
                 f.render_widget(
-                    Paragraph::new(Span::styled(unsaved_note, Style::default().fg(DIM))),
+                    Paragraph::new(Span::styled(unsaved_note, styles::muted())),
                     chunks[2],
                 );
             }
@@ -256,7 +257,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                 );
                 let msg = format!("Press the new key for:\n  {}", action_name);
                 f.render_widget(
-                    Paragraph::new(Span::styled(msg, Style::default().fg(TEXT))),
+                    Paragraph::new(Span::styled(msg, styles::fg())),
                     popup_inner,
                 );
             }

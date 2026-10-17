@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::question_form::{Editing, Row};
+use crate::theme::{color, styles};
 
 pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
     let Some(form) = &app.form else {
@@ -17,11 +18,11 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<TextLine> = Vec::new();
 
     // Heading: "❓ question 2 of 3" + tab strip (✓ answered, ▸ current, · pending).
-    let mut head = vec![Span::styled("  ❓ ", Style::default().fg(ORANGE).bold())];
+    let mut head = vec![Span::styled("  ❓ ", styles::brand().bold())];
     if form.len() > 1 {
         head.push(Span::styled(
             format!("question {} of {}   ", form.current + 1, form.len()),
-            Style::default().fg(ORANGE).bold(),
+            styles::brand().bold(),
         ));
         for (i, qi) in form.questions.iter().enumerate() {
             let label = if qi.header.is_empty() {
@@ -38,20 +39,17 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
                 "·"
             };
             let style = if current {
-                Style::default().fg(STATUSBG).bg(ORANGE).bold()
+                styles::pill(styles::brand())
             } else if form.answered(i) {
-                Style::default().fg(OKGREEN)
+                styles::ok()
             } else {
-                Style::default().fg(DIM)
+                styles::muted()
             };
             head.push(Span::styled(format!(" {mark} {label} "), style));
             head.push(Span::raw(" "));
         }
     } else {
-        head.push(Span::styled(
-            "question".to_string(),
-            Style::default().fg(ORANGE).bold(),
-        ));
+        head.push(Span::styled("question".to_string(), styles::brand().bold()));
     }
     lines.push(TextLine::from(head));
 
@@ -64,7 +62,7 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
     for row in wrap_words(&format!("{}{kind}", q.text), width.saturating_sub(5)) {
         lines.push(TextLine::from(vec![
             Span::raw("   "),
-            Span::styled(row, Style::default().fg(USER).bold()),
+            Span::styled(row, styles::user().bold()),
         ]));
     }
     lines.push(TextLine::default());
@@ -83,7 +81,7 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
     for row in &rows {
         let at = *row == form.cursor;
         let caret = if at { "▸ " } else { "  " };
-        let caret_style = Style::default().fg(ORANGE).bold();
+        let caret_style = styles::brand().bold();
         match *row {
             Row::Option(i) => {
                 let o = &q.options[i];
@@ -95,23 +93,23 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
                     (false, false) => "○",
                 };
                 let box_style = if chosen {
-                    Style::default().fg(OKGREEN).bold()
+                    styles::ok().bold()
                 } else if at {
-                    Style::default().fg(ORANGE)
+                    styles::brand()
                 } else {
-                    Style::default().fg(DIM)
+                    styles::muted()
                 };
                 let label_style = if at {
-                    Style::default().fg(TEXT).bold()
+                    styles::fg().bold()
                 } else if chosen {
-                    Style::default().fg(OKGREEN)
+                    styles::ok()
                 } else {
-                    Style::default().fg(TEXT)
+                    styles::fg()
                 };
                 let mut spans = vec![
                     Span::styled(format!("   {caret}"), caret_style),
                     Span::styled(format!("{box_} "), box_style),
-                    Span::styled(format!("{} ", i + 1), Style::default().fg(DIM)),
+                    Span::styled(format!("{} ", i + 1), styles::muted()),
                     Span::styled(
                         format!("{:<label_w$}", truncate(&o.label, label_w)),
                         label_style,
@@ -121,7 +119,7 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
                     let cap = width.saturating_sub(label_w + 12);
                     spans.push(Span::styled(
                         format!("  {}", truncate(&o.description, cap.max(8))),
-                        Style::default().fg(DIM),
+                        styles::muted(),
                     ));
                 }
                 body.push(TextLine::from(spans));
@@ -134,12 +132,20 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled(format!("   {caret}"), caret_style),
                     Span::styled(
                         format!("{mark} "),
-                        Style::default().fg(if chosen { OKGREEN } else { DIM }),
+                        Style::default().fg(if chosen {
+                            color::ok()
+                        } else {
+                            color::fg_muted()
+                        }),
                     ),
                     Span::styled(
                         "Other… ".to_string(),
                         Style::default()
-                            .fg(if at || editing { TEXT } else { DIM })
+                            .fg(if at || editing {
+                                color::fg()
+                            } else {
+                                color::fg_muted()
+                            })
                             .bold(),
                     ),
                 ];
@@ -148,12 +154,12 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
                 } else if chosen {
                     spans.push(Span::styled(
                         truncate(&draft.other, width.saturating_sub(16)),
-                        Style::default().fg(OKGREEN),
+                        styles::ok(),
                     ));
                 } else {
                     spans.push(Span::styled(
                         "type your own answer".to_string(),
-                        Style::default().fg(DIM),
+                        styles::muted(),
                     ));
                 }
                 body.push(TextLine::from(spans));
@@ -165,12 +171,20 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
                     Span::styled(format!("   {caret}"), caret_style),
                     Span::styled(
                         "✎ ".to_string(),
-                        Style::default().fg(if has { WARNYEL } else { DIM }),
+                        Style::default().fg(if has {
+                            color::warn()
+                        } else {
+                            color::fg_muted()
+                        }),
                     ),
                     Span::styled(
                         "note ".to_string(),
                         Style::default()
-                            .fg(if at || editing { TEXT } else { DIM })
+                            .fg(if at || editing {
+                                color::fg()
+                            } else {
+                                color::fg_muted()
+                            })
                             .bold(),
                     ),
                 ];
@@ -179,12 +193,12 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
                 } else if has {
                     spans.push(Span::styled(
                         truncate(&draft.note, width.saturating_sub(14)),
-                        Style::default().fg(WARNYEL),
+                        styles::warn(),
                     ));
                 } else {
                     spans.push(Span::styled(
                         "optional — anything the model should know".to_string(),
-                        Style::default().fg(DIM),
+                        styles::muted(),
                     ));
                 }
                 body.push(TextLine::from(spans));
@@ -206,7 +220,7 @@ pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(flash) = form.flash {
         lines.push(TextLine::from(Span::styled(
             format!("   ⚠ {flash}"),
-            Style::default().fg(WARNYEL),
+            styles::warn(),
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -223,9 +237,9 @@ fn inline_field(buffer: &str, cursor: usize) -> Vec<Span<'static>> {
         .unwrap_or_else(|| " ".to_string());
     let rest: String = chars.collect();
     vec![
-        Span::styled(before.to_string(), Style::default().fg(TEXT)),
-        Span::styled(under, Style::default().fg(STATUSBG).bg(TEXT)),
-        Span::styled(rest, Style::default().fg(TEXT)),
+        Span::styled(before.to_string(), styles::fg()),
+        Span::styled(under, styles::cursor()),
+        Span::styled(rest, styles::fg()),
     ]
 }
 

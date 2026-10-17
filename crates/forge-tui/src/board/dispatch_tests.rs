@@ -262,8 +262,8 @@ fn a_dispatchs_colour_is_stable_and_never_an_alarm_colour() {
     let mut seen = std::collections::HashSet::new();
     for i in 0..300 {
         let c = group_color(&format!("dispatch-{i}"));
-        assert_ne!(c, crate::surface::ERRRED);
-        assert_ne!(c, crate::surface::WARNYEL);
+        assert_ne!(c, crate::theme::color::err());
+        assert_ne!(c, crate::theme::color::warn());
         seen.insert(format!("{c:?}"));
     }
     assert!(seen.len() >= 4, "ids should spread over the palette");

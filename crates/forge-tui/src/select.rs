@@ -4,6 +4,7 @@
 //!
 //! Cross-platform: crossterm drives the terminal on Linux, macOS, and Windows alike.
 
+use crate::theme::{color, styles};
 use std::io::{self, Stdout};
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
-use crate::surface::{self, ACCENT, DIM, ERRRED, OKGREEN, TEXT as FG};
+use crate::surface::{self};
 
 /// One selectable row: a primary `label` and a dim `hint` (e.g. transport + source).
 #[derive(Debug, Clone)]
@@ -139,31 +140,31 @@ fn draw_single(
             "  "
         };
         let label_style = if on {
-            Style::default().fg(FG).add_modifier(Modifier::BOLD)
+            styles::fg().add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(DIM)
+            styles::muted()
         };
         lines.push(Line::from(vec![
-            Span::styled(caret, Style::default().fg(ACCENT)),
+            Span::styled(caret, styles::user()),
             Span::styled(format!("{:<26}", item.label), label_style),
-            Span::styled(item.hint.clone(), Style::default().fg(DIM)),
+            Span::styled(item.hint.clone(), styles::muted()),
         ]));
     }
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::LEFT)
-                .border_style(Style::default().fg(DIM)),
+                .border_style(styles::muted()),
         ),
         chunks[0],
     );
     let footer = Line::from(vec![
-        Span::styled("↑/↓", Style::default().fg(ACCENT)),
-        Span::styled(" move   ", Style::default().fg(DIM)),
-        Span::styled("enter", Style::default().fg(OKGREEN)),
-        Span::styled(" select   ", Style::default().fg(DIM)),
-        Span::styled("esc", Style::default().fg(ERRRED)),
-        Span::styled(" cancel", Style::default().fg(DIM)),
+        Span::styled("↑/↓", styles::user()),
+        Span::styled(" move   ", styles::muted()),
+        Span::styled("enter", styles::ok()),
+        Span::styled(" select   ", styles::muted()),
+        Span::styled("esc", styles::err()),
+        Span::styled(" cancel", styles::muted()),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[1]);
 }
@@ -243,7 +244,7 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
     let n = state.checked.iter().filter(|&&c| c).count();
     let header = Line::from(Span::styled(
         format!("{n}/{} selected", items.len()),
-        Style::default().fg(DIM),
+        styles::muted(),
     ));
     f.render_widget(Paragraph::new(header), chunks[0]);
 
@@ -253,7 +254,11 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
         let on_cursor = i == state.cursor;
         let checked = state.checked[i];
         let marker = if checked { "◉" } else { "○" };
-        let marker_color = if checked { OKGREEN } else { DIM };
+        let marker_color = if checked {
+            color::ok()
+        } else {
+            color::fg_muted()
+        };
         // Animated caret on the focused row.
         let caret = if on_cursor {
             if (state.tick / 4).is_multiple_of(2) {
@@ -265,40 +270,40 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
             "  "
         };
         let label_style = if on_cursor {
-            Style::default().fg(FG).add_modifier(Modifier::BOLD)
+            styles::fg().add_modifier(Modifier::BOLD)
         } else if checked {
-            Style::default().fg(FG)
+            styles::fg()
         } else {
-            Style::default().fg(DIM)
+            styles::muted()
         };
         lines.push(Line::from(vec![
-            Span::styled(caret, Style::default().fg(ACCENT)),
+            Span::styled(caret, styles::user()),
             Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
             Span::styled(format!("{:<18}", item.label), label_style),
-            Span::styled(item.hint.clone(), Style::default().fg(DIM)),
+            Span::styled(item.hint.clone(), styles::muted()),
         ]));
     }
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::LEFT)
-                .border_style(Style::default().fg(DIM)),
+                .border_style(styles::muted()),
         ),
         chunks[1],
     );
 
     // Footer keymap.
     let footer = Line::from(vec![
-        Span::styled("↑/↓", Style::default().fg(ACCENT)),
-        Span::styled(" move   ", Style::default().fg(DIM)),
-        Span::styled("space", Style::default().fg(ACCENT)),
-        Span::styled(" toggle   ", Style::default().fg(DIM)),
-        Span::styled("a/n", Style::default().fg(ACCENT)),
-        Span::styled(" all/none   ", Style::default().fg(DIM)),
-        Span::styled("enter", Style::default().fg(OKGREEN)),
-        Span::styled(" import   ", Style::default().fg(DIM)),
-        Span::styled("esc", Style::default().fg(ERRRED)),
-        Span::styled(" cancel", Style::default().fg(DIM)),
+        Span::styled("↑/↓", styles::user()),
+        Span::styled(" move   ", styles::muted()),
+        Span::styled("space", styles::user()),
+        Span::styled(" toggle   ", styles::muted()),
+        Span::styled("a/n", styles::user()),
+        Span::styled(" all/none   ", styles::muted()),
+        Span::styled("enter", styles::ok()),
+        Span::styled(" import   ", styles::muted()),
+        Span::styled("esc", styles::err()),
+        Span::styled(" cancel", styles::muted()),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[2]);
 }

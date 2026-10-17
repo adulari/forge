@@ -5,6 +5,7 @@
 //! Everything here is layout-only: it reads the board's state and writes into the frame plus a
 //! local hit list. Nothing mutates [`BoardApp`].
 
+use crate::theme::{color, styles};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -13,9 +14,7 @@ use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::SPINNER;
-use crate::surface::{
-    SurfaceTone, ACCENT, DIM, ERRRED, OKGREEN, ORANGE, SEPARATOR, TEXT, TOOLCYAN, VERY_DIM, WARNYEL,
-};
+use crate::surface::SurfaceTone;
 
 use super::dispatch::{dispatch_status, Role};
 use super::model::{fmt_cost, model_short, Card, Health};
@@ -170,7 +169,7 @@ impl Row {
     }
 
     pub(super) fn sep(&mut self) {
-        self.add(" · ", Style::default().fg(VERY_DIM));
+        self.add(" · ", styles::faint());
     }
 
     pub(super) fn width(&self) -> u16 {
@@ -276,12 +275,15 @@ pub(super) fn pulse(tick: u64) -> bool {
 
 pub(super) fn health_glyph(card: &Card, tick: u64) -> (String, Color) {
     match card.health {
-        Health::Waiting => (if pulse(tick) { "●" } else { "○" }.to_string(), ERRRED),
-        Health::Busy => (spinner(tick).to_string(), TOOLCYAN),
-        Health::Stalled => ("▲".into(), WARNYEL),
-        Health::Failed => ("✗".into(), ERRRED),
-        Health::Idle => ("●".into(), OKGREEN),
-        Health::Finished => ("✓".into(), DIM),
+        Health::Waiting => (
+            if pulse(tick) { "●" } else { "○" }.to_string(),
+            color::err(),
+        ),
+        Health::Busy => (spinner(tick).to_string(), color::fg_muted()),
+        Health::Stalled => ("▲".into(), color::warn()),
+        Health::Failed => ("✗".into(), color::err()),
+        Health::Idle => ("●".into(), color::ok()),
+        Health::Finished => ("✓".into(), color::fg_muted()),
     }
 }
 
@@ -305,17 +307,17 @@ pub(super) fn gauge(frac: f64, width: usize, color: Color) -> Vec<Span<'static>>
     let filled = ((frac * width as f64).round() as usize).min(width);
     vec![
         Span::styled("▰".repeat(filled), Style::default().fg(color)),
-        Span::styled("▱".repeat(width - filled), Style::default().fg(VERY_DIM)),
+        Span::styled("▱".repeat(width - filled), styles::faint()),
     ]
 }
 
 pub(super) fn context_color(pct: u8) -> Color {
     if pct >= 95 {
-        ERRRED
+        color::err()
     } else if pct >= 80 {
-        WARNYEL
+        color::warn()
     } else {
-        TOOLCYAN
+        color::fg_muted()
     }
 }
 
@@ -414,16 +416,16 @@ pub(super) fn keybar_line(binds: &[Bind], width: usize) -> Line<'static> {
     let mut fit = Fit::new(width);
     for (i, (key, desc, urgent)) in binds.iter().enumerate() {
         if i > 0 {
-            fit.add(" · ", Style::default().fg(VERY_DIM));
+            fit.add(" · ", styles::faint());
         }
         let key_style = if *urgent {
-            Style::default().fg(ERRRED).bold()
+            styles::err().bold()
         } else {
-            Style::default().fg(ACCENT).bold()
+            styles::user().bold()
         };
         fit.add(*key, key_style);
         fit.add(" ", Style::default());
-        fit.add(*desc, Style::default().fg(DIM));
+        fit.add(*desc, styles::muted());
         if fit.left() == 0 {
             break;
         }
@@ -442,12 +444,12 @@ pub(super) fn toast_items(app: &BoardApp) -> Vec<(String, Style)> {
             let age = app.tick.saturating_sub(t.born);
             let fading = life.saturating_sub(age) <= 10;
             let color = if fading {
-                DIM
+                color::fg_muted()
             } else {
                 match t.level {
-                    ToastLevel::Ok => OKGREEN,
-                    ToastLevel::Info => ACCENT,
-                    ToastLevel::Error => ERRRED,
+                    ToastLevel::Ok => color::ok(),
+                    ToastLevel::Info => color::user(),
+                    ToastLevel::Error => color::err(),
                 }
             };
             (
@@ -466,7 +468,7 @@ pub(super) fn rule(frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(area.width as usize),
-            Style::default().fg(SEPARATOR),
+            styles::line(),
         ))),
         Rect { height: 1, ..area },
     );
@@ -501,14 +503,14 @@ pub(super) fn framed(
 /// One `label   value` row of the pane's key/value grid.
 pub(super) fn kv(label: &str, value: String, style: Style, width: usize) -> Line<'static> {
     let mut fit = Fit::new(width);
-    fit.add(format!("{label:>13}  "), Style::default().fg(VERY_DIM));
+    fit.add(format!("{label:>13}  "), styles::faint());
     fit.add(value, style);
     fit.line()
 }
 
 pub(super) fn heading(text: &str, width: usize) -> Line<'static> {
     let mut fit = Fit::new(width);
-    fit.add(format!("  {text}"), Style::default().fg(ORANGE).bold());
+    fit.add(format!("  {text}"), styles::brand().bold());
     fit.line()
 }
 
@@ -532,12 +534,12 @@ pub(super) fn diff_line(
 ) -> Line<'static> {
     let mut fit = Fit::new(width);
     fit.add("    ", Style::default());
-    fit.add(format!("+{adds} "), Style::default().fg(OKGREEN));
-    fit.add(format!("−{dels}  "), Style::default().fg(ERRRED));
-    fit.add(path.to_string(), Style::default().fg(TEXT));
-    fit.add(format!("  {kind}"), Style::default().fg(VERY_DIM));
+    fit.add(format!("+{adds} "), styles::ok());
+    fit.add(format!("−{dels}  "), styles::err());
+    fit.add(path.to_string(), styles::fg());
+    fit.add(format!("  {kind}"), styles::faint());
     if binary {
-        fit.add("  binary", Style::default().fg(WARNYEL));
+        fit.add("  binary", styles::warn());
     }
     fit.line()
 }
@@ -554,25 +556,21 @@ pub(super) fn git_line(label: &str, f: &GitFile, width: usize) -> Line<'static> 
     fit.add(
         format!("    {mark} "),
         Style::default().fg(match label {
-            "staged" => OKGREEN,
-            "unstaged" => WARNYEL,
-            _ => DIM,
+            "staged" => color::ok(),
+            "unstaged" => color::warn(),
+            _ => color::fg_muted(),
         }),
     );
-    fit.add(f.path.clone(), Style::default().fg(TEXT));
+    fit.add(f.path.clone(), styles::fg());
     if f.adds > 0 || f.dels > 0 {
-        fit.add(format!("  +{}", f.adds), Style::default().fg(OKGREEN));
-        fit.add(format!(" −{}", f.dels), Style::default().fg(ERRRED));
+        fit.add(format!("  +{}", f.adds), styles::ok());
+        fit.add(format!(" −{}", f.dels), styles::err());
     }
     fit.line()
 }
 
 pub(super) fn empty(text: &str, width: usize) -> Line<'static> {
-    Line::from(Span::styled(
-        clip_cells(text, width),
-        Style::default().fg(VERY_DIM),
-    ))
-    .centered()
+    Line::from(Span::styled(clip_cells(text, width), styles::faint())).centered()
 }
 
 /// The fan-out under one session: running agents first, each with its task, model and spend.
@@ -584,26 +582,23 @@ pub(super) fn subagent_lines(agents: &[Subagent], width: usize) -> Vec<Line<'sta
         .take(12)
         .map(|s| {
             let (glyph, color) = if !s.done {
-                ("⑂", TOOLCYAN)
+                ("⑂", color::fg_muted())
             } else if s.ok {
-                ("✓", OKGREEN)
+                ("✓", color::ok())
             } else {
-                ("✗", ERRRED)
+                ("✗", color::err())
             };
             let mut fit = Fit::new(width);
             fit.add(format!("    {glyph} "), Style::default().fg(color));
-            fit.add(s.agent.clone(), Style::default().fg(TEXT));
-            fit.add(format!(" · {}", s.task), Style::default().fg(DIM));
+            fit.add(s.agent.clone(), styles::fg());
+            fit.add(format!(" · {}", s.task), styles::muted());
             if let Some(m) = &s.model {
-                fit.add(
-                    format!(" · {}", model_short(m)),
-                    Style::default().fg(VERY_DIM),
-                );
+                fit.add(format!(" · {}", model_short(m)), styles::faint());
             }
             if !s.last.is_empty() {
-                fit.add(format!(" · {}", s.last), italic(VERY_DIM));
+                fit.add(format!(" · {}", s.last), italic(color::fg_faint()));
             }
-            fit.right(fmt_cost(s.cost), Style::default().fg(DIM))
+            fit.right(fmt_cost(s.cost), styles::muted())
         })
         .collect()
 }
@@ -672,14 +667,18 @@ pub(super) fn draw_actions(
             row = Row::at(area.x, y);
         }
         let style = if chip.3 {
-            Style::default().fg(ACCENT).bold()
+            styles::user().bold()
         } else {
-            Style::default().fg(VERY_DIM)
+            styles::faint()
         };
         let start = row.add(format!(" {} ", chip.0), style);
         let end = row.add(
             format!("{}  ", chip.1),
-            Style::default().fg(if chip.3 { TEXT } else { VERY_DIM }),
+            Style::default().fg(if chip.3 {
+                color::fg()
+            } else {
+                color::fg_faint()
+            }),
         );
         pending.push((
             Rect {

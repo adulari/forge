@@ -46,6 +46,7 @@ mod peer_message;
 pub mod perf;
 mod picker;
 mod prompt_history;
+pub mod theme;
 pub use prompt_history::PromptHistory;
 mod refine_args;
 mod render;

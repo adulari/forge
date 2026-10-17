@@ -29,26 +29,17 @@ fn a_second_idle_esc_inside_the_window_opens_rewind() {
 }
 
 #[test]
-fn statusline_hint_reflects_esc_arming_and_startup_loading() {
+fn the_composer_border_reflects_esc_arming_and_startup_loading() {
     let mut app = App {
         loading: Some("starting session…"),
         ..Default::default()
     };
-    assert_eq!(
-        crate::app::render::status_line::statusline_hint(&app),
-        "starting session…"
-    );
+    assert!(crate::app::render::chrome::live_text(&app).contains("Starting session…"));
     app.loading = None;
     assert!(app.input.is_empty());
-    assert_eq!(
-        crate::app::render::status_line::statusline_hint(&app),
-        "Ctrl+K actions · / · ? keys"
-    );
+    assert!(crate::app::render::chrome::hint_text(&app).contains("Ctrl+K actions"));
     app.esc_tap();
-    assert_eq!(
-        crate::app::render::status_line::statusline_hint(&app),
-        "esc again to rewind · Ctrl-C quit"
-    );
+    assert!(crate::app::render::chrome::live_text(&app).contains("Esc again to rewind"));
 }
 
 #[test]

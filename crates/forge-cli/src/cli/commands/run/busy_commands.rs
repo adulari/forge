@@ -28,6 +28,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
     use BusyPolicy::{Immediate, Queue, Refuse};
     match action {
         CommandAction::Help
+        | CommandAction::Status
         | CommandAction::Keys
         | CommandAction::ListSessions
         | CommandAction::Board

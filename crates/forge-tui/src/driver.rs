@@ -3,10 +3,11 @@
 //! terminal for the render loop. The actual loop lives in the binary (it owns the
 //! `Session`, which this crate must not depend on).
 
-use std::io::{self, Stdout};
+use std::io;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+use crate::theme::backend::{stdout_backend, TermBackend};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
@@ -15,7 +16,6 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use forge_types::SideEffect;
-use ratatui::backend::CrosstermBackend;
 use ratatui::text::Line as TextLine;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -198,7 +198,7 @@ impl Presenter for ChannelPresenter {
 ///   folds lines into the app log instead). Round-tripping into the full-screen activity viewer
 ///   can't disturb the conversation.
 pub struct Tui {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<TermBackend>,
     fullscreen: bool,
     /// Whether mouse capture is on (full-screen wheel scroll). Off by default so the terminal's
     /// native click-drag text selection keeps working. Tracked so teardown matches setup.
@@ -310,7 +310,7 @@ impl Tui {
             }
             IN_ALT_SCREEN.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        let backend = CrosstermBackend::new(io::stdout());
+        let backend = stdout_backend();
         let terminal = Terminal::with_options(
             backend,
             TerminalOptions {
@@ -570,7 +570,7 @@ impl Tui {
                 enable_mouse()?;
             }
         }
-        let backend = CrosstermBackend::new(io::stdout());
+        let backend = stdout_backend();
         self.terminal = Terminal::with_options(
             backend,
             TerminalOptions {

@@ -14,11 +14,10 @@
 //! Cards exist only in full-screen mode: inline mode prints into the terminal's native scrollback,
 //! which cannot be rewritten after the fact, so it keeps the original two-line rendering.
 
+use crate::theme::styles;
 use ratatui::style::Style;
 use ratatui::text::{Line as TextLine, Span};
 use serde_json::Value;
-
-use crate::surface::{DIM, ERRRED, OKGREEN, TEXT, TOOLCYAN, VERY_DIM, WARNYEL};
 
 /// How a card's call ended. `Running` is the state between `ToolStart` and `ToolResult`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,15 +96,12 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
         for chunk in wrap_plain(value, width.saturating_sub(indent + 1)) {
             let mut spans = vec![Span::styled("     ┆ ", gutter_style())];
             if first {
-                spans.push(Span::styled(
-                    format!("{key:<label_w$}  "),
-                    Style::default().fg(TOOLCYAN),
-                ));
+                spans.push(Span::styled(format!("{key:<label_w$}  "), styles::muted()));
                 first = false;
             } else {
                 spans.push(Span::raw(" ".repeat(label_w + 2)));
             }
-            spans.push(Span::styled(chunk, Style::default().fg(TEXT)));
+            spans.push(Span::styled(chunk, styles::fg()));
             out.push(TextLine::from(spans));
         }
     }
@@ -113,13 +109,13 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
         if !rows.is_empty() {
             out.push(TextLine::from(Span::styled(
                 "     ┆ output",
-                Style::default().fg(VERY_DIM),
+                styles::faint(),
             )));
         }
         let style = if card.status == CardStatus::Failed {
-            Style::default().fg(ERRRED)
+            styles::err()
         } else {
-            Style::default().fg(DIM)
+            styles::muted()
         };
         for line in detail.lines() {
             for chunk in wrap_plain(line, width.saturating_sub(8)) {
@@ -135,19 +131,19 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
     if let Some(full) = &card.full {
         out.push(TextLine::from(vec![
             Span::styled("     ┆ ", gutter_style()),
-            Span::styled("⤢ view full output", Style::default().fg(TOOLCYAN).bold()),
+            Span::styled("⤢ view full output", styles::muted().bold()),
             Span::styled(
                 format!(
                     "  {} · click here or /output",
                     size_label(full.lines, full.bytes)
                 ),
-                Style::default().fg(DIM),
+                styles::muted(),
             ),
         ]));
     }
     out.push(TextLine::from(Span::styled(
         "     ┆ click or Ctrl+T to collapse",
-        Style::default().fg(VERY_DIM),
+        styles::faint(),
     )));
     out
 }
@@ -155,7 +151,7 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
 /// The `┆` rail down the left of an expanded card: decoration, so a selection copies the
 /// arguments and output without it.
 fn gutter_style() -> Style {
-    crate::copy_mark::decor(Style::default().fg(VERY_DIM))
+    crate::copy_mark::decor(styles::faint())
 }
 
 /// Which of a card's rendered lines is its "view full output" row, when it shows one.
@@ -166,15 +162,15 @@ pub(crate) fn full_output_row(card: &ToolCard) -> Option<usize> {
 /// The always-present first row: `▸ shell   <call headline>          ✓ exit 0 in 132ms`.
 fn header_line(card: &ToolCard, width: usize) -> TextLine<'static> {
     let (glyph, glyph_style) = match (card.expanded, card.has_detail()) {
-        (true, _) => ("▾ ", Style::default().fg(TOOLCYAN)),
-        (false, true) => ("▸ ", Style::default().fg(TOOLCYAN)),
+        (true, _) => ("▾ ", styles::muted()),
+        (false, true) => ("▸ ", styles::muted()),
         // Nothing to open: no disclosure triangle, so the row does not advertise a drawer.
-        (false, false) => ("· ", Style::default().fg(VERY_DIM)),
+        (false, false) => ("· ", styles::faint()),
     };
     let (mark, mark_style) = match card.status {
-        CardStatus::Running => ("◍", Style::default().fg(WARNYEL)),
-        CardStatus::Ok => ("✓", Style::default().fg(OKGREEN)),
-        CardStatus::Failed => ("✖", Style::default().fg(ERRRED).bold()),
+        CardStatus::Running => ("◍", styles::warn()),
+        CardStatus::Ok => ("✓", styles::ok()),
+        CardStatus::Failed => ("✖", styles::err().bold()),
     };
     let name = card.name.clone();
     let status = status_text(card);
@@ -191,12 +187,12 @@ fn header_line(card: &ToolCard, width: usize) -> TextLine<'static> {
     TextLine::from(vec![
         Span::raw("  "),
         Span::styled(glyph, glyph_style),
-        Span::styled(name, Style::default().fg(TOOLCYAN).bold()),
+        Span::styled(name, styles::muted().bold()),
         Span::raw("  "),
-        Span::styled(headline, Style::default().fg(DIM)),
+        Span::styled(headline, styles::muted()),
         Span::raw(" ".repeat(pad)),
         Span::styled(mark, mark_style),
-        Span::styled(format!(" {status}"), Style::default().fg(DIM)),
+        Span::styled(format!(" {status}"), styles::muted()),
     ])
 }
 

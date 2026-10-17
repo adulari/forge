@@ -31,6 +31,7 @@ mod goal_progress;
 pub(crate) use goal_progress::*;
 
 mod setup;
+mod status_cmd;
 pub(crate) use setup::*;
 
 mod pin_check;
@@ -496,6 +497,8 @@ pub(crate) async fn run_chat_tui(
     // Mouse capture (full-screen wheel scroll) is opt-in: it disables native click-drag text
     // selection, so it stays off unless the user enables `[tui] mouse_capture`.
     let mouse_capture = tui_config.tui.mouse_capture;
+    // The theme is resolved once, before the first draw or scrollback insert.
+    forge_tui::theme::init(&tui_config.tui);
     let mut tui = Tui::new(fullscreen, mouse_capture, tui_config.keybinds.clone())
         .context("initializing TUI")?;
     let mut app = App::default();
@@ -640,11 +643,7 @@ pub(crate) async fn run_chat_tui(
     // directory from which the launcher happened to start.
     app.watch_git_location(session_workspace.clone());
     let project = forge_config::project_initialization(&session_workspace);
-    if !project.initialized {
-        app.apply(forge_tui::PresenterEvent::Warning(
-            "This project isn't set up for Forge — no project guidance or custom agents. Run /init to set it up for me.".to_string(),
-        ));
-    }
+    app.set_project_initialized(project.initialized);
     {
         let s = session.lock().await;
         app.temper = s.temper().label().to_string();
@@ -1149,6 +1148,10 @@ pub(crate) async fn run_chat_tui(
         }
         if dirty {
             app.busy = busy;
+            app.set_autonomy_chips(
+                goal_state.as_ref().map(|g| g.iter),
+                loop_state.as_ref().map(|l| l.iter),
+            );
             if busy {
                 app.turn_elapsed_secs = busy_since.elapsed().as_secs();
             }
@@ -1624,6 +1627,7 @@ pub(crate) async fn run_chat_tui(
                 || app.palette.open
                 || app.btw_open()
                 || app.usage_overlay.open
+                || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
                 || app.picker.open
@@ -2343,6 +2347,15 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            // The /status inspector captures all keys; Esc closes it.
+            if app.status_open {
+                if matches!(key, KeyKind::Esc) {
+                    app.status_open = false;
+                    dirty = true;
+                }
+                continue;
+            }
+
             // Usage overlay captures all keys; Esc closes it.
             if app.usage_overlay.open {
                 if matches!(key, KeyKind::Esc) {
@@ -3029,12 +3042,13 @@ pub(crate) async fn run_chat_tui(
             }
             if let Some((tool, reply)) = pending.take() {
                 // Answering a permission prompt.
-                let outcome = match key {
-                    KeyKind::Char('a') | KeyKind::Char('A') => ConfirmOutcome::AlwaysAllow,
-                    KeyKind::Char('y') | KeyKind::Char('Y') | KeyKind::Enter => {
-                        ConfirmOutcome::Allow
+                let outcome = match app.permission_key(key) {
+                    Some(outcome) => outcome,
+                    None => {
+                        pending = Some((tool, reply));
+                        dirty = true;
+                        continue;
                     }
-                    _ => ConfirmOutcome::Deny,
                 };
                 let _ = reply.send(outcome);
                 app.prompt = None;
@@ -3656,7 +3670,7 @@ pub(crate) async fn run_chat_tui(
                     side_effect,
                     reply,
                 } => {
-                    app.prompt = Some(format!("allow {tool} ({side_effect:?}) [y/n/a=always]"));
+                    app.open_permission(&tool, &format!("{side_effect:?}"));
                     pending = Some((tool, reply));
                     // New prompt, new identity: remote answers rendered against an older prompt
                     // now carry a stale seq and are ignored instead of approving this one.

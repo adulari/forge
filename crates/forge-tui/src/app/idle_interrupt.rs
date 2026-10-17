@@ -163,13 +163,14 @@ mod tests {
     }
 
     #[test]
-    fn statusline_shows_the_quit_hint_while_armed() {
+    fn the_composer_border_shows_the_quit_hint_while_armed() {
         let mut app = App::default();
         let mut h = PromptHistory::default();
         app.idle_interrupt(&mut h);
-        assert_eq!(
-            crate::app::render::status_line::statusline_hint(&app),
-            "Press Ctrl+C again to exit"
+        assert!(
+            crate::app::render::chrome::live_text(&app).contains("Ctrl+C again to quit"),
+            "{}",
+            crate::app::render::chrome::live_text(&app)
         );
     }
 }

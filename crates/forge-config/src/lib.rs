@@ -1291,6 +1291,23 @@ pub struct TuiConfig {
     /// reporting entirely (e.g. a terminal where any reporting blocks selection). No effect inline.
     #[serde(default = "default_tui_mouse_capture")]
     pub mouse_capture: bool,
+    /// Colour mode: `"auto"` (default; detects from `COLORFGBG`), `"dark"` or `"light"`. The
+    /// `FORGE_THEME` environment variable overrides it.
+    #[serde(default = "default_tui_auto")]
+    pub theme: String,
+    /// Colour depth: `"auto"` (default; detects from `NO_COLOR`, `COLORTERM` and `TERM`),
+    /// `"truecolor"`, `"256"`, `"16"` or `"none"`. The `FORGE_COLOR` environment variable
+    /// overrides it.
+    #[serde(default = "default_tui_auto")]
+    pub color: String,
+    /// Glyph set: `"auto"` (default; ASCII on the Linux console, `TERM=dumb` and non-UTF-8 or CJK
+    /// locales), `"unicode"` or `"ascii"`. The `FORGE_GLYPHS` environment variable overrides it.
+    #[serde(default = "default_tui_auto")]
+    pub glyphs: String,
+    /// Turn off animation (spinner colour cycling, rail cooling, flashes). Default: false. The
+    /// `FORGE_REDUCE_MOTION` environment variable and monochrome terminals also turn it off.
+    #[serde(default)]
+    pub reduce_motion: bool,
 }
 
 impl Default for TuiConfig {
@@ -1298,8 +1315,16 @@ impl Default for TuiConfig {
         Self {
             fullscreen: default_tui_fullscreen(),
             mouse_capture: default_tui_mouse_capture(),
+            theme: default_tui_auto(),
+            color: default_tui_auto(),
+            glyphs: default_tui_auto(),
+            reduce_motion: false,
         }
     }
+}
+
+fn default_tui_auto() -> String {
+    "auto".to_string()
 }
 
 fn default_tui_fullscreen() -> bool {
@@ -4318,6 +4343,30 @@ pub fn inject_provider_keys() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tui_look_settings_default_to_auto_and_parse_from_toml() {
+        let cfg = TuiConfig::default();
+        assert_eq!(
+            (cfg.theme.as_str(), cfg.color.as_str(), cfg.glyphs.as_str()),
+            ("auto", "auto", "auto")
+        );
+        assert!(!cfg.reduce_motion);
+        // An older config with only the original keys still loads, and the new keys default.
+        let old: TuiConfig = toml::from_str("fullscreen = false\nmouse_capture = false").unwrap();
+        assert!(!old.fullscreen && !old.mouse_capture);
+        assert_eq!(old.theme, "auto");
+        assert!(!old.reduce_motion);
+        let set: TuiConfig = toml::from_str(
+            "theme = \"light\"\ncolor = \"256\"\nglyphs = \"ascii\"\nreduce_motion = true",
+        )
+        .unwrap();
+        assert_eq!(
+            (set.theme.as_str(), set.color.as_str(), set.glyphs.as_str()),
+            ("light", "256", "ascii")
+        );
+        assert!(set.reduce_motion);
+    }
     use super::*;
 
     #[test]
