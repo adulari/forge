@@ -11,6 +11,7 @@ pub fn render_voice_overlay(f: &mut Frame, app: &App) {
     let Some(v) = &app.voice else { return };
     let glyphs = g();
     let area = f.area();
+    surface::dim_backdrop(f, area);
     let w = area.width.saturating_sub(4).clamp(20, 60);
     let h = 9u16.min(area.height);
     if area.width < 4 || h == 0 {

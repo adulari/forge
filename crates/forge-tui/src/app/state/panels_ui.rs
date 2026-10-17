@@ -52,8 +52,7 @@ impl App {
         self.panels_ui.project_initialized = Some(initialized);
         if !initialized && !self.fullscreen {
             self.apply(crate::PresenterEvent::Warning(
-                "This project isn't set up for Forge yet. /init writes project guidance + agents"
-                    .to_string(),
+                "This project isn't set up for Forge yet. Run /init to set it up.".to_string(),
             ));
         }
     }

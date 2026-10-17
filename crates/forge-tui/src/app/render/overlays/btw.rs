@@ -6,7 +6,7 @@ use crate::theme::glyphs::g;
 
 /// Widest the card grows, border included.
 const MAX_WIDTH: u16 = 84;
-use crate::overlays::{PAD_X, PAD_Y};
+use crate::overlays::PAD_X;
 
 /// Rows a line takes when wrapped to `width` cells.
 fn wrapped_rows(line: &TextLine<'_>, width: usize) -> usize {
@@ -79,6 +79,7 @@ pub fn render_btw_overlay(f: &mut Frame, app: &App) {
         return;
     };
     let area = f.area();
+    surface::dim_backdrop(f, area);
     let width = area
         .width
         .saturating_sub(4)
@@ -88,9 +89,9 @@ pub fn render_btw_overlay(f: &mut Frame, app: &App) {
     let lines = body_lines(card, app);
     let rows: usize = lines.iter().map(|l| wrapped_rows(l, text_w)).sum();
     let height = (rows as u16)
-        .saturating_add(2 + PAD_Y * 2)
+        .saturating_add(2 + crate::overlays::pad_y(area.height) * 2)
         .min(area.height.saturating_sub(4).max(5));
-    let card_area = surface::modal_area(area, width, height);
+    let card_area = crate::overlays::card_area(area, width, height);
 
     let provenance = if card.meta.is_empty() {
         String::new()
@@ -98,7 +99,7 @@ pub fn render_btw_overlay(f: &mut Frame, app: &App) {
         format!("{} {} ", card.meta, g().sep)
     };
     let keys = if card.answer.is_some() {
-        format!("{}scroll {} Esc close", g().up_down, g().sep)
+        format!("{} scroll {} Esc close", g().up_down, g().sep)
     } else {
         "Esc close".to_string()
     };

@@ -120,8 +120,10 @@ fn narrow_inline_welcome_clips_the_tagline_and_drops_keys() {
 
 #[test]
 fn welcome_shows_only_on_an_empty_transcript_and_vanishes_after_the_first_message() {
-    let mut app = App::default();
-    app.fullscreen = true;
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
     let rows = screen_rows(&app, 160, 48).join("\n");
     assert!(rows.contains("Your coding partner"), "{rows}");
     assert!(
@@ -140,8 +142,10 @@ fn welcome_shows_only_on_an_empty_transcript_and_vanishes_after_the_first_messag
 
 #[test]
 fn welcome_stays_within_thirteen_rows_at_80x24() {
-    let mut app = App::default();
-    app.fullscreen = true;
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
     app.set_project_initialized(false);
     app.set_recent_sessions(vec![("hello".into(), "3m ago".into())]);
     let lines = crate::app::render::welcome::welcome_lines(&app, 80, 24);
@@ -160,9 +164,11 @@ fn welcome_stays_within_thirteen_rows_at_80x24() {
 fn onboarding_line_is_state_and_clears_once_the_project_is_initialised() {
     let dir = std::env::temp_dir().join(format!("forge-welcome-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let mut app = App::default();
-    app.fullscreen = true;
-    app.git_workspace = Some(dir.clone());
+    let mut app = App {
+        fullscreen: true,
+        git_workspace: Some(dir.clone()),
+        ..Default::default()
+    };
     app.set_project_initialized(false);
     assert!(
         app.drain_flush().is_empty(),
@@ -180,7 +186,6 @@ fn onboarding_line_is_state_and_clears_once_the_project_is_initialised() {
 #[test]
 fn inline_uninitialised_project_still_gets_the_scrollback_warning() {
     let mut app = App::default();
-    app.fullscreen = false;
     app.set_project_initialized(false);
     let sb = flush_text(&mut app);
     assert!(

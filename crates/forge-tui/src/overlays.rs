@@ -234,6 +234,50 @@ pub(crate) fn fmt_elapsed(d: std::time::Duration) -> String {
 /// Padding inside the frame: rows top and bottom, cells left and right.
 pub(crate) const PAD_Y: u16 = 1;
 pub(crate) const PAD_X: u16 = 2;
+/// Regions shorter than this (the inline live region) are treated as short.
+pub(crate) const SHORT_REGION: u16 = 20;
+
+/// Blank rows inside a frame, top and bottom, for a region `region_h` rows tall.
+pub(crate) fn pad_y(region_h: u16) -> u16 {
+    if region_h < SHORT_REGION {
+        0
+    } else {
+        PAD_Y
+    }
+}
+
+/// The standard inspector card for `content_rows` rows of content, or the whole region when it
+/// is short (see [`card_area`]).
+pub(crate) fn inspector_card(
+    area: ratatui::layout::Rect,
+    content_rows: u16,
+) -> ratatui::layout::Rect {
+    if area.height < SHORT_REGION {
+        ratatui::layout::Rect {
+            height: content_rows.saturating_add(2).min(area.height),
+            ..area
+        }
+    } else {
+        crate::surface::inspector_area(area, content_rows)
+    }
+}
+
+/// Where an overlay card goes: centred at its preferred size, or, in a short region, the whole
+/// region so a tall card is not cut off by a margin it cannot afford.
+pub(crate) fn card_area(
+    area: ratatui::layout::Rect,
+    width: u16,
+    height: u16,
+) -> ratatui::layout::Rect {
+    if area.height < SHORT_REGION {
+        ratatui::layout::Rect {
+            height: height.min(area.height),
+            ..area
+        }
+    } else {
+        crate::surface::modal_area(area, width, height)
+    }
+}
 
 /// Clear and frame `area` and return the padded body rectangle.
 pub(crate) fn padded_panel(
@@ -245,15 +289,17 @@ pub(crate) fn padded_panel(
     tone: crate::surface::SurfaceTone,
 ) -> ratatui::layout::Rect {
     let inner = crate::surface::render_panel_with_context(f, area, title, context, footer, tone);
+    // A short region (the inline live area) gives up the blank rows top and bottom.
+    let pad_y = pad_y(area.height);
     let decor = crate::copy_mark::decor(ratatui::style::Style::default());
     for pad in [
         ratatui::layout::Rect {
-            height: PAD_Y.min(inner.height),
+            height: pad_y.min(inner.height),
             ..inner
         },
         ratatui::layout::Rect {
-            y: inner.y + inner.height.saturating_sub(PAD_Y),
-            height: PAD_Y.min(inner.height),
+            y: inner.y + inner.height.saturating_sub(pad_y),
+            height: pad_y.min(inner.height),
             ..inner
         },
         ratatui::layout::Rect {
@@ -270,8 +316,8 @@ pub(crate) fn padded_panel(
     }
     ratatui::layout::Rect {
         x: inner.x + PAD_X,
-        y: inner.y + PAD_Y,
+        y: inner.y + pad_y,
         width: inner.width.saturating_sub(PAD_X * 2),
-        height: inner.height.saturating_sub(PAD_Y * 2),
+        height: inner.height.saturating_sub(pad_y * 2),
     }
 }

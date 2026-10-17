@@ -13,6 +13,8 @@ const WORDMARK_MIN_HEIGHT: u16 = 30;
 
 /// Rows the welcome may use on a short terminal, before the optional `More` row.
 const MAX_COMPACT_ROWS: usize = 12;
+/// Rows the welcome may use on a tall terminal.
+const TALL_ROWS: usize = 18;
 
 /// The half-block `FORGE`, two rows, one entry per letter.
 const WORDMARK: [[&str; 5]; 2] = [
@@ -188,7 +190,12 @@ pub(crate) fn welcome_lines(app: &App, width: u16, height: u16) -> Vec<TextLine<
         lines.push(recent);
     }
     // The setup and routing escape hatches, when the welcome has room left.
-    if lines.len() < MAX_COMPACT_ROWS && height >= 20 {
+    let row_budget = if height >= WORDMARK_MIN_HEIGHT {
+        TALL_ROWS
+    } else {
+        MAX_COMPACT_ROWS
+    };
+    if lines.len() < row_budget && height >= 20 {
         lines.push(TextLine::default());
         lines.push(labelled(
             "More",

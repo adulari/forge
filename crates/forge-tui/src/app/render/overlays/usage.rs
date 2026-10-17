@@ -216,13 +216,18 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
         return;
     }
     let area = f.area();
+    surface::dim_backdrop(f, area);
     let width = area.width.saturating_sub(4).clamp(10, 100).min(area.width);
     let text_w = width.saturating_sub(2 + crate::overlays::PAD_X * 2) as usize;
     let lines = usage_lines(&app.usage_overlay, text_w);
     let height = (lines.len() as u16)
-        .saturating_add(2 + crate::overlays::PAD_Y * 2)
-        .min(area.height.saturating_sub(2).max(5));
-    let card = surface::modal_area(area, width, height);
+        .saturating_add(2 + crate::overlays::pad_y(area.height) * 2)
+        .min(if area.height < crate::overlays::SHORT_REGION {
+            area.height
+        } else {
+            area.height.saturating_sub(2).max(5)
+        });
+    let card = crate::overlays::card_area(area, width, height);
     let title = if app.usage_overlay.loading {
         format!(
             "{} Usage · loading",

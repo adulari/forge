@@ -42,6 +42,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
 
     let o = &app.mesh_overlay;
     let area = f.area();
+    surface::dim_backdrop(f, area);
     // Keep the first routing decision and a useful candidate window visible. Larger candidate
     // sets retain the existing cursor-following scroll behavior instead of stretching the dialog.
     let decision_rows = 1u16
@@ -53,7 +54,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     let candidate_rows =
         (o.candidates.len() as u16).clamp(1, 8) + 2 + u16::from(!o.rationale.is_empty());
     let content_rows = decision_rows + quota_rows + candidate_rows + 2;
-    let inspector = surface::inspector_area(area, content_rows);
+    let inspector = crate::overlays::inspector_card(area, content_rows);
 
     let settled = o.anim_tick >= o.settle_tick();
     let title = if settled {
@@ -67,7 +68,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         surface::title(title, surface::SurfaceTone::Tool),
         Some(Span::styled(" /mesh ", styles::faint())),
         Some(Span::styled(
-            format!(" {}browse candidates {} Esc close ", g().up_down, g().sep),
+            format!(" {} browse candidates {} Esc close ", g().up_down, g().sep),
             styles::faint(),
         )),
         surface::SurfaceTone::Tool,

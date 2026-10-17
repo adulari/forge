@@ -142,11 +142,18 @@ fn setting_line(
         value_spans(r, selected)
     };
     let value_w: usize = value.iter().map(|s| s.content.width()).sum();
-    let label = truncate(&r.label, label_w);
+    // A label written as `Name — blurb` shows the name as the label and the blurb as the
+    // description; otherwise the description is the first sentence of the help.
+    let (name, blurb) = match r.label.split_once(" — ") {
+        Some((name, blurb)) => (name, Some(blurb)),
+        None => (r.label.as_str(), None),
+    };
+    let label = truncate(name, label_w);
     let label_pad = label_w.saturating_sub(label.width());
     let desc_room = width.saturating_sub(4 + label_w + 2 + value_w + 2);
-    let desc = match (&r.help, desc_room >= 12) {
-        (Some(help), true) => truncate(&short_help(help), desc_room),
+    let desc = match (blurb, &r.help, desc_room >= 12) {
+        (Some(blurb), _, true) => truncate(blurb, desc_room),
+        (None, Some(help), true) => truncate(&short_help(help), desc_room),
         _ => String::new(),
     };
     let left = vec![
@@ -276,7 +283,7 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
         area,
         surface::title("Settings", surface::SurfaceTone::Accent),
         Some(Span::styled(
-            format!(" {} settings ", matches.len()),
+            format!(" {} settings {} /config ", matches.len(), g().sep),
             styles::faint(),
         )),
         Some(Span::styled(format!(" {} ", hints(ed)), styles::faint())),
@@ -356,9 +363,20 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
         .unwrap_or_default();
     let list_area = match section_area {
         Some(sa) => {
-            let lines: Vec<TextLine> = sections
+            // Window the section list around the current section, with a `… N more` marker.
+            let rows_avail = sa.height as usize;
+            let window = rows_avail
+                .saturating_sub(usize::from(sections.len() > rows_avail))
+                .max(1);
+            let first = current
+                .saturating_sub(window.saturating_sub(1) / 2)
+                .min(sections.len().saturating_sub(window));
+            let hidden_below = sections.len().saturating_sub(first + window);
+            let mut lines: Vec<TextLine> = sections
                 .iter()
                 .enumerate()
+                .skip(first)
+                .take(window)
                 .map(|(i, (name, count))| {
                     let on = i == current;
                     let caret = if on { g().prompt } else { " " };
@@ -379,10 +397,21 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
                     right_aligned(
                         left,
                         vec![Span::styled(count.to_string(), styles::faint())],
-                        sa.width as usize,
+                        sa.width.saturating_sub(1) as usize,
                     )
                 })
                 .collect();
+            if hidden_below > 0 || first > 0 {
+                let note = match (first, hidden_below) {
+                    (0, n) => format!("{n} more"),
+                    (n, 0) => format!("{n} above"),
+                    (a, b) => format!("{a} above, {b} more"),
+                };
+                lines.push(TextLine::from(Span::styled(
+                    format!("  {} {note}", g().ellipsis),
+                    styles::faint(),
+                )));
+            }
             frame.render_widget(Paragraph::new(lines), sa);
             list_area
         }
