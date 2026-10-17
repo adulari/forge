@@ -15,7 +15,13 @@ pub fn record_model_failure_in(
     // a full cooldown and, because the auxiliary chains are trivial-tier, walks the identical
     // oversized payload into the next cheap model and benches that one too — so the damage
     // outlives the request that caused it and degrades routing for ordinary turns afterwards.
-    if err.is_context_overflow() || crate::zero_retention::is_refusal(err) {
+    // A token throttle is the same kind of statement about the payload: a request that exceeds the
+    // account's tokens-per-minute quota is throttled whatever model it goes to, while a short
+    // prompt on the same model is fine.
+    if err.is_context_overflow()
+        || err.is_token_throttle()
+        || crate::zero_retention::is_refusal(err)
+    {
         return;
     }
     let detail = err.to_string();

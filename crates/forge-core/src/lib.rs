@@ -140,6 +140,7 @@ pub mod steer;
 mod stop_hook;
 pub mod subagent;
 mod system_context;
+mod throttle_recovery;
 mod tool_outcome;
 mod working_tree;
 use working_tree::{working_tree_changed_since, working_tree_marker};
@@ -5084,6 +5085,9 @@ mod tests {
 
     #[path = "failure_streak_reset.rs"]
     mod failure_streak_reset_tests;
+
+    #[path = "token_throttle.rs"]
+    mod token_throttle_tests;
 
     #[path = "catalog_feed.rs"]
     mod catalog_feed_tests;

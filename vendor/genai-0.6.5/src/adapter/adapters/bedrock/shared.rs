@@ -64,6 +64,36 @@ fn urlencode_path_segment(s: &str) -> String {
 	out
 }
 
+/// Build the error body genai surfaces for a Bedrock failure, keeping the exception type.
+///
+/// Bedrock carries the exception type OUTSIDE the JSON payload: in the `:exception-type` (or
+/// `:error-code`) event-stream header on a streamed failure, and in the `x-amzn-ErrorType` response
+/// header on an HTTP one (`ThrottlingException:http://internal.amazon.com/...`). The payload is just
+/// `{"message": "..."}`, so dropping the header made a throttle, an outage and a validation error
+/// indistinguishable. Folded in as `{"error":{"type":..,"message":..}}`, the shape callers already
+/// read. Without a type the payload is returned unchanged.
+pub(super) fn error_body(error_type: Option<&str>, header_message: Option<&str>, raw: &[u8]) -> serde_json::Value {
+	let parsed: Option<serde_json::Value> = serde_json::from_slice(raw).ok();
+	let Some(error_type) = error_type
+		.map(|t| t.split(':').next().unwrap_or(t).trim())
+		.filter(|t| !t.is_empty())
+	else {
+		return parsed.unwrap_or(serde_json::Value::Null);
+	};
+	let from_payload = parsed.as_ref().and_then(|v| {
+		["message", "Message", "originalMessage"]
+			.iter()
+			.find_map(|k| v.get(*k).and_then(|m| m.as_str()))
+	});
+	let message = match (from_payload, parsed.as_ref()) {
+		(Some(m), _) => m.to_string(),
+		(None, _) if header_message.is_some() => header_message.unwrap_or_default().to_string(),
+		(None, Some(v)) if !v.is_null() => v.to_string(),
+		_ => String::from_utf8_lossy(raw).trim().to_string(),
+	};
+	serde_json::json!({ "error": { "type": error_type, "message": message } })
+}
+
 /// Turn a `reqwest::RequestBuilder` into a byte stream for the event-stream frame parser.
 /// On HTTP error, yields a single error item so the parser surfaces it through the normal
 /// error path.
@@ -93,7 +123,16 @@ fn async_stream_once(
 			.map_err(|e| Box::new(e) as crate::error::BoxError)?;
 		let status = resp.status();
 		if !status.is_success() {
-			let body = resp.text().await.unwrap_or_default();
+			let error_type = resp
+				.headers()
+				.get("x-amzn-errortype")
+				.and_then(|v| v.to_str().ok())
+				.map(str::to_string);
+			let raw = resp.text().await.unwrap_or_default();
+			let body = match error_type.as_deref() {
+				Some(ty) => error_body(Some(ty), None, raw.as_bytes()).to_string(),
+				None => raw,
+			};
 			let err = crate::Error::HttpError {
 				status,
 				canonical_reason: status.canonical_reason().unwrap_or("Unknown").to_string(),
@@ -107,4 +146,53 @@ fn async_stream_once(
 				.boxed();
 		Ok(bytes)
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::error_body;
+
+	#[test]
+	fn exception_type_is_kept_beside_the_message() {
+		let body = error_body(
+			Some("throttlingException"),
+			None,
+			br#"{"message":"Too many tokens, please wait before trying again."}"#,
+		);
+		assert_eq!(body["error"]["type"], "throttlingException");
+		assert_eq!(
+			body["error"]["message"],
+			"Too many tokens, please wait before trying again."
+		);
+	}
+
+	#[test]
+	fn http_error_type_header_drops_the_documentation_suffix() {
+		let body = error_body(
+			Some("ThrottlingException:http://internal.amazon.com/coral/com.amazon.bedrock/"),
+			None,
+			br#"{"Message":"slow down"}"#,
+		);
+		assert_eq!(body["error"]["type"], "ThrottlingException");
+		assert_eq!(body["error"]["message"], "slow down");
+	}
+
+	#[test]
+	fn stream_error_falls_back_to_original_message_then_header_message() {
+		let body = error_body(
+			Some("modelStreamErrorException"),
+			None,
+			br#"{"originalStatusCode":500,"originalMessage":"upstream blew up"}"#,
+		);
+		assert_eq!(body["error"]["message"], "upstream blew up");
+		let body = error_body(Some("internalServerException"), Some("boom"), b"");
+		assert_eq!(body["error"]["message"], "boom");
+	}
+
+	#[test]
+	fn without_a_type_the_payload_is_returned_unchanged() {
+		let body = error_body(None, None, br#"{"message":"x"}"#);
+		assert_eq!(body, serde_json::json!({"message":"x"}));
+		assert_eq!(error_body(None, None, b"not json"), serde_json::Value::Null);
+	}
 }

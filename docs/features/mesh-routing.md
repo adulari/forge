@@ -1122,6 +1122,30 @@ budget — `mesh.pin_outage_wait_secs`, default 600 s (`crates/forge-config/src/
 via separate counters, since an outage recovers in minutes and must not eat the rate-limit
 budget. `0` disables outage backoff (immediate `FailTurn`).
 
+**What the backoff warning says, and token throttles** (`crates/forge-core/src/throttle_recovery.rs`).
+The warning carries the provider's own reason, `rate limited (Bedrock: Too many tokens, please
+wait before trying again.) — retrying pinned model in 49s (attempt 3/6)`; the full error text is
+logged at `warn` (target `forge_provider`, status and body only, never headers or keys). A
+throttle that says *tokens* (`Too many tokens`, `tokens per min (TPM)`) is told apart from a
+request-rate one (`Too many requests`, plain backoff): Bedrock answers HTTP 429 `ThrottlingException`
+"Too many tokens" when one request exceeds the account's tokens-per-minute quota, which no wait
+can fix because each retry resends the same context. After the **second consecutive** token throttle
+on a request the pinned loop compacts the context (the same shrink-and-compact the overflow path
+uses, at most three times) before waiting again, and the warning says so and suggests requesting a
+higher tokens-per-minute quota (AWS Service Quotas for Bedrock). A token throttle is not an
+overflow and is not benched in the health table.
+
+**Bedrock error classification** (`crates/forge-provider/src/genai_provider/bedrock_error.rs`).
+The vendored genai Bedrock adapter keeps the exception type (the `:exception-type` stream header
+or the `x-amzn-ErrorType` HTTP header) in the error body as
+`{"error":{"type":"throttlingException","message":"..."}}`. `throttlingException` is a rate limit;
+`serviceUnavailableException`, `internalServerException`, `modelStreamErrorException`,
+`modelNotReadyException` and `modelTimeoutException` are outages; `validationException` is a
+non-failover request error, which an over-long input ("Input is too long for requested model")
+turns into the compact-and-retry path. The text fallback (`classify_text`) no longer reads a `429`
+inside a request id, byte count or timestamp as a rate limit (the status must stand alone), and
+`quota` only counts next to exceed/exhausted/limit wording.
+
 **Why context overflow is excluded from outage backoff** (`forge-core/src/lib.rs:3789-3793`):
 a context-overflow error rides the same `Unavailable` classification, but after the compact
 retries are spent, *waiting can never shrink the input* — backing off would burn the whole
