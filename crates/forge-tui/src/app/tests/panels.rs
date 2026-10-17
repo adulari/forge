@@ -1293,3 +1293,47 @@ fn workflow_view_is_a_header_phase_checklist_nested_agents_log_and_hint_row() {
         "{last}"
     );
 }
+
+#[test]
+fn welcome_try_focus_picks_an_example_into_the_composer() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    screen_rows(&app, 80, 24);
+    assert!(
+        !app.welcome_key(&KeyKind::Enter),
+        "Enter is untouched unfocused"
+    );
+    app.input = "x".into();
+    assert!(
+        !app.welcome_key(&KeyKind::Down),
+        "a draft keeps history keys"
+    );
+    app.input.clear();
+    assert!(app.welcome_key(&KeyKind::Down));
+    assert!(app.welcome_key(&KeyKind::Down));
+    let text = screen_rows(&app, 80, 24).join("\n");
+    assert!(text.contains("❯ explain how"), "{text}");
+    assert!(app.welcome_key(&KeyKind::Up));
+    assert!(app.welcome_key(&KeyKind::Enter));
+    assert_eq!(app.input, "fix the failing test in this project");
+    assert_eq!(app.input_cursor, app.input.len());
+    assert!(app.panels_ui.try_focus.is_none());
+    assert!(app.welcome_key(&KeyKind::Down) || !app.input.is_empty());
+}
+
+#[test]
+fn welcome_try_focus_yields_to_typing_and_esc() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    screen_rows(&app, 80, 24);
+    assert!(app.welcome_key(&KeyKind::Down));
+    assert!(!app.welcome_key(&KeyKind::Char('a')));
+    assert!(app.panels_ui.try_focus.is_none());
+    assert!(app.welcome_key(&KeyKind::Down));
+    assert!(app.welcome_key(&KeyKind::Esc));
+    assert!(app.panels_ui.try_focus.is_none());
+}

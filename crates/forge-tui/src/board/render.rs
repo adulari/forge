@@ -8,14 +8,14 @@
 
 use crate::theme::{color, styles};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use crate::surface::{self};
 
-use super::model::{fmt_age, fmt_cost, model_short, Card, Column, Health, SignalLevel};
+use super::model::{fmt_cost, Column};
 use super::state::{BoardApp, ConnState, Focus, Hit};
 use super::widgets as w;
 use super::{detail, dispatch_render as dr, form_render, overlays};
@@ -328,7 +328,7 @@ fn draw_tab_strip(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<
         }
         let n = app.columns[col.index()].len();
         let current = *col == app.cursor_col;
-        let mut style = Style::default().fg(column_color(*col));
+        let mut style = column_style(*col);
         if current {
             style = style.patch(styles::selected_row()).bold();
         }
@@ -350,13 +350,11 @@ fn draw_column(
     if inner_w < 6 || area.height < 2 {
         return;
     }
-    let tone = column_color(col);
+    let tone = column_style(col);
     let count = app.columns[col.index()].len();
     let mut head = w::Row::at(area.x, area.y);
-    head.add(
-        format!("{} · {count}", col.label().to_uppercase()),
-        Style::default().fg(tone).bold(),
-    );
+    head.add(col.label().to_uppercase(), tone.bold());
+    head.add(format!(" {count}"), styles::muted());
     head.render(frame, area);
     w::rule(
         frame,
@@ -439,7 +437,7 @@ fn draw_column(
             width: list.width,
             height: card_h,
         };
-        draw_card(app, frame, rect, card, card.id == selected_id, hits);
+        super::card_render::draw_card(app, frame, rect, card, card.id == selected_id, hits);
         y += card_h;
     }
     if end < count && y < list.y + list.height {
@@ -462,213 +460,6 @@ fn marker(frame: &mut Frame, list: Rect, y: u16, text: String) {
             ..list
         },
     );
-}
-
-// ─────────────────────────────────────────────────────────────────────── card
-
-fn draw_card(
-    app: &BoardApp,
-    frame: &mut Frame,
-    rect: Rect,
-    card: &Card,
-    selected: bool,
-    hits: &mut Vec<(Rect, Hit)>,
-) {
-    if rect.width < 6 || rect.height < 3 {
-        return;
-    }
-    w::push_hit(hits, rect, rect, Hit::Card(card.id.clone()));
-
-    let (glyph, gcolor) = dr::card_glyph(card).unwrap_or_else(|| w::health_glyph(card, app.tick));
-    let age = fmt_age(app.now.saturating_sub(card.last_activity));
-    let finished = app.just_finished(&card.id);
-    let chip_w = if finished { 11 } else { 0 };
-    let title_room = (rect.width as usize)
-        .saturating_sub(8 + w::cells(&age) + chip_w)
-        .max(4);
-    let mut title = vec![Span::styled(
-        format!(" {glyph} "),
-        Style::default().fg(gcolor),
-    )];
-    let mut tstyle = styles::fg().bold();
-    if selected {
-        tstyle = tstyle.patch(styles::selected_row());
-    }
-    title.push(Span::styled(
-        w::clip_cells(&card.display_title(), title_room),
-        tstyle,
-    ));
-    if finished {
-        title.push(Span::styled(" ✓ finished", styles::ok().bold()));
-    }
-    title.push(Span::raw(" "));
-
-    let (color, bold) = card_border(app, card, selected);
-    let mut block = ratatui::widgets::Block::bordered()
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(if bold {
-            Style::default().fg(color).bold()
-        } else {
-            Style::default().fg(color)
-        })
-        .title_top(Line::from(title));
-    block = block
-        .title_top(Line::from(Span::styled(format!(" {age} "), styles::muted())).right_aligned());
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let width = inner.width as usize;
-    let compact = rect.height <= 4;
-    let signal = card
-        .signals
-        .iter()
-        .find(|s| s.level >= SignalLevel::Warn)
-        .cloned();
-    let mut lines: Vec<Line> = Vec::new();
-
-    let mut l1 = w::Fit::new(width);
-    if let Some((chip, color)) = dr::worker_chip(card) {
-        l1.add(chip, Style::default().fg(color).bold());
-    }
-    if card.past {
-        l1.add(format!("{} messages", card.message_count), styles::muted());
-    } else {
-        l1.add(model_short(&card.model), styles::fg());
-    }
-    if let Some(tier) = &card.tier {
-        l1.add(format!(" {tier} "), styles::faint());
-    }
-    if card.worktree.is_some() {
-        l1.add(
-            format!(" {}", crate::theme::glyphs::g().branch),
-            styles::user(),
-        );
-    }
-    if compact {
-        if let Some(task) = &card.current_task {
-            l1.add(
-                format!("  {} ", crate::theme::glyphs::g().task_active),
-                styles::brand(),
-            );
-            l1.add(task.clone(), styles::fg());
-        }
-    } else if app.project_filter.is_none() {
-        l1.add(format!("  {}", card.project()), styles::muted());
-    }
-    lines.push(l1.line());
-
-    let dispatch_line = dr::coordinator_line(app, card, width);
-    if !compact {
-        lines.push(
-            dispatch_line
-                .clone()
-                .unwrap_or_else(|| line_two(card, signal.as_ref(), width)),
-        );
-        let mut l3 = w::Fit::new(width);
-        if card.streaming {
-            l3.add(format!("{} ", w::spinner(app.tick)), styles::muted());
-        }
-        match &card.last_line {
-            Some(t) => l3.add(t.clone(), w::italic(color::fg_muted())),
-            None => l3.add("no output yet", w::italic(color::fg_faint())),
-        }
-        lines.push(l3.line());
-    }
-    match dispatch_line.filter(|_| compact) {
-        Some(l) => lines.push(l),
-        None => lines.push(gauges(card, if compact { signal } else { None }, width)),
-    }
-
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The one line that says what this agent is actually doing — or what is wrong with it.
-fn line_two(card: &Card, signal: Option<&super::model::Signal>, width: usize) -> Line<'static> {
-    let mut fit = w::Fit::new(width);
-    match signal {
-        Some(s) if s.level == SignalLevel::Danger => {
-            fit.add(
-                format!("{} ", crate::theme::glyphs::g().fail),
-                styles::err().bold(),
-            );
-            fit.add(s.text.clone(), styles::err());
-        }
-        Some(s) => {
-            fit.add(
-                format!("{} ", crate::theme::glyphs::g().warn),
-                styles::warn().bold(),
-            );
-            fit.add(s.text.clone(), styles::warn());
-        }
-        None => match &card.current_task {
-            Some(task) => {
-                fit.add(
-                    format!("{} ", crate::theme::glyphs::g().task_active),
-                    styles::brand().bold(),
-                );
-                fit.add(task.clone(), styles::fg());
-            }
-            None => fit.add(card.health.label(), styles::muted()),
-        },
-    }
-    fit.line()
-}
-
-/// Progress, context pressure, fan-out, queue depth and spend — the numbers that decide whether
-/// a session is worth interrupting.
-fn gauges(card: &Card, spill: Option<super::model::Signal>, width: usize) -> Line<'static> {
-    let cost = fmt_cost(card.cost_usd);
-    let mut fit = w::Fit::new(width);
-    if let Some(s) = spill {
-        let color = if s.level == SignalLevel::Danger {
-            color::err()
-        } else {
-            color::warn()
-        };
-        fit.add(
-            if s.level == SignalLevel::Danger {
-                "! "
-            } else {
-                "▲ "
-            },
-            Style::default().fg(color).bold(),
-        );
-        fit.add(s.text, Style::default().fg(color));
-        return fit.right(cost, styles::muted());
-    }
-    if card.tasks_total > 0 {
-        fit.extend(w::gauge(
-            card.tasks_done as f64 / card.tasks_total as f64,
-            5,
-            color::ok(),
-        ));
-        fit.add(
-            format!(" {}/{} tasks", card.tasks_done, card.tasks_total),
-            styles::muted(),
-        );
-    }
-    if let Some(pct) = card.context_pct {
-        if fit.used() > 0 {
-            fit.add("  ", Style::default());
-        }
-        fit.add("ctx ", styles::muted());
-        fit.extend(w::gauge(f64::from(pct) / 100.0, 4, w::context_color(pct)));
-        fit.add(
-            format!(" {pct}%"),
-            Style::default().fg(w::context_color(pct)),
-        );
-    }
-    let running = card.subagents.iter().filter(|s| !s.done).count();
-    if running > 0 {
-        fit.add(format!("  ⑂ {running}"), styles::user());
-    }
-    if card.queued > 0 {
-        fit.add(format!("  ⇥ {}", card.queued), styles::warn());
-    }
-    fit.right(cost, styles::muted())
 }
 
 // ──────────────────────────────────────────────────────────────── hero/footer
@@ -732,35 +523,10 @@ fn draw_footer(app: &BoardApp, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// `color::brand()` while a card is brand new, `color::ok()` right after it finishes — the two moments the
-/// board is trying to make impossible to miss.
-fn card_border(app: &BoardApp, card: &Card, selected: bool) -> (Color, bool) {
-    if selected {
-        return (color::user(), true);
-    }
-    if app.is_new(&card.id) {
-        return (color::brand(), true);
-    }
-    if app.just_finished(&card.id) {
-        return (color::ok(), false);
-    }
-    let color = match card.health {
-        Health::Waiting => color::err(),
-        Health::Stalled | Health::Failed => color::warn(),
-        Health::Busy => color::fg_muted(),
-        Health::Idle => color::line(),
-        Health::Finished => color::fg_faint(),
-    };
-    (color, false)
-}
-
-fn column_color(col: Column) -> Color {
-    match col {
-        Column::Attention => color::err(),
-        Column::Working => color::fg_muted(),
-        Column::Ready => color::ok(),
-        Column::Done => color::fg_muted(),
-    }
+/// Lane colours are the categorical tokens, so the board never borrows a status colour for a
+/// column title; the label and count carry the meaning in mono.
+fn column_style(col: Column) -> Style {
+    styles::category(col.index())
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@ pub(crate) fn render_empty_state(frame: &mut Frame, area: Rect, app: &App) -> bo
     true
 }
 
-fn transcript_is_empty(app: &App, width: u16) -> bool {
+pub(crate) fn transcript_is_empty(app: &App, width: u16) -> bool {
     !app.busy
         && app.main_log.is_empty()
         && app.flush.is_empty()
@@ -95,14 +95,38 @@ fn keys_row(width: usize) -> TextLine<'static> {
     labelled("Keys", runs)
 }
 
-fn try_row(first: bool, text: &str) -> TextLine<'static> {
+/// The example prompts on the welcome; `↓` from an empty composer focuses them and Enter copies
+/// the focused one into the composer.
+pub(crate) const TRY_EXAMPLES: [&str; 3] = [
+    "fix the failing test in this project",
+    "explain how this codebase is organised",
+    "/plan split the largest file into modules",
+];
+
+fn try_row(first: bool, text: &str, focused: bool, width: usize) -> TextLine<'static> {
     let style = if text.starts_with('/') {
         styles::brand()
     } else {
         styles::muted()
     };
     let label = if first { "Try" } else { "" };
-    labelled(label, vec![Span::styled(text.to_string(), style)])
+    if !focused {
+        return labelled(label, vec![Span::styled(text.to_string(), style)]);
+    }
+    let fill = styles::selected_row();
+    let mut spans = vec![
+        Span::styled(format!("   {label:<5}"), styles::faint().patch(fill)),
+        Span::styled(format!("{} ", g().prompt), styles::brand().patch(fill)),
+        Span::styled(text.to_string(), style.patch(fill).bold()),
+    ];
+    let hint = "   Enter use · Esc back";
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    if used + hint.width() < width {
+        spans.push(Span::styled(hint, styles::faint().patch(fill)));
+    }
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    spans.push(Span::styled(" ".repeat(width.saturating_sub(used)), fill));
+    TextLine::from(spans)
 }
 
 fn onboarding_row(width: usize) -> TextLine<'static> {
@@ -173,15 +197,9 @@ pub(crate) fn welcome_lines(app: &App, width: u16, height: u16) -> Vec<TextLine<
         lines.push(onboarding_row(width));
         lines.push(TextLine::default());
     }
-    for (i, example) in [
-        "fix the failing test in this project",
-        "explain how this codebase is organised",
-        "/plan split the largest file into modules",
-    ]
-    .iter()
-    .enumerate()
-    {
-        lines.push(try_row(i == 0, example));
+    for (i, example) in TRY_EXAMPLES.iter().enumerate() {
+        let focused = app.panels_ui.try_focus == Some(i);
+        lines.push(try_row(i == 0, example, focused, width));
     }
     lines.push(TextLine::default());
     lines.push(keys_row(width));

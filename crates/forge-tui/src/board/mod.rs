@@ -15,7 +15,9 @@
 //! uses, so the same board can later render in the mobile and desktop apps.
 
 pub mod actions;
+pub mod card_render;
 pub mod detail;
+pub mod detail_head;
 pub mod dispatch;
 pub mod dispatch_render;
 pub mod dispatch_state;

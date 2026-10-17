@@ -99,3 +99,7 @@ recommended choice (`(recommended)`).
 ## Polish pass
 
 Plan-card rows carry wrap marks (`copy_mark::hang` plus prose) instead of being pre-wrapped, so they re-wrap at the live width and hang under the step text. The shared list view sizes its shortcut column from the visible window, and the config editor sizes its label column from the visible rows.
+
+## Welcome example focus
+
+On the empty-transcript welcome (fullscreen), `Down` from an empty composer moves focus into the three "Try" examples. The focused row shows the `❯` caret on the raised fill with an `Enter use · Esc back` hint. `Up`/`Down` move, `Enter` copies the example into the composer (it is not sent), `Esc` or any other key drops the focus and falls through to the normal handler. Implemented by `App::welcome_key` (`app/state/panels_ui.rs`), called from the idle branch of the key loop ahead of prompt history.

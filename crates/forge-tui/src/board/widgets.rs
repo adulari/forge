@@ -274,16 +274,22 @@ pub(super) fn pulse(tick: u64) -> bool {
 }
 
 pub(super) fn health_glyph(card: &Card, tick: u64) -> (String, Color) {
+    let glyphs = crate::theme::glyphs::g();
     match card.health {
         Health::Waiting => (
-            if pulse(tick) { "●" } else { "○" }.to_string(),
+            if pulse(tick) {
+                glyphs.live_dot
+            } else {
+                glyphs.task_open
+            }
+            .to_string(),
             color::err(),
         ),
         Health::Busy => (spinner(tick).to_string(), color::fg_muted()),
-        Health::Stalled => ("▲".into(), color::warn()),
-        Health::Failed => ("✗".into(), color::err()),
-        Health::Idle => ("●".into(), color::ok()),
-        Health::Finished => ("✓".into(), color::fg_muted()),
+        Health::Stalled => (glyphs.warn.into(), color::warn()),
+        Health::Failed => (glyphs.fail.into(), color::err()),
+        Health::Idle => (glyphs.live_dot.into(), color::ok()),
+        Health::Finished => (glyphs.ok.into(), color::fg_muted()),
     }
 }
 

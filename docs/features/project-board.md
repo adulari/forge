@@ -346,3 +346,7 @@ full history.
 The board uses the Forgeline glyph set: `✦ board` in the header, `◉` for the task in progress,
 `⑂` for a worktree, `✗`/`▲` for danger and warning signals, and `❯` for the focused form row and
 dispatch cursor. All colours come from the theme tokens.
+
+## Forgeline styling
+
+Cards (`board/card_render.rs`) have no frame: the selected card gets the `❯` caret and the raised fill, the title row carries the status glyph, an exceptions-only status pill (needs you, stalled, failed) and the age, and the detail lines are indented under the title. Lane headers use the categorical colour tokens; the label and count carry the meaning in mono. The detail pane header shows a health pill. Status glyphs come from the glyph tier so ASCII terminals get their twins.
