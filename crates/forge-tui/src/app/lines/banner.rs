@@ -111,9 +111,9 @@ fn compact_rows(width: u16) -> Vec<Vec<(String, Role)>> {
     let sep = format!(" {} ", glyphs.sep);
     let tail = TAGLINE.to_string();
     let budget = room.saturating_sub(used + sep.width());
-    if budget >= 16 {
+    if tail.width() <= budget {
         head.push((sep, Role::Faint));
-        head.push((clip(&tail, budget), Role::Muted));
+        head.push((tail, Role::Muted));
     }
     let mut keys = vec![(" Keys".to_string(), Role::Faint)];
     let mut used = keys[0].0.width();

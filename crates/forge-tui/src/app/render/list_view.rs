@@ -387,12 +387,6 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, view: &View) -> Geometry {
             .min(14)
             .min(width / 2)
             .max(4);
-        let meta_w = view
-            .rows()
-            .map(|r| r.meta.width())
-            .max()
-            .unwrap_or(0)
-            .min(width / 3);
         // Item index of the selected row.
         let mut seen = 0usize;
         let mut sel_item = 0usize;
@@ -420,6 +414,16 @@ pub(crate) fn render(frame: &mut Frame, area: Rect, view: &View) -> Geometry {
             start -= 1;
         }
         let end = (start + shown).min(total);
+        // Sized from the rows on screen: one long shortcut further down the list must not squeeze every description.
+        let meta_w = view.items[start..end]
+            .iter()
+            .filter_map(|i| match i {
+                Item::Row(r) => Some(r.meta.width()),
+                Item::Header(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .min(width / 3);
         let mut row_index = view.items[..start]
             .iter()
             .filter(|i| matches!(i, Item::Row(_)))

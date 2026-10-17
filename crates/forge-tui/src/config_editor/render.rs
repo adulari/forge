@@ -452,7 +452,14 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
     let start = sel_pos
         .saturating_sub(visible.saturating_sub(1))
         .min(section_rows.len().saturating_sub(visible));
-    let label_w = (list_area.width as usize / 4).clamp(14, 28);
+    let longest = section_rows
+        .iter()
+        .skip(start)
+        .take(visible)
+        .map(|&i| ed.rows[i].label.width())
+        .max()
+        .unwrap_or(0);
+    let label_w = longest.clamp(14, (list_area.width as usize * 2 / 5).max(14));
     let mut lines: Vec<TextLine> = section_rows
         .iter()
         .skip(start)

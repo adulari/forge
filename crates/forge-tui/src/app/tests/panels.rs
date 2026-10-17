@@ -312,7 +312,7 @@ fn plan_card_wraps_long_text_within_the_frame() {
         }],
         notes: Some(long.into()),
     };
-    let lines: Vec<String> = plan_card_lines(&plan)
+    let lines: Vec<String> = crate::transcript::wrap_lines(&plan_card_lines(&plan), 80)
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
         .collect();
@@ -328,7 +328,7 @@ fn plan_card_wraps_long_text_within_the_frame() {
     );
     for l in &lines {
         assert!(
-            unicode_width::UnicodeWidthStr::width(l.as_str()) <= 90,
+            unicode_width::UnicodeWidthStr::width(l.as_str()) <= 80,
             "nothing runs past the measure: {l:?}"
         );
     }
