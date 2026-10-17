@@ -5,6 +5,31 @@
 > inline viewport with native scrollback), not *what* it shows. Visual styling is
 > byte-for-byte preserved.
 
+> **Forgeline update: the transcript grammar.** Scrollback rows in both modes are built the same
+> way (`app/lines/`, `app/transcript_flow.rs`):
+>
+> - A user turn is a `you` label row and its text on a cool `▎` rail. The assistant turn is one
+>   `✦ forge` label with the routed model and tier right-aligned, its rows on a `▏` rail (ember
+>   while it works, cooling to the neutral line over about two seconds in full-screen; inline rows
+>   are baked, so they are written settled), a faint footer (`0.9s · ↑72 ↓30 · free`) and one
+>   blank row. There is exactly one assistant label per turn, however many text segments the tool
+>   calls split it into.
+> - Notices (command feedback, warnings, errors) use one grammar at column 1: `✓` done, `·`
+>   information, `▲` warning, `✗` error, text from column 3, wrapped lines hanging under it. Inside
+>   an open turn a notice sits on the rail. forge-cli keeps its call sites: a leading legacy glyph
+>   (`⚠ ✖ ✕ ⏹ ⚙ ◈ ※ →`) is classified into the four kinds. Status text that arrives as a warning
+>   (nothing to compact, the completeness review, the CLI-bridge notice) is information, and the
+>   bridge notice prints once per session. Notices that repeat with only digits changed fold into
+>   one `×N` row: full-screen rewrites the row, inline prints the first and, when the run ends, the
+>   final one. An error with a known fix gets a `Next:` line.
+> - Inline mode prints a finished tool card once, when its result lands (see
+>   [tui-tool-cards.md](tui-tool-cards.md)); the running call is shown in the composer border.
+> - Reasoning is one faint italic line (`▸ Thought for 12s`); `/thinking` opens it behind an inner
+>   rail. A re-answer after the completeness review starts a new segment, and an identical
+>   duplicate is dropped. The recap row appears only after a long (over twelve rows) or tool-heavy
+>   (three or more calls) turn, and never when it restates the answer.
+> - `Ctrl+R`/`/thinking` and the rest of the keybindings are unchanged.
+
 ## 1. Problem (JTBD)
 
 > When I'm deep in a `forge chat` session, I want to scroll back through earlier messages

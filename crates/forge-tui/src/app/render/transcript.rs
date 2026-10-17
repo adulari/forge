@@ -67,10 +67,27 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         app.transcript_scroll.min(max_scroll)
     };
-    // Clone only the visible window (~body_h rows), not the whole transcript, each frame.
+    // Clone only the visible window (~body_h rows), not the whole transcript, each frame. Two
+    // things are drawn live over the baked rows: the open turn's rail (hot while it works, then
+    // cooling) and the header of a running tool card (spinner, or awaiting approval).
+    let hot = app.hot_rail();
+    let live = app.running_card_headers(area.width.saturating_sub(1) as usize);
     let mut lines: Vec<TextLine> = Vec::with_capacity(body_h.min(total.saturating_sub(scroll)));
     for i in scroll..(scroll + body_h).min(committed) {
-        lines.push(cache.rows[i].clone());
+        let mut row = cache.rows[i].clone();
+        let src = cache.origins[i];
+        let first_of_line = i == 0 || cache.origins[i - 1] != src;
+        if let Some((_, header)) = live.iter().find(|(start, _)| *start == src) {
+            if first_of_line {
+                row = header.clone();
+            }
+        }
+        if let Some((from, style)) = hot {
+            if src >= from {
+                crate::app::transcript_flow::restyle_rail(&mut row, style);
+            }
+        }
+        lines.push(row);
     }
     drop(cache);
     lines.extend(app.streaming_edge(

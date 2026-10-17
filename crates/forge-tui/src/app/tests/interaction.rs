@@ -341,7 +341,7 @@ fn submitted_image_shows_a_marker_in_history() {
     let echoed = flush_text(&mut app);
     assert!(echoed.contains("look at this"));
     assert!(
-        echoed.contains("🖼 image attached"),
+        echoed.contains("image attached"),
         "history should mark the attached image, got: {echoed}"
     );
     // Marker is one-shot: a later plain turn doesn't repeat it.

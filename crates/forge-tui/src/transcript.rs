@@ -186,18 +186,31 @@ pub(crate) fn wrap_lines_indexed(
         return (rows, origins);
     }
     use unicode_width::UnicodeWidthChar;
+    type Cell = (char, ratatui::style::Style, usize);
     let mut out: Vec<TextLine<'static>> = Vec::with_capacity(lines.len());
     let mut origins: Vec<usize> = Vec::with_capacity(lines.len());
     for (src, line) in lines.iter().enumerate() {
-        // A framed line's continuation rows carry no gutter of their own, so tag them for the copy
-        // path to rejoin rather than treat them as separate source lines.
+        let plan = crate::copy_mark::plan(line);
+        if let Some(at) = plan.right {
+            out.push(crate::copy_mark::fit_right(line, at, width));
+            origins.push(src);
+            continue;
+        }
+        // A decorated line's continuation rows carry no gutter of their own (unless the line
+        // declared a repeating head), so tag them for the copy path to rejoin rather than treat
+        // them as separate source lines.
         let framed = crate::copy_mark::has_decor(line);
+        let limit = if plan.prose {
+            width.min(plan.rail_w + crate::copy_mark::MEASURE)
+        } else {
+            width
+        };
+        let avail = limit.saturating_sub(plan.prefix_w).max(1);
         // Wrap on terminal CELL width, not char count: a CJK ideograph / emoji is 2 cells. Break
         // after the last space in the row when there is one (so prose is never split mid-word);
         // an unbreakable token is split at the row edge. A wide glyph that won't fit starts the
         // next row.
-        let cells: Vec<(char, ratatui::style::Style, usize)> = line
-            .spans
+        let cells: Vec<Cell> = line.spans[plan.prefix..]
             .iter()
             .flat_map(|sp| {
                 let style = sp.style;
@@ -207,35 +220,43 @@ pub(crate) fn wrap_lines_indexed(
             })
             .collect();
         let mut rows = 0usize;
-        let mut push_row = |slice: &[(char, ratatui::style::Style, usize)],
-                            out: &mut Vec<TextLine<'static>>,
-                            origins: &mut Vec<usize>| {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            if framed && rows > 0 {
-                spans.push(crate::copy_mark::soft_wrap_marker());
-            }
-            let mut buf = String::new();
-            let mut cur_style = None;
-            for (ch, style, _) in slice {
-                if cur_style.is_some_and(|c| c != *style) {
-                    spans.push(Span::styled(std::mem::take(&mut buf), cur_style.unwrap()));
+        let mut push_row =
+            |slice: &[Cell], out: &mut Vec<TextLine<'static>>, origins: &mut Vec<usize>| {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                if rows == 0 {
+                    spans.extend(
+                        line.spans[..plan.prefix]
+                            .iter()
+                            .map(|s| Span::styled(s.content.to_string(), s.style)),
+                    );
+                } else {
+                    if framed {
+                        spans.push(crate::copy_mark::soft_wrap_marker());
+                    }
+                    spans.extend(plan.cont.iter().cloned());
                 }
-                cur_style = Some(*style);
-                buf.push(*ch);
-            }
-            if let Some(style) = cur_style {
-                spans.push(Span::styled(buf, style));
-            }
-            out.push(TextLine::from(spans));
-            origins.push(src);
-            rows += 1;
-        };
+                let mut buf = String::new();
+                let mut cur_style = None;
+                for (ch, style, _) in slice {
+                    if cur_style.is_some_and(|c| c != *style) {
+                        spans.push(Span::styled(std::mem::take(&mut buf), cur_style.unwrap()));
+                    }
+                    cur_style = Some(*style);
+                    buf.push(*ch);
+                }
+                if let Some(style) = cur_style {
+                    spans.push(Span::styled(buf, style));
+                }
+                out.push(TextLine::from(spans).style(line.style));
+                origins.push(src);
+                rows += 1;
+            };
         let mut start = 0usize;
         let mut cur_w = 0usize;
         let mut last_space: Option<usize> = None;
         for idx in 0..cells.len() {
             let (ch, _, cw) = cells[idx];
-            while cur_w + cw > width && cur_w > 0 {
+            while cur_w + cw > avail && cur_w > 0 {
                 let brk = last_space.filter(|&b| b > start).unwrap_or(idx);
                 push_row(&cells[start..brk], &mut out, &mut origins);
                 start = brk;
@@ -255,9 +276,9 @@ pub(crate) fn wrap_lines_indexed(
 
 fn kind_theme(kind: ActivityKind) -> (&'static str, Color) {
     match kind {
-        ActivityKind::MainChat => ("●", color::fg_muted()),
-        ActivityKind::Subagent => ("◈", color::user()),
-        ActivityKind::AssayCritic => ("⚖", color::warn()),
+        ActivityKind::MainChat => (crate::theme::glyphs::g().live_dot, color::fg_muted()),
+        ActivityKind::Subagent => (crate::theme::glyphs::g().group, color::user()),
+        ActivityKind::AssayCritic => (crate::theme::glyphs::g().task_active, color::warn()),
     }
 }
 
@@ -294,7 +315,7 @@ pub(crate) fn transcript_lines_from_wrapped(
     if views.is_empty() {
         return vec![
             TextLine::from(Span::styled(
-                "  ◈ activity",
+                "  activity",
                 styles::user().add_modifier(Modifier::BOLD),
             )),
             TextLine::from(Span::styled("  no activity yet", styles::muted())),
@@ -305,9 +326,9 @@ pub(crate) fn transcript_lines_from_wrapped(
     let (glyph, color) = kind_theme(view.kind);
     let (status, status_color) = match view.status {
         ActivityStatus::Running => ("… running", color::fg_muted()),
-        ActivityStatus::Done => ("✔ done", color::ok()),
+        ActivityStatus::Done => ("✓ done", color::ok()),
         ActivityStatus::Failed => ("✗ failed", color::err()),
-        ActivityStatus::Skipped => ("⏭ skipped", color::fg_muted()),
+        ActivityStatus::Skipped => ("skipped", color::fg_muted()),
     };
     let cost = if view.cost > 0.0 {
         format!(" · ${:.4}", view.cost)

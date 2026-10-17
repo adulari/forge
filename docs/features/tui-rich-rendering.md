@@ -8,6 +8,40 @@
 > native scrollback; only the in-flight edge stays pinned. No change to the agent loop's async
 > shape or the Presenter trait's method set.
 
+> **Forgeline update.** The renderers now draw the Forgeline transcript look. This section is
+> current; the acceptance criteria below record the original contract and still hold except where
+> they name a glyph or a frame that this section replaces.
+>
+> - **Rows carry wrap marks, not widths.** `copy_mark` tags spans (`REPEAT` for the turn rail and
+>   blockquote bar, `HANG` for list markers and card gutters, `PROSE` for text that wraps at the
+>   reading measure, `RIGHT` for right-aligned metadata). `transcript::wrap_lines` reads them, so a
+>   wrapped row repeats its rail, hangs under its marker, and prose never runs wider than
+>   `min(width, 100)` cells past the rail. A resize re-wraps correctly because nothing was baked
+>   at a width. Inline pre-wraps at flush time (`App::drain_flush`) because the terminal would wrap
+>   without these rules.
+> - **Headings** differ by level: H1 UPPERCASE bold with a heavy `━` rule in the brand colour (capped
+>   at 40 cells), H2 bold with a `─` rule as wide as the title, H3 bold, H4 and below bold muted.
+>   Hashes are never shown.
+> - **Lists** use `•` `◦` `▪` by depth (`* - +` in ASCII) and hang wrapped lines under the text.
+> - **Tables** have a bold header, a `─` rule per column and two-space gutters, with no `│` grid and
+>   no border. Columns whose body cells are all numbers (`86`, `1,204`, `93%`, `86 us`) are
+>   right-aligned. Cells over 48 cells clip with `…`.
+> - **Code blocks** are a `surface` band across the row where backgrounds are painted: a header with
+>   the language on the left and `/copy` on the right, line numbers from six rows up, no frame. In
+>   16-colour and mono there is no band, so a faint `│` rule runs down the left. Selection copies
+>   only the code (the header, gutters and rule are decoration).
+> - **Inline code** is `user` on `surface` (backticks are kept where no background is painted),
+>   **links** are underlined with their target after them in faint when it differs from the text,
+>   **blockquotes** are italic muted behind an inner `▏`.
+> - **Diffs** are rows inside a tool card: `<line number> <sigil> <text>`, a faint hunk separator
+>   `┄┄ @@ -a,b +c,d @@ ┄┄`, a full-row tint plus word-level emphasis where the tier paints
+>   backgrounds. `render::diff_rows` caps the rows and counts the rest; `diff_to_plain` and
+>   `diff_file_snapshot` (the remote projection) are unchanged in shape.
+> - The renderer is split: `render.rs` (markdown), `render/code.rs`, `render/diff.rs`,
+>   `render/table.rs`, `render/reports.rs` (MCP status and assay report), `render/stream.rs`
+>   (incremental rendering, which produces rows identical to the full render; the streaming edge
+>   adds the rail on top).
+
 ## 1. Problem (JTBD)
 
 > When the assistant answers me or proposes a file edit, I want to **read it the way it's meant to

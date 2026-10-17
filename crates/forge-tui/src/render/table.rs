@@ -27,7 +27,8 @@ pub(super) fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'sta
     }
     let mut out = Vec::new();
     let mut used = 0usize;
-    let budget = max.saturating_sub(1);
+    let ellipsis = crate::theme::glyphs::g().ellipsis;
+    let budget = max.saturating_sub(ellipsis.chars().count());
     for span in spans {
         let mut kept = String::new();
         for ch in span.content.chars() {
@@ -46,14 +47,42 @@ pub(super) fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'sta
             break;
         }
     }
-    out.push(Span::styled("…", styles::muted()));
+    out.push(Span::styled(ellipsis, styles::muted()));
     out
 }
 
-/// Lay a collected table out as aligned columns: cells padded to the column's widest cell,
-/// `│` between columns, and a `─┼─` rule under the header. Styling inside cells (code, bold)
-/// is preserved span-for-span; only padding is added.
-pub(super) fn layout(table: TableBuild, indent: &str) -> Vec<Line<'static>> {
+/// Whether a cell reads as a number (`86`, `1,204`, `$0.12`, `93%`, `86 us`): those columns are
+/// right-aligned so the digits line up.
+fn is_numeric(cell: &[Span<'_>]) -> bool {
+    let text: String = cell.iter().map(|s| s.content.as_ref()).collect();
+    let text = text.trim();
+    let mut parts = text.split_whitespace();
+    let Some(head) = parts.next() else {
+        return false;
+    };
+    let number = head
+        .trim_start_matches(['$', '+', '-', '~'])
+        .trim_end_matches(['%', 'x']);
+    if number.is_empty()
+        || !number
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | ','))
+    {
+        return false;
+    }
+    match (parts.next(), parts.next()) {
+        (None, _) => true,
+        (Some(unit), None) => {
+            unit.len() <= 4 && unit.chars().all(|c| c.is_alphabetic() || c == '/')
+        }
+        _ => false,
+    }
+}
+
+/// Lay a collected table out as aligned columns: a bold header, a `─` rule per column under it,
+/// two spaces between columns and no grid or outer border. Numeric columns are right-aligned.
+/// Styling inside cells (code, bold) is preserved span-for-span; only padding is added.
+pub(super) fn layout(table: TableBuild) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let cols = table.rows.iter().map(Vec::len).max().unwrap_or(0);
     if cols == 0 {
@@ -65,31 +94,57 @@ pub(super) fn layout(table: TableBuild, indent: &str) -> Vec<Line<'static>> {
             widths[i] = widths[i].max(spans_width(cell));
         }
     }
-    let frame = styles::muted();
+    let right: Vec<bool> = (0..cols)
+        .map(|i| {
+            let body: Vec<_> = table
+                .rows
+                .iter()
+                .skip(table.header_rows)
+                .filter_map(|r| r.get(i))
+                .collect();
+            !body.is_empty() && body.iter().all(|c| is_numeric(c))
+        })
+        .collect();
+    let rule_style = styles::line();
     for (r, row) in table.rows.into_iter().enumerate() {
-        let mut line: Vec<Span<'static>> = vec![Span::raw(indent.to_string())];
+        let header = r < table.header_rows;
+        let mut line: Vec<Span<'static>> = Vec::new();
         for (i, width) in widths.iter().enumerate() {
             let cell = row.get(i).cloned().unwrap_or_default();
             let pad = width.saturating_sub(spans_width(&cell));
             if i > 0 {
-                line.push(Span::styled(" │ ", frame));
+                line.push(Span::raw("  "));
             }
-            line.extend(cell);
-            if pad > 0 {
+            if right[i] && pad > 0 {
+                line.push(Span::raw(" ".repeat(pad)));
+            }
+            if header {
+                line.extend(cell.into_iter().map(|s| {
+                    let style = s.style.add_modifier(ratatui::style::Modifier::BOLD);
+                    Span::styled(s.content, style)
+                }));
+            } else {
+                line.extend(cell);
+            }
+            if !right[i] && pad > 0 && i + 1 < cols {
                 line.push(Span::raw(" ".repeat(pad)));
             }
         }
         lines.push(Line::from(line));
         if r + 1 == table.header_rows {
-            let rule = widths
-                .iter()
-                .map(|w| "─".repeat(*w))
-                .collect::<Vec<_>>()
-                .join("─┼─");
-            lines.push(Line::from(vec![
-                Span::raw(indent.to_string()),
-                Span::styled(rule, frame),
-            ]));
+            let dash = if crate::theme::t().glyphs().unicode {
+                "─"
+            } else {
+                "-"
+            };
+            let mut rule: Vec<Span<'static>> = Vec::new();
+            for (i, w) in widths.iter().enumerate() {
+                if i > 0 {
+                    rule.push(Span::raw("  "));
+                }
+                rule.push(Span::styled(dash.repeat(*w), rule_style));
+            }
+            lines.push(Line::from(rule));
         }
     }
     lines

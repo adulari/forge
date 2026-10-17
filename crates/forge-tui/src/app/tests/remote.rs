@@ -566,7 +566,7 @@ fn the_remote_transcript_sees_each_call_once_with_its_outcome() {
     app.apply(PresenterEvent::ToolResult {
         name: "shell".into(),
         ok: true,
-        summary: "exit 0 in 9s".into(),
+        summary: "exit 0".into(),
         detail: None,
     });
     let _ = app.drain_flush_remote();
@@ -581,7 +581,7 @@ fn the_remote_transcript_sees_each_call_once_with_its_outcome() {
         2,
         "the running row, then the finished one: {rows:?}"
     );
-    assert!(rows[1].contains("exit 0 in 9s"), "{rows:?}");
+    assert!(rows[1].contains("exit 0"), "{rows:?}");
 }
 
 #[test]
@@ -639,15 +639,12 @@ fn remote_transcript_rows_carry_the_provenance_of_each_line() {
     assert_eq!(kind_of("it isn't there").kind, TranscriptKind::Assistant);
     assert_eq!(kind_of("retrying").kind, TranscriptKind::System);
 
-    let call = kind_of("Cargo.toml\"}");
-    assert_eq!(call.kind, TranscriptKind::Tool);
-    assert_eq!(call.tool.as_deref(), Some("read_file"));
-    assert_eq!(call.meta, None, "the call row has no outcome yet");
-
-    let result = kind_of("no such file");
+    // Inline prints one finished card per call, so the single Tool row carries the outcome.
+    let result = kind_of("Read Cargo.toml");
     assert_eq!(result.kind, TranscriptKind::Tool);
     assert_eq!(result.tool.as_deref(), Some("read_file"));
     assert_eq!(result.meta.as_deref(), Some("failed"));
+    assert!(result.text.contains("no such file"), "{}", result.text);
 }
 
 #[test]
@@ -713,4 +710,50 @@ fn restored_turn_state_seeds_outcome_and_model_but_not_the_turn_count() {
         Some(forge_types::StopReason::MaxSteps)
     );
     assert_eq!(live.remote_snapshot().model, "groq::live");
+}
+
+#[test]
+fn a_replys_transcript_rows_keep_the_shape_the_daemon_supervisor_reads() {
+    // `serve_dispatch::supervisor::final_reply` extracts a worker's answer from these rows: a
+    // `⚒ forge` assistant header (stable on the wire, whatever the terminal draws), the answer
+    // rows, then system rows (footer, notices, recap) it skips.
+    let mut app = App::default();
+    app.submit_user("do it");
+    app.apply(PresenterEvent::Routing {
+        tier: "standard".into(),
+        model: "claude-cli".into(),
+        rationale: String::new(),
+        effort: None,
+    });
+    app.apply(PresenterEvent::AssistantDelta(
+        "Done — the file is written.".into(),
+    ));
+    app.apply(PresenterEvent::AssistantDone);
+    app.apply(PresenterEvent::Done {
+        stop_reason: forge_types::StopReason::FinalAnswer,
+        final_text: String::new(),
+    });
+    let _ = app.drain_flush_remote();
+    let rows: Vec<(String, String)> = app
+        .remote_snapshot()
+        .transcript_rows
+        .iter()
+        .map(|r| (r.kind.as_str().to_string(), r.text.clone()))
+        .collect();
+    let assistant: Vec<&str> = rows
+        .iter()
+        .filter(|(k, _)| k == "assistant")
+        .map(|(_, t)| t.as_str())
+        .collect();
+    assert_eq!(
+        assistant,
+        vec!["  ⚒ forge", "  Done — the file is written."],
+        "{rows:?}"
+    );
+    let (kind, footer) = rows.last().unwrap();
+    assert_eq!(
+        kind, "system",
+        "the footer is a system row the supervisor skips: {rows:?}"
+    );
+    assert!(footer.starts_with("  ") && footer.contains("s"), "{footer}");
 }

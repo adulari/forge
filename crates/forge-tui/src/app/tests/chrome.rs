@@ -707,7 +707,7 @@ fn streaming_tool_input_and_hidden_thinking_replace_the_buffered_event_count() {
     });
     let text = screen_wh(&app, 150, LIVE_H);
     assert!(!text.contains("Writing write_file call"), "{text}");
-    assert!(text.contains("Running write_file"), "{text}");
+    assert!(text.contains("Running Write"), "{text}");
     assert!(!text.contains("mcp__forge__"), "{text}");
 }
 

@@ -7,6 +7,7 @@ use crate::app::render::live::split_panel_budget;
 use crate::app::render::permission::prompt_height;
 use crate::app::render::{compact_band_height, cost_cell, fmt_dur, render_transcript_area};
 use crate::app_remote::REMOTE_DIFF_MAX_FILES;
+use crate::theme::color;
 use crate::voice::VOICE_WAVEFORM_BARS;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -111,10 +112,13 @@ fn drain_text_lines(app: &mut App) -> String {
 /// A full-screen app with a rendered transcript geometry, ready to receive tool events and
 /// be clicked. Cards are full-screen-only, so `fullscreen` is what arms them.
 fn card_app() -> App {
-    let app = App {
+    let mut app = App {
         fullscreen: true,
         ..Default::default()
     };
+    // The assistant's label row opens the turn, so the first card sits on row 1.
+    app.ensure_assistant_label();
+    let _ = app.drain_flush();
     app.last_width.set(100);
     app.transcript_geom.set(Some(TranscriptGeom {
         col0: 0,

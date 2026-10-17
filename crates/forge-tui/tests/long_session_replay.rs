@@ -38,9 +38,13 @@ fn native_history_sized_replay_stays_bounded_and_responsive() {
         "replaying a 768-turn / 7,680-tool history became pathologically slow: {:?}",
         started.elapsed()
     );
+    // A tool call and its result are one card (one row) in the scrollback, so the pairs count
+    // once; every user turn, answer and call stays represented.
+    let represented = 768 * 2 + 768 * 10;
     assert!(
-        lines.len() >= items.len(),
-        "every replay item should remain represented in terminal scrollback"
+        lines.len() >= represented,
+        "every replayed turn and tool call should remain represented in terminal scrollback: {} rows",
+        lines.len()
     );
     let (retained_rows, _) = app.transcript_metrics(160, 1);
     assert!(

@@ -1,23 +1,38 @@
-//! Expandable tool cards for the full-screen chat transcript.
+//! Tool cards: one row per call that owns both halves — the call on the left, its outcome on
+//! the right — in BOTH display modes.
 //!
-//! A tool call used to print two separate scrollback lines — a `↳ name {raw json args…}` line
-//! truncated mid-JSON, then an unrelated-looking `✓ name: exit 0 in 132ms` line further down once
-//! the tool returned. Reading a transcript meant mentally pairing them up, and the part a human
-//! actually wants (the command, the path, the output) was the part that got cut.
+//! `✓ Write  src/lib.rs                                   +18 −3 · 0.2s ▸`
 //!
-//! A card is ONE row per call that owns both halves: the call on the left, its outcome on the
-//! right. Clicking it (or Ctrl+T for the most recent) expands it in place into the full arguments
-//! and the tool's own output, and clicking again collapses it. The card's lines live in
-//! `App::main_log` like any other scrollback, so wrapping, scrolling, selection and copy keep
-//! working unchanged — expanding simply splices a longer run of lines over the collapsed one.
+//! The verb is humanised (`read_file` → Read), the target is decoded from the call's JSON (never
+//! the raw envelope), the outcome and duration sit flush right. A card that changed a file carries
+//! its diff in the card: up to eight rows with a line-number gutter, the rest behind Ctrl+T. A
+//! failed call shows the last lines of its output without being asked. Consecutive reads fold into
+//! one `◆ Read N files` card.
 //!
-//! Cards exist only in full-screen mode: inline mode prints into the terminal's native scrollback,
-//! which cannot be rewritten after the fact, so it keeps the original two-line rendering.
+//! In full-screen the card lives in `App::main_log` and is redrawn in place — clicking it (or
+//! Ctrl+T for the newest) expands the full arguments and output, and clicking again collapses it.
+//! Inline mode prints into the terminal's own scrollback, which cannot be rewritten, so the card
+//! is printed ONCE, finished, when its result lands; the running call is shown only in the
+//! composer border.
 
-use crate::theme::styles;
+use super::lines::rail;
+use crate::copy_mark;
+use crate::theme::glyphs::g;
+use crate::theme::styles::{self, RailKind};
+use forge_types::FileDiff;
 use ratatui::style::Style;
 use ratatui::text::{Line as TextLine, Span};
 use serde_json::Value;
+use std::time::Instant;
+
+/// Diff rows a collapsed card shows before folding the rest behind Ctrl+T.
+const PREVIEW_DIFF_ROWS: usize = 8;
+/// Output lines a failed, collapsed card shows without being asked.
+const FAILURE_TAIL_LINES: usize = 3;
+/// User-turn rows shown before the rest folds.
+pub(crate) const USER_FOLD_ROWS: usize = 6;
+/// Width of the verb column (the longest verb is six cells).
+const VERB_W: usize = 6;
 
 /// How a card's call ended. `Running` is the state between `ToolStart` and `ToolResult`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +40,24 @@ pub(crate) enum CardStatus {
     Running,
     Ok,
     Failed,
+}
+
+/// An earlier call folded into a group card (`◆ Read 4 files`).
+#[derive(Debug, Clone)]
+pub(crate) struct Member {
+    pub(crate) name: String,
+    pub(crate) args: String,
+    pub(crate) summary: String,
+    pub(crate) ms: Option<u128>,
+}
+
+/// A long user turn folded to a few rows (full-screen only; Ctrl+T or a click expands it).
+#[derive(Debug, Clone)]
+pub(crate) struct UserFold {
+    /// A canned command prompt shows this label instead of its text.
+    pub(crate) label: Option<String>,
+    /// The turn's text, wrapped, one entry per row.
+    pub(crate) rows: Vec<String>,
 }
 
 /// One tool call in the transcript, expandable in place.
@@ -38,7 +71,7 @@ pub(crate) struct ToolCard {
     /// The raw args JSON exactly as the model emitted it.
     pub(crate) args: String,
     pub(crate) status: CardStatus,
-    /// The result's first line (what the old `✓ name …` line showed).
+    /// The result's first line.
     pub(crate) summary: String,
     /// Bounded raw output, when the emitter had any to hand over.
     pub(crate) detail: Option<String>,
@@ -48,6 +81,17 @@ pub(crate) struct ToolCard {
     /// Where this card's rendered lines currently sit in `App::main_log`.
     pub(crate) start: usize,
     pub(crate) len: usize,
+    /// When the call began, and how long it took once it ended.
+    pub(crate) started: Instant,
+    pub(crate) ms: Option<u128>,
+    /// The file change this call made (or is about to make), shown inside the card.
+    pub(crate) diff: Option<FileDiff>,
+    /// Earlier same-verb calls folded into this card; the fields above are the newest.
+    pub(crate) group: Vec<Member>,
+    /// Set on a card that stands for a folded user turn instead of a tool call.
+    pub(crate) fold: Option<UserFold>,
+    /// Whether the card can be expanded (full-screen). Inline cards are printed once.
+    pub(crate) interactive: bool,
 }
 
 impl ToolCard {
@@ -63,164 +107,111 @@ impl ToolCard {
             expanded: false,
             start: 0,
             len: 0,
+            started: Instant::now(),
+            ms: None,
+            diff: None,
+            group: Vec::new(),
+            fold: None,
+            interactive: true,
         }
+    }
+
+    /// A card standing for a folded user turn.
+    pub(crate) fn user_fold(id: u64, fold: UserFold) -> Self {
+        let mut card = Self::new(id, "you".to_string(), String::new());
+        card.status = CardStatus::Ok;
+        card.fold = Some(fold);
+        card
     }
 
     /// Whether opening this card would reveal anything the collapsed row does not already show.
     /// A call with no arguments and no output stays a plain row rather than offering an empty
     /// drawer — the affordance must never lie about having something behind it.
     pub(crate) fn has_detail(&self) -> bool {
-        self.detail.is_some() || self.full.is_some() || !arg_rows(&self.args).is_empty()
+        self.interactive
+            && (self.fold.is_some()
+                || self.diff.is_some()
+                || !self.group.is_empty()
+                || self.detail.is_some()
+                || self.full.is_some()
+                || !arg_rows(&self.args).is_empty())
+    }
+
+    /// Fold the finished call this card holds into its group and start over with a new call.
+    pub(crate) fn fold_in(&mut self, name: String, args: String) {
+        self.group.push(Member {
+            name: std::mem::replace(&mut self.name, name),
+            args: std::mem::replace(&mut self.args, args),
+            summary: std::mem::take(&mut self.summary),
+            ms: self.ms.take(),
+        });
+        self.status = CardStatus::Running;
+        self.detail = None;
+        self.full = None;
+        self.diff = None;
+        self.started = Instant::now();
     }
 }
 
-/// Render one card: a single row when collapsed, the row plus its arguments and output when
-/// expanded. `width` is the transcript's cell width; long values are wrapped here with a hanging
-/// indent so a continuation line stays visually inside its field instead of starting at column 0.
-pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> {
-    let width = width.max(20) as usize;
-    let mut out = vec![header_line(card, width)];
-    if !card.expanded {
-        return out;
+/// `read_file` → `Read`. An unknown tool shows its own name.
+pub(crate) fn verb(name: &str) -> String {
+    let name = crate::app::tool_display_name(name);
+    match name {
+        "read_file" => "Read",
+        "write_file" => "Write",
+        "edit_file" => "Edit",
+        "apply_patch" => "Patch",
+        "shell" => "Run",
+        "grep" | "search" => "Search",
+        "glob" => "Find",
+        "list_dir" => "List",
+        "web_fetch" => "Fetch",
+        "web_search" => "Web",
+        "spawn_agents" => "Agents",
+        other => return other.to_string(),
     }
-    let rows = arg_rows(&card.args);
-    let label_w = rows
-        .iter()
-        .map(|(k, _)| k.chars().count())
-        .max()
-        .unwrap_or(0);
-    for (key, value) in &rows {
-        // "     ┆ " is 7 cells, then the label column and its two-space gutter.
-        let indent = 7 + label_w + 2;
-        let mut first = true;
-        for chunk in wrap_plain(value, width.saturating_sub(indent + 1)) {
-            let mut spans = vec![Span::styled("     ┆ ", gutter_style())];
-            if first {
-                spans.push(Span::styled(format!("{key:<label_w$}  "), styles::muted()));
-                first = false;
-            } else {
-                spans.push(Span::raw(" ".repeat(label_w + 2)));
-            }
-            spans.push(Span::styled(chunk, styles::fg()));
-            out.push(TextLine::from(spans));
+    .to_string()
+}
+
+/// `4ms`, `0.2s`, `41s`, `2m05s`.
+pub(crate) fn fmt_ms(ms: u128) -> String {
+    match ms {
+        0..=999 => format!("{ms}ms"),
+        1_000..=9_999 => format!("{:.1}s", ms as f64 / 1000.0),
+        10_000..=59_999 => format!("{}s", ms / 1000),
+        _ => format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000),
+    }
+}
+
+/// The result summary without the tool's own name in front and without a trailing
+/// ` in 132ms` (the card measures the duration itself).
+fn clean_summary(card_name: &str, summary: &str) -> String {
+    let s = summary
+        .strip_prefix(&format!("{card_name}: "))
+        .unwrap_or(summary)
+        .trim();
+    if let Some(at) = s.rfind(" in ") {
+        let tail = &s[at + 4..];
+        let digits = tail.trim_end_matches(['m', 's']);
+        if !digits.is_empty()
+            && tail.ends_with('s')
+            && digits.chars().all(|c| c.is_ascii_digit() || c == '.')
+        {
+            return s[..at].to_string();
         }
     }
-    if let Some(detail) = &card.detail {
-        if !rows.is_empty() {
-            out.push(TextLine::from(Span::styled(
-                "     ┆ output",
-                styles::faint(),
-            )));
-        }
-        let style = if card.status == CardStatus::Failed {
-            styles::err()
-        } else {
-            styles::muted()
-        };
-        for line in detail.lines() {
-            for chunk in wrap_plain(line, width.saturating_sub(8)) {
-                out.push(TextLine::from(vec![
-                    Span::styled("     ┆ ", gutter_style()),
-                    Span::styled(chunk, style),
-                ]));
-            }
-        }
-    }
-    // The preview above is bounded; this row is the way to everything. It sits directly above the
-    // collapse hint so `full_output_row` can find it without re-rendering the card.
-    if let Some(full) = &card.full {
-        out.push(TextLine::from(vec![
-            Span::styled("     ┆ ", gutter_style()),
-            Span::styled("⤢ view full output", styles::muted().bold()),
-            Span::styled(
-                format!(
-                    "  {} · click here or /output",
-                    size_label(full.lines, full.bytes)
-                ),
-                styles::muted(),
-            ),
-        ]));
-    }
-    out.push(TextLine::from(Span::styled(
-        "     ┆ click or Ctrl+T to collapse",
-        styles::faint(),
-    )));
-    out
+    s.to_string()
 }
 
-/// The `┆` rail down the left of an expanded card: decoration, so a selection copies the
-/// arguments and output without it.
-fn gutter_style() -> Style {
-    crate::copy_mark::decor(styles::faint())
-}
-
-/// Which of a card's rendered lines is its "view full output" row, when it shows one.
-pub(crate) fn full_output_row(card: &ToolCard) -> Option<usize> {
-    (card.expanded && card.full.is_some() && card.len >= 2).then(|| card.len - 2)
-}
-
-/// The always-present first row: `▸ shell   <call headline>          ✓ exit 0 in 132ms`.
-fn header_line(card: &ToolCard, width: usize) -> TextLine<'static> {
-    let (glyph, glyph_style) = match (card.expanded, card.has_detail()) {
-        (true, _) => ("▾ ", styles::muted()),
-        (false, true) => ("▸ ", styles::muted()),
-        // Nothing to open: no disclosure triangle, so the row does not advertise a drawer.
-        (false, false) => ("· ", styles::faint()),
-    };
-    let (mark, mark_style) = match card.status {
-        CardStatus::Running => ("◍", styles::warn()),
-        CardStatus::Ok => ("✓", styles::ok()),
-        CardStatus::Failed => ("✖", styles::err().bold()),
-    };
-    let name = card.name.clone();
-    let status = status_text(card);
-    // Row layout, in cells: 2 indent + 2 glyph + name + 2 gap + headline + pad + 1 mark +
-    // 1 space + status = exactly `width`. The headline is the elastic part and the pad is what
-    // pushes the outcome to the right margin; the row must land ON the width, because a row one
-    // cell over wraps into a blank second row and desynchronises click hit-testing.
-    let base = 2 + 2 + cells(&name) + 2 + 1 + 1 + cells(&status);
-    let headline = truncate_cells(
-        &headline(&card.name, &card.args),
-        width.saturating_sub(base + 1),
-    );
-    let pad = width.saturating_sub(base + cells(&headline)).max(1);
-    TextLine::from(vec![
-        Span::raw("  "),
-        Span::styled(glyph, glyph_style),
-        Span::styled(name, styles::muted().bold()),
-        Span::raw("  "),
-        Span::styled(headline, styles::muted()),
-        Span::raw(" ".repeat(pad)),
-        Span::styled(mark, mark_style),
-        Span::styled(format!(" {status}"), styles::muted()),
-    ])
-}
-
-/// The right-hand outcome text: the result's own first line while it says something, else a
-/// generic ok/failed so the row is never blank on the right.
-fn status_text(card: &ToolCard) -> String {
-    let outcome = outcome_text(card);
-    match (&card.full, card.status) {
-        (Some(full), CardStatus::Ok | CardStatus::Failed) => {
-            format!("{outcome} · ⤢ {} lines", group(full.lines))
-        }
-        _ => outcome,
-    }
-}
-
-/// The outcome alone: the result's first line while it says something, else a generic ok/failed.
+/// The outcome alone: what the call did, in a few words.
 pub(crate) fn outcome_text(card: &ToolCard) -> String {
     match card.status {
         CardStatus::Running => "running".to_string(),
         _ => {
-            // The core prefixes many summaries with the tool name ("shell: exit 0 in 132ms"),
-            // which the row already shows on the left — strip it rather than print it twice.
-            let s = card
-                .summary
-                .strip_prefix(&format!("{}: ", card.name))
-                .unwrap_or(&card.summary)
-                .trim()
-                .to_string();
+            if let Some(diff) = &card.diff {
+                return diff_outcome(diff);
+            }
+            let s = clean_summary(&card.name, &card.summary);
             if s.is_empty() {
                 if card.status == CardStatus::Ok {
                     "done".to_string()
@@ -232,6 +223,331 @@ pub(crate) fn outcome_text(card: &ToolCard) -> String {
             }
         }
     }
+}
+
+fn diff_outcome(diff: &FileDiff) -> String {
+    let (adds, dels) = crate::render::diff_stat(diff);
+    let minus = g().diff_minus;
+    let stat = match (adds, dels) {
+        (a, 0) => format!("+{a}"),
+        (0, d) => format!("{minus}{d}"),
+        (a, d) => format!("+{a} {minus}{d}"),
+    };
+    match diff.kind {
+        forge_types::DiffKind::Created => format!("new file {} {stat}", g().sep),
+        forge_types::DiffKind::Deleted => format!("deleted {} {stat}", g().sep),
+        forge_types::DiffKind::Modified => stat,
+    }
+}
+
+/// The right-hand text of the header row: outcome, kept-output size, duration.
+fn right_text(card: &ToolCard) -> String {
+    let sep = format!(" {} ", g().sep);
+    let mut parts = vec![outcome_text(card)];
+    if card.status != CardStatus::Running {
+        if let Some(full) = &card.full {
+            parts.push(format!("{} lines", group(full.lines)));
+        }
+        let ms = if card.group.is_empty() {
+            card.ms
+        } else {
+            let total: u128 =
+                card.group.iter().filter_map(|m| m.ms).sum::<u128>() + card.ms.unwrap_or(0);
+            Some(total)
+        };
+        if let Some(ms) = ms {
+            parts.push(fmt_ms(ms));
+        }
+    }
+    parts.join(&sep)
+}
+
+/// Status glyph and its style. `tick` animates the running spinner when given.
+fn status_mark(card: &ToolCard, tick: Option<usize>, awaiting: bool) -> (String, Style) {
+    let glyphs = g();
+    match card.status {
+        CardStatus::Running if awaiting => (glyphs.awaiting.to_string(), styles::warn()),
+        CardStatus::Running => (
+            glyphs.spin(tick.unwrap_or(0)).to_string(),
+            styles::spinner(tick.unwrap_or(0)),
+        ),
+        _ if !card.group.is_empty() => (glyphs.group.to_string(), styles::muted()),
+        CardStatus::Ok => (glyphs.ok.to_string(), styles::ok()),
+        CardStatus::Failed => (glyphs.fail.to_string(), styles::err().bold()),
+    }
+}
+
+/// The always-present first row.
+fn header_row(card: &ToolCard, tick: Option<usize>, awaiting: bool) -> TextLine<'static> {
+    let (mark, mark_style) = status_mark(card, tick, awaiting);
+    let (verb_text, target) = if card.group.is_empty() {
+        (verb(&card.name), headline(&card.name, &card.args))
+    } else {
+        let n = card.group.len() + 1;
+        let noun = if card.name == "read_file" {
+            "files"
+        } else {
+            "calls"
+        };
+        (verb(&card.name), format!("{n} {noun}"))
+    };
+    let right = if awaiting && card.status == CardStatus::Running {
+        "awaiting approval".to_string()
+    } else {
+        right_text(card)
+    };
+    let mut spans = rail::rail_spans(rail::BAKED);
+    spans.push(Span::styled(mark, mark_style));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!("{verb_text:<VERB_W$} "),
+        styles::muted().bold(),
+    ));
+    spans.push(Span::styled(target, styles::fg()));
+    spans.push(copy_mark::right_marker());
+    let right_style = if awaiting && card.status == CardStatus::Running {
+        styles::warn()
+    } else if card.status == CardStatus::Failed {
+        styles::err()
+    } else {
+        styles::muted()
+    };
+    spans.push(Span::styled(right, right_style));
+    if card.has_detail() && card.status != CardStatus::Running {
+        let tri = if card.expanded {
+            g().disclose_open
+        } else {
+            g().disclose_closed
+        };
+        spans.push(Span::styled(format!(" {tri}"), styles::faint()));
+    }
+    TextLine::from(spans)
+}
+
+/// The header of a still-running card as the draw loop shows it: an animated spinner, or the
+/// `◇ … awaiting approval` state while a permission prompt is open.
+pub(crate) fn live_header(card: &ToolCard, tick: usize, awaiting: bool) -> TextLine<'static> {
+    header_row(card, Some(tick), awaiting)
+}
+
+/// A body row under the header: rail, two blanks, the `┊` gutter, then the content.
+fn body_row(spans: Vec<Span<'static>>) -> TextLine<'static> {
+    prefixed(spans, Style::default())
+}
+
+fn prefixed(spans: Vec<Span<'static>>, line_style: Style) -> TextLine<'static> {
+    let mut row = rail::rail_spans(rail::BAKED);
+    row.push(Span::styled("  ", copy_mark::decor(Style::default())));
+    row.push(Span::styled(
+        g().card_gutter,
+        copy_mark::decor(styles::faint()),
+    ));
+    row.push(Span::styled(
+        " ",
+        copy_mark::hang(copy_mark::decor(Style::default())),
+    ));
+    let line = TextLine::from(spans).style(line_style);
+    rail::with_prefix(row, line)
+}
+
+fn text_row(text: String, style: Style) -> TextLine<'static> {
+    body_row(vec![Span::styled(text, style)])
+}
+
+/// Render one card: a single row (plus a diff preview or a failure tail) when collapsed, the row
+/// plus its arguments, diff and output when expanded. `width` is the transcript's cell width;
+/// long values are wrapped here with a hanging indent so a continuation line stays visually
+/// inside its field instead of starting at column 0.
+pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> {
+    if let Some(fold) = &card.fold {
+        return fold_lines(card, fold);
+    }
+    let width = width.max(20) as usize;
+    let mut out = vec![header_row(card, None, false)];
+    if !card.expanded {
+        collapsed_body(card, &mut out);
+        return out;
+    }
+    // "▏ ┊ " is 7 cells of prefix, then the label column and its two-space gutter.
+    const PREFIX: usize = 7;
+    let rows = arg_rows_for(card);
+    let label_w = rows
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("tool".len());
+    let kv = |out: &mut Vec<TextLine<'static>>, key: &str, value: &str| {
+        let indent = PREFIX + label_w + 2;
+        let mut first = true;
+        for chunk in wrap_plain(value, width.saturating_sub(indent + 1)) {
+            let mut spans = Vec::new();
+            if first {
+                spans.push(Span::styled(format!("{key:<label_w$}  "), styles::muted()));
+                first = false;
+            } else {
+                spans.push(Span::raw(" ".repeat(label_w + 2)));
+            }
+            spans.push(Span::styled(chunk, styles::fg()));
+            out.push(body_row(spans));
+        }
+    };
+    for m in &card.group {
+        let target = headline(&m.name, &m.args);
+        let outcome = clean_summary(&m.name, &m.summary);
+        let ms = m.ms.map(fmt_ms).unwrap_or_default();
+        out.push(body_row(vec![
+            Span::styled(format!("{target}  "), styles::fg()),
+            Span::styled(
+                [outcome, ms]
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(&format!(" {} ", g().sep)),
+                styles::muted(),
+            ),
+        ]));
+    }
+    kv(&mut out, "tool", crate::app::tool_display_name(&card.name));
+    for (key, value) in &rows {
+        kv(&mut out, key, value);
+    }
+    if let Some(diff) = &card.diff {
+        for row in crate::render::diff_to_lines(diff) {
+            out.push(prefixed(row.spans, row.style));
+        }
+    }
+    if let Some(detail) = &card.detail {
+        if !rows.is_empty() || card.diff.is_some() {
+            out.push(text_row("output".to_string(), styles::faint()));
+        }
+        let style = if card.status == CardStatus::Failed {
+            styles::err()
+        } else {
+            styles::muted()
+        };
+        for line in detail.lines() {
+            for chunk in wrap_plain(line, width.saturating_sub(PREFIX + 1)) {
+                out.push(text_row(chunk, style));
+            }
+        }
+    }
+    // The preview above is bounded; this row is the way to everything. It sits directly above the
+    // collapse hint so `full_output_row` can find it without re-rendering the card.
+    if let Some(full) = &card.full {
+        out.push(body_row(vec![
+            Span::styled("view full output", styles::muted().bold()),
+            Span::styled(
+                format!(
+                    "  {} {} click here or /output",
+                    size_label(full.lines, full.bytes),
+                    g().sep
+                ),
+                styles::muted(),
+            ),
+        ]));
+    }
+    out.push(text_row(
+        "click or Ctrl+T to collapse".to_string(),
+        styles::faint(),
+    ));
+    out
+}
+
+/// What a collapsed card shows under its header: a diff preview, or a failure's last lines.
+fn collapsed_body(card: &ToolCard, out: &mut Vec<TextLine<'static>>) {
+    if let Some(diff) = &card.diff {
+        if card.status == CardStatus::Failed {
+            return;
+        }
+        let r = crate::render::diff_rows(diff, PREVIEW_DIFF_ROWS);
+        for row in r.rows {
+            out.push(prefixed(row.spans, row.style));
+        }
+        if r.hidden > 0 {
+            let hint = if card.interactive {
+                format!(
+                    "{} {} more lines {} Ctrl+T expand",
+                    g().ellipsis,
+                    r.hidden,
+                    g().sep
+                )
+            } else {
+                format!("{} {} more lines", g().ellipsis, r.hidden)
+            };
+            out.push(text_row(hint, styles::faint()));
+        }
+        return;
+    }
+    if card.status == CardStatus::Failed {
+        if let Some(detail) = &card.detail {
+            let lines: Vec<&str> = detail.lines().filter(|l| !l.trim().is_empty()).collect();
+            let from = lines.len().saturating_sub(FAILURE_TAIL_LINES);
+            for l in &lines[from..] {
+                out.push(text_row(truncate_cells(l, 200), styles::err()));
+            }
+        }
+    }
+}
+
+/// The rows of a folded user turn.
+fn fold_lines(card: &ToolCard, fold: &UserFold) -> Vec<TextLine<'static>> {
+    let user = |text: &str| rail::text_row(RailKind::User, text, styles::fg());
+    let hint = |text: String| rail::text_row(RailKind::User, &text, styles::faint());
+    let (sep, ellipsis) = (g().sep, g().ellipsis);
+    if card.expanded {
+        let mut out: Vec<TextLine<'static>> = fold.rows.iter().map(|r| user(r)).collect();
+        out.push(hint("Ctrl+T hide".to_string()));
+        return out;
+    }
+    match &fold.label {
+        Some(label) => {
+            let mut row = rail::label_row(
+                RailKind::User,
+                vec![Span::styled(label.clone(), styles::fg())],
+                Vec::new(),
+            );
+            row.spans.push(Span::styled(
+                format!("  {sep} full prompt hidden {sep} Ctrl+T show"),
+                styles::faint(),
+            ));
+            vec![row]
+        }
+        None => {
+            let mut out: Vec<TextLine<'static>> = fold
+                .rows
+                .iter()
+                .take(USER_FOLD_ROWS)
+                .map(|r| user(r))
+                .collect();
+            out.push(hint(format!(
+                "{ellipsis} {} more lines {sep} Ctrl+T show",
+                fold.rows.len().saturating_sub(USER_FOLD_ROWS)
+            )));
+            out
+        }
+    }
+}
+
+/// Which of a card's rendered lines is its "view full output" row, when it shows one.
+pub(crate) fn full_output_row(card: &ToolCard) -> Option<usize> {
+    (card.expanded && card.full.is_some() && card.len >= 2).then(|| card.len - 2)
+}
+
+/// The argument rows of an expanded card. When the card carries its diff, the body arguments
+/// that only restate it (`content`, `old_string`, …) are left out.
+fn arg_rows_for(card: &ToolCard) -> Vec<(String, String)> {
+    let mut rows = arg_rows(&card.args);
+    if card.diff.is_some() {
+        rows.retain(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "content" | "old_string" | "new_string" | "patch" | "diff" | "old" | "new"
+            )
+        });
+    }
+    rows
 }
 
 /// The one-line "what did this call do" text: the argument a human identifies the call BY (the
@@ -403,17 +719,18 @@ pub(crate) fn truncate_cells(s: &str, cells: usize) -> String {
     if total <= cells {
         return s.to_string();
     }
+    let ellipsis = g().ellipsis;
     let mut out = String::new();
     let mut used = 0usize;
     for ch in s.chars() {
         let w = UnicodeWidthChar::width(ch).unwrap_or(1);
-        if used + w > cells.saturating_sub(1) {
+        if used + w > cells.saturating_sub(ellipsis.chars().count()) {
             break;
         }
         out.push(ch);
         used += w;
     }
-    out.push('…');
+    out.push_str(ellipsis);
     out
 }
 
@@ -476,11 +793,19 @@ mod tests {
         c.summary = "shell: exit 0 in 132ms".to_string();
         let lines = text(&card_lines(&c, 100));
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("shell"), "{:?}", lines[0]);
+        assert!(
+            lines[0].contains("✓ Run "),
+            "humanised verb: {:?}",
+            lines[0]
+        );
         assert!(lines[0].contains("cargo test"), "{:?}", lines[0]);
-        assert!(lines[0].contains("exit 0 in 132ms"), "{:?}", lines[0]);
-        // The tool name is not repeated on the right: the row already says `shell` on the left.
-        assert!(!lines[0].contains("shell: exit"), "{:?}", lines[0]);
+        assert!(lines[0].contains("exit 0"), "{:?}", lines[0]);
+        // The duration is measured by the card, and the tool name is not repeated on the right.
+        assert!(
+            !lines[0].contains("132ms") && !lines[0].contains("shell"),
+            "{:?}",
+            lines[0]
+        );
     }
 
     #[test]
@@ -499,7 +824,14 @@ mod tests {
         let joined = text(&card_lines(&c, 120)).join("\n");
         assert!(joined.contains(long), "full command shown: {joined}");
         assert!(joined.contains("line one") && joined.contains("line two"));
-        assert!(joined.starts_with("  ▾"), "expanded marker: {joined}");
+        assert!(
+            joined.lines().next().unwrap().ends_with('▾'),
+            "expanded marker: {joined}"
+        );
+        assert!(
+            joined.contains("tool     shell"),
+            "the raw tool name lives in the body: {joined}"
+        );
     }
 
     #[test]
@@ -508,7 +840,8 @@ mod tests {
         c.status = CardStatus::Ok;
         c.summary = "12:00".to_string();
         assert!(!c.has_detail());
-        assert!(text(&card_lines(&c, 80))[0].starts_with("  ·"));
+        let row = text(&card_lines(&c, 80)).remove(0);
+        assert!(!row.contains('▸') && !row.contains('▾'), "{row}");
     }
 
     #[test]
@@ -516,14 +849,14 @@ mod tests {
         let c = card("shell", r#"{"command":"sleep 5"}"#);
         let row = text(&card_lines(&c, 80)).remove(0);
         assert!(row.contains("running"), "{row}");
-        assert!(row.contains("◍"), "{row}");
+        assert!(row.contains("⠋"), "spinner glyph: {row}");
     }
 
     #[test]
     fn long_values_wrap_inside_their_field_instead_of_overflowing_the_row() {
         let mut c = card("shell", &format!(r#"{{"command":"{}"}}"#, "x".repeat(300)));
         c.expanded = true;
-        let lines = card_lines(&c, 60);
+        let lines = crate::transcript::wrap_lines(&card_lines(&c, 60), 59);
         assert!(lines.len() > 3, "wrapped into several rows");
         for l in &lines {
             let cells: usize = l
@@ -594,7 +927,7 @@ mod tests {
         c.full = Some(kept(5_012));
         let collapsed = text(&card_lines(&c, 120));
         assert!(
-            collapsed[0].contains("⤢ 5,012 lines"),
+            collapsed[0].contains("5,012 lines"),
             "the closed row already says there is more: {collapsed:?}"
         );
         c.expanded = true;
@@ -602,7 +935,7 @@ mod tests {
         c.len = lines.len();
         let rows = text(&lines);
         let at = full_output_row(&c).expect("an open card with kept output has the row");
-        assert!(rows[at].contains("⤢ view full output"), "{rows:?}");
+        assert!(rows[at].contains("view full output"), "{rows:?}");
         assert!(rows[at].contains("5,012 lines · 4 KB"), "{rows:?}");
     }
 
@@ -619,5 +952,161 @@ mod tests {
     fn sizes_read_the_way_a_person_would_write_them() {
         assert_eq!(size_label(1, 12), "1 line · 12 B");
         assert_eq!(size_label(1_234_567, 3 << 20), "1,234,567 lines · 3.0 MB");
+    }
+
+    fn diff_card(kind: forge_types::DiffKind, old: Option<&str>, new: &str) -> ToolCard {
+        let mut c = card("write_file", r#"{"path":"src/lib.rs","content":"X"}"#);
+        c.status = CardStatus::Ok;
+        c.summary = "wrote".into();
+        c.ms = Some(4);
+        c.diff = Some(FileDiff {
+            path: "src/lib.rs".into(),
+            kind,
+            old: old.map(str::to_string),
+            new: Some(new.to_string()),
+            lang: Some("rust".into()),
+            binary: false,
+        });
+        c
+    }
+
+    #[test]
+    fn a_write_card_carries_its_diff_and_no_separate_header() {
+        let c = diff_card(forge_types::DiffKind::Created, None, "one\ntwo\n");
+        let rows = text(&card_lines(&c, 100));
+        assert!(
+            rows[0].contains("✓ Write") && rows[0].contains("new file · +2"),
+            "{rows:?}"
+        );
+        assert!(rows[0].contains("4ms"), "{rows:?}");
+        assert!(
+            rows[1].contains("┊") && rows[1].contains("1 + one"),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("✎")),
+            "no separate header: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_diff_folds_behind_ctrl_t_and_the_hint_counts_the_rest() {
+        let old: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        let new: String = (1..=20).map(|i| format!("line {i} edited\n")).collect();
+        let mut c = diff_card(forge_types::DiffKind::Modified, Some(&old), &new);
+        let collapsed = text(&card_lines(&c, 100));
+        assert!(
+            collapsed.len() <= 1 + 1 + 8 + 1,
+            "header, separator, 8 rows, hint: {}",
+            collapsed.len()
+        );
+        let last = collapsed.last().unwrap();
+        assert!(
+            last.contains("more lines") && last.contains("Ctrl+T expand"),
+            "{last}"
+        );
+        c.expanded = true;
+        assert!(text(&card_lines(&c, 100)).len() > collapsed.len());
+        // Inline cannot expand, so it must not promise to.
+        c.expanded = false;
+        c.interactive = false;
+        let inline = text(&card_lines(&c, 100));
+        assert!(!inline.last().unwrap().contains("Ctrl+T"), "{inline:?}");
+    }
+
+    #[test]
+    fn a_failed_call_shows_the_last_three_lines_of_its_output() {
+        let mut c = card("shell", r#"{"command":"cargo test"}"#);
+        c.status = CardStatus::Failed;
+        c.summary = "exit 101".into();
+        c.detail = Some("a\nb\nc\nd\ne".into());
+        let rows = text(&card_lines(&c, 100));
+        assert!(rows[0].contains("✗ Run"), "{rows:?}");
+        assert_eq!(rows.len(), 4, "header + 3 lines: {rows:?}");
+        assert!(rows[1].contains('c') && rows[3].contains('e'), "{rows:?}");
+        assert!(
+            !rows.iter().any(|r| r.ends_with(" a")),
+            "older lines stay behind the drawer"
+        );
+    }
+
+    #[test]
+    fn consecutive_reads_fold_into_one_group_card() {
+        let mut c = card("read_file", r#"{"path":"a.rs"}"#);
+        c.status = CardStatus::Ok;
+        c.ms = Some(40);
+        c.fold_in("read_file".into(), r#"{"path":"b.rs"}"#.into());
+        c.status = CardStatus::Ok;
+        c.ms = Some(60);
+        let row = text(&card_lines(&c, 100)).remove(0);
+        assert!(row.contains("◆ Read") && row.contains("2 files"), "{row}");
+        assert!(row.contains("100ms"), "durations add up: {row}");
+        c.expanded = true;
+        let joined = text(&card_lines(&c, 100)).join("\n");
+        assert!(
+            joined.contains("a.rs") && joined.contains("b.rs"),
+            "members listed: {joined}"
+        );
+    }
+
+    #[test]
+    fn verbs_are_humanised_and_unknown_tools_keep_their_name() {
+        for (raw, shown) in [
+            ("read_file", "Read"),
+            ("write_file", "Write"),
+            ("edit_file", "Edit"),
+            ("shell", "Run"),
+            ("grep", "Search"),
+            ("glob", "Find"),
+            ("web_fetch", "Fetch"),
+            ("web_search", "Web"),
+            ("spawn_agents", "Agents"),
+            ("mcp__srv__lookup", "lookup"),
+            ("custom_tool", "custom_tool"),
+        ] {
+            assert_eq!(verb(raw), shown, "{raw}");
+        }
+    }
+
+    #[test]
+    fn durations_read_like_a_person_would_say_them() {
+        assert_eq!(fmt_ms(4), "4ms");
+        assert_eq!(fmt_ms(1_500), "1.5s");
+        assert_eq!(fmt_ms(41_000), "41s");
+        assert_eq!(fmt_ms(125_000), "2m05s");
+    }
+
+    #[test]
+    fn a_long_user_paste_folds_to_six_rows_and_a_hint() {
+        let rows: Vec<String> = (1..=12).map(|i| format!("row {i}")).collect();
+        let mut c = ToolCard::user_fold(1, UserFold { label: None, rows });
+        let collapsed = text(&card_lines(&c, 80));
+        assert_eq!(collapsed.len(), 7, "{collapsed:?}");
+        assert!(collapsed[6].contains("6 more lines") && collapsed[6].contains("Ctrl+T show"));
+        c.expanded = true;
+        let open = text(&card_lines(&c, 80));
+        assert_eq!(open.len(), 13, "all rows plus the hide hint: {open:?}");
+    }
+
+    #[test]
+    fn a_canned_prompt_folds_to_one_labelled_row() {
+        let c = ToolCard::user_fold(
+            1,
+            UserFold {
+                label: Some("Set up Forge for this project".into()),
+                rows: vec!["a very long internal prompt".into()],
+            },
+        );
+        let rows = text(&card_lines(&c, 80));
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].contains("Set up Forge for this project"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[0].contains("full prompt hidden") && rows[0].contains("Ctrl+T show"),
+            "{rows:?}"
+        );
+        assert!(!rows[0].contains("internal prompt"));
     }
 }

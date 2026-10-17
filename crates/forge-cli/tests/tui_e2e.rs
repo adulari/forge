@@ -321,15 +321,16 @@ fn tui_esc_sends_a_queued_prompt_the_turn_already_absorbed() {
         plain.contains("queued (1 pending)"),
         "queued mid-turn: {plain}"
     );
+    // The notice reads `▲ interrupted — …` since the transcript re-glyphs legacy `⏹` notes.
     let first_esc = plain
-        .find("⏹ interrupted")
+        .find("interrupted — continuing")
         .expect("the first Esc interrupted the turn");
     assert!(
         plain[..first_esc].contains("steer"),
         "the turn absorbed the prompt before Esc (the case that used to stop): {plain}"
     );
     assert!(
-        plain[first_esc..].starts_with("⏹ interrupted — continuing with the next queued prompt"),
+        plain[first_esc..].starts_with("interrupted — continuing with the next queued prompt"),
         "Esc must send the absorbed prompt, not stop: {}",
         &plain[first_esc..]
     );

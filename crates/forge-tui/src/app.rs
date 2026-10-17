@@ -6,7 +6,7 @@
 //! shell drains and pushes into the terminal's native scrollback (`insert_before`). The
 //! line builders and `render_live` are free of terminal I/O so they stay TestBackend-able.
 
-use crate::theme::{color, styles};
+use crate::theme::styles::{self, NoticeKind, RailKind};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
@@ -30,7 +30,7 @@ pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 
 /// The text a scrollback line contributes to the remote transcript ring. A tool-card row is laid
 /// out for a terminal width — the status is pushed to the right margin with padding, and a call
-/// that has not finished carries a `◍ running` mark. The phone renders rows in its own width and
+/// that has not finished ends in `running`. The phone renders rows in its own width and
 /// its ring is append-only (the in-place redraw the terminal gets cannot reach it), so the padded
 /// running row wrapped into a stray "running" line under every call and then stayed there next to
 /// the finished row. Collapse the padding and drop the transient mark; the finished row still
@@ -40,11 +40,25 @@ fn remote_transcript_text(plain: &str, origin: &LineOrigin) -> String {
         return plain.to_string();
     }
     let collapsed = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    // The disclosure triangle at the end of a card row is for the terminal's mouse.
+    let collapsed = collapsed
+        .strip_suffix(" ▸")
+        .or_else(|| collapsed.strip_suffix(" ▾"))
+        .map(str::to_string)
+        .unwrap_or(collapsed);
+    // Only the call row carries the running marker; a result row's own text is left alone.
+    if origin.meta.is_some() {
+        return collapsed;
+    }
     collapsed
-        .strip_suffix(" ◍ running")
+        .strip_suffix(" running")
         .map(str::to_string)
         .unwrap_or(collapsed)
 }
+
+/// The text of an assistant label row on the remote wire (a stable word, not what the terminal
+/// shows: the supervisor strips it from a worker's final reply).
+const REMOTE_ASSISTANT_HEADER: &str = "⚒ forge";
 
 /// Two idle Esc presses closer together than this open the rewind picker.
 pub const ESC_DOUBLE_TAP: std::time::Duration = std::time::Duration::from_millis(700);
@@ -1239,15 +1253,16 @@ impl App {
                 self.model_search = None;
                 self.turn_activity.response_chars += text.chars().count();
                 self.set_turn_activity(TurnPhase::Finalizing, "complete response received");
-                self.tag_flush(LineOrigin::assistant(), |s| {
-                    s.flush.push(header_line("⚒ forge", color::brand()));
-                    s.flush.extend(crate::render::markdown_to_lines(&text));
-                    s.flush.push(TextLine::default());
-                });
+                self.flush_reasoning();
+                self.ensure_assistant_label();
+                self.push_answer_segment(&text, crate::render::markdown_to_lines(&text));
             }
             PresenterEvent::Reasoning(delta) => {
                 self.model_search = None;
                 let delta = sanitize_terminal_text(&delta);
+                self.transcript_ui
+                    .reasoning_since
+                    .get_or_insert_with(std::time::Instant::now);
                 self.turn_activity.reasoning_chars += delta.chars().count();
                 self.throughput
                     .on_delta(delta.chars().count(), std::time::Instant::now());
@@ -1263,9 +1278,7 @@ impl App {
                 self.touch_turn_activity(TurnPhase::Responding);
                 if !self.streaming_active {
                     self.flush_reasoning();
-                    self.tag_flush(LineOrigin::assistant(), |s| {
-                        s.flush.push(header_line("⚒ forge", color::brand()))
-                    });
+                    self.ensure_assistant_label();
                     self.streaming_active = true;
                 }
                 // Accumulate the whole reply; it's rendered as markdown on AssistantDone so
@@ -1293,27 +1306,41 @@ impl App {
             }
             PresenterEvent::Warning(msg) => {
                 if !self.apply_btw_failure(&msg) {
-                    self.flush.push(warning_line(&msg));
+                    let msg = sanitize_terminal_text(&msg);
+                    let (kind, body) = lines::notice::classify(&msg, NoticeKind::Warn);
+                    self.push_notice(kind, &body);
                 }
             }
-            PresenterEvent::Error(msg) => self.flush.push(error_line(&msg)),
+            PresenterEvent::Error(msg) => {
+                let msg = sanitize_terminal_text(&msg);
+                let (_, body) = lines::notice::classify(&msg, NoticeKind::Err);
+                self.push_error(&body);
+            }
             PresenterEvent::ToolStart { name, args } => {
                 self.model_search = None;
+                if self.streaming_active {
+                    self.finish_streaming_text();
+                }
+                self.ensure_assistant_label();
                 self.turn_activity.composing_tool = None;
                 self.turn_activity.tool_calls += 1;
-                self.set_turn_activity(TurnPhase::RunningTool, format!("executing {name}"));
+                self.transcript_ui.tools_used += 1;
+                let target = tool_cards::headline(&name, &args);
+                self.set_turn_activity(
+                    TurnPhase::RunningTool,
+                    format!(
+                        "executing {}",
+                        [tool_cards::verb(&name), target]
+                            .iter()
+                            .filter(|p| !p.is_empty())
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                );
                 let origin = LineOrigin::tool_call(&name);
                 self.interaction_ui.note_tool_call(&name, &args);
-                if self.fullscreen {
-                    self.open_tool_card(origin, name, args);
-                } else {
-                    // Inline mode prints into the terminal's own scrollback, which cannot be
-                    // rewritten once printed — so no card, and the call/result stay two lines.
-                    self.tag_flush(origin, |s| {
-                        s.flush
-                            .push(tool_start_line(&name, &args, s.last_width.get()))
-                    })
-                }
+                self.open_tool_card(origin, name, args);
             }
             PresenterEvent::ToolResult {
                 name,
@@ -1337,13 +1364,10 @@ impl App {
                         self.push_turn_diff(d);
                     }
                 }
-                if self.fullscreen && self.close_tool_card(&name, ok, &summary, detail) {
-                    return;
+                if !self.close_tool_card(&name, ok, &summary, detail.clone()) {
+                    self.ensure_assistant_label();
+                    self.print_orphan_result(&name, ok, &summary, detail);
                 }
-                self.tag_flush(LineOrigin::tool_result(&name, ok), |s| {
-                    s.flush
-                        .push(tool_result_line(&name, ok, &summary, s.last_width.get()))
-                })
             }
             PresenterEvent::ToolOutput { name, output } => self.attach_tool_output(&name, output),
             PresenterEvent::ContextInjected {
@@ -1355,7 +1379,9 @@ impl App {
                     TurnPhase::Preparing,
                     format!("loaded {symbols} symbols from {files} files ({tokens} tokens)"),
                 );
-                self.flush.push(lattice_line(symbols, files, tokens));
+                let in_turn = self.transcript_ui.turn_open;
+                let rows = lattice_line(symbols, files, tokens, in_turn);
+                self.flush.extend(rows);
             }
             PresenterEvent::ShellDiagnosis {
                 command,
@@ -1366,11 +1392,13 @@ impl App {
                     TurnPhase::ProcessingToolResult,
                     "shell diagnosis ready; sending the result back to the model",
                 );
+                let in_turn = self.transcript_ui.turn_open;
                 self.flush.extend(shell_diagnosis_lines(
                     &command,
                     &diagnosis,
                     fix.as_deref(),
                     self.last_width.get(),
+                    in_turn,
                 ));
             }
             PresenterEvent::BtwAnswer {
@@ -1566,15 +1594,17 @@ impl App {
                     &diff,
                     crate::render::REMOTE_DIFF_MAX_HUNK_LINES,
                 ));
-                self.flush.extend(crate::render::diff_to_lines(&diff));
-                self.flush.push(TextLine::default());
+                // The change belongs inside the card of the call that makes it. With no such
+                // call waiting, it stands alone as rows on the rail.
+                if !self.attach_diff_to_card(diff.clone()) {
+                    self.ensure_assistant_label();
+                    let rows = crate::render::diff_to_lines(&diff);
+                    self.push_turn_lines(rows);
+                }
             }
             PresenterEvent::AssayProgress(msg) => {
                 self.set_turn_activity(TurnPhase::Coordinating, "analysis critics are running");
-                self.flush.push(TextLine::from(Span::styled(
-                    format!("  {msg}"),
-                    styles::muted(),
-                )));
+                self.push_notice(NoticeKind::Info, &msg);
             }
             PresenterEvent::AssayCriticRow(row) => {
                 self.set_turn_activity(TurnPhase::Coordinating, "analysis critic updated");
@@ -1619,18 +1649,12 @@ impl App {
                 self.flush.push(TextLine::default());
             }
             PresenterEvent::Recap { text } => {
-                self.flush.push(TextLine::from(vec![
-                    Span::styled("  ※ recap  ", styles::user().bold()),
-                    Span::styled(text, styles::fg()),
-                ]));
-                self.flush.push(TextLine::default());
+                if self.recap_is_worth_showing(&text) {
+                    let row = self.recap_row(&text);
+                    self.flush.push(row);
+                }
             }
-            PresenterEvent::Progress(text) => {
-                self.flush.push(TextLine::from(vec![
-                    Span::styled("  ⋯ ", styles::user()),
-                    Span::styled(text, styles::muted()),
-                ]));
-            }
+            PresenterEvent::Progress(text) => self.push_notice(NoticeKind::Info, &text),
             PresenterEvent::SuggestionReady { text } => {
                 // Silent — no scrollback line. It only ever shows as ghost text in the (by now
                 // empty, idle) input box; see `render_input`.
@@ -1640,9 +1664,14 @@ impl App {
                 self.model_search = None;
                 self.set_turn_activity(TurnPhase::Finalizing, "turn completed");
                 self.throughput.on_turn_end(std::time::Instant::now());
+                if self.streaming_active {
+                    self.finish_streaming_text();
+                }
                 self.done = true;
                 self.last_stop_reason = Some(stop_reason);
                 self.turns_finished += 1;
+                self.settle_running_cards();
+                self.close_turn();
             }
             PresenterEvent::QuotaUpdate {
                 provider,
@@ -2184,19 +2213,18 @@ impl App {
         self.prompt = None;
         self.question_prompt = None;
         for (i, q) in form.questions.iter().enumerate() {
-            self.flush.push(TextLine::from(vec![
-                Span::styled("❓ ", styles::brand().bold()),
-                Span::styled(q.text.clone(), styles::user().bold()),
-            ]));
-            let (text, color) = match answers.and_then(|a| a.get(i)) {
-                Some(a) if !a.is_empty() => (a.summary(), color::ok()),
-                Some(_) => ("(no answer)".to_string(), color::fg_muted()),
-                None => ("(dismissed)".to_string(), color::fg_muted()),
+            self.flush.push(lines::rail::text_row(
+                RailKind::User,
+                &q.text,
+                styles::user().bold(),
+            ));
+            let (text, style) = match answers.and_then(|a| a.get(i)) {
+                Some(a) if !a.is_empty() => (a.summary(), styles::ok()),
+                Some(_) => ("(no answer)".to_string(), styles::muted()),
+                None => ("(dismissed)".to_string(), styles::muted()),
             };
-            self.flush.push(TextLine::from(vec![
-                Span::styled("  ↳ ", styles::muted()),
-                Span::styled(text, Style::default().fg(color)),
-            ]));
+            self.flush
+                .push(lines::rail::text_row(RailKind::User, &text, style));
         }
     }
 
@@ -2255,34 +2283,24 @@ impl App {
         }
     }
 
-    /// Flush accumulated reasoning into scrollback as a dim "thinking" block (once), if any.
-    /// When `show_thinking` is false the block collapses to a single dim discoverability marker.
+    /// Flush accumulated reasoning into scrollback as a thinking block (once), if any. Hidden
+    /// by default it is one faint line (`▸ Thought for 12s`); `/thinking` opens it.
     fn flush_reasoning(&mut self) {
         if self.reasoning.is_empty() {
             return;
         }
         let text = std::mem::take(&mut self.reasoning);
+        let secs = self
+            .transcript_ui
+            .reasoning_since
+            .take()
+            .map_or(0, |t| t.elapsed().as_secs())
+            .max(1);
+        self.ensure_assistant_label();
+        let rows = lines::turn::thinking_rows(&text, secs, self.show_thinking);
         // Reasoning is the model talking, so it rides the wire as assistant provenance — a
         // remote client renders it under the same speaker, dimmed, exactly like the TUI does.
-        self.tag_flush(LineOrigin::assistant(), |s| {
-            if !s.show_thinking {
-                // Collapsed-by-default: a one-line marker so the user knows reasoning happened and
-                // is toggleable, instead of silently discarding it (undiscoverable).
-                s.flush.push(TextLine::from(Span::styled(
-                    "  💭 thinking… (/thinking to expand)",
-                    styles::muted(),
-                )));
-                return;
-            }
-            let dim = styles::muted();
-            s.flush
-                .push(TextLine::from(Span::styled("✱ thinking", dim)));
-            for l in text.lines() {
-                s.flush
-                    .push(TextLine::from(Span::styled(l.to_string(), dim)));
-            }
-            s.flush.push(TextLine::default());
-        });
+        self.push_turn_lines(rows);
     }
 
     /// Clamp `input_cursor` into a valid byte index: never past the end, and always on a UTF-8
@@ -2416,6 +2434,7 @@ impl App {
         self.turn_diffs.clear();
         self.turn_diffs_skipped = 0;
         self.plan = None;
+        self.begin_user_turn();
         if self.echo_harness_notice(line) {
             return;
         }
@@ -2427,35 +2446,15 @@ impl App {
         };
         self.tag_flush(origin, |s| {
             match &peer {
-                Some((who, _)) => s.flush.push(header_line(
-                    &format!("peer message from {who}"),
-                    crate::theme::color::fg_muted(),
-                )),
-                None => s.flush.push(header_line("you", color::user())),
+                Some((who, _)) => s.flush.push(lines::turn::peer_label(who)),
+                None => s.flush.push(lines::turn::user_label(None)),
             }
             let shown = peer.as_ref().map_or(line, |(_, body)| body.as_str());
-            // A huge paste is sent in full but echoed only in part, so scrollback stays usable.
-            const ECHO_LINES: usize = 40;
-            const ECHO_LINE_CHARS: usize = 2000;
-            let total = shown.lines().count();
-            for l in shown.lines().take(ECHO_LINES) {
-                if l.chars().count() > ECHO_LINE_CHARS {
-                    let cut: String = l.chars().take(ECHO_LINE_CHARS).collect();
-                    s.flush.push(body_line(&format!("{cut}…")));
-                } else {
-                    s.flush.push(body_line(l));
-                }
-            }
-            if total > ECHO_LINES {
-                s.flush.push(body_line(&format!(
-                    "… {} more lines (sent in full)",
-                    total - ECHO_LINES
-                )));
-            }
+            s.echo_user_text(shown);
             for img in std::mem::take(&mut s.last_submit_images) {
                 let kb = (img.data_base64.len() * 3 / 4).div_ceil(1024);
-                s.flush.push(body_line(&format!(
-                    "🖼 image attached ({}, ~{kb} KB)",
+                s.flush.push(lines::turn::user_text(&format!(
+                    "image attached ({}, ~{kb} KB)",
                     img.media_type
                 )));
             }
@@ -2495,33 +2494,33 @@ impl App {
             match item {
                 ReplayItem::User(content) => self.submit_user(content),
                 ReplayItem::Assistant(content) => {
-                    self.tag_flush(LineOrigin::assistant(), |s| {
-                        s.flush.push(header_line("⚒ forge", color::brand()));
-                        s.flush.extend(crate::render::markdown_to_lines(content));
-                        s.flush.push(TextLine::default());
-                    });
+                    self.ensure_assistant_label();
+                    self.push_turn_lines(crate::render::markdown_to_lines(content));
                 }
-                ReplayItem::Tool { name, args } if self.fullscreen => {
+                ReplayItem::Tool { name, args } => {
+                    self.ensure_assistant_label();
                     // Same card the live turn showed, instead of a raw JSON line.
                     self.open_tool_card(LineOrigin::tool_call(name), name.clone(), args.clone());
                 }
-                ReplayItem::Tool { name, args } => {
-                    self.tag_flush(LineOrigin::tool_call(name), |s| {
-                        s.flush
-                            .push(tool_start_line(name, args, s.last_width.get()));
-                    });
-                }
-                ReplayItem::ToolResult { name, ok, summary }
-                    if self.fullscreen && self.close_tool_card(name, *ok, summary, None) => {}
                 ReplayItem::ToolResult { name, ok, summary } => {
-                    self.tag_flush(LineOrigin::tool_result(name, *ok), |s| {
-                        s.flush
-                            .push(tool_result_line(name, *ok, summary, s.last_width.get()));
-                    });
+                    if !self.close_tool_card(name, *ok, summary, None) {
+                        self.ensure_assistant_label();
+                        self.print_orphan_result(name, *ok, summary, None);
+                    }
                 }
-                ReplayItem::Note(text) => self.flush.push(warning_line(text)),
+                ReplayItem::Note(text) => {
+                    let (kind, body) = lines::notice::classify(text, NoticeKind::Warn);
+                    self.push_notice(kind, &body);
+                }
             }
         }
+        // A replayed turn has no footer: its timings are not this process's.
+        self.flush_notice_run();
+        if self.transcript_ui.turn_open {
+            self.flush.push(TextLine::default());
+            self.transcript_ui.turn_open = false;
+        }
+        self.transcript_ui.cooling = None;
     }
 
     /// Update the visible queued-prompts list (prompts typed while a turn was running).
@@ -2563,10 +2562,8 @@ impl App {
     /// can tell where the prior history ends and new input begins.
     pub fn push_resume_separator(&mut self, text: &str) {
         self.flush.push(TextLine::default());
-        self.flush.push(TextLine::from(Span::styled(
-            format!("  {text}"),
-            styles::muted(),
-        )));
+        self.flush
+            .extend(lines::notice::notice_lines(NoticeKind::Info, false, text));
         self.flush.push(TextLine::default());
     }
 
@@ -2603,17 +2600,17 @@ impl App {
             .is_some_and(|at| at.elapsed() < ESC_DOUBLE_TAP)
     }
 
-    /// Render the streamed assistant text as finished scrollback and end the stream.
-    fn finish_streaming_text(&mut self) {
+    /// Render the streamed assistant text as finished scrollback and end the stream. The text
+    /// is one segment of the turn: a segment identical to the one before it (a re-answer after
+    /// the completeness review) is dropped.
+    pub(super) fn finish_streaming_text(&mut self) {
         let rest = std::mem::take(&mut self.streaming);
         self.streaming_rev = self.streaming_rev.wrapping_add(1);
         let cache = std::mem::take(&mut *self.stream_cache.borrow_mut());
-        self.tag_flush(LineOrigin::assistant(), |s| {
-            if !rest.is_empty() {
-                s.flush.extend(cache.finish(&rest));
-            }
-            s.flush.push(TextLine::default());
-        });
+        if !rest.is_empty() {
+            let rows = cache.finish(&rest);
+            self.push_answer_segment(&rest, rows);
+        }
         self.streaming_active = false;
     }
 
@@ -2624,18 +2621,25 @@ impl App {
         if self.echo_harness_notice(text) {
             return;
         }
+        // The steer is a new message in the conversation: the assistant turn it interrupted
+        // ends here (the answer that follows opens a new one).
+        self.flush_notice_run();
+        if self.transcript_ui.turn_open {
+            self.flush.push(TextLine::default());
+            self.transcript_ui.turn_open = false;
+            self.transcript_ui.cooling = None;
+        }
         self.tag_flush(LineOrigin::user(), |s| {
-            s.flush.push(header_line("you ⚡ steer", color::user()));
-            for l in text.lines() {
-                s.flush.push(body_line(l));
-            }
+            s.flush.push(lines::turn::user_label(Some("steer")));
+            s.echo_user_text(text);
             s.flush.push(TextLine::default());
         });
     }
 
     /// Push a dim informational line into scrollback (command feedback, session lists, etc).
     pub fn note(&mut self, text: &str) {
-        self.flush.push(lines::notice::note_line(text));
+        let (kind, body) = lines::notice::classify(text, NoticeKind::Info);
+        self.push_notice(kind, &body);
     }
 
     /// Push plain (unstyled) multi-line text into the scrollback outbox — for verbatim blocks
@@ -2670,7 +2674,21 @@ impl App {
         self.remote_only.clear();
         self.place_pending_cards();
         self.fold_main_log(&lines);
-        lines
+        self.inline_rows(lines)
+    }
+
+    /// Rows for the terminal's native scrollback. They are wrapped here, with the rail and the
+    /// hanging indent repeated on every row, because the terminal would wrap them without. In
+    /// full-screen the transcript wraps at draw time, so the rows pass through.
+    fn inline_rows(&self, lines: Vec<TextLine<'static>>) -> Vec<TextLine<'static>> {
+        if self.fullscreen {
+            return lines;
+        }
+        let width = match self.last_width.get() {
+            0 => 80,
+            w => w,
+        };
+        crate::transcript::wrap_lines(&lines, width.saturating_sub(1) as usize)
     }
 
     /// Resolve each queued card's `main_log` position: the log's current length plus the card's
@@ -2705,7 +2723,7 @@ impl App {
         }
         self.place_pending_cards();
         self.fold_main_log(&lines);
-        lines
+        self.inline_rows(lines)
     }
 
     /// Append out-of-band scrollback (banner, command output, `/clear` marker, …) directly into the
@@ -2934,6 +2952,9 @@ impl App {
         self.transcript_follow = true;
         self.suggested_prompt = None; // stale once the session it was predicted for is gone
         self.turn_activity = TurnActivity::default();
+        let seen = self.transcript_ui.bridge_notice_seen;
+        self.transcript_ui = Default::default();
+        self.transcript_ui.bridge_notice_seen = seen;
     }
 
     /// Zero the statusline's usage counters, for a brand-new session (`/new`).
@@ -3008,7 +3029,7 @@ impl App {
             let is_header = self
                 .main_log
                 .get(line)
-                .is_some_and(|l| l.spans.len() == 1 && l.spans[0].content.as_ref() == "  you");
+                .is_some_and(lines::rail::is_user_label);
             if is_header {
                 rows.push(row);
             }
@@ -3102,9 +3123,9 @@ impl App {
     /// wrapped once; only the open block at the end is re-rendered as tokens arrive, so the cost
     /// of a frame does not grow with the length of the reply.
     fn ensure_stream_cache(&self, width: u16) {
-        self.stream_cache
-            .borrow_mut()
-            .refresh(&self.streaming, self.streaming_rev, width);
+        let mut cache = self.stream_cache.borrow_mut();
+        cache.set_rail(Some(styles::RailKind::Live));
+        cache.refresh(&self.streaming, self.streaming_rev, width);
     }
 
     /// The reply text past what the cached rows cover, wrapped as plain rows so a token that
@@ -3143,7 +3164,7 @@ impl App {
             );
         }
         if end == total {
-            let cursor = Span::styled("▌", styles::user());
+            let cursor = Span::styled(crate::theme::glyphs::g().caret, styles::brand_hot());
             match rows.last_mut() {
                 Some(line) => line.spans.push(cursor),
                 None => rows.push(TextLine::from(cursor)),
@@ -3272,6 +3293,20 @@ impl App {
         if self.main_log.len() > MAIN_LOG_MAX {
             let drop = self.main_log.len() - MAIN_LOG_MAX;
             self.main_log.drain(0..drop);
+            if let Some(c) = &mut self.transcript_ui.cooling {
+                c.from = c.from.saturating_sub(drop);
+            }
+            if self
+                .transcript_ui
+                .notice_run
+                .as_ref()
+                .is_some_and(|r| r.start < drop)
+            {
+                self.transcript_ui.notice_run = None;
+            } else if let Some(r) = &mut self.transcript_ui.notice_run {
+                r.start -= drop;
+                r.end -= drop;
+            }
             // Every card's recorded position is an index into `main_log`, so trimming the front
             // moves all of them. A card whose own lines were (partly) trimmed no longer has a
             // region to rewrite and is dropped — expanding it would splice over its neighbours.
@@ -3287,199 +3322,25 @@ impl App {
         self.main_log_rev += 1;
     }
 
-    /// The cell width a card renders to. Two columns come off the area width: the transcript
-    /// itself reserves one when it wraps (`ensure_wrapped_main`), and `wrap_lines` breaks AT the
-    /// wrap width, so a row filling it exactly still emits a second, empty row. A card row must
-    /// stay one wrapped row — a card that occupies two rows shows a blank gap under every call
-    /// and desynchronises click hit-testing from the card's own line range.
-    fn card_width(&self) -> u16 {
-        self.last_width.get().saturating_sub(2)
-    }
-
-    /// Start a tool card: queue its collapsed row into the flush like any other scrollback line,
-    /// and remember where in this flush it sits so `drain_flush` can record the card's final
-    /// position in `main_log` (the only point at which that position is known).
-    fn open_tool_card(&mut self, origin: LineOrigin, name: String, args: String) {
-        let id = self.next_card_id;
-        self.next_card_id += 1;
-        let card = ToolCard::new(id, name, args);
-        let lines = tool_cards::card_lines(&card, self.card_width());
-        let len = lines.len();
-        self.tool_cards.push(card);
-        self.seal_flush_origins(&LineOrigin::default());
-        self.pending_card_marks.push((self.flush.len(), id, len));
-        self.tag_flush(origin, |s| s.flush.extend(lines));
-    }
-
-    /// Finish the newest still-running card for `name` and redraw it in place. Returns false when
-    /// there is no such card (a result with no matching start — e.g. a call refused before its
-    /// `ToolStart` was emitted), so the caller can fall back to the plain result line.
-    fn close_tool_card(
-        &mut self,
-        name: &str,
-        ok: bool,
-        summary: &str,
-        detail: Option<String>,
-    ) -> bool {
-        let Some(card) = self
-            .tool_cards
-            .iter_mut()
-            .rev()
-            .find(|c| c.name == name && c.status == CardStatus::Running)
-        else {
-            return false;
-        };
-        card.status = if ok {
-            CardStatus::Ok
-        } else {
-            CardStatus::Failed
-        };
-        card.summary = sanitize_terminal_text(summary);
-        card.detail = detail.map(|d| sanitize_terminal_text(&d));
-        let id = card.id;
-        self.last_closed_card = Some(id);
-        self.redraw_tool_card(id);
-        // The redraw rewrote `main_log` directly; the remote transcript ring only ever sees
-        // flushed lines, so hand it the finished row explicitly or the phone would be left
-        // showing this call as still running. Not needed when the card was still queued — the
-        // redraw rewrote the queued row itself, which the ring is about to receive anyway, and
-        // pushing here too would show the phone the same call twice.
-        let still_queued = self.pending_card_marks.iter().any(|(_, mid, _)| *mid == id);
-        if let Some(card) = self
-            .tool_cards
-            .iter()
-            .find(|c| c.id == id)
-            .filter(|_| !still_queued)
-        {
-            let row = tool_cards::card_lines(card, self.card_width())
-                .into_iter()
-                .next();
-            if let Some(row) = row {
-                self.remote_only
-                    .push((row, LineOrigin::tool_result(name, ok)));
-            }
-        }
-        true
-    }
-
-    /// Re-render one card over the lines it currently occupies, shifting the cards after it by the
-    /// change in height. Bumps the log revision so the wrap cache re-wraps.
-    fn redraw_tool_card(&mut self, id: u64) {
-        let width = self.card_width();
-        let Some(pos) = self.tool_cards.iter().position(|c| c.id == id) else {
-            return;
-        };
-        // A card still carrying a pending mark has no place in `main_log` yet — its lines are
-        // sitting in the flush, unclaimed. That is the common case for a fast tool, which starts
-        // and finishes inside a single frame: rewrite the QUEUED lines. Splicing `main_log` at the
-        // card's still-unset position would instead insert a second copy of the row at the very
-        // top of the transcript, above the banner, while the queued row stayed "running" forever.
-        if let Some(mark) = self
-            .pending_card_marks
-            .iter()
-            .position(|(_, mid, _)| *mid == id)
-        {
-            let (offset, _, old_len) = self.pending_card_marks[mark];
-            if offset + old_len > self.flush.len() {
-                return;
-            }
-            let lines = tool_cards::card_lines(&self.tool_cards[pos], width);
-            let new_len = lines.len();
-            self.flush.splice(offset..offset + old_len, lines);
-            // `flush_origins` runs in lockstep with `flush`; keep the replaced lines' provenance
-            // (a tool call) rather than letting a later seal reclassify them.
-            if self.flush_origins.len() >= offset + old_len {
-                let origin = self.flush_origins[offset].clone();
-                self.flush_origins.splice(
-                    offset..offset + old_len,
-                    std::iter::repeat_n(origin, new_len),
-                );
-            }
-            self.tool_cards[pos].len = new_len;
-            self.pending_card_marks[mark].2 = new_len;
-            // Every later mark in this same flush shifts by the change in height.
-            let delta = new_len as isize - old_len as isize;
-            if delta != 0 {
-                for (other_offset, _, _) in self.pending_card_marks.iter_mut().skip(mark + 1) {
-                    *other_offset = (*other_offset as isize + delta).max(0) as usize;
-                }
-            }
-            return;
-        }
-        let (start, old_len) = (self.tool_cards[pos].start, self.tool_cards[pos].len);
-        if start + old_len > self.main_log.len() {
-            return; // its region no longer exists (log cleared under it)
-        }
-        let lines = tool_cards::card_lines(&self.tool_cards[pos], width);
-        let new_len = lines.len();
-        self.main_log.splice(start..start + old_len, lines);
-        self.tool_cards[pos].len = new_len;
-        let delta = new_len as isize - old_len as isize;
-        if delta != 0 {
-            for card in self.tool_cards.iter_mut().skip(pos + 1) {
-                card.start = (card.start as isize + delta).max(0) as usize;
-            }
-        }
-        self.main_log_rev += 1;
-        if self.transcript_follow {
-            self.transcript_scroll = usize::MAX / 2;
-        }
-    }
-
-    /// Toggle the tool card under a screen cell. Returns true when a card was hit, so the caller
-    /// treats the click as a card toggle instead of the start of a text selection.
-    pub fn toggle_tool_card_at(&mut self, col: u16, row: u16) -> bool {
-        let Some((wrapped_row, _)) = self.pointer_to_text(col, row) else {
-            return false;
-        };
-        let width = self.transcript_geom.get().map(|g| g.width).unwrap_or(0);
-        self.ensure_wrapped_main(width);
-        let source = {
-            let cache = self.wrap_cache.borrow();
-            match cache.origins.get(wrapped_row) {
-                Some(line) => *line,
-                None => return false, // the streaming edge, below the committed log
-            }
-        };
-        let Some(id) = self
-            .tool_cards
-            .iter()
-            .find(|c| c.has_detail() && source >= c.start && source < c.start + c.len)
-            .map(|c| c.id)
-        else {
-            return false;
-        };
-        self.toggle_tool_card(id);
-        true
-    }
-
-    /// Toggle the most recent expandable card (Ctrl+T) — the keyboard path to the same drawer,
-    /// for terminals without mouse reporting and for a quick look at what just ran.
-    pub fn toggle_last_tool_card(&mut self) -> bool {
-        let Some(id) = self
-            .tool_cards
-            .iter()
-            .rev()
-            .find(|c| c.has_detail())
-            .map(|c| c.id)
-        else {
-            return false;
-        };
-        self.toggle_tool_card(id);
-        true
-    }
-
-    fn toggle_tool_card(&mut self, id: u64) {
-        if let Some(card) = self.tool_cards.iter_mut().find(|c| c.id == id) {
-            card.expanded = !card.expanded;
-            self.redraw_tool_card(id);
-        }
-    }
-
     fn push_remote_transcript_line(&mut self, line: &TextLine<'static>, origin: &LineOrigin) {
-        let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // The rail is decoration for a terminal; a phone draws its own. Rows keep the two-cell
+        // indent they have always had on the wire, and the assistant's label stays the
+        // `⚒ forge` header the daemon's supervisor looks for when it extracts a reply.
+        let railed = line.spans.first().is_some_and(crate::copy_mark::is_rail);
+        let mut plain: String = if lines::rail::is_assistant_label(line) {
+            REMOTE_ASSISTANT_HEADER.to_string()
+        } else {
+            line.spans
+                .iter()
+                .filter(|s| !crate::copy_mark::is_rail(s))
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
         if plain.trim().is_empty() {
             return;
+        }
+        if railed {
+            plain.insert_str(0, "  ");
         }
         let plain = remote_transcript_text(&plain, origin);
         self.recent_transcript.push_back(TranscriptRow {
@@ -3511,9 +3372,12 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
     w.saturating_sub(reserve).max(min)
 }
 
+mod card_flow;
 mod lines;
 mod state;
+mod transcript_flow;
 pub use lines::banner::{banner_lines, print_banner_direct};
+pub(crate) use lines::rail::rail_lines;
 pub use lines::turn::lattice_view_lines;
 use lines::{
     agents::{
@@ -3521,10 +3385,7 @@ use lines::{
         workflow_log_line, workflow_phase_line, workflow_started_line,
     },
     plan::plan_card_lines,
-    turn::{
-        body_line, error_line, header_line, lattice_line, shell_diagnosis_lines, tool_result_line,
-        tool_start_line, warning_line,
-    },
+    turn::{lattice_line, shell_diagnosis_lines},
 };
 mod idle_interrupt;
 pub use idle_interrupt::IdleInterrupt;
@@ -3545,7 +3406,9 @@ pub use render::{
     input_box_height, input_cursor_up, render_live, render_mesh_overlay, render_usage_overlay,
     render_voice_overlay,
 };
-pub(crate) use tool_cards::{CardStatus, ToolCard};
+#[cfg(test)]
+pub(crate) use tool_cards::CardStatus;
+pub(crate) use tool_cards::ToolCard;
 
 #[cfg(test)]
 mod stream_perf_tests;
