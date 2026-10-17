@@ -547,13 +547,14 @@ fn the_backdrop_is_not_a_painted_fill_in_any_tier() {
     }
 }
 
+/// The colour of the permission block's bottom-left corner: the border the pulse drives.
 fn composer_corner_fg(app: &App) -> Color {
     let rows = screen_rows(app, 80, 24);
     let y = rows
         .iter()
-        .position(|r| r.starts_with('╭'))
-        .expect("composer top row") as u16;
-    render_buffer(app, 80, 24)[(0, y)].fg
+        .position(|r| r.starts_with(" ╰"))
+        .expect("decision block bottom border") as u16;
+    render_buffer(app, 80, 24)[(1, y)].fg
 }
 
 #[test]

@@ -4,7 +4,6 @@
 //!
 //! Cross-platform: crossterm drives the terminal on Linux, macOS, and Windows alike.
 
-use crate::theme::{color, styles};
 use std::io::{self, Stdout};
 use std::time::Duration;
 
@@ -13,13 +12,12 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
-use crate::surface::{self};
+use crate::app::chrome_hint as hint;
+use crate::app::list_view::{self, Item, Row, View};
+use crate::theme::glyphs::g;
+use crate::theme::styles;
 
 /// One selectable row: a primary `label` and a dim `hint` (e.g. transport + source).
 #[derive(Debug, Clone)]
@@ -50,7 +48,6 @@ pub fn select_multi(title: &str, items: &[SelectItem]) -> io::Result<Option<Vec<
     let mut state = State {
         cursor: 0,
         checked: items.iter().map(|i| i.preselected).collect(),
-        tick: 0,
     };
 
     let result = run_loop(&mut terminal, title, items, &mut state);
@@ -79,9 +76,8 @@ pub fn select_one(title: &str, items: &[SelectItem]) -> io::Result<Option<usize>
         },
     )?;
     let mut cursor = 0usize;
-    let mut tick = 0u64;
     let result = loop {
-        terminal.draw(|f| draw_single(f, title, items, cursor, tick))?;
+        terminal.draw(|f| draw_single(f, title, items, cursor))?;
         if event::poll(Duration::from_millis(80))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Release {
@@ -96,12 +92,13 @@ pub fn select_one(title: &str, items: &[SelectItem]) -> io::Result<Option<usize>
                         cursor = cursor.checked_sub(1).unwrap_or(items.len() - 1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => cursor = (cursor + 1) % items.len(),
+                    KeyCode::Home => cursor = 0,
+                    KeyCode::End => cursor = items.len() - 1,
                     KeyCode::Enter => break Ok(Some(cursor)),
                     _ => {}
                 }
             }
         }
-        tick = tick.wrapping_add(1);
     };
     disable_raw_mode().ok();
     terminal.backend_mut().execute(LeaveAlternateScreen).ok();
@@ -109,70 +106,50 @@ pub fn select_one(title: &str, items: &[SelectItem]) -> io::Result<Option<usize>
     result
 }
 
-fn draw_single(
-    f: &mut ratatui::Frame,
-    title: &str,
-    items: &[SelectItem],
-    cursor: usize,
-    tick: u64,
-) {
-    let inner = surface::render_panel(
-        f,
-        f.area(),
-        surface::title(title, surface::SurfaceTone::Accent),
-        None,
-        surface::SurfaceTone::Accent,
-    );
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(inner);
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        let on = i == cursor;
-        let caret = if on {
-            if (tick / 4).is_multiple_of(2) {
-                "▸ "
-            } else {
-                "▹ "
-            }
-        } else {
-            "  "
-        };
-        let label_style = if on {
-            styles::fg().add_modifier(Modifier::BOLD)
-        } else {
-            styles::muted()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(caret, styles::user()),
-            Span::styled(format!("{:<26}", item.label), label_style),
-            Span::styled(item.hint.clone(), styles::muted()),
-        ]));
-    }
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::LEFT)
-                .border_style(styles::muted()),
-        ),
-        chunks[0],
-    );
-    let footer = Line::from(vec![
-        Span::styled("↑/↓", styles::user()),
-        Span::styled(" move   ", styles::muted()),
-        Span::styled("enter", styles::ok()),
-        Span::styled(" select   ", styles::muted()),
-        Span::styled("esc", styles::err()),
-        Span::styled(" cancel", styles::muted()),
-    ]);
-    f.render_widget(Paragraph::new(footer), chunks[1]);
+fn rows(items: &[SelectItem], checked: Option<&[bool]>) -> Vec<Item> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let label = match checked {
+                Some(c) if c[i] => format!("{} {}", g().ok, item.label),
+                Some(_) => format!("{} {}", g().task_open, item.label),
+                None => item.label.clone(),
+            };
+            Item::Row(Row {
+                label,
+                label_style: Some(match checked {
+                    Some(c) if c[i] => styles::fg(),
+                    Some(_) => styles::muted(),
+                    None => styles::fg(),
+                }),
+                desc: item.hint.clone(),
+                ..Row::default()
+            })
+        })
+        .collect()
+}
+
+fn draw_single(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], cursor: usize) {
+    let view = View {
+        title: title.to_string(),
+        context: format!("{} of {}", cursor + 1, items.len()),
+        items: rows(items, None),
+        selected: cursor,
+        footer: vec![
+            hint("↑↓", "move"),
+            hint("Enter", "select"),
+            hint("Esc", "cancel"),
+        ],
+        padded: true,
+        ..View::default()
+    };
+    list_view::render(f, f.area(), &view);
 }
 
 struct State {
     cursor: usize,
     checked: Vec<bool>,
-    tick: u64,
 }
 
 fn run_loop(
@@ -200,6 +177,8 @@ fn run_loop(
                     KeyCode::Down | KeyCode::Char('j') => {
                         state.cursor = (state.cursor + 1) % items.len();
                     }
+                    KeyCode::Home => state.cursor = 0,
+                    KeyCode::End => state.cursor = items.len() - 1,
                     KeyCode::Char(' ') => {
                         let c = &mut state.checked[state.cursor];
                         *c = !*c;
@@ -219,91 +198,89 @@ fn run_loop(
                 }
             }
         }
-        state.tick = state.tick.wrapping_add(1);
     }
 }
 
 fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State) {
-    let inner = surface::render_panel(
-        f,
-        f.area(),
-        surface::title(title, surface::SurfaceTone::Accent),
-        None,
-        surface::SurfaceTone::Accent,
-    );
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(inner);
-
-    // Header — the ◈ pulses between accent and dim so the screen reads as "live".
     let n = state.checked.iter().filter(|&&c| c).count();
-    let header = Line::from(Span::styled(
-        format!("{n}/{} selected", items.len()),
-        styles::muted(),
-    ));
-    f.render_widget(Paragraph::new(header), chunks[0]);
+    let view = View {
+        title: title.to_string(),
+        context: format!("{n}/{} selected", items.len()),
+        items: rows(items, Some(&state.checked)),
+        selected: state.cursor,
+        footer: vec![
+            hint("↑↓", "move"),
+            hint("Space", "toggle"),
+            hint("a/n", "all/none"),
+            hint("Enter", "import"),
+            hint("Esc", "cancel"),
+        ],
+        padded: true,
+        ..View::default()
+    };
+    list_view::render(f, f.area(), &view);
+}
 
-    // The list.
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        let on_cursor = i == state.cursor;
-        let checked = state.checked[i];
-        let marker = if checked { "◉" } else { "○" };
-        let marker_color = if checked {
-            color::ok()
-        } else {
-            color::fg_muted()
-        };
-        // Animated caret on the focused row.
-        let caret = if on_cursor {
-            if (state.tick / 4).is_multiple_of(2) {
-                "▸ "
-            } else {
-                "▹ "
-            }
-        } else {
-            "  "
-        };
-        let label_style = if on_cursor {
-            styles::fg().add_modifier(Modifier::BOLD)
-        } else if checked {
-            styles::fg()
-        } else {
-            styles::muted()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(caret, styles::user()),
-            Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
-            Span::styled(format!("{:<18}", item.label), label_style),
-            Span::styled(item.hint.clone(), styles::muted()),
-        ]));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn items() -> Vec<SelectItem> {
+        vec![
+            SelectItem {
+                label: "filesystem".into(),
+                hint: "stdio · claude".into(),
+                preselected: true,
+            },
+            SelectItem {
+                label: "github".into(),
+                hint: "http · cursor".into(),
+                preselected: false,
+            },
+        ]
     }
-    f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::LEFT)
-                .border_style(styles::muted()),
-        ),
-        chunks[1],
-    );
 
-    // Footer keymap.
-    let footer = Line::from(vec![
-        Span::styled("↑/↓", styles::user()),
-        Span::styled(" move   ", styles::muted()),
-        Span::styled("space", styles::user()),
-        Span::styled(" toggle   ", styles::muted()),
-        Span::styled("a/n", styles::user()),
-        Span::styled(" all/none   ", styles::muted()),
-        Span::styled("enter", styles::ok()),
-        Span::styled(" import   ", styles::muted()),
-        Span::styled("esc", styles::err()),
-        Span::styled(" cancel", styles::muted()),
-    ]);
-    f.render_widget(Paragraph::new(footer), chunks[2]);
+    fn screen(draw_fn: impl FnOnce(&mut ratatui::Frame)) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(draw_fn).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..12u16)
+            .map(|y| {
+                (0..80u16)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_single_select_uses_the_shared_list() {
+        let out = screen(|f| draw_single(f, "Pick one", &items(), 1));
+        assert!(out.contains("Pick one") && out.contains("2 of 2"), "{out}");
+        assert!(out.contains("❯ github"), "{out}");
+        assert!(
+            out.contains("Enter select") && out.contains("Esc cancel"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_multi_select_marks_checked_rows_and_counts_them() {
+        let state = State {
+            cursor: 0,
+            checked: vec![true, false],
+        };
+        let out = screen(|f| draw(f, "Import", &items(), &state));
+        assert!(out.contains("1/2 selected"), "{out}");
+        assert!(
+            out.contains("✓ filesystem") && out.contains("○ github"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Space toggle") && out.contains("a/n all/none"),
+            "{out}"
+        );
+    }
 }

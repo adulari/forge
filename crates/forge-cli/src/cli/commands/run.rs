@@ -1674,10 +1674,7 @@ pub(crate) async fn run_chat_tui(
                 }
 
                 if matches!(key, KeyKind::ShowHelp) {
-                    let bindings = app.keybinds.clone();
-                    let _ = tui.run_fullscreen(|| {
-                        forge_tui::run_help(&bindings, forge_tui::HelpTab::Keybinds)
-                    });
+                    app.open_help(&mut tui, forge_tui::HelpTab::Keybinds);
                     dirty = true;
                     continue;
                 }
@@ -1689,10 +1686,7 @@ pub(crate) async fn run_chat_tui(
                     && !busy
                     && !app.palette.open
                 {
-                    let bindings = app.keybinds.clone();
-                    let _ = tui.run_fullscreen(|| {
-                        forge_tui::run_help(&bindings, forge_tui::HelpTab::Keybinds)
-                    });
+                    app.open_help(&mut tui, forge_tui::HelpTab::Keybinds);
                     dirty = true;
                     continue;
                 }
@@ -2015,6 +2009,10 @@ pub(crate) async fn run_chat_tui(
                     KeyKind::Esc => app.command_center.close(),
                     KeyKind::Up => app.command_center.move_up(),
                     KeyKind::Down => app.command_center.move_down(&app.palette.extra),
+                    KeyKind::PageUp => app.command_center.jump_up(Some(8)),
+                    KeyKind::PageDown => app.command_center.jump_down(Some(8), &app.palette.extra),
+                    KeyKind::Home => app.command_center.jump_up(None),
+                    KeyKind::End => app.command_center.jump_down(None, &app.palette.extra),
                     KeyKind::Backspace => {
                         app.command_center.query.pop();
                         app.command_center.clamp(&app.palette.extra);
@@ -2023,7 +2021,8 @@ pub(crate) async fn run_chat_tui(
                         app.command_center.query.push(c);
                         app.command_center.clamp(&app.palette.extra);
                     }
-                    KeyKind::Enter | KeyKind::Tab => {
+                    KeyKind::Tab => app.command_center.cycle_group(),
+                    KeyKind::Enter => {
                         if let Some(entry) = app.command_center.selected_entry(&app.palette.extra) {
                             app.input = format!("/{}", entry.name);
                             if entry.usage.contains('<') {
@@ -2051,6 +2050,8 @@ pub(crate) async fn run_chat_tui(
                     }
                     KeyKind::Up => app.palette.move_up(),
                     KeyKind::Down => app.palette.move_down(),
+                    KeyKind::PageUp => app.palette.page_up(6),
+                    KeyKind::PageDown => app.palette.page_down(6),
                     KeyKind::Tab => {
                         if let Some(name) = app.palette.selected_name().map(|s| s.to_string()) {
                             // Replace the `/command` token in place (mid-line aware), not the
@@ -2488,23 +2489,9 @@ pub(crate) async fn run_chat_tui(
                     KeyKind::Esc => app.at_picker.close(),
                     KeyKind::Up => app.at_picker.move_up(),
                     KeyKind::Down => app.at_picker.move_down(),
-                    KeyKind::Tab | KeyKind::Enter => {
-                        if let Some(path) = app.at_picker.selected_path() {
-                            if let Some(tok) = forge_tui::at_token_at(
-                                &app.input,
-                                app.input_cursor.min(app.input.len()),
-                            ) {
-                                // Insert `@path ` (trailing space so the user can keep typing).
-                                app.input
-                                    .replace_range(tok.start..tok.end, &format!("@{path} "));
-                                app.input_cursor = app.input.len();
-                            } else {
-                                app.input = format!("@{path} ");
-                                app.input_cursor = app.input.len();
-                            }
-                        }
-                        app.at_picker.close();
-                    }
+                    KeyKind::PageUp => app.at_picker.page_up(6),
+                    KeyKind::PageDown => app.at_picker.page_down(6),
+                    KeyKind::Tab | KeyKind::Enter => app.accept_at_path(),
                     KeyKind::Char(_)
                     | KeyKind::Backspace
                     | KeyKind::DeleteForward

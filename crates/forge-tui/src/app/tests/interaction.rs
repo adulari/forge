@@ -1,4 +1,11 @@
 use super::*;
+use crate::theme::color;
+
+fn buffer_of(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+    terminal.draw(|f| render_live(f, app)).unwrap();
+    terminal.backend().buffer().clone()
+}
 
 // ── Next-prompt suggestion: SuggestionReady + Tab-accept + turn/session clearing ──────────
 #[test]
@@ -200,13 +207,20 @@ fn permission_controls_stay_visible_on_a_narrow_terminal() {
         ..Default::default()
     };
     let screen = screen_wh(&app, 30, LIVE_H);
-    assert_eq!(prompt_height(&app), PERMISSION_H);
-    assert!(screen.contains("[y]es"), "allow stays visible: {screen}");
+    assert!(prompt_height(&app) >= PERMISSION_H + 3, "a real block");
     assert!(
-        screen.contains("[a]lways"),
+        screen.contains("Allow once"),
+        "allow stays visible: {screen}"
+    );
+    assert!(
+        screen.contains("Always allow"),
         "always stays visible: {screen}"
     );
-    assert!(screen.contains("[n]o"), "deny stays visible: {screen}");
+    assert!(screen.contains("Deny"), "deny stays visible: {screen}");
+    assert!(
+        screen.contains("y  Enter") && screen.contains("n  Esc"),
+        "the legacy keys stay on the rows: {screen}"
+    );
 }
 
 #[test]
@@ -221,7 +235,17 @@ fn question_response_never_looks_like_a_permission_prompt() {
         false,
     );
     let screen = screen_wh(&app, 80, LIVE_H);
-    assert_eq!(prompt_height(&app), 0, "the form is not a permission bar");
+    assert!(prompt_height(&app) > 0, "the question is a decision block");
+    let rows = screen_rows(&app, 80, LIVE_H);
+    let rail_row = rows
+        .iter()
+        .position(|r| r.contains("Which migration"))
+        .expect("question row");
+    assert_eq!(
+        buffer_of(&app, 80, LIVE_H)[(1, rail_row as u16)].fg,
+        color::user(),
+        "the question rail is the info hue, never the permission warn"
+    );
     assert!(
         screen.contains("Which migration should Forge run?"),
         "question rendered in the live region: {screen}"
@@ -231,8 +255,12 @@ fn question_response_never_looks_like_a_permission_prompt() {
         "options rendered as rows: {screen}"
     );
     assert!(
-        screen.contains("answer"),
-        "composer has answer affordance: {screen}"
+        screen.contains("Enter confirm"),
+        "the block carries its own keys: {screen}"
+    );
+    assert!(
+        !screen.contains("◉ answer"),
+        "no parallel answer input: {screen}"
     );
     assert!(
         !screen.contains("[y]es"),
@@ -461,7 +489,7 @@ fn question_renders_options_to_scrollback_and_resolves_an_answer() {
         "question shown in the live region: {screen}"
     );
     assert!(
-        screen.contains("1 Postgres") && screen.contains("2 SQLite"),
+        screen.contains("1  Postgres") && screen.contains("2  SQLite"),
         "options numbered: {screen}"
     );
     assert!(
@@ -525,18 +553,21 @@ fn question_form_renders_tabs_checkboxes_other_and_note_rows() {
     }
     let screen = screen_wh(&app, 90, LIVE_H);
     println!("{screen}");
-    assert!(screen.contains("question 2 of 2"), "{screen}");
+    assert!(screen.contains("question 2/2"), "{screen}");
     assert!(
-        screen.contains("✓ Database") && screen.contains("✓ Scope"),
+        screen.contains("✓ Database") && screen.contains("▸ Scope"),
         "tab strip: {screen}"
     );
     assert!(
-        screen.contains("☑ 1 Auth") && screen.contains("☐ 2 Billing"),
+        screen.contains("✓ 1  Auth") && screen.contains("○ 2  Billing"),
         "{screen}"
     );
-    assert!(screen.contains("☑ 3 Search"), "{screen}");
+    assert!(screen.contains("✓ 3  Search"), "{screen}");
     assert!(screen.contains("Other…"), "{screen}");
-    assert!(screen.contains("note later"), "inline note field: {screen}");
+    assert!(
+        screen.contains("note") && screen.contains("later"),
+        "inline note field: {screen}"
+    );
     assert!(screen.contains("choose all that apply"), "{screen}");
     // Enter saves the note; Enter again (on the note row, answered) submits.
     assert_eq!(app.form_key(KeyKind::Enter), Some(crate::FormOutcome::Open));
@@ -560,7 +591,7 @@ fn command_palette_renders_filtered_commands() {
     app.palette.anim = 1.0; // fully revealed
     let text = screen(&app);
     assert!(text.contains("/help"), "palette shows commands: {text}");
-    assert!(text.contains("▸"), "selected row marked");
+    assert!(text.contains("❯ /help"), "selected row marked: {text}");
 }
 
 #[test]
@@ -580,7 +611,7 @@ fn picker_renders_heading_rows_and_selection() {
     let text = screen(&app);
     assert!(text.contains("resume a session"), "heading shown: {text}");
     assert!(text.contains("fix the auth bug"), "row subtitle shown");
-    assert!(text.contains('▸'), "selected row marked");
+    assert!(text.contains("❯ aaa"), "selected row marked: {text}");
 }
 
 #[test]
@@ -610,7 +641,7 @@ fn command_center_and_empty_chat_are_discoverable() {
     app.command_center.open();
     let center = screen_wh(&app, 100, 30);
     assert!(center.contains("Command center"), "title shown: {center}");
-    assert!(center.contains("Start work"), "categories shown: {center}");
+    assert!(center.contains("START WORK"), "categories shown: {center}");
     assert!(center.contains("/plan"), "commands shown: {center}");
 }
 
@@ -792,4 +823,490 @@ fn composer_cursor_moves_by_grapheme_cluster() {
     assert_eq!(crate::app::prev_char_boundary(s, accent_end), family_end);
     assert_eq!(crate::app::prev_char_boundary(s, 0), 0);
     assert_eq!(crate::app::next_char_boundary(s, s.len()), s.len());
+}
+
+mod blocks {
+    //! The decision block, the shared list and the composer, across widths and colour tiers.
+    use super::*;
+    use crate::theme::{scoped, ColorTier, GlyphTier, Mode, Motion, Theme};
+
+    fn shell_prompt(command: &str) -> App {
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::ToolStart {
+            name: "shell".into(),
+            args: serde_json::json!({ "command": command }).to_string(),
+        });
+        app.open_permission("shell", "Shell");
+        app
+    }
+
+    #[test]
+    fn the_permission_block_names_the_action_and_lists_numbered_choices() {
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::ToolStart {
+            name: "write_file".into(),
+            args: r#"{"path":"mock-note.txt","content":"x"}"#.into(),
+        });
+        app.open_permission("write_file", "Write");
+        for (w, h) in [(80u16, 24u16), (160, 48), (80, LIVE_H)] {
+            let rows = screen_rows(&app, w, h);
+            let text = rows.join("\n");
+            assert!(text.contains("Allow Write"), "{w}x{h}: {text}");
+            assert!(text.contains("❯ 1  Allow once"), "{w}x{h}: {text}");
+            assert!(
+                text.contains("2  Always allow write_file"),
+                "{w}x{h}: {text}"
+            );
+            assert!(text.contains("3  Deny"), "{w}x{h}: {text}");
+            assert!(
+                !text.contains("Message Forge"),
+                "the block replaces the composer: {text}"
+            );
+            assert!(
+                rows.iter().all(|r| !r.starts_with('╭')),
+                "no composer frame while deciding: {text}"
+            );
+            assert!(text.contains("╰"), "bottom border with hints: {text}");
+        }
+    }
+
+    #[test]
+    fn moving_the_focus_moves_the_caret_and_the_highlight() {
+        let mut app = App::default();
+        app.open_permission("write_file", "Write");
+        app.permission_key(KeyKind::Down);
+        let text = screen_rows(&app, 80, 24).join("\n");
+        assert!(text.contains("❯ 2  Always allow"), "{text}");
+        assert!(!text.contains("❯ 1"), "{text}");
+    }
+
+    #[test]
+    fn a_long_shell_command_is_wrapped_in_full_not_truncated() {
+        let command = "cargo test --workspace --all-features -- --nocapture --test-threads=1 \
+            && cargo clippy --workspace --all-targets -- -D warnings && echo finished";
+        let app = shell_prompt(command);
+        let text = screen_rows(&app, 60, 30).join("\n");
+        for word in ["--nocapture", "--test-threads=1", "clippy", "finished"] {
+            assert!(text.contains(word), "{word} must stay visible: {text}");
+        }
+        assert!(text.contains("Allow Shell to run this command?"), "{text}");
+    }
+
+    #[test]
+    fn the_permission_block_fits_the_inline_region_with_room_for_the_preview() {
+        let app = shell_prompt("ls");
+        assert!(
+            prompt_height(&app) as usize <= LIVE_H as usize - 5,
+            "{}",
+            prompt_height(&app)
+        );
+    }
+
+    #[test]
+    fn typing_on_the_question_list_starts_an_other_answer() {
+        let mut form = crate::QuestionForm::new(vec![forge_types::Question::single(
+            "Which one?",
+            &[QChoice {
+                label: "A".into(),
+                description: String::new(),
+            }],
+            true,
+        )]);
+        assert_eq!(form.key(KeyKind::Char('x')), crate::FormOutcome::Open);
+        assert_eq!(form.editing, Some(crate::question_form::Editing::Other));
+        assert_eq!(form.buffer, "x");
+        form.key(KeyKind::Char('y'));
+        match form.key(KeyKind::Enter) {
+            crate::FormOutcome::Submit(a) => assert_eq!(a[0].other.as_deref(), Some("xy")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_digit_past_the_options_opens_the_other_row() {
+        let mut form = crate::QuestionForm::new(vec![forge_types::Question::single(
+            "Which one?",
+            &[QChoice {
+                label: "A".into(),
+                description: String::new(),
+            }],
+            true,
+        )]);
+        form.key(KeyKind::Char('2'));
+        assert_eq!(form.editing, Some(crate::question_form::Editing::Other));
+    }
+
+    #[test]
+    fn the_command_center_lists_every_registered_command_and_tab_cycles_groups() {
+        let mut app = App::default();
+        app.command_center.open();
+        let all: Vec<String> = app
+            .command_center
+            .matches(&[])
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        for c in crate::commands::COMMANDS {
+            assert!(all.iter().any(|n| n == c.name), "/{} missing", c.name);
+        }
+        let all_count = all.len();
+        app.command_center.cycle_group();
+        let start = app.command_center.matches(&[]);
+        assert!(!start.is_empty() && start.len() < all_count);
+        assert!(start.iter().all(|e| e.category == "Start work"));
+        for _ in 0..crate::commands::COMMAND_GROUPS.len() - 1 {
+            app.command_center.cycle_group();
+        }
+        assert_eq!(app.command_center.group, 0, "wraps back to All");
+    }
+
+    #[test]
+    fn every_registered_command_still_parses() {
+        for c in crate::commands::COMMANDS {
+            assert!(
+                !matches!(
+                    crate::parse_command(&format!("/{}", c.name)),
+                    crate::CommandAction::Unknown(_)
+                ),
+                "/{} no longer parses",
+                c.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_default_keybind_action_is_still_wired() {
+        let defaults = forge_config::KeybindsConfig::default();
+        for action in defaults.binds.keys() {
+            assert!(
+                crate::keybinds::action_to_key_kind(action).is_some()
+                    || action == "command_palette",
+                "{action} lost its handler"
+            );
+        }
+    }
+
+    #[test]
+    fn the_palette_lists_recent_commands_first_and_tags_skills() {
+        let mut app = App::default();
+        app.palette.extra = vec![crate::PaletteEntry {
+            name: "demoskill".into(),
+            desc: "does a thing  (skill)".into(),
+            usage: String::new(),
+        }];
+        app.note_command_used("/models");
+        app.note_command_used("/compact now");
+        app.palette.open_with("");
+        let names: Vec<String> = app.palette.matches().into_iter().map(|e| e.name).collect();
+        assert_eq!(&names[..2], ["compact", "models"], "{names:?}");
+        let text = screen_wh(&app, 100, 30);
+        assert!(text.contains("recent first"), "{text}");
+        app.palette.open_with("demo");
+        let text = screen_wh(&app, 100, 30);
+        assert!(
+            text.contains("/demoskill") && text.contains("skill"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("(skill)"),
+            "the marker becomes a tag: {text}"
+        );
+    }
+
+    #[test]
+    fn the_at_picker_browses_directories_descends_and_searches_fuzzily() {
+        let mut picker = crate::AtPathPicker::default();
+        let files = ["README.md", "src/main.rs", "src/upload.rs", "docs/guide.md"]
+            .map(String::from)
+            .to_vec();
+        picker.open_with("", files);
+        picker.set_modified(["src/upload.rs".to_string()]);
+        let top = picker.matches();
+        assert_eq!(top, ["docs/", "src/", "README.md"], "dirs first: {top:?}");
+        let entries = picker.entries();
+        assert!(entries[1].modified && entries[1].is_dir, "{entries:?}");
+        picker.query = "src/".into();
+        assert_eq!(picker.matches(), ["src/main.rs", "src/upload.rs"]);
+        picker.query = "upl".into();
+        assert_eq!(picker.matches(), ["src/upload.rs"]);
+        picker.query = "mrs".into();
+        assert_eq!(
+            picker.matches(),
+            ["src/main.rs"],
+            "subsequence over the workspace"
+        );
+    }
+
+    #[test]
+    fn accepting_a_directory_descends_and_a_file_inserts_and_closes() {
+        let mut app = App::default();
+        app.input = "look at @sr".into();
+        app.input_cursor = app.input.len();
+        app.at_picker.open_with(
+            "sr",
+            ["src/main.rs", "src/lib.rs"].map(String::from).to_vec(),
+        );
+        app.at_picker.query = String::new();
+        app.at_picker.selected = 0;
+        app.accept_at_path();
+        assert_eq!(app.input, "look at @src/");
+        assert!(app.at_picker.open, "still open, browsing inside");
+        assert_eq!(app.at_picker.matches(), ["src/lib.rs", "src/main.rs"]);
+        app.accept_at_path();
+        assert_eq!(app.input, "look at @src/lib.rs ");
+        assert!(!app.at_picker.open);
+    }
+
+    #[test]
+    fn composer_continuation_rows_hang_at_two_cells_and_a_scrolled_input_says_so() {
+        let mut app = App {
+            input: "line one\nline two".into(),
+            ..App::default()
+        };
+        app.input_cursor = app.input.len();
+        let rows = screen_rows(&app, 80, 14);
+        assert!(rows.iter().any(|r| r.contains("│ ❯ line one")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.contains("│   line two")), "{rows:?}");
+        let long = (0..12)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.input = long;
+        app.input_cursor = app.input.len();
+        let text = screen_rows(&app, 80, 24).join("\n");
+        assert!(text.contains("↑ ") && text.contains(" more"), "{text}");
+    }
+
+    #[test]
+    fn long_composer_text_wraps_with_a_hanging_indent() {
+        let app = App {
+            input: "word ".repeat(40),
+            ..App::default()
+        };
+        let rows = screen_rows(&app, 60, 14);
+        let body: Vec<&String> = rows.iter().filter(|r| r.contains("word")).collect();
+        assert!(body.len() >= 3, "{rows:?}");
+        assert!(body[0].starts_with("│ ❯ word"), "{}", body[0]);
+        assert!(body[1].starts_with("│   word"), "{}", body[1]);
+    }
+
+    #[test]
+    fn mentions_and_commands_get_their_own_styles_in_the_composer() {
+        use crate::theme::color;
+        let app = App {
+            input: "/plan look at @src/a.rs now".into(),
+            ..App::default()
+        };
+        let buf = buffer_of(&app, 80, 14);
+        let row = (0..14u16)
+            .find(|&y| {
+                (0..80)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .contains("/plan")
+            })
+            .unwrap();
+        let find = |needle: &str| -> u16 {
+            let line: String = (0..80)
+                .map(|x| buf[(x, row)].symbol().to_string())
+                .collect();
+            line.find(needle).unwrap() as u16
+        };
+        assert_eq!(buf[(find("/plan"), row)].fg, color::brand());
+        assert_eq!(buf[(find("@src"), row)].fg, color::user());
+    }
+
+    #[test]
+    fn the_busy_composer_invites_a_follow_up() {
+        let app = App {
+            busy: true,
+            ..App::default()
+        };
+        let text = screen_rows(&app, 80, 24).join("\n");
+        assert!(text.contains("queue a follow-up"), "{text}");
+    }
+
+    #[test]
+    fn ascii_and_mono_render_every_interaction_surface_without_unicode() {
+        scoped(
+            Theme::new(
+                ColorTier::Mono,
+                Mode::Dark,
+                GlyphTier::Ascii,
+                Motion::Reduced,
+            ),
+            || {
+                let mut app = App::default();
+                app.open_permission("write_file", "Write");
+                let permission = screen_rows(&app, 80, 24);
+                app.clear_question();
+                app.palette.open_with("mo");
+                let palette = screen_rows(&app, 80, 24);
+                app.palette.close();
+                app.command_center.open();
+                let center = screen_rows(&app, 80, 24);
+                app.command_center.close();
+                app.picker.open_with(
+                    crate::PickerKind::Sessions,
+                    "resume a session",
+                    vec![crate::PickerRow {
+                        id: "a".into(),
+                        title: "hello".into(),
+                        subtitle: "master".into(),
+                    }],
+                );
+                let picker = screen_rows(&app, 80, 24);
+                app.picker.close();
+                app.open_form(vec![forge_types::Question::single(
+                    "Which one?",
+                    &[QChoice {
+                        label: "A".into(),
+                        description: "first".into(),
+                    }],
+                    true,
+                )]);
+                let question = screen_rows(&app, 80, 24);
+                for (name, rows) in [
+                    ("permission", permission),
+                    ("palette", palette),
+                    ("command center", center),
+                    ("picker", picker),
+                    ("question", question),
+                ] {
+                    for row in rows {
+                        assert!(row.is_ascii(), "{name}: non-ASCII glyph in {row:?}");
+                    }
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn no_surface_paints_a_background_in_sixteen_colour_or_mono() {
+        for tier in [ColorTier::Ansi16, ColorTier::Mono] {
+            scoped(
+                Theme::new(tier, Mode::Dark, GlyphTier::Unicode, Motion::Reduced),
+                || {
+                    let mut app = App::default();
+                    app.palette.open_with("");
+                    let buf = buffer_of(&app, 80, 24);
+                    assert!(buf
+                        .content
+                        .iter()
+                        .all(|c| c.bg == ratatui::style::Color::Reset));
+                    app.palette.close();
+                    app.command_center.open();
+                    let buf = buffer_of(&app, 80, 24);
+                    assert!(buf
+                        .content
+                        .iter()
+                        .all(|c| c.bg == ratatui::style::Color::Reset));
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn page_and_home_end_jumps_clamp_in_the_palette_the_center_and_the_file_picker() {
+        let mut app = App::default();
+        app.palette.open_with("");
+        let n = app.palette.matches().len();
+        app.palette.page_down(6);
+        assert_eq!(app.palette.selected, 6);
+        app.palette.page_down(1000);
+        assert_eq!(app.palette.selected, n - 1);
+        app.palette.page_up(1000);
+        assert_eq!(app.palette.selected, 0);
+        app.command_center.open();
+        app.command_center.jump_down(None, &[]);
+        let last = app.command_center.matches(&[]).len() - 1;
+        assert_eq!(app.command_center.selected, last);
+        app.command_center.jump_up(Some(8));
+        assert_eq!(app.command_center.selected, last - 8);
+        app.command_center.jump_up(None);
+        assert_eq!(app.command_center.selected, 0);
+        app.at_picker
+            .open_with("", (0..20).map(|i| format!("f{i:02}.rs")).collect());
+        app.at_picker.page_down(6);
+        assert_eq!(app.at_picker.selected, 6);
+        app.at_picker.page_down(100);
+        assert_eq!(app.at_picker.selected, 19);
+    }
+
+    #[test]
+    fn key_names_use_one_canonical_spelling() {
+        use crate::keybinds::combo_display;
+        use forge_config::KeyCombo;
+        let combo = |key: &str, ctrl, alt, shift| KeyCombo {
+            key: key.into(),
+            ctrl,
+            alt,
+            shift,
+        };
+        assert_eq!(combo_display(&combo("k", true, false, false)), "Ctrl+K");
+        assert_eq!(
+            combo_display(&combo("k", true, false, true)),
+            "Ctrl+Shift+K"
+        );
+        assert_eq!(combo_display(&combo("m", false, true, false)), "Alt+M");
+        assert_eq!(
+            combo_display(&combo("tab", false, false, true)),
+            "Shift+Tab"
+        );
+        assert_eq!(combo_display(&combo("up", true, false, false)), "Ctrl+↑");
+        assert_eq!(combo_display(&combo("pageup", false, false, false)), "PgUp");
+        assert_eq!(combo_display(&combo("f1", false, false, false)), "F1");
+        assert_eq!(combo_display(&combo(",", true, false, false)), "Ctrl+,");
+    }
+
+    #[test]
+    fn a_current_marker_moves_to_the_right_edge_of_its_picker_row() {
+        let mut app = App::default();
+        app.picker.open_with(
+            crate::PickerKind::Tempers,
+            "switch operating mode",
+            vec![crate::PickerRow {
+                id: "Auto-edit".into(),
+                title: "Auto-edit".into(),
+                subtitle: format!(
+                    "auto-apply file edits; still ask before shell commands{}",
+                    "   ● current"
+                ),
+            }],
+        );
+        let rows = screen_rows(&app, 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("Auto-edit  "))
+            .expect("row");
+        let trimmed = row.trim_end_matches(['│', ' ']);
+        assert!(trimmed.ends_with("● current"), "{row}");
+    }
+
+    #[test]
+    fn a_modal_at_80_columns_leaves_no_chat_showing_at_its_left_edge() {
+        let mut app = App {
+            fullscreen: true,
+            ..App::default()
+        };
+        app.apply(crate::PresenterEvent::Warning(
+            "a warning line to bleed through".into(),
+        ));
+        app.command_center.open();
+        let rows = screen_rows(&app, 80, 24);
+        let top = rows
+            .iter()
+            .position(|r| r.starts_with('╭'))
+            .expect("modal frame");
+        for row in &rows[top..top + 8] {
+            assert!(
+                row.starts_with('│') || row.starts_with('╭'),
+                "bleed at col 0: {row:?}"
+            );
+            assert!(
+                row.trim_end().ends_with(['│', '╮']),
+                "bleed at the right edge: {row:?}"
+            );
+        }
+    }
 }

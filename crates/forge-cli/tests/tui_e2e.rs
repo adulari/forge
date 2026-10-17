@@ -74,7 +74,25 @@ fn drive_pty_env(script: &[(&str, u64)], env: &[(&str, &str)]) -> (bool, String)
         "Use the **demoskill** skill to handle this request.\n\nRequest: $ARGUMENTS",
     )
     .unwrap();
+    // The project-trust gate ignores a project's `.forge/` settings (and asks on a TTY) until the
+    // project is trusted. Trust the throwaway cwd in a store private to this run, so the seeded
+    // skill and command load on the first try and the developer's real trust store is untouched.
+    let xdg_data = dir.join("xdg-data");
+    let xdg_config = dir.join("xdg-config");
+    std::fs::create_dir_all(&xdg_data).unwrap();
+    std::fs::create_dir_all(&xdg_config).unwrap();
+    let trusted = std::process::Command::new(env!("CARGO_BIN_EXE_forge"))
+        .arg("trust")
+        .arg(&dir)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("FORGE_DB", dir.join("forge.db"))
+        .output()
+        .expect("run forge trust");
+    assert!(trusted.status.success(), "forge trust failed: {trusted:?}");
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_forge"));
+    cmd.env("XDG_DATA_HOME", &xdg_data);
+    cmd.env("XDG_CONFIG_HOME", &xdg_config);
     cmd.arg("chat");
     cmd.arg("--mock");
     // Inline viewport: drives the native-scrollback path so the PTY capture is deterministic
@@ -170,7 +188,9 @@ fn tui_autocheckpoints_then_undo_picker_rewinds_over_a_pty() {
         ("say hi\r", 2500),
         ("/undo\r", 800),
         ("\r", 800),
-        // Idle Esc only arms the rewind picker; /quit is what exits.
+        // Rewinding puts the rewound prompt back in the composer; clear it (Ctrl+U) so `/quit`
+        // is the whole line. Idle Esc only arms the rewind picker; /quit is what exits.
+        ("\x15", 100),
         ("/quit\r", 0),
     ]);
     assert!(clean, "clean exit, no panic: {plain}");

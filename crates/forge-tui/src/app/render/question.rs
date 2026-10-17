@@ -1,233 +1,237 @@
-//! The `ask_user` form in the live region: a tab strip when several questions were asked, the
-//! current question, its options as radio buttons / checkboxes, the "Other…" row and the note
-//! row, with the row being typed into drawn inline.
+//! The `ask_user` question block: the decision block in the `user` hue. The question on top, its
+//! options as numbered rows with the `❯` focus, the `Other…` row with its inline field, and the
+//! optional note row. There is no second input box: free text is typed into the row itself.
 
+use unicode_width::UnicodeWidthStr;
+
+use super::chrome::{hint, Hint};
+use super::list_view::{fit, plain};
+use super::permission::{content_width, split_row, wrap, Decision};
 use super::*;
-use crate::question_form::{Editing, Row};
-use crate::theme::{color, styles};
+use crate::question_form::{Editing, QuestionForm, Row};
+use crate::theme::glyphs::g;
+use crate::theme::styles;
 
-pub(crate) fn render_question_form(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(form) = &app.form else {
-        return;
-    };
-    if area.height == 0 || area.width < 8 {
-        return;
-    }
-    let width = area.width as usize;
+pub(super) fn question_block(app: &App, width: u16, budget: usize) -> Decision {
+    let form = app.form.as_ref().expect("question block needs a form");
+    let w = content_width(width);
     let q = form.question();
-    let mut lines: Vec<TextLine> = Vec::new();
+    let mut rows: Vec<TextLine<'static>> = Vec::new();
 
-    // Heading: "❓ question 2 of 3" + tab strip (✓ answered, ▸ current, · pending).
-    let mut head = vec![Span::styled("  ❓ ", styles::brand().bold())];
-    if form.len() > 1 {
-        head.push(Span::styled(
-            format!("question {} of {}   ", form.current + 1, form.len()),
-            styles::brand().bold(),
-        ));
-        for (i, qi) in form.questions.iter().enumerate() {
-            let label = if qi.header.is_empty() {
-                format!("{}", i + 1)
-            } else {
-                truncate(&qi.header, 16)
-            };
-            let current = i == form.current;
-            let mark = if form.answered(i) {
-                "✓"
-            } else if current {
-                "▸"
-            } else {
-                "·"
-            };
-            let style = if current {
-                styles::pill(styles::brand())
-            } else if form.answered(i) {
-                styles::ok()
-            } else {
-                styles::muted()
-            };
-            head.push(Span::styled(format!(" {mark} {label} "), style));
-            head.push(Span::raw(" "));
-        }
-    } else {
-        head.push(Span::styled("question".to_string(), styles::brand().bold()));
-    }
-    lines.push(TextLine::from(head));
-
-    // The question text, wrapped; a multi-select says so.
     let kind = if q.multi {
         "  (choose all that apply)"
     } else {
         ""
     };
-    for row in wrap_words(&format!("{}{kind}", q.text), width.saturating_sub(5)) {
-        lines.push(TextLine::from(vec![
-            Span::raw("   "),
-            Span::styled(row, styles::user().bold()),
-        ]));
+    let right = vec![Span::styled(
+        format!("question {}/{}", form.current + 1, form.len()),
+        styles::faint(),
+    )];
+    let right_w = format!("question {}/{}", form.current + 1, form.len()).width() + 2;
+    for (i, text) in wrap(
+        &plain(&format!("{}{kind}", q.text)),
+        w.saturating_sub(right_w),
+    )
+    .into_iter()
+    .enumerate()
+    {
+        let left = vec![Span::styled(text, styles::user().bold())];
+        rows.push(if i == 0 {
+            split_row(left, right.clone(), w)
+        } else {
+            TextLine::from(left)
+        });
     }
-    lines.push(TextLine::default());
+    if form.len() > 1 {
+        let mut spans = Vec::new();
+        for (i, qi) in form.questions.iter().enumerate() {
+            let label = if qi.header.is_empty() {
+                format!("{}", i + 1)
+            } else {
+                fit(&qi.header, 16)
+            };
+            let (mark, style) = if i == form.current {
+                (g().disclose_closed, styles::user().bold())
+            } else if form.answered(i) {
+                (g().ok, styles::ok())
+            } else {
+                (g().info, styles::muted())
+            };
+            spans.push(Span::styled(format!("{mark} {label}"), style));
+            spans.push(Span::raw("  "));
+        }
+        rows.push(TextLine::from(spans));
+    } else if !q.header.is_empty() {
+        rows.push(TextLine::from(Span::styled(
+            plain(&q.header).into_owned(),
+            styles::muted(),
+        )));
+    }
+    rows.push(TextLine::default());
 
-    // Rows.
+    let body = body_rows(form, w);
+    let flash = form
+        .flash
+        .map(|f| TextLine::from(Span::styled(format!("{} {f}", g().warn), styles::warn())));
+    let fixed = rows.len() + 1 + usize::from(flash.is_some());
+    let avail = budget.saturating_sub(fixed).max(3);
+    let cursor_pos = form_rows(form)
+        .iter()
+        .position(|r| *r == form.cursor)
+        .unwrap_or(0);
+    if body.len() <= avail {
+        rows.extend(body);
+    } else {
+        let shown = avail - 1;
+        let start = cursor_pos.saturating_sub(shown / 2).min(body.len() - shown);
+        rows.extend(body[start..start + shown].iter().cloned());
+        rows.push(TextLine::from(Span::styled(
+            format!("{} {} more", g().ellipsis, body.len() - shown),
+            styles::faint(),
+        )));
+    }
+    rows.extend(flash);
+    Decision {
+        rail: styles::user(),
+        rows,
+        hints: question_hints(app),
+    }
+}
+
+fn other_label() -> String {
+    format!("Other{}", g().ellipsis)
+}
+
+fn form_rows(form: &QuestionForm) -> Vec<Row> {
+    form.rows()
+}
+
+fn body_rows(form: &QuestionForm, w: usize) -> Vec<TextLine<'static>> {
+    let q = form.question();
     let draft = form.draft();
-    let rows = form.rows();
     let label_w = q
         .options
         .iter()
-        .map(|o| o.label.chars().count())
+        .map(|o| o.label.width())
         .max()
         .unwrap_or(0)
-        .clamp(6, 28);
-    let mut body: Vec<TextLine> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let at = *row == form.cursor;
-        let caret = if at { "▸ " } else { "  " };
-        let caret_style = styles::brand().bold();
-        match *row {
+        .clamp(6, 20)
+        .max(other_label().width());
+    let other_no = q.options.len() + 1;
+    let mut out = Vec::new();
+    for row in form.rows() {
+        let at = row == form.cursor;
+        let caret = if at {
+            format!("{} ", g().prompt)
+        } else {
+            "  ".to_string()
+        };
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(caret, styles::brand().bold())];
+        let label_style = if at {
+            styles::fg().bold()
+        } else {
+            styles::fg()
+        };
+        let mut used = 2;
+        let (number, label, desc_spans): (String, String, Vec<Span<'static>>) = match row {
             Row::Option(i) => {
                 let o = &q.options[i];
-                let chosen = draft.selected.contains(&i);
-                let box_ = match (q.multi, chosen) {
-                    (true, true) => "☑",
-                    (true, false) => "☐",
-                    (false, true) => "◉",
-                    (false, false) => "○",
-                };
-                let box_style = if chosen {
-                    styles::ok().bold()
-                } else if at {
-                    styles::brand()
-                } else {
-                    styles::muted()
-                };
-                let label_style = if at {
-                    styles::fg().bold()
-                } else if chosen {
-                    styles::ok()
-                } else {
-                    styles::fg()
-                };
-                let mut spans = vec![
-                    Span::styled(format!("   {caret}"), caret_style),
-                    Span::styled(format!("{box_} "), box_style),
-                    Span::styled(format!("{} ", i + 1), styles::muted()),
-                    Span::styled(
-                        format!("{:<label_w$}", truncate(&o.label, label_w)),
-                        label_style,
-                    ),
-                ];
-                if !o.description.is_empty() {
-                    let cap = width.saturating_sub(label_w + 12);
-                    spans.push(Span::styled(
-                        format!("  {}", truncate(&o.description, cap.max(8))),
-                        styles::muted(),
-                    ));
+                if q.multi {
+                    let chosen = draft.selected.contains(&i);
+                    let (mark, style) = if chosen {
+                        (g().ok, styles::ok().bold())
+                    } else {
+                        (g().task_open, styles::muted())
+                    };
+                    spans.push(Span::styled(format!("{mark} "), style));
+                    used += 2;
+                } else if draft.selected.contains(&i) {
+                    // A single-select answer already given stays visible on re-visit.
+                    spans.push(Span::styled(format!("{} ", g().ok), styles::ok()));
+                    used += 2;
                 }
-                body.push(TextLine::from(spans));
+                (
+                    (i + 1).to_string(),
+                    o.label.clone(),
+                    vec![Span::styled(o.description.clone(), styles::muted())],
+                )
             }
             Row::Other => {
                 let editing = form.editing == Some(Editing::Other);
                 let chosen = !draft.other.trim().is_empty();
-                let mark = if chosen { "◉" } else { "○" };
-                let mut spans = vec![
-                    Span::styled(format!("   {caret}"), caret_style),
-                    Span::styled(
-                        format!("{mark} "),
-                        Style::default().fg(if chosen {
-                            color::ok()
-                        } else {
-                            color::fg_muted()
-                        }),
-                    ),
-                    Span::styled(
-                        "Other… ".to_string(),
-                        Style::default()
-                            .fg(if at || editing {
-                                color::fg()
-                            } else {
-                                color::fg_muted()
-                            })
-                            .bold(),
-                    ),
-                ];
-                if editing {
-                    spans.extend(inline_field(&form.buffer, form.buffer_cursor));
+                let spans_desc = if editing {
+                    inline_field(
+                        &form.buffer,
+                        form.buffer_cursor,
+                        w.saturating_sub(label_w + 10),
+                    )
                 } else if chosen {
-                    spans.push(Span::styled(
-                        truncate(&draft.other, width.saturating_sub(16)),
-                        styles::ok(),
-                    ));
+                    vec![Span::styled(draft.other.clone(), styles::ok())]
                 } else {
-                    spans.push(Span::styled(
+                    vec![Span::styled(
                         "type your own answer".to_string(),
-                        styles::muted(),
-                    ));
-                }
-                body.push(TextLine::from(spans));
+                        styles::faint(),
+                    )]
+                };
+                (other_no.to_string(), other_label(), spans_desc)
             }
             Row::Note => {
                 let editing = form.editing == Some(Editing::Note);
                 let has = !draft.note.trim().is_empty();
-                let mut spans = vec![
-                    Span::styled(format!("   {caret}"), caret_style),
-                    Span::styled(
-                        "✎ ".to_string(),
-                        Style::default().fg(if has {
-                            color::warn()
-                        } else {
-                            color::fg_muted()
-                        }),
-                    ),
-                    Span::styled(
-                        "note ".to_string(),
-                        Style::default()
-                            .fg(if at || editing {
-                                color::fg()
-                            } else {
-                                color::fg_muted()
-                            })
-                            .bold(),
-                    ),
-                ];
-                if editing {
-                    spans.extend(inline_field(&form.buffer, form.buffer_cursor));
+                let spans_desc = if editing {
+                    inline_field(
+                        &form.buffer,
+                        form.buffer_cursor,
+                        w.saturating_sub(label_w + 10),
+                    )
                 } else if has {
-                    spans.push(Span::styled(
-                        truncate(&draft.note, width.saturating_sub(14)),
-                        styles::warn(),
-                    ));
+                    vec![Span::styled(draft.note.clone(), styles::warn())]
                 } else {
-                    spans.push(Span::styled(
-                        "optional — anything the model should know".to_string(),
-                        styles::muted(),
-                    ));
-                }
-                body.push(TextLine::from(spans));
+                    vec![Span::styled(
+                        "optional, anything the model should know".to_string(),
+                        styles::faint(),
+                    )]
+                };
+                ("n".to_string(), "note".to_string(), spans_desc)
             }
+        };
+        spans.push(Span::styled(number.clone(), styles::muted()));
+        spans.push(Span::raw("  "));
+        used += number.width() + 2;
+        let label = fit(&label, label_w);
+        used += label.width();
+        spans.push(Span::styled(
+            label.clone(),
+            if matches!(row, Row::Note) && !at {
+                styles::muted()
+            } else {
+                label_style
+            },
+        ));
+        let pad = label_w.saturating_sub(label.width()) + 2;
+        spans.push(Span::raw(" ".repeat(pad)));
+        used += pad;
+        let room = w.saturating_sub(used);
+        let mut taken = 0;
+        for span in desc_spans {
+            let text = fit(&span.content, room.saturating_sub(taken));
+            taken += text.width();
+            spans.push(Span::styled(text, span.style));
         }
+        used += taken;
+        spans.push(Span::raw(" ".repeat(w.saturating_sub(used))));
+        let line = TextLine::from(spans);
+        out.push(if at {
+            line.style(styles::selected_row())
+        } else {
+            line
+        });
     }
-
-    // Fit: keep the heading + question, scroll the rows around the cursor.
-    let h = area.height as usize;
-    let flash_h = usize::from(form.flash.is_some());
-    let avail = h.saturating_sub(lines.len() + flash_h).max(1);
-    let cursor_pos = rows.iter().position(|r| *r == form.cursor).unwrap_or(0);
-    let start = if body.len() <= avail {
-        0
-    } else {
-        cursor_pos.saturating_sub(avail - 1).min(body.len() - avail)
-    };
-    lines.extend(body.into_iter().skip(start).take(avail));
-    if let Some(flash) = form.flash {
-        lines.push(TextLine::from(Span::styled(
-            format!("   ⚠ {flash}"),
-            styles::warn(),
-        )));
-    }
-    frame.render_widget(Paragraph::new(lines), area);
+    out
 }
 
-/// The text being typed, with a block cursor, as spans.
-fn inline_field(buffer: &str, cursor: usize) -> Vec<Span<'static>> {
+/// The text being typed, with a block cursor, clipped to `room` cells from its tail.
+fn inline_field(buffer: &str, cursor: usize, room: usize) -> Vec<Span<'static>> {
     let cursor = cursor.min(buffer.len());
     let (before, after) = buffer.split_at(cursor);
     let mut chars = after.chars();
@@ -236,38 +240,46 @@ fn inline_field(buffer: &str, cursor: usize) -> Vec<Span<'static>> {
         .map(|c| c.to_string())
         .unwrap_or_else(|| " ".to_string());
     let rest: String = chars.collect();
+    // Keep the end of long text visible: drop leading characters until it fits.
+    let mut before = before.to_string();
+    while before.width() + 1 + rest.width() > room.max(4) && !before.is_empty() {
+        before.remove(0);
+    }
     vec![
-        Span::styled(before.to_string(), styles::fg()),
+        Span::styled(before, styles::fg()),
         Span::styled(under, styles::cursor()),
         Span::styled(rest, styles::fg()),
     ]
 }
 
-/// Greedy word wrap on display width (no hyphenation; a single over-long word is truncated).
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(8);
-    let mut out = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let w = word.chars().count();
-        let cur = line.chars().count();
-        if cur == 0 {
-            line = truncate(word, width);
-        } else if cur + 1 + w <= width {
-            line.push(' ');
-            line.push_str(word);
-        } else {
-            out.push(std::mem::take(&mut line));
-            line = truncate(word, width);
-        }
+pub(super) fn question_hints(app: &App) -> Vec<Hint> {
+    let Some(form) = &app.form else {
+        return Vec::new();
+    };
+    if form.editing.is_some() {
+        return vec![
+            hint("Enter", "save"),
+            hint("Esc", "cancel"),
+            hint("?", "keys"),
+        ];
     }
-    if !line.is_empty() {
-        out.push(line);
+    let q = form.question();
+    let picks = q.options.len() + usize::from(q.allow_other);
+    let mut hints = vec![
+        hint("↑↓", "choose"),
+        hint("Enter", "confirm"),
+        Hint {
+            key: format!("1-{}", picks.max(1)),
+            label: "pick",
+        },
+    ];
+    if q.allow_other {
+        hints.push(hint("o", "other"));
     }
-    if out.is_empty() {
-        out.push(String::new());
+    if q.allow_note {
+        hints.push(hint("n", "add note"));
     }
-    out
+    hints
 }
 
 #[cfg(test)]
@@ -275,9 +287,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrap_words_breaks_on_width_and_keeps_words_whole() {
-        let rows = wrap_words("which database should the service use for sessions", 20);
-        assert!(rows.iter().all(|r| r.chars().count() <= 20), "{rows:?}");
+    fn wrap_breaks_on_width_and_keeps_words_whole() {
+        let rows = wrap("which database should the service use for sessions", 20);
+        assert!(rows.iter().all(|r| r.width() <= 20), "{rows:?}");
         assert_eq!(
             rows.join(" "),
             "which database should the service use for sessions"

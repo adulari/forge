@@ -1,5 +1,8 @@
 # Feature: configurable TUI and app keybindings
 
+> Key names are spelled one way everywhere (`Ctrl+K`, `Alt+M`, `Shift+Tab`, `Ctrl+Shift+C`, `PgUp`):
+> in Help, in hints, in lists and in the keybinding editor. See [tui-interaction.md](tui-interaction.md).
+
 > **Status: shipped.** Every TUI action key is remappable via `[keybinds.binds]` in
 > `config.toml`. The desktop/web app has its own searchable Settings → Keyboard shortcuts
 > editor with live capture, conflict warnings, per-action reset, and reset-all. The two

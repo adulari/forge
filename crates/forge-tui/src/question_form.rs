@@ -302,12 +302,15 @@ impl QuestionForm {
             }
             KeyKind::Char(c @ '1'..='9') => {
                 let i = c as usize - '1' as usize;
-                if i < self.question().options.len() {
+                let options = self.question().options.len();
+                if i < options {
                     let single = !self.question().multi;
                     self.choose(i);
                     if single {
                         return self.advance();
                     }
+                } else if i == options && self.question().allow_other {
+                    self.start_editing(Editing::Other);
                 }
                 FormOutcome::Open
             }
@@ -348,6 +351,12 @@ impl QuestionForm {
                     }
                 }
             },
+            // Typing on the list starts an `Other…` answer: no second input box to find.
+            KeyKind::Char(c) if self.question().allow_other && !c.is_control() => {
+                self.start_editing(Editing::Other);
+                let _ = handle_key(&mut self.buffer, &mut self.buffer_cursor, KeyKind::Char(c));
+                FormOutcome::Open
+            }
             _ => FormOutcome::Open,
         }
     }

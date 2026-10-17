@@ -1,7 +1,7 @@
 //! Interactive keybind configurator overlay. Runs as a fullscreen takeover (via `Tui::run_fullscreen`).
 //! The user can navigate binds, rebind individual actions, reset to defaults, and save.
 
-use crate::theme::{color, styles};
+use crate::theme::styles;
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -9,14 +9,14 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
+use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
 use forge_config::KeybindsConfig;
 
+use crate::app::chrome_hint as hint;
+use crate::app::list_view;
 use crate::keybinds::{combo_display, key_event_to_combo};
 use crate::surface::{self};
 
@@ -110,137 +110,76 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
         let actions_len = actions.len();
         terminal.draw(|f| {
             let area = f.area();
-            let inner = surface::render_panel(
-                f,
-                area,
-                surface::title("Keybind configuration", surface::SurfaceTone::Accent),
-                None,
-                surface::SurfaceTone::Accent,
-            );
-
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Min(5),
-                    Constraint::Length(1),
-                ])
-                .split(inner);
-
-            let help_text = match &mode {
-                OverlayMode::Browse => {
-                    "j/k Up/Down navigate  •  Enter rebind  •  r reset  •  R reset all  •  s save+close  •  q/Esc discard"
-                }
-                OverlayMode::Capture { .. } => "Press the new key combination...  •  Esc cancel",
-            };
-            f.render_widget(
-                Paragraph::new(Span::styled(help_text, styles::muted())),
-                chunks[0],
-            );
-
-            let header = Row::new(vec![
-                Cell::from(Span::styled(
-                    "Action",
-                    styles::user().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Binding",
-                    styles::user().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Description",
-                    styles::user().add_modifier(Modifier::BOLD),
-                )),
-            ])
-            .height(1);
-
-            let rows: Vec<Row> = actions
+            let items: Vec<list_view::Item> = actions
                 .iter()
-                .enumerate()
-                .map(|(i, action)| {
+                .map(|action| {
                     let combo = working.binds.get(*action);
-                    let binding_text = combo
+                    let binding = combo
                         .map(combo_display)
                         .unwrap_or_else(|| "(unset)".to_string());
-                    let is_default = defaults.binds.get(*action) == working.binds.get(*action);
-                    let mid_turn = is_mid_turn_only(action);
-
-                    let binding_display = if !is_default {
-                        format!("{} [*]", binding_text)
-                    } else {
-                        binding_text
-                    };
-
-                    let is_selected = i == selected;
-                    let row_style = if is_selected {
-                        styles::selected_row()
-                    } else {
-                        styles::fg()
-                    };
-
-                    let marker = if mid_turn { " >" } else { "  " };
-
-                    Row::new(vec![
-                        Cell::from(Span::styled(
-                            format!("{}{}", marker, action),
-                            row_style,
-                        )),
-                        Cell::from(Span::styled(
-                            binding_display,
-                            if is_selected {
-                                row_style
-                            } else if !is_default {
-                                styles::warn()
-                            } else {
-                                styles::ok()
-                            },
-                        )),
-                        Cell::from(Span::styled(
-                            action_desc(action),
-                            if is_selected {
-                                row_style
-                            } else {
-                                styles::muted()
-                            },
-                        )),
-                    ])
-                    .height(1)
+                    let modified = defaults.binds.get(*action) != working.binds.get(*action);
+                    let mut desc = action_desc(action).to_string();
+                    if is_mid_turn_only(action) {
+                        desc.push_str("  (mid-turn only)");
+                    }
+                    list_view::Item::Row(list_view::Row {
+                        label: if modified {
+                            format!("{binding} *")
+                        } else {
+                            binding
+                        },
+                        label_style: Some(if modified {
+                            styles::warn()
+                        } else {
+                            styles::fg()
+                        }),
+                        desc,
+                        meta: action.to_string(),
+                        ..list_view::Row::default()
+                    })
                 })
                 .collect();
-
-            let table = Table::new(
-                rows,
-                [
-                    Constraint::Length(22),
-                    Constraint::Length(22),
-                    Constraint::Min(20),
+            let detail = match &status {
+                Some((msg, ok)) => Some(vec![Span::styled(
+                    msg.clone(),
+                    if *ok { styles::ok() } else { styles::err() },
+                )]),
+                None => Some(vec![Span::styled(
+                    "* modified from the default",
+                    styles::muted(),
+                )]),
+            };
+            let footer = match &mode {
+                OverlayMode::Browse => vec![
+                    hint("↑↓", "move"),
+                    hint("Enter", "rebind"),
+                    hint("r", "reset"),
+                    hint("R", "reset all"),
+                    hint("s", "save"),
+                    hint("Esc", "discard"),
                 ],
-            )
-            .header(header)
-            .block(Block::default());
-
-            f.render_widget(table, chunks[1]);
-
-            if let Some((msg, ok)) = &status {
-                let color = if *ok { color::ok() } else { color::err() };
-                f.render_widget(
-                    Paragraph::new(Span::styled(msg.clone(), Style::default().fg(color))),
-                    chunks[2],
-                );
-            } else {
-                let unsaved_note = if changes > 0 {
-                    format!(
-                        "  Unsaved changes: {}  •  > = mid-turn only  •  [*] = modified",
-                        changes
-                    )
-                } else {
-                    "  No unsaved changes  •  > = mid-turn only".to_string()
-                };
-                f.render_widget(
-                    Paragraph::new(Span::styled(unsaved_note, styles::muted())),
-                    chunks[2],
-                );
-            }
+                OverlayMode::Capture { .. } => {
+                    vec![hint("any key", "bind it"), hint("Esc", "cancel")]
+                }
+            };
+            list_view::render(
+                f,
+                area,
+                &list_view::View {
+                    title: "Keybindings".to_string(),
+                    context: if changes > 0 {
+                        format!("{changes} unsaved")
+                    } else {
+                        "no changes".to_string()
+                    },
+                    items,
+                    selected,
+                    detail,
+                    footer,
+                    padded: true,
+                    ..list_view::View::default()
+                },
+            );
 
             if matches!(mode, OverlayMode::Capture { .. }) {
                 let action_name = match &mode {
@@ -256,10 +195,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                     surface::SurfaceTone::Brand,
                 );
                 let msg = format!("Press the new key for:\n  {}", action_name);
-                f.render_widget(
-                    Paragraph::new(Span::styled(msg, styles::fg())),
-                    popup_inner,
-                );
+                f.render_widget(Paragraph::new(Span::styled(msg, styles::fg())), popup_inner);
             }
         })?;
 

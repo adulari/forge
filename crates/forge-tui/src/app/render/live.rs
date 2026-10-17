@@ -49,6 +49,7 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     app.forget_viewer_wrapped();
     const MIN_STREAM: u16 = 1;
     let full = frame.area();
+    app.interaction_ui.note_screen(full.width, full.height);
     // Chrome is the header (fullscreen only), the composer and the status line. The composer grows
     // with wrapped/multiline content (capped); the stream area absorbs the change, so the inline
     // viewport's total height is untouched (never resized at runtime).
@@ -110,11 +111,9 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         main_area
     };
 
-    // The main region: the slash-command palette and @path picker are *completion popups*. In
-    // full-screen they show as a small bottom-anchored list with the transcript still visible
-    // above. The session picker stays a full modal. Otherwise it is the transcript (full-screen)
-    // or the in-flight reply edge (inline).
-    const POPUP_MAX: u16 = 10;
+    // The main region. The palette and @path picker are completion popups attached to the
+    // composer: the transcript keeps the rows above them. Pickers are modals over the dimmed
+    // transcript. A question never lives here: it replaces the composer (see `permission`).
     if app.command_center.open {
         if app.fullscreen {
             render_transcript_area(frame, main, app);
@@ -122,32 +121,35 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
             render_preview(frame, main, app);
         }
     } else if app.palette.open || app.at_picker.open {
-        let (top, popup) = if app.fullscreen && main.height > POPUP_MAX + 1 {
-            let popup_h = POPUP_MAX;
-            let top = Rect {
-                height: main.height - popup_h,
-                ..main
-            };
-            let popup = Rect {
-                y: main.y + main.height - popup_h,
-                height: popup_h,
-                ..main
-            };
-            (Some(top), popup)
-        } else {
-            (None, main)
+        let popup_h = popups::attached_height(app, main);
+        let top = Rect {
+            height: main.height - popup_h,
+            ..main
         };
-        if let Some(top) = top {
-            render_transcript_area(frame, top, app);
+        let popup = Rect {
+            y: main.y + main.height - popup_h,
+            height: popup_h,
+            ..main
+        };
+        if top.height > 0 {
+            if app.fullscreen {
+                render_transcript_area(frame, top, app);
+            } else {
+                render_preview(frame, top, app);
+            }
         }
         if app.palette.open {
             popups::render_palette(frame, popup, app);
         } else {
             popups::render_at_path_picker(frame, popup, app);
         }
-    } else if app.form.is_some() {
-        super::question::render_question_form(frame, main, app);
     } else if app.picker.open {
+        if app.fullscreen {
+            render_transcript_area(frame, main, app);
+        } else {
+            render_preview(frame, main, app);
+        }
+        surface::dim_backdrop(frame, main);
         popups::render_picker(frame, main, app);
     } else if app.fullscreen {
         render_transcript_area(frame, main, app);
@@ -183,7 +185,17 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     render_btw_overlay(frame, app);
     render_voice_overlay(frame, app);
     crate::config_editor::render_config_overlay(frame, &app.config_editor);
-    popups::render_command_center(frame, full, app);
+    // A modal never covers the header or the composer: it gets the rows between them.
+    let modal_region = Rect {
+        y: main_area.y,
+        height: if composer_h > 0 {
+            composer_area.y.saturating_sub(main_area.y)
+        } else {
+            full.height.saturating_sub(status_h + main_area.y - full.y)
+        },
+        ..full
+    };
+    popups::render_command_center(frame, modal_region, app);
     // The inspector sits between the header and the composer; inline, where the live region is
     // short, it takes the composer's rows too (the composer has nothing to say while it is open).
     let status_modal = if app.fullscreen {
