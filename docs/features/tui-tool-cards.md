@@ -49,7 +49,9 @@
 
 The same machinery folds long **user turns** (`UserFold`): a canned command prompt (`/init`)
 becomes one labelled row, a paste longer than six rows keeps its first six and `… N more lines ·
-Ctrl+T show`. `Ctrl+T` opens the newest card that has a drawer, a folded turn included, so a tool
+Ctrl+T show` (full-screen only: inline and the daemon driver show a generic message in full, because
+the scrollback scrolls natively and a phone reads the same rows). The remote transcript gets the
+hidden rows after the visible ones and never the fold hint. `Ctrl+T` opens the newest card that has a drawer, a folded turn included, so a tool
 card that is newer always wins.
 
 > One transcript row per tool call, click (or `Ctrl+T`) to open it, and a full-screen viewer for

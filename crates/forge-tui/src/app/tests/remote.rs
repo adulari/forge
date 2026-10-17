@@ -750,10 +750,120 @@ fn a_replys_transcript_rows_keep_the_shape_the_daemon_supervisor_reads() {
         vec!["  ⚒ forge", "  Done — the file is written."],
         "{rows:?}"
     );
-    let (kind, footer) = rows.last().unwrap();
-    assert_eq!(
-        kind, "system",
-        "the footer is a system row the supervisor skips: {rows:?}"
+    assert!(
+        !rows.iter().any(|(_, t)| t.contains("0.0s")),
+        "the footer is for the terminal and never reaches the wire: {rows:?}"
     );
-    assert!(footer.starts_with("  ") && footer.contains("s"), "{footer}");
+}
+
+#[test]
+fn the_remote_ring_keeps_what_was_said_and_run_not_card_bodies_or_footers() {
+    // The ring holds the last twelve rows; a turn's footer and a card's diff preview are for the
+    // terminal and must not push the notes a client is waiting for out of it.
+    let mut app = App::default();
+    app.submit_user("write it");
+    app.note("📎 included notes.txt");
+    app.apply(PresenterEvent::ToolStart {
+        name: "write_file".into(),
+        args: r#"{"path":"a.txt","content":"x"}"#.into(),
+    });
+    app.apply(PresenterEvent::Diff(forge_types::FileDiff {
+        path: "a.txt".into(),
+        kind: forge_types::DiffKind::Created,
+        old: None,
+        new: Some("l1\nl2\nl3\n".into()),
+        lang: None,
+        binary: false,
+    }));
+    app.apply(PresenterEvent::ToolResult {
+        name: "write_file".into(),
+        ok: true,
+        summary: "wrote".into(),
+        detail: None,
+    });
+    app.apply(PresenterEvent::AssistantText("Done.".into()));
+    app.apply(PresenterEvent::Done {
+        stop_reason: forge_types::StopReason::FinalAnswer,
+        final_text: String::new(),
+    });
+    let _ = app.drain_flush_remote();
+    let rows: Vec<String> = app
+        .recent_transcript
+        .iter()
+        .map(|r| r.text.clone())
+        .collect();
+    assert!(
+        rows.iter().any(|r| r.contains("📎 included notes.txt")),
+        "{rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("l2")),
+        "diff body stays local: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("0.0s")),
+        "footer stays local: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("Write a.txt")),
+        "the card header is kept: {rows:?}"
+    );
+}
+
+#[test]
+fn a_long_prompt_line_is_one_remote_row_not_one_per_wrapped_piece() {
+    let mut app = App::default();
+    app.submit_user(&format!(
+        "see @/tmp/{}",
+        "very-long-path-segment/".repeat(3)
+    ));
+    let _ = app.drain_flush_remote();
+    let user_rows = app
+        .recent_transcript
+        .iter()
+        .filter(|r| r.kind == TranscriptKind::User)
+        .count();
+    assert_eq!(user_rows, 2, "label + one row for the one line typed");
+}
+
+#[test]
+fn a_folded_paste_still_reaches_the_phone_in_full_and_in_order() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    app.last_width.set(100);
+    let paste: String = (1..=12).map(|i| format!("pasted line {i}\n")).collect();
+    app.submit_user(&paste);
+    let _ = app.drain_flush_remote();
+    let rows: Vec<&str> = app
+        .recent_transcript
+        .iter()
+        .map(|r| r.text.trim())
+        .collect();
+    let at = |needle: &str| rows.iter().position(|r| r.contains(needle));
+    assert!(
+        at("pasted line 1").is_some() && at("pasted line 12").is_some(),
+        "{rows:?}"
+    );
+    assert!(
+        at("pasted line 6") < at("pasted line 7"),
+        "in order: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("Ctrl+T")),
+        "the terminal's fold hint stays local: {rows:?}"
+    );
+}
+
+#[test]
+fn outside_full_screen_a_long_message_is_not_folded() {
+    let mut app = App::default();
+    let paste: String = (1..=12).map(|i| format!("pasted line {i}\n")).collect();
+    app.submit_user(&paste);
+    let text = drain_text_lines(&mut app);
+    assert!(
+        text.contains("pasted line 12") && !text.contains("more lines"),
+        "{text}"
+    );
 }

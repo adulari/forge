@@ -371,8 +371,10 @@ impl App {
         }
     }
 
-    /// The rows a user turn is echoed as: the label row, then its text on the user rail. A long
-    /// turn folds: a canned command prompt to one labelled row, a long paste to its first rows.
+    /// The rows a user turn is echoed as: its text on the user rail. A canned command prompt
+    /// folds to one labelled row; in full-screen a long paste folds to its first rows (`Ctrl+T`
+    /// opens it). Outside full-screen (inline, or the daemon driver a phone reads) a generic
+    /// message is never folded: the scrollback scrolls natively and a client must see all of it.
     pub(super) fn echo_user_text(&mut self, text: &str) {
         let label = CANNED
             .iter()
@@ -394,12 +396,22 @@ impl App {
             })
             .collect();
         let extra = text.lines().count().saturating_sub(ECHO_LINES);
-        let long = label.is_some() || rows.len() > USER_FOLD_ROWS;
-        if !long {
-            let lines: Vec<TextLine<'static>> = rows
-                .iter()
-                .map(|r| super::lines::turn::user_text(r))
+        let fold = label.is_some() || (self.fullscreen && rows.len() > USER_FOLD_ROWS);
+        if !fold {
+            // One row per line the user typed; the transcript wraps them at draw time.
+            let mut lines: Vec<TextLine<'static>> = text
+                .lines()
+                .take(ECHO_LINES)
+                .map(|l| {
+                    let l: String = l.chars().take(ECHO_LINE_CHARS).collect();
+                    super::lines::turn::user_text(&l)
+                })
                 .collect();
+            if extra > 0 {
+                lines.push(super::lines::turn::user_text(&format!(
+                    "… {extra} more lines (sent in full)"
+                )));
+            }
             self.flush.extend(lines);
             return;
         }
@@ -408,30 +420,37 @@ impl App {
             rows.push(format!("… {extra} more lines (sent in full)"));
         }
         if !self.fullscreen {
-            let rows = match &label {
-                Some(label) => vec![label.clone()],
-                None => {
-                    let mut kept: Vec<String> = rows.iter().take(USER_FOLD_ROWS).cloned().collect();
-                    kept.push(format!(
-                        "… {} more lines (sent in full)",
-                        rows.len() - USER_FOLD_ROWS
-                    ));
-                    kept
-                }
-            };
-            self.flush
-                .extend(rows.iter().map(|r| super::lines::turn::user_text(r)));
+            // Only a canned prompt gets here: one labelled row, nothing to open.
+            if let Some(label) = label {
+                self.flush.push(super::lines::turn::user_text(&label));
+            }
             return;
         }
         let id = self.next_card_id;
         self.next_card_id += 1;
+        let hidden: Vec<String> = match label {
+            Some(_) => Vec::new(),
+            None => rows.iter().skip(USER_FOLD_ROWS).cloned().collect(),
+        };
         let card = ToolCard::user_fold(id, UserFold { label, rows });
-        let lines = tool_cards::card_lines(&card, self.card_width());
+        let mut lines = tool_cards::card_lines(&card, self.card_width());
         let len = lines.len();
         self.tool_cards.push(card);
         // The caller tags the whole echo (label, rows, blank) as one user turn.
         self.pending_card_marks.push((self.flush.len(), id, len));
+        // The fold's hint is for the terminal. A phone reads the whole message: the rows the
+        // terminal hides ride along for it.
+        let hint = (!hidden.is_empty()).then(|| lines.pop()).flatten();
         self.flush.extend(lines);
+        if let Some(hint) = hint {
+            self.seal_flush_origins(&LineOrigin::user());
+            self.flush.push(hint);
+            self.seal_flush_origins(&LineOrigin::local());
+        }
+        for row in hidden {
+            self.remote_only
+                .push((super::lines::turn::user_text(&row), LineOrigin::user()));
+        }
     }
 }
 

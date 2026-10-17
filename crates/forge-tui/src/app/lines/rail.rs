@@ -81,6 +81,14 @@ pub(crate) fn text_row(kind: RailKind, text: &str, style: Style) -> Line<'static
     Line::from(spans)
 }
 
+/// Whether `line` is a row under a tool card's header (its `┊` gutter follows the rail).
+pub(crate) fn is_card_body(line: &Line<'_>) -> bool {
+    line.spans
+        .get(4)
+        .is_some_and(|s| s.content.as_ref() == g().card_gutter)
+        && line.spans.first().is_some_and(crate::copy_mark::is_rail)
+}
+
 /// Whether `line` is the assistant's label row (`✦ forge` and the routed model).
 pub(crate) fn is_assistant_label(line: &Line<'_>) -> bool {
     line.spans.len() >= 5

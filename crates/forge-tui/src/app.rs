@@ -630,6 +630,15 @@ impl LineOrigin {
         }
     }
 
+    /// A row that is for the terminal only (a turn's footer): the remote transcript skips it.
+    fn local() -> Self {
+        Self {
+            kind: TranscriptKind::System,
+            tool: None,
+            meta: Some("local".to_string()),
+        }
+    }
+
     fn assistant() -> Self {
         Self {
             kind: TranscriptKind::Assistant,
@@ -2454,7 +2463,7 @@ impl App {
             for img in std::mem::take(&mut s.last_submit_images) {
                 let kb = (img.data_base64.len() * 3 / 4).div_ceil(1024);
                 s.flush.push(lines::turn::user_text(&format!(
-                    "image attached ({}, ~{kb} KB)",
+                    "🖼 image attached ({}, ~{kb} KB)",
                     img.media_type
                 )));
             }
@@ -3323,6 +3332,11 @@ impl App {
     }
 
     fn push_remote_transcript_line(&mut self, line: &TextLine<'static>, origin: &LineOrigin) {
+        // A card's body (diff preview, failure tail) and a turn's footer are for the terminal:
+        // the phone has its own diff cards and keeps a short ring of what was said and run.
+        if origin.meta.as_deref() == Some("local") || lines::rail::is_card_body(line) {
+            return;
+        }
         // The rail is decoration for a terminal; a phone draws its own. Rows keep the two-cell
         // indent they have always had on the wire, and the assistant's label stays the
         // `⚒ forge` header the daemon's supervisor looks for when it extracts a reply.

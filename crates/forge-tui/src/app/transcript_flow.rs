@@ -120,7 +120,7 @@ impl App {
         let facts = self.turn_facts();
         self.transcript_ui.turn_open = false;
         let footer = (!facts.is_empty()).then(|| turn::turn_footer(&facts));
-        self.tag_flush(LineOrigin::default(), |s| {
+        self.tag_flush(LineOrigin::local(), |s| {
             s.flush.extend(footer);
             s.flush.push(TextLine::default());
         });
