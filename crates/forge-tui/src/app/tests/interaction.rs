@@ -622,19 +622,16 @@ fn command_center_and_empty_chat_are_discoverable() {
     };
     let idle = screen_wh(&app, 100, 30);
     assert!(
-        idle.contains("Explain this codebase"),
+        idle.contains("explain how this codebase"),
         "starter shown: {idle}"
     );
+    assert!(idle.contains("Ctrl+K"), "command hint shown: {idle}");
     assert!(
-        idle.contains("Ctrl+K for all actions"),
-        "command hint shown: {idle}"
-    );
-    assert!(
-        idle.contains("Check readiness with forge doctor"),
+        idle.contains("forge doctor"),
         "setup recovery action shown: {idle}"
     );
     assert!(
-        idle.contains("Preview routing with /mesh"),
+        idle.contains("/mesh"),
         "routing discovery action shown: {idle}"
     );
 

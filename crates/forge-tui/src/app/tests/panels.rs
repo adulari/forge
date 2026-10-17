@@ -26,7 +26,7 @@ fn subagent_batch_animates_live_then_folds_into_a_scrollback_box() {
         "running child shown in activity list: {live}"
     );
     // The activity panel shows each child's model (stripped to the short name).
-    assert!(live.contains("[opus]"), "child model shown: {live}");
+    assert!(live.contains("· opus"), "child model shown: {live}");
 
     app.apply(PresenterEvent::SubagentProgress {
         id: "a".into(),
@@ -58,7 +58,7 @@ fn subagent_batch_animates_live_then_folds_into_a_scrollback_box() {
     // group box also lands in scrollback. on_turn_start collapses the panel for the next turn.
     let done_screen = screen(&app);
     assert!(
-        done_screen.contains("activity ("),
+        done_screen.contains("Agents"),
         "activity panel visible: {done_screen}"
     );
     assert!(
@@ -66,7 +66,7 @@ fn subagent_batch_animates_live_then_folds_into_a_scrollback_box() {
         "done panel shows agent names: {done_screen}"
     );
     let sb = flush_text(&mut app);
-    assert!(sb.contains("subagents"), "group header: {sb}");
+    assert!(sb.contains("◆ Agents"), "group header: {sb}");
     assert!(
         sb.contains("reviewer") && sb.contains("2 issues"),
         "branch: {sb}"
@@ -81,28 +81,112 @@ fn subagent_batch_animates_live_then_folds_into_a_scrollback_box() {
 }
 
 #[test]
-fn welcome_banner_builds_ascii_wordmark() {
-    let text: String = banner_lines(80)
+fn inline_welcome_is_a_compact_identity_row_and_keys_row() {
+    let rows: Vec<String> = banner_lines(160)
         .iter()
-        .flat_map(|l| l.spans.iter())
-        .map(|s| s.content.as_ref())
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
-    assert!(text.contains('█'), "ASCII wordmark in banner");
-    assert!(text.contains("Your coding partner"), "tagline in banner");
+    let text = rows.join("\n");
+    assert!(text.contains("✦ forge"), "identity row: {text}");
+    assert!(text.contains("Your coding partner"), "tagline: {text}");
+    assert!(
+        text.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+        "version: {text}"
+    );
+    assert!(
+        text.contains("Keys") && text.contains("Ctrl+K"),
+        "keys: {text}"
+    );
+    assert!(
+        !text.contains('█'),
+        "no block art in the inline welcome: {text}"
+    );
+    assert!(rows.len() <= 5, "3-4 compact lines plus padding: {rows:?}");
 }
 
 #[test]
-fn narrow_terminal_banner_falls_back_to_compact_wordmark() {
-    let text: String = banner_lines(30)
+fn narrow_inline_welcome_clips_the_tagline_and_drops_keys() {
+    let rows: Vec<String> = banner_lines(40)
         .iter()
-        .flat_map(|l| l.spans.iter())
-        .map(|s| s.content.as_ref())
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
+    for row in &rows {
+        assert!(
+            unicode_width::UnicodeWidthStr::width(row.as_str()) <= 40,
+            "row fits 40 cells: {row:?}"
+        );
+    }
+}
+
+#[test]
+fn welcome_shows_only_on_an_empty_transcript_and_vanishes_after_the_first_message() {
+    let mut app = App::default();
+    app.fullscreen = true;
+    let rows = screen_rows(&app, 160, 48).join("\n");
+    assert!(rows.contains("Your coding partner"), "{rows}");
     assert!(
-        text.contains("FORGE"),
-        "compact wordmark on narrow terminal"
+        rows.contains("█▀▀"),
+        "tall terminals draw the wordmark: {rows}"
     );
-    assert!(!text.contains('█'), "no block art when too narrow");
+    assert!(rows.contains("Try"), "{rows}");
+    assert!(rows.contains("Keys"), "{rows}");
+
+    app.submit_user("hello");
+    app.drain_flush();
+    let rows = screen_rows(&app, 160, 48).join("\n");
+    assert!(!rows.contains("Your coding partner"), "{rows}");
+    assert!(rows.contains("hello"), "{rows}");
+}
+
+#[test]
+fn welcome_stays_within_thirteen_rows_at_80x24() {
+    let mut app = App::default();
+    app.fullscreen = true;
+    app.set_project_initialized(false);
+    app.set_recent_sessions(vec![("hello".into(), "3m ago".into())]);
+    let lines = crate::app::render::welcome::welcome_lines(&app, 80, 24);
+    assert!(lines.len() <= 13, "{} rows", lines.len());
+    let text = screen_rows(&app, 80, 24).join("\n");
+    assert!(
+        text.contains("✦ forge"),
+        "one-row mark on short terminals: {text}"
+    );
+    assert!(!text.contains("█▀▀"), "no wordmark at 24 rows: {text}");
+    assert!(text.contains("/init"), "onboarding nudge: {text}");
+    assert!(text.contains("Recent"), "recent sessions: {text}");
+}
+
+#[test]
+fn onboarding_line_is_state_and_clears_once_the_project_is_initialised() {
+    let dir = std::env::temp_dir().join(format!("forge-welcome-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = App::default();
+    app.fullscreen = true;
+    app.git_workspace = Some(dir.clone());
+    app.set_project_initialized(false);
+    assert!(
+        app.drain_flush().is_empty(),
+        "fullscreen pushes no scrollback warning"
+    );
+    let text = screen_rows(&app, 100, 40).join("\n");
+    assert!(text.contains("isn't set up for Forge"), "{text}");
+
+    app.panels_ui = Default::default();
+    app.set_project_initialized(true);
+    let text = screen_rows(&app, 100, 40).join("\n");
+    assert!(!text.contains("set up for Forge"), "{text}");
+}
+
+#[test]
+fn inline_uninitialised_project_still_gets_the_scrollback_warning() {
+    let mut app = App::default();
+    app.fullscreen = false;
+    app.set_project_initialized(false);
+    let sb = flush_text(&mut app);
+    assert!(
+        sb.contains("/init") && sb.contains("set up for Forge"),
+        "{sb}"
+    );
 }
 
 #[test]
@@ -110,7 +194,7 @@ fn tasks_panel_visible_while_active_and_absent_when_empty() {
     use forge_types::TodoStatus;
     let mut app = App::default();
     // No tasks → no sticky panel in the idle preview region.
-    assert!(!screen(&app).contains("tasks ("), "panel hidden when empty");
+    assert!(!screen(&app).contains("Tasks"), "panel hidden when empty");
 
     app.apply(PresenterEvent::Tasks(vec![
         todo("scan repo", TodoStatus::Done),
@@ -118,22 +202,19 @@ fn tasks_panel_visible_while_active_and_absent_when_empty() {
         todo("ship it", TodoStatus::Pending),
     ]));
     assert!(
-        screen(&app).contains("Work summary"),
-        "basic chat summarizes work before it is expanded"
+        screen(&app).contains("Tasks 1/3") && screen(&app).contains("write tests"),
+        "collapsed band names progress and the task in progress"
     );
     app.activity_focused = true;
     let s = screen(&app);
-    assert!(
-        s.contains("3 tasks (1 done, 1 in progress, 1 open)"),
-        "panel header + breakdown: {s}"
-    );
+    assert!(s.contains("Tasks 1/3"), "panel header + breakdown: {s}");
     // The in-progress item is shown with its glyph (prioritized into the small region).
-    assert!(s.contains('◼'), "in-progress glyph shown: {s}");
+    assert!(s.contains('◉'), "in-progress glyph shown: {s}");
 
     // Emptying the list collapses the panel.
     app.apply(PresenterEvent::Tasks(vec![]));
     assert!(
-        !screen(&app).contains("tasks ("),
+        !screen(&app).contains("Tasks"),
         "panel collapses when the list empties"
     );
 }
@@ -192,7 +273,8 @@ fn plan_card_renders_title_steps_and_frame() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("⬡ PLAN"), "has the plan tag: {text}");
+    assert!(text.contains("PLAN"), "has the plan label: {text}");
+    assert!(text.contains("2 steps"), "step count: {text}");
     assert!(text.contains("Refactor main.rs"), "has the title");
     assert!(text.contains("Extract clap defs") && text.contains("Split dispatch"));
     assert!(text.contains("into cli/args.rs"), "shows step detail");
@@ -200,7 +282,15 @@ fn plan_card_renders_title_steps_and_frame() {
         text.contains("keep the CLI surface identical"),
         "shows notes"
     );
-    assert!(text.contains('╭') && text.contains('╰'), "has a frame");
+    assert!(
+        !text.contains('╭'),
+        "the plan card is a block on the rail, not a box: {text}"
+    );
+    assert!(
+        text.contains("1  Extract clap defs"),
+        "numbered steps: {text}"
+    );
+    assert!(text.contains("Risks:"), "risks labelled: {text}");
     assert!(text.contains("approve to build"), "footer hint present");
 }
 
@@ -221,15 +311,29 @@ fn plan_card_wraps_long_text_within_the_frame() {
         .iter()
         .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
         .collect();
-    // Every framed row (starts with the left border) must end at the right border and all
-    // share the same visible width — i.e. nothing overflowed past the box.
-    let framed: Vec<&String> = lines.iter().filter(|l| l.starts_with("  │")).collect();
-    assert!(framed.len() > 3, "long text wrapped to multiple rows");
-    let w = framed[0].chars().count();
-    for l in &framed {
-        assert!(l.ends_with('│'), "row stays inside the right border: {l:?}");
-        assert_eq!(l.chars().count(), w, "all framed rows equal width: {l:?}");
+    // The long step title wraps, and its continuation rows hang under the title, not the number.
+    let step_start = lines
+        .iter()
+        .position(|l| l.starts_with("  1  Move every"))
+        .expect("step one row");
+    let continuation = &lines[step_start + 1];
+    assert!(
+        continuation.starts_with("     ") && !continuation.trim().is_empty(),
+        "wrapped text hangs at the step title: {continuation:?}"
+    );
+    for l in &lines {
+        assert!(
+            unicode_width::UnicodeWidthStr::width(l.as_str()) <= 90,
+            "nothing runs past the measure: {l:?}"
+        );
     }
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("  1 ") || l.starts_with("     "))
+            .count()
+            > 3
+    );
 }
 
 #[test]
@@ -243,7 +347,7 @@ fn tasks_panel_stays_visible_while_streaming() {
     let s = screen(&app);
     assert!(s.contains("streaming now"), "stream shown: {s}");
     assert!(
-        s.contains("tasks ("),
+        s.contains("Tasks 0/1"),
         "tasks panel stays visible while streaming: {s}"
     );
 }
@@ -263,7 +367,7 @@ fn subagent_panel_stays_visible_while_streaming() {
     let s = screen(&app);
     assert!(s.contains("thinking out loud"), "stream shown: {s}");
     assert!(
-        s.contains("activity ("),
+        s.contains("Agents"),
         "activity panel stays visible while streaming: {s}"
     );
 }
@@ -282,7 +386,7 @@ fn subagent_panel_present_while_running_and_after_done_collapses_on_next_turn() 
     assert_eq!(app.running_subagents(), 1);
     app.activity_focused = true;
     let s = screen(&app);
-    assert!(s.contains("activity ("), "panel header while running: {s}");
+    assert!(s.contains("Agents"), "panel header while running: {s}");
     assert!(s.contains("reviewer"), "agent label shown: {s}");
 
     // After SubagentResult the panel stays visible (shows "done") so it's never invisible
@@ -301,7 +405,7 @@ fn subagent_panel_present_while_running_and_after_done_collapses_on_next_turn() 
     );
     let s = screen(&app);
     assert!(
-        s.contains("activity ("),
+        s.contains("Agents"),
         "panel stays visible showing done state: {s}"
     );
 
@@ -442,7 +546,7 @@ fn a_second_batchs_scrollback_footer_counts_only_its_own_rows() {
     });
     let phase1_flush = flush_text(&mut app);
     assert!(
-        phase1_flush.contains("1 agents"),
+        phase1_flush.contains("1 agent "),
         "phase 1's own footer: {phase1_flush}"
     );
 
@@ -547,14 +651,14 @@ fn activity_panel_groups_workflow_phases_with_header_lines() {
     // The default test screen's activity panel is only a few rows tall — too short to fit 3
     // rows + 2 phase headers alongside the input box/statusline. Use a taller one.
     let s = screen_wh(&app, 100, 30);
-    assert!(s.contains("▶ research"), "research phase header shown: {s}");
+    assert!(s.contains("◆ research"), "research phase header shown: {s}");
     assert!(
-        s.contains("▶ implement"),
+        s.contains("◆ implement"),
         "implement phase header shown: {s}"
     );
     // Exactly one header per phase — the second `research` row must NOT repeat the header.
     assert_eq!(
-        s.matches("▶ research").count(),
+        s.matches("◆ research").count(),
         1,
         "header shown once per phase, not once per row: {s}"
     );
@@ -840,8 +944,8 @@ fn the_workflow_view_renders_name_phases_rows_totals_and_narration() {
     assert!(out.contains("reading files"), "live activity edge: {out:?}");
     // The scrollback record still tells the story after the view closes.
     let flushed = flush_text(&mut app);
-    assert!(flushed.contains("workflow 'audit' started"));
-    assert!(flushed.contains("phase: research"));
+    assert!(flushed.contains("workflow audit started"));
+    assert!(flushed.contains("phase research"));
 }
 
 #[test]
@@ -875,4 +979,141 @@ fn plan_card_selection_drops_frame_and_padding() {
     assert!(text.contains("do the thing"), "{text:?}");
     assert!(!text.contains(['╭', '╮', '╰', '╯', '│', '─']), "{text:?}");
     assert!(text.lines().all(|l| l == l.trim_end()), "{text:?}");
+}
+
+fn tasks_and_agent_app() -> App {
+    use forge_types::TodoStatus;
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    app.submit_user("go");
+    app.drain_flush();
+    app.apply(PresenterEvent::Tasks(vec![
+        todo("Read the uploader", TodoStatus::Done),
+        todo("Wire retry into the uploader", TodoStatus::InProgress),
+        todo("Add a test for the give-up path", TodoStatus::Pending),
+    ]));
+    app.apply(PresenterEvent::SubagentStart {
+        id: "a".into(),
+        agent: "reviewer".into(),
+        task: "review".into(),
+        model: Some("anthropic::opus".into()),
+        phase: None,
+    });
+    app
+}
+
+#[test]
+fn collapsed_band_shows_progress_task_and_running_agents() {
+    let app = tasks_and_agent_app();
+    let rows = screen_rows(&app, 100, 24);
+    let band = rows
+        .iter()
+        .find(|r| r.contains("Tasks 1/3"))
+        .unwrap_or_else(|| panic!("band row missing: {rows:#?}"));
+    assert!(band.contains("◉ Wire retry into the uploader"), "{band}");
+    assert!(band.contains("1 agent running"), "{band}");
+    assert!(band.contains("Ctrl+O details"), "{band}");
+}
+
+#[test]
+fn expanded_band_lists_tasks_and_agents_below_150_columns() {
+    let mut app = tasks_and_agent_app();
+    app.activity_focused = true;
+    let text = screen_rows(&app, 100, 30).join("\n");
+    assert!(text.contains("▾ Tasks 1/3"), "{text}");
+    assert!(text.contains("✓ Read the uploader"), "{text}");
+    assert!(text.contains("○ Add a test for the give-up path"), "{text}");
+    assert!(text.contains("▾ Agents 1"), "{text}");
+    assert!(text.contains("reviewer · opus"), "{text}");
+    assert!(
+        !text.contains("CONTEXT"),
+        "no rail below 150 columns: {text}"
+    );
+}
+
+#[test]
+fn details_become_a_38_column_rail_from_150_columns() {
+    use crate::app::render::panels::rail_width;
+    let mut app = tasks_and_agent_app();
+    assert_eq!(
+        rail_width(&app, Rect::new(0, 0, 160, 40)),
+        0,
+        "collapsed: no rail"
+    );
+    app.activity_focused = true;
+    assert_eq!(rail_width(&app, Rect::new(0, 0, 160, 40)), 38);
+    assert_eq!(
+        rail_width(&app, Rect::new(0, 0, 149, 40)),
+        0,
+        "narrower than 150"
+    );
+
+    let rows = screen_rows(&app, 160, 48);
+    let text = rows.join("\n");
+    assert!(
+        text.contains("TASKS 1/3") && text.contains("AGENTS"),
+        "{text}"
+    );
+    assert!(text.contains("CONTEXT"), "{text}");
+    assert!(
+        !text.contains("▾ Tasks"),
+        "the band folds into the rail: {text}"
+    );
+    let rail_col = 160 - 38;
+    assert!(
+        rows[3].chars().nth(rail_col) == Some('│'),
+        "rule on the rail's left edge: {:?}",
+        rows[3]
+    );
+    // The transcript shrank with it: its hit-test geometry stops at the rail.
+    let geom = app.transcript_geom.get().expect("transcript drawn");
+    assert_eq!(
+        geom.col0 + geom.width,
+        160 - 38,
+        "selection stays left of the rail"
+    );
+}
+
+#[test]
+fn rail_never_opens_inline() {
+    use crate::app::render::panels::rail_width;
+    let mut app = tasks_and_agent_app();
+    app.fullscreen = false;
+    app.activity_focused = true;
+    assert_eq!(rail_width(&app, Rect::new(0, 0, 200, 14)), 0);
+}
+
+#[test]
+fn task_elapsed_counts_for_running_work_and_freezes_when_done() {
+    use forge_types::TodoStatus;
+    let mut app = tasks_and_agent_app();
+    app.activity_focused = true;
+    let _ = screen_rows(&app, 100, 30);
+    assert!(app
+        .panel_elapsed("task:Wire retry into the uploader", true, false)
+        .is_some());
+    app.apply(PresenterEvent::Tasks(vec![todo(
+        "Wire retry into the uploader",
+        TodoStatus::Done,
+    )]));
+    let a = app.panel_elapsed("task:Wire retry into the uploader", false, true);
+    let b = app.panel_elapsed("task:Wire retry into the uploader", false, true);
+    assert_eq!(a, b, "finished tasks stop counting");
+    assert!(app.panel_elapsed("task:never seen", false, true).is_none());
+}
+
+#[test]
+fn panel_cost_formatting_table() {
+    use crate::app::render::panels::fmt_cost;
+    for (usd, want) in [
+        (0.0, "$0"),
+        (0.004, "<$0.01"),
+        (0.01, "$0.01"),
+        (0.126, "$0.13"),
+        (12.0, "$12.00"),
+    ] {
+        assert_eq!(fmt_cost(usd), want, "{usd}");
+    }
 }

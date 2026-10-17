@@ -69,7 +69,11 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     // One-line status band while a live workflow's view is backgrounded (Esc'd away): the run's
     // only always-visible trace, since its rows don't join the activity panel.
     let wf_band_h = u16::from(app.workflow.band_visible());
-    let band_h = panels::band_height(app, avail.saturating_sub(MIN_STREAM + wf_band_h));
+    let band_h = panels::band_height(
+        app,
+        full.width,
+        avail.saturating_sub(MIN_STREAM + wf_band_h),
+    );
     let stream_h = avail.saturating_sub(band_h + wf_band_h);
 
     let areas = Layout::vertical([

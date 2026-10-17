@@ -462,8 +462,8 @@ pub(crate) async fn run_chat_tui(
     pin: Option<String>,
 ) -> Result<()> {
     use forge_tui::{
-        banner_lines, handle_key, print_banner_direct, App, ChannelPresenter, ConfirmOutcome,
-        InputOutcome, KeyKind, Tui, UiMsg,
+        handle_key, print_banner_direct, App, ChannelPresenter, ConfirmOutcome, InputOutcome,
+        KeyKind, Tui, UiMsg,
     };
     use std::time::{Duration, Instant};
 
@@ -512,12 +512,8 @@ pub(crate) async fn run_chat_tui(
             "⚠ keybind `{action}`: `{key}` is not a valid key name — use a single key plus ctrl/alt/shift flags"
         ));
     }
-    // Full-screen banner goes into the transcript log (no native scrollback in full-screen mode).
-    // Inline banner was already printed directly to stdout above.
-    if matches!(resume_mode, ResumeMode::Fresh) && fullscreen {
-        let banner = banner_lines(tui.width());
-        app.push_scrollback(banner);
-    }
+    // Full-screen shows its welcome as a state of the empty transcript, so nothing is pushed into
+    // the log. The inline welcome was already printed directly to stdout above.
 
     // The terminal is live from here on: the session (store, keyring, provider catalog, skills,
     // MCP) comes up behind a spinner instead of in front of a blank screen. Warm, that phase is a
