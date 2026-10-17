@@ -499,9 +499,10 @@ impl Store {
     /// Sessions that were in the daemon's fleet when it last stopped, most recently active first.
     ///
     /// Archived sessions are excluded: archiving is an explicit "I am done with this", and it would
-    /// be worse to drag those back into a fleet the user deliberately cleared. Sessions that never
-    /// received a user message are excluded for the same reason [`Store::list_sessions`] skips
-    /// them — there is nothing to resume.
+    /// be worse to drag those back into a fleet the user deliberately cleared. A session that never
+    /// received a user message IS restored: the daemon hosted it (the flag is only set then), the
+    /// user may be about to type into it, and a worker or coordinator started with a prompt that
+    /// had not been recorded yet would otherwise vanish with the restart.
     pub fn daemon_live_sessions(&self) -> Result<Vec<String>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -510,8 +511,6 @@ impl Store {
                              s.created_at) AS last_activity
              FROM session s
              WHERE s.daemon_live = 1 AND s.archived = 0 AND s.parent_session_id IS NULL
-               AND EXISTS (SELECT 1 FROM message m
-                           WHERE m.session_id = s.id AND m.role = 'user')
              ORDER BY last_activity DESC, s.rowid DESC",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;

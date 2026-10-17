@@ -144,8 +144,25 @@ async fn a_prompt_queued_during_a_tool_step_joins_the_turn_after_that_step() {
 #[tokio::test]
 async fn a_prompt_queued_during_the_final_answer_continues_the_same_turn() {
     // No tool call at all: the only boundary is where the turn would have ended.
-    let (mut session, events, _store, calls) = steer_session(false, 0);
+    let (mut session, events, store, calls) = steer_session(false, 0);
     session.run_turn("summarize").await.unwrap();
+    let shown: Vec<(String, String)> = store
+        .load_history_page(&session.id, None, 50)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .map(|r| (r.role.as_str().to_string(), r.content))
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            ("user".to_string(), "summarize".to_string()),
+            ("assistant".to_string(), "answer after call 0".to_string()),
+            ("user".to_string(), "also rename the helper".to_string()),
+            ("assistant".to_string(), "answer after call 1".to_string()),
+        ],
+        "the reply the steer interrupted stays in the history, before the steer"
+    );
     let dbg: Vec<String> = events
         .lock()
         .unwrap()
@@ -323,11 +340,11 @@ fn inject_steers_persists_and_echoes_each_prompt() {
         test_workspace().to_str().unwrap(),
     )
     .unwrap();
-    assert!(!session.inject_steers(), "empty inbox injects nothing");
+    assert!(!session.inject_steers(""), "empty inbox injects nothing");
     let handle = session.steer_handle();
     handle.push("one");
     handle.push("two");
-    assert!(session.inject_steers());
+    assert!(session.inject_steers(""));
     assert_eq!(steered(&events), vec!["one".to_string(), "two".to_string()]);
     let persisted = store.load_messages(&session.id).unwrap();
     assert_eq!(persisted.len(), 2);

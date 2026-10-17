@@ -51,6 +51,25 @@ impl SteerInbox {
         }
     }
 
+    /// Queue `text` for the running turn only when everything ahead of it in the surface's
+    /// visible queue (`queued_before` entries) is also waiting here. A queued command, an image
+    /// prompt or a fleet follow-up is never in the inbox; letting a later prompt overtake one
+    /// would run it first, so it stays in the visible queue and runs at the turn boundary, in
+    /// typed order. Returns whether the text was added.
+    pub fn push_behind(&self, text: impl Into<String>, queued_before: usize) -> bool {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return false;
+        }
+        match self.inner.lock() {
+            Ok(mut q) if q.pending.len() == queued_before => {
+                q.pending.push_back(text);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Withdraw the oldest not-yet-taken `text`; false when the turn already took it.
     pub fn remove_pending(&self, text: &str) -> bool {
         self.inner.lock().is_ok_and(|mut q| {
@@ -112,6 +131,18 @@ mod tests {
         inbox.push("follow-up");
         inbox.push_front("steer");
         assert_eq!(inbox.drain(), ["steer", "follow-up"]);
+    }
+
+    #[test]
+    fn push_behind_never_overtakes_a_queued_entry_the_inbox_does_not_hold() {
+        let inbox = SteerInbox::default();
+        assert!(inbox.push_behind("a", 0));
+        assert!(inbox.push_behind("b", 1));
+        assert!(
+            !inbox.push_behind("c", 3),
+            "an entry that is queued but not in the inbox sits ahead of it"
+        );
+        assert_eq!(inbox.drain(), ["a", "b"]);
     }
 
     #[test]

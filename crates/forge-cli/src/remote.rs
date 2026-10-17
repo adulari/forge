@@ -593,6 +593,12 @@ pub struct Snapshot {
     /// as `transcript`; empty from a pre-v9 host.
     #[serde(default)]
     pub transcript_rows: Vec<SnapTranscriptRow>,
+    /// How many rows have ever entered the live tail (additive within v10). The tail is a ring of the last few
+    /// lines, so `transcript_total - transcript.len()` is the absolute index of its first line: a
+    /// client that pages persisted history in uses it to drop the lines that history already
+    /// shows instead of rendering the newest turn twice. 0 from an older host.
+    #[serde(default)]
+    pub transcript_total: u64,
     /// The live task list (`update_tasks`) — drives the remote task panel.
     pub tasks: Vec<SnapTask>,
     /// Live subagents in the current `spawn_agents` batch.
@@ -682,6 +688,7 @@ impl Default for Snapshot {
             streaming: String::new(),
             transcript: Vec::new(),
             transcript_rows: Vec::new(),
+            transcript_total: 0,
             tasks: Vec::new(),
             subagents: Vec::new(),
             queued: Vec::new(),
@@ -823,6 +830,11 @@ pub enum RemoteInput {
     /// back; while idle it starts a turn immediately, exactly like [`RemoteInput::Prompt`] (there
     /// is no backlog to outrank).
     Steer { text: String },
+    /// A fleet-messaging "follow_up" delivery: queued FIFO behind the current turn and run when
+    /// it ends. Unlike a [`RemoteInput::Prompt`] typed mid-turn it is never offered to the
+    /// running turn at its next step, so a peer's follow-up cannot act as a steer. While idle it
+    /// starts a turn immediately, exactly like [`RemoteInput::Prompt`].
+    FollowUp { text: String },
 }
 
 /// One message-correlated attachment riding a [`RemoteInput::Prompt`] (v7.1) — the client's own
@@ -2392,6 +2404,8 @@ mod tests {
             "needs decision",
             "s.diff",
             "s.plan",
+            "function tailLines", // history/tail seam: no newest turn twice
+            "transcript_total",
         ] {
             assert!(APP_JS.contains(needle), "app.js must contain {needle:?}");
         }

@@ -32,6 +32,7 @@ mod migrations;
 mod model_health_store;
 mod notification_store;
 mod provider_items_store;
+mod queued_prompt_store;
 use migrations::{
     add_column_if_missing, migrate_subscription_usage, run_migrations, seed_singleton_rows,
 };
@@ -82,7 +83,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 44;
+const SCHEMA_VERSION: i64 = 45;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);

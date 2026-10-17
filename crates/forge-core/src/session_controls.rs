@@ -751,11 +751,20 @@ impl Session {
     /// Hand every queued steer prompt to the model as a persisted user message and tell the
     /// surface. Returns whether anything was injected — the loop then continues instead of
     /// treating the last response as the end of the turn.
-    pub(crate) fn inject_steers(&mut self) -> bool {
+    ///
+    /// `answered` is the text the model just finished streaming when the injection replaces the
+    /// end of the turn. That reply is stored provider-only until a turn accepts it as terminal, and
+    /// this turn will not end on it, so it is published first: otherwise history, resume and the
+    /// phone show the steer straight after the user's prompt with the reply the user watched
+    /// stream missing, and the steer's own answer reading as the reply to the wrong message.
+    pub(crate) fn inject_steers(&mut self, answered: &str) -> bool {
         let mut texts = self.steer.drain();
         texts.extend(self.job_wake.drain());
         if texts.is_empty() {
             return false;
+        }
+        if let Err(error) = self.publish_terminal_answer(answered) {
+            tracing::warn!(%error, "could not publish the reply a steer interrupted");
         }
         self.adaptive_effort.restore();
         for text in texts {

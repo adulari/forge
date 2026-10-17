@@ -30,6 +30,7 @@ use crate::serve::{
 
 mod merge;
 mod messages;
+mod planning;
 mod start;
 mod supervisor;
 use messages::approval_text;

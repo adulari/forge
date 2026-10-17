@@ -16,7 +16,9 @@ impl DriverState {
         if self.draining.load(Ordering::Acquire)
             && matches!(
                 input,
-                remote::RemoteInput::Prompt { .. } | remote::RemoteInput::Steer { .. }
+                remote::RemoteInput::Prompt { .. }
+                    | remote::RemoteInput::Steer { .. }
+                    | remote::RemoteInput::FollowUp { .. }
             )
         {
             return Ok(());
@@ -190,6 +192,23 @@ impl DriverState {
                     image,
                 )
                 .await;
+            }
+            remote::RemoteInput::FollowUp { text } => {
+                if self.busy && is_command_line(&text) {
+                    self.busy_command(text).await?;
+                } else if self.busy {
+                    self.prompt_history.record(&text);
+                    forge_core::fleet::insert_into_queue(
+                        &mut self.queued_prompts,
+                        forge_core::fleet::MessageMode::FollowUp,
+                        text,
+                    );
+                    self.app.set_queued(&self.queued_prompts);
+                    self.app
+                        .note("⏳ follow-up queued — runs when this turn finishes");
+                } else {
+                    self.submit_line(text, None).await?;
+                }
             }
             remote::RemoteInput::Steer { text } => {
                 if self.busy && is_command_line(&text) {

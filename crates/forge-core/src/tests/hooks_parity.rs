@@ -233,7 +233,10 @@ async fn a_finished_background_job_reaches_the_model_at_the_next_step() {
     assert!(started.contains("started background job"), "{started}");
     assert!(wait_pending(&wake).await, "exit was never reported");
 
-    assert!(session.inject_steers(), "the notice joins the running turn");
+    assert!(
+        session.inject_steers(""),
+        "the notice joins the running turn"
+    );
     let injected = session
         .transcript
         .iter()
@@ -243,7 +246,7 @@ async fn a_finished_background_job_reaches_the_model_at_the_next_step() {
         .clone();
     assert!(injected.contains("exited 3"), "{injected}");
     assert!(injected.contains("built-ok"), "{injected}");
-    assert!(!session.inject_steers(), "delivered exactly once");
+    assert!(!session.inject_steers(""), "delivered exactly once");
     let _ = std::fs::remove_dir_all(base);
 }
 

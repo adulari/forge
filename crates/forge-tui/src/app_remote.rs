@@ -40,6 +40,7 @@ impl App {
                 .map(|r| r.text.clone())
                 .collect(),
             transcript_rows: self.recent_transcript.iter().cloned().collect(),
+            transcript_total: self.transcript_total,
             tasks: self.tasks.clone(),
             // `log` is left empty — the remote wire type (`remote::SnapSubagent`) never reads
             // it, so cloning the real (unbounded-growing) log buffer here on every dirty/busy
@@ -709,6 +710,8 @@ pub struct RemoteSnapshot {
     /// The same lines as `transcript`, each carrying the provenance its emitter recorded (v9) —
     /// see [`TranscriptRow`]. Same length and order.
     pub transcript_rows: Vec<TranscriptRow>,
+    /// Rows ever pushed into the ring (see `App::transcript_total`).
+    pub transcript_total: u64,
     pub tasks: Vec<forge_types::TodoItem>,
     pub subagents: Vec<SubagentSnapshot>,
     pub queued: Vec<String>,
