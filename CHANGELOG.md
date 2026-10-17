@@ -7,6 +7,7 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Changed
+- **`forge board` key hints move to the top row.** The contextual key hints sit right-aligned in the header row instead of the footer keybar (same keys, same order); on a narrow terminal the lowest-priority hints drop first and the title is never clipped. The footer keeps toasts only.
 - **Forgeline: welcome examples are selectable, the board wears the theme.** On the empty-transcript welcome, `↓` from an empty composer focuses the three example prompts (`❯` caret and raised fill; `↑`/`↓` move, `Enter` copies the example into the composer without sending, `Esc` or any other key leaves). `forge board` cards drop their frames for the list/card grammar (caret and raised fill on the selected card, exceptions-only status pill on the title row), lane headers use the categorical colour tokens, status glyphs follow the glyph tier (ASCII twins), and the detail pane header carries a health pill.
 
 ### Fixed

@@ -196,7 +196,7 @@ scheduling semantics, the CLI, and the HTTP API.
 ## 8. Keys
 
 Generated from `HELP` in `crates/forge-tui/src/board/keys.rs` — the same table the in-app `?`
-overlay and the footer keybar read, so none of the three can drift from what the keys actually
+overlay and the top-row key hints read, so none of the three can drift from what the keys actually
 do.
 
 | Key | Does |

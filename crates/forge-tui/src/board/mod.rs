@@ -23,6 +23,7 @@ pub mod dispatch_render;
 pub mod dispatch_state;
 pub mod form;
 pub mod form_render;
+pub mod hints;
 pub mod keys;
 pub mod model;
 pub mod overlays;

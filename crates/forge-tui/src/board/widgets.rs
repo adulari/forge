@@ -418,27 +418,6 @@ fn board_keybar(app: &BoardApp) -> Vec<Bind> {
     v
 }
 
-pub(super) fn keybar_line(binds: &[Bind], width: usize) -> Line<'static> {
-    let mut fit = Fit::new(width);
-    for (i, (key, desc, urgent)) in binds.iter().enumerate() {
-        if i > 0 {
-            fit.add(" · ", styles::faint());
-        }
-        let key_style = if *urgent {
-            styles::err().bold()
-        } else {
-            styles::user().bold()
-        };
-        fit.add(*key, key_style);
-        fit.add(" ", Style::default());
-        fit.add(*desc, styles::muted());
-        if fit.left() == 0 {
-            break;
-        }
-    }
-    fit.line()
-}
-
 /// The newest toasts (up to two, newest last), fading over their last ten ticks.
 pub(super) fn toast_items(app: &BoardApp) -> Vec<(String, Style)> {
     let recent: Vec<_> = app.toasts.iter().rev().take(2).collect();

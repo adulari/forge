@@ -1,5 +1,5 @@
-//! The board itself: the two-row header, the four columns of session cards, the footer keybar
-//! with its toasts, and the hand-off to the detail pane and the overlays.
+//! The board itself: the two-row header, the four columns of session cards, the footer toasts,
+//! the key hints in the header row, and the hand-off to the detail pane and the overlays.
 //!
 //! One rule governs everything here: a person glancing at this screen for one second must be able
 //! to tell which agent is doing what, which one needs them, and whether things are going well.
@@ -199,12 +199,15 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
         row.sep();
         row.add(text, style);
     }
+    let left_end = area.x + row.width() + 1;
     let left_area = Rect {
         width: avail,
         ..area
     };
     row.render(frame, left_area);
-    let mut right = w::Row::at(area.x + area.width.saturating_sub(1 + total), area.y);
+    let right_start = area.x + area.width.saturating_sub(1 + total);
+    super::hints::draw_top_hints(frame, area, &w::keybar(app), left_end, right_start);
+    let mut right = w::Row::at(right_start, area.y);
     let mut help_rect = Rect::default();
     for (text, style) in items {
         let is_help = text.starts_with('?');
@@ -507,17 +510,6 @@ fn draw_footer(app: &BoardApp, frame: &mut Frame, area: Rect) {
     frame.render_widget(Block::default().style(Style::default()), area);
     let toasts = w::toast_items(app);
     let toast_w: u16 = toasts.iter().map(|(t, _)| w::cells(t) as u16).sum();
-    let bar_w = area.width.saturating_sub(toast_w + 2);
-    let binds = w::keybar(app);
-    frame.render_widget(
-        Paragraph::new(w::keybar_line(&binds, bar_w as usize)),
-        Rect {
-            x: area.x + 1,
-            width: bar_w,
-            height: 1,
-            ..area
-        },
-    );
     if toast_w > 0 && toast_w + 4 < area.width {
         w::right_row(toasts, area.x + area.width.saturating_sub(1), area.y).render(frame, area);
     }
@@ -672,8 +664,24 @@ mod tests {
         assert!(s.contains("1 working"), "{s}");
         assert!(s.contains("all projects"), "{s}");
         assert!(s.contains("live"), "{s}");
-        assert!(s.contains("attach"), "{s}");
-        assert!(s.contains("quit"), "{s}");
+        assert!(
+            s.lines().next().unwrap_or_default().contains("↑↓ move"),
+            "{s}"
+        );
+        let wide = screen(&mut app, 320, 40);
+        let top = wide.lines().next().unwrap_or_default();
+        assert!(top.contains("attach"), "{top}");
+        assert!(top.contains("quit"), "{top}");
+    }
+
+    #[test]
+    fn a_narrow_header_drops_hints_before_the_title() {
+        let mut app = busy_app();
+        let s = screen(&mut app, 60, 20);
+        let top = s.lines().next().unwrap_or_default();
+        assert!(top.contains("✦ board"), "{top}");
+        assert!(top.contains("? help"), "{top}");
+        assert!(!top.contains("quit"), "{top}");
     }
 
     #[test]
@@ -681,7 +689,7 @@ mod tests {
         let mut app = busy_app();
         app.select("cccc3333");
         let s = screen(&mut app, 160, 40);
-        let bar = s.lines().last().unwrap_or_default();
+        let bar = s.lines().next().unwrap_or_default();
         assert!(bar.contains("allow"), "{bar}");
         assert!(bar.contains("deny"), "{bar}");
     }
