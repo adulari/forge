@@ -511,6 +511,25 @@ async fn drive_session(
     // edge pushes "failed" instead of "done". Cleared when the next turn starts.
     let mut turn_error: Option<String> = None;
 
+    let queue_store = st.session.lock().await.store.clone();
+    let mut persisted_queue: Vec<String> = Vec::new();
+    match queue_store.session_queued_prompts(&session_id) {
+        Ok(restored) if !restored.is_empty() => {
+            st.app.note(&format!(
+                "↻ restored {} queued prompt(s) from before the restart",
+                restored.len()
+            ));
+            persisted_queue.clone_from(&restored);
+            st.queued_prompts = restored;
+            st.app.set_queued(&st.queued_prompts);
+            st.drain_queue().await;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(session = %session_id, %error, "could not restore queued prompts")
+        }
+    }
+
     if auto_setup {
         let _ = forge_config::mark_project_auto_setup_attempted(std::path::Path::new(&cwd));
         st.app
@@ -617,6 +636,17 @@ async fn drive_session(
         // 6. Fold finalized lines into the transcript ring (there is no terminal to print to)
         //    and broadcast a snapshot when anything changed. Change-only, like the TUI loop.
         let _ = st.app.drain_flush_remote();
+        // Mirror the queue to the store whenever it changes so a restart can restore it. Not while
+        // draining: that path empties the in-memory queue on purpose, and the saved copy is what
+        // the next daemon generation restores.
+        if !st.draining.load(Ordering::Acquire) && st.queued_prompts != persisted_queue {
+            match queue_store.set_session_queued_prompts(&session_id, &st.queued_prompts) {
+                Ok(()) => persisted_queue.clone_from(&st.queued_prompts),
+                Err(error) => {
+                    tracing::warn!(session = %session_id, %error, "could not persist queued prompts");
+                }
+            }
+        }
         if dirty || st.busy {
             st.app.busy = st.busy;
             if st.busy {
@@ -1419,6 +1449,66 @@ mod tests {
         assert!(state.busy, "steer must not interrupt the running turn");
         assert!(state.turn_handle.is_some());
         state.turn_handle.take().unwrap().abort();
+    }
+
+    /// A fleet `follow_up` queues FIFO behind the running turn and is never offered to it at its
+    /// next step: only a steer may do that. A plain prompt typed after it must not overtake it.
+    #[tokio::test]
+    async fn follow_up_input_while_busy_queues_fifo_and_is_not_steered() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        for text in ["first follow-up", "second follow-up"] {
+            state
+                .handle_input(remote::RemoteInput::FollowUp { text: text.into() })
+                .await
+                .unwrap();
+        }
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "typed later".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        state
+            .handle_input(remote::RemoteInput::Steer {
+                text: "urgent".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            state.queued_prompts,
+            vec![
+                "urgent",
+                "first follow-up",
+                "second follow-up",
+                "typed later"
+            ]
+        );
+        assert_eq!(
+            state.steer.drain(),
+            vec!["urgent"],
+            "only the steer reaches the running turn; the rest wait for the turn boundary"
+        );
+        assert!(state.busy, "a follow-up never touches the running turn");
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn follow_up_input_while_idle_starts_a_turn_immediately() {
+        let mut state = test_driver_state().await;
+        state
+            .handle_input(remote::RemoteInput::FollowUp { text: "go".into() })
+            .await
+            .unwrap();
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.busy);
+        if let Some(h) = state.turn_handle.take() {
+            h.abort();
+        }
     }
 
     /// The same input while IDLE has no backlog to outrank, so it behaves exactly like a normal

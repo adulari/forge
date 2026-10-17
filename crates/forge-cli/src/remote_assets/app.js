@@ -304,7 +304,9 @@ $("ncreate").onclick = () => {
 };
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
+let lastSnap = null;
 function render(s) {
+  lastSnap = s;
   if (s.protocol && s.protocol !== PROTO) {
     $("banner").style.display = "block";
     $("banner").textContent = s.protocol > PROTO
@@ -351,24 +353,25 @@ function renderTranscript(s) {
   // A session change (/new, resume) invalidates the paginated history — it belongs to the
   // session it was fetched from.
   if (s.session_id && s.session_id !== histSession) {
-    if (histSession !== null) { $("hist").innerHTML = ""; histOldest = null; histDone = false; }
+    if (histSession !== null) { $("hist").innerHTML = ""; histOldest = null; histDone = false; histCut = null; }
     histSession = s.session_id;
   }
   // A true resync (unfillable gap) may have skipped turns: drop the accumulated history so a
   // scroll-up refetches it from the store — which has everything that happened meanwhile.
   if (s.resync && $("hist").childElementCount) {
-    $("hist").innerHTML = ""; histOldest = null; histDone = false;
+    $("hist").innerHTML = ""; histOldest = null; histDone = false; histCut = null;
   }
   const panel = $("transcript");
   const tail = $("tail");
   // Exact content signature — a length-based check missed equal-length ring
   // rotations/replacements and left stale lines on screen. Only the live tail is rebuilt:
   // the paginated history above it (#hist) accumulates and must survive every snapshot.
-  const body = (s.transcript || []).join("\n") + (s.streaming ? "\n" + s.streaming : "");
+  const lines = tailLines(s);
+  const body = lines.join("\n") + (s.streaming ? "\n" + s.streaming : "");
   if (tail._sig === body) return; // unchanged
   const nearBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 80;
   tail.innerHTML = "";
-  (s.transcript || []).forEach(line => { const d = document.createElement("div"); d.textContent = line; tail.appendChild(d); });
+  lines.forEach(line => { const d = document.createElement("div"); d.textContent = line; tail.appendChild(d); });
   if (s.streaming) {
     // The streaming edge is the RAW reply text (unlike the pre-rendered tail lines), so it
     // gets the full markdown treatment live.
@@ -389,6 +392,20 @@ function renderTranscript(s) {
 // GET __BASE__/api/history?before=<oldest seq>&limit=N and PREPENDS it, preserving the scroll
 // position. The live snapshot transcript stays a short tail; this is the real scrollback.
 let histSession = null, histOldest = null, histLoading = false, histDone = false;
+// The tail is a short ring of the newest lines, and the first history page ends at the newest
+// persisted row, so the two overlap: the newest turn was rendered twice. The host numbers every
+// line it ever pushed (`transcript_total`); `histCut` is that count when the first history page
+// was requested, and the tail then drops every line numbered below it, since the page has them.
+// Rows persisted after the request still arrive as tail lines, so nothing is lost. A host that
+// predates the counter reports 0, which leaves the tail whole.
+let histCut = null;
+function tailLines(s) {
+  const lines = s.transcript || [];
+  const total = s.transcript_total || 0;
+  if (histCut === null || !total) return lines;
+  const firstAbs = total - lines.length;
+  return lines.slice(Math.max(0, Math.min(lines.length, histCut - firstAbs)));
+}
 const HIST_PAGE = 60;
 
 $("transcript").addEventListener("scroll", () => {
@@ -399,6 +416,8 @@ function loadHistory() {
   if (histLoading || histDone || !histSession) return;
   histLoading = true;
   $("histload").hidden = false;
+  const firstPage = histOldest === null;
+  const cutAtRequest = lastSnap && lastSnap.session_id === histSession ? (lastSnap.transcript_total || 0) : 0;
   const q = histOldest === null ? "?limit=" + HIST_PAGE : "?before=" + histOldest + "&limit=" + HIST_PAGE;
   // Under a daemon the route is shared by every session — address ours explicitly (without
   // it the server pages an empty id and scrollback never loads).
@@ -408,6 +427,10 @@ function loadHistory() {
     .then(rows => {
       if (!rows.length) { histDone = true; return; }
       histOldest = rows[rows.length - 1].seq; // rows are newest-first
+      if (firstPage && cutAtRequest) {
+        histCut = cutAtRequest;
+        if (lastSnap) renderTranscript(lastSnap);
+      }
       const panel = $("transcript"), hist = $("hist");
       const beforeH = panel.scrollHeight;
       const frag = document.createDocumentFragment();

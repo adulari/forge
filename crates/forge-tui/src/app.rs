@@ -435,6 +435,10 @@ pub struct App {
     /// so a remote-control snapshot can show the phone the tail of the conversation. Kept small
     /// (the full transcript lives in the terminal's native scrollback); newest is last.
     pub recent_transcript: std::collections::VecDeque<TranscriptRow>,
+    /// How many rows have ever entered [`Self::recent_transcript`]. The ring only keeps the last
+    /// few, so this is what lets a remote client tell which of them it has already seen in the
+    /// persisted history it paged in.
+    pub transcript_total: u64,
     /// When true, model reasoning/thinking blocks are shown in scrollback. Default false (hidden).
     /// Toggled by `/thinking`.
     pub show_thinking: bool,
@@ -3481,6 +3485,7 @@ impl App {
             tool: origin.tool.clone(),
             meta: origin.meta.clone(),
         });
+        self.transcript_total += 1;
         while self.recent_transcript.len() > REMOTE_TRANSCRIPT_MAX {
             self.recent_transcript.pop_front();
         }
@@ -5938,6 +5943,23 @@ mod tests {
             detail: None,
         });
         assert!(flush_text(&mut app).contains("read_file"));
+    }
+
+    #[test]
+    fn the_remote_tail_counts_every_row_it_ever_held() {
+        let mut app = App::default();
+        for n in 0..30 {
+            app.submit_user(&format!("prompt {n}"));
+            let _ = app.drain_flush_remote();
+        }
+        let view = app.remote_snapshot();
+        assert_eq!(view.transcript.len(), REMOTE_TRANSCRIPT_MAX);
+        assert!(
+            view.transcript_total > view.transcript.len() as u64,
+            "the total keeps counting rows the ring dropped"
+        );
+        let first_abs = view.transcript_total - view.transcript.len() as u64;
+        assert!(first_abs >= 30, "the first retained row's absolute index");
     }
 
     #[test]

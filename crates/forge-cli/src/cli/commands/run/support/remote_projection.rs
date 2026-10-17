@@ -90,6 +90,7 @@ pub(crate) fn build_snapshot_frame(
                 meta: r.meta,
             })
             .collect(),
+        transcript_total: view.transcript_total,
         tasks: view
             .tasks
             .iter()

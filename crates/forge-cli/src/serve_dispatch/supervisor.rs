@@ -351,8 +351,10 @@ pub(super) fn prune_trackers(trackers: &mut Trackers, ids: &BTreeSet<String>, re
 pub(crate) async fn run_supervisor(state: Arc<DaemonState>) {
     let mut fleet = state.registry.subscribe_fleet();
     let mut trackers = Trackers::new();
+    let mut quiet = super::planning::Quiet::new();
     loop {
         supervise(&state, &mut trackers).await;
+        reclaim_unanswered_revisions(&state, &mut quiet).await;
         tokio::select! {
             () = tokio::time::sleep(TICK) => {}
             changed = fleet.changed() => {
@@ -362,6 +364,24 @@ pub(crate) async fn run_supervisor(state: Arc<DaemonState>) {
             }
         }
         tokio::time::sleep(MIN_PASS_GAP).await;
+    }
+}
+
+/// A revised split whose coordinator never answered goes back to the user (see `planning`).
+async fn reclaim_unanswered_revisions(state: &DaemonState, quiet: &mut super::planning::Quiet) {
+    if state.registry.is_draining() {
+        return;
+    }
+    let Ok(active) = state.store.active_dispatches() else {
+        return;
+    };
+    let revising: Vec<DispatchRow> = active
+        .into_iter()
+        .filter(|d| d.status == dispatch_status::PLANNING)
+        .collect();
+    quiet.retain(|id, _| revising.iter().any(|d| &d.id == id));
+    if super::planning::reclaim_stalled(state, &revising, quiet).await {
+        state.registry.notify_fleet();
     }
 }
 

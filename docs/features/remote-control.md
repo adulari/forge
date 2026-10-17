@@ -219,6 +219,10 @@ directions over one connection. `axum` bundles `hyper` + `tokio-tungstenite`, an
 workspace already has `reqwest` (rustls) + a multi-thread tokio runtime, so the added
 dependency surface is small.
 
+### Queue persistence and the scrollback seam
+
+A daemon-hosted session mirrors its visible queue (prompts and queued `/commands`, in order) to `session.queued_prompts` (schema 45) whenever it changes, and restores it when the session is resumed or resurrected after a restart; the first restored entry runs at once. A graceful drain keeps the saved copy instead of clearing it, and sessions that never received a prompt are restored with the rest of the fleet. The snapshot also carries `transcript_total`, the number of lines ever pushed into the live tail; the built-in PWA records it when it requests the first history page and drops the tail lines numbered below it, so the newest turn is not shown once from history and again from the tail.
+
 ## 3. Security posture
 
 The threat model is **a peer on the same LAN** (coffee-shop / shared Wi-Fi), not a

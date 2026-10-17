@@ -5,8 +5,21 @@
 //! way to carry pixels. So image prompts wait for the turn boundary and run as a normal queued
 //! turn, with their images attached when [`forge_tui::App::promote_queued_images`] hands them to
 //! the spawn.
+//!
+//! Prompts keep their arrival order: a prompt is only offered to the running turn when every
+//! prompt ahead of it is offered too, so it never runs before an image prompt or a fleet
+//! follow-up that was queued first. Queued commands are outside this ordering by design (they run
+//! at the turn boundary, never through the model).
 
 use forge_types::ImageAttachment;
+
+use super::busy_commands::is_command_line;
+
+/// How many entries of `queue` are prompts (not queued commands): what the steer inbox must hold
+/// for a new prompt to be offered to the running turn without overtaking one.
+pub(crate) fn prompts_ahead(queue: &[String]) -> usize {
+    queue.iter().filter(|q| !is_command_line(q)).count()
+}
 
 pub(crate) fn queue_prompt(
     queue: &mut Vec<String>,
@@ -16,21 +29,27 @@ pub(crate) fn queue_prompt(
     images: Vec<ImageAttachment>,
 ) {
     let with_images = !images.is_empty();
-    if with_images {
+    let steered = if with_images {
         app.stash_queued_images(&line, images);
+        false
     } else {
-        steer.push(line.clone());
-    }
+        steer.push_behind(line.clone(), prompts_ahead(queue))
+    };
     queue.push(line);
     app.set_queued(queue);
-    if with_images {
+    if steered {
+        app.note(&format!(
+            "⏳ queued ({} pending) — sent at this turn's next step",
+            queue.len()
+        ));
+    } else if with_images {
         app.note(&format!(
             "⏳ queued with image ({} pending) — runs when this turn finishes",
             queue.len()
         ));
     } else {
         app.note(&format!(
-            "⏳ queued ({} pending) — sent at this turn's next step",
+            "⏳ queued ({} pending) — runs when this turn finishes, after the prompts ahead of it",
             queue.len()
         ));
     }
@@ -61,7 +80,10 @@ mod tests {
         );
         queue_prompt(&mut queue, &steer, &mut app, "plain".into(), vec![]);
         assert_eq!(queue, ["what is this", "plain"]);
-        assert_eq!(steer.drain(), ["plain"]);
+        assert!(
+            steer.drain().is_empty(),
+            "a plain prompt must not overtake the image prompt queued ahead of it"
+        );
 
         let first = crate::cli::commands::run::dequeue_prompt(&mut queue, &mut app).unwrap();
         assert_eq!(first, "what is this");

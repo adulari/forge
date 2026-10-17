@@ -341,6 +341,56 @@ async fn a_revision_returns_the_split_to_planning_and_tells_the_coordinator() {
 }
 
 #[tokio::test]
+async fn a_revision_the_coordinator_never_answers_is_handed_back_as_proposed() {
+    let (store, id, _coordinator) = seeded();
+    let state = state_with(store.clone(), "/tmp");
+    let router = daemon_router(state.clone());
+    call(
+        &router,
+        post(&format!("/api/dispatches/{id}/proposal"), three_items()),
+    )
+    .await;
+    let (_, json) = call(
+        &router,
+        post(
+            &format!("/api/dispatches/{id}/revise"),
+            serde_json::json!({"feedback": "merge 2 and 3"}),
+        ),
+    )
+    .await;
+    assert_eq!(json["status"], "planning");
+
+    // No coordinator driver is live in this registry, so the revision can only go unanswered.
+    let mut quiet = planning::Quiet::new();
+    let rows = store.active_dispatches().unwrap();
+    assert!(!planning::reclaim_stalled(&state, &rows, &mut quiet).await);
+    assert_eq!(store.dispatch(&id).unwrap().unwrap().status, "planning");
+
+    quiet.insert(
+        id.clone(),
+        std::time::Instant::now() - planning::QUIET_GRACE - std::time::Duration::from_secs(1),
+    );
+    assert!(planning::reclaim_stalled(&state, &rows, &mut quiet).await);
+    let row = store.dispatch(&id).unwrap().unwrap();
+    assert_eq!(row.status, "proposed");
+    assert_eq!(row.items.len(), 3, "the earlier split is intact");
+
+    let (status, _) = call(
+        &router,
+        post(
+            &format!("/api/dispatches/{id}/revise"),
+            serde_json::json!({"feedback": "try again"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the user can revise or approve again"
+    );
+}
+
+#[tokio::test]
 async fn cancelling_cancels_everything_not_running_and_refuses_twice() {
     let (store, id, coordinator) = seeded();
     let router = daemon_router(state_with(store.clone(), "/tmp"));

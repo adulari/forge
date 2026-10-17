@@ -42,6 +42,8 @@ Arguments mirror the CLI: `target`, `message`, and `mode` (`follow_up` | `steer`
 finishes what it is saying, then takes the steer before its own backlog. That is the same rule the
 TUI's own steering follows, so a message from another agent cannot corrupt a reply mid-sentence.
 
+A `follow_up` reaches a daemon-hosted target as the `follow_up` remote input: it joins the back of the visible queue and is never offered to the running turn at its next step (a plain prompt typed mid-turn is). A later plain prompt never overtakes it; prompts keep arrival order, and queued `/commands` stay outside that ordering because they never go through the model. A `forge chat` terminal target still receives it as a `prompt` over its control channel.
+
 Messages arrive in the target's transcript as a labelled turn — `[message from <sender>] …` —
 where the sender is `cli` or the sending session's name/id. The target can always tell it is being
 addressed by something other than its user.

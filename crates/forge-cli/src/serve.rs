@@ -426,10 +426,7 @@ pub(crate) async fn deliver_pending_fleet_messages(
         let input = if msg.mode == "steer" {
             remote::RemoteInput::Steer { text }
         } else {
-            remote::RemoteInput::Prompt {
-                text,
-                attachments: Vec::new(),
-            }
+            remote::RemoteInput::FollowUp { text }
         };
         if handle.input_tx.send(input).await.is_ok() {
             match store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp()) {
@@ -7628,6 +7625,79 @@ pub(crate) mod tests {
 
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A daemon restart must not drop what a session had lined up behind its running turn, nor a
+    /// session that was created but never prompted: both come back, and the queue runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restore_brings_back_queued_prompts_and_never_prompted_sessions() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("restore-queue.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let queued_id = store
+            .create_session(ws.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .add_message(&queued_id, 0, forge_types::Role::User, "first", None)
+            .unwrap();
+        store
+            .set_session_queued_prompts(&queued_id, &["queued before the restart".to_string()])
+            .unwrap();
+        store.set_session_daemon_live(&queued_id, true).unwrap();
+        let never_prompted = store
+            .create_session(ws.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .set_session_daemon_live(&never_prompted, true)
+            .unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        resurrect_fleet(state.clone()).await;
+
+        assert!(state.registry.get(&never_prompted).await.is_some());
+        assert!(state.registry.get(&queued_id).await.is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let ran = store.load_messages(&queued_id).unwrap().iter().any(|m| {
+                m.role == forge_types::Role::User && m.content == "queued before the restart"
+            });
+            if ran {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the restored queue never ran"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        for _ in 0..50 {
+            if store.session_queued_prompts(&queued_id).unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            store.session_queued_prompts(&queued_id).unwrap().is_empty(),
+            "a prompt that ran is no longer persisted as queued"
+        );
+
+        std::env::remove_var("FORGE_DB");
     }
 
     /// A session whose recorded workspace is gone fails every restore with 410. It must be

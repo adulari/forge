@@ -3696,7 +3696,7 @@ pub(crate) async fn run_chat_tui(
                 let input = match input {
                     remote::RemoteInput::Steer { text } if busy && !is_command_line(&text) => {
                         prompt_history.record(&text);
-                        steer.push(text.clone());
+                        steer.push_front(text.clone());
                         forge_core::fleet::insert_into_queue(
                             &mut queued_prompts,
                             forge_core::fleet::MessageMode::Steer,
@@ -3706,7 +3706,19 @@ pub(crate) async fn run_chat_tui(
                         app.note("⚡ steered — sent at this turn's next step");
                         continue;
                     }
-                    remote::RemoteInput::Steer { text } => remote::RemoteInput::Prompt {
+                    remote::RemoteInput::FollowUp { text } if busy && !is_command_line(&text) => {
+                        prompt_history.record(&text);
+                        forge_core::fleet::insert_into_queue(
+                            &mut queued_prompts,
+                            forge_core::fleet::MessageMode::FollowUp,
+                            text,
+                        );
+                        app.set_queued(&queued_prompts);
+                        app.note("⏳ follow-up queued — runs when this turn finishes");
+                        continue;
+                    }
+                    remote::RemoteInput::Steer { text }
+                    | remote::RemoteInput::FollowUp { text } => remote::RemoteInput::Prompt {
                         text,
                         attachments: Vec::new(),
                     },
@@ -3789,8 +3801,11 @@ pub(crate) async fn run_chat_tui(
                                 }
                             } else {
                                 prompt_history.record(&text);
+                                steer.push_behind(
+                                    text.clone(),
+                                    queue_images::prompts_ahead(&queued_prompts),
+                                );
                                 queued_prompts.push(text.clone());
-                                steer.push(text.clone());
                                 app.set_queued(&queued_prompts);
                                 app.note(&format!(
                                     "⏳ queued ({} pending) — sent at this turn's next step",
@@ -4276,7 +4291,9 @@ pub(crate) async fn run_chat_tui(
                     }
                     // Normalized away above (into a queue-front insert + `continue`, or a plain
                     // `Prompt`) before this match ever sees it.
-                    remote::RemoteInput::Steer { .. } => unreachable!("Steer is normalized above"),
+                    remote::RemoteInput::Steer { .. } | remote::RemoteInput::FollowUp { .. } => {
+                        unreachable!("Steer and FollowUp are normalized above")
+                    }
                 }
             }
         }

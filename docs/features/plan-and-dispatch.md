@@ -121,6 +121,8 @@ UI.
 feedback and moves the dispatch back to `planning`; the coordinator calls `dispatch_sessions`
 again with a revised plan, replacing the previous proposal.
 
+If the coordinator ends its turn without proposing (it asked a question in prose, failed, or was archived or lost), the daemon hands the earlier proposal back as `proposed` after it has been idle with nothing queued for ~8 s, so the user can approve or revise again instead of finding the dispatch stuck in `planning`. A first plan that has no earlier proposal is not reclaimed.
+
 **Cancel** (`POST /api/dispatches/{id}/cancel`, refused once the dispatch is `done`/`cancelled`)
 moves every non-terminal, not-yet-running item to `cancelled` and the dispatch itself to
 `cancelled`. Items already running keep running to completion — cancel stops new starts, not work
