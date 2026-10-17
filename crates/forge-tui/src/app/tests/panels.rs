@@ -1117,3 +1117,86 @@ fn panel_cost_formatting_table() {
         assert_eq!(fmt_cost(usd), want, "{usd}");
     }
 }
+
+#[test]
+fn btw_card_shows_question_markdown_answer_and_provenance_in_the_footer() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    app.submit_user("hello");
+    app.drain_flush();
+    app.open_btw("what is this");
+    let waiting = screen_rows(&app, 100, 30).join("\n");
+    assert!(waiting.contains("what is this"), "{waiting}");
+    assert!(
+        waiting.contains("asking"),
+        "spinner row while it runs: {waiting}"
+    );
+    assert!(waiting.contains("Esc close"), "{waiting}");
+
+    app.apply(PresenterEvent::BtwAnswer {
+        question: "what is this".into(),
+        answer: "It **renders** the chat.\n\n- pickers\n- the board".into(),
+        model: "ollama::llama3.2".into(),
+        cost_usd: Some(0.0),
+    });
+    let rows = screen_rows(&app, 160, 30);
+    let text = rows.join("\n");
+    assert!(text.contains("╭─ btw"), "titled frame: {text}");
+    assert!(text.contains("side question · not saved"), "{text}");
+    assert!(
+        text.contains("renders") && !text.contains("**"),
+        "markdown rendered: {text}"
+    );
+    assert!(text.contains("pickers"), "{text}");
+    let footer = rows
+        .iter()
+        .find(|r| r.contains("scroll"))
+        .expect("footer row");
+    assert!(
+        footer.contains("ollama::llama3.2") && footer.contains("Esc close"),
+        "{footer}"
+    );
+    let top = rows.iter().find(|r| r.contains("╭─ btw")).unwrap();
+    let frame_w = top.chars().filter(|c| *c != ' ').count();
+    assert!(
+        frame_w <= 84 + 30,
+        "card stays narrow at 160 columns: {top:?}"
+    );
+    let card_cols: Vec<usize> = top
+        .char_indices()
+        .filter(|(_, c)| *c == '╭' || *c == '╮')
+        .map(|(i, _)| i)
+        .collect();
+    assert!(card_cols[1] - card_cols[0] <= 3 * 84, "{top:?}");
+}
+
+#[test]
+fn btw_scroll_stops_at_the_end_of_the_answer() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    app.open_btw("q");
+    app.apply(PresenterEvent::BtwAnswer {
+        question: "q".into(),
+        answer: (0..60).map(|i| format!("line {i}\n\n")).collect(),
+        model: "m".into(),
+        cost_usd: None,
+    });
+    let _ = screen_rows(&app, 100, 30);
+    for _ in 0..500 {
+        app.btw_key(&KeyKind::Down);
+    }
+    let scroll = app.btw.as_ref().unwrap().scroll;
+    assert!(
+        scroll > 0 && scroll < 200,
+        "clamped to the content: {scroll}"
+    );
+    let text = screen_rows(&app, 100, 30).join("\n");
+    assert!(
+        text.contains("line 59"),
+        "the last line is reachable: {text}"
+    );
+}

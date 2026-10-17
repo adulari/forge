@@ -13,6 +13,8 @@ pub struct BtwOverlay {
     pub meta: String,
     pub failed: bool,
     pub scroll: u16,
+    /// Furthest the answer can scroll, recorded by the last frame so keys never scroll past it.
+    pub(crate) max_scroll: std::cell::Cell<u16>,
 }
 
 impl App {
@@ -39,7 +41,9 @@ impl App {
         cost_usd: Option<f64>,
     ) {
         let meta = match cost_usd {
-            Some(c) if c > 0.0 => format!("{model} · ${c:.4}"),
+            Some(c) if c > 0.0 => {
+                format!("{model} · {}", crate::overlays::fmt_cost(c))
+            }
             _ => model,
         };
         if self.btw_dismissed.as_deref() == Some(question.as_str()) {
@@ -89,9 +93,11 @@ impl App {
                 self.btw = None;
             }
             KeyKind::Up => card.scroll = card.scroll.saturating_sub(1),
-            KeyKind::Down => card.scroll = card.scroll.saturating_add(1),
+            KeyKind::Down => card.scroll = card.scroll.saturating_add(1).min(card.max_scroll.get()),
             KeyKind::PageUp => card.scroll = card.scroll.saturating_sub(10),
-            KeyKind::PageDown => card.scroll = card.scroll.saturating_add(10),
+            KeyKind::PageDown => {
+                card.scroll = card.scroll.saturating_add(10).min(card.max_scroll.get())
+            }
             _ => {}
         }
     }
@@ -126,7 +132,7 @@ mod tests {
         });
         let card = app.btw.as_ref().expect("card stays open until dismissed");
         assert_eq!(card.answer.as_deref(), Some("Try again later."));
-        assert_eq!(card.meta, "ollama::m · $0.0012");
+        assert_eq!(card.meta, "ollama::m · <$0.01");
         assert!(
             app.drain_flush().is_empty(),
             "nothing printed into the chat"
@@ -143,6 +149,7 @@ mod tests {
         }
         let mut app = App::default();
         app.open_btw("q");
+        app.btw.as_ref().unwrap().max_scroll.set(5);
         app.btw_key(&KeyKind::Down);
         app.btw_key(&KeyKind::Down);
         app.btw_key(&KeyKind::Up);

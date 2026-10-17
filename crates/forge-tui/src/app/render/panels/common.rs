@@ -44,16 +44,7 @@ pub(crate) fn fmt_elapsed(d: Duration) -> String {
     }
 }
 
-/// Cost for a panel cell: `$0`, `<$0.01`, otherwise two decimals.
-pub(crate) fn fmt_cost(usd: f64) -> String {
-    if usd <= 0.0 {
-        "$0".to_string()
-    } else if usd < 0.01 {
-        "<$0.01".to_string()
-    } else {
-        format!("${usd:.2}")
-    }
-}
+pub(crate) use crate::overlays::fmt_cost;
 
 /// Start and finish times observed for tasks and agents, keyed by a stable label. The protocol
 /// carries no timestamps for either, so the clock starts when the panel first sees the item

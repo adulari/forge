@@ -207,3 +207,14 @@ impl MeshOverlay {
         self.candidates.len() as u32 * 2 + 12
     }
 }
+
+/// Cost for a panel cell: `$0`, `<$0.01`, otherwise two decimals.
+pub(crate) fn fmt_cost(usd: f64) -> String {
+    if usd <= 0.0 {
+        "$0".to_string()
+    } else if usd < 0.01 {
+        "<$0.01".to_string()
+    } else {
+        format!("${usd:.2}")
+    }
+}
