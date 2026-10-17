@@ -3,6 +3,18 @@
 use super::*;
 
 pub(super) fn classify_genai_error(err: &genai::Error) -> ProviderError {
+    let classified = classify_genai_error_unlogged(err);
+    if classified.is_rate_limited() {
+        // The chat shows a one-line reason; the provider's whole answer goes here. The error's
+        // Display carries status and body only, never request headers or credentials.
+        let full = err.to_string();
+        let full: String = full.chars().take(4000).collect();
+        tracing::warn!(error = %full, "provider rate limit");
+    }
+    classified
+}
+
+fn classify_genai_error_unlogged(err: &genai::Error) -> ProviderError {
     use genai::webc::Error as WebcError;
     match err {
         genai::Error::HttpError { status, body, .. } => classify_status(
@@ -30,7 +42,13 @@ pub(super) fn classify_genai_error(err: &genai::Error) -> ProviderError {
                             .or_else(|| parse_secs(t).and_then(duration_from_secs))
                     })
                     .or_else(|| parse_retry_after_body(body));
-                classify_status(status.as_u16(), err.to_string(), body, retry_after)
+                let typed_body = bedrock_error::body_with_error_type(
+                    headers
+                        .get("x-amzn-errortype")
+                        .and_then(|v| v.to_str().ok()),
+                    body,
+                );
+                classify_status(status.as_u16(), err.to_string(), &typed_body, retry_after)
             }
             other => {
                 let note = forge_config::headroom_route()
@@ -49,7 +67,7 @@ pub(super) fn classify_genai_error(err: &genai::Error) -> ProviderError {
             // that typed error instead of collapsing it to a generic stream outage; cache-field
             // compatibility fallback and normal 4xx/429/5xx classification both depend on it.
             if let Some(inner) = error.downcast_ref::<genai::Error>() {
-                classify_genai_error(inner)
+                classify_genai_error_unlogged(inner)
             } else {
                 parse_embedded_json(cause)
                     .as_ref()
@@ -98,6 +116,17 @@ pub(super) fn classify_error_body(body: &serde_json::Value) -> Option<ProviderEr
         .and_then(|m| m.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| raw.clone());
+    if bedrock_profile_blip(&raw) {
+        return Some(ProviderError::Unavailable(short(&msg)));
+    }
+    // A typed Bedrock exception names the failure outright — more reliable than its prose.
+    if let Some(kind) = bedrock_error::exception_kind(err) {
+        return Some(bedrock_error::classify(
+            &kind,
+            short(&msg),
+            parse_retry_after_body(&raw),
+        ));
+    }
     // Permanent incapability / payment markers win first (mirrors `classify_status`' ordering), so a
     // "requires more credits" / "function calling not supported" body is EXCLUDED, not retried.
     if is_capability_failure(&raw) {
@@ -427,6 +456,12 @@ pub(super) fn classify_status(
     if bedrock_profile_blip(body) || bedrock_profile_blip(&message) {
         return ProviderError::Unavailable(message);
     }
+    let typed_error = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("error").and_then(bedrock_error::exception_kind));
+    if let Some(kind) = typed_error {
+        return bedrock_error::classify(&kind, message, retry_after.filter(|_| !exhausted));
+    }
     // A permanent incapability (no tool support / unaffordable) regardless of status code: 402
     // is always "can't afford", and 400/404 bodies often carry "tool calling not supported".
     if code == 402
@@ -501,7 +536,13 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
         ProviderError::Capability(message)
     } else if is_model_access_failure(text) {
         ProviderError::NoModelAccess(message)
-    } else if has("429") || has("resource_exhausted") || has("rate limit") || has("quota") {
+    } else if has_status_429(&lower)
+        || has("resource_exhausted")
+        || has("rate limit")
+        || has("too many requests")
+        || has("throttl")
+        || quota_limit_wording(&lower)
+    {
         ProviderError::RateLimited {
             message,
             retry_after,
@@ -516,6 +557,60 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
         // A dropped/5xx stream — treat as a transient provider problem worth failing over.
         ProviderError::Unavailable(message)
     }
+}
+
+/// Whether `lower` carries a standalone HTTP 429 status, as opposed to `429` inside a request id
+/// (`1b429e3f-…`), a byte or token count (`429 tokens`, `1,429`), a version or a timestamp. The old
+/// substring test read all of those as a rate limit and sent a pinned turn through six backoffs.
+pub(super) fn has_status_429(lower: &str) -> bool {
+    const UNITS: &[&str] = &[
+        "token", "byte", "char", "ms", "sec", "second", "kb", "mb", "gb", "item", "line", "word",
+    ];
+    let bytes = lower.as_bytes();
+    lower.match_indices("429").any(|(i, _)| {
+        let before = lower[..i].chars().next_back();
+        let rest = &lower[i + 3..];
+        let after = rest.chars().next();
+        // A neighbour that glues the digits to an id or a longer number.
+        let glued =
+            |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || "-_/#".contains(c));
+        // `1,429` / `4.29` / `429.5`: a digit on the far side of a separator.
+        let before_number =
+            matches!(before, Some(',' | '.')) && i >= 2 && bytes[i - 2].is_ascii_digit();
+        let after_number = matches!(after, Some(',' | '.'))
+            && rest.as_bytes().get(1).is_some_and(u8::is_ascii_digit);
+        if glued(before) || glued(after) || before_number || after_number {
+            return false;
+        }
+        let next_word: String = rest
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect();
+        !UNITS.iter().any(|u| next_word.starts_with(u))
+    })
+}
+
+/// `quota` only counts as a rate limit when the same breath says it was exceeded, exhausted or
+/// limited. A bare `quota` is just as often a file, a setting or a billing page.
+pub(super) fn quota_limit_wording(lower: &str) -> bool {
+    const WORDING: &[&str] = &[
+        "exceed", "exhaust", "limit", "reached", "deplet", "too many",
+    ];
+    const WINDOW: usize = 40;
+    lower.match_indices("quota").any(|(i, _)| {
+        let start = floor_boundary(lower, i.saturating_sub(WINDOW));
+        let end = floor_boundary(lower, (i + 5 + WINDOW).min(lower.len()));
+        let near = &lower[start..end];
+        WORDING.iter().any(|w| near.contains(w))
+    })
+}
+
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Scan an error body for a cooldown: Gemini's `"retryDelay": "37s"` or a `retry in 37.04s`

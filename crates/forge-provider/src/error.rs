@@ -102,6 +102,12 @@ impl ProviderError {
             _ => return false,
         };
         let m = msg.to_lowercase();
+        // A token-per-minute throttle ("Too many tokens, please wait before trying again") is a
+        // RATE LIMIT that happens to name tokens, not an over-window prompt: the pinned-turn
+        // backoff owns it and compacts only once waiting has demonstrably not helped.
+        if self.is_token_throttle() {
+            return false;
+        }
         [
             "context length",
             "context window",
@@ -109,6 +115,9 @@ impl ProviderError {
             "maximum context",
             "maximum number of tokens",
             "too many tokens",
+            "too many input tokens",
+            "input is too long",
+            "input token count",
             "reduce the length",
             "prompt is too long",
             "input is too large",
@@ -121,6 +130,27 @@ impl ProviderError {
         ]
         .iter()
         .any(|k| m.contains(k))
+    }
+
+    /// Whether this is a rate limit on TOKENS (Bedrock's `Too many tokens, please wait before trying
+    /// again`, OpenAI's `tokens per min (TPM)`) rather than on requests. Only a token throttle can be
+    /// helped by sending less: a request-rate throttle clears with time alone.
+    pub fn is_token_throttle(&self) -> bool {
+        let Self::RateLimited { message, .. } = self else {
+            return false;
+        };
+        let m = message.to_lowercase();
+        // `request too large` is groq's over-the-per-request-cap wording; the overflow path owns it.
+        !m.contains("request too large")
+            && [
+                "too many tokens",
+                "tokens per min",
+                "token rate limit",
+                "(tpm)",
+                "tpm limit",
+            ]
+            .iter()
+            .any(|k| m.contains(k))
     }
 
     /// A short reason string for the health record / UI ("rate-limited (429)", …).
@@ -139,6 +169,50 @@ impl ProviderError {
 #[cfg(test)]
 mod overflow_413_tests {
     use super::*;
+
+    #[test]
+    fn a_token_throttle_is_a_rate_limit_not_an_overflow() {
+        let throttle = ProviderError::RateLimited {
+            message: "Too many tokens, please wait before trying again.".into(),
+            retry_after: None,
+        };
+        assert!(throttle.is_token_throttle());
+        assert!(!throttle.is_context_overflow());
+        let requests = ProviderError::RateLimited {
+            message: "Too many requests, please wait before trying again.".into(),
+            retry_after: None,
+        };
+        assert!(!requests.is_token_throttle());
+        assert!(!requests.is_context_overflow());
+        let tpm = ProviderError::RateLimited {
+            message: "Rate limit reached on tokens per min (TPM): Limit 10000, Used 9000".into(),
+            retry_after: None,
+        };
+        assert!(tpm.is_token_throttle());
+        // Over the PER-REQUEST cap is still an overflow, and a 400 "too many tokens" stays one.
+        assert!(ProviderError::RateLimited {
+            message: "Request too large for model on tokens per minute (TPM)".into(),
+            retry_after: None,
+        }
+        .is_context_overflow());
+        assert!(
+            ProviderError::Request("too many tokens in the prompt".into()).is_context_overflow()
+        );
+        assert!(!ProviderError::Request("too many tokens".into()).is_token_throttle());
+    }
+
+    #[test]
+    fn bedrock_input_too_long_wording_is_an_overflow() {
+        for m in [
+            "Input is too long for requested model.",
+            "Too many input tokens. Max input tokens: 262144, request input token count: 300000",
+        ] {
+            assert!(
+                ProviderError::Request(m.into()).is_context_overflow(),
+                "{m}"
+            );
+        }
+    }
 
     #[test]
     fn request_too_large_counts_as_context_overflow() {

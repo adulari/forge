@@ -126,7 +126,18 @@ impl BedrockStreamer {
 		let message_type = frame.headers.get(":message-type").cloned().unwrap_or_default();
 
 		if message_type == "exception" || message_type == "error" {
-			let body: Value = serde_json::from_slice(&frame.payload).unwrap_or(Value::Null);
+			// `:exception-type` (message-type exception) or `:error-code` (message-type error) names
+			// the failure; the payload alone is `{"message": ...}` and cannot tell a throttle from
+			// an outage or a validation error.
+			let error_type = frame
+				.headers
+				.get(":exception-type")
+				.or_else(|| frame.headers.get(":error-code"));
+			let body = super::shared::error_body(
+				error_type.map(String::as_str),
+				frame.headers.get(":error-message").map(String::as_str),
+				&frame.payload,
+			);
 			return Err(Error::ChatResponse {
 				model_iden: self.options.model_iden.clone(),
 				body,
@@ -414,15 +425,20 @@ mod tests {
 
 	/// Build a minimal valid event-stream frame with the given headers and payload.
 	fn build_frame(event_type: &str, payload: &[u8]) -> Vec<u8> {
-		// Headers: :event-type (string type 7) = event_type
+		build_frame_with_headers(&[(":event-type", event_type)], payload)
+	}
+
+	fn build_frame_with_headers(pairs: &[(&str, &str)], payload: &[u8]) -> Vec<u8> {
+		// Headers: string type 7 each.
 		// Format per header: name_len u8 | name | type u8 | value_len u16 | value
 		let mut headers = Vec::new();
-		let name = ":event-type";
-		headers.push(name.len() as u8);
-		headers.extend_from_slice(name.as_bytes());
-		headers.push(7);
-		headers.extend_from_slice(&(event_type.len() as u16).to_be_bytes());
-		headers.extend_from_slice(event_type.as_bytes());
+		for (name, value) in pairs {
+			headers.push(name.len() as u8);
+			headers.extend_from_slice(name.as_bytes());
+			headers.push(7);
+			headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
+			headers.extend_from_slice(value.as_bytes());
+		}
 
 		let headers_len = headers.len() as u32;
 		let total_len = 12 + headers_len + payload.len() as u32 + 4;
@@ -499,6 +515,34 @@ mod tests {
 		assert_eq!(usage.prompt_tokens, Some(90));
 		assert_eq!(usage.completion_tokens, Some(69));
 		assert_eq!(end.captured_stop_reason, Some(StopReason::from("end_turn".to_string())));
+	}
+
+	#[tokio::test]
+	async fn exception_frame_keeps_the_exception_type() {
+		use futures::StreamExt;
+		let mut bytes = Vec::new();
+		bytes.extend(build_frame("messageStart", br#"{"role":"assistant"}"#));
+		bytes.extend(build_frame_with_headers(
+			&[(":message-type", "exception"), (":exception-type", "throttlingException")],
+			br#"{"message":"Too many tokens, please wait before trying again."}"#,
+		));
+		let inner: Pin<Box<dyn Stream<Item = _> + Send>> =
+			Box::pin(futures::stream::iter(vec![Ok(bytes::Bytes::from(bytes))]));
+		let results: Vec<_> = BedrockStreamer::new(inner, test_model_iden(), Default::default())
+			.collect::<Vec<_>>()
+			.await;
+		let err = results
+			.into_iter()
+			.find_map(|r| r.err())
+			.expect("the exception frame surfaces as an error");
+		let Error::ChatResponse { body, .. } = err else {
+			panic!("exception frames surface as ChatResponse");
+		};
+		assert_eq!(body["error"]["type"], "throttlingException");
+		assert_eq!(
+			body["error"]["message"],
+			"Too many tokens, please wait before trying again."
+		);
 	}
 
 	#[test]

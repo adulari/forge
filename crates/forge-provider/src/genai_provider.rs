@@ -955,6 +955,7 @@ fn short(s: &str) -> String {
 /// shortened (`short`) so a multi-line JSON body never reaches the UI.
 mod error_policy;
 use error_policy::*;
+mod bedrock_error;
 
 /// Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint (the API rejects
 /// `enable_thinking=false`). Bound its private reasoning phase independently from the answer/tool

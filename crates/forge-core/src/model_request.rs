@@ -147,6 +147,9 @@ pub(super) async fn request_provider_response(
     let mut deferred_held: Vec<String> = Vec::new();
     // Stream the reply, with transparent failover for this step's completion.
     let mut failover_hop = 0u32;
+    // Consecutive token throttles on this request, and the compactions spent on them. Local: both
+    // describe one request's retries, not the turn.
+    let mut throttles = throttle_recovery::TokenThrottles::default();
     let resp = loop {
         // Bound what we send to the active model's context window (fetched/heuristic), so a
         // long conversation can't overflow it — which otherwise fails the turn as
@@ -377,17 +380,10 @@ pub(super) async fn request_provider_response(
             // tokenizer — each retry multiplies the cap down. Bounded by `compact_retries`.
             Err(e) if *compact_retries < 3 && e.is_context_overflow() => {
                 *compact_retries += 1;
-                let shrunk = (session.effective_context_window(active_model) as u64 * 55 / 100)
-                    .max(1) as u32;
-                session.overflow_window_cap = Some((active_model.clone(), shrunk));
                 session.presenter.emit(PresenterEvent::Warning(format!(
                 "{active_model}: input exceeded the context window — trimming context and retrying"
             )));
-                // Best-effort LLM compaction too: a cleaner summary when the summarize call
-                // itself fits. The window cap above is the guarantee that the retry shrinks
-                // regardless of whether compaction runs.
-                let _ = session.compact(true).await;
-                session.emit_context_gauge(active_model);
+                throttle_recovery::shrink_context(session, active_model).await;
                 continue;
             }
             Err(e) if failover_enabled && (e.is_retryable() || e.is_context_overflow()) => {
@@ -468,6 +464,7 @@ pub(super) async fn request_provider_response(
                             _ => None,
                         };
                         let attempt = *pinned_rl_attempts + 1;
+                        let compacting = throttles.observe(&e);
                         // Cheap jitter without a rand dependency: sub-second wall-clock
                         // nanos.
                         let jitter = f64::from(
@@ -482,11 +479,14 @@ pub(super) async fn request_provider_response(
                         {
                             *pinned_rl_attempts = attempt;
                             *pinned_rl_waited += delay;
-                            session.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model}: rate limited — retrying pinned model in \
-                             {}s (attempt {attempt}/{PINNED_RL_MAX_ATTEMPTS})",
-                                delay.as_secs().max(1)
-                            )));
+                            throttle_recovery::announce_backoff(
+                                session,
+                                active_model,
+                                &e,
+                                (delay, attempt, PINNED_RL_MAX_ATTEMPTS),
+                                compacting,
+                            )
+                            .await;
                             session.presenter.emit(PresenterEvent::ModelSearch {
                                 model: active_model.clone(),
                                 retrying: true,
