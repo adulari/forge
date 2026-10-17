@@ -52,7 +52,9 @@ pub(crate) fn assay_action(arg: &str) -> CommandAction {
 
 /// `/goal <objective> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`
 pub(crate) fn goal_action(arg: &str) -> CommandAction {
-    let (objective, gates, max_tokens, max_minutes) = parse_autonomy_options(arg);
+    let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(arg) else {
+        return bad_budget("/goal", arg);
+    };
     CommandAction::Goal {
         objective,
         gates,
@@ -63,7 +65,9 @@ pub(crate) fn goal_action(arg: &str) -> CommandAction {
 
 /// `/loop <task> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`
 pub(crate) fn loop_action(arg: &str) -> CommandAction {
-    let (prompt, gates, max_tokens, max_minutes) = parse_autonomy_options(arg);
+    let Ok((prompt, gates, max_tokens, max_minutes)) = parse_autonomy_options(arg) else {
+        return bad_budget("/loop", arg);
+    };
     CommandAction::Loop {
         prompt,
         gates,
@@ -81,14 +85,22 @@ pub(crate) fn loop_action(arg: &str) -> CommandAction {
 /// tokenizing, no re-joining — so `/loop <task>`/`/goal <objective>` keep their exact prior
 /// behavior (whitespace and all) for backward compatibility. Malformed quoting in the slow path
 /// (unbalanced `"`) falls back the same way rather than erroring.
-fn parse_autonomy_options(arg: &str) -> (String, Vec<String>, Option<u64>, Option<u64>) {
+fn bad_budget(cmd: &str, arg: &str) -> CommandAction {
+    CommandAction::Unknown(format!(
+        "{cmd} {arg} (--max-tokens and --max-minutes need a whole number; nothing was started)"
+    ))
+}
+
+type AutonomyOptions = (String, Vec<String>, Option<u64>, Option<u64>);
+
+fn parse_autonomy_options(arg: &str) -> Result<AutonomyOptions, ()> {
     let has_options =
         arg.contains("--gate") || arg.contains("--max-tokens") || arg.contains("--max-minutes");
     if !has_options {
-        return (arg.to_string(), Vec::new(), None, None);
+        return Ok((arg.to_string(), Vec::new(), None, None));
     }
     let Ok(tokens) = shell_words::split(arg) else {
-        return (arg.to_string(), Vec::new(), None, None);
+        return Ok((arg.to_string(), Vec::new(), None, None));
     };
     let mut gates = Vec::new();
     let mut max_tokens = None;
@@ -102,11 +114,11 @@ fn parse_autonomy_options(arg: &str) -> (String, Vec<String>, Option<u64>, Optio
                 i += 2;
             }
             "--max-tokens" if i + 1 < tokens.len() => {
-                max_tokens = tokens[i + 1].parse().ok();
+                max_tokens = Some(tokens[i + 1].parse().map_err(|_| ())?);
                 i += 2;
             }
             "--max-minutes" if i + 1 < tokens.len() => {
-                max_minutes = tokens[i + 1].parse().ok();
+                max_minutes = Some(tokens[i + 1].parse().map_err(|_| ())?);
                 i += 2;
             }
             _ => {
@@ -115,5 +127,5 @@ fn parse_autonomy_options(arg: &str) -> (String, Vec<String>, Option<u64>, Optio
             }
         }
     }
-    (rest.join(" "), gates, max_tokens, max_minutes)
+    Ok((rest.join(" "), gates, max_tokens, max_minutes))
 }

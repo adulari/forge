@@ -2530,6 +2530,7 @@ impl Session {
         // the approve→Auto-edit→build flow non-recursive (the build turn can't re-propose a plan).
         if self.mode == PermissionMode::Plan {
             specs.push(present_plan_spec());
+            specs.retain(|s| !matches!(s.name.as_str(), "append_file" | "multi_edit"));
             for spec in specs.iter_mut().filter(|s| s.name == "shell") {
                 spec.description.push_str(permission::PLAN_SHELL_NOTE);
             }
@@ -2662,6 +2663,12 @@ impl Session {
             "readme",
             "everywhere",
             "across",
+            "subagent",
+            "sub-agent",
+            "spawn",
+            "delegate",
+            "parallel",
+            "workflow",
         ]
         .iter()
         .any(|intent| prompt.contains(intent))
@@ -5681,6 +5688,25 @@ mod tests {
             fitted.contains("omitted"),
             "the hole must be declared so the summarizer doesn't invent continuity"
         );
+    }
+
+    #[test]
+    fn polling_with_changing_output_is_not_a_doom_loop() {
+        let mut t = ToolFailureTracker::new();
+        for i in 0..6 {
+            assert!(
+                t.record_call("shell", "{\"cmd\":\"poll\"}").is_none(),
+                "call {i}"
+            );
+            t.note_result("shell", "{\"cmd\":\"poll\"}", &format!("state {i}"));
+        }
+        let mut same = ToolFailureTracker::new();
+        let mut tripped = false;
+        for _ in 0..4 {
+            tripped |= same.record_call("shell", "{}").is_some();
+            same.note_result("shell", "{}", "unchanged");
+        }
+        assert!(tripped, "identical results still trip the guard");
     }
 
     #[test]

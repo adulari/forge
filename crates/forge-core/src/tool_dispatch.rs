@@ -728,9 +728,9 @@ impl Session {
 
         if ok {
             self.note_read_files(&call.name, &effective_args);
-            self.failure_tracker.record_success(&call.name);
-            // A shell command that may have moved HEAD (commit, amend, reset, …) is the moment the
-            // commit-discipline tracker forgets whatever is no longer dirty.
+            self.failure_tracker
+                .record_success_with(&call.name, &call_args_json, &result);
+            // A shell command that may move HEAD is when the commit tracker forgets clean files.
             if self.config.git.commit_nudge
                 && call.name == "shell"
                 && forge_types::shell_command_text(&call.args)

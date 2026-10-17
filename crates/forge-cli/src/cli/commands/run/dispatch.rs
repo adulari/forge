@@ -606,11 +606,15 @@ with the tool.\n\nTask: {task}"
         CommandAction::Execute => {
             let label = {
                 let mut s = session.lock().await;
-                s.set_temper(forge_types::PermissionMode::AcceptEdits)
-                    .label()
+                if s.temper() == forge_types::PermissionMode::Plan {
+                    s.set_temper(forge_types::PermissionMode::AcceptEdits)
+                        .label()
+                } else {
+                    s.temper().label()
+                }
             };
             app.set_temper(label);
-            app.note("⚒ executing the approved plan (Auto-edit)");
+            app.note(&format!("⚒ executing the plan ({label})"));
             return Ok(DispatchOutcome::RunTurn {
                 prompt: "Implement the plan you just proposed, step by step — make the edits and \
 run the commands needed to carry it out. If something forces a deviation from the plan, say so \

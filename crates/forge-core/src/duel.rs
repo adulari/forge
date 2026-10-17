@@ -92,6 +92,12 @@ pub async fn run(
     if !worktree::is_git_repo(&ctx.repo_root) {
         return Err(CoreError::Precondition("duel needs a git repo".to_string()));
     }
+    if ctx.mode == PermissionMode::Plan {
+        return Err(CoreError::Precondition(
+            "/duel edits files in isolated worktrees; leave the read-only/plan temper first"
+                .to_string(),
+        ));
+    }
 
     let readiness = crate::readiness::ProviderReadiness::snapshot(&ctx.config, &ctx.store);
     let health = readiness.health;

@@ -11,6 +11,9 @@ pub(super) struct StreamRun {
     /// The routed model — last `routing` event wins, so mid-run failover reports the model
     /// that actually finished the work.
     pub(super) model: Option<String>,
+    /// The tail of the child's stderr, kept so a child that died before emitting a result
+    /// still leaves a reason behind.
+    pub(super) stderr_tail: String,
 }
 
 impl StreamRun {
@@ -79,7 +82,7 @@ pub(super) fn status_glyph(status: &str) -> &'static str {
         "empty" => "○",
         "gated" => "⚠",
         "over-budget" => "$",
-        "failed" => "✗",
+        "failed" | "gate-error" => "✗",
         "running" => "▶",
         _ => "·",
     }

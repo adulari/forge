@@ -482,6 +482,11 @@ impl Session {
             inherit_pin: !self.subagents_free(),
         };
         let workflows_dir = repo_root.join(".forge").join("workflows");
+        if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+            return Err(CoreError::Precondition(format!(
+                "workflow name '{name}' must be a plain filename with no path separators"
+            )));
+        }
 
         // Same Started/Finished bracket as the `run_workflow` tool path, carrying the saved name.
         self.presenter.emit(PresenterEvent::WorkflowStarted {

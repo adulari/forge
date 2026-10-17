@@ -1288,16 +1288,15 @@ mod tests {
                 max_minutes: None,
             }
         );
-        // A non-numeric budget value is dropped rather than panicking.
-        assert_eq!(
+        // A non-numeric budget value is refused, not silently run uncapped.
+        assert!(matches!(
             parse_command("/loop --max-tokens oops go"),
-            CommandAction::Loop {
-                prompt: "go".into(),
-                gates: Vec::new(),
-                max_tokens: None,
-                max_minutes: None,
-            }
-        );
+            CommandAction::Unknown(_)
+        ));
+        assert!(matches!(
+            parse_command("/goal ship --max-minutes soon"),
+            CommandAction::Unknown(_)
+        ));
     }
 
     #[test]

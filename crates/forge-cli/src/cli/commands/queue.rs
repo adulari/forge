@@ -274,13 +274,18 @@ fn spawn_task_run(
     mock: bool,
     strict_free: bool,
 ) -> Result<(StreamRun, std::process::ExitStatus, bool)> {
+    let stderr_file = tempfile::tempfile().context("creating the stderr capture")?;
     let mut cmd = std::process::Command::new(forge_exe);
     cmd.arg("run")
         .arg(task)
         .args(["--output-format", "stream-json", "--mode", mode])
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(
+            stderr_file
+                .try_clone()
+                .context("cloning the stderr capture")?,
+        ))
         .stdin(std::process::Stdio::null());
     if let Some(m) = model {
         cmd.args(["--model", m]);
@@ -308,6 +313,19 @@ fn spawn_task_run(
         }
     }
     let exit = child.wait().context("waiting for the task run")?;
+    {
+        use std::io::{Read, Seek};
+        let mut f = stderr_file;
+        let mut text = String::new();
+        if f.rewind().is_ok() && f.read_to_string(&mut text).is_ok() {
+            let text = text.trim();
+            let start = text.len().saturating_sub(400);
+            let start = (start..=text.len())
+                .find(|i| text.is_char_boundary(*i))
+                .unwrap_or(text.len());
+            run.stderr_tail = text[start..].to_string();
+        }
+    }
     Ok((run, exit, over_budget))
 }
 
@@ -379,10 +397,15 @@ fn run_one_task(
         None
     };
 
+    let gate_crashed = gate_note
+        .as_deref()
+        .is_some_and(|n| n.starts_with("assay gate failed to complete"));
     let status = if over_budget {
         "over-budget"
     } else if !exit.success() {
         "failed"
+    } else if gate_crashed {
+        "gate-error"
     } else if gate_note.is_some() {
         "gated"
     } else if branch.is_some() {
@@ -394,7 +417,13 @@ fn run_one_task(
         status: status.to_string(),
         session_id: run.session_id,
         branch,
-        summary: run.result.map(|s| truncate(&s, 400).to_string()),
+        summary: run
+            .result
+            .map(|s| truncate(&s, 400).to_string())
+            .or_else(|| {
+                (!run.stderr_tail.is_empty())
+                    .then(|| format!("no result; stderr: {}", run.stderr_tail))
+            }),
         cost_usd: run.cost_usd,
         gate: gate_note,
         model: run.model,

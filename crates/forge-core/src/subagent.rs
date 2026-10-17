@@ -332,7 +332,20 @@ async fn run_agent_loop(
                 .provider
                 .complete(&active_model, &transcript, &specs, &mut sink);
             let idle = crate::effective_stream_idle(&*ctx.provider, &active_model, stream_idle);
-            match crate::stream_with_idle_timeout(completion, &activity, None, idle).await {
+            let first_event = if idle > stream_idle {
+                idle
+            } else {
+                std::time::Duration::from_secs(ctx.config.mesh.first_event_timeout_secs)
+            };
+            match crate::stream_with_first_event_timeout(
+                completion,
+                &activity,
+                None,
+                idle,
+                first_event,
+            )
+            .await
+            {
                 Ok(r) => break r,
                 Err(e) if failover_enabled && e.is_retryable() => {
                     let _ = ctx.store.bench_for(

@@ -478,6 +478,9 @@ pub(crate) struct ToolFailureTracker {
     failure_counts: std::collections::HashMap<(String, ErrorCategory), u32>,
     /// Ring buffer of recent (tool_name, args_hash) calls for doom-loop detection.
     recent_calls: std::collections::VecDeque<(String, u64)>,
+    /// Hash of the last result each (tool, args) call produced, so polling a command whose
+    /// output keeps changing is not mistaken for a loop.
+    last_results: std::collections::HashMap<(String, u64), u64>,
     failure_threshold: u32,
     doom_loop_threshold: u32,
 }
@@ -493,6 +496,7 @@ impl ToolFailureTracker {
         Self {
             failure_counts: Default::default(),
             recent_calls: std::collections::VecDeque::with_capacity(10),
+            last_results: std::collections::HashMap::new(),
             failure_threshold: 3,
             doom_loop_threshold: 3,
         }
@@ -501,6 +505,32 @@ impl ToolFailureTracker {
     pub(crate) fn reset_turn(&mut self) {
         self.failure_counts.clear();
         self.recent_calls.clear();
+        self.last_results.clear();
+    }
+
+    pub(crate) fn record_success_with(&mut self, tool_name: &str, args_json: &str, result: &str) {
+        self.record_success(tool_name);
+        self.note_result(tool_name, args_json, result);
+    }
+
+    /// Record what a call returned. An identical call whose result differs from last time is
+    /// making progress (a poll), so its repeat streak starts over.
+    pub(crate) fn note_result(&mut self, tool_name: &str, args_json: &str, result: &str) {
+        use std::hash::{Hash, Hasher};
+        let hash = |s: &str| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        };
+        let key = (tool_name.to_string(), hash(args_json));
+        let rh = hash(result);
+        if self
+            .last_results
+            .insert(key.clone(), rh)
+            .is_some_and(|prev| prev != rh)
+        {
+            self.recent_calls.retain(|k| k != &key);
+        }
     }
 
     pub(crate) fn record_call(&mut self, tool_name: &str, args_json: &str) -> Option<String> {

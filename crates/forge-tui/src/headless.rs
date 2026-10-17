@@ -24,6 +24,9 @@ pub struct HeadlessPresenter {
     /// The newest accounting line, printed once when the turn ends. `Cost` now arrives after
     /// every model call (so the TUI statusline is live); a line per call would flood plain output.
     pending_cost: Option<String>,
+    /// A streamed answer line is still open (no trailing newline yet), so a warning must start
+    /// on a fresh line instead of being glued onto the model's text.
+    mid_line: bool,
 }
 
 impl Default for HeadlessPresenter {
@@ -39,6 +42,7 @@ impl HeadlessPresenter {
             styled: std::io::stdout().is_terminal(),
             reasoning_open: false,
             pending_cost: None,
+            mid_line: false,
         }
     }
 
@@ -84,10 +88,14 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::ProviderToolInput { .. } | PresenterEvent::ProviderThinking { .. } => {}
             PresenterEvent::AssistantText(text) => {
                 self.end_reasoning();
+                self.mid_line = false;
                 println!("\n{text}");
             }
             PresenterEvent::AssistantDelta(delta) => {
                 self.end_reasoning();
+                if !delta.is_empty() {
+                    self.mid_line = !delta.ends_with('\n');
+                }
                 print!("{delta}");
                 let _ = std::io::stdout().flush();
             }
@@ -133,6 +141,9 @@ impl Presenter for HeadlessPresenter {
                 println!("  ⚡ steer: {text}");
             }
             PresenterEvent::Warning(msg) => {
+                if std::mem::take(&mut self.mid_line) {
+                    println!();
+                }
                 println!("  ⚠ {msg}");
             }
             PresenterEvent::Error(msg) => {
