@@ -5,6 +5,7 @@
 //! the same pre-styled lines as the main chat, wrapped to the terminal width. The line layout
 //! ([`transcript_lines`]) is pure → unit-tested without terminal I/O.
 
+use crate::theme::{color, styles};
 use std::io;
 use std::time::Duration;
 
@@ -19,7 +20,6 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Terminal;
 
 use crate::app::{ActivityKind, ActivityStatus, TranscriptView};
-use crate::surface::{ACCENT, DIM, ERRRED, OKGREEN, TOOLCYAN, VERY_DIM, WARNYEL};
 use forge_types::truncate_ellipsis as truncate;
 
 /// Run the full-screen activity transcript viewer on the alternate screen (so it never pollutes the
@@ -255,9 +255,9 @@ pub(crate) fn wrap_lines_indexed(
 
 fn kind_theme(kind: ActivityKind) -> (&'static str, Color) {
     match kind {
-        ActivityKind::MainChat => ("●", TOOLCYAN),
-        ActivityKind::Subagent => ("◈", ACCENT),
-        ActivityKind::AssayCritic => ("⚖", WARNYEL),
+        ActivityKind::MainChat => ("●", color::fg_muted()),
+        ActivityKind::Subagent => ("◈", color::user()),
+        ActivityKind::AssayCritic => ("⚖", color::warn()),
     }
 }
 
@@ -295,19 +295,19 @@ pub(crate) fn transcript_lines_from_wrapped(
         return vec![
             TextLine::from(Span::styled(
                 "  ◈ activity",
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                styles::user().add_modifier(Modifier::BOLD),
             )),
-            TextLine::from(Span::styled("  no activity yet", Style::default().fg(DIM))),
+            TextLine::from(Span::styled("  no activity yet", styles::muted())),
         ];
     }
     let selected = selected.min(views.len() - 1);
     let view = &views[selected];
     let (glyph, color) = kind_theme(view.kind);
     let (status, status_color) = match view.status {
-        ActivityStatus::Running => ("… running", DIM),
-        ActivityStatus::Done => ("✔ done", OKGREEN),
-        ActivityStatus::Failed => ("✗ failed", ERRRED),
-        ActivityStatus::Skipped => ("⏭ skipped", DIM),
+        ActivityStatus::Running => ("… running", color::fg_muted()),
+        ActivityStatus::Done => ("✔ done", color::ok()),
+        ActivityStatus::Failed => ("✗ failed", color::err()),
+        ActivityStatus::Skipped => ("⏭ skipped", color::fg_muted()),
     };
     let cost = if view.cost > 0.0 {
         format!(" · ${:.4}", view.cost)
@@ -329,13 +329,10 @@ pub(crate) fn transcript_lines_from_wrapped(
             "  {}",
             truncate(&view.subtitle, w.saturating_sub(20).max(10))
         ),
-        Style::default().fg(DIM),
+        styles::muted(),
     )];
     if let Some(m) = model {
-        header2_spans.push(Span::styled(
-            format!("  [{m}]"),
-            Style::default().fg(VERY_DIM),
-        ));
+        header2_spans.push(Span::styled(format!("  [{m}]"), styles::faint()));
     }
 
     let mut lines = vec![
@@ -349,8 +346,8 @@ pub(crate) fn transcript_lines_from_wrapped(
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("  {status}"), Style::default().fg(status_color)),
-            Span::styled(cost, Style::default().fg(DIM)),
-            Span::styled(nav, Style::default().fg(VERY_DIM)),
+            Span::styled(cost, styles::muted()),
+            Span::styled(nav, styles::faint()),
         ]),
         TextLine::from(header2_spans),
     ];
@@ -363,7 +360,7 @@ pub(crate) fn transcript_lines_from_wrapped(
     if wrapped.is_empty() {
         lines.push(TextLine::from(Span::styled(
             "  (no activity captured yet)",
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
     }
     for line in wrapped.iter().skip(scroll).take(body_h).cloned() {
@@ -381,7 +378,7 @@ pub(crate) fn transcript_lines_from_wrapped(
             shown_end,
             total,
         ),
-        Style::default().fg(VERY_DIM),
+        styles::faint(),
     )));
     lines
 }

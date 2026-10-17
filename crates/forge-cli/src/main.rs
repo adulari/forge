@@ -257,6 +257,8 @@ async fn run_cli(login_path_added: Vec<String>) {
     {
         let config = forge_config::load().ok();
         if let Some(config) = &config {
+            // Resolved once, so every terminal surface (and the startup error below) shares it.
+            forge_tui::theme::init(&config.tui);
             forge_tools::set_attach_endpoint(config.browser.endpoint());
             preview::install(config);
         }
@@ -311,17 +313,12 @@ fn exit_code_for(e: &anyhow::Error) -> i32 {
 /// raw multi-line Debug anyhow dump, followed by a single next-step hint. Config/provider failures
 /// point at `forge doctor`.
 fn print_top_level_error(e: &anyhow::Error) {
-    let mut msg = format!("{e}");
     let causes: Vec<String> = e.chain().skip(1).map(|c| c.to_string()).collect();
-    if !causes.is_empty() {
-        msg.push_str(&format!("  ({})", causes.join(": ")));
-    }
-    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
-        eprintln!("\x1b[31m✖ error:\x1b[0m {msg}");
-    } else {
-        eprintln!("error: {msg}");
-    }
-    eprintln!("  → {}", error_next_step(e));
+    let colored = std::io::stderr().is_terminal();
+    eprintln!(
+        "{}",
+        forge_tui::theme::render_error(&format!("{e}"), &causes, error_next_step(e), colored)
+    );
 }
 
 /// One-line next-step hint for a failed command. Provider/config/auth failures get the `forge

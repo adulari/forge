@@ -1,4 +1,5 @@
 use super::*;
+use crate::theme::styles;
 
 /// Inner text width available to the input: box width minus the two borders, the 1-col horizontal
 /// padding each side. The leading `› ` prompt (2 cols) eats into the first row, handled by callers.
@@ -69,20 +70,7 @@ pub fn input_cursor_up(input: &str, cursor: usize) -> Option<usize> {
 }
 
 pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    let (tone, title_text) = if app.awaiting_question() {
-        (surface::SurfaceTone::Warning, "◉ answer".to_string())
-    } else if app.prompt.is_some() {
-        (surface::SurfaceTone::Warning, "◉ respond".to_string())
-    } else if app.busy {
-        (
-            surface::SurfaceTone::Accent,
-            format!("▸ {}", app.turn_activity.phase.input_label()),
-        )
-    } else {
-        (surface::SurfaceTone::Brand, "✦ message".to_string())
-    };
-    let block =
-        surface::panel(surface::title(title_text, tone), tone).padding(Padding::horizontal(1));
+    let block = chrome::composer_block(app, area.width);
 
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
@@ -94,11 +82,11 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     // Cursor appearance: a solid orange block when focused, suppressed on the blink "off" frame,
     // and a dim hollow (underline) when the terminal window has lost focus.
     let cursor_style = if app.unfocused {
-        Style::default().fg(DIM).add_modifier(Modifier::UNDERLINED)
+        styles::muted().add_modifier(Modifier::UNDERLINED)
     } else if app.cursor_hidden {
         Style::default()
     } else {
-        Style::default().fg(STATUSBG).bg(ORANGE)
+        styles::cursor()
     };
     let input_lines: Vec<&str> = app.input.split('\n').collect();
     let mut byte_off = 0usize;
@@ -114,7 +102,10 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 
         let mut spans = Vec::new();
         if i == 0 {
-            spans.push(Span::styled("› ", Style::default().fg(ORANGE).bold()));
+            spans.push(Span::styled(
+                format!("{} ", crate::theme::glyphs::g().prompt),
+                styles::brand().bold(),
+            ));
         }
         if let Some(col) = cursor_col {
             spans.extend(line_spans_with_cursor(line, col, i == 0, cursor_style));
@@ -134,18 +125,15 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         if let Some(first) = text_lines.first_mut() {
             match &app.suggested_prompt {
                 Some(suggestion) => {
-                    first
-                        .spans
-                        .push(Span::styled(suggestion.clone(), Style::default().fg(DIM)));
                     first.spans.push(Span::styled(
-                        "  ⇥ tab",
-                        Style::default().fg(DIM).add_modifier(Modifier::DIM),
+                        format!("try: {suggestion}"),
+                        styles::faint().add_modifier(Modifier::ITALIC),
                     ));
                 }
                 None => {
                     first.spans.push(Span::styled(
-                        "Message…   / commands  ·  @ files  ·  ? keys",
-                        Style::default().fg(DIM),
+                        format!("Message Forge{}", crate::theme::glyphs::g().ellipsis),
+                        styles::faint().add_modifier(Modifier::ITALIC),
                     ));
                 }
             }
@@ -186,7 +174,7 @@ pub(crate) fn input_spans(input: &str) -> Vec<Span<'static>> {
             }
             out.push(Span::styled(
                 input[tok.start..tok.end].to_string(),
-                Style::default().fg(ACCENT).bold(),
+                styles::user().bold(),
             ));
             if tok.end < input.len() {
                 out.push(Span::raw(input[tok.end..].to_string()));
@@ -228,9 +216,8 @@ fn line_spans_with_cursor(
             let tok_start = tok.start;
             let tok_end = tok.end;
 
-            let tok_span = |s: &str| -> Span<'static> {
-                Span::styled(s.to_string(), Style::default().fg(ACCENT).bold())
-            };
+            let tok_span =
+                |s: &str| -> Span<'static> { Span::styled(s.to_string(), styles::user().bold()) };
 
             if col < tok_start {
                 // cursor is before the token

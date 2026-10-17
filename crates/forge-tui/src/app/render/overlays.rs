@@ -1,4 +1,5 @@
 use super::*;
+use crate::theme::{color, styles};
 
 /// Render `/usage` as a centered, summary-first inspector. Spend and token details stay in one
 /// focused view that leaves the active conversation stable in the background.
@@ -154,7 +155,11 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
             Span::raw(format!("{:<8}", "Pace")),
             Span::styled(
                 format!("{}: {}", note.provider, note.note),
-                Style::default().fg(if note.over_pace { WARNYEL } else { DIM }),
+                Style::default().fg(if note.over_pace {
+                    color::warn()
+                } else {
+                    color::fg_muted()
+                }),
             ),
         ]));
     }
@@ -184,7 +189,7 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
                 || display.starts_with("codex-cli")
                 || display.starts_with("agy-cli")
             {
-                Style::default().fg(TOOLCYAN)
+                styles::muted()
             } else {
                 Style::default()
             };
@@ -234,14 +239,14 @@ fn mesh_meter(frac: f64, ease: f32, status: &str) -> Vec<Span<'static>> {
     let shown = (frac as f32 * ease).clamp(0.0, 1.0);
     let filled = (shown * 14.0).round() as usize;
     let col = match status {
-        "Exhausted" => ERRRED,
-        "Warning" => WARNYEL,
-        _ if frac >= 0.6 => WARNYEL,
-        _ => OKGREEN,
+        "Exhausted" => color::err(),
+        "Warning" => color::warn(),
+        _ if frac >= 0.6 => color::warn(),
+        _ => color::ok(),
     };
     vec![
         Span::styled("█".repeat(filled), Style::default().fg(col)),
-        Span::styled("░".repeat(14 - filled), Style::default().fg(DIM)),
+        Span::styled("░".repeat(14 - filled), styles::muted()),
     ]
 }
 
@@ -319,7 +324,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         let spinner = SPINNER[(o.anim_tick as usize) % SPINNER.len()];
         f.render_widget(
             ratatui::widgets::Paragraph::new(format!(" {spinner} analyzing routing…"))
-                .style(Style::default().fg(DIM)),
+                .style(styles::muted()),
             inner,
         );
         return;
@@ -332,11 +337,11 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     if o.prompt.is_empty() {
         top.push(Line::from(Span::styled(
             "Routing overview — run `/mesh <task>` to trace a specific request.",
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
     } else {
         top.push(Line::from(vec![
-            Span::styled("task  ", Style::default().fg(DIM)),
+            Span::styled("task  ", styles::muted()),
             Span::raw(mesh_truncate(
                 &o.prompt,
                 inner.width.saturating_sub(8) as usize,
@@ -350,27 +355,24 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             format!("{}   ({})", o.classified, o.reasons)
         };
         top.push(Line::from(vec![
-            Span::styled("decision  ", Style::default().fg(DIM)),
-            Span::styled(tier, Style::default().fg(ACCENT).bold()),
+            Span::styled("decision  ", styles::muted()),
+            Span::styled(tier, styles::user().bold()),
         ]));
     }
     if !o.pick.is_empty() {
         let mut spans = vec![
-            Span::styled("selected  ", Style::default().fg(DIM)),
-            Span::styled(o.pick.clone(), Style::default().fg(OKGREEN).bold()),
+            Span::styled("selected  ", styles::muted()),
+            Span::styled(o.pick.clone(), styles::ok().bold()),
         ];
         if let Some(rung) = &o.pick_effort {
-            spans.push(Span::styled(
-                format!("⟨{rung}⟩"),
-                Style::default().fg(OKGREEN).bold(),
-            ));
+            spans.push(Span::styled(format!("⟨{rung}⟩"), styles::ok().bold()));
         }
         top.push(Line::from(spans));
     }
     if !o.classifier.is_empty() {
         top.push(Line::from(vec![
-            Span::styled("classifier  ", Style::default().fg(DIM)),
-            Span::styled(o.classifier.clone(), Style::default().fg(DIM)),
+            Span::styled("classifier  ", styles::muted()),
+            Span::styled(o.classifier.clone(), styles::muted()),
         ]));
     }
     if !o.fallbacks.is_empty() {
@@ -379,7 +381,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
                 &format!("fallbacks  {}", o.fallbacks.join(" → ")),
                 inner.width as usize,
             ),
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
     }
     top.push(Line::from(""));
@@ -403,18 +405,30 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
                 q.spread_complex * 100.0,
                 mesh_pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),
             ),
-            Style::default().fg(if q.exhaustion_warning { WARNYEL } else { DIM }),
+            Style::default().fg(if q.exhaustion_warning {
+                color::warn()
+            } else {
+                color::fg_muted()
+            }),
         ));
         if !q.pace_note.is_empty() {
             spans.push(Span::styled(
                 format!(" · {}", q.pace_note),
-                Style::default().fg(if q.over_pace { WARNYEL } else { DIM }),
+                Style::default().fg(if q.over_pace {
+                    color::warn()
+                } else {
+                    color::fg_muted()
+                }),
             ));
         }
         top.push(Line::from(spans));
     }
     if !o.conserve_line.is_empty() {
-        let col = if o.conserve_fired { WARNYEL } else { DIM };
+        let col = if o.conserve_fired {
+            color::warn()
+        } else {
+            color::fg_muted()
+        };
         top.push(Line::from(Span::styled(
             format!("  conserve  {}", o.conserve_line),
             Style::default().fg(col),
@@ -455,9 +469,9 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             if c.usable { "" } else { " · unusable" },
         );
         let mut base = if c.selected {
-            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD)
+            styles::ok().add_modifier(Modifier::BOLD)
         } else if !c.usable {
-            Style::default().fg(DIM)
+            styles::muted()
         } else {
             Style::default()
         };
@@ -484,30 +498,27 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
                 if i == cursor || c.selected {
                     base
                 } else {
-                    Style::default().fg(DIM)
+                    styles::muted()
                 },
             ),
         ]));
     }
     rows.push(Line::from(""));
     let mut pick_spans = vec![
-        Span::styled("pick  ", Style::default().fg(DIM)),
-        Span::styled(
-            o.pick.clone(),
-            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("pick  ", styles::muted()),
+        Span::styled(o.pick.clone(), styles::ok().add_modifier(Modifier::BOLD)),
     ];
     if let Some(rung) = &o.pick_effort {
         pick_spans.push(Span::styled(
             format!("⟨{rung}⟩"),
-            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
+            styles::ok().add_modifier(Modifier::BOLD),
         ));
     }
     rows.push(Line::from(pick_spans));
     if !o.rationale.is_empty() {
         rows.push(Line::from(Span::styled(
             mesh_truncate(&format!("why   {}", o.rationale), inner.width as usize),
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
     }
     // Auto-scroll to keep the cursor row on-screen: stay at the top until the cursor scrolls past
@@ -534,19 +545,17 @@ pub fn render_btw_overlay(f: &mut Frame, app: &App) {
         return;
     };
     let mut lines = vec![
-        TextLine::from(Span::styled(
-            card.question.clone(),
-            Style::default().fg(TEXT).bold(),
-        )),
+        TextLine::from(Span::styled(card.question.clone(), styles::fg().bold())),
         TextLine::default(),
     ];
     match &card.answer {
-        None => lines.push(TextLine::from(Span::styled(
-            "thinking…",
-            Style::default().fg(DIM),
-        ))),
+        None => lines.push(TextLine::from(Span::styled("thinking…", styles::muted()))),
         Some(answer) => {
-            let tone = if card.failed { WARNYEL } else { TEXT };
+            let tone = if card.failed {
+                color::warn()
+            } else {
+                color::fg()
+            };
             lines.extend(
                 answer.lines().map(|l| {
                     TextLine::from(Span::styled(l.to_string(), Style::default().fg(tone)))
@@ -558,7 +567,7 @@ pub fn render_btw_overlay(f: &mut Frame, app: &App) {
         lines.push(TextLine::default());
         lines.push(TextLine::from(Span::styled(
             format!("{} · not part of the conversation", card.meta),
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
     }
     let area = f.area();

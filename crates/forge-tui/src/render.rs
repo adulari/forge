@@ -6,6 +6,7 @@
 //! `pulldown-cmark` is *total* (it degrades malformed markdown to literal text and never
 //! panics), so this renderer never drops content or crashes on bad input.
 
+use crate::theme::{color, styles};
 use std::sync::OnceLock;
 
 use forge_types::{DiffKind, FileDiff};
@@ -23,10 +24,6 @@ pub(crate) use stream::StreamCache;
 use table::{clip_spans, TableBuild, TABLE_CELL_MAX};
 
 use crate::copy_mark;
-use crate::surface::{ACCENT, DIM, ERRRED, OKGREEN, ORANGE, TEXT, TOOLCYAN, WARNYEL};
-
-const CODEFG: Color = TEXT; // code body text = primary body text
-const CODEBG: Color = Color::Rgb(40, 40, 48); // code block background
 
 /// Cap on rendered changed lines before truncating (keeps a huge diff from flooding scrollback).
 const MAX_DIFF_LINES: usize = 500;
@@ -37,13 +34,18 @@ const INDENT: &str = "  ";
 /// Bundled syntaxes + theme, loaded once. The cost is paid at most once per process and
 /// only when a code block is actually highlighted — never on `forge --help`/`forge run`.
 fn highlighter() -> &'static (SyntaxSet, Theme) {
-    static HL: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
-    HL.get_or_init(|| {
+    static DARK: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
+    static LIGHT: OnceLock<(SyntaxSet, Theme)> = OnceLock::new();
+    let (cell, name) = match crate::theme::t().mode {
+        crate::theme::Mode::Dark => (&DARK, "base16-ocean.dark"),
+        crate::theme::Mode::Light => (&LIGHT, "InspiredGitHub"),
+    };
+    cell.get_or_init(|| {
         let ss = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
         let theme = ts
             .themes
-            .get("base16-ocean.dark")
+            .get(name)
             .or_else(|| ts.themes.values().next())
             .cloned()
             .unwrap_or_default();
@@ -61,7 +63,11 @@ fn highlighted_spans(
             .into_iter()
             .map(|(st, text)| {
                 let fg = st.foreground;
-                let mut style = Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b));
+                let mut style = if crate::theme::t().tier == crate::theme::ColorTier::Mono {
+                    Style::default()
+                } else {
+                    Style::default().fg(crate::theme::rgb(fg.r, fg.g, fg.b))
+                };
                 if st.font_style.contains(FontStyle::BOLD) {
                     style = style.add_modifier(Modifier::BOLD);
                 }
@@ -71,7 +77,7 @@ fn highlighted_spans(
                 Span::styled(text.to_string(), style)
             })
             .collect(),
-        Err(_) => vec![Span::styled(line.to_string(), Style::default().fg(CODEFG))],
+        Err(_) => vec![Span::styled(line.to_string(), styles::fg())],
     }
 }
 
@@ -104,7 +110,7 @@ fn diff_header(diff: &FileDiff) -> String {
 pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
     let mut out = vec![Line::from(Span::styled(
         diff_header(diff),
-        Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+        styles::brand().add_modifier(Modifier::BOLD),
     ))];
 
     if diff.binary {
@@ -112,7 +118,7 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
         let n = diff.new.as_ref().map(|s| s.len()).unwrap_or(0);
         out.push(Line::from(Span::styled(
             format!("{INDENT}binary file ({o} → {n} bytes)"),
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
         return out;
     }
@@ -153,30 +159,30 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
                 ns + 1,
                 ne - ns
             ),
-            Style::default().fg(TOOLCYAN),
+            styles::muted(),
         )));
         for op in group {
             for change in td.iter_changes(&op) {
                 if emitted >= MAX_DIFF_LINES {
                     out.push(Line::from(Span::styled(
                         format!("{INDENT}… (diff truncated — full change in the tool result)"),
-                        Style::default().fg(DIM),
+                        styles::muted(),
                     )));
                     return out;
                 }
                 emitted += 1;
                 let text = change.value().trim_end_matches('\n').to_string();
                 let (sym, color) = match change.tag() {
-                    ChangeTag::Delete => ("-", ERRRED),
-                    ChangeTag::Insert => ("+", OKGREEN),
-                    ChangeTag::Equal => (" ", DIM),
+                    ChangeTag::Delete => ("-", color::err()),
+                    ChangeTag::Insert => ("+", color::ok()),
+                    ChangeTag::Equal => (" ", color::fg_muted()),
                 };
                 let mut line = gutter(sym, color).to_vec();
                 // highlight the body; context/added stay readable, deletions tinted red.
                 let body = highlighted_spans(&mut highlighter, ss, &text);
                 if change.tag() == ChangeTag::Delete {
                     let joined: String = body.into_iter().map(|s| s.content.into_owned()).collect();
-                    line.push(Span::styled(joined, Style::default().fg(ERRRED)));
+                    line.push(Span::styled(joined, styles::err()));
                 } else {
                     line.extend(body);
                 }
@@ -187,7 +193,7 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
     if emitted == 0 {
         out.push(Line::from(Span::styled(
             format!("{INDENT}(no textual changes)"),
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
     }
     out
@@ -297,10 +303,10 @@ pub fn diff_to_plain(diff: &FileDiff) -> String {
 fn severity_color(sev: forge_types::Severity) -> Color {
     use forge_types::Severity;
     match sev {
-        Severity::Critical => ERRRED,
-        Severity::High => ORANGE,
-        Severity::Medium => WARNYEL,
-        Severity::Low => DIM,
+        Severity::Critical => color::err(),
+        Severity::High => color::brand(),
+        Severity::Medium => color::warn(),
+        Severity::Low => color::fg_muted(),
     }
 }
 
@@ -312,32 +318,32 @@ pub fn mcp_status_lines(servers: &[forge_types::McpServerLine]) -> Vec<Line<'sta
         if let Some(problem) = forge_config::mcp_toml_problem(project) {
             return vec![Line::from(Span::styled(
                 format!("  ⚠ .forge/mcp.toml is ignored: {problem}"),
-                Style::default().fg(WARNYEL),
+                styles::warn(),
             ))];
         }
         return vec![Line::from(Span::styled(
             "  ◈ no MCP servers configured — declare them in .forge/mcp.toml (or `forge mcp import`)"
                 .to_string(),
-            Style::default().fg(DIM),
+            styles::muted(),
         ))];
     }
     let mut out = vec![Line::from(Span::styled(
         format!("  ◈ MCP servers  ({} configured)", servers.len()),
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        styles::user().add_modifier(Modifier::BOLD),
     ))];
     for s in servers {
         let (glyph, color) = match s.status.as_str() {
-            "connected" => ("●", OKGREEN),
-            "slow" => ("●", WARNYEL),
-            "reconnecting" => ("↻", WARNYEL),
-            "failed" | "unauthorized" => ("○", ERRRED),
-            _ => ("○", DIM), // disabled / unknown
+            "connected" => ("●", color::ok()),
+            "slow" => ("●", color::warn()),
+            "reconnecting" => ("↻", color::warn()),
+            "failed" | "unauthorized" => ("○", color::err()),
+            _ => ("○", color::fg_muted()), // disabled / unknown
         };
         let mut spans = vec![
             Span::styled(format!("    {glyph} "), Style::default().fg(color)),
             Span::styled(
                 format!("{:<12}", s.name),
-                Style::default().fg(CODEFG).add_modifier(Modifier::BOLD),
+                styles::fg().add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{:<13}{:<6}", s.status, s.transport),
@@ -348,21 +354,18 @@ pub fn mcp_status_lines(servers: &[forge_types::McpServerLine]) -> Vec<Line<'sta
                     "{} tools · {} resources · {} prompts",
                     s.tools, s.resources, s.prompts
                 ),
-                Style::default().fg(DIM),
+                styles::muted(),
             ),
         ];
         if let Some(detail) = &s.detail {
-            spans.push(Span::styled(
-                format!("   {detail}"),
-                Style::default().fg(ERRRED),
-            ));
+            spans.push(Span::styled(format!("   {detail}"), styles::err()));
         }
         out.push(Line::from(spans));
     }
     out.push(Line::from(Span::styled(
         "    tools load on demand — the model finds them with tool_search or mcp_search_tools."
             .to_string(),
-        Style::default().fg(DIM),
+        styles::muted(),
     )));
     out
 }
@@ -379,21 +382,18 @@ pub fn assay_report_lines(r: &forge_types::AssayReport) -> Vec<Line<'static>> {
                 "{INDENT}◈ ASSAY REPORT  run {id8}  scope: {}",
                 r.scope.label()
             ),
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+            styles::brand().add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
             Span::styled(
                 format!("{INDENT}{} findings  ", r.findings.len()),
-                Style::default().fg(CODEFG),
+                styles::fg(),
             ),
-            Span::styled(format!("{crit} crit "), Style::default().fg(ERRRED)),
-            Span::styled(format!("{high} high "), Style::default().fg(ORANGE)),
-            Span::styled(format!("{med} med "), Style::default().fg(WARNYEL)),
-            Span::styled(format!("{low} low"), Style::default().fg(DIM)),
-            Span::styled(
-                format!("  ·  ${:.4}", r.cost_usd),
-                Style::default().fg(OKGREEN),
-            ),
+            Span::styled(format!("{crit} crit "), styles::err()),
+            Span::styled(format!("{high} high "), styles::brand()),
+            Span::styled(format!("{med} med "), styles::warn()),
+            Span::styled(format!("{low} low"), styles::muted()),
+            Span::styled(format!("  ·  ${:.4}", r.cost_usd), styles::ok()),
         ]),
     ];
     if !r.skipped_lenses.is_empty() {
@@ -404,13 +404,13 @@ pub fn assay_report_lines(r: &forge_types::AssayReport) -> Vec<Line<'static>> {
             .collect();
         out.push(Line::from(Span::styled(
             format!("{INDENT}skipped: {}", sk.join(", ")),
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
     }
     if r.findings.is_empty() {
         out.push(Line::from(Span::styled(
             format!("{INDENT}no findings — clean, or the scope had no analyzable source."),
-            Style::default().fg(DIM),
+            styles::muted(),
         )));
         return out;
     }
@@ -421,20 +421,17 @@ pub fn assay_report_lines(r: &forge_types::AssayReport) -> Vec<Line<'static>> {
             None => f.file.clone(),
         };
         out.push(Line::from(vec![
-            Span::styled(format!("{INDENT}{:>2}. ", i + 1), Style::default().fg(DIM)),
+            Span::styled(format!("{INDENT}{:>2}. ", i + 1), styles::muted()),
             Span::styled(
                 format!("{} ", f.severity.as_str().to_uppercase()),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!("{} ", f.category.as_str()),
-                Style::default().fg(CODEFG),
-            ),
-            Span::styled(loc, Style::default().fg(DIM)),
+            Span::styled(format!("{} ", f.category.as_str()), styles::fg()),
+            Span::styled(loc, styles::muted()),
         ]));
         out.push(Line::from(Span::styled(
             format!("{INDENT}    {}", f.title),
-            Style::default().fg(CODEFG),
+            styles::fg(),
         )));
         if !f.suggested_fix.is_empty() {
             out.push(Line::from(Span::styled(
@@ -443,7 +440,7 @@ pub fn assay_report_lines(r: &forge_types::AssayReport) -> Vec<Line<'static>> {
                     f.suggested_fix,
                     f.effort.as_str()
                 ),
-                Style::default().fg(DIM),
+                styles::muted(),
             )));
         }
     }
@@ -531,9 +528,9 @@ struct Renderer {
 
 impl Renderer {
     fn style(&self) -> Style {
-        let mut s = Style::default().fg(CODEFG);
+        let mut s = styles::fg();
         if self.heading {
-            s = s.fg(ORANGE).add_modifier(Modifier::BOLD);
+            s = s.patch(styles::brand()).add_modifier(Modifier::BOLD);
         }
         if self.bold > 0 {
             s = s.add_modifier(Modifier::BOLD);
@@ -566,10 +563,8 @@ impl Renderer {
             // start the line with its indent (+ quote bar if quoted).
             self.cur.push(Span::raw(self.indent_prefix()));
             if self.quote > 0 {
-                self.cur.push(Span::styled(
-                    "▏ ",
-                    copy_mark::decor(Style::default().fg(DIM)),
-                ));
+                self.cur
+                    .push(Span::styled("▏ ", copy_mark::decor(styles::muted())));
             }
         }
         self.cur.push(Span::styled(text.to_string(), self.style()));
@@ -624,7 +619,7 @@ impl Renderer {
                 if matches!(level, HeadingLevel::H1 | HeadingLevel::H2) {
                     self.lines.push(Line::from(Span::styled(
                         format!("{INDENT}{}", "─".repeat(44)),
-                        Style::default().fg(DIM),
+                        styles::muted(),
                     )));
                 }
                 self.heading = false;
@@ -669,8 +664,7 @@ impl Renderer {
                     }
                     _ => "• ".to_string(),
                 };
-                self.cur
-                    .push(Span::styled(marker, Style::default().fg(ACCENT)));
+                self.cur.push(Span::styled(marker, styles::user()));
             }
             Event::End(TagEnd::Item) => self.flush_line(),
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -726,7 +720,7 @@ impl Renderer {
                 if let Some(table) = self.table.as_mut() {
                     table.cell.push(Span::styled(
                         c.to_string(),
-                        Style::default().fg(TOOLCYAN).bg(CODEBG),
+                        styles::muted().patch(styles::surface()),
                     ));
                 }
             }
@@ -736,7 +730,7 @@ impl Renderer {
                 }
                 self.cur.push(Span::styled(
                     c.to_string(),
-                    Style::default().fg(TOOLCYAN).bg(CODEBG),
+                    styles::muted().patch(styles::surface()),
                 ));
             }
             Event::SoftBreak if self.table.is_some() => self.push_text(" "),
@@ -748,7 +742,7 @@ impl Renderer {
                 self.blank();
                 self.lines.push(Line::from(Span::styled(
                     format!("{INDENT}{}", "─".repeat(48)),
-                    Style::default().fg(DIM),
+                    styles::muted(),
                 )));
                 self.blank();
             }
@@ -767,8 +761,8 @@ impl Renderer {
         while matches!(lines.last(), Some(l) if l.is_empty()) {
             lines = &lines[..lines.len() - 1];
         }
-        let frame = copy_mark::frame_row(Style::default().fg(DIM));
-        let gutter = copy_mark::decor(Style::default().fg(DIM));
+        let frame = copy_mark::frame_row(styles::muted());
+        let gutter = copy_mark::decor(styles::muted());
         let label = if lang.is_empty() { "text" } else { lang };
         let bar = "─".repeat(48usize.saturating_sub(label.len() + 2));
         self.lines.push(Line::from(Span::styled(
@@ -970,7 +964,7 @@ mod tests {
 
     #[test]
     fn diff_context_lines_are_readable_not_all_dim() {
-        // Equal/context lines must render readably (syntax-highlighted body), with DIM reserved for
+        // Equal/context lines must render readably (syntax-highlighted body), with color::fg_muted() reserved for
         // the gutter — not the whole line in the very-dim muted color.
         let diff = FileDiff {
             path: "src/a.rs".into(),
@@ -985,15 +979,15 @@ mod tests {
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.contains("context_anchor")))
             .expect("context line present");
-        // The gutter (first span) may be DIM, but the body must carry a readable (non-DIM) fg.
+        // The gutter (first span) may be color::fg_muted(), but the body must carry a readable (non-color::fg_muted()) fg.
         let body_readable = ctx
             .spans
             .iter()
             .skip(1)
-            .any(|s| !s.content.trim().is_empty() && s.style.fg != Some(DIM));
+            .any(|s| !s.content.trim().is_empty() && s.style.fg != Some(color::fg_muted()));
         assert!(
             body_readable,
-            "context body should be readable, not DIM: {ctx:?}"
+            "context body should be readable, not color::fg_muted(): {ctx:?}"
         );
     }
 

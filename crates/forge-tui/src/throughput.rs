@@ -243,7 +243,7 @@ pub struct Throughput {
 }
 
 impl Throughput {
-    /// `⚡ 64 tok/s ▂▄▇█`. Sub-10 rates keep one decimal, because the difference between 2 and 9
+    /// `64 tok/s`. Sub-10 rates keep one decimal, because the difference between 2 and 9
     /// tok/s is the difference between unusable and tolerable and rounding hides it.
     pub fn label(&self) -> String {
         let rate = if self.tok_per_sec < 10.0 {
@@ -251,10 +251,15 @@ impl Throughput {
         } else {
             format!("{}", self.tok_per_sec.round() as u64)
         };
+        format!("{rate} tok/s")
+    }
+
+    /// [`label`](Self::label) plus the trend sparkline, for the `/status` inspector.
+    pub fn label_with_trend(&self) -> String {
         if self.spark.is_empty() {
-            format!("⚡ {rate} tok/s")
+            self.label()
         } else {
-            format!("⚡ {rate} tok/s {}", self.spark)
+            format!("{} {}", self.label(), self.spark)
         }
     }
 }
@@ -390,13 +395,14 @@ mod tests {
             spark: "▂▄█".into(),
             live: true,
         };
-        assert_eq!(fast.label(), "⚡ 64 tok/s ▂▄█");
+        assert_eq!(fast.label(), "64 tok/s");
+        assert_eq!(fast.label_with_trend(), "64 tok/s ▂▄█");
         let slow = Throughput {
             tok_per_sec: 2.4,
             spark: String::new(),
             live: true,
         };
-        assert_eq!(slow.label(), "⚡ 2.4 tok/s");
+        assert_eq!(slow.label(), "2.4 tok/s");
     }
 
     #[test]

@@ -1,10 +1,8 @@
 //! GFM table layout for the transcript renderer: collected styled cells → padded, aligned lines.
 
-use ratatui::style::Style;
+use crate::theme::styles;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
-
-use crate::surface::DIM;
 
 /// Widest a single table column may render. Wider cells are cut with an ellipsis so one long
 /// cell cannot push the whole table past the terminal edge and wrap every row.
@@ -48,7 +46,7 @@ pub(super) fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'sta
             break;
         }
     }
-    out.push(Span::styled("…", Style::default().fg(DIM)));
+    out.push(Span::styled("…", styles::muted()));
     out
 }
 
@@ -67,7 +65,7 @@ pub(super) fn layout(table: TableBuild, indent: &str) -> Vec<Line<'static>> {
             widths[i] = widths[i].max(spans_width(cell));
         }
     }
-    let frame = Style::default().fg(DIM);
+    let frame = styles::muted();
     for (r, row) in table.rows.into_iter().enumerate() {
         let mut line: Vec<Span<'static>> = vec![Span::raw(indent.to_string())];
         for (i, width) in widths.iter().enumerate() {

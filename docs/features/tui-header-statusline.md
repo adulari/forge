@@ -1,7 +1,21 @@
-# Feature: TUI ASCII header & statusline
+# Feature: TUI header, composer border & statusline
 
-> Right-sized spec for a TUI cosmetic + UX feature. Implemented in `crates/forge-tui`
-> immediately after.
+> Originally a right-sized spec for the ASCII welcome banner and a statusline. The chrome has since
+> been redesigned as part of the Forgeline identity (see [tui-theme.md](tui-theme.md)): sections 5
+> onwards describe the current behaviour. The welcome banner is owned by the panels surface.
+
+## 0. Current design: four regions, one job each
+
+| Region | Answers | Content |
+|---|---|---|
+| Header (fullscreen only, 1 row) | where am I | `✦ forge`, `repo ⑂ branch` (`worktree` marker, `@sha` in warn for a detached HEAD), `● remote` while remote control is on, version from 120 columns |
+| Composer border | what is happening now, how my next message runs, which keys work | top-left live line, top-right chips, bottom-right hints |
+| Status line (1 row) | engine and meters | model · tier, cost, turn tokens, throughput on the left; context gauge and mesh effort on the right |
+| `/status` | everything the others drop | model, mode, location, context, turn, session, quotas, MCP, version |
+
+Row budget at 80x24 fullscreen: header 1 + composer 3 + status 1 = 5 rows of chrome, 19 for the
+transcript. Inline has no header (the region stays `LIVE_H` = 14 rows) and keeps a `● remote` and
+a `⑂ branch` item in the status line instead.
 
 ## 1. Problem (JTBD)
 
@@ -102,78 +116,62 @@ Conversation area renders, centered, the wordmark + tagline instead of an empty 
 
 Non-empty conversation → compact header row: ` ⚒ FORGE   <session>`.
 
-### Statusline (bottom bar, replaces the plain footer)
-Segments, separated by ` · `, left→right by priority; right side reserved for hints:
+### Composer border
 
-```
- ⠙ model reasoning   [complex] qwen3.8-max-preview   $0.0033         esc stop · Ctrl↑ escalate
-```
-- phase/spinner segment only when `busy`.
-- `[tier] model` from `app.routing`.
-- `$cost` from `app.cost_usd`.
-- `mode` (permission) — optional v1.
-- hints right-aligned; dropped first when width is tight.
+The composer is the only permanent frame. Its border carries three zones and nothing is drawn
+twice (`app/render/chrome.rs`):
 
-### Live turn activity heartbeat
+- **Top-left, the live line.** One of: `⠹ Starting session…`; `▲ Esc again to rewind` or
+  `▲ Ctrl+C again to quit` while armed; `● Waiting for you · your approval`; `⠼ Finding a model`;
+  the busy line `⠼ Writing · 14s · ↓1.2k tok · 38 tok/s`; or, after a turn that stopped for a reason,
+  `▲ Step limit reached · send `continue` to resume` (`✗` for a budget cap, unfinished tasks or no
+  output). The verb follows real presenter events (Preparing, Routing, Thinking, Writing,
+  Running <tool>, Waiting, Working, Retrying, Compacting, Finishing). `last event 41s ago` joins the
+  line after 15 s of silence and turns warn after 60 s, so a provider stall looks different from
+  hidden reasoning. On narrow borders a stop reason shrinks to a short phrase and then to the bare
+  recovery.
+- **Top-right, chips.** `N lines` while multi-line, `N queued`, the loop and goal chips, and the mode
+  chip last in its temper colour (Read-only `user`, Ask `fg_muted`, Auto-edit `brand`, Full `err`).
+  The border itself takes the temper colour, and `warn` while the app waits for you.
+- **Bottom-right, hints.** At most five `key label` pairs for the current state: idle, typing,
+  suggestion pending, busy, stopped, palette, picker, permission, question, armed. When the border
+  is narrow they drop from the second-to-last backwards so the first and `? keys` survive longest.
+  Decision blocks and popups supply their own set through their `hints` hook.
 
-While a turn is busy, a dedicated row above the input reports event-backed progress rather than a
-generic `working…` label:
+The counters the old turn-activity row printed (hidden-reasoning characters, buffered provider
+events, tool-call count, the model at the provider boundary) are listed under `ACTIVITY` in
+`/status` while a turn runs.
 
-```text
- ⠹ model reasoning  ·  qwen3.8-max-preview  ·  thought 42.8k chars  ·  event now
-```
+### Status line
 
-The phase follows real presenter events: preparing context, provider request/first-event wait,
-reasoning, response streaming, tool execution, tool-result processing, provider recovery,
-subagent/workflow coordination, compaction, and finalization. Hidden reasoning still increments a
-visible character counter. The row shows `quiet Ns` after 15 seconds without an event and an amber
-`⚠ no events for …` warning after 60 seconds. This is deliberately a heartbeat, not fabricated
-percentage progress: a provider that is still computing is distinguishable from an actively
-streaming model, but Forge does not claim how close either one is to completion.
+One row (plus one per configured `extra_rows` entry and one for a `[statusline] command`). Left:
+the model with its tier (`llama3.2 · trivial`), the `⟨med⟩` rung marker, cost (`$0`, `<$0.01`,
+`$0.42`, `free`, `subscription`), the last turn's `↑72 ↓30` tokens, and live throughput. Right: the
+context gauge (`ctx ▱▱▱▱▱▱▱▱ 0% of 32k`, muted below 70 %, warn from 70, err from 90) and the mesh
+effort chip (`mesh auto`).
 
-Width handling: compute available cols; build segments in priority order
-(model+cost, then tier, then mode, then hints) and stop adding when they won't fit.
+When the row is too narrow widgets drop in this order, and a faint `+N` counts them: throughput,
+extras (quotas, MCP, branch, custom, session tokens), tokens, mesh, rung marker, tier, cost, then the
+model. The gauge never drops; it shrinks to a short bar and then to `ctx 12%`. Configured widgets
+still render: `Mode` lives on the composer border, and every widget is listed by `/status`.
 
-### Narrow-terminal fallback
-- If `area.width < WORDMARK_WIDTH (≈44)` in welcome state → render single-line
-  `⚒ FORGE — model-mesh coding agent`.
-- Statusline: drop hints → mode → tier until it fits; never drop model/cost.
+### `/status`
 
-### Repository and branch
-
-Row 1 names where the chat is working, right-aligned just before the version:
-
-```text
- [complex] gpt-5.6  │  ◈ $0.0033  │  ◆ Auto-edit      forge ⎇ feat/tool-output-viewer  │  v2.15.0  Ctrl+K actions
-```
-
-It is on by default, not another opt-in widget: which repository and branch an agent is editing is
-context nobody should have to configure to see.
-
-- **Live.** The branch used to be read once at startup by spawning `git`, so a checkout during the
-  session left the statusline naming a branch the workspace had left. `git_location.rs` reads
-  `.git`, `HEAD` and `commondir` directly (no process) and the chat loop re-reads them at most
-  every two seconds.
-- **Worktrees name their repository.** The old repository name was the top-level directory's
-  basename, which in a linked worktree is the worktree's own directory (`dev`). A worktree now
-  shows the repository it belongs to, with a dim `⧉`. A submodule shows its checkout's name.
-- **Detached HEAD** shows as `⎇ @e50b52d` in amber: commits made there belong to no branch.
-- **Fitted, never pushing.** The chip is sized to what row 1 has left after the model, cost and
-  hints. A long branch is cut in the middle (`feat/to…viewer`) so both ends stay recognisable; when
-  space runs out the repository goes first, then the whole chip. The model and cost are never
-  pushed off for it.
-- **No duplicates.** A layout that already shows `git_branch` or `repo_name` as a widget gets no
-  chip; those widgets now read the same live location.
-- Outside a git checkout there is no chip.
+`/status` (also in the palette, Ctrl+K under Session, and Help) opens a modal inspector; Esc closes
+it. It lists MODEL (provider-qualified id, tier, mesh effort, model rung), MODE (temper, thinking,
+goal, loop, queue), WHERE (directory, branch, worktree, remote control), CONTEXT (bar, tokens,
+window, auto-compact), TURN, ACTIVITY (while busy), SESSION (id, turns, cost, tokens with cache),
+QUOTAS, MCP and VERSION, plus a line saying how many status-line widgets were dropped at the
+current width.
 
 ### Edge cases
 | Edge case | Behaviour |
 |-----------|-----------|
 | Terminal < wordmark width | compact single-line wordmark |
 | Very short terminal height | banner still drawn; conversation panel just smaller (banner only in welcome state, so no conflict) |
-| No routing yet (before first turn) | statusline shows brand + hints; model/cost show `—` / `$0.0000` |
+| No routing yet (before first turn) | status line shows `no model yet`, `ctx —` and `mesh auto`; no cost |
 | Extremely narrow (<24 cols) | statusline shows just `$cost`; banner shows `FORGE` |
-| busy but no tokens yet | spinner segment animates (tick-driven, already wired) |
+| busy but no tokens yet | the live line's spinner animates (tick-driven); under reduced motion it is a static `…` and the elapsed counter carries liveness |
 
 ## 6. Definition of done
 - [ ] Welcome banner renders in brand orange on empty session; tagline shown

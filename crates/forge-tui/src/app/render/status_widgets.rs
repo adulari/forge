@@ -1,4 +1,5 @@
 use super::*;
+use crate::theme::{color, styles};
 
 /// A real status bar: working state · mesh tier+model · cost, with right-aligned key
 /// hints. Lower-priority segments drop out on narrow terminals; model+cost always show.
@@ -20,39 +21,63 @@ pub(crate) fn human(n: u64) -> String {
 /// mid-size window — conservative enough to warn before most models actually overflow.
 const CONTEXT_FALLBACK_LIMIT: u64 = 128_000;
 
-/// Render the context gauge: a small bar + `used/limit` + `pct%`, colored by fill. When the model's
-/// real window is unknown, a conservative fallback is assumed and the reading is marked `~approx`.
-pub(crate) fn context_gauge_spans(used: u64, limit: Option<u32>) -> Vec<Span<'static>> {
-    let (limit, approx) = match limit {
+/// How much of the gauge to draw: bar and "of limit", bar only, or just the percentage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GaugeSize {
+    Full,
+    Compact,
+    Minimal,
+}
+
+/// A context window as a short label: `32k`, `128k`, `1M` (no trailing `.0`).
+fn window_label(limit: u64) -> String {
+    human(limit).replace(".0k", "k").replace(".0M", "M")
+}
+
+/// The window the gauge measures against: the model's real limit, or a conservative fallback
+/// (marked `~`) so a percentage can still be shown.
+fn gauge_limit(limit: Option<u32>) -> (u64, bool) {
+    match limit {
         Some(l) if l > 0 => (l as u64, false),
         _ => (CONTEXT_FALLBACK_LIMIT, true),
-    };
+    }
+}
+
+/// The context gauge in the shape the status line asks for: `ctx ▰▱▱▱▱▱▱▱ 12% of 32k`, coloured
+/// muted below 70 percent, warn from 70 and err from 90.
+pub(crate) fn context_gauge(used: u64, limit: Option<u32>, size: GaugeSize) -> Vec<Span<'static>> {
+    let glyphs = crate::theme::glyphs::g();
+    if used == 0 && limit.is_none() {
+        return vec![
+            Span::styled("ctx ", styles::faint()),
+            Span::styled(if glyphs.unicode { "—" } else { "-" }, styles::faint()),
+        ];
+    }
+    let (limit, approx) = gauge_limit(limit);
     let frac = (used as f64 / limit as f64).clamp(0.0, 1.0);
     let pct = (frac * 100.0).round() as u64;
-    let color = if pct >= 90 {
-        ERRRED
-    } else if pct >= 70 {
-        WARNYEL
-    } else {
-        DIM
-    };
-    // A compact 10-cell bar: filled cells scale with the fill fraction.
-    const CELLS: usize = 10;
-    let filled = (frac * CELLS as f64).round() as usize;
-    let bar: String = "█".repeat(filled) + &"░".repeat(CELLS - filled);
-    let tail = if approx { " ~approx" } else { "" };
-    vec![
-        Span::styled("◷ ", Style::default().fg(DIM).bg(STATUSBG)),
-        Span::styled(bar, Style::default().fg(color).bg(STATUSBG)),
-        Span::styled(
-            format!(" {}/{} ", human(used), human(limit)),
-            Style::default().fg(DIM).bg(STATUSBG),
-        ),
-        Span::styled(
-            format!("{pct}%{tail}"),
-            Style::default().fg(color).bold().bg(STATUSBG),
-        ),
-    ]
+    let style = styles::gauge(frac);
+    let mut spans = vec![Span::styled("ctx ", styles::faint())];
+    if size != GaugeSize::Minimal {
+        let cells = if size == GaugeSize::Full { 8 } else { 4 };
+        let bar = glyphs.bar(frac, cells);
+        let bar = if glyphs.unicode {
+            bar
+        } else {
+            format!("[{bar}]")
+        };
+        spans.push(Span::styled(bar, style));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(format!("{pct}%"), style));
+    if size == GaugeSize::Full {
+        let tilde = if approx { "~" } else { "" };
+        spans.push(Span::styled(
+            format!(" of {tilde}{}", window_label(limit)),
+            styles::muted(),
+        ));
+    }
+    spans
 }
 
 /// A compact " (Xm/Xh ago)" suffix for rate-limit data older than ~10 min; empty when fresh or
@@ -111,7 +136,7 @@ pub(crate) fn compact_band_height(app: &App) -> u16 {
 /// Render the compaction band: an animated, eased progress bar with elapsed time while compacting,
 /// else a colored "approaching auto-compact" hint with the tokens remaining until the trigger.
 pub(crate) fn render_compact_band(frame: &mut Frame, area: Rect, app: &App) {
-    let bg = Style::default().bg(STATUSBG);
+    let bg = Style::default();
     let spans: Vec<Span> = if let Some(c) = &app.compaction {
         let elapsed = app.tick.saturating_sub(c.start_tick) as f64 * 0.06;
         // Indeterminate work (one summarizer call): ease toward a ceiling instead of faking a real
@@ -119,25 +144,18 @@ pub(crate) fn render_compact_band(frame: &mut Frame, area: Rect, app: &App) {
         let frac = 1.0 - (-elapsed / COMPACT_EASE_TAU_SECS).exp();
         let pct = (frac * 95.0).round() as u64;
         const CELLS: usize = 16;
-        let filled = ((frac * 0.95) * CELLS as f64).round() as usize;
-        let filled = filled.min(CELLS);
-        let spin = SPINNER[app.tick % SPINNER.len()];
-        let bar: String = "█".repeat(filled) + &"░".repeat(CELLS - filled);
+        let glyphs = crate::theme::glyphs::g();
+        let spin = glyphs.spin(app.tick);
+        let bar = glyphs.bar(frac * 0.95, CELLS);
         let label = if c.auto {
             "auto-compacting"
         } else {
             "compacting"
         };
         vec![
-            Span::styled(
-                format!(" {spin} {label} "),
-                Style::default().fg(ACCENT).bold().bg(STATUSBG),
-            ),
-            Span::styled(bar, Style::default().fg(ACCENT).bg(STATUSBG)),
-            Span::styled(
-                format!(" {pct}%  {elapsed:.1}s"),
-                Style::default().fg(DIM).bg(STATUSBG),
-            ),
+            Span::styled(format!(" {spin} {label} "), styles::user().bold()),
+            Span::styled(bar, styles::user()),
+            Span::styled(format!(" {pct}%  {elapsed:.1}s"), styles::muted()),
         ]
     } else {
         let frac = context_fraction(app).unwrap_or(0.0);
@@ -148,45 +166,47 @@ pub(crate) fn render_compact_band(frame: &mut Frame, area: Rect, app: &App) {
         };
         let trigger = (AUTO_COMPACT_FRACTION * limit as f64) as u64;
         let left = trigger.saturating_sub(app.context_tokens);
-        let color = if frac >= AUTO_COMPACT_FRACTION {
-            ERRRED
+        let style = if frac >= AUTO_COMPACT_FRACTION {
+            styles::err()
         } else if frac >= 0.72 {
-            WARNYEL
+            styles::warn()
         } else {
-            DIM
+            styles::muted()
         };
         let msg = if frac >= AUTO_COMPACT_FRACTION {
-            format!(" ⚠ context {pct}% — auto-compact imminent")
+            format!(
+                " {} context {pct}% — auto-compact imminent",
+                crate::theme::glyphs::g().warn
+            )
         } else {
             format!(
-                " ⚠ context {pct}% — auto-compact at {:.0}% (~{} left)",
+                " {} context {pct}% — auto-compact at {:.0}% (~{} left)",
+                crate::theme::glyphs::g().warn,
                 AUTO_COMPACT_FRACTION * 100.0,
                 human(left)
             )
         };
-        vec![Span::styled(msg, Style::default().fg(color).bg(STATUSBG))]
+        vec![Span::styled(msg, style)]
     };
     frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), area);
 }
 
-/// Whether row 2 (turn timer / context gauge / session totals) has anything to show. Shared by
-/// `statusline_height` (to size the reserved area) and `render_statusline` (to decide whether to
-/// render it) so the two can never disagree about which row extra_rows starts on.
-pub(crate) fn statusline_wants_row2(app: &App) -> bool {
-    app.context_tokens > 0
-        || app.context_limit.is_some()
-        || app.session_in > 0
-        || app.session_out > 0
-        || app.busy
-        || app.turn_ran
+/// Session cost for the status line: `$0`, `<$0.01` for dust, otherwise two decimals.
+pub(crate) fn fmt_cost(cost: f64) -> String {
+    if cost <= 0.0 {
+        "$0".to_string()
+    } else if cost < 0.01 {
+        "<$0.01".to_string()
+    } else {
+        format!("${cost:.2}")
+    }
 }
 
-/// Returns 1 when idle (no session data), 2 once context / token data is available, plus one row
-/// per `statusline_config.extra_rows` entry (a static, config-driven count — see `extra_rows`'s
-/// doc comment). Used by [`render_live`] to allocate the right number of rows for the status area.
+/// One row for the built-in status line, plus one per `statusline_config.extra_rows` entry (a
+/// static, config-driven count) and one for a `[statusline] command` once it has output. Used by
+/// [`render_live`] to allocate the status area.
 pub fn statusline_height(app: &App) -> u16 {
-    let base = if statusline_wants_row2(app) { 2 } else { 1 };
-    base + app.statusline_config.extra_rows.len() as u16 + u16::from(command_line(app).is_some())
+    1 + app.statusline_config.extra_rows.len() as u16 + u16::from(command_line(app).is_some())
 }
 
 /// The first line a `[statusline] command` produced, once it has produced one.
@@ -207,17 +227,6 @@ pub(crate) fn fmt_dur(secs: u64) -> String {
         format!("{}m{:02}s", secs / 60, secs % 60)
     } else {
         format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
-/// The colour a rung is drawn in — shared by the model marker and the mesh chip so the same level
-/// reads as the same intensity wherever it appears.
-fn rung_colour(level: forge_types::EffortLevel) -> Color {
-    match level {
-        forge_types::EffortLevel::Low => TOOLCYAN,
-        forge_types::EffortLevel::Medium | forge_types::EffortLevel::High => WARNYEL,
-        forge_types::EffortLevel::XHigh => ERRRED,
-        forge_types::EffortLevel::WhiteHot => Color::Rgb(255, 252, 235),
     }
 }
 
@@ -267,34 +276,31 @@ pub(crate) fn model_effort_marker(
     Some(match decision.sent {
         Some(level) => (
             format!("⟨{}⟩", rung_short(level)),
-            Style::default().fg(rung_colour(level)).bold().bg(STATUSBG),
+            styles::effort(level, 0).bold(),
         ),
-        None => ("⟨auto⟩".to_string(), Style::default().fg(DIM).bg(STATUSBG)),
+        None => ("⟨auto⟩".to_string(), styles::muted()),
     })
 }
 
 /// Forge's OWN effort: the level mesh routes with. A separate cell from the marker above because
 /// they answer different questions and are frequently different values — mesh may route at high
 /// while the chosen model is asked for medium.
-pub(crate) fn mesh_effort_chip(pinned: Option<forge_types::EffortLevel>) -> (String, Style) {
+pub(crate) fn mesh_effort_chip(
+    pinned: Option<forge_types::EffortLevel>,
+    tick: usize,
+) -> (String, Style) {
     match pinned {
         Some(forge_types::EffortLevel::WhiteHot) => (
-            "⚒ mesh WHITE-HOT".to_string(),
-            Style::default()
-                .fg(rung_colour(forge_types::EffortLevel::WhiteHot))
-                .bold()
-                .bg(STATUSBG),
+            "mesh white-hot".to_string(),
+            styles::effort(forge_types::EffortLevel::WhiteHot, tick).bold(),
         ),
         Some(level) => (
-            format!("⚙ mesh {}", rung_long(level)),
-            Style::default().fg(rung_colour(level)).bold().bg(STATUSBG),
+            format!("mesh {}", rung_long(level)),
+            styles::effort(level, tick),
         ),
         // Nothing pinned: mesh is choosing. Dim, and named "auto" rather than given the level mesh
-        // happens to default to — the user did not set one.
-        None => (
-            "⚙ mesh auto".to_string(),
-            Style::default().fg(DIM).bg(STATUSBG),
-        ),
+        // happens to default to: the user did not set one.
+        None => ("mesh auto".to_string(), styles::muted()),
     }
 }
 
@@ -310,42 +316,22 @@ const EFFORT_LEVELS: [forge_types::EffortLevel; 5] = [
 ];
 const EFFORT_LABELS: [&str; 5] = ["LOW", "MEDIUM", "HIGH", "XHIGH", "WHITE·HOT"];
 
-/// The WHITE·HOT ramp — the forge at the temperature where metal glows white:
-/// ember → flame → forge orange → gold → white-hot.
-const WHITEHOT_RAMP: [Color; 6] = [
-    Color::Rgb(216, 45, 28),   // deep ember
-    Color::Rgb(255, 96, 32),   // flame
-    Color::Rgb(255, 152, 40),  // forge orange
-    Color::Rgb(255, 208, 64),  // gold
-    Color::Rgb(255, 238, 150), // near-white gold
-    Color::Rgb(255, 252, 235), // white-hot
-];
-
-/// Sparkle chars that cycle at XHigh stop positions and handle.
+/// Sparkle chars that cycle at XHigh stop positions and handle (Unicode tier only).
 const SPARKLES: [char; 6] = ['✦', '✧', '⋆', '✺', '✼', '❋'];
 
-/// 12-color rainbow for XHigh — each track char gets a phase-shifted hue.
-const XHIGH_COLORS: [Color; 12] = [
-    Color::Rgb(255, 75, 110), // rose
-    Color::Rgb(255, 110, 55), // coral
-    Color::Rgb(255, 155, 30), // amber
-    Color::Rgb(255, 215, 45), // gold
-    Color::Rgb(190, 255, 55), // lime
-    Color::Rgb(75, 230, 125), // neon-green
-    Color::Rgb(35, 215, 215), // teal
-    Color::Rgb(82, 162, 255), // electric-blue
-    Color::Rgb(110, 95, 255), // indigo
-    Color::Rgb(185, 75, 255), // violet
-    Color::Rgb(255, 55, 255), // magenta
-    Color::Rgb(255, 75, 160), // hot-pink
-];
+/// A rung of the ember heat ramp (0 cool .. 4 white-hot); static when motion is reduced.
+fn heat(step: usize) -> Color {
+    crate::theme::t().palette.heat[step.min(4)].fg
+}
 
-/// Three-phase pulse for HIGH: orange → gold → hot-red.
-const HIGH_PULSE: [Color; 3] = [
-    Color::Rgb(255, 138, 48),
-    Color::Rgb(255, 210, 40),
-    Color::Rgb(245, 55, 35),
-];
+/// Where in the ramp an animated rung sits at `tick` (always the same step under reduced motion).
+fn ramp_step(tick: usize, speed: usize) -> usize {
+    if crate::theme::t().animates() {
+        (tick / speed.max(1)) % 5
+    } else {
+        3
+    }
+}
 
 fn slider_idx(app: &App) -> usize {
     let cur = app.effort.unwrap_or(forge_types::EffortLevel::Medium);
@@ -354,60 +340,54 @@ fn slider_idx(app: &App) -> usize {
 
 fn slider_border_color(idx: usize, tick: usize) -> Color {
     match idx {
-        0 => Color::Rgb(55, 60, 88),
-        1 => TOOLCYAN,
-        2 => HIGH_PULSE[(tick / 5) % HIGH_PULSE.len()],
-        3 => XHIGH_COLORS[tick % XHIGH_COLORS.len()],
-        _ => WHITEHOT_RAMP[(tick / 2) % WHITEHOT_RAMP.len()],
+        0 => color::fg_faint(),
+        1 => color::fg_muted(),
+        2 => color::brand(),
+        3 => color::brand_hot(),
+        _ => heat(ramp_step(tick, 2)),
     }
 }
 
 fn slider_fill_color(idx: usize, tick: usize, pos: usize) -> Color {
     match idx {
-        0 => Color::Rgb(85, 92, 118),
-        1 => TOOLCYAN,
-        2 => HIGH_PULSE[(tick / 5) % HIGH_PULSE.len()],
-        3 => XHIGH_COLORS[(tick + pos) % XHIGH_COLORS.len()],
+        0 => color::fg_faint(),
+        1 => color::fg_muted(),
+        2 => color::brand(),
+        3 => color::brand_hot(),
         // The track heats up toward the handle: ember at the left edge, white-hot at the
         // handle, with a slow tick shimmer rippling along it.
-        _ => WHITEHOT_RAMP[(pos / 3 + tick / 4) % WHITEHOT_RAMP.len()],
+        _ => heat(if crate::theme::t().animates() {
+            (pos / 3 + tick / 4) % 5
+        } else {
+            3
+        }),
     }
 }
 
 fn slider_handle_color(idx: usize, tick: usize) -> Color {
     match idx {
-        0 => Color::Rgb(175, 180, 208),
-        1 => Color::Rgb(115, 242, 248),
-        2 => {
-            let t = (tick % 12) as f32;
-            let pulse = (std::f32::consts::PI * t / 12.0).sin();
-            Color::Rgb(255, (120.0 + 110.0 * pulse) as u8, (30.0 * pulse) as u8)
-        }
-        3 => XHIGH_COLORS[(tick * 3) % XHIGH_COLORS.len()],
-        // Blinding pulse between white-hot and gold — the hottest point of the forge.
-        _ => {
-            if (tick / 3).is_multiple_of(2) {
-                Color::Rgb(255, 252, 235)
+        0 => color::fg_muted(),
+        1 => color::fg(),
+        2 => color::brand(),
+        3 => color::brand_hot(),
+        // Pulse between white-hot and gold: the hottest point of the forge.
+        _ => heat(
+            if crate::theme::t().animates() && (tick / 3).is_multiple_of(2) {
+                4
             } else {
-                Color::Rgb(255, 220, 90)
-            }
-        }
+                3
+            },
+        ),
     }
 }
 
 fn slider_label_style(idx: usize, tick: usize) -> Style {
     match idx {
-        0 => Style::default().fg(DIM),
-        1 => Style::default().fg(Color::Rgb(115, 242, 248)).bold(),
-        2 => Style::default()
-            .fg(HIGH_PULSE[(tick / 5) % HIGH_PULSE.len()])
-            .bold(),
-        3 => Style::default()
-            .fg(XHIGH_COLORS[(tick * 2) % XHIGH_COLORS.len()])
-            .bold(),
-        _ => Style::default()
-            .fg(WHITEHOT_RAMP[3 + (tick / 3) % 3])
-            .bold(),
+        0 => styles::faint(),
+        1 => styles::muted().bold(),
+        2 => styles::brand().bold(),
+        3 => styles::brand_hot().bold(),
+        _ => Style::default().fg(heat(ramp_step(tick, 3))).bold(),
     }
 }
 
@@ -430,12 +410,12 @@ pub(crate) fn render_effort_slider(frame: &mut Frame, area: Rect, app: &App) {
 
     let title_text = if idx == 4 {
         let sp = SPARKLES[(tick / 2) % SPARKLES.len()];
-        format!(" {sp} ⚒ forge · white-hot {sp} ")
+        format!(" {sp} white-hot {sp} ")
     } else if idx == 3 {
         let sp = SPARKLES[(tick / 2) % SPARKLES.len()];
         format!(" {sp} effort {sp} ")
     } else {
-        " ⚡ effort ".to_string()
+        " effort ".to_string()
     };
 
     let block = surface::panel(
@@ -481,9 +461,9 @@ pub(crate) fn render_effort_slider(frame: &mut Frame, area: Rect, app: &App) {
                 };
                 (ch, Style::default().fg(fcol).bold())
             }
-            Some(_) => ('○', Style::default().fg(DIM)),
+            Some(_) => ('○', styles::muted()),
             None if filled => ('━', Style::default().fg(slider_fill_color(idx, tick, pos))),
-            None => ('─', Style::default().fg(DIM)),
+            None => ('─', styles::muted()),
         };
         spans.push(Span::styled(ch.to_string(), style));
     }
@@ -519,7 +499,11 @@ mod effort_cell_tests {
             Some("⟨auto⟩")
         );
         let (_, style) = model_effort_marker("codex-oauth::gpt-6-astra", None).unwrap();
-        assert_eq!(style.fg, Some(DIM), "a provider-chosen rung reads as dim");
+        assert_eq!(
+            style,
+            styles::muted(),
+            "a provider-chosen rung reads as dim"
+        );
     }
 
     #[test]
@@ -548,8 +532,8 @@ mod effort_cell_tests {
     fn the_mesh_chip_and_the_model_marker_can_legitimately_disagree() {
         // Mesh routes at white-hot while the chosen model is only asked for high. Both are true at
         // once, which is why they are two cells and not one.
-        let (chip, _) = mesh_effort_chip(Some(EffortLevel::WhiteHot));
-        assert_eq!(chip, "⚒ mesh WHITE-HOT");
+        let (chip, _) = mesh_effort_chip(Some(EffortLevel::WhiteHot), 0);
+        assert_eq!(chip, "mesh white-hot");
         assert_eq!(
             marker("agy-cli::gemini-3.8-flash", Some(EffortLevel::WhiteHot)).as_deref(),
             Some("⟨high⟩")
@@ -560,8 +544,8 @@ mod effort_cell_tests {
     fn the_mesh_chip_renders_when_nothing_is_pinned() {
         // Previously the widget returned nothing at all in this state, so a statusline configured
         // to show effort showed none — in the most common case of all.
-        let (chip, style) = mesh_effort_chip(None);
-        assert_eq!(chip, "⚙ mesh auto");
-        assert_eq!(style.fg, Some(DIM));
+        let (chip, style) = mesh_effort_chip(None, 0);
+        assert_eq!(chip, "mesh auto");
+        assert_eq!(style, styles::muted());
     }
 }

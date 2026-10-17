@@ -1,4 +1,5 @@
 use super::*;
+use crate::theme::color;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -123,8 +124,8 @@ fn the_selection_is_highlighted() {
     app.screen_select_begin(x0, y0);
     app.screen_select_extend(x0 + 4, y0);
     let t = draw(&app, 100, 30);
-    assert_eq!(t.backend().buffer()[(x0, y0)].bg, SELECT_BG);
-    assert_ne!(t.backend().buffer()[(x0 + 8, y0)].bg, SELECT_BG);
+    assert_eq!(t.backend().buffer()[(x0, y0)].bg, color::selection());
+    assert_ne!(t.backend().buffer()[(x0 + 8, y0)].bg, color::selection());
 }
 
 #[test]

@@ -1,13 +1,14 @@
 //! The board's modal overlays: the one-line composer, the confirmation dialog and the key help.
 //! Layout-only, like `widgets.rs`, which they share their primitives with.
 
+use crate::theme::styles;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::surface::{self, SurfaceTone, ACCENT, DIM, SELECT_BG, TEXT};
+use crate::surface::{self, SurfaceTone};
 
 use super::keys::HELP;
 use super::state::{BoardApp, ComposerMode};
@@ -49,9 +50,9 @@ pub(super) fn draw_composer(app: &BoardApp, frame: &mut Frame, area: Rect) {
         None => (" ".to_string(), String::new()),
     };
     let mut fit = Fit::new(width);
-    fit.add(before, Style::default().fg(TEXT));
-    fit.add(at, Style::default().fg(TEXT).bg(SELECT_BG));
-    fit.add(after, Style::default().fg(TEXT));
+    fit.add(before, styles::fg());
+    fit.add(at, styles::fg().patch(styles::selected_row()));
+    fit.add(after, styles::fg());
     frame.render_widget(Paragraph::new(fit.line()), inner);
 }
 
@@ -83,7 +84,7 @@ pub(super) fn draw_confirm(app: &BoardApp, frame: &mut Frame, area: Rect) {
     );
     let lines: Vec<Line> = body
         .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(TEXT))))
+        .map(|l| Line::from(Span::styled(l, styles::fg())))
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -131,8 +132,8 @@ fn help_cell(fit: &mut Fit, entry: Option<&(&'static str, &'static str)>, width:
         return;
     };
     let before = fit.used();
-    fit.add(format!("{key:>11}  "), Style::default().fg(ACCENT).bold());
-    fit.add(*desc, Style::default().fg(DIM));
+    fit.add(format!("{key:>11}  "), styles::user().bold());
+    fit.add(*desc, styles::muted());
     let used = fit.used() - before;
     if used < width {
         fit.add(" ".repeat(width - used), Style::default());

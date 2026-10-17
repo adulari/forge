@@ -3,6 +3,7 @@
 //! bridge. Pure [`State`] + transitions are unit-tested; [`run`] is the thin terminal I/O shell.
 //! Keys are returned to the caller to store in the OS keyring — never written to disk here.
 
+use crate::theme::{color, styles};
 use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
-use crate::surface::{self, DIM, OKGREEN, ORANGE, TOOLCYAN, USER, WARNYEL};
+use crate::surface::{self};
 
 /// A key-based provider offered in the wizard.
 #[derive(Debug, Clone)]
@@ -332,11 +333,11 @@ fn render(f: &mut Frame, state: &State) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         "Enable providers (Enter to type a key, masked) · pick your bridge plan · then Finish.",
-        Style::default().fg(DIM),
+        styles::muted(),
     )));
     lines.push(Line::from(Span::styled(
         "↑/↓ move · Enter edit/cycle · digits pick a plan · Esc cancel",
-        Style::default().fg(DIM),
+        styles::muted(),
     )));
     lines.push(Line::from(""));
 
@@ -344,7 +345,7 @@ fn render(f: &mut Frame, state: &State) {
     // Reveal rows progressively with the open animation.
     let revealed = ((state.anim * rows.len() as f32).ceil() as usize).clamp(1, rows.len());
 
-    lines.push(section("Providers", USER));
+    lines.push(section("Providers", color::user()));
     for (vi, row) in rows.iter().enumerate().take(revealed) {
         if let Row::Provider(i) = row {
             let p = &state.input.providers[*i];
@@ -358,7 +359,7 @@ fn render(f: &mut Frame, state: &State) {
     }
     if !state.input.search.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section("Search (web_search key)", WARNYEL));
+        lines.push(section("Search (web_search key)", color::warn()));
         for (vi, row) in rows.iter().enumerate().take(revealed) {
             if let Row::Search(i) = row {
                 let p = &state.input.search[*i];
@@ -373,7 +374,7 @@ fn render(f: &mut Frame, state: &State) {
     }
     if !state.input.bridges.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section("Subscription bridges", TOOLCYAN));
+        lines.push(section("Subscription bridges", color::fg_muted()));
         for (vi, row) in rows.iter().enumerate().take(revealed) {
             if let Row::Bridge(i) = row {
                 lines.push(bridge_line(state, *i, vi == state.cursor));
@@ -381,7 +382,7 @@ fn render(f: &mut Frame, state: &State) {
         }
     }
     lines.push(Line::from(""));
-    lines.push(section("Settings", WARNYEL));
+    lines.push(section("Settings", color::warn()));
     for (vi, row) in rows.iter().enumerate().take(revealed) {
         match row {
             Row::Permission => lines.push(cycle_line(
@@ -408,9 +409,9 @@ fn render(f: &mut Frame, state: &State) {
     lines.push(Line::from(""));
     let finish_selected = matches!(state.focused(), Row::Finish);
     let finish_style = if finish_selected {
-        Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD)
+        styles::ok().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(OKGREEN)
+        styles::ok()
     };
     lines.push(Line::from(Span::styled(
         format!("{} Finish setup", marker(finish_selected)),
@@ -465,20 +466,24 @@ fn key_line(p: &ProviderItem, key: &str, selected: bool, state_editing: bool) ->
     } else {
         "(Enter to add a key)".to_string()
     };
-    let name_color = if selected { ORANGE } else { USER };
-    let val_color = if editing {
-        WARNYEL
-    } else if !key.is_empty() || p.had_key {
-        OKGREEN
+    let name_color = if selected {
+        color::brand()
     } else {
-        DIM
+        color::user()
+    };
+    let val_color = if editing {
+        color::warn()
+    } else if !key.is_empty() || p.had_key {
+        color::ok()
+    } else {
+        color::fg_muted()
     };
     Line::from(vec![
         Span::styled(
             format!("  {} {:<14}", marker(selected), p.id),
             Style::default().fg(name_color),
         ),
-        Span::styled(format!("{:<42} ", p.label), Style::default().fg(DIM)),
+        Span::styled(format!("{:<42} ", p.label), styles::muted()),
         Span::styled(value, Style::default().fg(val_color)),
     ])
 }
@@ -495,7 +500,11 @@ fn bridge_line(state: &State, i: usize, selected: bool) -> Line<'static> {
         .map(|(n, (label, _))| format!("{})_{}", n + 1, label).replace('_', " "))
         .collect::<Vec<_>>()
         .join("  ");
-    let name_color = if selected { ORANGE } else { TOOLCYAN };
+    let name_color = if selected {
+        color::brand()
+    } else {
+        color::fg_muted()
+    };
     Line::from(vec![
         Span::styled(
             format!("  {} {:<12}", marker(selected), b.prefix),
@@ -503,9 +512,9 @@ fn bridge_line(state: &State, i: usize, selected: bool) -> Line<'static> {
         ),
         Span::styled(
             format!("{:<14}", chosen),
-            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
+            styles::ok().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(opts, Style::default().fg(DIM)),
+        Span::styled(opts, styles::muted()),
     ])
 }
 
@@ -524,7 +533,11 @@ fn cycle_line(
         .map(|(n, (label, _))| format!("{}){}", n + 1, label))
         .collect::<Vec<_>>()
         .join("  ");
-    let name_color = if selected { ORANGE } else { WARNYEL };
+    let name_color = if selected {
+        color::brand()
+    } else {
+        color::warn()
+    };
     Line::from(vec![
         Span::styled(
             format!("  {} {:<14}", marker(selected), name),
@@ -532,10 +545,10 @@ fn cycle_line(
         ),
         Span::styled(
             format!("{:<14}", chosen),
-            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
+            styles::ok().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("{:<38} ", desc), Style::default().fg(DIM)),
-        Span::styled(opts, Style::default().fg(DIM)),
+        Span::styled(format!("{:<38} ", desc), styles::muted()),
+        Span::styled(opts, styles::muted()),
     ])
 }
 

@@ -7,6 +7,7 @@
 //! does: line numbers, search, a wrap toggle, copy-all, and a hand-off to `$PAGER`. It takes over
 //! the chat's own terminal like the activity viewer, so a running turn keeps streaming underneath.
 
+use crate::theme::{color, styles};
 use std::cell::{Cell, RefCell};
 
 use forge_types::ToolOutputRef;
@@ -16,7 +17,6 @@ use ratatui::Frame;
 
 use super::tool_cards::{self, CardStatus, ToolCard};
 use super::*;
-use crate::surface::VERY_DIM;
 
 /// What a key in the viewer asks of the shell beyond a redraw.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,10 +356,8 @@ impl App {
                     tool_cards::size_label(output.lines, output.bytes)
                 );
                 self.tag_flush(LineOrigin::tool_result(name, true), |s| {
-                    s.flush.push(TextLine::from(Span::styled(
-                        hint,
-                        Style::default().fg(VERY_DIM),
-                    )))
+                    s.flush
+                        .push(TextLine::from(Span::styled(hint, styles::faint())))
                 });
             }
             None => {}
@@ -431,9 +429,9 @@ pub(crate) fn render_output_view(frame: &mut Frame, view: &OutputView) {
 
 fn header_line(view: &OutputView, width: usize) -> TextLine<'static> {
     let (mark, color) = if view.ok {
-        ("✓", OKGREEN)
+        ("✓", color::ok())
     } else {
-        ("✖", ERRRED)
+        ("✖", color::err())
     };
     let right = if view.outcome.is_empty() {
         String::new()
@@ -448,11 +446,8 @@ fn header_line(view: &OutputView, width: usize) -> TextLine<'static> {
         .saturating_sub(4 + tool_cards::cells(&title) + tool_cards::cells(&right) + 1)
         .max(1);
     TextLine::from(vec![
-        Span::styled("  ⤢ ", Style::default().fg(TOOLCYAN)),
-        Span::styled(
-            title,
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("  ⤢ ", styles::muted()),
+        Span::styled(title, styles::fg().add_modifier(Modifier::BOLD)),
         Span::raw(" ".repeat(pad)),
         Span::styled(right, Style::default().fg(color)),
     ])
@@ -460,21 +455,15 @@ fn header_line(view: &OutputView, width: usize) -> TextLine<'static> {
 
 fn meta_line(view: &OutputView, width: usize) -> TextLine<'static> {
     let size = tool_cards::size_label(view.lines.len(), view.bytes);
-    let mut spans = vec![Span::styled(format!("  {size}"), Style::default().fg(DIM))];
+    let mut spans = vec![Span::styled(format!("  {size}"), styles::muted())];
     if !view.complete {
-        spans.push(Span::styled(
-            "  · preview only",
-            Style::default().fg(WARNYEL),
-        ));
+        spans.push(Span::styled("  · preview only", styles::warn()));
     } else if let Some(path) = &view.path {
         let shown = tool_cards::truncate_cells(
             &tool_cards::shorten(path),
             width.saturating_sub(tool_cards::cells(&size) + 8),
         );
-        spans.push(Span::styled(
-            format!("  · {shown}"),
-            Style::default().fg(VERY_DIM),
-        ));
+        spans.push(Span::styled(format!("  · {shown}"), styles::faint()));
     }
     TextLine::from(spans)
 }
@@ -491,16 +480,16 @@ fn body_line(
         " ".repeat(gutter)
     };
     let number_style = if row.first && current == Some(row.line) {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        styles::user().add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(VERY_DIM)
+        styles::faint()
     };
     let mut spans = vec![
         Span::raw(" "),
         Span::styled(number, number_style),
-        Span::styled(" │ ", Style::default().fg(VERY_DIM)),
+        Span::styled(" │ ", styles::faint()),
     ];
-    let base = Style::default().fg(TEXT);
+    let base = styles::fg();
     match view
         .query
         .as_deref()
@@ -521,13 +510,10 @@ fn footer_line(
 ) -> TextLine<'static> {
     if let Some(typed) = &view.typing {
         return TextLine::from(vec![
-            Span::styled("  /", Style::default().fg(ACCENT)),
-            Span::styled(typed.clone(), Style::default().fg(TEXT)),
-            Span::styled("▏", Style::default().fg(ACCENT)),
-            Span::styled(
-                "   Enter search · Esc cancel",
-                Style::default().fg(VERY_DIM),
-            ),
+            Span::styled("  /", styles::user()),
+            Span::styled(typed.clone(), styles::fg()),
+            Span::styled("▏", styles::user()),
+            Span::styled("   Enter search · Esc cancel", styles::faint()),
         ]);
     }
     let first = rows.get(top).map_or(0, |r| r.line + 1);
@@ -547,8 +533,8 @@ fn footer_line(
         };
     }
     let (left, left_style) = match &view.notice {
-        Some(notice) => (notice.clone(), Style::default().fg(WARNYEL)),
-        None => (hints(view).to_string(), Style::default().fg(VERY_DIM)),
+        Some(notice) => (notice.clone(), styles::warn()),
+        None => (hints(view).to_string(), styles::faint()),
     };
     let left = tool_cards::truncate_cells(
         &left,
@@ -561,7 +547,7 @@ fn footer_line(
         Span::raw("  "),
         Span::styled(left, left_style),
         Span::raw(" ".repeat(pad)),
-        Span::styled(position, Style::default().fg(DIM)),
+        Span::styled(position, styles::muted()),
     ])
 }
 

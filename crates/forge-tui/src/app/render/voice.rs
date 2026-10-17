@@ -1,4 +1,5 @@
 use super::*;
+use crate::theme::{color, styles};
 
 /// The `/voice` recording overlay: a focused single-purpose card with a pulsing REC indicator,
 /// live waveform, and (on first use) a whisper-model download progress bar. See voice.md.
@@ -55,24 +56,24 @@ pub fn render_voice_overlay(f: &mut Frame, app: &App) {
                 "░".repeat(bar_w.saturating_sub(filled))
             );
             let lines = vec![
-                Line::from(Span::styled(label, Style::default().fg(TEXT))),
-                Line::from(Span::styled(bar, Style::default().fg(ACCENT))),
+                Line::from(Span::styled(label, styles::fg())),
+                Line::from(Span::styled(bar, styles::user())),
                 Line::from(""),
-                Line::from(Span::styled("  Esc to cancel", Style::default().fg(DIM))),
+                Line::from(Span::styled("  Esc to cancel", styles::muted())),
             ];
             f.render_widget(Paragraph::new(lines), inner);
         }
         VoicePhase::Recording { ptt_active } => {
             let blink_on = (v.anim_tick / 6).is_multiple_of(2);
             let rec_span = if blink_on {
-                Span::styled("● REC", Style::default().fg(ERRRED).bold())
+                Span::styled("● REC", styles::err().bold())
             } else {
-                Span::styled("○ REC", Style::default().fg(DIM))
+                Span::styled("○ REC", styles::muted())
             };
             let header = Line::from(vec![
                 rec_span,
                 Span::raw("   "),
-                Span::styled(v.mmss(), Style::default().fg(TEXT)),
+                Span::styled(v.mmss(), styles::fg()),
             ]);
             let waveform = render_voice_waveform(&v.waveform, false);
             let footer_text = if *ptt_active {
@@ -80,33 +81,27 @@ pub fn render_voice_overlay(f: &mut Frame, app: &App) {
             } else {
                 "  Enter transcribe · Esc cancel · r restart"
             };
-            let footer = Line::from(Span::styled(footer_text, Style::default().fg(DIM)));
+            let footer = Line::from(Span::styled(footer_text, styles::muted()));
             let lines = vec![header, Line::from(""), waveform, Line::from(""), footer];
             f.render_widget(Paragraph::new(lines), inner);
         }
         VoicePhase::Transcribing => {
             let spinner = SPINNER[(v.anim_tick as usize) % SPINNER.len()];
             let header = Line::from(vec![
-                Span::styled(
-                    format!("{spinner} transcribing…"),
-                    Style::default().fg(ACCENT),
-                ),
+                Span::styled(format!("{spinner} transcribing…"), styles::user()),
                 Span::raw("   "),
-                Span::styled(v.mmss(), Style::default().fg(TEXT)),
+                Span::styled(v.mmss(), styles::fg()),
             ]);
             let waveform = render_voice_waveform(&v.waveform, true);
-            let footer = Line::from(Span::styled("  please wait…", Style::default().fg(DIM)));
+            let footer = Line::from(Span::styled("  please wait…", styles::muted()));
             let lines = vec![header, Line::from(""), waveform, Line::from(""), footer];
             f.render_widget(Paragraph::new(lines), inner);
         }
         VoicePhase::Error(msg) => {
             let lines = vec![
-                Line::from(Span::styled(msg.clone(), Style::default().fg(ERRRED))),
+                Line::from(Span::styled(msg.clone(), styles::err())),
                 Line::from(""),
-                Line::from(Span::styled(
-                    "  any key to dismiss",
-                    Style::default().fg(DIM),
-                )),
+                Line::from(Span::styled("  any key to dismiss", styles::muted())),
             ];
             f.render_widget(Paragraph::new(lines), inner);
         }
@@ -121,7 +116,11 @@ fn render_voice_waveform(
     dim: bool,
 ) -> ratatui::text::Line<'static> {
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let color = if dim { DIM } else { ACCENT };
+    let color = if dim {
+        color::fg_muted()
+    } else {
+        color::user()
+    };
     let spans: Vec<Span<'static>> = waveform
         .iter()
         .map(|&lvl| {

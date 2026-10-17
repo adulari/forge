@@ -6,16 +6,14 @@
 //! Colour is therefore never decorative — it is the column's tone, the card's health, or an
 //! alarm — and every clickable thing registers a [`Hit`] in the same pass that draws it.
 
+use crate::theme::{color, styles};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::surface::{
-    self, ACCENT, DIM, ERRRED, OKGREEN, ORANGE, SELECT_BG, SEPARATOR, STATUS_BG, TEXT, TOOLCYAN,
-    VERY_DIM, WARNYEL,
-};
+use crate::surface::{self};
 
 use super::model::{fmt_age, fmt_cost, model_short, Card, Column, Health, SignalLevel};
 use super::state::{BoardApp, ConnState, Focus, Hit};
@@ -112,22 +110,28 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
     let t = app.totals();
     let x0 = area.x + 1;
     let mut row = w::Row::at(x0, area.y);
-    row.add("⚒ forge board", Style::default().fg(ORANGE).bold());
+    row.add("⚒ forge board", styles::brand().bold());
     row.sep();
     let label = match app.project_filter.as_deref() {
         Some(p) => format!("▾ {}", w::clip_cells(p, 24)),
         None => "▾ all projects".to_string(),
     };
-    let r = row.add(label, Style::default().fg(ACCENT));
+    let r = row.add(label, styles::user());
     w::push_hit(hits, r, area, Hit::ProjectFilter);
     row.sep();
     match dr::zoom_chip(app) {
         Some((text, color)) => {
-            let r = row.add(text, Style::default().fg(color).bg(SELECT_BG).bold());
+            let r = row.add(
+                text,
+                Style::default()
+                    .fg(color)
+                    .patch(styles::selected_row())
+                    .bold(),
+            );
             w::push_hit(hits, r, area, Hit::ClearZoom);
         }
         None => {
-            let r = row.add("◆ dispatch", Style::default().fg(ACCENT));
+            let r = row.add("◆ dispatch", styles::user());
             w::push_hit(hits, r, area, Hit::DispatchChip);
         }
     }
@@ -138,9 +142,9 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
         "○"
     };
     let attn = if t.attention > 0 {
-        Style::default().fg(ERRRED).bold()
+        styles::err().bold()
     } else {
-        Style::default().fg(VERY_DIM)
+        styles::faint()
     };
     let spin = if t.working > 0 {
         w::spinner(app.tick)
@@ -151,29 +155,34 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
         (format!("{dot} {} needs you", t.attention), attn),
         (
             format!("{spin} {} working", t.working),
-            Style::default().fg(if t.working > 0 { TOOLCYAN } else { VERY_DIM }),
+            Style::default().fg(if t.working > 0 {
+                color::fg_muted()
+            } else {
+                color::fg_faint()
+            }),
         ),
         (
             format!("{} ready", t.ready),
-            Style::default().fg(if t.ready > 0 { OKGREEN } else { VERY_DIM }),
+            Style::default().fg(if t.ready > 0 {
+                color::ok()
+            } else {
+                color::fg_faint()
+            }),
         ),
-        (format!("{} done", t.done), Style::default().fg(DIM)),
+        (format!("{} done", t.done), styles::muted()),
     ];
     if t.subagents > 0 {
-        chips.push((
-            format!("⑂ {} subagents", t.subagents),
-            Style::default().fg(ACCENT),
-        ));
+        chips.push((format!("⑂ {} subagents", t.subagents), styles::user()));
     }
     if t.cost_usd > 0.0 {
-        chips.push((fmt_cost(t.cost_usd), Style::default().fg(TEXT)));
+        chips.push((fmt_cost(t.cost_usd), styles::fg()));
     }
 
     let (conn_text, conn_style) = connection_chip(app);
     let items = vec![
         (conn_text, conn_style),
         ("  ".to_string(), Style::default()),
-        ("? help".to_string(), Style::default().fg(DIM)),
+        ("? help".to_string(), styles::muted()),
     ];
     let total: u16 = items.iter().map(|(t, _)| w::cells(t) as u16).sum();
     // The chips never run under the connection indicator: whole chips are dropped from the
@@ -214,15 +223,15 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
     };
     if app.focus == Focus::Filter || !app.query.is_empty() {
         let mut row = w::Row::at(x0, second.y);
-        row.add("/ filter: ", Style::default().fg(ACCENT).bold());
+        row.add("/ filter: ", styles::user().bold());
         row.add(
             w::clip_cells(&app.query, second.width.saturating_sub(28) as usize),
-            Style::default().fg(TEXT),
+            styles::fg(),
         );
         if app.focus == Focus::Filter {
-            row.add(" ", Style::default().bg(SELECT_BG));
+            row.add(" ", styles::selected_row());
         }
-        row.add("   Esc clears", Style::default().fg(VERY_DIM));
+        row.add("   Esc clears", styles::faint());
         row.render(frame, second);
     } else {
         w::rule(frame, second);
@@ -231,7 +240,7 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
 
 fn connection_chip(app: &BoardApp) -> (String, Style) {
     match &app.connection {
-        ConnState::Live => ("● live".into(), Style::default().fg(OKGREEN)),
+        ConnState::Live => ("● live".into(), styles::ok()),
         ConnState::Connecting | ConnState::Reconnecting => {
             let word = if matches!(app.connection, ConnState::Connecting) {
                 "connecting"
@@ -239,15 +248,15 @@ fn connection_chip(app: &BoardApp) -> (String, Style) {
                 "reconnecting"
             };
             let style = if w::pulse(app.tick) {
-                Style::default().fg(WARNYEL)
+                styles::warn()
             } else {
-                Style::default().fg(VERY_DIM)
+                styles::faint()
             };
             (format!("◌ {word}"), style)
         }
         ConnState::Offline(reason) => (
             format!("● offline: {}", w::clip_cells(reason, 28)),
-            Style::default().fg(ERRRED).bold(),
+            styles::err().bold(),
         ),
     }
 }
@@ -318,7 +327,7 @@ fn draw_tab_strip(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<
         let current = *col == app.cursor_col;
         let mut style = Style::default().fg(column_color(*col));
         if current {
-            style = style.bg(SELECT_BG).bold();
+            style = style.patch(styles::selected_row()).bold();
         }
         let r = row.add(format!(" {} {n} ", col.label().to_uppercase()), style);
         w::push_hit(hits, r, area, Hit::ColumnHeader(*col));
@@ -387,7 +396,7 @@ fn draw_column(
             Paragraph::new(
                 Line::from(Span::styled(
                     w::clip_cells(hint, list.width as usize),
-                    Style::default().fg(VERY_DIM),
+                    styles::faint(),
                 ))
                 .centered(),
             ),
@@ -440,7 +449,7 @@ fn marker(frame: &mut Frame, list: Rect, y: u16, text: String) {
         Paragraph::new(
             Line::from(Span::styled(
                 w::clip_cells(&text, list.width as usize),
-                Style::default().fg(DIM),
+                styles::muted(),
             ))
             .centered(),
         ),
@@ -478,19 +487,16 @@ fn draw_card(
         format!(" {glyph} "),
         Style::default().fg(gcolor),
     )];
-    let mut tstyle = Style::default().fg(TEXT).bold();
+    let mut tstyle = styles::fg().bold();
     if selected {
-        tstyle = tstyle.bg(SELECT_BG);
+        tstyle = tstyle.patch(styles::selected_row());
     }
     title.push(Span::styled(
         w::clip_cells(&card.display_title(), title_room),
         tstyle,
     ));
     if finished {
-        title.push(Span::styled(
-            " ✓ finished",
-            Style::default().fg(OKGREEN).bold(),
-        ));
+        title.push(Span::styled(" ✓ finished", styles::ok().bold()));
     }
     title.push(Span::raw(" "));
 
@@ -503,9 +509,8 @@ fn draw_card(
             Style::default().fg(color)
         })
         .title_top(Line::from(title));
-    block = block.title_top(
-        Line::from(Span::styled(format!(" {age} "), Style::default().fg(DIM))).right_aligned(),
-    );
+    block = block
+        .title_top(Line::from(Span::styled(format!(" {age} "), styles::muted())).right_aligned());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     if inner.width == 0 || inner.height == 0 {
@@ -526,26 +531,23 @@ fn draw_card(
         l1.add(chip, Style::default().fg(color).bold());
     }
     if card.past {
-        l1.add(
-            format!("{} messages", card.message_count),
-            Style::default().fg(DIM),
-        );
+        l1.add(format!("{} messages", card.message_count), styles::muted());
     } else {
-        l1.add(model_short(&card.model), Style::default().fg(TEXT));
+        l1.add(model_short(&card.model), styles::fg());
     }
     if let Some(tier) = &card.tier {
-        l1.add(format!(" {tier} "), Style::default().fg(VERY_DIM));
+        l1.add(format!(" {tier} "), styles::faint());
     }
     if card.worktree.is_some() {
-        l1.add(" ⎇", Style::default().fg(ACCENT));
+        l1.add(" ⎇", styles::user());
     }
     if compact {
         if let Some(task) = &card.current_task {
-            l1.add("  ▸ ", Style::default().fg(ACCENT));
-            l1.add(task.clone(), Style::default().fg(TEXT));
+            l1.add("  ▸ ", styles::user());
+            l1.add(task.clone(), styles::fg());
         }
     } else if app.project_filter.is_none() {
-        l1.add(format!("  {}", card.project()), Style::default().fg(DIM));
+        l1.add(format!("  {}", card.project()), styles::muted());
     }
     lines.push(l1.line());
 
@@ -558,14 +560,11 @@ fn draw_card(
         );
         let mut l3 = w::Fit::new(width);
         if card.streaming {
-            l3.add(
-                format!("{} ", w::spinner(app.tick)),
-                Style::default().fg(TOOLCYAN),
-            );
+            l3.add(format!("{} ", w::spinner(app.tick)), styles::muted());
         }
         match &card.last_line {
-            Some(t) => l3.add(t.clone(), w::italic(DIM)),
-            None => l3.add("no output yet", w::italic(VERY_DIM)),
+            Some(t) => l3.add(t.clone(), w::italic(color::fg_muted())),
+            None => l3.add("no output yet", w::italic(color::fg_faint())),
         }
         lines.push(l3.line());
     }
@@ -582,19 +581,19 @@ fn line_two(card: &Card, signal: Option<&super::model::Signal>, width: usize) ->
     let mut fit = w::Fit::new(width);
     match signal {
         Some(s) if s.level == SignalLevel::Danger => {
-            fit.add("! ", Style::default().fg(ERRRED).bold());
-            fit.add(s.text.clone(), Style::default().fg(ERRRED));
+            fit.add("! ", styles::err().bold());
+            fit.add(s.text.clone(), styles::err());
         }
         Some(s) => {
-            fit.add("▲ ", Style::default().fg(WARNYEL).bold());
-            fit.add(s.text.clone(), Style::default().fg(WARNYEL));
+            fit.add("▲ ", styles::warn().bold());
+            fit.add(s.text.clone(), styles::warn());
         }
         None => match &card.current_task {
             Some(task) => {
-                fit.add("▸ ", Style::default().fg(ACCENT).bold());
-                fit.add(task.clone(), Style::default().fg(TEXT));
+                fit.add("▸ ", styles::user().bold());
+                fit.add(task.clone(), styles::fg());
             }
-            None => fit.add(card.health.label(), Style::default().fg(DIM)),
+            None => fit.add(card.health.label(), styles::muted()),
         },
     }
     fit.line()
@@ -607,9 +606,9 @@ fn gauges(card: &Card, spill: Option<super::model::Signal>, width: usize) -> Lin
     let mut fit = w::Fit::new(width);
     if let Some(s) = spill {
         let color = if s.level == SignalLevel::Danger {
-            ERRRED
+            color::err()
         } else {
-            WARNYEL
+            color::warn()
         };
         fit.add(
             if s.level == SignalLevel::Danger {
@@ -620,24 +619,24 @@ fn gauges(card: &Card, spill: Option<super::model::Signal>, width: usize) -> Lin
             Style::default().fg(color).bold(),
         );
         fit.add(s.text, Style::default().fg(color));
-        return fit.right(cost, Style::default().fg(DIM));
+        return fit.right(cost, styles::muted());
     }
     if card.tasks_total > 0 {
         fit.extend(w::gauge(
             card.tasks_done as f64 / card.tasks_total as f64,
             5,
-            OKGREEN,
+            color::ok(),
         ));
         fit.add(
             format!(" {}/{} tasks", card.tasks_done, card.tasks_total),
-            Style::default().fg(DIM),
+            styles::muted(),
         );
     }
     if let Some(pct) = card.context_pct {
         if fit.used() > 0 {
             fit.add("  ", Style::default());
         }
-        fit.add("ctx ", Style::default().fg(DIM));
+        fit.add("ctx ", styles::muted());
         fit.extend(w::gauge(f64::from(pct) / 100.0, 4, w::context_color(pct)));
         fit.add(
             format!(" {pct}%"),
@@ -646,12 +645,12 @@ fn gauges(card: &Card, spill: Option<super::model::Signal>, width: usize) -> Lin
     }
     let running = card.subagents.iter().filter(|s| !s.done).count();
     if running > 0 {
-        fit.add(format!("  ⑂ {running}"), Style::default().fg(ACCENT));
+        fit.add(format!("  ⑂ {running}"), styles::user());
     }
     if card.queued > 0 {
-        fit.add(format!("  ⇥ {}", card.queued), Style::default().fg(WARNYEL));
+        fit.add(format!("  ⇥ {}", card.queued), styles::warn());
     }
-    fit.right(cost, Style::default().fg(DIM))
+    fit.right(cost, styles::muted())
 }
 
 // ──────────────────────────────────────────────────────────────── hero/footer
@@ -671,12 +670,12 @@ fn draw_hero(app: &BoardApp, frame: &mut Frame, area: Rect) {
         "N  start one here   ·   or run: forge serve --local".to_string()
     };
     let mut lines = vec![
-        Line::from(Span::styled(head, Style::default().fg(TEXT).bold())).centered(),
+        Line::from(Span::styled(head, styles::fg().bold())).centered(),
         Line::from(""),
-        Line::from(Span::styled(sub, Style::default().fg(DIM))).centered(),
+        Line::from(Span::styled(sub, styles::muted())).centered(),
     ];
     if !filtered {
-        lines.push(Line::from(Span::styled(dr::HERO_LINE, Style::default().fg(DIM))).centered());
+        lines.push(Line::from(Span::styled(dr::HERO_LINE, styles::muted())).centered());
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(conn, style)).centered());
@@ -696,7 +695,7 @@ fn draw_hero(app: &BoardApp, frame: &mut Frame, area: Rect) {
 }
 
 fn draw_footer(app: &BoardApp, frame: &mut Frame, area: Rect) {
-    frame.render_widget(Block::default().style(Style::default().bg(STATUS_BG)), area);
+    frame.render_widget(Block::default().style(Style::default()), area);
     let toasts = w::toast_items(app);
     let toast_w: u16 = toasts.iter().map(|(t, _)| w::cells(t) as u16).sum();
     let bar_w = area.width.saturating_sub(toast_w + 2);
@@ -715,34 +714,34 @@ fn draw_footer(app: &BoardApp, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// `ORANGE` while a card is brand new, `OKGREEN` right after it finishes — the two moments the
+/// `color::brand()` while a card is brand new, `color::ok()` right after it finishes — the two moments the
 /// board is trying to make impossible to miss.
 fn card_border(app: &BoardApp, card: &Card, selected: bool) -> (Color, bool) {
     if selected {
-        return (ACCENT, true);
+        return (color::user(), true);
     }
     if app.is_new(&card.id) {
-        return (ORANGE, true);
+        return (color::brand(), true);
     }
     if app.just_finished(&card.id) {
-        return (OKGREEN, false);
+        return (color::ok(), false);
     }
     let color = match card.health {
-        Health::Waiting => ERRRED,
-        Health::Stalled | Health::Failed => WARNYEL,
-        Health::Busy => TOOLCYAN,
-        Health::Idle => SEPARATOR,
-        Health::Finished => VERY_DIM,
+        Health::Waiting => color::err(),
+        Health::Stalled | Health::Failed => color::warn(),
+        Health::Busy => color::fg_muted(),
+        Health::Idle => color::line(),
+        Health::Finished => color::fg_faint(),
     };
     (color, false)
 }
 
 fn column_color(col: Column) -> Color {
     match col {
-        Column::Attention => ERRRED,
-        Column::Working => TOOLCYAN,
-        Column::Ready => OKGREEN,
-        Column::Done => DIM,
+        Column::Attention => color::err(),
+        Column::Working => color::fg_muted(),
+        Column::Ready => color::ok(),
+        Column::Done => color::fg_muted(),
     }
 }
 

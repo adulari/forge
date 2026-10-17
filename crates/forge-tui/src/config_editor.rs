@@ -4,13 +4,14 @@
 //! source for the selected row. State, input handling, and rendering live here (no `forge-config`
 //! dependency); the I/O shell feeds it rows and performs the validated writes via [`ConfigAction`].
 
+use crate::theme::{color, styles};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::KeyKind;
-use crate::surface::{self, ACCENT, DIM, ERRRED, OKGREEN, USER, VERY_DIM, WARNYEL};
+use crate::surface::{self};
 use forge_types::truncate_ellipsis as truncate;
 
 /// The editing control a row uses.
@@ -297,7 +298,7 @@ fn display_items(ed: &ConfigEditor, matches: &[usize]) -> Vec<Disp> {
 
 /// Render the value control for a row: `[● on]`/`[○ off]`, `‹ value ›`, masked secret, or the value.
 fn value_span(r: &SettingRow, sel: bool) -> Span<'static> {
-    let style = Style::default().fg(if sel { OKGREEN } else { DIM });
+    let style = Style::default().fg(if sel { color::ok() } else { color::fg_muted() });
     match &r.kind {
         RowKind::Bool => {
             let on = r.value == "true";
@@ -307,14 +308,18 @@ fn value_span(r: &SettingRow, sel: bool) -> Span<'static> {
                 } else {
                     "[○ off]".to_string()
                 },
-                Style::default().fg(if on { OKGREEN } else { DIM }),
+                Style::default().fg(if on { color::ok() } else { color::fg_muted() }),
             )
         }
         RowKind::Enum(_) => Span::styled(format!("‹ {} ›", r.value), style),
         RowKind::Secret => Span::styled(r.value.clone(), style),
         RowKind::ReadOnly => Span::styled(
             "↵ edit in $EDITOR".to_string(),
-            Style::default().fg(if sel { WARNYEL } else { DIM }),
+            Style::default().fg(if sel {
+                color::warn()
+            } else {
+                color::fg_muted()
+            }),
         ),
         _ => {
             let v = if r.value.is_empty() {
@@ -350,27 +355,25 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
 
     let mut lines: Vec<TextLine> = Vec::with_capacity(h);
     lines.push(TextLine::from(vec![
-        Span::styled("  ◈ config  ", Style::default().fg(ACCENT).bold()),
-        Span::styled(
-            format!("writing to {scope} scope"),
-            Style::default().fg(USER),
-        ),
-        Span::styled("  ·  Tab switch", Style::default().fg(VERY_DIM)),
+        Span::styled("  ◈ config  ", styles::user().bold()),
+        Span::styled(format!("writing to {scope} scope"), styles::user()),
+        Span::styled("  ·  Tab switch", styles::faint()),
     ]));
     lines.push(TextLine::from(vec![
-        Span::styled("  search ", Style::default().fg(DIM)),
+        Span::styled("  search ", styles::muted()),
         Span::styled(
             if ed.filter.is_empty() {
                 "(type to filter)".to_string()
             } else {
                 ed.filter.clone()
             },
-            Style::default().fg(if ed.filter.is_empty() { VERY_DIM } else { USER }),
+            Style::default().fg(if ed.filter.is_empty() {
+                color::fg_faint()
+            } else {
+                color::user()
+            }),
         ),
-        Span::styled(
-            format!("   {} settings", matches.len()),
-            Style::default().fg(VERY_DIM),
-        ),
+        Span::styled(format!("   {} settings", matches.len()), styles::faint()),
     ]));
     lines.push(TextLine::default());
 
@@ -389,7 +392,7 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
         match d {
             Disp::Header(g) => lines.push(TextLine::from(Span::styled(
                 format!("  {g}"),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                styles::user().add_modifier(Modifier::BOLD),
             ))),
             Disp::Row(ri) => {
                 let r = &ed.rows[*ri];
@@ -405,18 +408,18 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
                     };
                     Span::styled(
                         format!("{shown}▌"),
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                        styles::user().add_modifier(Modifier::BOLD),
                     )
                 } else {
                     value_span(r, sel)
                 };
                 let label_style = if sel {
-                    Style::default().fg(ACCENT).bold()
+                    styles::user().bold()
                 } else {
-                    Style::default().fg(USER)
+                    styles::user()
                 };
                 let mods = if r.modified {
-                    Span::styled(" ●", Style::default().fg(WARNYEL))
+                    Span::styled(" ●", styles::warn())
                 } else {
                     Span::raw("")
                 };
@@ -470,12 +473,12 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
                 truncate(&r.path, w.saturating_sub(40).max(10)),
                 r.source
             ),
-            Style::default().fg(VERY_DIM),
+            styles::faint(),
         )));
         let help = r.help.clone().unwrap_or_default();
         lines.push(TextLine::from(Span::styled(
             format!("  {}", truncate(&help, w.saturating_sub(4))),
-            Style::default().fg(USER),
+            styles::user(),
         )));
     } else {
         lines.push(TextLine::default());
@@ -485,9 +488,9 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
     // Status (last save/reset result).
     if let Some(s) = &ed.status {
         let color = if s.starts_with('✓') {
-            OKGREEN
+            color::ok()
         } else {
-            ERRRED
+            color::err()
         };
         lines.push(TextLine::from(Span::styled(
             format!("  {}", truncate(s, w.saturating_sub(4))),
@@ -508,10 +511,7 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
             _ => "  Enter edit · Del reset · Tab scope · Esc close",
         }
     };
-    lines.push(TextLine::from(Span::styled(
-        hint,
-        Style::default().fg(VERY_DIM),
-    )));
+    lines.push(TextLine::from(Span::styled(hint, styles::faint())));
 
     frame.render_widget(Paragraph::new(lines), area);
 }

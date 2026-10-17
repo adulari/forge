@@ -2,6 +2,7 @@
 //! and grows, and one row per choice with its meaning spelled out under whichever is focused.
 //! Every value is clickable; the prompt border flashes red and shakes on an empty submit.
 
+use crate::theme::{color, styles};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -9,10 +10,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use unicode_width::UnicodeWidthChar;
 
-use crate::surface::{
-    self, SurfaceTone, ACCENT, DIM, ERRRED, OKGREEN, SELECT_BG, SEPARATOR, SURFACE_BG, TEXT,
-    VERY_DIM,
-};
+use crate::surface::{self, SurfaceTone};
 
 use super::form::{DispatchForm, FormField, FormHit};
 use super::model::project_name;
@@ -65,9 +63,9 @@ pub(super) fn draw_form(app: &mut BoardApp, frame: &mut Frame, area: Rect) {
     let mut y = inner.y;
 
     let mut fit = Fit::new(inner.width as usize);
-    fit.add(" in ", Style::default().fg(DIM));
-    fit.add(project_name(&form.cwd), Style::default().fg(TEXT).bold());
-    fit.add(format!("  {}", form.cwd), Style::default().fg(VERY_DIM));
+    fit.add(" in ", styles::muted());
+    fit.add(project_name(&form.cwd), styles::fg().bold());
+    fit.add(format!("  {}", form.cwd), styles::faint());
     line_at(frame, inner, y, fit.line());
     y += 1;
 
@@ -86,11 +84,11 @@ pub(super) fn draw_form(app: &mut BoardApp, frame: &mut Frame, area: Rect) {
         };
         let focused = form.field == FormField::Prompt;
         let color = if shaking {
-            ERRRED
+            color::err()
         } else if focused {
-            ACCENT
+            color::user()
         } else {
-            SEPARATOR
+            color::line()
         };
         let text_area = w::framed(frame, brect, None, color, focused || shaking);
         draw_prompt(frame, text_area, &form, focused);
@@ -125,11 +123,11 @@ pub(super) fn draw_form(app: &mut BoardApp, frame: &mut Frame, area: Rect) {
         let mut row = Row::at(inner.x + 1, y);
         let r = row.add(
             "[ Enter  start ]",
-            Style::default().fg(OKGREEN).bg(SELECT_BG).bold(),
+            styles::ok().patch(styles::selected_row()).bold(),
         );
         w::push_hit(&mut hits, r, inner, Hit::Form(FormHit::Start));
         row.add("  ", Style::default());
-        let r = row.add("[ Esc  cancel ]", Style::default().fg(DIM));
+        let r = row.add("[ Esc  cancel ]", styles::muted());
         w::push_hit(&mut hits, r, inner, Hit::Form(FormHit::Cancel));
         row.render(frame, inner);
     }
@@ -162,7 +160,7 @@ fn explain(frame: &mut Frame, inner: Rect, y: u16, form: &DispatchForm) -> u16 {
         };
     let mut fit = Fit::new(inner.width as usize);
     fit.add(" ".repeat(indent), Style::default());
-    fit.add(text, w::italic(DIM));
+    fit.add(text, w::italic(color::fg_muted()));
     line_at(frame, inner, y, fit.line());
     y + 1
 }
@@ -187,10 +185,7 @@ fn field_row(
         Hit::Form(FormHit::Field(field)),
     );
     let mut row = Row::at(inner.x, y);
-    row.add(
-        if focused { " ▸ " } else { "   " },
-        Style::default().fg(ACCENT).bold(),
-    );
+    row.add(if focused { " ▸ " } else { "   " }, styles::user().bold());
     let label = match field {
         FormField::Worktree => "Worktrees",
         FormField::Mode => "Sessions may",
@@ -201,9 +196,9 @@ fn field_row(
     row.add(
         format!("{label:<13}"),
         if focused {
-            Style::default().fg(TEXT).bold()
+            styles::fg().bold()
         } else {
-            Style::default().fg(DIM)
+            styles::muted()
         },
     );
     match field {
@@ -211,12 +206,12 @@ fn field_row(
             for (on, text) in [(true, "one per session"), (false, "shared directory")] {
                 let chosen = form.worktree == on;
                 let mut style = if chosen {
-                    Style::default().fg(TEXT).bold()
+                    styles::fg().bold()
                 } else {
-                    Style::default().fg(DIM)
+                    styles::muted()
                 };
                 if chosen && focused {
-                    style = style.bg(SELECT_BG);
+                    style = style.patch(styles::selected_row());
                 }
                 let r = row.add(format!("{} {text}", if chosen { "●" } else { "○" }), style);
                 w::push_hit(hits, r, inner, Hit::Form(FormHit::Worktree(on)));
@@ -257,19 +252,23 @@ fn stepper(
     hits: &mut Vec<(Rect, Hit)>,
 ) {
     let arrow = Style::default()
-        .fg(if focused { ACCENT } else { VERY_DIM })
+        .fg(if focused {
+            color::user()
+        } else {
+            color::fg_faint()
+        })
         .bold();
     let r = row.add("‹ ", arrow);
     w::push_hit(hits, r, clip, Hit::Form(FormHit::Step(field, -1)));
-    let mut vstyle = Style::default().fg(TEXT).bold();
+    let mut vstyle = styles::fg().bold();
     if focused {
-        vstyle = vstyle.bg(SELECT_BG);
+        vstyle = vstyle.patch(styles::selected_row());
     }
     row.add(value.to_string(), vstyle);
     let r = row.add(" ›", arrow);
     w::push_hit(hits, r, clip, Hit::Form(FormHit::Step(field, 1)));
     if !suffix.is_empty() {
-        row.add(suffix.to_string(), Style::default().fg(DIM));
+        row.add(suffix.to_string(), styles::muted());
     }
 }
 
@@ -336,7 +335,7 @@ fn draw_prompt(frame: &mut Frame, area: Rect, form: &DispatchForm, focused: bool
         return;
     }
     let width = area.width as usize;
-    let cursor_style = Style::default().fg(SURFACE_BG).bg(ACCENT);
+    let cursor_style = styles::pill(styles::user());
     if form.text.text.is_empty() {
         let lines: Vec<Line> = w::wrap(PLACEHOLDER, width)
             .into_iter()
@@ -349,7 +348,10 @@ fn draw_prompt(frame: &mut Frame, area: Rect, form: &DispatchForm, focused: bool
                     let first = chars.next().map(String::from).unwrap_or_default();
                     spans.push(Span::styled(first, cursor_style));
                 }
-                spans.push(Span::styled(chars.collect::<String>(), w::italic(VERY_DIM)));
+                spans.push(Span::styled(
+                    chars.collect::<String>(),
+                    w::italic(color::fg_faint()),
+                ));
                 Line::from(spans)
             })
             .collect();
@@ -362,7 +364,7 @@ fn draw_prompt(frame: &mut Frame, area: Rect, form: &DispatchForm, focused: bool
     let current = cursor_row(&rows, cursor);
     let h = area.height as usize;
     let top = (current + 1).saturating_sub(h);
-    let text = Style::default().fg(TEXT);
+    let text = styles::fg();
     let mut lines: Vec<Line> = Vec::new();
     for (i, (s, e)) in rows.iter().copied().enumerate().skip(top).take(h) {
         let seg =

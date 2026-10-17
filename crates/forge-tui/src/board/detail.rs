@@ -5,15 +5,14 @@
 //! Rendering is read-only over [`BoardApp`] apart from one write-back: while the live tail is
 //! following, the pane reports the offset it settled on so a later scroll starts from there.
 
+use crate::theme::{color, styles};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::surface::{
-    self, ACCENT, DIM, ERRRED, OKGREEN, SELECT_BG, TEXT, TOOLCYAN, USER, VERY_DIM, WARNYEL,
-};
+use crate::surface::{self};
 
 use super::model::{fmt_age, fmt_cost, model_short, stop_reason_words, Card, SignalLevel};
 use super::state::{BoardApp, Button, DetailTab, Hit};
@@ -61,10 +60,7 @@ fn render_pane(
         height: 1,
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " ✕ ",
-            Style::default().fg(DIM).bold(),
-        ))),
+        Paragraph::new(Line::from(Span::styled(" ✕ ", styles::muted().bold()))),
         close,
     );
     w::push_hit(hits, close, area, Hit::CloseDetail);
@@ -166,9 +162,9 @@ fn draw_tabs(
             _ => String::new(),
         };
         let style = if *tab == app.effective_tab() {
-            Style::default().fg(ACCENT).bg(SELECT_BG).bold()
+            styles::user().patch(styles::selected_row()).bold()
         } else {
-            Style::default().fg(DIM)
+            styles::muted()
         };
         let r = row.add(format!(" {}{count} ", tab.label()), style);
         w::push_hit(hits, r, inner, Hit::DetailTab(*tab));
@@ -187,7 +183,11 @@ fn draw_tabs(
         );
         let r = right.add(
             text,
-            Style::default().fg(if app.show_tools { TOOLCYAN } else { VERY_DIM }),
+            Style::default().fg(if app.show_tools {
+                color::fg_muted()
+            } else {
+                color::fg_faint()
+            }),
         );
         w::push_hit(hits, r, inner, Hit::Button(Button::ToggleTools));
         right.render(frame, inner);
@@ -207,17 +207,17 @@ fn attention_plan(snap: &LiveSnapshot, width: usize) -> Vec<Att> {
     let mut out = Vec::new();
     if let Some(prompt) = &snap.permission_prompt {
         for l in w::wrap(prompt, w_in).into_iter().take(8) {
-            out.push(Att::Text(l, TEXT));
+            out.push(Att::Text(l, color::fg()));
         }
         out.push(Att::Buttons(vec![
-            ("[ y  allow ]".into(), Button::Allow, OKGREEN),
-            ("[ n  deny ]".into(), Button::Deny, ERRRED),
+            ("[ y  allow ]".into(), Button::Allow, color::ok()),
+            ("[ n  deny ]".into(), Button::Deny, color::err()),
         ]));
         return out;
     }
     if let Some(q) = &snap.question {
         for l in w::wrap(q, w_in).into_iter().take(4) {
-            out.push(Att::Text(l, TEXT));
+            out.push(Att::Text(l, color::fg()));
         }
         for (i, opt) in snap.question_options.iter().enumerate().take(6) {
             let desc = if opt.description.is_empty() {
@@ -228,10 +228,10 @@ fn attention_plan(snap: &LiveSnapshot, width: usize) -> Vec<Att> {
             out.push(Att::Buttons(vec![(
                 w::clip_cells(&format!("[ {} ] {}{desc}", i + 1, opt.label), w_in),
                 Button::Answer(i + 1),
-                ACCENT,
+                color::user(),
             )]));
         }
-        out.push(Att::Text("[ e ] type an answer".into(), DIM));
+        out.push(Att::Text("[ e ] type an answer".into(), color::fg_muted()));
     }
     out
 }
@@ -242,9 +242,9 @@ fn draw_attention(frame: &mut Frame, area: Rect, plan: &[Att], hits: &mut Vec<(R
         area,
         Some(Line::from(Span::styled(
             " needs you ",
-            Style::default().fg(ERRRED).bold(),
+            styles::err().bold(),
         ))),
-        ERRRED,
+        color::err(),
         true,
     );
     if inner.width == 0 || inner.height == 0 {
@@ -271,7 +271,10 @@ fn draw_attention(frame: &mut Frame, area: Rect, plan: &[Att], hits: &mut Vec<(R
                 for (label, button, color) in buttons {
                     let r = row.add(
                         format!("{label}  "),
-                        Style::default().fg(*color).bg(SELECT_BG).bold(),
+                        Style::default()
+                            .fg(*color)
+                            .patch(styles::selected_row())
+                            .bold(),
                     );
                     w::push_hit(hits, r, inner, Hit::Button(*button));
                 }
@@ -319,7 +322,7 @@ fn draw_body(
             area.x + area.width.saturating_sub(w::cells(chip) as u16),
             area.y + area.height - 1,
         );
-        row.add(chip, Style::default().fg(WARNYEL).bg(SELECT_BG));
+        row.add(chip, styles::warn().patch(styles::selected_row()));
         row.render(frame, area);
     }
     let _ = hits;
@@ -346,7 +349,7 @@ fn overview(
     out.push(w::kv(
         "model",
         format!("{}{tier}{effort}", model_short(&card.model)),
-        Style::default().fg(TEXT),
+        styles::fg(),
         width,
     ));
     if let Some(s) = snap {
@@ -363,23 +366,13 @@ fn overview(
         out.push(w::kv(
             "mode",
             format!("{mode}{temper}"),
-            Style::default().fg(TEXT),
+            styles::fg(),
             width,
         ));
     }
-    out.push(w::kv(
-        "cwd",
-        card.cwd.clone(),
-        Style::default().fg(DIM),
-        width,
-    ));
+    out.push(w::kv("cwd", card.cwd.clone(), styles::muted(), width));
     if let Some(wt) = &card.worktree {
-        out.push(w::kv(
-            "worktree",
-            format!("⎇ {wt}"),
-            Style::default().fg(ACCENT),
-            width,
-        ));
+        out.push(w::kv("worktree", format!("⎇ {wt}"), styles::user(), width));
     }
     if let Some(git) = app.git.get(&card.id) {
         let base = git
@@ -390,14 +383,14 @@ fn overview(
         out.push(w::kv(
             "branch",
             format!("{}{base}", git.branch),
-            Style::default().fg(TEXT),
+            styles::fg(),
             width,
         ));
     }
     out.push(w::kv(
         "created",
         format!("{} ago", fmt_age(app.now.saturating_sub(card.created_at))),
-        Style::default().fg(DIM),
+        styles::muted(),
         width,
     ));
     out.push(w::kv(
@@ -406,20 +399,15 @@ fn overview(
             "{} ago",
             fmt_age(app.now.saturating_sub(card.last_activity))
         ),
-        Style::default().fg(DIM),
+        styles::muted(),
         width,
     ));
-    out.push(w::kv(
-        "cost",
-        fmt_cost(card.cost_usd),
-        Style::default().fg(TEXT),
-        width,
-    ));
+    out.push(w::kv("cost", fmt_cost(card.cost_usd), styles::fg(), width));
     if let Some(pct) = card.context_pct {
         let tokens = snap.map_or(0, |s| s.context_tokens);
         let limit = snap.and_then(|s| s.context_limit).unwrap_or(0);
         let mut fit = w::Fit::new(width);
-        fit.add("      context  ", Style::default().fg(VERY_DIM));
+        fit.add("      context  ", styles::faint());
         fit.extend(w::gauge(f64::from(pct) / 100.0, 12, w::context_color(pct)));
         fit.add(
             format!("  {pct}%  ({tokens} / {limit})"),
@@ -433,7 +421,7 @@ fn overview(
             out.push(w::kv(
                 "last turn",
                 stop_reason_words(s.last_stop_reason.as_deref()),
-                Style::default().fg(if ok { OKGREEN } else { WARNYEL }),
+                Style::default().fg(if ok { color::ok() } else { color::warn() }),
                 width,
             ));
         }
@@ -441,7 +429,7 @@ fn overview(
             out.push(Line::from(""));
             out.push(w::heading(&format!("queued · {}", s.queued.len()), width));
             for q in s.queued.iter().take(5) {
-                out.push(w::bullet("⇥", q, WARNYEL, width));
+                out.push(w::bullet("⇥", q, color::warn(), width));
             }
         }
     }
@@ -450,9 +438,9 @@ fn overview(
         out.push(w::heading("signals", width));
         for sig in &card.signals {
             let color = match sig.level {
-                SignalLevel::Danger => ERRRED,
-                SignalLevel::Warn => WARNYEL,
-                SignalLevel::Info => DIM,
+                SignalLevel::Danger => color::err(),
+                SignalLevel::Warn => color::warn(),
+                SignalLevel::Info => color::fg_muted(),
             };
             out.push(w::bullet("•", &sig.text, color, width));
         }
@@ -474,7 +462,7 @@ fn overview(
         out.push(Line::from(""));
         out.push(w::heading("in progress", width));
         for t in in_progress {
-            out.push(w::bullet("▸", &t.title, ACCENT, width));
+            out.push(w::bullet("▸", &t.title, color::user(), width));
         }
     }
     if let Some(s) = snap {
@@ -490,7 +478,7 @@ fn overview(
             out.push(Line::from(""));
             out.push(w::heading("latest", width));
             for t in recent.into_iter().rev() {
-                out.push(w::bullet("·", &t, DIM, width));
+                out.push(w::bullet("·", &t, color::fg_muted(), width));
             }
         }
     }
@@ -507,13 +495,13 @@ fn tail(app: &BoardApp, snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'
     let mut out: Vec<Line> = Vec::new();
     for r in s.rows() {
         let (prefix, style) = match r.kind.as_str() {
-            "user" => ("› ".to_string(), Style::default().fg(USER)),
+            "user" => ("› ".to_string(), styles::user()),
             "tool" => {
                 if !app.show_tools {
                     continue;
                 }
                 let name = r.tool.clone().unwrap_or_else(|| "tool".into());
-                (format!("⚙ {name}  "), Style::default().fg(TOOLCYAN))
+                (format!("⚙ {name}  "), styles::muted())
             }
             "system" => {
                 let t = r.text.to_ascii_lowercase();
@@ -523,10 +511,14 @@ fn tail(app: &BoardApp, snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'
                     || t.contains("stall");
                 (
                     "  ".to_string(),
-                    w::italic(if warn { WARNYEL } else { DIM }),
+                    w::italic(if warn {
+                        color::warn()
+                    } else {
+                        color::fg_muted()
+                    }),
                 )
             }
-            _ => ("  ".to_string(), Style::default().fg(TEXT)),
+            _ => ("  ".to_string(), styles::fg()),
         };
         let body = if r.kind == "tool" {
             match r.meta.as_deref() {
@@ -538,8 +530,8 @@ fn tail(app: &BoardApp, snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'
             r.text.clone()
         };
         let meta_color = match r.meta.as_deref() {
-            Some("failed") => Some(ERRRED),
-            Some("ok") => Some(OKGREEN),
+            Some("failed") => Some(color::err()),
+            Some("ok") => Some(color::ok()),
             _ => None,
         };
         for (i, l) in w::wrap(&body, width.saturating_sub(w::cells(&prefix)))
@@ -568,16 +560,16 @@ fn tail(app: &BoardApp, snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'
                 } else {
                     "  ".into()
                 },
-                Style::default().fg(TOOLCYAN),
+                styles::muted(),
             );
-            fit.add(l, w::italic(TEXT));
+            fit.add(l, w::italic(color::fg()));
             out.push(fit.line());
         }
     }
     if !s.notes.is_empty() {
         out.push(Line::from(""));
         for n in &s.notes {
-            out.push(w::bullet("·", n, VERY_DIM, width));
+            out.push(w::bullet("·", n, color::fg_faint(), width));
         }
     }
     if out.is_empty() {
@@ -596,20 +588,24 @@ fn tasks(snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'static>> {
     }
     for t in &s.tasks {
         let (glyph, color, bold) = match t.status.as_str() {
-            "done" => ("✓", OKGREEN, false),
-            "in_progress" => ("▸", ACCENT, true),
-            _ => ("○", DIM, false),
+            "done" => ("✓", color::ok(), false),
+            "in_progress" => ("▸", color::user(), true),
+            _ => ("○", color::fg_muted(), false),
         };
         let mut fit = w::Fit::new(width);
         fit.add(format!("    {glyph} "), Style::default().fg(color));
         let style = if bold {
-            Style::default().fg(TEXT).bold()
+            styles::fg().bold()
         } else {
-            Style::default().fg(if t.status == "done" { DIM } else { TEXT })
+            Style::default().fg(if t.status == "done" {
+                color::fg_muted()
+            } else {
+                color::fg()
+            })
         };
         fit.add(t.title.clone(), style);
         if let Some(a) = &t.assignee {
-            fit.add(format!("  [{a}]"), Style::default().fg(VERY_DIM));
+            fit.add(format!("  [{a}]"), styles::faint());
         }
         out.push(fit.line());
     }
@@ -623,9 +619,9 @@ fn tasks(snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'static>> {
         out.push(w::heading(&format!("plan · {}", plan.title), width));
         for step in &plan.steps {
             let color = match step.status.as_str() {
-                "done" => OKGREEN,
-                "in_progress" => ACCENT,
-                _ => DIM,
+                "done" => color::ok(),
+                "in_progress" => color::user(),
+                _ => color::fg_muted(),
             };
             out.push(w::bullet(
                 "·",
@@ -643,16 +639,16 @@ fn tasks(snap: Option<&LiveSnapshot>, width: usize) -> Vec<Line<'static>> {
             width,
         ));
         for p in wf.phases.iter().take(8) {
-            out.push(w::bullet("▸", p, ACCENT, width));
+            out.push(w::bullet("▸", p, color::user(), width));
         }
         for l in wf.logs.iter().rev().take(5).rev() {
-            out.push(w::bullet("·", l, DIM, width));
+            out.push(w::bullet("·", l, color::fg_muted(), width));
         }
         if let Some(sum) = &wf.summary {
             let color = if wf.finished_ok == Some(false) {
-                ERRRED
+                color::err()
             } else {
-                OKGREEN
+                color::ok()
             };
             out.push(w::bullet("✓", sum, color, width));
         }
@@ -673,7 +669,7 @@ fn changes(
             out.push(w::bullet(
                 "!",
                 "proposed — awaiting permission",
-                ERRRED,
+                color::err(),
                 width,
             ));
         }
@@ -686,7 +682,7 @@ fn changes(
             out.push(w::bullet(
                 "·",
                 &format!("+{} more files", diff.skipped_files),
-                DIM,
+                color::fg_muted(),
                 width,
             ));
         }
@@ -709,11 +705,11 @@ fn changes(
                     git.unstaged.len(),
                     git.untracked.len()
                 ),
-                Style::default().fg(DIM),
+                styles::muted(),
                 width,
             ));
             if git.dirty_count() == 0 {
-                out.push(w::bullet("✓", "working tree clean", OKGREEN, width));
+                out.push(w::bullet("✓", "working tree clean", color::ok(), width));
             }
             for (label, files) in [
                 ("staged", &git.staged),
@@ -728,7 +724,7 @@ fn changes(
                 out.push(w::bullet(
                     "·",
                     &format!("+{} more files", git.truncated),
-                    DIM,
+                    color::fg_muted(),
                     width,
                 ));
             }
@@ -770,11 +766,8 @@ fn tools(app: &BoardApp, card: &Card, width: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line> = Vec::new();
     for (name, call, result) in calls.iter().rev().take(60).rev() {
         let mut fit = w::Fit::new(width);
-        fit.add(
-            format!("  ⚙ {name}  "),
-            Style::default().fg(TOOLCYAN).bold(),
-        );
-        fit.add(call.replace('\n', " "), Style::default().fg(TEXT));
+        fit.add(format!("  ⚙ {name}  "), styles::muted().bold());
+        fit.add(call.replace('\n', " "), styles::fg());
         out.push(fit.line());
         if let Some(res) = result {
             let first = res.lines().next().unwrap_or("").trim().to_string();
@@ -783,9 +776,12 @@ fn tools(app: &BoardApp, card: &Card, width: usize) -> Vec<Line<'static>> {
             let mut fit = w::Fit::new(width);
             fit.add(
                 "      ↳ ",
-                Style::default().fg(if bad { ERRRED } else { VERY_DIM }),
+                Style::default().fg(if bad { color::err() } else { color::fg_faint() }),
             );
-            fit.add(first, Style::default().fg(if bad { ERRRED } else { DIM }));
+            fit.add(
+                first,
+                Style::default().fg(if bad { color::err() } else { color::fg_muted() }),
+            );
             out.push(fit.line());
         }
     }

@@ -1,5 +1,6 @@
 //! Read-only fullscreen command and keyboard-reference viewer.
 
+use crate::theme::styles;
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -8,7 +9,7 @@ use crossterm::terminal::{
 };
 use forge_config::KeybindsConfig;
 use ratatui::backend::CrosstermBackend;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Terminal;
@@ -16,7 +17,7 @@ use ratatui::Terminal;
 use crate::commands::COMMANDS;
 use crate::keybind_configurator::{action_desc, all_actions};
 use crate::keybinds::combo_display;
-use crate::surface::{self, ACCENT, DIM, TEXT, TOOLCYAN};
+use crate::surface::{self};
 
 /// The reference page opened initially. Both pages remain one Tab press away from the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +65,7 @@ fn command_group(name: &str) -> &'static str {
 fn command_reference_lines() -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         "Start with a plain request. Use / only when you need a specific control.",
-        Style::default().fg(DIM),
+        styles::muted(),
     ))];
     let mut previous_group = None;
     let group_rank = |group: &str| {
@@ -81,22 +82,19 @@ fn command_reference_lines() -> Vec<Line<'static>> {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
                 group,
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                styles::user().add_modifier(Modifier::BOLD),
             )));
             previous_group = Some(group);
         }
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  /{:<14}", command.name),
-                Style::default().fg(TEXT),
-            ),
-            Span::styled(command.desc, Style::default().fg(DIM)),
+            Span::styled(format!("  /{:<14}", command.name), styles::fg()),
+            Span::styled(command.desc, styles::muted()),
         ]));
         let basic_usage = format!("/{}", command.name);
         if command.usage != basic_usage {
             lines.push(Line::from(Span::styled(
                 format!("      {}", command.usage),
-                Style::default().fg(TOOLCYAN),
+                styles::muted(),
             )));
         }
     }
@@ -106,12 +104,12 @@ fn command_reference_lines() -> Vec<Line<'static>> {
 fn keybind_reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         "F1 or ? opens this page. Change bindings with /keys, then Ctrl+K if you need an action.",
-        Style::default().fg(DIM),
+        styles::muted(),
     ))];
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         "Keyboard shortcuts",
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        styles::user().add_modifier(Modifier::BOLD),
     )));
     lines.extend(all_actions().into_iter().map(|action| {
         let combo = keybinds
@@ -120,14 +118,14 @@ fn keybind_reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
             .map(combo_display)
             .unwrap_or_else(|| "(unset)".to_string());
         Line::from(vec![
-            Span::styled(format!("  {:<22}", combo), Style::default().fg(TEXT)),
-            Span::styled(action_desc(action), Style::default().fg(DIM)),
+            Span::styled(format!("  {:<22}", combo), styles::fg()),
+            Span::styled(action_desc(action), styles::muted()),
         ])
     }));
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
         "Fixed keys (not rebindable)",
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        styles::user().add_modifier(Modifier::BOLD),
     )));
     for (key, desc) in [
         ("Ctrl+T", "Expand/collapse the latest tool call"),
@@ -140,8 +138,8 @@ fn keybind_reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
         ("Shift+Tab", "Cycle temper"),
     ] {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {key:<22}"), Style::default().fg(TEXT)),
-            Span::styled(desc, Style::default().fg(DIM)),
+            Span::styled(format!("  {key:<22}"), styles::fg()),
+            Span::styled(desc, styles::muted()),
         ]));
     }
     lines

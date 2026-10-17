@@ -4,12 +4,12 @@
 //! redraws the small pinned live region. `confirm` shows a permission prompt and blocks on
 //! a key. All rendering lives in `app` (pure, TestBackend-tested); this is the I/O shell.
 
-use std::io::{self, Stdout};
+use std::io;
 
+use crate::theme::backend::{stdout_backend, TermBackend};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use forge_types::SideEffect;
-use ratatui::backend::CrosstermBackend;
 use ratatui::text::Line as TextLine;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -18,7 +18,7 @@ use crate::app::{self, handle_key, print_banner_direct, App, InputOutcome, KeyKi
 use crate::{Presenter, PresenterEvent};
 
 pub struct TuiPresenter {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<TermBackend>,
     app: App,
 }
 
@@ -40,7 +40,7 @@ impl TuiPresenter {
         // ratatui's draw_lines_over_cleared diff skips default-style cells at cols 42+, leaving
         // old terminal content (e.g. hook output) visible to the right of the 42-char logo.
         print_banner_direct();
-        let backend = CrosstermBackend::new(io::stdout());
+        let backend = stdout_backend();
         let mut terminal = Terminal::with_options(
             backend,
             TerminalOptions {

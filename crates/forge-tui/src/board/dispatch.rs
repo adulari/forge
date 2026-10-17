@@ -10,8 +10,6 @@ use std::collections::BTreeSet;
 
 use ratatui::style::Color;
 
-use crate::surface::{ACCENT, OKGREEN, ORANGE, TOOLCYAN};
-
 use super::model::{Card, Column, Health, Signal, SignalLevel};
 use super::wire::{DispatchInfo, DispatchItemInfo, FleetRow};
 
@@ -102,9 +100,18 @@ pub fn progress(d: &DispatchInfo) -> Progress {
 
 /// Two board-local hues extend the palette so six dispatches can sit side by side. Red and
 /// yellow are never used: on this board they mean "needs you" and "something is wrong".
-const VIOLET: Color = Color::Rgb(178, 132, 255);
-const PINK: Color = Color::Rgb(240, 128, 200);
-const GROUP_COLORS: [Color; 6] = [ORANGE, TOOLCYAN, ACCENT, OKGREEN, VIOLET, PINK];
+fn group_colors() -> [Color; 6] {
+    // TODO(wp4): the board still draws group identities as bare colours; migrate to styles::category.
+    let p = crate::theme::t().palette;
+    [
+        p.cat[0].fg,
+        p.cat[1].fg,
+        p.cat[2].fg,
+        p.cat[3].fg,
+        p.cat[4].fg,
+        p.cat[5].fg,
+    ]
+}
 
 /// A dispatch's colour, stable across refreshes, restarts and machines (FNV-1a over the id —
 /// `DefaultHasher` makes no stability promise).
@@ -114,7 +121,8 @@ pub fn group_color(id: &str) -> Color {
         hash ^= u64::from(b);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    GROUP_COLORS[(hash % GROUP_COLORS.len() as u64) as usize]
+    let colors = group_colors();
+    colors[(hash % colors.len() as u64) as usize]
 }
 
 /// Which dispatch a session belongs to, and how. The dispatch list is the authority for the

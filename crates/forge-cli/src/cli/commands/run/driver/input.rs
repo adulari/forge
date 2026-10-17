@@ -168,6 +168,13 @@ impl DriverState {
             self.app.btw_key(&key);
             return Ok(());
         }
+        // The /status inspector: informational, Esc closes.
+        if self.app.status_open {
+            if matches!(key, KeyKind::Esc) {
+                self.app.status_open = false;
+            }
+            return Ok(());
+        }
         // Usage overlay: informational, Esc closes.
         if self.app.usage_overlay.open {
             if matches!(key, KeyKind::Esc) {

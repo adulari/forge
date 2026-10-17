@@ -11,6 +11,7 @@
 //! Enter zooms into the selected agent's full transcript, reusing the same
 //! [`transcript_lines`](crate::transcript::transcript_lines) renderer as the Ctrl+O viewer.
 
+use crate::theme::{color, styles};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
@@ -18,8 +19,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{
-    model_short, truncate, ActivityKind, ActivityStatus, App, TranscriptView, ACCENT, DIM, ERRRED,
-    OKGREEN, ORANGE, SPINNER, TEXT, TOOLCYAN, WARNYEL,
+    model_short, truncate, ActivityKind, ActivityStatus, App, TranscriptView, SPINNER,
 };
 use crate::surface::{self, SurfaceTone};
 
@@ -313,16 +313,16 @@ impl WorkflowView {
                 } else if r.log.iter().all(|l| l.trim().is_empty()) {
                     vec![TextLine::from(Span::styled(
                         "(no activity captured yet)",
-                        Style::default().fg(DIM),
+                        styles::muted(),
                     ))]
                 } else {
                     r.log
                         .iter()
                         .map(|l| {
                             let style = if l.starts_with("── result") {
-                                Style::default().fg(TOOLCYAN)
+                                styles::muted()
                             } else {
-                                Style::default().fg(TEXT)
+                                styles::fg()
                             };
                             TextLine::from(Span::styled(l.clone(), style))
                         })
@@ -420,15 +420,12 @@ pub(crate) fn workflow_band_line(app: &App) -> TextLine<'static> {
         String::new()
     };
     TextLine::from(vec![
-        Span::styled(
-            format!("  ⛓ {spin} workflow"),
-            Style::default().fg(ORANGE).bold(),
-        ),
+        Span::styled(format!("  ⛓ {spin} workflow"), styles::brand().bold()),
         Span::styled(
             format!("{phase} · {running} running · {done} done{failed_part} · ${cost:.4}  "),
-            Style::default().fg(TEXT),
+            styles::fg(),
         ),
-        Span::styled("^O view", Style::default().fg(DIM)),
+        Span::styled("^O view", styles::muted()),
     ])
 }
 
@@ -438,7 +435,7 @@ fn meter(frac: f64, ease: f32, width: usize, color: ratatui::style::Color) -> Ve
     let filled = (frac * width as f64).round() as usize;
     vec![
         Span::styled("█".repeat(filled), Style::default().fg(color)),
-        Span::styled("░".repeat(width - filled), Style::default().fg(DIM)),
+        Span::styled("░".repeat(width - filled), styles::muted()),
     ]
 }
 
@@ -530,7 +527,11 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
         frac,
         ease,
         meter_w,
-        if failed > 0 { WARNYEL } else { OKGREEN },
+        if failed > 0 {
+            color::warn()
+        } else {
+            color::ok()
+        },
     ));
     let failed_part = if failed > 0 {
         format!(" · {failed} failed")
@@ -539,14 +540,14 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
     };
     spans.push(Span::styled(
         format!("  {done}/{total} agents · {running} running{failed_part} · ${cost:.4}"),
-        Style::default().fg(TEXT),
+        styles::fg(),
     ));
     top.push(TextLine::from(spans));
     if let Some((ok, summary)) = &wf.finished {
         let (glyph, color) = if *ok {
-            ("✓", OKGREEN)
+            ("✓", color::ok())
         } else {
-            ("⚠", WARNYEL)
+            ("⚠", color::warn())
         };
         top.push(TextLine::from(Span::styled(
             format!(
@@ -584,18 +585,18 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
                 .filter(|&&i| wf.rows[i].done && !wf.rows[i].ok)
                 .count();
             let glyph = if members.is_empty() || p_done < members.len() {
-                Span::styled(format!("{spin} "), Style::default().fg(ACCENT))
+                Span::styled(format!("{spin} "), styles::user())
             } else if p_failed > 0 {
-                Span::styled("✗ ", Style::default().fg(ERRRED))
+                Span::styled("✗ ", styles::err())
             } else {
-                Span::styled("✓ ", Style::default().fg(OKGREEN))
+                Span::styled("✓ ", styles::ok())
             };
             let mut spans = vec![
-                Span::styled("  ▶ ", Style::default().fg(WARNYEL).bold()),
+                Span::styled("  ▶ ", styles::warn().bold()),
                 glyph,
                 Span::styled(
                     format!("{}  ", truncate(&p.title, 40)),
-                    Style::default().fg(WARNYEL).bold(),
+                    styles::warn().bold(),
                 ),
             ];
             if !members.is_empty() {
@@ -603,11 +604,15 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
                     p_done as f64 / members.len() as f64,
                     ease,
                     12,
-                    if p_failed > 0 { WARNYEL } else { OKGREEN },
+                    if p_failed > 0 {
+                        color::warn()
+                    } else {
+                        color::ok()
+                    },
                 ));
                 spans.push(Span::styled(
                     format!(" {p_done}/{}", members.len()),
-                    Style::default().fg(DIM),
+                    styles::muted(),
                 ));
             }
             body.push((TextLine::from(spans), None));
@@ -619,11 +624,9 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
             let selected = i == wf.selected;
             let marker = if selected { "▸" } else { " " };
             let status = match row_status(r) {
-                ActivityStatus::Running => {
-                    Span::styled(format!("{spin} "), Style::default().fg(ACCENT))
-                }
-                ActivityStatus::Done => Span::styled("✓ ", Style::default().fg(OKGREEN)),
-                _ => Span::styled("✗ ", Style::default().fg(ERRRED)),
+                ActivityStatus::Running => Span::styled(format!("{spin} "), styles::user()),
+                ActivityStatus::Done => Span::styled("✓ ", styles::ok()),
+                _ => Span::styled("✗ ", styles::err()),
             };
             let mut base = if selected {
                 Style::default().add_modifier(Modifier::REVERSED)
@@ -631,7 +634,7 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
                 Style::default()
             };
             if r.done && !r.ok {
-                base = base.fg(ERRRED);
+                base = base.patch(styles::err());
             }
             let cost = if r.cost > 0.0 {
                 format!("  ${:.4}", r.cost)
@@ -644,12 +647,12 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
                 .max(8);
             body.push((
                 TextLine::from(vec![
-                    Span::styled(format!("   {marker} "), Style::default().fg(ACCENT)),
+                    Span::styled(format!("   {marker} "), styles::user()),
                     status,
-                    Span::styled(format!("{} ", r.agent), base.fg(TOOLCYAN)),
-                    Span::styled(format!("[{model}] "), base.fg(DIM)),
+                    Span::styled(format!("{} ", r.agent), base.patch(styles::muted())),
+                    Span::styled(format!("[{model}] "), base.patch(styles::muted())),
                     Span::styled(truncate(&r.task, task_max), base),
-                    Span::styled(cost, Style::default().fg(DIM)),
+                    Span::styled(cost, styles::muted()),
                 ]),
                 Some(i),
             ));
@@ -661,7 +664,7 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
                             "        ▏{}",
                             truncate(&r.last, (inner.width as usize).saturating_sub(10).max(8))
                         ),
-                        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+                        styles::muted().add_modifier(Modifier::ITALIC),
                     )),
                     None,
                 ));
@@ -672,7 +675,7 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
         body.push((
             TextLine::from(Span::styled(
                 format!("  {spin} authoring… waiting for the first agent to spawn"),
-                Style::default().fg(DIM),
+                styles::muted(),
             )),
             None,
         ));
@@ -718,14 +721,14 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
     if feed_h > 0 {
         let mut feed: Vec<TextLine> = vec![TextLine::from(Span::styled(
             "  ── narration ──",
-            Style::default().fg(DIM),
+            styles::muted(),
         ))];
         for msg in wf.logs.iter().rev().take(feed_h as usize - 1).rev() {
             feed.push(TextLine::from(vec![
-                Span::styled("  💬 ", Style::default().fg(ACCENT)),
+                Span::styled("  💬 ", styles::user()),
                 Span::styled(
                     truncate(msg, (inner.width as usize).saturating_sub(8).max(8)),
-                    Style::default().fg(TEXT),
+                    styles::fg(),
                 ),
             ]));
         }
