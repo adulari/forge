@@ -561,77 +561,67 @@ fn add_custom_provider_at(
             rp.namespace
         )));
     }
-    let mut root: toml::Table = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
+    let mut doc = crate::toml_write::load_doc(path)?;
 
-    let providers = root
-        .entry("providers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if !providers.is_table() {
-        *providers = toml::Value::Table(toml::Table::new());
+    let providers = crate::toml_write::table_at(&mut doc, &["providers"]);
+    if !providers
+        .get("custom")
+        .is_some_and(toml_edit::Item::is_array_of_tables)
+    {
+        providers.insert("custom", toml_edit::Item::ArrayOfTables(Default::default()));
     }
-    let custom = providers
-        .as_table_mut()
-        .unwrap()
-        .entry("custom".to_string())
-        .or_insert_with(|| toml::Value::Array(Vec::new()));
-    if !custom.is_array() {
-        *custom = toml::Value::Array(Vec::new());
+    let arr = providers
+        .get_mut("custom")
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
+        .expect("array of tables just ensured");
+    let mut keep = Vec::new();
+    for (index, table) in arr.iter().enumerate() {
+        if table.get("namespace").and_then(toml_edit::Item::as_str) != Some(rp.namespace.as_str()) {
+            keep.push(index);
+        }
     }
-    let arr = custom.as_array_mut().unwrap();
-    arr.retain(|v| v.get("namespace").and_then(|n| n.as_str()) != Some(rp.namespace.as_str()));
+    let mut position = arr.len();
+    while position > 0 {
+        position -= 1;
+        if !keep.contains(&position) {
+            arr.remove(position);
+        }
+    }
 
-    let mut entry = toml::Table::new();
-    entry.insert(
-        "namespace".into(),
-        toml::Value::String(rp.namespace.clone()),
-    );
-    entry.insert(
-        "base_url".into(),
-        toml::Value::String(p.base_url.trim().to_string()),
-    );
+    let mut entry = toml_edit::Table::new();
+    entry.insert("namespace", toml_edit::value(rp.namespace.as_str()));
+    entry.insert("base_url", toml_edit::value(p.base_url.trim()));
     if let Some(env) = &p.api_key_env {
         if !env.trim().is_empty() {
-            entry.insert(
-                "api_key_env".into(),
-                toml::Value::String(env.trim().to_string()),
-            );
+            entry.insert("api_key_env", toml_edit::value(env.trim()));
         }
     }
     if p.free {
-        entry.insert("free".into(), toml::Value::Boolean(true));
+        entry.insert("free", toml_edit::value(true));
     }
     if !rp.seed_models.is_empty() {
         entry.insert(
-            "models".into(),
-            toml::Value::Array(
+            "models",
+            toml_edit::value(
                 rp.seed_models
                     .iter()
-                    .cloned()
-                    .map(toml::Value::String)
-                    .collect(),
+                    .map(String::as_str)
+                    .collect::<toml_edit::Array>(),
             ),
         );
     }
     if let Some(label) = &p.label {
         if !label.trim().is_empty() {
-            entry.insert(
-                "label".into(),
-                toml::Value::String(label.trim().to_string()),
-            );
+            entry.insert("label", toml_edit::value(label.trim()));
         }
     }
-    arr.push(toml::Value::Table(entry));
+    arr.push(entry);
 
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
     Figment::from(Serialized::defaults(Config::default()))
-        .merge(Toml::string(&body))
+        .merge(Toml::string(&doc.to_string()))
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid config after add: {e}")))?;
-    crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
-    Ok(())
+    crate::toml_write::save_doc(path, &doc)
 }
 
 /// Remove a user-registered `[[providers.custom]]` entry by namespace from the user `config.toml`.
@@ -643,26 +633,34 @@ pub fn remove_custom_provider(namespace: &str) -> Result<bool, ConfigError> {
 }
 
 fn remove_custom_provider_at(path: &std::path::Path, namespace: &str) -> Result<bool, ConfigError> {
-    let Some(text) = std::fs::read_to_string(path).ok() else {
+    if !path.exists() {
         return Ok(false);
-    };
-    let mut root: toml::Table = text
-        .parse()
-        .map_err(|e| ConfigError::Write(format!("config.toml is not valid TOML: {e}")))?;
+    }
+    let mut doc = crate::toml_write::load_doc(path)?;
     let mut removed = false;
-    if let Some(arr) = root
+    if let Some(arr) = doc
         .get_mut("providers")
-        .and_then(|p| p.as_table_mut())
+        .and_then(toml_edit::Item::as_table_like_mut)
         .and_then(|p| p.get_mut("custom"))
-        .and_then(|c| c.as_array_mut())
+        .and_then(toml_edit::Item::as_array_of_tables_mut)
     {
         let before = arr.len();
-        arr.retain(|v| v.get("namespace").and_then(|n| n.as_str()) != Some(namespace));
+        let mut index = before;
+        while index > 0 {
+            index -= 1;
+            let matches = arr
+                .get(index)
+                .and_then(|t| t.get("namespace"))
+                .and_then(toml_edit::Item::as_str)
+                == Some(namespace);
+            if matches {
+                arr.remove(index);
+            }
+        }
         removed = arr.len() != before;
     }
     if removed {
-        let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-        crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+        crate::toml_write::save_doc(path, &doc)?;
     }
     Ok(removed)
 }
@@ -707,23 +705,20 @@ pub fn remove_azure_provider() -> Result<bool, ConfigError> {
 }
 
 fn remove_azure_provider_at(path: &std::path::Path) -> Result<bool, ConfigError> {
-    let Some(text) = std::fs::read_to_string(path).ok() else {
+    if !path.exists() {
         return Ok(false);
-    };
-    let mut root: toml::Table = text
-        .parse()
-        .map_err(|e| ConfigError::Write(format!("config.toml is not valid TOML: {e}")))?;
-    let removed = root
+    }
+    let mut doc = crate::toml_write::load_doc(path)?;
+    let removed = doc
         .get_mut("providers")
-        .and_then(toml::Value::as_table_mut)
+        .and_then(toml_edit::Item::as_table_like_mut)
         .is_some_and(|providers| providers.remove("azure").is_some());
     if removed {
-        let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
         Figment::from(Serialized::defaults(Config::default()))
-            .merge(Toml::string(&body))
+            .merge(Toml::string(&doc.to_string()))
             .extract::<Config>()
             .map_err(|e| ConfigError::Write(format!("invalid config after Azure removal: {e}")))?;
-        crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+        crate::toml_write::save_doc(path, &doc)?;
     }
     Ok(removed)
 }
@@ -735,22 +730,8 @@ fn add_azure_provider_at(path: &std::path::Path, cfg: &AzureConfig) -> Result<()
     cfg.clone().into_provider().map_err(ConfigError::Write)?;
     check_env_var_name(cfg.api_key_env.as_deref()).map_err(ConfigError::Write)?;
 
-    let mut root: toml::Table = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
+    let mut doc = crate::toml_write::load_doc(path)?;
 
-    let providers = root
-        .entry("providers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if !providers.is_table() {
-        *providers = toml::Value::Table(toml::Table::new());
-    }
-    let azure = providers
-        .as_table_mut()
-        .unwrap()
-        .entry("azure".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
     let mut entry = toml::Table::new();
     let mut put = |k: &str, v: Option<&String>| {
         if let Some(s) = v.map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -775,15 +756,16 @@ fn add_azure_provider_at(path: &std::path::Path, cfg: &AzureConfig) -> Result<()
     if !deps.is_empty() {
         entry.insert("deployments".into(), toml::Value::Array(deps));
     }
-    *azure = toml::Value::Table(entry);
+    crate::toml_write::sync_table(
+        crate::toml_write::table_at(&mut doc, &["providers", "azure"]),
+        &entry,
+    );
 
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
     Figment::from(Serialized::defaults(Config::default()))
-        .merge(Toml::string(&body))
+        .merge(Toml::string(&doc.to_string()))
         .extract::<Config>()
         .map_err(|e| ConfigError::Write(format!("invalid config after azure add: {e}")))?;
-    crate::write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
-    Ok(())
+    crate::toml_write::save_doc(path, &doc)
 }
 
 // Search-API providers for the `web_search` tool. Kept separate from PROVIDER_ENV_VARS so

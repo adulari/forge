@@ -28,3 +28,42 @@ pub(crate) fn custom_provider_checks(out: &mut Vec<Check>) -> bool {
     }
     usable
 }
+
+/// The secret-store rows: which store this binary reads, then whether `secrets.enc` actually
+/// decrypts (the backend line only says which store is selected, not that it is readable).
+pub(crate) fn secret_store_checks(out: &mut Vec<Check>) {
+    use forge_config::secret_health::FileStoreHealth;
+    // A `forge` bin built by `cargo test` carries the in-memory `test-secrets` store, so "no keys"
+    // from it says nothing about the user's setup.
+    let backend = forge_config::secret_store::backend();
+    out.push(check(
+        if backend.is_blind() {
+            Status::Warn
+        } else {
+            Status::Ok
+        },
+        "secret store",
+        backend.describe(),
+        backend.is_blind().then_some(
+            "rebuild with `cargo build --bin forge` — this binary cannot see any stored key",
+        ),
+    ));
+    if backend.is_blind() {
+        return;
+    }
+    match forge_config::secret_health::file_store_health() {
+        FileStoreHealth::Absent => {}
+        FileStoreHealth::Healthy { entries } => out.push(check(
+            Status::Ok,
+            "secrets file",
+            format!("{entries} stored secret(s) decrypt cleanly"),
+            None,
+        )),
+        FileStoreHealth::Corrupt(detail) => out.push(check(
+            Status::Fail,
+            "secrets file",
+            format!("corrupt: {detail}"),
+            Some("stored keys in the encrypted file cannot be read; re-add them with `forge auth <provider>`"),
+        )),
+    }
+}

@@ -18,6 +18,7 @@ use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 use crate::*;
 
 mod autonomous;
+pub(crate) mod claude_flags;
 mod commit_prompt;
 mod dispatch_checks;
 pub(crate) use autonomous::*;

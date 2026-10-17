@@ -608,3 +608,9 @@ posture: **treat every MCP server as untrusted by default.**
 - [ ] Docs: README/feature note on declaring servers + importing `.mcp.json`; an ADR for the
       `forge-mcp` crate and the `External` side-effect/permission decision.
 ```
+
+## Allowlist and permission prompts
+
+`forge mcp tools <server>` and the per-server tool count in `forge mcp` honour `[mcp.allow] tools`:
+a tool the allowlist denies is not listed. An `mcp_call` asks once, for the inner tool (the
+wrapper's own prompt is deferred to it), instead of twice.

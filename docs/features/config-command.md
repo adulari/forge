@@ -45,3 +45,18 @@ plans mid-session.
 - PTY e2e (`tui_config_opens_wizard_fullscreen_and_returns_to_chat`): `/config` opens the
   wizard, Esc cancels, the chat loop resumes, `/quit` exits cleanly — proving the takeover +
   restore doesn't wedge the terminal.
+
+## How config files are written
+
+Every programmatic write to `config.toml` (`/config`, `/mode`, keybinds, providers, Azure,
+subscriptions, statusline, Anywhere settings) edits the file with `toml_edit`
+(`forge-config/src/toml_write.rs`), so comments, key order and formatting survive; `.forge/mcp.toml`
+edits keep comments on servers that did not change. A file that does not parse is an error naming
+`file:line:column` and is never overwritten.
+
+Loading reports a wrongly-typed value with its location (`invalid configuration: ... (at
+<file>:<line>:<col>)`) and warns once per process about each key Forge does not recognise
+(`config_diagnostics.rs`, via `serde_ignored`); an unknown key never fails loading.
+
+`forge doctor` also decrypts every entry of `secrets.enc` (`secret_health.rs`) and fails with the
+damaged entries or missing/mismatched `secret.key` named; it never creates or repairs either file.

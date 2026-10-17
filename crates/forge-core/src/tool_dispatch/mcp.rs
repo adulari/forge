@@ -78,6 +78,13 @@ impl Session {
             }
         }
 
+        // `mcp_call` is only a wrapper: the real prompt is the inner tool's, asked below. Asking
+        // for the wrapper too made every call prompt twice.
+        let defer_to_inner_gate = call.name == forge_mcp::MCP_CALL
+            && ["name", "qualified_name", "tool"]
+                .iter()
+                .filter_map(|key| effective_args.get(*key).and_then(|v| v.as_str()))
+                .any(|name| !name.is_empty());
         let allowed = match permission::decide(
             self.mode,
             side_effect,
@@ -87,6 +94,7 @@ impl Session {
         ) {
             PermissionDecision::Allow => true,
             PermissionDecision::Deny => false,
+            PermissionDecision::Ask if defer_to_inner_gate => true,
             PermissionDecision::Ask => match self.presenter.confirm(&call.name, side_effect) {
                 forge_types::ConfirmOutcome::AlwaysAllow => {
                     self.rules.push(forge_types::PermissionRule {
@@ -209,3 +217,6 @@ impl Session {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests;

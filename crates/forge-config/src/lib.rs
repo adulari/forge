@@ -18,6 +18,7 @@ pub mod browser;
 pub mod codemode;
 mod commit_policy;
 mod compact_model;
+mod config_diagnostics;
 pub mod goal;
 mod harness_profile;
 mod lsp_diagnostics;
@@ -31,6 +32,7 @@ pub mod privacy;
 pub mod project_trust;
 pub mod provider_oauth;
 pub mod quota_status;
+pub mod secret_health;
 pub mod secret_store;
 mod vision_fallback;
 pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
@@ -69,6 +71,8 @@ pub enum ConfigError {
     NoConfigDir,
     #[error("writing config failed: {0}")]
     Write(String),
+    #[error("invalid configuration: {0}")]
+    Invalid(String),
     #[error("failed to read system-prompt override file '{0}': {1}")]
     PromptFile(String, String),
 }
@@ -3456,7 +3460,17 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
     // `FORGE_TELEMETRY=0` is the telemetry opt-out flag (read in forge-cli), not a `[telemetry]` table.
     fig = fig.merge(Env::prefixed("FORGE_").ignore(&["telemetry"]).split("__"));
 
-    let mut config: Config = fig.extract()?;
+    let mut config: Config = fig.extract().map_err(|error| {
+        let mut files: Vec<&Path> = Vec::new();
+        if trusted && project_config.is_file() {
+            files.push(project_config);
+        }
+        files.extend(user_config.as_deref().filter(|p| p.is_file()));
+        match config_diagnostics::locate(&error.path, &files) {
+            Some(at) => ConfigError::Invalid(format!("{error} (at {at})")),
+            None => ConfigError::from(error),
+        }
+    })?;
     accumulate_permission_rules(&mut config, user_config.as_deref(), project_has_rules);
     if !trusted {
         config
@@ -3526,6 +3540,13 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
                 }
             }
         }
+    }
+
+    if let Some(path) = user_config.as_deref().filter(|p| p.is_file()) {
+        config_diagnostics::warn_unknown_keys(path);
+    }
+    if trusted && project_config.is_file() {
+        config_diagnostics::warn_unknown_keys(project_config);
     }
 
     // A typo in `[anywhere]` (e.g. `nabled` for `enabled`) is otherwise silent: Figment/serde drop
@@ -3628,27 +3649,17 @@ fn write_anywhere_settings_at(
     host_name: Option<&str>,
     sync: bool,
 ) -> Result<(), ConfigError> {
-    let mut root: toml::Table = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or_default();
-    let anywhere = root
-        .entry("anywhere")
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
-        .as_table_mut()
-        .ok_or_else(|| ConfigError::Write("[anywhere] must be a TOML table".into()))?;
-    anywhere.insert("enabled".into(), toml::Value::Boolean(enabled));
-    anywhere.insert("sync".into(), toml::Value::Boolean(sync));
+    let mut doc = toml_write::load_doc(path)?;
+    let anywhere = toml_write::table_at(&mut doc, &["anywhere"]);
+    toml_write::put(anywhere, "enabled", toml_edit::value(enabled));
+    toml_write::put(anywhere, "sync", toml_edit::value(sync));
     match host_name {
-        Some(name) => {
-            anywhere.insert("host_name".into(), toml::Value::String(name.to_owned()));
-        }
+        Some(name) => toml_write::put(anywhere, "host_name", toml_edit::value(name)),
         None => {
             anywhere.remove("host_name");
         }
     }
-    let rendered = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    write_atomic(path, rendered).map_err(|e| ConfigError::Write(e.to_string()))
+    toml_write::save_doc(path, &doc)
 }
 
 fn write_settings_at(
@@ -3656,36 +3667,24 @@ fn write_settings_at(
     permission: PermissionMode,
     credit_mode: CreditMode,
 ) -> Result<(), ConfigError> {
-    let mut root: toml::Table = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
-
+    let mut doc = toml_write::load_doc(path)?;
     // permission_mode uses kebab-case serde names
-    let perm_str = permission.key();
-    root.insert(
-        "permission_mode".to_string(),
-        toml::Value::String(perm_str.to_string()),
+    toml_write::put(
+        doc.as_table_mut(),
+        "permission_mode",
+        toml_edit::value(permission.key()),
     );
-
-    let mesh = root
-        .entry("mesh".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if let toml::Value::Table(mesh_t) = mesh {
-        let credit_str = match credit_mode {
-            CreditMode::Normal => "normal",
-            CreditMode::Frugal => "frugal",
-            CreditMode::Strict => "strict",
-        };
-        mesh_t.insert(
-            "credit_mode".to_string(),
-            toml::Value::String(credit_str.to_string()),
-        );
-    }
-
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    write_atomic(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
-    Ok(())
+    let credit_str = match credit_mode {
+        CreditMode::Normal => "normal",
+        CreditMode::Frugal => "frugal",
+        CreditMode::Strict => "strict",
+    };
+    toml_write::put(
+        toml_write::table_at(&mut doc, &["mesh"]),
+        "credit_mode",
+        toml_edit::value(credit_str),
+    );
+    toml_write::save_doc(path, &doc)
 }
 
 /// Persist `self_mcp = true/false` to the global user config, preserving all other keys.
@@ -3694,13 +3693,9 @@ pub fn write_self_mcp(enabled: bool) -> Result<PathBuf, ConfigError> {
     let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
     std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
     let path = dir.join("config.toml");
-    let mut root: toml::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
-    root.insert("self_mcp".to_string(), toml::Value::Boolean(enabled));
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let mut doc = toml_write::load_doc(&path)?;
+    toml_write::put(doc.as_table_mut(), "self_mcp", toml_edit::value(enabled));
+    toml_write::save_doc(&path, &doc)?;
     Ok(path)
 }
 
@@ -3709,14 +3704,15 @@ pub fn write_statusline_config(cfg: &StatuslineConfig) -> Result<PathBuf, Config
     let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
     std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
     let path = dir.join("config.toml");
-    let mut root: toml::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
-    let val = toml::Value::try_from(cfg).map_err(|e| ConfigError::Write(e.to_string()))?;
-    root.insert("statusline".to_string(), val);
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let mut doc = toml_write::load_doc(&path)?;
+    let value = toml::Value::try_from(cfg).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let toml::Value::Table(table) = value else {
+        return Err(ConfigError::Write(
+            "[statusline] must serialize to a table".into(),
+        ));
+    };
+    toml_write::sync_table(toml_write::table_at(&mut doc, &["statusline"]), &table);
+    toml_write::save_doc(&path, &doc)?;
     Ok(path)
 }
 
@@ -3769,34 +3765,15 @@ pub fn write_keybind(action: &str, combo: &KeyCombo) -> Result<PathBuf, ConfigEr
     let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
     std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
     let path = dir.join("config.toml");
-    let mut root: toml::Table = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_default();
-    let keybinds = root
-        .entry("keybinds".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if !keybinds.is_table() {
-        *keybinds = toml::Value::Table(toml::Table::new());
-    }
-    if let toml::Value::Table(kb) = keybinds {
-        let binds = kb
-            .entry("binds".to_string())
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        if !binds.is_table() {
-            *binds = toml::Value::Table(toml::Table::new());
-        }
-        if let toml::Value::Table(binds_t) = binds {
-            let mut combo_t = toml::Table::new();
-            combo_t.insert("key".to_string(), toml::Value::String(combo.key.clone()));
-            combo_t.insert("ctrl".to_string(), toml::Value::Boolean(combo.ctrl));
-            combo_t.insert("alt".to_string(), toml::Value::Boolean(combo.alt));
-            combo_t.insert("shift".to_string(), toml::Value::Boolean(combo.shift));
-            binds_t.insert(action.to_string(), toml::Value::Table(combo_t));
-        }
-    }
-    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
-    write_atomic(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let mut doc = toml_write::load_doc(&path)?;
+    let binds = toml_write::table_at(&mut doc, &["keybinds", "binds"]);
+    let mut combo_t = toml_edit::InlineTable::new();
+    combo_t.insert("key", combo.key.as_str().into());
+    combo_t.insert("ctrl", combo.ctrl.into());
+    combo_t.insert("alt", combo.alt.into());
+    combo_t.insert("shift", combo.shift.into());
+    toml_write::put(binds, action, toml_edit::Item::Value(combo_t.into()));
+    toml_write::save_doc(&path, &doc)?;
     Ok(path)
 }
 
@@ -3862,6 +3839,7 @@ mod editor;
 mod endpoint_check;
 mod provider_registry;
 mod provider_reload;
+mod toml_write;
 pub use editor::*;
 pub use provider_registry::*;
 pub(crate) use provider_registry::{
@@ -3870,9 +3848,9 @@ pub(crate) use provider_registry::{
 pub use provider_reload::{provider_set_fingerprint, reload_provider_registries};
 
 #[cfg(test)]
-use editor::test_support::{
-    coerce_value, flatten_value, priority_rank, remove_dotted, set_dotted, write_subscriptions_at,
-};
+use editor::set_model_disabled_at as editor_set_model_disabled_at;
+#[cfg(test)]
+use editor::test_support::{coerce_value, flatten_value, priority_rank, write_subscriptions_at};
 #[cfg(test)]
 use provider_registry::test_support::{
     add_azure_provider_at, add_custom_provider_at, build_custom_registry, remove_azure_provider_at,
@@ -5024,15 +5002,15 @@ auto = "local"
 
     #[test]
     fn set_and_remove_dotted_paths() {
-        let mut root = toml::Table::new();
-        set_dotted(
-            &mut root,
+        let mut doc = toml_edit::DocumentMut::new();
+        toml_write::set_dotted(
+            &mut doc,
             "local.model",
-            toml::Value::String("gemma4:12b".into()),
+            &toml::Value::String("gemma4:12b".into()),
         );
-        assert_eq!(root["local"]["model"].as_str(), Some("gemma4:12b"));
-        remove_dotted(&mut root, "local.model");
-        assert!(root["local"].as_table().unwrap().get("model").is_none());
+        assert_eq!(doc["local"]["model"].as_str(), Some("gemma4:12b"));
+        toml_write::remove_dotted(&mut doc, "local.model");
+        assert!(doc["local"].as_table().unwrap().get("model").is_none());
     }
 
     #[test]

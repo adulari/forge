@@ -237,6 +237,9 @@ pub(crate) enum AssayCmd {
 #[path = "args/anywhere.rs"]
 pub(crate) mod anywhere;
 pub(crate) use anywhere::AnywhereCmd;
+#[path = "args/claude_compat.rs"]
+pub(crate) mod claude_compat;
+pub(crate) use claude_compat::ClaudeCompat;
 #[path = "args/stats.rs"]
 pub(crate) mod stats;
 pub(crate) use stats::StatsCmd;
@@ -304,6 +307,8 @@ pub(crate) enum Command {
         /// cost, notional cost, wall time) as one JSON object to this path. Implies a local run.
         #[arg(long, value_name = "PATH", conflicts_with = "publish_to_fleet")]
         usage_json: Option<std::path::PathBuf>,
+        #[command(flatten)]
+        claude: ClaudeCompat,
     },
     /// Start an interactive multi-turn chat session.
     ///
