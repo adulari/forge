@@ -8,12 +8,6 @@ All notable changes to Forge are documented here. The format follows
 
 ## [2.21.0] - 2026-10-18
 
-### Upgrade notes
-- **Project trust.** A repository's own `.forge/` hooks, MCP servers, allow rules and a more permissive `permission_mode` are ignored until you trust it. Interactive `forge chat` asks once; for headless, CI or daemon use run `forge trust [path]` or set `FORGE_TRUST_PROJECT=1` (see Added).
-- **Auto-edit asks before risky shell.** Ordinary commands still run, but shell that deletes, moves, copies or redirects outside the workspace, touches a raw disk, pipes into a shell or runs inline code that deletes files now prompts. Unattended runs that relied on auto-edit running everything will see prompts (see Security).
-- **Compaction summaries come from the session's own model by default** (`[mesh] compact_model = "session"`), which can spend paid credits or plan quota. Set `[mesh] compact_model = "auto"` for the previous free-model-first order.
-- **Session store schema 44 → 45.** The first 2.21.0 run migrates `forge.db`; older Forge versions refuse to open it afterwards. Back up `~/.local/share/forge/forge.db` first if you may roll back.
-
 ### Security
 - **A cloned repo could run commands and switch Forge to bypass with no prompt.** `.forge/config.toml` was merged unconditionally (so `permission_mode = "bypass"`, an allow-all rule and `[[hooks]]` applied), and `.forge/settings.json` hooks and `.forge/mcp.toml` stdio servers started at session start. They now wait for project trust (see Added).
 - **Auto-edit, the default temper, ran every shell command, including `rm -fr ~`.** The docs said it asked before shell; the code allowed all of it. It now runs ordinary commands and asks for shell that deletes, moves, copies or redirects outside the workspace, touches a raw disk, pipes into a shell or runs inline code that deletes files (`auto-edit asks: …`); README, ADR-0008 and the temper docs now describe that (`crates/forge-core/src/permission/auto.rs`, docs/features/temper-modes.md).
@@ -41,6 +35,10 @@ All notable changes to Forge are documented here. The format follows
 - **ModelGateway works as a custom provider.** A `[[providers.custom]]` endpoint running new-api (ModelGateway, `https://www.modelgateway.co/v1`) is now priced live from its `<origin>/api/pricing` page at official price less the listed discount, which is what calibration calls were actually billed; `model_ratio` is ignored because it does not match the bill. `modelgateway::*` models get the same `minimal` harness profile as InferHub (`crates/forge-cli/src/context_windows/parsers.rs`, docs/features/mesh-routing.md).
 
 ### Changed
+- **Upgrade: Project trust.** A repository's own `.forge/` hooks, MCP servers, allow rules and a more permissive `permission_mode` are ignored until you trust it. Interactive `forge chat` asks once; for headless, CI or daemon use run `forge trust [path]` or set `FORGE_TRUST_PROJECT=1` (see Added).
+- **Upgrade: Auto-edit asks before risky shell.** Ordinary commands still run, but shell that deletes, moves, copies or redirects outside the workspace, touches a raw disk, pipes into a shell or runs inline code that deletes files now prompts. Unattended runs that relied on auto-edit running everything will see prompts (see Security).
+- **Upgrade: Compaction summaries come from the session's own model by default** (`[mesh] compact_model = "session"`), which can spend paid credits or plan quota. Set `[mesh] compact_model = "auto"` for the previous free-model-first order.
+- **Upgrade: Session store schema 44 → 45.** The first 2.21.0 run migrates `forge.db`; older Forge versions refuse to open it afterwards. Back up `~/.local/share/forge/forge.db` first if you may roll back.
 - **`forge board` key hints move to the top row.** The contextual key hints sit right-aligned in the header row instead of the footer keybar (same keys, same order); on a narrow terminal the lowest-priority hints drop first and the title is never clipped. The footer keeps toasts only.
 - **Forgeline: welcome examples are selectable, the board wears the theme.** On the empty-transcript welcome, `↓` from an empty composer focuses the three example prompts (`❯` caret and raised fill; `↑`/`↓` move, `Enter` copies the example into the composer without sending, `Esc` or any other key leaves). `forge board` cards drop their frames for the list/card grammar (caret and raised fill on the selected card, exceptions-only status pill on the title row), lane headers use the categorical colour tokens, status glyphs follow the glyph tier (ASCII twins), and the detail pane header carries a health pill.
 
