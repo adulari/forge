@@ -30,6 +30,7 @@ import {
   billingCheckoutBody,
   commitPendingDeviceRevocation,
   prepareDeviceRevocation,
+  anywhereUnauthorizedAction,
   refreshAnywhereCredentialsExclusively,
   refreshPendingAnywhereAuth,
   stagePreparedDeviceRevocation,
@@ -382,17 +383,16 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     });
   }, [replayWindows, syncAnywhereHosts]);
 
-  useEffect(() => observeAnywhereUnauthorized((rejectedAccessToken) => {
-    void requireReauthentication(rejectedAccessToken);
-  }), [requireReauthentication]);
 
-  const accessToken = useCallback(async (): Promise<string> => {
+  const accessToken = useCallback(async (rejectedAccessToken?: string): Promise<string> => {
     const current = credentialsRef.current;
     if (!current) throw new Error("Forge Anywhere is not signed in");
     if (current.reauthenticationRequired) {
       throw new Error("This device's secure session expired. Reconnect with GitHub to continue.");
     }
-    if (current.accessExpiresAtMs > Date.now() + 30_000) return current.accessToken;
+    if (current.accessToken !== rejectedAccessToken && current.accessExpiresAtMs > Date.now() + 30_000) {
+      return current.accessToken;
+    }
     let resolved = "";
     mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
       const latest = credentialsRef.current;
@@ -411,6 +411,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
           body: JSON.stringify({ refresh_token: refreshToken }),
         }),
         persistCredentials,
+        Date.now(),
+        rejectedAccessToken,
       );
       if (credentialsRef.current?.refreshToken !== next.refreshToken) {
         const merged = replayWindows.adopt(next);
@@ -427,6 +429,32 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     }
     return resolved;
   }, [persistCredentials, replayWindows, requireReauthentication]);
+
+  const renewedAfterRejection = useRef(new Set<string>());
+  const unauthorizedRecovery = useRef<Promise<void> | null>(null);
+  useEffect(() => observeAnywhereUnauthorized((rejectedAccessToken) => {
+    const action = anywhereUnauthorizedAction(
+      credentialsRef.current?.accessToken,
+      rejectedAccessToken,
+      renewedAfterRejection.current,
+    );
+    if (action === "reauthenticate") {
+      void requireReauthentication(rejectedAccessToken);
+      return;
+    }
+    if (action !== "refresh" || unauthorizedRecovery.current) return;
+    unauthorizedRecovery.current = (async () => {
+      try {
+        // A refresh 401 inside accessToken() still moves to reauthentication.
+        const renewed = await accessToken(rejectedAccessToken);
+        renewedAfterRejection.current.clear();
+        renewedAfterRejection.current.add(renewed);
+      } catch {
+        // accessToken() already moved to reauthentication when the refresh token was rejected;
+        // a network failure leaves the session intact for the next request to retry.
+      }
+    })().finally(() => { unauthorizedRecovery.current = null; });
+  }), [accessToken, requireReauthentication]);
 
   const pushApi = useMemo<AnywherePushApi>(() => ({
     register: async (input) => {

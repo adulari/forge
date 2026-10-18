@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { base64Url, type AnywhereAuthSession } from "./anywhereApi";
 import {
   DEFAULT_BILLING_PERIOD,
+  anywhereUnauthorizedAction,
   billingCheckoutBody,
   commitPendingDeviceRevocation,
   prepareDeviceRevocation,
@@ -50,6 +51,36 @@ describe("Anywhere account operations", () => {
     const result = await refreshAnywhereCredentials(credentials(), refresh, persist, 100);
     expect(result).toMatchObject({ accessToken: "new-access", refreshToken: "new-refresh", accessExpiresAtMs: 999_999 });
     expect(persist).toHaveBeenCalledOnce();
+  });
+
+  it("renews an unexpired access token the service rejected", async () => {
+    const persist = vi.fn(async () => undefined);
+    const refresh = vi.fn(async () => ({ access_token: "new-access", refresh_token: "new-refresh", access_expires_at_ms: 999_999 }));
+    const fresh = { ...credentials(), accessExpiresAtMs: 10_000_000 };
+    expect(await refreshAnywhereCredentials(fresh, refresh, persist, 100)).toBe(fresh);
+    expect(refresh).not.toHaveBeenCalled();
+    const result = await refreshAnywhereCredentials(fresh, refresh, persist, 100, "old-access");
+    expect(result.accessToken).toBe("new-access");
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("does not renew again when another tab already replaced the rejected token", async () => {
+    const stored = { ...credentials(), accessToken: "tab-access", refreshToken: "tab-refresh", accessExpiresAtMs: 10_000_000 };
+    const refresh = vi.fn(async () => ({ access_token: "x", refresh_token: "y", access_expires_at_ms: 1 }));
+    const result = await refreshAnywhereCredentialsExclusively(
+      credentials(), (work) => work(), async () => stored, refresh, async () => undefined, 100, "old-access",
+    );
+    expect(result).toBe(stored);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("renews on a 401 first and only reauthenticates when the renewed token is rejected", () => {
+    const renewed = new Set<string>();
+    expect(anywhereUnauthorizedAction("a", "a", renewed)).toBe("refresh");
+    expect(anywhereUnauthorizedAction("b", "a", renewed)).toBe("ignore");
+    expect(anywhereUnauthorizedAction(undefined, "a", renewed)).toBe("ignore");
+    renewed.add("b");
+    expect(anywhereUnauthorizedAction("b", "b", renewed)).toBe("reauthenticate");
   });
 
   it("serializes browser tabs and adopts the token rotated by the first tab", async () => {
