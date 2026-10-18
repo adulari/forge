@@ -143,7 +143,7 @@ mod tests {
         assert!(first.date.is_some(), "a released version carries its date");
         assert!(first.entries.iter().all(|e| matches!(
             e.section.as_str(),
-            "Added" | "Changed" | "Fixed" | "Removed"
+            "Added" | "Changed" | "Deprecated" | "Removed" | "Fixed" | "Security"
         )));
     }
 
