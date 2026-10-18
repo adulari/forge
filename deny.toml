@@ -33,6 +33,12 @@ ignore = [
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
   { crate = "zip@8.6.0", reason = "all zip 8.x yanked; self_update has no zip 9 release yet" },
+  # zvariant, zbus_names, zvariant_derive: unmaintained only because they were folded into zbus 6.
+  # Pulled by keyring 3.6.3 -> zbus 4.4.0 (Linux secret-service). No CVE; no upgrade within keyring 3.
+  # Added 2026-10-18; drop when keyring moves to zbus >= 6.
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
 ]
 
 [licenses]
