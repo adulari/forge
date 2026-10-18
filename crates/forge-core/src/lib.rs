@@ -1440,7 +1440,7 @@ fn tail_within_token_budget(text: &str, budget_tokens: usize) -> String {
 /// Classify a tool RESULT string as a failure of a given kind, or `None` if it looks like a success.
 ///
 /// Anchored on the markers Forge actually produces for failures (`invoke_tool` returns `"error: …"`
-/// for a tool `Err`, `"permission denied by policy"` for a blocked call, and [`shell_command_failed`]
+/// for a tool `Err`, `"permission denied by policy"` for a blocked call, and [`shell_command_did_fail`]
 /// recognises a non-zero shell exit) — so a *successful* tool output that merely happens to contain a
 /// word like "invalid" is NOT misread as a failure. The category is then a keyword sniff of the
 /// message. Only consumed behind a ≥3 threshold, so the worst case of a misclassification is one
@@ -1449,7 +1449,7 @@ fn classify_tool_failure(result: &str) -> Option<ErrorCategory> {
     let lower = result.to_ascii_lowercase();
     let is_failure = lower.starts_with("error:")
         || lower.starts_with("permission denied")
-        || shell_command_failed(result);
+        || shell_command_did_fail(result);
     if !is_failure {
         return None;
     }
@@ -9457,23 +9457,23 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_failed_reads_the_exit_status() {
-        assert!(!shell_command_failed("shell: exit 0 in 5ms\n\nhi"));
-        assert!(!shell_command_failed("shell: ready after 0s (exit 0)"));
-        assert!(!shell_command_failed(
+    fn shell_command_did_fail_reads_the_exit_status() {
+        assert!(!shell_command_did_fail("shell: exit 0 in 5ms\n\nhi"));
+        assert!(!shell_command_did_fail("shell: ready after 0s (exit 0)"));
+        assert!(!shell_command_did_fail(
             "shell: started background job 1 (pid 2)"
         ));
-        assert!(!shell_command_failed(
+        assert!(!shell_command_did_fail(
             "shell: not ready after 3s (last exit 1)"
         ));
-        assert!(shell_command_failed("shell: exit 1 in 5ms"));
-        assert!(shell_command_failed("shell: exit 127 in 5ms"));
-        assert!(!shell_command_failed("shell: started background job 3"));
-        assert!(shell_command_failed("shell: timed out after 1s (killed)"));
-        assert!(shell_command_failed("shell: failed to start (cwd .): x"));
-        assert!(shell_command_failed("shell: exit signal in 5ms"));
+        assert!(shell_command_did_fail("shell: exit 1 in 5ms"));
+        assert!(shell_command_did_fail("shell: exit 127 in 5ms"));
+        assert!(!shell_command_did_fail("shell: started background job 3"));
+        assert!(shell_command_did_fail("shell: timed out after 1s (killed)"));
+        assert!(shell_command_did_fail("shell: failed to start (cwd .): x"));
+        assert!(shell_command_did_fail("shell: exit signal in 5ms"));
         // Not a shell result at all → not treated as a shell failure.
-        assert!(!shell_command_failed("read 3 files"));
+        assert!(!shell_command_did_fail("read 3 files"));
     }
 
     #[test]

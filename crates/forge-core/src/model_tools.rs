@@ -169,7 +169,7 @@ impl Session {
             // its hint is delivered with the batch's other hints below.
             if self.config.shell.explain_errors {
                 for (call, (_, _, result)) in calls.iter().zip(&classified) {
-                    if call.name == "shell" && shell_command_failed(result) {
+                    if call.name == "shell" && shell_command_did_fail(result) {
                         if let Some((command, output)) =
                             crate::shell_batch::failing_command(&call.args, result)
                         {

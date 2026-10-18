@@ -1586,6 +1586,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_offset_2_limit_1_returns_only_second_line() {
+        let dir = temp_dir("read-offset-2-limit-1");
+        let path = dir.join("f.txt");
+        std::fs::write(&path, "line1\nline2\nline3").unwrap();
+
+        let out = ReadFileTool
+            .run(&json!({ "path": path.to_str().unwrap(), "offset": 2, "limit": 1 }))
+            .await
+            .unwrap();
+        assert_eq!(out, "line2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn read_file_inverted_line_range_does_not_panic() {
         // start_line > end_line used to panic `lines[7..3]` and crash the turn on tool input.
         let dir = temp_dir("read-inverted");
