@@ -386,7 +386,7 @@ async fn run_tests_in(dir: &Path) -> Option<bool> {
     let cmd = detect_test_cmd(dir)?;
     let out =
         forge_tools::run_shell_command(&cmd, &dir.to_string_lossy(), DUEL_TEST_TIMEOUT_SECS).await;
-    Some(!crate::shell_command_failed(&out))
+    Some(!crate::shell_command_did_fail(&out))
 }
 
 #[cfg(test)]

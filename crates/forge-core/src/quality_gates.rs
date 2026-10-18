@@ -254,7 +254,7 @@ impl Session {
                 AUTOFIX_TIMEOUT_SECS,
             )
             .await;
-            if shell_command_failed(&out) {
+            if shell_command_did_fail(&out) {
                 failures.push(format!("[lint: {}]\n{}", af.lint_cmd, out));
             }
         }
@@ -265,7 +265,7 @@ impl Session {
                 AUTOFIX_TIMEOUT_SECS,
             )
             .await;
-            if shell_command_failed(&out) {
+            if shell_command_did_fail(&out) {
                 failures.push(format!("[test: {}]\n{}", af.test_cmd, out));
             }
         }

@@ -122,7 +122,7 @@ impl Session {
         // tool_call_id is answered in sequence. Also classify each result for the failure-loop guard.
         let mut classified = Vec::with_capacity(pend.len());
         for (p, (result, full, ok)) in pend.iter().zip(results) {
-            let shown_ok = ok && !(p.name == "shell" && shell_command_failed(&result));
+            let shown_ok = ok && !(p.name == "shell" && shell_command_did_fail(&result));
             self.emit_tool_card(&p.name, shown_ok, &result);
             self.record_test_proof(&p.name, &p.args, &result, full.as_deref());
             if ok {
@@ -708,7 +708,7 @@ impl Session {
 
         // The call ran, so `ok` stays true for the failure tracker and the commit bookkeeping, but
         // a shell command that exited non-zero must not be drawn with a success mark.
-        let shown_ok = ok && !(call.name == "shell" && shell_command_failed(&result));
+        let shown_ok = ok && !(call.name == "shell" && shell_command_did_fail(&result));
         self.presenter.emit(PresenterEvent::ToolResult {
             name: call.name.clone(),
             ok: shown_ok,
@@ -780,7 +780,7 @@ impl Session {
         // alters the result the model sees.
         if side_effect == forge_types::SideEffect::Shell
             && self.config.shell.explain_errors
-            && shell_command_failed(&result)
+            && shell_command_did_fail(&result)
         {
             if let Some((command, output)) =
                 crate::shell_batch::failing_command(&call.args, &result)

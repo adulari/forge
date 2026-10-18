@@ -373,7 +373,7 @@ pub(crate) fn unresolved_completeness_production_paths(
 /// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
 /// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
 /// or `shell: failed to start …`; only `exit 0` is success.
-pub(crate) fn shell_command_failed(result: &str) -> bool {
+pub(crate) fn shell_command_did_fail(result: &str) -> bool {
     let first = result.lines().next().unwrap_or("");
     match first.strip_prefix("shell: exit ") {
         Some(rest) => {
@@ -742,15 +742,15 @@ mod review_answer_tests {
 
 #[cfg(test)]
 mod shell_failed_tests {
-    use super::shell_command_failed;
+    use super::shell_command_did_fail;
 
     #[test]
     fn background_start_is_not_a_failure() {
-        assert!(!shell_command_failed(
+        assert!(!shell_command_did_fail(
             "shell: started background job 1 (pid 42)\n  log: x"
         ));
-        assert!(!shell_command_failed("shell: exit 0"));
-        assert!(shell_command_failed("shell: exit 2"));
-        assert!(shell_command_failed("shell: failed to start x"));
+        assert!(!shell_command_did_fail("shell: exit 0"));
+        assert!(shell_command_did_fail("shell: exit 2"));
+        assert!(shell_command_did_fail("shell: failed to start x"));
     }
 }

@@ -25,14 +25,14 @@ fix.
 
 ## Design
 
-- **Failure detection:** `shell_command_failed(result)` in `forge-core` is pure (unit-tested) —
+- **Failure detection:** `shell_command_did_fail(result)` in `forge-core` is pure (unit-tested) —
   it reads the tool's first line (`shell: exit N …` / `timed out` / `error:` / `failed to
   start`); only `exit 0` is success.
 - **The call:** `Session::diagnose_shell_error` reuses the compaction pattern —
   `Router::route_hinted(Trivial)` + a single `provider.complete` with a fixed system prompt
   (`SHELL_DIAGNOSE_SYSTEM`) and the command + result as the user message.
 - **Wiring:** in `invoke_tool`, after the PostToolUse hooks and before returning, when
-  `side_effect == Shell && config.shell.explain_errors && shell_command_failed(&result)`.
+  `side_effect == Shell && config.shell.explain_errors && shell_command_did_fail(&result)`.
 
 ## Shipped (follow-up)
 

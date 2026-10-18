@@ -116,7 +116,7 @@ impl Session {
         if self.config.mesh.env_fight_nudge && call.name == "shell" {
             if let Some(cmd) = forge_types::shell_command_text(&call.args) {
                 if is_env_setup_command(&cmd)
-                    && self.env_fight.observe(shell_command_failed(result))
+                    && self.env_fight.observe(shell_command_did_fail(result))
                 {
                     self.presenter.emit(PresenterEvent::Warning(format!(
                         "environment setup/build spend cap reached after a failure \
