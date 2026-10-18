@@ -6,6 +6,9 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The Forge app no longer logs you out when one request is rejected.** Any 401 on an authenticated Anywhere request sent the app straight to "Reconnect with GitHub", which then needed a fresh device approval. A rejected access token (for example a phone clock running behind the service) is now renewed first, and the app only asks you to sign in again when the renewal itself is refused or the renewed token is rejected too (`mobile/src/lib/AnywhereProvider.tsx`).
+
 ## [2.21.0] - 2026-10-18
 
 ### Security

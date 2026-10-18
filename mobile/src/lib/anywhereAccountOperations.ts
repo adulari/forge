@@ -42,13 +42,30 @@ export async function refreshPendingAnywhereAuth(
   };
 }
 
+export type AnywhereUnauthorizedAction = "ignore" | "refresh" | "reauthenticate";
+
+/**
+ * A 401 on an authenticated request usually means the access token expired early (device clock
+ * behind the service) or was rotated elsewhere, so renew it first. Only a token that was itself
+ * just issued by such a renewal proves the login is gone.
+ */
+export function anywhereUnauthorizedAction(
+  currentAccessToken: string | undefined,
+  rejectedAccessToken: string,
+  renewedAfterRejection: ReadonlySet<string>,
+): AnywhereUnauthorizedAction {
+  if (!currentAccessToken || currentAccessToken !== rejectedAccessToken) return "ignore";
+  return renewedAfterRejection.has(rejectedAccessToken) ? "reauthenticate" : "refresh";
+}
+
 export async function refreshAnywhereCredentials(
   current: StoredAnywhereCredentials,
   refresh: (refreshToken: string) => Promise<RefreshResponse>,
   persist: (credentials: StoredAnywhereCredentials) => Promise<void>,
   now = Date.now(),
+  rejectedAccessToken?: string,
 ): Promise<StoredAnywhereCredentials> {
-  if (current.accessExpiresAtMs > now + 30_000) return current;
+  if (current.accessToken !== rejectedAccessToken && current.accessExpiresAtMs > now + 30_000) return current;
   const response = await refresh(current.refreshToken);
   const next = {
     ...current,
@@ -71,6 +88,7 @@ export async function refreshAnywhereCredentialsExclusively(
   refresh: (refreshToken: string) => Promise<RefreshResponse>,
   persist: (credentials: StoredAnywhereCredentials) => Promise<void>,
   now = Date.now(),
+  rejectedAccessToken?: string,
 ): Promise<StoredAnywhereCredentials> {
   return exclusive(async () => {
     const stored = await load();
@@ -78,7 +96,7 @@ export async function refreshAnywhereCredentialsExclusively(
       && stored.deviceIdHex === current.deviceIdHex
       ? stored
       : current;
-    return refreshAnywhereCredentials(latest, refresh, persist, now);
+    return refreshAnywhereCredentials(latest, refresh, persist, now, rejectedAccessToken);
   });
 }
 
