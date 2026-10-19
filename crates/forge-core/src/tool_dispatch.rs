@@ -696,6 +696,10 @@ impl Session {
             )
         } else if let Some(note) = self.floor_denial(&call.name, &effective_args) {
             (note, None, false)
+        } else if let Some(rule) =
+            permission::denying_rule(&call.name, &effective_args, &self.rules)
+        {
+            (permission::rule_denial(&call.name, rule), None, false)
         } else {
             denial::result(
                 &call.name,

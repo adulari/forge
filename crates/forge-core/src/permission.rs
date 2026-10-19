@@ -235,6 +235,47 @@ pub fn denial_note(tool_name: &str, args: &Value) -> Option<String> {
     })
 }
 
+/// The deny rule that refuses this call, built-in first. Lets the refusal name the rule, so a
+/// model that hit `grep */.ssh/*` with one command does not conclude the whole tool is banned.
+pub fn denying_rule<'a>(
+    tool_name: &str,
+    args: &Value,
+    rules: &'a [PermissionRule],
+) -> Option<&'a PermissionRule> {
+    let denies = || {
+        rules
+            .iter()
+            .filter(|r| r.decision == PermissionDecision::Deny && rule_matches(r, tool_name, args))
+    };
+    denies()
+        .find(|r| r.source == RuleSource::Builtin)
+        .or_else(|| denies().next())
+}
+
+/// The model-facing refusal for a call a deny rule matched.
+pub fn rule_denial(tool_name: &str, rule: &PermissionRule) -> String {
+    let origin = if rule.source == RuleSource::Builtin {
+        "Forge's built-in"
+    } else {
+        "a configured"
+    };
+    let pattern = if rule.patterns.is_empty() {
+        "(any arguments)".to_string()
+    } else {
+        rule.patterns.join("`, `")
+    };
+    let why = rule
+        .reason
+        .as_deref()
+        .map(|r| format!(" ({r})"))
+        .unwrap_or_default();
+    format!(
+        "permission denied by policy: this `{tool_name}` call matched {origin} deny rule `{pattern}`{why}. \
+         Only calls matching that rule are refused; `{tool_name}` itself still works. Retry \
+         without the part that matches it, and do not try to reach the same thing another way."
+    )
+}
+
 /// Allow/ask resolution for a shell command line (denies were already handled in `decide`).
 /// Each effective segment picks its most-specific matching non-deny rule. `Some(Ask)` if any
 /// segment resolved to ask; `Some(Allow)` only when parsing succeeded and *every* segment
@@ -591,6 +632,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_denied_call_names_the_rule_and_says_the_tool_still_works() {
+        let rules = vec![PermissionRule {
+            tool: "shell".into(),
+            patterns: vec!["grep */.ssh/*".into()],
+            decision: PermissionDecision::Deny,
+            source: RuleSource::Builtin,
+            reason: None,
+        }];
+        let call = sh_call("hostname; grep -i host ~/.ssh/config");
+        let rule = denying_rule("shell", &call, &rules).expect("the ~/.ssh read is denied");
+        let text = rule_denial("shell", rule);
+        assert!(text.contains("`grep */.ssh/*`"), "{text}");
+        assert!(text.contains("`shell` itself still works"), "{text}");
+        assert!(denying_rule("shell", &sh_call("hostname"), &rules).is_none());
     }
 
     #[test]

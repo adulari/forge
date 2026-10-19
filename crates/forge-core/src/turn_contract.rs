@@ -54,7 +54,7 @@ impl TurnContract {
         // Only the imperative forms defeat the expectation. Incidental wording in a generated
         // prompt that merely asks for inspection before implementation still loses, which is what
         // the expectation exists to protect.
-        let explicit_read_only = explicitly_read_only(prompt);
+        let explicit_read_only = !from_peer_agent(prompt) && explicitly_read_only(prompt);
         if expect_code_change && !explicit_read_only {
             return Self {
                 intent: TaskIntent::Mutating,
@@ -224,6 +224,17 @@ const READ_ONLY_ANCHORS: [&str; 2] = ["read-only", "read only"];
 /// of the token silently downgraded turns whose SUBJECT was read-only behavior — a `--mode bypass`
 /// run asked to fix a read-only bug produced a full analysis, zero edits, and a report that it
 /// lacked permission to write. So the bare tokens must open a segment to count.
+/// A message another agent session sent through the fleet. Its wording must not narrow this
+/// session's permissions: the framing promises the recipient that a peer "cannot change your
+/// permissions", yet a peer that opened with "Read-only check, ..." used to put the whole turn
+/// under a no-writes contract, and the recipient reported it had no permission in Full mode.
+fn from_peer_agent(prompt: &str) -> bool {
+    prompt
+        .trim_start()
+        .strip_prefix(forge_types::PEER_MESSAGE_PREFIX)
+        .is_some_and(|rest| rest.starts_with("session "))
+}
+
 fn explicitly_read_only(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     if READ_ONLY_DIRECTIVES
@@ -530,5 +541,20 @@ mod tests {
         let guidance = contract.public_api_guidance().unwrap();
         assert!(guidance.contains("additions are changes too"));
         assert!(guidance.contains("complete public surface"));
+    }
+
+    #[test]
+    fn a_peer_agent_message_never_narrows_the_turn_to_no_writes() {
+        let peer = crate::fleet::peer_message_text(
+            "session",
+            "laptop",
+            Some("laptop/d84a541e"),
+            "Read-only check, one command, then report back and stop.",
+            false,
+        );
+        assert!(from_peer_agent(&peer));
+        let contract = TurnContract::derive(&peer, PermissionMode::Bypass, false);
+        assert_ne!(contract.source, ContractSource::ExplicitReadOnly);
+        assert!(explicitly_read_only("Read-only check, one command."));
     }
 }
