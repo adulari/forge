@@ -130,3 +130,26 @@ AC7  web_search with a mock backend → formatted, numbered results (title / url
 ## Fetch safety and decoding
 
 `web_fetch` resolves hostnames through a resolver that discards loopback, private and link-local answers, for the first request and every redirect, so a public-looking name that points at an internal address (`localtest.me`, `127.0.0.1.nip.io`) is refused along with `localhost.`. Binary responses (non-text content type, or NUL bytes without one) are reported, not decoded, and a Latin-1 / Windows-1252 `charset` is honoured.
+
+## Fetch output, paging and redirects (Oct 2026)
+
+Compared against Claude Code's WebFetch/WebSearch, which return Markdown, cache for 15 minutes,
+report cross-host redirects and accept domain filters:
+
+- **Markdown, main region only.** HTML is converted with `htmd` from the `<main>` or `<article>`
+  element when there is one (else the whole body minus `header`/`footer`/`aside`), skipping
+  `nav`, `script`, `style`, `svg`, forms and iframes. Relative links are made absolute so the
+  model can fetch them. Non-HTML text (plain, JSON, source, Markdown) is returned verbatim.
+- **Paging.** `max_chars` (default 10000, max 100000) and `offset`. A truncated reply ends with
+  the offset to pass next. The rendered page is cached in-process for 15 minutes (32 entries),
+  so paging costs no refetch.
+- **Cross-host redirects** stop and are reported (`www.` counts as the same site), because the
+  permission rules matched the original host. Same-site redirects are followed as before.
+- **Search domain filters.** `allowed_domains` becomes `site:` operators in the query and both
+  `allowed_domains` and `blocked_domains` filter the returned hosts (subdomains match).
+- **SearXNG reachability.** The SearXNG backend is an operator-configured endpoint and uses a
+  client without the public-only resolver; with that resolver, `localhost:8888` was refused and
+  search silently fell back to DuckDuckGo/Bing.
+
+Not copied: Claude Code's WebFetch passes the page plus a prompt to a small model and returns
+only the answer. Forge returns the page itself and leaves context control to `max_chars`/`offset`.

@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::{str_arg, Tool, ToolError};
 
+mod page;
 mod search;
 use search::keyless_chain;
 pub use search::{
@@ -26,6 +27,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// larger than any real HTML page yet far below an OOM threshold.
 const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_MAX_CHARS: usize = 10_000;
+const MAX_MAX_CHARS: usize = 100_000;
 const DEFAULT_SEARCH_COUNT: u32 = 5;
 const MAX_SEARCH_COUNT: u32 = 10;
 const USER_AGENT: &str = concat!(
@@ -72,6 +74,39 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
     }
 }
 
+/// A client for an endpoint the operator configured (a local SearXNG). It must reach loopback, so
+/// it skips the public-only resolver that guards model-chosen URLs.
+fn trusted_client_builder() -> reqwest::ClientBuilder {
+    let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+        .iter()
+        .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok());
+    reqwest::Client::builder()
+        .tls_certs_only(certs)
+        .redirect(reqwest::redirect::Policy::limited(5))
+}
+
+/// `web_fetch`'s redirect policy: the SSRF checks of [`safe_redirect_policy`], and it stops at a
+/// hop to another site. Permission rules match on the URL the model asked for, so silently
+/// following a redirect to a different host would let it read a host nobody approved. The tool
+/// reports the target instead and the model fetches it as a fresh, gated call.
+fn fetch_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let leaves_site = attempt
+            .previous()
+            .first()
+            .is_some_and(|origin| !page::same_site(origin, attempt.url()));
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else if is_safe_url(attempt.url().as_str()).is_err() {
+            attempt.error("refusing redirect to private/local URL")
+        } else if leaves_site {
+            attempt.stop()
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
 fn safe_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 10 {
@@ -97,8 +132,11 @@ impl Tool for WebFetchTool {
         "web_fetch"
     }
     fn description(&self) -> &str {
-        "Fetch a web page over HTTP(S) and return its readable text content. \
-         Use for reading documentation, articles, or any public URL."
+        "Fetch a public http(s) URL and return its main content as Markdown (headings, links, \
+         code blocks kept; navigation and page chrome dropped). Plain-text, JSON and source files \
+         are returned verbatim. Long pages are paged: the reply ends with the offset to pass to \
+         read on. Pages are cached for 15 minutes, so paging does not refetch. A redirect to a \
+         different host is reported, not followed; fetch the reported URL to continue."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Network
@@ -108,7 +146,8 @@ impl Tool for WebFetchTool {
             "type": "object",
             "properties": {
                 "url": { "type": "string", "description": "The http(s) URL to fetch." },
-                "max_chars": { "type": "integer", "description": "Cap on returned characters (default 10000)." }
+                "max_chars": { "type": "integer", "description": "Characters to return (default 10000, max 100000)." },
+                "offset": { "type": "integer", "description": "Character offset to start from, for reading past the first window (default 0)." }
             },
             "required": ["url"]
         })
@@ -118,11 +157,20 @@ impl Tool for WebFetchTool {
         let max_chars = args
             .get("max_chars")
             .and_then(Value::as_u64)
-            .map(|n| n as usize)
+            .map(|n| (n as usize).clamp(1, MAX_MAX_CHARS))
             .unwrap_or(DEFAULT_MAX_CHARS);
+        let offset = args
+            .get("offset")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .unwrap_or(0);
         is_safe_url(url)?;
+        if let Some(text) = page::cached(url) {
+            return Ok(page::window(&text, offset, max_chars));
+        }
 
         let client = bundled_client_builder()
+            .redirect(fetch_redirect_policy())
             .user_agent(USER_AGENT)
             .timeout(FETCH_TIMEOUT)
             .build()
@@ -133,6 +181,19 @@ impl Tool for WebFetchTool {
             .await
             .map_err(|e| ToolError::Failed(format!("fetching {url}: {e}")))?;
         let status = resp.status();
+        if status.is_redirection() {
+            let target = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|loc| resp.url().join(loc).ok());
+            if let Some(target) = target {
+                return Ok(format!(
+                    "{url} redirects to a different host: {target}\nCall web_fetch with that URL \
+                     to read it."
+                ));
+            }
+        }
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -156,8 +217,9 @@ impl Tool for WebFetchTool {
         }
 
         let body = decode_body(&content_type, &bytes);
-        let text = html_to_text(&body);
-        Ok(truncate_chars(&text, max_chars))
+        let text = page::render_body(url, &content_type, &body);
+        page::remember(url, &text);
+        Ok(page::window(&text, offset, max_chars))
     }
 }
 
@@ -460,14 +522,6 @@ fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let truncated: String = s.chars().take(max).collect();
-    format!("{truncated}\n\n[truncated at {max} chars]")
-}
-
 fn format_results(results: &[SearchResult]) -> String {
     if results.is_empty() {
         return "No results found.".to_string();
@@ -534,8 +588,10 @@ impl Tool for WebSearchTool {
         "web_search"
     }
     fn description(&self) -> &str {
-        "Search the web and return ranked results (title, URL, snippet). \
-         Use to find current information, documentation, or sources to then fetch."
+        "Search the web and return ranked results (title, URL, snippet). Use for current \
+         information, docs, errors and versions; read promising results with web_fetch. Put the \
+         current year in queries about recent releases or events. Cite the URLs you rely on. \
+         `allowed_domains` limits results to those sites; `blocked_domains` removes sites."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Network
@@ -545,7 +601,9 @@ impl Tool for WebSearchTool {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "The search query." },
-                "count": { "type": "integer", "description": "How many results (default 5, max 10)." }
+                "count": { "type": "integer", "description": "How many results (default 5, max 10)." },
+                "allowed_domains": { "type": "array", "items": { "type": "string" }, "description": "Only return results from these domains (subdomains included), e.g. [\"docs.rs\"]." },
+                "blocked_domains": { "type": "array", "items": { "type": "string" }, "description": "Never return results from these domains." }
             },
             "required": ["query"]
         })
@@ -562,9 +620,57 @@ impl Tool for WebSearchTool {
             .and_then(Value::as_u64)
             .map(|n| (n as u32).clamp(1, MAX_SEARCH_COUNT))
             .unwrap_or(DEFAULT_SEARCH_COUNT);
-        let results = self.resolve_backend().search(query, count).await?;
+        let allowed = domain_list(args, "allowed_domains");
+        let blocked = domain_list(args, "blocked_domains");
+        let scoped = scoped_query(query, &allowed);
+        let ask = if allowed.is_empty() && blocked.is_empty() {
+            count
+        } else {
+            MAX_SEARCH_COUNT * 2
+        };
+        let mut results = self.resolve_backend().search(&scoped, ask).await?;
+        results.retain(|r| domain_allowed(&r.url, &allowed, &blocked));
+        results.truncate(count as usize);
         Ok(format_results(&results))
     }
+}
+
+fn domain_list(args: &Value, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|d| d.trim().trim_start_matches("www.").to_ascii_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Add `site:` operators so the engines search inside the allowed domains rather than us
+/// filtering a generic top ten down to nothing.
+fn scoped_query(query: &str, allowed: &[String]) -> String {
+    match allowed {
+        [] => query.to_string(),
+        [one] => format!("{query} site:{one}"),
+        many => {
+            let sites: Vec<String> = many.iter().map(|d| format!("site:{d}")).collect();
+            format!("{query} ({})", sites.join(" OR "))
+        }
+    }
+}
+
+fn domain_allowed(url: &str, allowed: &[String], blocked: &[String]) -> bool {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+    else {
+        return allowed.is_empty();
+    };
+    let matches = |d: &String| host == *d || host.ends_with(&format!(".{d}"));
+    (allowed.is_empty() || allowed.iter().any(matches)) && !blocked.iter().any(matches)
 }
 
 #[cfg(test)]
@@ -691,12 +797,26 @@ mod tests {
     }
 
     #[test]
-    fn truncate_caps_long_text() {
-        let s = "x".repeat(100);
-        let out = truncate_chars(&s, 10);
-        assert!(out.starts_with(&"x".repeat(10)));
-        assert!(out.contains("truncated"));
-        assert_eq!(truncate_chars("short", 10), "short");
+    fn domain_filters_scope_the_query_and_the_results() {
+        let allowed = vec!["docs.rs".to_string()];
+        let blocked = vec!["pinterest.com".to_string()];
+        assert_eq!(
+            scoped_query("tokio select", &allowed),
+            "tokio select site:docs.rs"
+        );
+        assert_eq!(
+            scoped_query("q", &["a.com".into(), "b.org".into()]),
+            "q (site:a.com OR site:b.org)"
+        );
+        assert!(domain_allowed("https://docs.rs/tokio", &allowed, &[]));
+        assert!(domain_allowed("https://sub.docs.rs/x", &allowed, &[]));
+        assert!(!domain_allowed("https://notdocs.rs/x", &allowed, &[]));
+        assert!(!domain_allowed(
+            "https://www.pinterest.com/p",
+            &[],
+            &blocked
+        ));
+        assert!(domain_allowed("https://example.com/", &[], &blocked));
     }
 
     #[test]
