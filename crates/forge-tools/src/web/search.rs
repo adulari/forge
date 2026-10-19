@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{
-    bundled_client_builder, decode_entities, html_to_text, read_body_capped, FETCH_TIMEOUT,
-    MAX_BODY_BYTES, USER_AGENT,
+    bundled_client_builder, decode_entities, html_to_text, read_body_capped,
+    trusted_client_builder, FETCH_TIMEOUT, MAX_BODY_BYTES, USER_AGENT,
 };
 use crate::ToolError;
 // ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ impl SearchBackend for FirstThatAnswers {
         Err(ToolError::Failed(format!(
             "every search engine failed or was throttled ({}). Keyless engines rate-limit per IP \
              and usually recover within minutes. For unlimited, high-quality search, run a local \
-             SearXNG — `docker run -d --name forge-searxng -p 8888:8080 searxng/searxng` with \
+             SearXNG — `docker run -d --name forge-searxng -p 127.0.0.1:8888:8080 searxng/searxng` with \
              `json` in its `search.formats` — and Forge picks it up automatically on {}.",
             failures.join("; "),
             DEFAULT_SEARXNG_URL
@@ -315,7 +315,9 @@ impl SearxNg {
 #[async_trait]
 impl SearchBackend for SearxNg {
     async fn search(&self, query: &str, count: u32) -> Result<Vec<SearchResult>, ToolError> {
-        let client = bundled_client_builder()
+        // The operator's own instance, usually on localhost: the public-only resolver that guards
+        // model-chosen URLs would refuse it, which silently sent every search to DuckDuckGo.
+        let client = trusted_client_builder()
             .user_agent(USER_AGENT)
             .timeout(FETCH_TIMEOUT)
             .build()
@@ -715,6 +717,32 @@ mod tests {
     }
 
     /// SearXNG's JSON is the shape the whole free-search path depends on.
+    #[tokio::test]
+    async fn a_local_searxng_on_loopback_is_reachable() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0; 2048];
+            let _ = stream.read(&mut buf);
+            let body = r#"{"results":[{"title":"select in tokio","url":"https://docs.rs/tokio","content":"macro"}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let results = SearxNg::new(format!("http://localhost:{port}"))
+            .search("tokio select", 5)
+            .await
+            .expect("loopback SearXNG must not be refused by the public-only resolver");
+        server.join().unwrap();
+        assert_eq!(results[0].url, "https://docs.rs/tokio");
+    }
+
     #[test]
     fn searxng_json_maps_to_results() {
         let json: Value = serde_json::json!({

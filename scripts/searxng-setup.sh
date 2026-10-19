@@ -20,7 +20,7 @@ if [ ! -f "$CONF/settings.yml" ]; then
 use_default_settings: true
 server:
   # Local-only instance: no rate limiter to fight, and not a public endpoint.
-  secret_key: "forge-local-searxng"
+  secret_key: "$(head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n")"
   limiter: false
   public_instance: false
 search:
@@ -33,7 +33,7 @@ fi
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" --restart unless-stopped \
-  -p "$PORT:8080" -v "$CONF:/etc/searxng:rw" searxng/searxng:latest >/dev/null
+  -p "127.0.0.1:$PORT:8080" -v "$CONF:/etc/searxng:rw" searxng/searxng:latest >/dev/null
 echo "[searxng] container $NAME starting on :$PORT"
 
 for _ in $(seq 1 30); do

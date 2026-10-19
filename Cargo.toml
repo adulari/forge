@@ -13,6 +13,7 @@ repository = "https://github.com/Adulari/forge"
 description = "Fast, model-agnostic AI coding harness and CLI in Rust."
 
 [workspace.dependencies]
+htmd = "0.5"
 # Internal crates. version MUST track workspace.package.version above so `cargo publish`
 # resolves each path+version dep against the just-published sibling (a stale version here makes
 # `cargo publish -p forge-cli` fail to select its deps). See docs/RELEASING-crates.md.

@@ -6,7 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`web_fetch` returns Markdown and can page through long pages.** Pages are rendered from their `<main>`/`<article>` region with headings, links (made absolute) and code blocks kept, and navigation, scripts and page chrome dropped; before, every page was flattened to one line, and the 10k-character window was often spent on the menu. Plain-text, JSON and source files come back verbatim instead of having `<T>` generics stripped as tags. A new `offset` argument reads past the window, fetched pages are cached for 15 minutes so paging does not refetch, and `max_chars` goes up to 100k (`crates/forge-tools/src/web/page.rs`).
+- **`web_search` takes `allowed_domains` and `blocked_domains`.** Allowed domains are added to the query as `site:` operators and both lists filter the results (`crates/forge-tools/src/web.rs`).
+
 ### Fixed
+- **Web search uses the local SearXNG again.** The resolver that stops `web_fetch` from reaching private addresses also refused `localhost`, so a running SearXNG on `localhost:8888` (or `FORGE_SEARXNG_URL`) was silently skipped and every search fell through to DuckDuckGo, which throttles after a query or two, and then to keyless Bing. SearXNG now uses its own client (`crates/forge-tools/src/web/search.rs`).
+- **`web_fetch` no longer follows a redirect to a different site.** Permission rules match the URL the model asked for, so following `golang.org` to `go.dev` read a host nobody approved. The redirect target is now reported and fetching it is a separate, gated call.
+- **`scripts/searxng-setup.sh` binds SearXNG to 127.0.0.1 and writes a random `secret_key`.** It published port 8888 on every interface, which exposes an open search proxy on a server.
 - **The Forge app no longer logs you out when one request is rejected.** Any 401 on an authenticated Anywhere request sent the app straight to "Reconnect with GitHub", which then needed a fresh device approval. A rejected access token (for example a phone clock running behind the service) is now renewed first, and the app only asks you to sign in again when the renewal itself is refused or the renewed token is rejected too (`mobile/src/lib/AnywhereProvider.tsx`).
 
 ## [2.21.0] - 2026-10-18
