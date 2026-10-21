@@ -322,14 +322,16 @@ enum ApnsBackend {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ApnsSendResult {
     status: u16,
     invalid_token: bool,
+    /// Apple's `reason` for a non-2xx answer (e.g. `BadTopic`), passed through by the relay.
+    reason: Option<String>,
 }
 
 impl ApnsSendResult {
-    fn is_success(self) -> bool {
+    fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
     }
 }
@@ -464,11 +466,15 @@ impl ApnsNotifier {
                     );
                 }
                 Ok(result) if !result.is_success() => {
-                    tracing::warn!(status = result.status, "apns alert delivery was rejected");
+                    tracing::warn!(
+                        status = result.status,
+                        reason = result.reason.as_deref().unwrap_or("-"),
+                        "apns alert delivery was rejected"
+                    );
                 }
                 Ok(_) => {}
                 // Device tokens are bearer-like routing secrets; never retain them in logs.
-                Err(e) => tracing::debug!("apns alert delivery failed: {e}"),
+                Err(e) => tracing::warn!("apns alert delivery failed: {e}"),
             }
         }
     }
@@ -541,11 +547,12 @@ impl ApnsNotifier {
             Ok(result) if !result.is_success() => {
                 tracing::warn!(
                     status = result.status,
+                    reason = result.reason.as_deref().unwrap_or("-"),
                     "apns Live Activity delivery was rejected"
                 );
             }
             Ok(_) => {}
-            Err(e) => tracing::debug!("apns Live Activity delivery failed: {e}"),
+            Err(e) => tracing::warn!("apns Live Activity delivery failed: {e}"),
         }
     }
 
@@ -626,28 +633,34 @@ impl ApnsNotifier {
             .await
             .map_err(reqwest::Error::without_url)?;
         let status = resp.status().as_u16();
-        let invalid_token = if status == 410 {
-            true
-        } else if status == 400 {
+        let reason = if (200..300).contains(&status) {
+            None
+        } else {
             resp.json::<serde_json::Value>()
                 .await
                 .ok()
-                .and_then(|body| {
-                    body.get("reason")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .is_some_and(|reason| {
-                    matches!(reason.as_str(), "BadDeviceToken" | "DeviceTokenNotForTopic")
-                })
-        } else {
-            false
+                .and_then(|body| apns_reason(&body))
         };
+        let invalid_token = status == 410
+            || (status == 400
+                && matches!(
+                    reason.as_deref(),
+                    Some("BadDeviceToken" | "DeviceTokenNotForTopic")
+                ));
         Ok(ApnsSendResult {
             status,
             invalid_token,
+            reason,
         })
     }
+}
+
+/// Apple's reasons are short CamelCase identifiers. Anything else in that field (a relay's own
+/// error text, which could echo request data) is dropped rather than logged.
+fn apns_reason(body: &serde_json::Value) -> Option<String> {
+    let reason = body.get("reason")?.as_str()?;
+    (!reason.is_empty() && reason.len() <= 64 && reason.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then(|| reason.to_owned())
 }
 
 #[cfg(test)]
@@ -1260,6 +1273,39 @@ mod tests {
             1,
             "a configuration/payload rejection must not destroy a valid device token"
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_send_carries_apples_reason_for_the_log() {
+        let (base_url, _rx) = mock_http_server_with_body(400, r#"{"reason":"BadTopic"}"#).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let notifier = ApnsNotifier::new_relay(store, base_url, None).unwrap();
+
+        let result = notifier
+            .send_one(
+                &"e".repeat(64),
+                "production",
+                "alert",
+                &serde_json::json!({}),
+                APNS_BUNDLE_ID,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.reason.as_deref(), Some("BadTopic"));
+        assert!(!result.invalid_token);
+    }
+
+    #[test]
+    fn apns_reason_drops_anything_but_a_short_identifier() {
+        let reason = |v: serde_json::Value| apns_reason(&v);
+        assert_eq!(
+            reason(serde_json::json!({"reason": "TooManyRequests"})).as_deref(),
+            Some("TooManyRequests")
+        );
+        assert_eq!(reason(serde_json::json!({"reason": "token abc/def"})), None);
+        assert_eq!(reason(serde_json::json!({"reason": "x".repeat(65)})), None);
+        assert_eq!(reason(serde_json::json!({"error": "nope"})), None);
     }
 
     #[tokio::test]

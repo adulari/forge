@@ -21,15 +21,16 @@ async function canNotify(): Promise<boolean> {
   return (await Notifications.requestPermissionsAsync()).granted;
 }
 
-export async function presentLocal(notice: LocalNotice): Promise<void> {
-  if (!(await canNotify())) return;
+export async function presentLocal(notice: LocalNotice): Promise<boolean> {
+  if (!(await canNotify())) return false;
   await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
     name: "Forge sessions",
     importance: Notifications.AndroidImportance.DEFAULT,
   });
   await scheduleNotice(notice);
+  return true;
 }
 
-export async function dismissGenericPushes(): Promise<void> {
+export async function dismissGenericPushes(_replaced: number): Promise<void> {
   // No generic push exists on Android.
 }

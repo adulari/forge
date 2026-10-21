@@ -25,11 +25,12 @@ export interface NotificationObserver {
   onNoticeTap: (data: NoticeTapData) => void;
 }
 
-export async function presentLocal(notice: LocalNotice): Promise<void> {
+export async function presentLocal(notice: LocalNotice): Promise<boolean> {
   await notify(notice.title, notice.body);
+  return true;
 }
 
-export async function dismissGenericPushes(): Promise<void> {
+export async function dismissGenericPushes(_replaced: number): Promise<void> {
   // No notification centre API outside iOS.
 }
 

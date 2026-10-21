@@ -184,14 +184,29 @@ export function bannerCopy(fresh: readonly Notice[]): BannerCopy {
   return { title: `${fresh.length} new notices`, body: `${newest.title}: ${newest.message}` };
 }
 
+export const GENERIC_PUSH_BODY = "Open Forge to view an update.";
+
 /** What an OS surface may say. The generic copy mirrors the hosted push alert, so enabling the
  * app lock never leaves a notice's text on the lock screen. */
 export function osCopy(notice: Notice, appLocked: boolean): BannerCopy {
-  if (appLocked) return { title: "Forge", body: "Open Forge to view an update." };
+  if (appLocked) return { title: "Forge", body: GENERIC_PUSH_BODY };
   return { title: notice.title, body: notice.message };
 }
 
-export const GENERIC_PUSH_BODY = "Open Forge to view an update.";
+export interface PresentedAlert {
+  id: string;
+  body: string | null;
+  /** Raised by this app (a local notice), not drawn by iOS from a hosted push. */
+  own: boolean;
+}
+
+/** Hosted generic alerts to clear. Only once `replaced` real-text OS notifications were actually
+ * raised: an alert cleared without a replacement is an update the user never gets to see. Our own
+ * lock-screen copy shares the generic body and is never touched. */
+export function genericAlertsToDismiss(presented: readonly PresentedAlert[], replaced: number): string[] {
+  if (replaced <= 0) return [];
+  return presented.filter((a) => !a.own && a.body === GENERIC_PUSH_BODY).map((a) => a.id);
+}
 
 export interface PersistedState {
   [serverId: string]: PersistedMarks;

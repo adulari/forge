@@ -54,18 +54,22 @@ export function NoticesWatcher() {
     openRef.current = open;
   });
 
-  const announce = useCallback(async (serverId: string, fresh: Notice[]) => {
-    if (fresh.length === 0) return;
+  /** Resolves to how many real-text OS notifications it raised. */
+  const announce = useCallback(async (serverId: string, fresh: Notice[]): Promise<number> => {
+    if (fresh.length === 0) return 0;
     showBanner({ serverId, notices: fresh });
-    if (inBackground()) {
-      const locked = await appLockOn();
-      for (const notice of fresh.slice(0, MAX_OS_NOTICES)) {
-        const copy = osCopy(notice, locked);
-        void presentLocal({ ...copy, serverId, sessionId: sessionIdOf(notice), seq: notice.seq, at: notice.at }).catch(() => undefined);
-      }
-    } else {
+    if (!inBackground()) {
       haptics.select();
+      return 0;
     }
+    const locked = await appLockOn();
+    const raised = await Promise.all(
+      fresh.slice(0, MAX_OS_NOTICES).map((notice) =>
+        presentLocal({ ...osCopy(notice, locked), serverId, sessionId: sessionIdOf(notice), seq: notice.seq, at: notice.at })
+          .catch(() => false),
+      ),
+    );
+    return locked ? 0 : raised.filter(Boolean).length;
   }, []);
 
   const syncServers = useCallback(
@@ -74,10 +78,10 @@ export function NoticesWatcher() {
         (a, b) => Number(b.id === activeRef.current) - Number(a.id === activeRef.current),
       );
       const targets = (only ? ordered.filter((s) => s.id === only) : ordered).slice(0, MAX_HOSTS);
-      await Promise.all(
+      const raised = await Promise.all(
         targets.map(async (server) => announce(server.id, await syncNotices({ id: server.id, baseUrl: server.baseUrl }))),
       );
-      void dismissGenericPushes().catch(() => undefined);
+      void dismissGenericPushes(raised.reduce((sum, n) => sum + n, 0)).catch(() => undefined);
     },
     [announce],
   );
