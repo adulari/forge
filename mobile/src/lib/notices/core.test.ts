@@ -6,6 +6,8 @@ import {
   buildNoticeRows,
   bannerCopy,
   emptyHost,
+  genericAlertsToDismiss,
+  GENERIC_PUSH_BODY,
   isUnseen,
   markSeen,
   mergeNotices,
@@ -173,6 +175,23 @@ describe("presentation", () => {
     expect(rows.map((r) => (r.kind === "header" ? r.label : `${r.serverId}${r.notice.seq}${r.unseen ? "*" : ""}`))).toEqual([
       "Laptop", "a1", "Desktop", "b2*", "b1*",
     ]);
+  });
+});
+
+describe("genericAlertsToDismiss", () => {
+  const presented = [
+    { id: "push", body: GENERIC_PUSH_BODY, own: false },
+    { id: "locked-local", body: GENERIC_PUSH_BODY, own: true },
+    { id: "real", body: "m1", own: true },
+    { id: "untitled", body: null, own: false },
+  ];
+
+  it("keeps generic alerts when no real-text notification replaced them", () => {
+    expect(genericAlertsToDismiss(presented, 0)).toEqual([]);
+  });
+
+  it("clears only hosted generic alerts once a replacement was raised", () => {
+    expect(genericAlertsToDismiss(presented, 1)).toEqual(["push"]);
   });
 });
 

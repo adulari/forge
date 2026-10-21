@@ -19,6 +19,10 @@ export async function scheduleNotice(notice: LocalNotice): Promise<void> {
   });
 }
 
+export function isOwnNoticeData(data: Record<string, unknown> | undefined): boolean {
+  return data?.[MARKER] === true;
+}
+
 function tapData(data: Record<string, unknown> | undefined): NoticeTapData | null {
   if (!data || data[MARKER] !== true || typeof data.serverId !== "string") return null;
   return {
