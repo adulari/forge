@@ -60,36 +60,12 @@ instructions.\n\
 - Platform: {platform}{git_ctx}"
     );
     let mut session = build_session(false, mode, false, None, None).await?;
-    let sid = session.session_id().to_string();
-    let hooks = session.hooks().to_vec();
-    let workspace = session.workspace_root().to_path_buf();
-    let context = forge_core::hooks::run_session_hooks_in(
-        &hooks,
-        forge_config::HookEvent::SessionStart,
-        &sid,
-        Some(&workspace),
-    )
-    .await;
-    for c in &context {
-        session.inject_hook_context(c);
-    }
+    session.fire_session_start(None).await;
     session.name_from_prompt(&query);
-    let hook_runner = session.llm_hook_runner().await;
-    let query = match forge_core::hooks_llm::with_runner(
-        hook_runner,
-        forge_core::hooks::run_prompt_hooks_for(&hooks, &query, Some(&workspace), &sid),
-    )
-    .await
-    {
+    let query = match session.run_prompt_submit_hooks(&query).await {
         Ok(query) => query,
         Err(reason) => {
-            forge_core::hooks::run_session_hooks_in(
-                &hooks,
-                forge_config::HookEvent::SessionEnd,
-                &sid,
-                Some(&workspace),
-            )
-            .await;
+            session.fire_session_end("other").await;
             anyhow::bail!("prompt blocked by hook: {reason}");
         }
     };
@@ -97,13 +73,7 @@ instructions.\n\
         .run_turn_with(&query, &[guidance], None)
         .await
         .context("nl query");
-    forge_core::hooks::run_session_hooks_in(
-        &hooks,
-        forge_config::HookEvent::SessionEnd,
-        &sid,
-        Some(&workspace),
-    )
-    .await;
+    session.fire_session_end("other").await;
     result?;
     Ok(())
 }

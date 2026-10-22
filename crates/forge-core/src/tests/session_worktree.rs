@@ -160,7 +160,7 @@ async fn a_main_checkout_session_works_in_its_own_worktree_and_comes_back() {
     let msg = session
         .store
         .add_message(session.id(), 999, Role::Assistant, "", None);
-    let out = session.worktree_tool(&msg.unwrap(), &call).unwrap();
+    let out = session.worktree_tool(&msg.unwrap(), &call).await.unwrap();
     assert!(out.contains("deleted branch feat/x"), "{out}");
     assert_eq!(session.workspace_root(), main);
     assert_eq!(session.worktree_home, None);

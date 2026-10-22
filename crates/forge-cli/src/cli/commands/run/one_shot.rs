@@ -101,6 +101,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     let print = print
         || quiet
         || (goal_spec.is_none() && !tui && !std::io::IsTerminal::is_terminal(&std::io::stdout()));
+    let raw_prompt = prompt.clone();
     let (prompt, command_guidance, tier) = if goal_spec.is_some() || prompt.trim().is_empty() {
         (prompt.trim().to_string(), Vec::new(), None)
     } else {
@@ -109,6 +110,8 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     // A skill's methodology, grant and fork live in this process: handed to a daemon session they
     // would be dropped and only the typed argument would run.
     let carries_skill = !command_guidance.is_empty() || super::skill_invoke::grant_pending();
+    let expanded_from =
+        super::one_shot_hooks::expanded_from(&raw_prompt, &prompt, &command_guidance);
     let mut guidance = system;
     guidance.extend(command_guidance);
     let at_images = if goal_spec.is_none() {
@@ -163,6 +166,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         guidance: guidance.clone(),
         tier,
         goal: goal_spec,
+        expanded_from: expanded_from.clone(),
     });
 
     // Machine formats: a JSON result (`json`) or NDJSON events (`stream-json`) on stdout — no
@@ -200,12 +204,15 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         }
         session.attach_images(at_images);
         mark_one_shot(&mut session, true);
+        session.fire_session_start(None).await;
         let before = session.session_usage_detail();
         // A resumed session's restored totals arrive before routing; the presenter keeps them as
         // a baseline so `usage` reports this invocation, as `claude -p` does.
         session.emit_restored_totals();
         let result = drive(&mut session, &setup, first, stream_input, &guidance, true).await;
-        return finish_run(&session, &setup, result, write_usage(&session, &before));
+        let written = write_usage(&session, &before);
+        session.fire_session_end("other").await;
+        return finish_run(&session, &setup, result, written);
     }
 
     if tui && first.as_ref().is_some_and(|t| t.goal.is_some()) {
@@ -231,16 +238,28 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     }
     session.attach_images(at_images);
     mark_one_shot(&mut session, !tui);
+    session.fire_session_start(None).await;
     let before = session.session_usage_detail();
 
     // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.
     if tui {
         setup.arm_budget(&mut session);
-        let result = session
-            .run_turn_with(&prompt, &guidance, tier)
-            .await
-            .context("running agent turn");
+        let prepared = super::one_shot_hooks::prepare_turn(
+            &mut session,
+            expanded_from.as_deref(),
+            &prompt,
+            &guidance,
+        )
+        .await;
+        let result = match prepared {
+            Ok((prompt, guidance)) => session
+                .run_turn_with(&prompt, &guidance, tier)
+                .await
+                .context("running agent turn"),
+            Err(e) => Err(e),
+        };
         let written = write_usage(&session, &before);
+        session.fire_session_end("other").await;
         setup.finish(&session);
         result?;
         written?;
@@ -269,7 +288,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         eprint!("\r\x1b[K"); // clear the heartbeat line
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
-    finish_run(&session, &setup, result, write_usage(&session, &before))
+    let written = write_usage(&session, &before);
+    session.fire_session_end("other").await;
+    finish_run(&session, &setup, result, written)
 }
 
 /// One prompt to run as a turn (or, with `goal`, as a `/goal` loop).
@@ -278,6 +299,8 @@ struct OneTurn {
     guidance: Vec<String>,
     tier: Option<forge_types::TaskTier>,
     goal: Option<GoalRunSpec>,
+    /// The `/command` line the prompt expanded from (`UserPromptExpansion`).
+    expanded_from: Option<String>,
 }
 
 /// Run the first prompt, then (stream-json input) every user message on stdin. `Ok(true)` means
@@ -325,6 +348,7 @@ async fn drive(
         };
         let turn = match expand_one_shot_slash(&text) {
             Ok((prompt, extra, tier)) => OneTurn {
+                expanded_from: super::one_shot_hooks::expanded_from(&text, &prompt, &extra),
                 prompt,
                 guidance: guidance.iter().cloned().chain(extra).collect(),
                 tier,
@@ -358,7 +382,23 @@ async fn drive_turn(
         let end = run_goal_headless(session, spec, &turn.guidance, &cwd, interrupt_signal()).await;
         return end.and_then(GoalRunEnd::into_result).map(|()| false);
     }
-    let run = session.run_turn_with(&turn.prompt, &turn.guidance, turn.tier);
+    let prepared = super::one_shot_hooks::prepare_turn(
+        session,
+        turn.expanded_from.as_deref(),
+        &turn.prompt,
+        &turn.guidance,
+    )
+    .await;
+    let (prompt, guidance) = match prepared {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            if machine {
+                println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+            }
+            return Err(e);
+        }
+    };
+    let run = session.run_turn_with(&prompt, &guidance, turn.tier);
     tokio::pin!(run);
     tokio::select! {
         r = &mut run => match r.context("running agent turn") {

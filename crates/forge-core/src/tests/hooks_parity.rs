@@ -7,6 +7,11 @@ fn cc_hook(event: forge_config::HookEvent, command: &str) -> forge_config::HookC
     forge_config::HookConfig {
         event,
         kind: Default::default(),
+        if_rule: None,
+        url: None,
+        headers: Default::default(),
+        allowed_env_vars: Vec::new(),
+        run_async: false,
         matcher: None,
         command: command.into(),
         prompt: None,

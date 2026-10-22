@@ -278,6 +278,11 @@ async fn hook_context_from_an_inner_call_is_visible_to_the_script_and_delivered_
         hooks: vec![forge_config::HookConfig {
             event: forge_config::HookEvent::PostToolUse,
             kind: Default::default(),
+            if_rule: None,
+            url: None,
+            headers: Default::default(),
+            allowed_env_vars: Vec::new(),
+            run_async: false,
             matcher: Some("write_file".into()),
             command: r#"echo '{"action":"inject","context":"HOOK-CONTEXT-7"}'"#.into(),
             prompt: None,
@@ -317,6 +322,11 @@ async fn a_hint_the_script_returned_is_not_delivered_a_second_time() {
         hooks: vec![forge_config::HookConfig {
             event: forge_config::HookEvent::PostToolUse,
             kind: Default::default(),
+            if_rule: None,
+            url: None,
+            headers: Default::default(),
+            allowed_env_vars: Vec::new(),
+            run_async: false,
             matcher: Some("write_file".into()),
             command: r#"echo '{"action":"inject","context":"HOOK-CONTEXT-8"}'"#.into(),
             prompt: None,

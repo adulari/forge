@@ -431,25 +431,7 @@ async fn drive_session(
         })
         .collect();
     let trust_project = session.lock().await.commands_trust_project();
-    {
-        let (hooks, workspace) = {
-            let s = session.lock().await;
-            (s.hooks().to_vec(), s.workspace_root().to_path_buf())
-        };
-        let context = forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionStart,
-            &session_id,
-            Some(&workspace),
-        )
-        .await;
-        if !context.is_empty() {
-            let mut s = session.lock().await;
-            for c in &context {
-                s.inject_hook_context(c);
-            }
-        }
-    }
+    forge_core::hooks_session::fire_session_start_shared(&session, None).await;
     // Resumed session: rebuild the transcript ring so the first snapshot isn't empty.
     {
         let s = session.lock().await;

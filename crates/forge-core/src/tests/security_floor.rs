@@ -131,6 +131,11 @@ fn hook(
     forge_config::HookConfig {
         event,
         kind,
+        if_rule: None,
+        url: None,
+        headers: Default::default(),
+        allowed_env_vars: Vec::new(),
+        run_async: false,
         matcher: None,
         command: command.into(),
         prompt: prompt.map(str::to_string),

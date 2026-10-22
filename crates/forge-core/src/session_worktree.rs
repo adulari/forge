@@ -14,7 +14,7 @@ use super::*;
 use crate::worktree_ops::{self, Context, Request};
 
 impl Session {
-    pub(crate) fn worktree_tool(
+    pub(crate) async fn worktree_tool(
         &mut self,
         msg_id: &str,
         call: &forge_types::ToolCall,
@@ -73,15 +73,21 @@ impl Session {
             );
             roots
         });
-        let outcome = worktree_ops::execute(
-            &request,
-            &Context {
-                current: &current,
-                home: home.as_deref(),
-                daemon_owned: daemon_owned.as_deref(),
-                confine: confine.as_deref(),
-            },
-        );
+        // A `WorktreeCreate` hook replaces git, and a worktree one made is removed by hooks.
+        let hooked = self
+            .worktree_via_hooks(&request, &current, home.as_deref(), confine.as_deref())
+            .await;
+        let outcome = hooked.unwrap_or_else(|| {
+            worktree_ops::execute(
+                &request,
+                &Context {
+                    current: &current,
+                    home: home.as_deref(),
+                    daemon_owned: daemon_owned.as_deref(),
+                    confine: confine.as_deref(),
+                },
+            )
+        });
         let mut result = outcome.text;
         let mut ok = outcome.ok;
         if let Some(root) = outcome.switch_to {
@@ -96,6 +102,7 @@ impl Session {
                     result.push_str(&format!("\nbut switching the session failed: {error}"));
                 }
             }
+            self.fire_cwd_changed(&current).await;
         }
         self.store.record_tool_call(
             msg_id,

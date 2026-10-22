@@ -52,41 +52,14 @@ pub(crate) async fn chat(
             )
         );
     }
-    {
-        let sid = session.session_id().to_string();
-        let hooks = session.hooks().to_vec();
-        let workspace = session.workspace_root().to_path_buf();
-        let context = forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionStart,
-            &sid,
-            Some(&workspace),
-        )
-        .await;
-        for c in &context {
-            session.inject_hook_context(c);
-        }
-    }
+    session.fire_session_start(None).await;
     while let Some(line) = session.read_line() {
         match chat_action(&line) {
             ChatAction::Quit => break,
             ChatAction::Skip => continue,
             ChatAction::Run(task) => {
                 session.name_from_prompt(&task);
-                let hooks = session.hooks().to_vec();
-                let hook_workspace = session.workspace_root().to_path_buf();
-                let hook_runner = session.llm_hook_runner().await;
-                let task = match forge_core::hooks_llm::with_runner(
-                    hook_runner,
-                    forge_core::hooks::run_prompt_hooks_for(
-                        &hooks,
-                        &task,
-                        Some(&hook_workspace),
-                        session.id(),
-                    ),
-                )
-                .await
-                {
+                let task = match session.run_prompt_submit_hooks(&task).await {
                     Ok(t) => t,
                     Err(reason) => {
                         eprintln!(
@@ -105,17 +78,6 @@ pub(crate) async fn chat(
             }
         }
     }
-    {
-        let sid = session.session_id().to_string();
-        let hooks = session.hooks().to_vec();
-        let workspace = session.workspace_root().to_path_buf();
-        forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionEnd,
-            &sid,
-            Some(&workspace),
-        )
-        .await;
-    }
+    session.fire_session_end("prompt_input_exit").await;
     Ok(())
 }

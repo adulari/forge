@@ -32,6 +32,8 @@ globset.workspace = true
 shell-words.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+# `type: "http"` hooks (hooks_http.rs).
+reqwest.workspace = true
 similar.workspace = true
 tiktoken-rs.workspace = true
 tokio = { workspace = true }

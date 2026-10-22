@@ -1,17 +1,18 @@
-//! Shell hooks (docs/features/hooks.md). Each `[[hooks]]` entry runs via the OS shell around
-//! tool calls and session lifecycle events. A `PreToolUse` hook that exits non-zero **blocks**
-//! the tool; a `UserPromptSubmit` hook can rewrite the user's prompt (stdout replaces it on
-//! exit 0) or block the turn (non-zero). `SessionStart` output can be injected as model context
-//! (CC-compat hooks); `SessionEnd` observes only. Hooks are time-bounded so a wedged hook can't hang the agent.
-
-use std::process::Stdio;
-use std::time::Duration;
+//! Shell hooks (docs/features/hooks.md). Each `[[hooks]]` entry runs via the OS shell (or as an
+//! HTTP call or a model judgement, see `hooks_exec.rs`) around tool calls and session lifecycle
+//! events. A `PreToolUse` hook that exits non-zero **blocks** the tool; a `UserPromptSubmit` hook
+//! can rewrite the user's prompt (stdout replaces it on exit 0) or block the turn (non-zero).
+//! `SessionStart` output can be injected as model context (CC-compat hooks); `SessionEnd` observes
+//! only. The hooks one event matches run concurrently and are folded in declaration order. Hooks
+//! are time-bounded so a wedged hook can't hang the agent.
 
 use forge_config::{HookConfig, HookEvent};
 use forge_types::truncate_ellipsis as truncate;
+use serde_json::Value;
 
 use crate::hooks_cc::{cc_input_to_forge, parse_cc_output, to_cc_payload};
-use tokio::io::AsyncWriteExt;
+use crate::hooks_exec::{run_all, HookRun};
+use crate::hooks_match::{event_value_matches, if_allows, runs_off_tool};
 
 /// The combined effect of running the hooks that matched one tool call + event.
 #[derive(Debug, Default)]
@@ -29,6 +30,8 @@ pub struct HookOutcome {
     /// so a hook can feed the model extra context (lint output, "this file is generated", a policy
     /// reminder) without blocking or rewriting. Works for both `PreToolUse` and `PostToolUse`.
     pub injected_context: Vec<String>,
+    /// A `PermissionDenied` hook answered `hookSpecificOutput.retry: true`.
+    pub retry: bool,
 }
 
 /// A structured directive a hook can emit on stdout as a JSON object with an `"action"` field.
@@ -103,50 +106,144 @@ pub(crate) fn hook_applies(h: &HookConfig, tool: &str) -> bool {
     }
 }
 
-/// Run one CC-compat hook and fold its decision into `outcome`. Returns `true` if the call should
-/// be blocked + short-circuited (PreToolUse only; PostToolUse downgrades a block to a note).
-/// `updatedInput` replaces the tool's args (PreToolUse), translated from Claude-Code names.
-async fn run_cc_hook(
-    h: &HookConfig,
+/// The tool-event hooks that run for this call: event, tool-name matcher and `if` rule all agree.
+fn tool_event_hooks<'a>(
+    hooks: &'a [HookConfig],
     event: HookEvent,
     tool: &str,
     payload: &str,
-    outcome: &mut HookOutcome,
-) -> bool {
-    let cc_payload = to_cc_payload(payload, event, "");
-    match run_one(h, &cc_payload).await {
-        Ok((code, stdout, stderr)) => {
-            let out = parse_cc_output(code, &stdout, &stderr);
-            if let Some(reason) = out.block {
-                if event == HookEvent::PreToolUse {
-                    outcome.blocked = Some(reason);
-                    return true;
-                }
-                // Claude Code shows a PostToolUse block reason to the model (the tool already ran).
-                if event == HookEvent::PostToolUse {
-                    outcome.injected_context.push(reason.clone());
-                }
-                outcome.notes.push(format!("⎇ hook: {reason}"));
-            }
-            if event == HookEvent::PreToolUse {
-                if let Some(input) = out.updated_input {
-                    outcome.rewritten_args = Some(cc_input_to_forge(tool, &input));
-                }
-            }
-            outcome.injected_context.extend(out.context);
-            if let Some(text) = out.note {
-                outcome.notes.push(format!("⎇ hook: {text}"));
-            }
+) -> Vec<&'a HookConfig> {
+    let parsed: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+    let args = parsed.get("args").cloned().unwrap_or(Value::Null);
+    let cwd = parsed.get("cwd").and_then(Value::as_str);
+    hooks
+        .iter()
+        .filter(|h| h.event == event && hook_applies(h, tool))
+        .filter(|h| if_allows(h, event, tool, &args, cwd))
+        .collect()
+}
+
+/// The payload each hook reads: the Claude-Code shape for a CC-compat hook, Forge's own otherwise.
+fn jobs_for<'a>(
+    hooks: Vec<&'a HookConfig>,
+    payload: &str,
+    event: HookEvent,
+    session_id: &str,
+) -> Vec<(&'a HookConfig, String)> {
+    hooks
+        .into_iter()
+        .map(|h| {
+            let sent = if h.cc_compat {
+                to_cc_payload(payload, event, session_id)
+            } else {
+                payload.to_string()
+            };
+            (h, sent)
+        })
+        .collect()
+}
+
+/// Fold one CC-compat hook's result into `outcome`. Returns `true` if the call should be blocked
+/// (PreToolUse only; the after-call events turn a block into feedback for the model).
+/// `updatedInput` replaces the tool's args (PreToolUse), translated from Claude-Code names.
+fn fold_cc(event: HookEvent, tool: &str, run: HookRun, outcome: &mut HookOutcome) -> bool {
+    let (code, stdout, stderr) = match run {
+        Ok(result) => result,
+        Err(e) => {
+            outcome.notes.push(format!("⎇ hook error: {e}"));
+            return false;
         }
-        Err(e) => outcome.notes.push(format!("⎇ hook error: {e}")),
+    };
+    let out = parse_cc_output(code, &stdout, &stderr);
+    if let Some(reason) = out.block {
+        if event == HookEvent::PreToolUse {
+            outcome.blocked = Some(reason);
+            return true;
+        }
+        // Claude Code shows an after-call block reason to the model (the tool already ran).
+        if after_call(event) {
+            outcome.injected_context.push(reason.clone());
+        }
+        outcome.notes.push(format!("⎇ hook: {reason}"));
+    }
+    if event == HookEvent::PreToolUse {
+        if let Some(input) = out.updated_input {
+            outcome.rewritten_args = Some(cc_input_to_forge(tool, &input));
+        }
+    }
+    outcome.retry |= out.retry;
+    outcome.injected_context.extend(out.context);
+    if let Some(text) = out.note {
+        outcome.notes.push(format!("⎇ hook: {text}"));
     }
     false
 }
 
-/// Run every hook matching `event` + `tool`, in declaration order. The first `PreToolUse` hook
-/// that exits non-zero blocks and short-circuits. A hook that fails to launch is noted, not fatal.
-/// CC-compat hooks ([`HookConfig::cc_compat`]) speak the Claude-Code protocol (CC stdin payload +
-/// `decision`/exit-2 output); native hooks keep Forge's directive protocol.
+fn after_call(event: HookEvent) -> bool {
+    matches!(
+        event,
+        HookEvent::PostToolUse | HookEvent::PostToolUseFailure
+    )
+}
+
+/// Fold one native hook's result into `outcome`; `true` blocks the call (PreToolUse only).
+fn fold_native(event: HookEvent, tool: &str, run: HookRun, outcome: &mut HookOutcome) -> bool {
+    let (code, stdout, stderr) = match run {
+        Ok(result) => result,
+        Err(e) => {
+            outcome.notes.push(format!("⎇ hook error: {e}"));
+            return false;
+        }
+    };
+    let trimmed = stdout.trim();
+    if event == HookEvent::PreToolUse && code != 0 {
+        let err = stderr.trim();
+        let reason = if !err.is_empty() {
+            truncate(err, 800)
+        } else if !trimmed.is_empty() {
+            truncate(trimmed, 800)
+        } else {
+            format!("{tool} blocked by hook (exit {code})")
+        };
+        outcome.blocked = Some(reason);
+        return true;
+    }
+    // Exit 2 after the call (CC semantics): the reason is feedback for the model.
+    if after_call(event) && code == 2 && !stderr.trim().is_empty() {
+        let reason = truncate(stderr.trim(), 800);
+        outcome.notes.push(format!("⎇ hook: {reason}"));
+        outcome.injected_context.push(reason);
+    }
+    // exit 0 + non-empty stdout: interpret the structured directive protocol (rewrite / inject /
+    // block / allow), falling back to the legacy "bare object = rewrite" and to a plain note.
+    // `block` only blocks on PreToolUse (Post can't unwind a finished call).
+    if !trimmed.is_empty() {
+        match parse_hook_directive(trimmed, event) {
+            HookDirective::Rewrite(args) => outcome.rewritten_args = Some(args),
+            HookDirective::Inject(ctx) => outcome.injected_context.push(ctx),
+            HookDirective::Block(reason) => {
+                if event == HookEvent::PreToolUse {
+                    outcome.blocked = Some(truncate(&reason, 800));
+                    return true;
+                }
+                outcome
+                    .notes
+                    .push(format!("⎇ hook: {}", truncate(&reason, 800)));
+            }
+            HookDirective::Noop => {}
+            HookDirective::Note(text) => outcome
+                .notes
+                .push(format!("⎇ hook: {}", truncate(&text, 800))),
+        }
+    }
+    false
+}
+
+/// Run every hook matching a tool `event` + `tool` (and its `if` rule), concurrently, then fold
+/// the results in declaration order: the first `PreToolUse` block wins and later results are
+/// ignored. A hook that fails to launch is noted, not fatal. CC-compat hooks
+/// ([`HookConfig::cc_compat`]) speak the Claude-Code protocol (CC stdin payload + `decision` /
+/// exit-2 output); native hooks keep Forge's directive protocol.
 pub async fn run_hooks(
     hooks: &[HookConfig],
     event: HookEvent,
@@ -154,62 +251,18 @@ pub async fn run_hooks(
     payload: &str,
 ) -> HookOutcome {
     let mut outcome = HookOutcome::default();
-    let payload = payload.to_string();
-    for h in hooks
-        .iter()
-        .filter(|h| h.event == event && hook_applies(h, tool))
-    {
-        if h.cc_compat {
-            if run_cc_hook(h, event, tool, &payload, &mut outcome).await {
-                break;
-            }
-            continue;
-        }
-        match run_one(h, &payload).await {
-            Ok((code, stdout, stderr)) => {
-                let trimmed = stdout.trim();
-                if event == HookEvent::PreToolUse && code != 0 {
-                    let err = stderr.trim();
-                    let reason = if !err.is_empty() {
-                        truncate(err, 800)
-                    } else if !trimmed.is_empty() {
-                        truncate(trimmed, 800)
-                    } else {
-                        format!("{tool} blocked by hook (exit {code})")
-                    };
-                    outcome.blocked = Some(reason);
-                    break;
-                }
-                // Exit 2 after the call (CC semantics): the reason is feedback for the model.
-                if event == HookEvent::PostToolUse && code == 2 && !stderr.trim().is_empty() {
-                    let reason = truncate(stderr.trim(), 800);
-                    outcome.notes.push(format!("⎇ hook: {reason}"));
-                    outcome.injected_context.push(reason);
-                }
-                // exit 0 + non-empty stdout: interpret the structured directive protocol (rewrite /
-                // inject / block / allow), falling back to the legacy "bare object = rewrite" and to
-                // a plain note. `block` only blocks on PreToolUse (Post can't unwind a finished call).
-                if !trimmed.is_empty() {
-                    match parse_hook_directive(trimmed, event) {
-                        HookDirective::Rewrite(args) => outcome.rewritten_args = Some(args),
-                        HookDirective::Inject(ctx) => outcome.injected_context.push(ctx),
-                        HookDirective::Block(reason) => {
-                            if event == HookEvent::PreToolUse {
-                                outcome.blocked = Some(truncate(&reason, 800));
-                                break;
-                            }
-                            outcome
-                                .notes
-                                .push(format!("⎇ hook: {}", truncate(&reason, 800)));
-                        }
-                        HookDirective::Noop => {}
-                        HookDirective::Note(text) => outcome
-                            .notes
-                            .push(format!("⎇ hook: {}", truncate(&text, 800))),
-                    }
-                }
-            }
-            Err(e) => outcome.notes.push(format!("⎇ hook error: {e}")),
+    let matched = tool_event_hooks(hooks, event, tool, payload);
+    if matched.is_empty() {
+        return outcome;
+    }
+    for (h, run) in run_all(jobs_for(matched, payload, event, "")).await {
+        let blocked = if h.cc_compat {
+            fold_cc(event, tool, run, &mut outcome)
+        } else {
+            fold_native(event, tool, run, &mut outcome)
+        };
+        if blocked {
+            break;
         }
     }
     outcome
@@ -228,7 +281,8 @@ pub async fn run_prompt_hooks_in(
     run_prompt_hooks_for(hooks, prompt, cwd, "").await
 }
 
-/// [`run_prompt_hooks_in`] that also tells the hook which session the prompt belongs to.
+/// [`run_prompt_hooks_in`] that also tells the hook which session the prompt belongs to. The
+/// hooks run concurrently; their results are applied in declaration order.
 pub async fn run_prompt_hooks_for(
     hooks: &[HookConfig],
     prompt: &str,
@@ -241,51 +295,50 @@ pub async fn run_prompt_hooks_for(
         "session_id": (!session_id.is_empty()).then_some(session_id),
     })
     .to_string();
-    let mut current = prompt.to_string();
-    for h in hooks
+    let matched: Vec<&HookConfig> = hooks
         .iter()
-        .filter(|h| h.event == HookEvent::UserPromptSubmit)
-    {
+        .filter(|h| h.event == HookEvent::UserPromptSubmit && runs_off_tool(h))
+        .collect();
+    let mut current = prompt.to_string();
+    if matched.is_empty() {
+        return Ok(current);
+    }
+    let jobs = jobs_for(matched, &payload, HookEvent::UserPromptSubmit, session_id);
+    for (h, run) in run_all(jobs).await {
+        let (code, stdout, stderr) = match run {
+            Ok(result) => result,
+            Err(e) => {
+                // Launch failure is noted but doesn't block the turn.
+                eprintln!("⎇ hook error: {e}");
+                continue;
+            }
+        };
         if h.cc_compat {
             // CC UserPromptSubmit: a block decision / exit-2 blocks the turn; otherwise stdout (and
             // `additionalContext`) is APPENDED as extra context (CC semantics — it doesn't replace
             // the prompt the way a native prompt hook does).
-            let cc_payload = to_cc_payload(&payload, HookEvent::UserPromptSubmit, session_id);
-            match run_one(h, &cc_payload).await {
-                Ok((code, stdout, stderr)) => {
-                    let out = parse_cc_output(code, &stdout, &stderr);
-                    if let Some(reason) = out.block {
-                        return Err(reason);
-                    }
-                    for ctx in out.context.into_iter().chain(out.note) {
-                        current = format!("{current}\n\n{ctx}");
-                    }
-                }
-                Err(e) => eprintln!("⎇ hook error: {e}"),
+            let out = parse_cc_output(code, &stdout, &stderr);
+            if let Some(reason) = out.block {
+                return Err(reason);
+            }
+            for ctx in out.context.into_iter().chain(out.note) {
+                current = format!("{current}\n\n{ctx}");
             }
             continue;
         }
-        match run_one(h, &payload).await {
-            Ok((code, stdout, stderr)) => {
-                if code != 0 {
-                    let reason = if !stderr.trim().is_empty() {
-                        truncate(stderr.trim(), 800)
-                    } else if !stdout.trim().is_empty() {
-                        truncate(stdout.trim(), 800)
-                    } else {
-                        format!("prompt blocked by hook (exit {code})")
-                    };
-                    return Err(reason);
-                }
-                let out = stdout.trim().to_string();
-                if !out.is_empty() {
-                    current = out;
-                }
-            }
-            Err(e) => {
-                // Launch failure is noted but doesn't block the turn.
-                eprintln!("⎇ hook error: {e}");
-            }
+        if code != 0 {
+            let reason = if !stderr.trim().is_empty() {
+                truncate(stderr.trim(), 800)
+            } else if !stdout.trim().is_empty() {
+                truncate(stdout.trim(), 800)
+            } else {
+                format!("prompt blocked by hook (exit {code})")
+            };
+            return Err(reason);
+        }
+        let out = stdout.trim().to_string();
+        if !out.is_empty() {
+            current = out;
         }
     }
     Ok(current)
@@ -296,41 +349,63 @@ pub async fn run_prompt_hooks(hooks: &[HookConfig], prompt: &str) -> Result<Stri
 }
 
 /// Run session lifecycle hooks (`session_start` / `session_end`). Exit code is advisory.
-///
-/// Returns the context a `SessionStart` hook asked to put in front of the model, for the caller to
-/// inject (`Session::inject_hook_context`). Claude-Code semantics apply to `cc_compat` hooks: plain
-/// stdout and `hookSpecificOutput.additionalContext` are context, not a visible note, and the hook
-/// gets the CC payload (`hook_event_name`, `source`). Native hooks keep printing stdout to stderr.
+/// `SessionStart` reports `source: "startup"`; see [`run_session_hooks_with`] for the others.
 pub async fn run_session_hooks_in(
     hooks: &[HookConfig],
     event: HookEvent,
     session_id: &str,
     cwd: Option<&std::path::Path>,
 ) -> Vec<String> {
+    let value = if event == HookEvent::SessionStart {
+        "startup"
+    } else {
+        "other"
+    };
+    run_session_hooks_with(hooks, event, session_id, cwd, value).await
+}
+
+/// Run `session_start` / `session_end` hooks. `value` is the start's `source` (`startup`,
+/// `resume`, `clear`, `compact`) or the end's `reason` (`clear`, `resume`, `other` …); a CC-compat
+/// hook's matcher is tested against it, as in Claude Code.
+///
+/// Returns the context a `SessionStart` hook asked to put in front of the model, for the caller to
+/// inject (`Session::inject_hook_context`). Claude-Code semantics apply to `cc_compat` hooks: plain
+/// stdout and `hookSpecificOutput.additionalContext` are context, not a visible note, and the hook
+/// gets the CC payload (`hook_event_name`, `source`). Native hooks keep printing stdout to stderr.
+pub async fn run_session_hooks_with(
+    hooks: &[HookConfig],
+    event: HookEvent,
+    session_id: &str,
+    cwd: Option<&std::path::Path>,
+    value: &str,
+) -> Vec<String> {
     debug_assert!(
         matches!(event, HookEvent::SessionStart | HookEvent::SessionEnd),
         "run_session_hooks called with non-session event"
     );
-    let event_str = match event {
-        HookEvent::SessionStart => "session_start",
-        HookEvent::SessionEnd => "session_end",
+    let (event_str, key) = match event {
+        HookEvent::SessionStart => ("session_start", "source"),
+        HookEvent::SessionEnd => ("session_end", "reason"),
         _ => return Vec::new(),
     };
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "session_id": session_id,
         "event": event_str,
         "cwd": cwd.map(|cwd| cwd.display().to_string()),
-        "source": "startup",
-    })
-    .to_string();
+    });
+    payload[key] = value.into();
+    let payload = payload.to_string();
+    let matched: Vec<&HookConfig> = hooks
+        .iter()
+        .filter(|h| h.event == event && runs_off_tool(h))
+        .filter(|h| !h.cc_compat || event_value_matches(h, value))
+        .collect();
     let mut context = Vec::new();
-    for h in hooks.iter().filter(|h| h.event == event) {
-        let sent = if h.cc_compat {
-            to_cc_payload(&payload, event, session_id)
-        } else {
-            payload.clone()
-        };
-        match run_one(h, &sent).await {
+    if matched.is_empty() {
+        return context;
+    }
+    for (h, run) in run_all(jobs_for(matched, &payload, event, session_id)).await {
+        match run {
             Ok((code, stdout, stderr)) if h.cc_compat => {
                 let out = parse_cc_output(code, &stdout, &stderr);
                 if event == HookEvent::SessionStart {
@@ -363,12 +438,24 @@ pub struct LifecycleOutcome {
     pub notes: Vec<String>,
 }
 
-/// Run the Claude-Code lifecycle hooks Forge previously lacked: `Notification`, `PreCompact`,
-/// `PostCompact`, `Stop`, `SubagentStop`. `fields` are merged into the stdin payload (e.g.
-/// `{"message":…}` for a notification, `{"trigger":…}` for compaction). Native hooks receive
-/// `{session_id, event, …fields}`; CC-compat hooks receive the CC shape with `hook_event_name`.
-/// Output is collected as notes; acting on `blocked` is the caller's job (only `Stop` and
-/// `SubagentStop` do, see `stop_hook.rs`).
+/// The payload field a Claude-Code matcher filters on for a lifecycle event, if it has one.
+fn lifecycle_matcher_value(event: HookEvent, fields: &Value) -> Option<String> {
+    let key = match event {
+        HookEvent::Notification => "notification_type",
+        HookEvent::PreCompact | HookEvent::PostCompact => "trigger",
+        HookEvent::SubagentStop => "agent_type",
+        _ => return None,
+    };
+    fields.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Run the Claude-Code lifecycle hooks: `Notification`, `PreCompact`, `PostCompact`, `Stop`,
+/// `SubagentStop`. `fields` are merged into the stdin payload (e.g. `{"message":…}` for a
+/// notification, `{"trigger":…}` for compaction). Native hooks receive `{session_id, event,
+/// …fields}`; CC-compat hooks receive the CC shape with `hook_event_name`, and their matcher is
+/// tested against the event's value (`notification_type`, `trigger`). Output is collected as
+/// notes; acting on `blocked` is the caller's job (only `Stop` and `SubagentStop` do, see
+/// `stop_hook.rs`).
 pub async fn run_lifecycle_hooks(
     hooks: &[HookConfig],
     event: HookEvent,
@@ -387,14 +474,22 @@ pub async fn run_lifecycle_hooks(
     }
     let native_payload = serde_json::Value::Object(base).to_string();
     let continues = matches!(event, HookEvent::Stop | HookEvent::SubagentStop);
-
-    for h in hooks.iter().filter(|h| h.event == event) {
-        let payload = if h.cc_compat {
-            to_cc_payload(&native_payload, event, session_id)
-        } else {
-            native_payload.clone()
-        };
-        match run_one(h, &payload).await {
+    let value = lifecycle_matcher_value(event, &fields);
+    let matched: Vec<&HookConfig> = hooks
+        .iter()
+        .filter(|h| h.event == event && runs_off_tool(h))
+        .filter(|h| {
+            !h.cc_compat
+                || value
+                    .as_deref()
+                    .is_none_or(|value| event_value_matches(h, value))
+        })
+        .collect();
+    if matched.is_empty() {
+        return outcome;
+    }
+    for (_, run) in run_all(jobs_for(matched, &native_payload, event, session_id)).await {
+        match run {
             Ok((code, stdout, stderr)) => {
                 let out = parse_cc_output(code, &stdout, &stderr);
                 outcome.halt |= out.halt;
@@ -446,16 +541,13 @@ pub async fn run_permission_hooks(
     payload: &str,
 ) -> PermissionHookOutcome {
     let mut outcome = PermissionHookOutcome::default();
-    for h in hooks
-        .iter()
-        .filter(|h| h.event == HookEvent::PermissionRequest && hook_applies(h, tool))
-    {
-        let sent = if h.cc_compat {
-            to_cc_payload(payload, HookEvent::PermissionRequest, "")
-        } else {
-            payload.to_string()
-        };
-        let (code, stdout, stderr) = match run_one(h, &sent).await {
+    let event = HookEvent::PermissionRequest;
+    let matched = tool_event_hooks(hooks, event, tool, payload);
+    if matched.is_empty() {
+        return outcome;
+    }
+    for (h, run) in run_all(jobs_for(matched, payload, event, "")).await {
+        let (code, stdout, stderr) = match run {
             Ok(result) => result,
             Err(e) => {
                 outcome.notes.push(format!("⎇ hook error: {e}"));
@@ -552,109 +644,12 @@ fn permission_decision_of(
     }
 }
 
-fn hook_shell() -> (&'static str, &'static str) {
-    #[cfg(windows)]
-    return ("cmd", "/C");
-    #[cfg(not(windows))]
-    ("sh", "-c")
-}
-
 pub async fn run_session_hooks(
     hooks: &[HookConfig],
     event: HookEvent,
     session_id: &str,
 ) -> Vec<String> {
     run_session_hooks_in(hooks, event, session_id, None).await
-}
-
-/// Run one hook and report it the way a command hook would: `(exit code, stdout, stderr)`. A
-/// `prompt` / `agent` hook's `{"ok": false, "reason"}` becomes exit 2 with `reason` on stderr, so
-/// every event interprets it exactly like a blocking command hook; `ok: true` is a clean exit
-/// (and, for `PermissionRequest`, an explicit allow).
-async fn run_one(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
-    if h.kind == forge_config::HookKind::Command {
-        return run_command(h, payload).await;
-    }
-    let runner = crate::hooks_llm::current_runner()
-        .ok_or("prompt/agent hook skipped: no model is available on this surface")?;
-    let input = serde_json::from_str::<serde_json::Value>(payload)
-        .unwrap_or_else(|_| serde_json::Value::String(payload.to_string()));
-    let verdict = tokio::time::timeout(
-        Duration::from_secs(h.timeout_secs),
-        runner.evaluate(h, &input),
-    )
-    .await
-    .map_err(|_| format!("timed out after {}s", h.timeout_secs))??;
-    Ok(if verdict.ok {
-        let stdout = if h.event == HookEvent::PermissionRequest {
-            serde_json::json!({"hookSpecificOutput": {
-                "hookEventName": "PermissionRequest",
-                "decision": {"behavior": "allow"}
-            }})
-            .to_string()
-        } else {
-            String::new()
-        };
-        (0, stdout, String::new())
-    } else {
-        let reason = verdict
-            .reason
-            .unwrap_or_else(|| format!("blocked by {} hook", hook_kind_label(h)));
-        (2, String::new(), reason)
-    })
-}
-
-fn hook_kind_label(h: &HookConfig) -> &'static str {
-    match h.kind {
-        forge_config::HookKind::Command => "command",
-        forge_config::HookKind::Prompt => "prompt",
-        forge_config::HookKind::Agent => "agent",
-    }
-}
-
-async fn run_command(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
-    let (sh, sh_flag) = hook_shell();
-    let mut cmd = tokio::process::Command::new(sh);
-    cmd.arg(sh_flag).arg(&h.command);
-    if h.cc_compat {
-        // Claude-Code scripts expect to start in the project and find it in CLAUDE_PROJECT_DIR.
-        let project = serde_json::from_str::<serde_json::Value>(payload)
-            .ok()
-            .and_then(|v| v.get("cwd").and_then(|c| c.as_str()).map(String::from))
-            .filter(|dir| std::path::Path::new(dir).is_dir());
-        if let Some(dir) = project {
-            cmd.env("CLAUDE_PROJECT_DIR", &dir).current_dir(dir);
-        }
-    }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true) // a timeout drops the future → the child is killed, not orphaned
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.as_bytes()).await;
-        // Dropping `stdin` here sends EOF so a hook that reads to end returns.
-    }
-
-    let out = match tokio::time::timeout(
-        Duration::from_secs(h.timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(e.to_string()),
-        Err(_) => return Err(format!("timed out after {}s", h.timeout_secs)),
-    };
-
-    Ok((
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    ))
 }
 
 #[cfg(test)]
@@ -679,27 +674,15 @@ mod tests {
 
     fn hook(event: HookEvent, command: &str) -> HookConfig {
         HookConfig {
-            event,
-            kind: Default::default(),
-            matcher: None,
-            command: command.into(),
-            prompt: None,
-            model: None,
             timeout_secs: 10,
-            cc_compat: false,
+            ..HookConfig::new(event, command)
         }
     }
 
     fn cc_hook(event: HookEvent, command: &str) -> HookConfig {
         HookConfig {
-            event,
-            kind: Default::default(),
-            matcher: None,
-            command: command.into(),
-            prompt: None,
-            model: None,
-            timeout_secs: 10,
             cc_compat: true,
+            ..hook(event, command)
         }
     }
 

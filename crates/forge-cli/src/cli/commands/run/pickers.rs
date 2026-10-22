@@ -637,7 +637,8 @@ pub(crate) async fn picker_accept(
             let (items, compacted, view) = {
                 let mut s = session.lock().await;
                 let left_behind = s.id().to_string();
-                s.reset_resumed(&row.id)
+                s.reset_resumed_hooked(&row.id)
+                    .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 if left_behind != row.id {
                     let _ = open_store().map(|st| st.delete_session_if_empty(&left_behind));
@@ -688,76 +689,12 @@ pub(crate) async fn picker_accept(
         forge_tui::PickerKind::Models => {}
         // The copy picker resolves in the render loop (it needs the clipboard); never here.
         forge_tui::PickerKind::CopyBlocks => {}
-        // Flat model pin picker: "mesh" → clear pin, any other row → pin it.
+        // Model pin / rung pickers (bodies in `model_switch.rs`, gated by PreModelSwitch hooks).
         forge_tui::PickerKind::ModelPin => {
-            if row.id == "mesh" {
-                session.lock().await.pin_model(None);
-                app.note("⊕ model pin cleared — mesh auto-routing restored");
-            } else {
-                let model_id = forge_provider::normalize_model_id(&row.id).into_owned();
-                // Emit the pick so the status row is right immediately — see the matching comment
-                // on the `/model <full-id>` path in dispatch.rs. Selecting from the picker used to
-                // change session state and leave the statusline naming the previous model.
-                // Enter pins at the model's best-value rung; `->` opens the rung list for anyone
-                // who wants a different trade. Pinning the rung too is the point of the two-step
-                // design — a model pin that left effort unset would keep running at whatever the
-                // session ceiling happened to be.
-                let rung = {
-                    let mut s = session.lock().await;
-                    s.pin_model(Some(model_id.clone()));
-                    let ceiling = s.pinned_effort();
-                    let rung = s.catalog().and_then(|catalog| {
-                        forge_mesh::rung_cost::best_value_rung(catalog, &model_id, ceiling, false)
-                    });
-                    if let Some(level) = rung {
-                        s.set_effort(Some(level));
-                    }
-                    rung
-                };
-                if let Some(level) = rung {
-                    app.apply(forge_tui::PresenterEvent::Effort(Some(level)));
-                }
-                app.apply(forge_tui::PresenterEvent::Routing {
-                    tier: "pinned".to_string(),
-                    model: model_id.clone(),
-                    rationale: "pinned by /model".to_string(),
-                    effort: rung,
-                });
-                match rung {
-                    Some(level) => app.note(&format!(
-                        "⊕ pinned: {model_id} at {} effort (best value) — → for other rungs",
-                        forge_types::effort::wire_name(level)
-                    )),
-                    None => app.note(&format!("⊕ model pinned: {model_id} (clear with /model)")),
-                }
-            }
+            super::model_switch::accept_model_pin(session, app, row).await;
         }
         forge_tui::PickerKind::ModelRung => {
-            // Row ids are `provider::model@rung`, so the pair is pinned without carrying state
-            // between the two steps.
-            if let Some((model_id, rung)) = row.id.rsplit_once('@') {
-                let level = forge_types::EffortLevel::parse(rung);
-                let model_id = model_id.to_string();
-                {
-                    let mut s = session.lock().await;
-                    s.pin_model(Some(model_id.clone()));
-                    if let Some(level) = level {
-                        s.set_effort(Some(level));
-                    }
-                }
-                if let Some(level) = level {
-                    app.apply(forge_tui::PresenterEvent::Effort(Some(level)));
-                }
-                app.apply(forge_tui::PresenterEvent::Routing {
-                    tier: "pinned".to_string(),
-                    model: model_id.clone(),
-                    rationale: "pinned by /model".to_string(),
-                    effort: level,
-                });
-                app.note(&format!(
-                    "⊕ pinned: {model_id} at {rung} effort (clear with /model)"
-                ));
-            }
+            super::model_switch::accept_model_rung(session, app, row).await;
         }
         // /duel resolves in the render loop (it needs to merge a worktree branch + drop guards
         // that live only there), never here.

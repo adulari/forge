@@ -214,7 +214,8 @@ impl Session {
         // CC, which only has PreCompact).
         self.fire_lifecycle(
             forge_config::HookEvent::PostCompact,
-            serde_json::json!({ "before": before, "after": after }),
+            serde_json::json!({ "before": before, "after": after,
+                "trigger": if auto { "auto" } else { "manual" } }),
         )
         .await;
         self.history_epoch += 1;
@@ -228,6 +229,9 @@ impl Session {
         self.stale_tasks.note_compaction();
         self.rehydrate_after_compaction(&budget).await;
         self.settle_after_compaction(&budget);
+        // Claude Code starts the compacted conversation with `SessionStart` (`source: compact`).
+        self.fire_session_start(Some(crate::hooks_session::SessionSource::Compact))
+            .await;
         Ok((before, after))
     }
 

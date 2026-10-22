@@ -9,6 +9,7 @@ mod denial;
 mod mcp;
 mod permission_hooks;
 mod runtime_allow;
+mod tool_hooks;
 
 impl Session {
     /// Steer main-checkout paths into a linked worktree session and compute the roots this call
@@ -259,7 +260,7 @@ impl Session {
             return self.schedule_wakeup(msg_id, call);
         }
         if call.name == WORKTREE_TOOL {
-            return self.worktree_tool(msg_id, call);
+            return self.worktree_tool(msg_id, call).await;
         }
         if call.name == crate::deferred_tools::TOOL_SEARCH
             || call.name == crate::deferred_tools::TOOL_CALL
@@ -528,7 +529,8 @@ impl Session {
                     &self.config.hooks,
                     forge_config::HookEvent::Notification,
                     &self.id,
-                    serde_json::json!({ "message": format!("permission needed: {}", call.name) }),
+                    serde_json::json!({ "message": format!("permission needed: {}", call.name),
+                        "notification_type": "permission_prompt" }),
                 ),
             )
             .await;
@@ -645,25 +647,9 @@ impl Session {
                 }
                 Err(e) => (format!("error: {e}"), None, false),
             }
-        } else if self.mode == forge_types::PermissionMode::Plan
-            && permission::is_shell_tool(&call.name)
-        {
-            (permission::plan_shell_denial(), None, false)
-        } else if let Some(reason) = hook_denial {
-            denial::hook(&reason)
-        } else if let Some(note) = self.floor_denial(&call.name, &effective_args) {
-            (note, None, false)
-        } else if let Some(rule) =
-            permission::denying_rule(&call.name, &effective_args, &self.rules)
-        {
-            (permission::rule_denial(&call.name, rule), None, false)
         } else {
-            denial::result(
-                &call.name,
-                self.mode,
-                user_declined,
-                self.presenter.is_attended(),
-            )
+            self.refusal(call, &effective_args, hook_denial, user_declined)
+                .await
         };
         let result = match (&answer.note, allowed) {
             (Some(note), false) => {
@@ -727,33 +713,10 @@ impl Session {
             self.pending_hints.push(warning);
         }
 
-        // PostToolUse hooks (hooks.md): observe the completed call (e.g. re-index, notify). The
-        // tool result is already final; post hooks only surface notes, they don't change it.
-        if !self.config.hooks.is_empty() {
-            let payload =
-                serde_json::json!({ "tool": call.name, "args": effective_args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id })
-                    .to_string();
-            let runner = self.llm_hook_runner().await;
-
-            let outcome = crate::hooks_llm::with_runner(
-                runner,
-                hooks::run_hooks(
-                    &self.config.hooks,
-                    forge_config::HookEvent::PostToolUse,
-                    &call.name,
-                    &payload,
-                ),
-            )
+        // PostToolUse / PostToolUseFailure hooks (hooks.md): observe the completed call (e.g.
+        // re-index, notify). The tool result is already final; they only add notes and context.
+        self.run_post_tool_hooks(call, &effective_args, &result, allowed, ok)
             .await;
-            for n in outcome.notes {
-                self.presenter.emit(PresenterEvent::Warning(n));
-            }
-            // Queue any hook-injected context as a model-visible system hint (drained into the
-            // transcript after the tool result), so a hook can feed the model extra context.
-            for ctx in outcome.injected_context {
-                self.pending_hints.push(ctx);
-            }
-        }
 
         // Shell error interceptor (shell-error-interceptor.md): on a failed shell command,
         // auto-explain the likely cause + a fix with one cheap model call. Best-effort, never
