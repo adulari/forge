@@ -183,6 +183,17 @@ impl Store {
         self.load_messages_where(session_id, "(active = 1 OR compacted = 1)")
     }
 
+    /// The active messages at or after `from_seq`, in turn order, without the compaction summary
+    /// [`load_messages`](Self::load_messages) prepends: the part of a conversation a "summarize
+    /// from here" folds.
+    pub fn load_active_messages_from(
+        &self,
+        session_id: &str,
+        from_seq: i64,
+    ) -> Result<Vec<StoredMessage>> {
+        self.load_messages_where(session_id, &format!("active = 1 AND seq >= {from_seq}"))
+    }
+
     fn load_messages_where(&self, session_id: &str, filter: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&format!(

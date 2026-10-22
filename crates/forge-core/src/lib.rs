@@ -137,6 +137,8 @@ mod session_controls;
 mod session_history;
 mod session_lifecycle;
 mod session_restore;
+mod session_rewind;
+pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};
 mod session_usage_detail;
 mod session_virtual_tools;
 mod session_worktree;
@@ -5128,6 +5130,12 @@ mod tests {
 
     #[path = "rewind_seq_space.rs"]
     mod rewind_seq_space_tests;
+
+    #[path = "rewind_menu.rs"]
+    mod rewind_menu_tests;
+
+    #[path = "prompt_answers.rs"]
+    mod prompt_answers_tests;
 
     #[path = "tool_marks.rs"]
     mod tool_marks_tests;

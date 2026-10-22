@@ -3,7 +3,7 @@
 //! rule, `auto` verdict, accept-edits or bypass skips the prompt. Plan mode denies it earlier, like
 //! every other side effect, and a deny rule still wins.
 
-use forge_types::{ConfirmOutcome, Presenter, SideEffect};
+use forge_types::{ConfirmOutcome, ConfirmReply, Presenter, SideEffect};
 use serde_json::Value;
 
 /// Every prompt label for an expose starts with this, so a presenter with no human behind it
@@ -33,21 +33,25 @@ pub fn confirm_label(tool_name: &str, args: &Value) -> Option<String> {
     ))
 }
 
-/// Ask the presenter about a call, naming an expose for what it is. "Always" on an expose counts
-/// as a one-time yes: it asks every time, so a saved allow rule could never apply anyway.
+/// Ask the presenter about a call, naming an expose for what it is. "Always" or "this session" on
+/// an expose counts as a one-time yes: it asks every time, so an allow rule could never apply.
 pub fn confirm_call(
     presenter: &mut dyn Presenter,
     tool_name: &str,
     args: &Value,
     side_effect: SideEffect,
-) -> ConfirmOutcome {
+) -> ConfirmReply {
     let Some(label) = confirm_label(tool_name, args) else {
-        return presenter.confirm(tool_name, side_effect);
+        return presenter.confirm_reply(tool_name, side_effect);
     };
-    match presenter.confirm(&label, side_effect) {
-        ConfirmOutcome::AlwaysAllow => ConfirmOutcome::Allow,
-        other => other,
+    let mut reply = presenter.confirm_reply(&label, side_effect);
+    if matches!(
+        reply.outcome,
+        ConfirmOutcome::AlwaysAllow | ConfirmOutcome::AllowSession
+    ) {
+        reply.outcome = ConfirmOutcome::Allow;
     }
+    reply
 }
 
 #[cfg(test)]
@@ -156,12 +160,12 @@ mod tests {
         let mut presenter = Answers { seen: Vec::new() };
         let expose = json!({"action": "expose", "id": 1, "port": 3000});
         assert_eq!(
-            super::confirm_call(&mut presenter, "shell_job", &expose, SideEffect::Shell),
+            super::confirm_call(&mut presenter, "shell_job", &expose, SideEffect::Shell).outcome,
             ConfirmOutcome::Allow
         );
         let stop = json!({"action": "stop", "id": 1});
         assert_eq!(
-            super::confirm_call(&mut presenter, "shell_job", &stop, SideEffect::Shell),
+            super::confirm_call(&mut presenter, "shell_job", &stop, SideEffect::Shell).outcome,
             ConfirmOutcome::AlwaysAllow
         );
         assert!(presenter.seen[0].starts_with(super::EXPOSE_PROMPT_PREFIX));

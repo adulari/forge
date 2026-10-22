@@ -65,6 +65,10 @@ impl Presenter for Timed {
         let clock = self.clock.clone();
         clock.timed(|| self.inner().confirm(tool, side_effect))
     }
+    fn confirm_reply(&mut self, tool: &str, side_effect: SideEffect) -> forge_types::ConfirmReply {
+        let clock = self.clock.clone();
+        clock.timed(|| self.inner().confirm_reply(tool, side_effect))
+    }
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String {
         let clock = self.clock.clone();
         clock.timed(|| self.inner().ask(question, options, allow_other))

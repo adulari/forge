@@ -4,7 +4,7 @@ use std::io::{IsTerminal, Write};
 
 use forge_types::SideEffect;
 use forge_types::{
-    Answer, ConfirmOutcome, Presenter, PresenterEvent, QChoice, Question, NO_ANSWER,
+    Answer, ConfirmOutcome, ConfirmReply, Presenter, PresenterEvent, QChoice, Question, NO_ANSWER,
 };
 
 use crate::answer::resolve_answer;
@@ -387,21 +387,23 @@ impl Presenter for HeadlessPresenter {
     }
 
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmOutcome {
+        self.confirm_reply(tool, side_effect).outcome
+    }
+
+    fn confirm_reply(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmReply {
         if !self.interactive {
             out!("  ⚠ denying {tool} ({side_effect:?}) — non-interactive session");
-            return ConfirmOutcome::Deny;
+            return ConfirmOutcome::Deny.into();
         }
-        out_inline!("  ⚠ allow {tool} ({side_effect:?})? [y/a=always/N] ");
+        out_inline!(
+            "  ⚠ allow {tool} ({side_effect:?})? [y/s=this session/a=always/N, then an optional note] "
+        );
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
-            return ConfirmOutcome::Deny;
+            return ConfirmOutcome::Deny.into();
         }
-        match line.trim() {
-            "a" | "A" | "always" => ConfirmOutcome::AlwaysAllow,
-            "y" | "Y" | "yes" => ConfirmOutcome::Allow,
-            _ => ConfirmOutcome::Deny,
-        }
+        parse_confirm_line(&line)
     }
 
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String {
@@ -548,9 +550,38 @@ fn ask_one_headless(q: &Question) -> Answer {
     Answer::default()
 }
 
+/// A typed permission answer: the first word decides (`y`, `s`, `a`, anything else denies) and
+/// the rest of the line is a note for the model.
+fn parse_confirm_line(line: &str) -> ConfirmReply {
+    let line = line.trim();
+    let (word, note) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let outcome = match word {
+        "a" | "A" | "always" => ConfirmOutcome::AlwaysAllow,
+        "s" | "S" | "session" => ConfirmOutcome::AllowSession,
+        "y" | "Y" | "yes" => ConfirmOutcome::Allow,
+        _ => ConfirmOutcome::Deny,
+    };
+    ConfirmReply::with_note(outcome, note)
+}
+
 #[cfg(test)]
 mod ask_tests {
     use super::*;
+
+    #[test]
+    fn a_typed_permission_answer_takes_its_first_word_and_keeps_the_rest_as_a_note() {
+        assert_eq!(parse_confirm_line("y\n"), ConfirmOutcome::Allow.into());
+        assert_eq!(
+            parse_confirm_line("s\n"),
+            ConfirmOutcome::AllowSession.into()
+        );
+        assert_eq!(
+            parse_confirm_line("n use rg instead\n"),
+            ConfirmReply::with_note(ConfirmOutcome::Deny, "use rg instead")
+        );
+        assert_eq!(parse_confirm_line(""), ConfirmOutcome::Deny.into());
+        assert_eq!(parse_confirm_line("yolo"), ConfirmOutcome::Deny.into());
+    }
 
     fn opts() -> Vec<QChoice> {
         vec![

@@ -101,7 +101,9 @@ impl Presenter for TuiPresenter {
     }
 
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> crate::ConfirmOutcome {
-        self.app.prompt = Some(format!("allow {tool} ({side_effect:?})? [y/a=always/n]"));
+        self.app.prompt = Some(format!(
+            "allow {tool} ({side_effect:?})? [y/s=this session/a=always/n]"
+        ));
         self.draw();
 
         let outcome = loop {
@@ -110,6 +112,9 @@ impl Presenter for TuiPresenter {
                     KeyCode::Char('y') | KeyCode::Char('Y') => break crate::ConfirmOutcome::Allow,
                     KeyCode::Char('a') | KeyCode::Char('A') => {
                         break crate::ConfirmOutcome::AlwaysAllow
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        break crate::ConfirmOutcome::AllowSession
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                         break crate::ConfirmOutcome::Deny

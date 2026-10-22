@@ -868,6 +868,32 @@ mod blocks {
     }
 
     #[test]
+    fn this_session_is_the_fourth_choice_and_tab_opens_a_note_row() {
+        let mut app = App::default();
+        app.open_permission("write_file", "Write");
+        let text = screen_rows(&app, 100, 24).join("\n");
+        assert!(
+            text.contains("4  Allow write_file for this session (not saved)"),
+            "{text}"
+        );
+        assert!(text.contains("Tab add note"), "{text}");
+        app.permission_key(KeyKind::Tab);
+        let text = screen_rows(&app, 100, 24).join("\n");
+        assert!(text.contains("why, or what to do instead"), "{text}");
+        for c in "use docs/".chars() {
+            app.permission_key(KeyKind::Char(c));
+        }
+        let text = screen_rows(&app, 100, 24).join("\n");
+        assert!(text.contains("note  use docs/"), "{text}");
+        assert!(text.contains("Enter answer with note"), "{text}");
+        assert!(
+            prompt_height(&app) as usize <= LIVE_H as usize - 4,
+            "the note row still fits the inline region: {}",
+            prompt_height(&app)
+        );
+    }
+
+    #[test]
     fn moving_the_focus_moves_the_caret_and_the_highlight() {
         let mut app = App::default();
         app.open_permission("write_file", "Write");

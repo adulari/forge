@@ -8,25 +8,7 @@ mod deferred;
 mod denial;
 mod mcp;
 mod permission_hooks;
-
-/// Patterns for a runtime "always allow", scoped to the command the user was shown. An empty list
-/// means tool-wide (the previous behaviour), kept for cases we cannot narrow confidently.
-fn always_allow_patterns(tool: &str, args: &serde_json::Value) -> Vec<String> {
-    if tool != "shell" {
-        return Vec::new();
-    }
-    let Some(cmd_text) = forge_types::shell_command_text(args) else {
-        return Vec::new();
-    };
-    let cmd = cmd_text.as_str();
-    // The leading word only: `git status --short` grants `git *`, never `--short`.
-    match cmd.split_whitespace().next() {
-        Some(verb) if !verb.is_empty() && !verb.starts_with('-') => {
-            vec![format!("{verb} *"), verb.to_string()]
-        }
-        _ => Vec::new(),
-    }
-}
+mod runtime_allow;
 
 impl Session {
     /// Steer main-checkout paths into a linked worktree session and compute the roots this call
@@ -547,47 +529,15 @@ impl Session {
                 self.presenter.emit(PresenterEvent::Warning(n));
             }
         }
-        let mut user_declined = false;
-        let allowed = match decision {
-            PermissionDecision::Allow => true,
-            PermissionDecision::Deny => false,
-            PermissionDecision::Ask => match permission::confirm_call(
-                self.presenter.as_mut(),
-                &call.name,
-                &effective_args,
-                side_effect,
-            ) {
-                forge_types::ConfirmOutcome::AlwaysAllow => {
-                    // Scope to what the user SAW: an empty list matches every segment (see
-                    // decide_shell_segments), so approving `git status` used to auto-approve
-                    // every later shell command in the session.
-                    let patterns = always_allow_patterns(&call.name, &call.args);
-                    // Persisted with the same scope; an unscopable shell call is allowed once.
-                    if let Err(e) =
-                        forge_config::append_allow_rule_in(self.rules_root(), &call.name, &patterns)
-                    {
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "allow rule not saved: {e}"
-                        )));
-                    }
-                    if call.name != "shell" || !patterns.is_empty() {
-                        self.rules.push(forge_types::PermissionRule {
-                            tool: call.name.clone(),
-                            patterns,
-                            decision: forge_types::PermissionDecision::Allow,
-                            source: forge_types::RuleSource::Configured,
-                            reason: Some("user answered 'always' at runtime prompt".into()),
-                        });
-                    }
-                    true
-                }
-                forge_types::ConfirmOutcome::Allow => true,
-                forge_types::ConfirmOutcome::Deny => {
-                    user_declined = true;
-                    false
-                }
+        let answer = match decision {
+            PermissionDecision::Ask => self.ask_at_prompt(call, &effective_args, side_effect),
+            settled => runtime_allow::PromptAnswer {
+                allowed: settled == PermissionDecision::Allow,
+                declined: false,
+                note: None,
             },
         };
+        let (allowed, user_declined) = (answer.allowed, answer.declined);
         let permission_label = if allowed { "allowed" } else { "denied" };
 
         // Snapshot the target's pre-edit bytes BEFORE a permitted write, so `/undo` can restore
@@ -708,6 +658,12 @@ impl Session {
                 self.presenter.is_attended(),
             )
         };
+        let result = match (&answer.note, allowed) {
+            (Some(note), false) => {
+                format!("{result}. {}", runtime_allow::note_for_model(false, note))
+            }
+            _ => result,
+        };
         self.record_test_proof(&call.name, &effective_args, &result, full.as_deref());
 
         // The call ran, so `ok` stays true for the failure tracker and the commit bookkeeping, but
@@ -720,7 +676,10 @@ impl Session {
             detail: crate::tool_detail(&result),
         });
         let kept = self.surface_full_output(&call.name, &call.id, full.as_deref(), &result);
-        let result = crate::tool_output::fit_for_model(result, kept.as_deref());
+        let mut result = crate::tool_output::fit_for_model(result, kept.as_deref());
+        if let (true, Some(note)) = (allowed, &answer.note) {
+            result = format!("{result}\n\n{}", runtime_allow::note_for_model(true, note));
+        }
         self.store.record_tool_call(
             msg_id,
             &call.name,
@@ -794,32 +753,5 @@ impl Session {
         }
 
         Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod always_allow_tests {
-    use super::always_allow_patterns;
-
-    /// "Always allow" must grant what the user was SHOWN, not the whole tool. An empty pattern
-    /// list matches every shell segment (see `decide_shell_segments`), so approving `git status`
-    /// once used to authorise every later shell command in the session.
-    #[test]
-    fn always_allow_scopes_the_grant_to_the_approved_verb() {
-        let args = serde_json::json!({ "command": "git status --short" });
-        let pats = always_allow_patterns("shell", &args);
-        assert!(
-            pats.iter().any(|p| p == "git *"),
-            "the approved verb must be granted: {pats:?}"
-        );
-        assert!(
-            !pats.iter().any(|p| p == "--short"),
-            "a flag must never become the granted pattern: {pats:?}"
-        );
-
-        // Cases we cannot narrow confidently stay tool-wide rather than silently granting less
-        // than the user expects, which would make "always" unreliable in the other direction.
-        assert!(always_allow_patterns("shell", &serde_json::json!({ "command": "" })).is_empty());
-        assert!(always_allow_patterns("read_file", &serde_json::json!({})).is_empty());
     }
 }

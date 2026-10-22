@@ -148,6 +148,7 @@ fn pending(app: &App) -> PendingPermission {
         tool: tool.trim().to_string(),
         side_effect: side.to_string(),
         focus: 0,
+        note: None,
     }
 }
 
@@ -416,15 +417,25 @@ pub(super) fn permission_block(app: &App, width: u16) -> Decision {
     );
     let short = format!("Always allow {} here ({scope})", p.tool);
     let always = if long.width() + 12 <= w { long } else { short };
+    let session_long = format!("Allow {} for this session (not saved)", p.tool);
+    let session = if session_long.width() + 12 <= w {
+        session_long
+    } else {
+        "Allow for this session".to_string()
+    };
     let labels = [
         ("Allow once".to_string(), "y  Enter"),
         (always, "a"),
         ("Deny".to_string(), "n  Esc"),
+        (session, "s"),
     ];
     for (i, (label, keys)) in labels.iter().enumerate() {
         rows.push(choice_row(i == p.focus, i + 1, label, keys, w));
     }
     debug_assert_eq!(labels.len(), PERMISSION_CHOICES.len());
+    if let Some(note) = &p.note {
+        rows.push(note_row(note, w));
+    }
     Decision {
         rail: super::chrome::border_style(app),
         rows,
@@ -432,11 +443,53 @@ pub(super) fn permission_block(app: &App, width: u16) -> Decision {
     }
 }
 
+/// The open note field: what the user typed, sent to the model with the answer Enter gives.
+fn note_row(note: &str, width: usize) -> TextLine<'static> {
+    let label = "  note  ";
+    let room = width.saturating_sub(label.width() + 1);
+    let text = if note.is_empty() {
+        Span::styled(
+            fit("why, or what to do instead (sent to the model)", room),
+            styles::faint(),
+        )
+    } else {
+        Span::styled(tail_within(note, room), styles::fg())
+    };
+    TextLine::from(vec![
+        Span::styled(label, styles::muted()),
+        text,
+        Span::styled(g().caret, styles::brand()),
+    ])
+}
+
+/// The end of `text` that fits `width` columns, so the cursor end stays visible while typing.
+fn tail_within(text: &str, width: usize) -> String {
+    let mut used = 0;
+    let mut tail: Vec<char> = Vec::new();
+    for c in text.chars().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        used += w;
+        tail.push(c);
+    }
+    tail.into_iter().rev().collect()
+}
+
 fn choice_hints(app: &App) -> Vec<Hint> {
+    if app.permission_note().is_some() {
+        return vec![
+            hint("Enter", "answer with note"),
+            hint("↑↓", "choose"),
+            hint("Esc", "drop note"),
+        ];
+    }
     let mut hints = vec![
         hint("↑↓", "choose"),
         hint("Enter", "confirm"),
-        hint("1-3", "pick"),
+        hint("1-4", "pick"),
+        hint("Tab", "add note"),
     ];
     // Ctrl+T expands a tool card; inline has none (the diff is already in the scrollback).
     if app.fullscreen {
@@ -471,10 +524,11 @@ fn block(app: &App, width: u16) -> Option<Decision> {
         return Some(super::question::question_block(app, width, row_budget(app)));
     }
     app.prompt.as_ref()?;
+    let note_rows = usize::from(app.permission_note().is_some());
     Some(clamp(
         permission_block(app, width),
         row_budget(app),
-        PERMISSION_CHOICES.len(),
+        PERMISSION_CHOICES.len() + note_rows,
     ))
 }
 

@@ -175,6 +175,7 @@ pub fn picker_kind_wire(kind: crate::commands::PickerKind) -> &'static str {
         P::ModelPin => "picker:model_pin",
         P::ModelRung => "picker:model_rung",
         P::Duel => "picker:duel",
+        P::RewindAction => "picker:rewind_action",
     }
 }
 

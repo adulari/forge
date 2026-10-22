@@ -4,7 +4,8 @@
 //! ratatui+crossterm interactive renderer is the next increment behind this same trait.
 
 pub use forge_types::{
-    Answer, ConfirmOutcome, Presenter, PresenterEvent, QChoice, Question, ReplayItem, NO_ANSWER,
+    Answer, ConfirmOutcome, ConfirmReply, Presenter, PresenterEvent, QChoice, Question, ReplayItem,
+    NO_ANSWER,
 };
 pub use question_form::{parse_structured_answers, FormOutcome, QuestionForm};
 

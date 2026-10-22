@@ -142,10 +142,15 @@ pub(super) fn handle_stream_event(
             side_effect,
             answer_path,
         } => {
-            let answer = match presenter.confirm(&tool, side_effect) {
-                forge_types::ConfirmOutcome::AlwaysAllow => "always",
-                forge_types::ConfirmOutcome::Allow => "allow",
-                forge_types::ConfirmOutcome::Deny => "deny",
+            // One word, and on a deny the user's note on the lines after it (the relay's refusal
+            // carries it to the bridged model).
+            let reply = presenter.confirm_reply(&tool, side_effect);
+            let answer = match (reply.outcome, reply.note) {
+                (forge_types::ConfirmOutcome::AlwaysAllow, _) => "always".to_string(),
+                (forge_types::ConfirmOutcome::AllowSession, _) => "session".to_string(),
+                (forge_types::ConfirmOutcome::Allow, _) => "allow".to_string(),
+                (forge_types::ConfirmOutcome::Deny, Some(note)) => format!("deny\n{note}"),
+                (forge_types::ConfirmOutcome::Deny, None) => "deny".to_string(),
             };
             if let Err(error) = std::fs::write(&answer_path, answer) {
                 presenter.emit(PresenterEvent::Warning(format!(

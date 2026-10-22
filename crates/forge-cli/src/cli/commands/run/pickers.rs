@@ -606,17 +606,17 @@ pub(crate) async fn open_models_provider(
     Ok(())
 }
 
-/// Act on the picker's selected row: resume the chosen session, or rewind to the chosen
-/// checkpoint — then redraw the surviving transcript into scrollback. `tui` is `None` only in
-/// tests (there is no real terminal there); the arms that repaint the screen skip the repaint
-/// then, everything else behaves identically.
+/// Act on the picker's selected row: resume the chosen session, open the rewind actions for the
+/// chosen checkpoint, apply one — then redraw the surviving transcript into scrollback. `tui` is
+/// `None` only in tests (there is no real terminal there); the arms that repaint the screen skip
+/// the repaint then. A "summarize from here" comes back for the loop to spawn.
 pub(crate) async fn picker_accept(
     kind: forge_tui::PickerKind,
     row: &forge_tui::PickerRow,
     session: &Arc<tokio::sync::Mutex<Session>>,
     tui: Option<&mut forge_tui::Tui>,
     app: &mut forge_tui::App,
-) -> Result<()> {
+) -> Result<Option<SummarizeRequest>> {
     match kind {
         forge_tui::PickerKind::Sessions => {
             let store = open_store()?;
@@ -624,7 +624,7 @@ pub(crate) async fn picker_accept(
             // taken over.
             if let Err(refusal) = super::super::replay::ensure_not_daemon_driven(&store, &row.id) {
                 app.note(&format!("⚠ {refusal}"));
-                return Ok(());
+                return Ok(None);
             }
             // Resuming is the explicit "bring it back": decided by the session's own state, not
             // by which view the picker was in.
@@ -666,27 +666,9 @@ pub(crate) async fn picker_accept(
                 open_resume_choice_picker(app);
             }
         }
-        forge_tui::PickerKind::Checkpoints => {
-            let seq: i64 = row.id.parse().unwrap_or(0);
-            let (items, outcome) = {
-                let mut s = session.lock().await;
-                let outcome = s.rewind_to(seq).map_err(|e| anyhow::anyhow!("{e}"))?;
-                (s.replay_items(), outcome)
-            };
-            if let Some(tui) = tui {
-                tui.clear_screen();
-            }
-            app.clear_transcript();
-            app.note("● rewound to that point");
-            app.replay_history(&items);
-            note_restore(app, &outcome.restore);
-            // Put the rewound-to message back in the input box so it can be edited/resubmitted,
-            // with the cursor after it: left at its old offset, typed text landed in the middle
-            // of the restored prompt and Ctrl-U cleared nothing.
-            if let Some(prompt) = outcome.rewound_prompt {
-                app.input_cursor = prompt.len();
-                app.input = prompt;
-            }
+        forge_tui::PickerKind::Checkpoints => open_rewind_actions(session, app, row).await?,
+        forge_tui::PickerKind::RewindAction => {
+            return apply_rewind_action(row, session, tui, app).await
         }
         forge_tui::PickerKind::Tempers => {
             if let Some(mode) = forge_types::PermissionMode::from_label(&row.id) {
@@ -796,5 +778,5 @@ pub(crate) async fn picker_accept(
             }
         }
     }
-    Ok(())
+    Ok(None)
 }

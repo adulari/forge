@@ -220,7 +220,8 @@ fn center_view(app: &App) -> View {
 fn picker_enter_text(kind: Option<PickerKind>) -> &'static str {
     match kind {
         Some(PickerKind::Sessions) => "Enter resume this session",
-        Some(PickerKind::Checkpoints) => "Enter rewind to this point",
+        Some(PickerKind::Checkpoints) => "Enter choose what to restore from this point",
+        Some(PickerKind::RewindAction) => "Enter apply, 1-5 pick, type to guide a summary",
         Some(PickerKind::Tempers) => "Enter switch to this mode",
         Some(PickerKind::Models) => "Enter open this provider or pin this model",
         Some(PickerKind::ModelPin) | Some(PickerKind::ModelRung) => "Enter pin for this session",
@@ -277,7 +278,14 @@ fn picker_view(app: &App) -> View {
     if p.kind == Some(PickerKind::Sessions) {
         footer.insert(1, hint("Del", "archive"));
     }
-    footer.push(hint("Esc", "close"));
+    footer.push(hint(
+        "Esc",
+        if p.kind == Some(PickerKind::RewindAction) {
+            "back"
+        } else {
+            "close"
+        },
+    ));
     // Headings carry their own key hints (`resume a session · Tab archived · …`); the frame's
     // footer shows those, so the title keeps only its first part.
     let title = p
@@ -294,10 +302,18 @@ fn picker_view(app: &App) -> View {
         } else {
             format!("{} of {}", p.selected + 1, matches.len())
         },
-        filter: Some(Filter {
-            label: "filter",
-            query: p.query.clone(),
-            placeholder: "type to filter",
+        filter: Some(if p.kind == Some(PickerKind::RewindAction) {
+            Filter {
+                label: "focus",
+                query: p.query.clone(),
+                placeholder: "optional: what a summary should keep",
+            }
+        } else {
+            Filter {
+                label: "filter",
+                query: p.query.clone(),
+                placeholder: "type to filter",
+            }
         }),
         items,
         selected: p.selected,

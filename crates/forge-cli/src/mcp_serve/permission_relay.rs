@@ -24,9 +24,12 @@ pub(super) async fn gate(
     };
     match relay_permission(&sink, tool, side_effect, PERMISSION_RELAY_WAIT).await {
         RelayAnswer::Allowed => Ok(()),
-        RelayAnswer::Denied => Err(format!(
+        RelayAnswer::Denied(None) => Err(format!(
             "denied by the user: {tool}. Do not retry it; say what you would have done instead."
         )),
+        RelayAnswer::Denied(Some(note)) => {
+            Err(format!("denied by the user: {tool}. The user said: {note}"))
+        }
         RelayAnswer::NoAnswer => Err(format!(
             "denied: {tool} needed the user's confirmation and no answer came within {} minutes.",
             PERMISSION_RELAY_WAIT.as_secs() / 60
@@ -86,7 +89,8 @@ pub(super) async fn permission_hooks(
 #[derive(Debug, PartialEq, Eq)]
 enum RelayAnswer {
     Allowed,
-    Denied,
+    /// With the note the user typed, if any.
+    Denied(Option<String>),
     NoAnswer,
     Unavailable,
 }
@@ -112,14 +116,9 @@ async fn relay_permission(
     let deadline = std::time::Instant::now() + wait;
     loop {
         if let Ok(text) = std::fs::read_to_string(&answer_path) {
-            let answer = text.trim();
-            if !answer.is_empty() {
+            if !text.trim().is_empty() {
                 let _ = std::fs::remove_file(&answer_path);
-                return if matches!(answer, "allow" | "always") {
-                    RelayAnswer::Allowed
-                } else {
-                    RelayAnswer::Denied
-                };
+                return parse_answer(&text);
             }
         }
         if std::time::Instant::now() >= deadline {
@@ -127,6 +126,19 @@ async fn relay_permission(
             return RelayAnswer::NoAnswer;
         }
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
+/// The parent's answer file: a decision word, then on a deny the user's note.
+fn parse_answer(text: &str) -> RelayAnswer {
+    let text = text.trim();
+    let (word, note) = text.split_once('\n').unwrap_or((text, ""));
+    match word.trim() {
+        "allow" | "always" | "session" => RelayAnswer::Allowed,
+        _ => {
+            let note = note.trim();
+            RelayAnswer::Denied((!note.is_empty()).then(|| note.to_string()))
+        }
     }
 }
 
@@ -170,7 +182,12 @@ mod tests {
         for (reply, expected) in [
             ("allow", RelayAnswer::Allowed),
             ("always", RelayAnswer::Allowed),
-            ("deny", RelayAnswer::Denied),
+            ("session", RelayAnswer::Allowed),
+            ("deny", RelayAnswer::Denied(None)),
+            (
+                "deny\nuse rg instead",
+                RelayAnswer::Denied(Some("use rg instead".into())),
+            ),
         ] {
             let _ = std::fs::remove_file(&sink);
             let parent_sink = sink.clone();
@@ -210,5 +227,15 @@ mod tests {
         .await;
         assert_eq!(unanswered, RelayAnswer::NoAnswer);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_word_or_a_note_after_allow_never_turns_into_an_allow() {
+        assert_eq!(parse_answer("allowed"), RelayAnswer::Denied(None));
+        assert_eq!(
+            parse_answer("maybe\nlater"),
+            RelayAnswer::Denied(Some("later".into()))
+        );
+        assert_eq!(parse_answer("always\n"), RelayAnswer::Allowed);
     }
 }

@@ -85,6 +85,7 @@ impl Session {
                 .iter()
                 .filter_map(|key| effective_args.get(*key).and_then(|v| v.as_str()))
                 .any(|name| !name.is_empty());
+        let mut prompt: Option<forge_types::ConfirmReply> = None;
         let allowed = match permission::decide(
             self.mode,
             side_effect,
@@ -95,20 +96,7 @@ impl Session {
             PermissionDecision::Allow => true,
             PermissionDecision::Deny => false,
             PermissionDecision::Ask if defer_to_inner_gate => true,
-            PermissionDecision::Ask => match self.presenter.confirm(&call.name, side_effect) {
-                forge_types::ConfirmOutcome::AlwaysAllow => {
-                    self.rules.push(forge_types::PermissionRule {
-                        tool: call.name.clone(),
-                        patterns: vec![],
-                        decision: forge_types::PermissionDecision::Allow,
-                        source: forge_types::RuleSource::Configured,
-                        reason: Some("user answered 'always' at runtime prompt".into()),
-                    });
-                    true
-                }
-                forge_types::ConfirmOutcome::Allow => true,
-                forge_types::ConfirmOutcome::Deny => false,
-            },
+            PermissionDecision::Ask => self.ask_mcp(&call.name, side_effect, &mut prompt),
         };
         // When the model routes an MCP server tool via the mcp_call meta-wrapper, also gate the
         // inner (real) tool name against the permission broker. Without this, a per-tool
@@ -138,23 +126,9 @@ impl Session {
                 ) {
                     PermissionDecision::Allow => true,
                     PermissionDecision::Deny => false,
-                    PermissionDecision::Ask => match self
-                        .presenter
-                        .confirm(inner_name, forge_types::SideEffect::External)
-                    {
-                        forge_types::ConfirmOutcome::AlwaysAllow => {
-                            self.rules.push(forge_types::PermissionRule {
-                                tool: inner_name.to_string(),
-                                patterns: vec![],
-                                decision: forge_types::PermissionDecision::Allow,
-                                source: forge_types::RuleSource::Configured,
-                                reason: Some("user answered 'always' at runtime prompt".into()),
-                            });
-                            true
-                        }
-                        forge_types::ConfirmOutcome::Allow => true,
-                        forge_types::ConfirmOutcome::Deny => false,
-                    },
+                    PermissionDecision::Ask => {
+                        self.ask_mcp(inner_name, forge_types::SideEffect::External, &mut prompt)
+                    }
                 }
             }
         } else {
@@ -162,9 +136,30 @@ impl Session {
         };
         let permission_label = if allowed { "allowed" } else { "denied" };
 
+        let note = prompt.as_ref().and_then(|p| p.note.as_deref());
         let (result, ok) = if allowed {
             let out = mcp.call(&call.name, &effective_args).await;
-            (out.text, out.ok)
+            match note {
+                Some(note) => (
+                    format!(
+                        "{}\n\n{}",
+                        out.text,
+                        super::runtime_allow::note_for_model(true, note)
+                    ),
+                    out.ok,
+                ),
+                None => (out.text, out.ok),
+            }
+        } else if prompt.as_ref().is_some_and(|p| !p.outcome.allows()) {
+            let reason =
+                note.map(|n| format!(". {}", super::runtime_allow::note_for_model(false, n)));
+            (
+                format!(
+                    "permission denied by the user (declined at the prompt){}",
+                    reason.unwrap_or_default()
+                ),
+                false,
+            )
         } else {
             ("permission denied by policy".to_string(), false)
         };
@@ -215,6 +210,34 @@ impl Session {
         }
 
         Ok(result)
+    }
+}
+
+impl Session {
+    /// Prompt for an MCP tool. Both standing answers add an in-memory rule only: MCP rules are
+    /// never written to the project config.
+    fn ask_mcp(
+        &mut self,
+        tool: &str,
+        side_effect: forge_types::SideEffect,
+        prompt: &mut Option<forge_types::ConfirmReply>,
+    ) -> bool {
+        let reply = self.presenter.confirm_reply(tool, side_effect);
+        let outcome = reply.outcome;
+        if matches!(
+            outcome,
+            forge_types::ConfirmOutcome::AlwaysAllow | forge_types::ConfirmOutcome::AllowSession
+        ) {
+            self.rules.push(forge_types::PermissionRule {
+                tool: tool.to_string(),
+                patterns: vec![],
+                decision: forge_types::PermissionDecision::Allow,
+                source: forge_types::RuleSource::Configured,
+                reason: Some("user allowed it for this session at runtime prompt".into()),
+            });
+        }
+        *prompt = Some(reply);
+        outcome.allows()
     }
 }
 

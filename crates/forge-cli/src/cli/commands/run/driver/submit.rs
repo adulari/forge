@@ -82,7 +82,7 @@ impl DriverState {
                     } else {
                         ConfirmOutcome::Deny
                     };
-                    let _ = reply.send(outcome);
+                    let _ = reply.send(outcome.into());
                     self.app.prompt = None;
                     if yes {
                         self.app.note(&format!("✓ remote allowed {tool}"));

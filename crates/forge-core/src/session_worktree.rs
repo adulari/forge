@@ -33,15 +33,14 @@ impl Session {
             match permission::decide(self.mode, side_effect, &call.name, &call.args, &self.rules) {
                 PermissionDecision::Allow => true,
                 PermissionDecision::Deny => false,
-                PermissionDecision::Ask => !matches!(
-                    permission::confirm_call(
-                        self.presenter.as_mut(),
-                        &call.name,
-                        &call.args,
-                        side_effect
-                    ),
-                    forge_types::ConfirmOutcome::Deny
-                ),
+                PermissionDecision::Ask => permission::confirm_call(
+                    self.presenter.as_mut(),
+                    &call.name,
+                    &call.args,
+                    side_effect,
+                )
+                .outcome
+                .allows(),
             };
         if !allowed {
             let result = format!(

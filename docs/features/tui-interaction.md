@@ -63,18 +63,33 @@ still below it. A heavy rail (`┃`) runs down the left; the bottom border carri
 
 **Permission** (warn rail). The title names the exact action in words (`Allow Write to create
 mock-note.txt?`), a subject row says what changes (`new file · +1 line · ~/proj/mock-note.txt`, or
-the full shell command wrapped in a surface band, never truncated), then three numbered choices
-with the legacy keys on the right:
+the full shell command wrapped in a surface band, never truncated), then four numbered choices
+with the keys on the right:
 
 | Choice | Keys |
 |---|---|
 | 1 Allow once | `y`, `Enter` (while it is focused) |
 | 2 Always allow `<tool>` here (where the rule is saved) | `a` |
 | 3 Deny | `n`, `Esc` |
+| 4 Allow `<tool>` for this session (not saved) | `s` |
 
-Up/Down (or `j`/`k`, Tab) move the `❯` focus and Enter confirms the focused choice; it starts on
+"This session" is last so `3` still denies. It adds the same scoped rule as `a` (a shell call is
+scoped to the verb you were shown) to the running session and writes nothing to a config file; an
+MCP tool's `a` is session-only too. A shell call that cannot be scoped is allowed once.
+
+Up/Down (or `j`/`k`) move the `❯` focus and Enter confirms the focused choice; it starts on
 "Allow once", so Enter keeps its old meaning. Digits pick directly. Keys that are not a choice are
-ignored: an arrow press used to deny the tool. The card above the block reads `awaiting approval`,
+ignored: an arrow press used to deny the tool.
+
+**Notes.** Tab opens a one-line `note` field under the choices. While it is open, letters and
+digits are text, the arrows still move the focus, Enter answers with the focused choice plus the
+note, and Esc or Tab closes the field without answering (Ctrl+C still denies). The note reaches the
+model with the tool result: on a deny it is the reason (`permission denied by the user (declined at
+the prompt). The user said: <note>`), on an allow it follows the output (`[the user approved this
+call and added: <note>]`). On a bridged CLI model (`claude`, `codex`) the note rides the relay's
+refusal, so a deny note reaches that model too; an allow note has nowhere to go there. A blank note
+is no note. The headless prompt takes the same: `y`, `s`, `a` or anything else, then the note on the
+same line. The card above the block reads `awaiting approval`,
 and Ctrl+T expands its diff. The block fits the 14-row inline region.
 
 **Question** (info rail, never the warn colour). The question text, a tab strip when there are
