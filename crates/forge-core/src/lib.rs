@@ -14741,6 +14741,11 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
+        // "Keep existing tests unchanged" arms the test guard, which stashes modified test files in
+        // the session's workspace. Left at the process cwd that is this repository, and the test
+        // stashed a developer's uncommitted edits to any test file under crates/forge-core.
+        let workspace = tempfile::tempdir().unwrap();
+        session.workspace = WorkspaceContext::new(workspace.path()).unwrap();
 
         session
             .run_turn("Review the suite and keep existing tests unchanged.")
