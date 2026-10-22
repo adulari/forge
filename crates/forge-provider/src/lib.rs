@@ -26,6 +26,7 @@ mod mock;
 mod mock_goal;
 mod mock_long;
 mod mock_soak;
+mod mock_tools;
 mod oauth_responses;
 mod output_cap;
 pub mod prompt_cache;

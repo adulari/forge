@@ -1311,6 +1311,10 @@ pub struct TuiConfig {
     /// `FORGE_REDUCE_MOTION` environment variable and monochrome terminals also turn it off.
     #[serde(default)]
     pub reduce_motion: bool,
+    /// Fold each run of tool calls into one summary row in the full-screen transcript (click or
+    /// Enter opens it). Default: true. False shows every call as its own card, as before.
+    #[serde(default = "default_true")]
+    pub fold_tool_groups: bool,
 }
 
 impl Default for TuiConfig {
@@ -1322,6 +1326,7 @@ impl Default for TuiConfig {
             color: default_tui_auto(),
             glyphs: default_tui_auto(),
             reduce_motion: false,
+            fold_tool_groups: true,
         }
     }
 }
@@ -2953,6 +2958,9 @@ impl Default for KeybindsConfig {
         binds.insert("tier_down".into(), bind("down", true, false, false));
         binds.insert("toggle_reasoning".into(), bind("r", true, false, false));
         binds.insert("toggle_tool_card".into(), bind("t", true, false, false));
+        binds.insert("toggle_tool_groups".into(), bind("o", false, true, false));
+        binds.insert("prev_tool_group".into(), bind("up", false, true, false));
+        binds.insert("next_tool_group".into(), bind("down", false, true, false));
         binds.insert("undo".into(), bind("z", true, false, false));
         binds.insert("compact".into(), bind("l", true, false, false));
         binds.insert("model_picker".into(), bind("m", false, true, false));
@@ -4855,7 +4863,7 @@ auto = "local"
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 23);
+        assert_eq!(kb.binds.len(), 26);
         assert_eq!(
             kb.binds["interrupt"],
             KeyCombo {
@@ -4921,7 +4929,7 @@ auto = "local"
         // The override took effect…
         assert_eq!(cfg.keybinds.binds["toggle_reasoning"].key, "x");
         // …and every other default bind survived the merge.
-        assert_eq!(cfg.keybinds.binds.len(), 23);
+        assert_eq!(cfg.keybinds.binds.len(), 26);
         assert_eq!(cfg.keybinds.binds["interrupt"].key, "c");
         assert_eq!(cfg.keybinds.binds["help"].key, "f1");
     }

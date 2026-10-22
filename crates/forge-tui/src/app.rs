@@ -535,6 +535,10 @@ pub struct App {
     pub goal_chip: Option<String>,
     /// Loop chip text (`5m`), shown on the composer border while a `/loop` runs.
     pub loop_chip: Option<String>,
+    /// Fold each run of tool calls into one summary row (`[tui] fold_tool_groups`, full-screen).
+    pub fold_tool_groups: bool,
+    /// Which tool groups are open and which has keyboard focus.
+    pub(crate) fold_ui: state::fold_ui::FoldUi,
     #[allow(dead_code)] // filled in by the transcript surface
     pub(crate) transcript_ui: state::transcript_ui::TranscriptUi,
     #[allow(dead_code)] // filled in by the interaction surface
@@ -567,6 +571,11 @@ struct WrapCache {
     /// tool cards own a RANGE of source lines, so a card can only be identified from a click
     /// through this map.
     origins: Vec<usize>,
+    /// The fold state the rows were built with, and the rows the fold added (sorted by row) and
+    /// the blocks a click toggles a group from. Empty while groups do not fold.
+    fold_key: group_flow::FoldKey,
+    fold_rows: Vec<group_flow::FoldRow>,
+    group_hits: Vec<group_flow::GroupHit>,
 }
 
 /// Cached wrap of the entry the in-loop activity viewer has selected, keyed on
@@ -868,6 +877,12 @@ pub enum KeyKind {
     /// Ctrl+Home — jump the full-screen transcript to the most recent user message above the
     /// current view; pressed again, to the one before it (shell-handled).
     JumpPrevUser,
+    /// Alt+↑ / Alt+↓ — move the keyboard focus to the previous / next tool group in the
+    /// full-screen transcript (shell-handled; see `App::tool_group_key`).
+    PrevToolGroup,
+    NextToolGroup,
+    /// Alt+O — open every tool group, or fold them all again.
+    ToggleToolGroups,
     /// Ctrl+R — toggle the effort-level slider popup above the input bar.
     ToggleEffortSlider,
     /// Mid-turn: abort + retry with next mesh model.
@@ -1108,6 +1123,9 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::CycleTemper
         | KeyKind::ToggleSubagentDetail
         | KeyKind::ToggleToolCard
+        | KeyKind::PrevToolGroup
+        | KeyKind::NextToolGroup
+        | KeyKind::ToggleToolGroups
         | KeyKind::ToggleEffortSlider
         | KeyKind::PageUp
         | KeyKind::PageDown
@@ -2960,6 +2978,11 @@ impl App {
     pub fn clear_transcript(&mut self) {
         self.main_log.clear();
         self.main_log_rev += 1;
+        // Placed cards pointed into the log just cleared; only cards still queued in the flush
+        // have rows left to own.
+        let queued: Vec<u64> = self.pending_card_marks.iter().map(|m| m.1).collect();
+        self.tool_cards.retain(|c| queued.contains(&c.id));
+        self.fold_ui.clear();
         self.subagents.clear();
         self.assay_critics.clear();
         self.assay_verifying = None;
@@ -3126,15 +3149,23 @@ impl App {
     /// conversations; the cache makes a streaming frame re-wrap only the one in-flight edge line.
     fn ensure_wrapped_main(&self, width: u16) {
         let mut c = self.wrap_cache.borrow_mut();
-        if c.width != width || c.rev != self.main_log_rev {
-            let (rows, origins) = crate::transcript::wrap_lines_indexed(
-                &self.main_log,
-                width.saturating_sub(1) as usize,
-            );
-            c.rows = rows;
-            c.origins = origins;
+        let fold = self.fold_key();
+        if c.width != width || c.rev != self.main_log_rev || c.fold_key != fold {
+            if fold.enabled {
+                self.wrap_folded(width, &mut c);
+            } else {
+                let (rows, origins) = crate::transcript::wrap_lines_indexed(
+                    &self.main_log,
+                    width.saturating_sub(1) as usize,
+                );
+                c.rows = rows;
+                c.origins = origins;
+                c.fold_rows.clear();
+                c.group_hits.clear();
+            }
             c.width = width;
             c.rev = self.main_log_rev;
+            c.fold_key = fold;
         }
     }
 
@@ -3397,6 +3428,7 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 }
 
 mod card_flow;
+mod group_flow;
 mod lines;
 mod state;
 mod transcript_flow;
@@ -3422,6 +3454,7 @@ mod screen_select;
 mod steer_esc_tests;
 pub use output_view::{page_file, OutputAction, OutputView};
 mod tool_cards;
+mod tool_groups;
 /// The shared list component, for the takeover screens outside `app` (Help, select).
 pub(crate) use render::chrome::hint as chrome_hint;
 pub(crate) use render::list_view;

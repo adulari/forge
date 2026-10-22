@@ -91,6 +91,26 @@ command inserts it into the composer. The Keys table is generated from the same 
 keybinding editor edits plus the fixed keys, in one spelling (`Ctrl+K`, `Alt+M`, `Shift+Tab`,
 `Ctrl+Shift+C`, `PgUp`). At 120 columns and wider, commands and keys sit side by side.
 
+## Tool groups and the navigation pills
+
+In full-screen, a run of tool calls folds into one dim summary row (`Read 3 files, ran 2 shell
+commands`), see [tui-tool-cards.md](tui-tool-cards.md) section 0a. Click it, or `Alt+↑`/`Alt+↓` to
+focus a group and `Enter`/`Space` to toggle it; `Alt+O` opens or folds every group. The chords were
+picked clear of Forge's own bindings and of Claude Code's defaults (`Ctrl+O`, `Ctrl+T`, `Alt+P`,
+`Alt+T` are taken there), and all three are rebindable.
+
+The "↑ Previous message · Ctrl+Home" pill (top right) and the "↓ Jump to bottom · Ctrl+End" pill
+(bottom centre) show only while the transcript is scrolled up, and vanish the frame you are back at
+the bottom. Both take a click. The top pill quotes the start of the message it goes to
+(`↑ fix the login redirect… · Ctrl+Home`), the way Claude Code's sticky header shows the previous
+prompt; the quote takes at most 36 cells and never more than half the row, and the pill falls back
+to "Previous message" when the row is too narrow for a useful quote or the message has no text.
+Below about 34 columns both pills shorten to the arrow and the chord.
+
+The newest folded group ends its summary with a faint `click or Alt+O to expand`, so the fold is
+discoverable without the help screen. On macOS the Alt chords need the terminal's "Option as Meta"
+setting ([keybinds.md](keybinds.md)).
+
 ## Compatibility
 
 Every keybinding and slash command keeps its meaning. The one behaviour change is the permission

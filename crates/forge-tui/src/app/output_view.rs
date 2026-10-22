@@ -279,6 +279,9 @@ impl App {
         };
         let width = self.transcript_geom.get().map(|g| g.width).unwrap_or(0);
         self.ensure_wrapped_main(width);
+        if self.row_belongs_to_group(wrapped_row) {
+            return false;
+        }
         let source = {
             let cache = self.wrap_cache.borrow();
             match cache.origins.get(wrapped_row) {

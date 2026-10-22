@@ -84,14 +84,20 @@ pub(crate) struct ToolCard {
     /// When the call began, and how long it took once it ended.
     pub(crate) started: Instant,
     pub(crate) ms: Option<u128>,
-    /// The file change this call made (or is about to make), shown inside the card.
+    /// The file change this call made (or is about to make), shown inside the card. Set it with
+    /// [`ToolCard::set_diff`], which also counts it.
     pub(crate) diff: Option<FileDiff>,
+    /// `(adds, dels)` of `diff`, counted once when it attached: the diff holds both whole files,
+    /// so counting it again on every redraw or summary costs a full-file diff each time.
+    pub(crate) diff_counts: (usize, usize),
     /// Earlier same-verb calls folded into this card; the fields above are the newest.
     pub(crate) group: Vec<Member>,
     /// Set on a card that stands for a folded user turn instead of a tool call.
     pub(crate) fold: Option<UserFold>,
     /// Whether the card can be expanded (full-screen). Inline cards are printed once.
     pub(crate) interactive: bool,
+    /// The tool group this call belongs to (the id of the group's first card), full-screen only.
+    pub(crate) batch: Option<u64>,
 }
 
 impl ToolCard {
@@ -110,9 +116,11 @@ impl ToolCard {
             started: Instant::now(),
             ms: None,
             diff: None,
+            diff_counts: (0, 0),
             group: Vec::new(),
             fold: None,
             interactive: true,
+            batch: None,
         }
     }
 
@@ -137,6 +145,12 @@ impl ToolCard {
                 || !arg_rows(&self.args).is_empty())
     }
 
+    /// Give the card the file change its call makes, counted here once.
+    pub(crate) fn set_diff(&mut self, diff: FileDiff) {
+        self.diff_counts = crate::render::diff_stat(&diff);
+        self.diff = Some(diff);
+    }
+
     /// Fold the finished call this card holds into its group and start over with a new call.
     pub(crate) fn fold_in(&mut self, name: String, args: String) {
         self.group.push(Member {
@@ -149,6 +163,7 @@ impl ToolCard {
         self.detail = None;
         self.full = None;
         self.diff = None;
+        self.diff_counts = (0, 0);
         self.started = Instant::now();
     }
 }
@@ -209,7 +224,7 @@ pub(crate) fn outcome_text(card: &ToolCard) -> String {
         CardStatus::Running => "running".to_string(),
         _ => {
             if let Some(diff) = &card.diff {
-                return diff_outcome(diff);
+                return diff_outcome(diff, card.diff_counts);
             }
             let s = clean_summary(&card.name, &card.summary);
             if s.is_empty() {
@@ -225,8 +240,7 @@ pub(crate) fn outcome_text(card: &ToolCard) -> String {
     }
 }
 
-fn diff_outcome(diff: &FileDiff) -> String {
-    let (adds, dels) = crate::render::diff_stat(diff);
+fn diff_outcome(diff: &FileDiff, (adds, dels): (usize, usize)) -> String {
     let minus = g().diff_minus;
     let stat = match (adds, dels) {
         (a, 0) => format!("+{a}"),
@@ -959,7 +973,7 @@ mod tests {
         c.status = CardStatus::Ok;
         c.summary = "wrote".into();
         c.ms = Some(4);
-        c.diff = Some(FileDiff {
+        c.set_diff(FileDiff {
             path: "src/lib.rs".into(),
             kind,
             old: old.map(str::to_string),

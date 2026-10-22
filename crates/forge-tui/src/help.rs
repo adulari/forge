@@ -73,7 +73,10 @@ const FIXED_KEYS: [(&str, &str); 12] = [
     ("Tab", "Accept the suggestion or the selected completion"),
     ("Esc", "Stop the turn, or close what is open"),
     ("Esc Esc", "Rewind to an earlier message (idle)"),
-    ("Ctrl+T", "Expand or collapse the latest tool call"),
+    (
+        "Ctrl+T",
+        "Open the latest tool group, then its newest call; again folds it",
+    ),
     ("Ctrl+O", "Show or hide task and agent details"),
     ("Ctrl+J", "Insert a newline (also Shift+Enter, Alt+Enter)"),
     ("Ctrl+A", "Start of line (Ctrl+E end of line)"),
@@ -89,8 +92,12 @@ const FIXED_KEYS: [(&str, &str); 12] = [
     ),
 ];
 
-const MOUSE_ROWS: [(&str, &str); 4] = [
+const MOUSE_ROWS: [(&str, &str); 5] = [
     ("Wheel", "Scroll the transcript"),
+    (
+        "Click",
+        "A tool group's summary: open or fold the calls in it",
+    ),
     (
         "Click",
         "A tool call: expand or collapse its output (same as Ctrl+T)",
@@ -98,7 +105,7 @@ const MOUSE_ROWS: [(&str, &str); 4] = [
     ("Drag", "Select text; releasing the button copies it"),
     (
         "Click",
-        "The jump bar: go to the latest or the previous message",
+        "A pill while scrolled up: jump to the bottom or the previous message",
     ),
 ];
 

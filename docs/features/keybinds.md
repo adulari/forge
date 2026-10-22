@@ -37,7 +37,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 |---|---|---|
 | `interrupt` | Ctrl-C | Stop current turn (in an overlay: close it). Idle with text: clear the input and save it to prompt history (↑ recalls it). Idle with empty input: press twice within 2 s to quit |
 | — | Esc | Stop current turn (idle: press twice to open the rewind picker; never quits) |
-| — | Ctrl-Home | Full-screen: jump to the most recent user message above the view; again = the one before (the "↑ Previous message" bar at the top does the same on click) |
+| — | Ctrl-Home | Full-screen: jump to the most recent user message above the view; again = the one before (the "↑ Previous message" pill at the top does the same on click; it and the "Jump to bottom" pill only show while scrolled up) |
 | — | ↑/↓ · 1–9 · Space · Enter · ←/→ · o · n · Esc | Inside an `ask_user` form: move · pick · toggle · confirm · switch question · other / note · dismiss ([docs](ask-user-question.md)) |
 | `command_palette` | / | Open slash-command palette |
 | `skip_model` | Ctrl-Shift-K | Mid-turn: abort so you can retry on another model |
@@ -45,7 +45,10 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `tier_up` | Ctrl-↑ | Pin the next turn to the next higher mesh tier (mid-turn: abort and retry) |
 | `tier_down` | Ctrl-↓ | Pin the next turn to the next lower mesh tier (mid-turn: abort and retry) |
 | `toggle_reasoning` | Ctrl-R | Show/hide reasoning blocks inline |
-| `toggle_tool_card` | Ctrl-T | Expand/collapse the most recent tool call (click a card for any other) |
+| `toggle_tool_card` | Ctrl-T | Expand/collapse the most recent tool call (click a card for any other). With tool groups folding: opens the newest group, then its newest call, then folds it |
+| `toggle_tool_groups` | Alt-O | Full-screen: open every tool group (new ones too), or fold them all ([tool groups](tui-tool-cards.md)) |
+| `prev_tool_group` | Alt-↑ | Full-screen: focus the previous tool group; then ↑/↓ move, Enter or Space toggle, Esc lets go |
+| `next_tool_group` | Alt-↓ | Full-screen: focus the next tool group (same keys as above) |
 | `undo` | Ctrl-Z | Undo last file write (`/undo`) |
 | `compact` | Ctrl-L | Compact/summarize conversation (`/compact`) |
 | `model_picker` | Alt-M | Open model picker overlay |
@@ -62,10 +65,18 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `voice` | Ctrl-V | Open the `/voice` recording overlay |
 | `kill_line_forward` | Alt-K | Delete from the cursor to the end of the line |
 
+**Alt chords on macOS.** Alt-O, Alt-↑/↓ and the other Alt binds reach Forge only when the terminal
+sends Option as Meta (Escape+key). Without that, Option+O types `ø` and Option+↑ may move by
+paragraph instead. Turn it on in Terminal.app (Settings → Profiles → Keyboard → "Use Option as Meta
+key"), iTerm2 (Profiles → Keys → Left/Right Option key → "Esc+"), Ghostty (`macos-option-as-alt =
+true`), kitty (`macos_option_as_alt yes`), WezTerm (`send_composed_key_when_left_alt_is_pressed =
+false`) or Alacritty (`option_as_alt = "Both"`), or rebind the action to a Ctrl chord. A tool group
+can always be opened with a click.
+
 ## 3. Implementation
 
 - **`forge-config`** — `KeyCombo`, `KeybindsConfig` (`BTreeMap<String, KeyCombo>`), a `Default`
-  with the binds above (the shipped default map has 23), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
+  with the binds above (the shipped default map has 26), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
   preserving all other config keys). `Config` gains a `keybinds` field.
 - **`forge-tui/keybinds.rs`** — `matches(combo, key_event)` compares a combo against a crossterm
   `KeyEvent`; `resolve_action()` returns the `KeyKind` for the first matching configured action.
