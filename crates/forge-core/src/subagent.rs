@@ -47,10 +47,11 @@ use execution::{execute_tool, tool_result_failed};
 
 mod requests;
 pub use requests::{
-    cancel_subagent_spec, is_write_capable, list_subagents_spec, parse_detached_flag,
-    parse_requests, resolve, resolve_child_address, rewrite_args_for_root, send_to_agent_spec,
-    spawn_agents_spec, spawn_agents_spec_for, spawn_agents_spec_with, AdmissionHandle,
-    AgentRequest, ResolvedAgent, CANCEL_SUBAGENT_TOOL, LIST_SUBAGENTS_TOOL, SEND_TO_AGENT_TOOL,
+    cancel_subagent_spec, effective_tools, find_agent, is_write_capable, list_subagents_spec,
+    narrowed_mode, parse_detached_flag, parse_requests, resolve, resolve_child_address,
+    rewrite_args_for_root, send_to_agent_spec, spawn_agents_spec, spawn_agents_spec_for,
+    spawn_agents_spec_with, system_prompt_with_skills, AdmissionHandle, AgentRequest,
+    ResolvedAgent, CANCEL_SUBAGENT_TOOL, LIST_SUBAGENTS_TOOL, SEND_TO_AGENT_TOOL,
 };
 
 /// Shared, cheaply-cloneable machinery a subagent needs — the same backends the parent uses.
@@ -198,7 +199,8 @@ pub async fn run_subagent(
 ) -> Result<SubagentOutcome, CoreError> {
     let task = agent.task.as_str();
     // `decision` is a parameter (routed once by the caller); no second route_child here.
-    let transcript = vec![Message::system(&agent.system_prompt), Message::user(task)];
+    let system = child_system_prompt(ctx, agent);
+    let transcript = vec![Message::system(&system), Message::user(task)];
     ctx.store.add_message(child_id, 0, Role::User, task, None)?;
     run_agent_loop(
         ctx, child_id, agent, decision, budget, transcript, 1, on_delta,
@@ -223,7 +225,7 @@ pub async fn resume_subagent(
 ) -> Result<SubagentOutcome, CoreError> {
     let stored = ctx.store.load_messages(child_id)?;
     let mut transcript = Vec::with_capacity(stored.len() + 2);
-    transcript.push(Message::system(&agent.system_prompt));
+    transcript.push(Message::system(child_system_prompt(ctx, agent)));
     for m in stored {
         let visibility = m.visibility;
         let mut msg = match m.role {
@@ -252,6 +254,10 @@ pub async fn resume_subagent(
     .await
 }
 
+fn child_system_prompt(ctx: &AgentCtx, agent: &ResolvedAgent) -> String {
+    system_prompt_with_skills(agent, &ctx.repo_root, ctx.config.commands.trust_project)
+}
+
 /// The child model↔tool loop shared by a fresh [`run_subagent`] and a [`resume_subagent`]
 /// follow-up: same toolset resolution, same failover chain, same persistence — only the
 /// starting transcript and message-seq offset differ.
@@ -267,20 +273,21 @@ async fn run_agent_loop(
     on_delta: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Result<SubagentOutcome, CoreError> {
     // The agent type may widen the toolset beyond read-only; writes/shell still pass the
-    // permission gate (where Ask→Deny in a child). The child can itself spawn subagents only
-    // while there is depth budget left (RFC subagent-orchestration Phase 3c).
-    let full = ToolRegistry::with_core_tools();
-    let can_recurse = ctx.depth < ctx.max_depth;
-    let allowed: Vec<&str> = if agent.tools.is_empty() {
-        SUBAGENT_TOOLS.to_vec()
-    } else {
-        agent
-            .tools
-            .iter()
-            .map(String::as_str)
-            .filter(|t| *t != SPAWN_AGENTS_TOOL)
-            .collect()
+    // permission gate (where Ask→Deny in a child) under the agent's temper, which can only be
+    // stricter than the parent's. The child can itself spawn subagents only while there is depth
+    // budget left (RFC subagent-orchestration Phase 3c) and its type does not disallow it.
+    let narrowed = AgentCtx {
+        mode: narrowed_mode(ctx.mode, agent.mode),
+        ..ctx.clone()
     };
+    let ctx = &narrowed;
+    let full = ToolRegistry::with_core_tools();
+    let can_recurse = ctx.depth < ctx.max_depth
+        && !agent
+            .disallowed_tools
+            .iter()
+            .any(|t| t == SPAWN_AGENTS_TOOL);
+    let allowed = effective_tools(agent);
     let mut specs: Vec<ToolSpec> = allowed
         .iter()
         .filter_map(|name| full.get(name))
@@ -312,7 +319,12 @@ async fn run_agent_loop(
     let mut chain = decision.fallbacks.clone().into_iter();
     let mut active_model = decision.model.clone();
 
-    let max_steps = ctx.config.mesh.max_steps.max(1);
+    let max_steps = agent
+        .max_turns
+        .map_or(ctx.config.mesh.max_steps, |n| {
+            n.min(ctx.config.mesh.max_steps)
+        })
+        .max(1);
     for step in 0..max_steps {
         // Forward the child's streamed deltas so the orchestrator can show live per-child
         // activity (RFC subagent-orchestration Phase 3b), with transparent failover.
@@ -328,9 +340,20 @@ async fn run_agent_loop(
                 sink_activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 on_delta(ev);
             };
-            let completion = ctx
-                .provider
-                .complete(&active_model, &transcript, &specs, &mut sink);
+            // The agent type's `effort`, resolved against the routed model's own ladder.
+            let opts = forge_provider::CompletionOptions {
+                effort: agent.effort.and_then(|level| {
+                    forge_types::effort::resolve_id(&active_model, Some(level)).sent
+                }),
+                ..Default::default()
+            };
+            let completion = if opts.effort.is_some() {
+                ctx.provider
+                    .complete_with(&active_model, &transcript, &specs, &opts, &mut sink)
+            } else {
+                ctx.provider
+                    .complete(&active_model, &transcript, &specs, &mut sink)
+            };
             let idle = crate::effective_stream_idle(&*ctx.provider, &active_model, stream_idle);
             let first_event = if idle > stream_idle {
                 idle
@@ -843,10 +866,10 @@ pub async fn orchestrate(
         // Decide whether this child gets an isolated worktree. We create the WorktreeGuard here
         // (on the orchestrator task, before spawning) so any creation error is visible immediately
         // and doesn't kill an already-running child task.
-        let maybe_guard = if isolation_enabled
-            && repo_is_git
-            && is_write_capable(&resolved, &full_registry)
-        {
+        // An agent type with `isolation: worktree` is isolated even when the config is off.
+        let wants_worktree = (isolation_enabled && repo_is_git)
+            || (resolved.worktree && worktree::is_git_repo(&ctx.repo_root));
+        let maybe_guard = if wants_worktree && is_write_capable(&resolved, &full_registry) {
             let repo_root = ctx.repo_root.clone();
             let cid = child_id.clone();
             match tokio::task::spawn_blocking(move || {
@@ -1082,6 +1105,7 @@ mod tests {
                 tier: Some(TaskTier::Complex),
                 pinned_model: Some("p::m".into()),
                 system_prompt: "You review.".into(),
+                ..Default::default()
             },
         );
         let named = resolve(
@@ -1120,6 +1144,7 @@ mod tests {
                 tier: None,
                 pinned_model: None,
                 system_prompt: String::new(),
+                ..Default::default()
             },
         );
         let with = spawn_agents_spec_with(4, &agents);
@@ -1157,6 +1182,7 @@ mod tests {
             tools: Vec::new(),
             tier: None,
             pinned_model: Some("provx::model".into()),
+            ..Default::default()
         };
         let decision = route_child(&ctx, &agent, BudgetState::default()).await;
         assert_eq!(decision.model, "provx::model");
@@ -1556,6 +1582,7 @@ mod tests {
             tools: Vec::new(),
             tier: None,
             pinned_model: None,
+            ..Default::default()
         }
     }
 
@@ -1580,6 +1607,7 @@ mod tests {
             tools: Vec::new(),
             tier: None,
             pinned_model: None,
+            ..Default::default()
         };
         let mut sink = |_: StreamEvent| {};
         let decision = route_child(&ctx, &agent, BudgetState::default()).await;
@@ -1650,6 +1678,7 @@ mod tests {
             tools: Vec::new(),
             tier: None,
             pinned_model: None,
+            ..Default::default()
         };
         let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = Arc::clone(&progress);
@@ -1769,6 +1798,7 @@ mod tests {
             tools: Vec::new(),
             tier: None,
             pinned_model: None,
+            ..Default::default()
         };
         let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = Arc::clone(&progress);
@@ -1826,6 +1856,7 @@ mod tests {
             tools: vec!["write_file".into()],
             tier: None,
             pinned_model: None,
+            ..Default::default()
         };
         assert!(is_write_capable(&write_agent, &registry));
 
@@ -1837,6 +1868,7 @@ mod tests {
             tools: vec!["read_file".into()],
             tier: None,
             pinned_model: None,
+            ..Default::default()
         };
         assert!(!is_write_capable(&read_agent, &registry));
 
@@ -1848,6 +1880,7 @@ mod tests {
             tools: vec!["shell".into()],
             tier: None,
             pinned_model: None,
+            ..Default::default()
         };
         assert!(is_write_capable(&shell_agent, &registry));
 
@@ -1859,6 +1892,7 @@ mod tests {
             tools: Vec::new(),
             tier: None,
             pinned_model: None,
+            ..Default::default()
         };
         assert!(!is_write_capable(&default_agent, &registry));
     }

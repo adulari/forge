@@ -188,11 +188,15 @@ mod busy_queue;
 mod queue_images;
 pub(crate) use busy_commands::*;
 pub(crate) use queue_images::queue_prompt;
+mod agents_cmd;
+mod catalog_dispatch;
 mod effort;
 mod output_view;
+mod skill_invoke;
 mod subagents;
 pub(crate) use btw::*;
 pub(crate) use busy_queue::{InterruptNext, SteerTracker};
+pub(crate) use catalog_dispatch::dispatch_catalog;
 mod export;
 pub(crate) use export::*;
 
@@ -672,8 +676,13 @@ pub(crate) async fn run_chat_tui(
             } else {
                 e.description.clone()
             },
-            // File-based commands/skills take freeform input; no fixed usage hint.
-            usage: String::new(),
+            // File-based commands/skills take freeform input; `argument-hint:` (or declared
+            // args) is the only usage hint they have.
+            usage: if e.hint.is_empty() {
+                String::new()
+            } else {
+                format!("/{} {}", e.name, e.hint)
+            },
         })
         .collect();
     for w in catalog.warnings() {

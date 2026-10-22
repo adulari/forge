@@ -237,6 +237,7 @@ impl Session {
             pinned_model: None,
             pinned_effort: None,
             exact_effort: None,
+            turn_grant: Default::default(),
             adaptive_effort: Default::default(),
             subagent_pin_free: None,
             overflow_window_cap: None,

@@ -358,6 +358,7 @@ pub(crate) async fn dispatch_command(
         CommandAction::Subagents(explicit) => {
             super::subagents::set_subagent_pin_release(session, app, explicit).await;
         }
+        CommandAction::Agents => super::agents_cmd::list_agents(session, app).await,
         // `/models` opens the interactive model browser: a provider list (with global counts in
         // the heading) that drills into each provider's models on Enter; Esc steps back.
         CommandAction::ListModels => open_models_root(session, app).await?,
@@ -1222,100 +1223,4 @@ script with `return <final result>` so the run yields a relayable answer.\n\nGoa
         }
     }
     Ok(DispatchOutcome::Handled)
-}
-
-/// Resolve a `/line` that isn't a builtin against the file catalog: expand a command, load a
-/// skill's methodology, or report a missing-arg / unknown error. A project-scope definition is
-/// gated on first use (re-run confirms) unless `trust_project`.
-pub(crate) async fn dispatch_catalog(
-    line: &str,
-    catalog: &forge_skills::Catalog,
-    session: &Arc<tokio::sync::Mutex<Session>>,
-    app: &mut forge_tui::App,
-    armed: &mut std::collections::HashSet<String>,
-    trust_project: bool,
-    busy: bool,
-) -> Result<DispatchOutcome> {
-    use forge_skills::Resolved;
-    match catalog.resolve(line) {
-        Resolved::Command {
-            cmd,
-            prompt,
-            guidance,
-        } => {
-            if busy {
-                app.note("⚠ finish or Esc the current turn first");
-                return Ok(DispatchOutcome::Handled);
-            }
-            if !project_trust_ok(&cmd.name, cmd.scope, trust_project, armed, app) {
-                return Ok(DispatchOutcome::Handled);
-            }
-            app.note(&format!(
-                "⚒ command · /{} ({})",
-                cmd.name,
-                cmd.scope.label()
-            ));
-            Ok(DispatchOutcome::RunTurn {
-                prompt,
-                guidance,
-                tier: cmd.tier,
-            })
-        }
-        Resolved::Skill { meta, prompt } => {
-            if busy {
-                app.note("⚠ finish or Esc the current turn first");
-                return Ok(DispatchOutcome::Handled);
-            }
-            if !project_trust_ok(&meta.name, meta.scope, trust_project, armed, app) {
-                return Ok(DispatchOutcome::Handled);
-            }
-            let skill = forge_skills::Skill::load(&meta);
-            for w in &skill.warnings {
-                app.note(&format!("⚠ {w}"));
-            }
-            app.note(&format!("⚒ skill · {} ({})", meta.name, meta.scope.label()));
-            if !skill.resources.is_empty() {
-                app.note(&format!(
-                    "↳ loaded methodology + {} resource(s)",
-                    skill.resources.len()
-                ));
-            }
-            let guidance = vec![skill.guidance()];
-            if prompt.trim().is_empty() {
-                // No task given: prime the methodology into the transcript (no model call) so it
-                // shapes the next turn the user types.
-                {
-                    let mut s = session.lock().await;
-                    s.prime_guidance(&guidance)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                }
-                app.note("↳ methodology primed — type your task");
-                Ok(DispatchOutcome::Handled)
-            } else {
-                Ok(DispatchOutcome::RunTurn {
-                    prompt,
-                    guidance,
-                    tier: meta.tier,
-                })
-            }
-        }
-        Resolved::MissingArgs { name, missing } => {
-            let need = missing
-                .iter()
-                .map(|m| format!("<{m}>"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            app.note(&format!("/{name} requires {need}"));
-            Ok(DispatchOutcome::Handled)
-        }
-        Resolved::Unknown(x) => {
-            app.note(&super::dispatch_checks::unknown_command_note(&x, line));
-            Ok(DispatchOutcome::Handled)
-        }
-        // A `/`-line never resolves to Plain, but stay safe rather than silently submit it.
-        Resolved::Plain(_) => {
-            app.note("unknown command — try /help");
-            Ok(DispatchOutcome::Handled)
-        }
-    }
 }

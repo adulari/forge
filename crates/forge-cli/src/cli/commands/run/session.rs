@@ -652,6 +652,7 @@ pub(crate) async fn build_session_with_self_mcp(
         )));
     }
     clock.mark("skills + mcp + lsp");
+    super::skill_invoke::apply_one_shot_grant(&mut session);
     Ok(session)
 }
 

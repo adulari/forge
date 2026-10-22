@@ -145,6 +145,8 @@ pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};
 mod session_usage_detail;
 mod session_virtual_tools;
 mod session_worktree;
+mod skill_fork;
+pub mod skill_shell;
 pub mod snapshot;
 pub(crate) mod stall_guard;
 pub mod steer;
@@ -165,6 +167,7 @@ pub(crate) use tool_output::tool_detail;
 mod spend_guard;
 mod turn_context;
 pub mod turn_contract;
+pub mod turn_grant;
 mod turn_guards;
 mod unapplied_edit;
 mod vision_policy;
@@ -183,6 +186,7 @@ pub use session_usage_detail::SessionUsageDetail;
 use session_virtual_tools::ASK_USER_TOOL;
 pub use session_virtual_tools::{remember_spec, REMEMBER_TOOL};
 use text_policy::{completed_tasks_recap, memory_scope_at, recap_line, sanitize_suggestion};
+pub use turn_grant::{ForkTurn, TurnGrant};
 pub use workspace_context::WorkspaceContext;
 pub use worktree_ops::WORKTREE_TOOL;
 
@@ -1566,6 +1570,8 @@ pub struct Session {
     /// Deliberately session-scoped and NOT persisted: the durable form is `[model_effort]` in
     /// config, and adding a column for an ad-hoc override would mean a schema migration.
     exact_effort: Option<EffortLevel>,
+    /// The invoked skill's per-turn overrides (`allowed-tools`, `effort`, `context: fork`).
+    turn_grant: turn_grant::TurnGrantState,
     /// In-session override for subagent pin inheritance (`/subagents free|pinned`). `Some(true)`
     /// releases this session's children from the active model pin so they route the mesh on their
     /// own; `Some(false)` forces inheritance. `None` = follow `mesh.subagents.inherit_pin`.
@@ -2255,7 +2261,9 @@ impl Session {
 
     /// The surface the model is shown: lean (core + `tool_search`/`tool_call`) unless switched off.
     fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.advertised_tool_specs(self.full_tool_specs())
+        let mut specs = self.full_tool_specs();
+        specs.retain(|spec| !self.turn_removes_tool(&spec.name));
+        self.advertised_tool_specs(specs)
     }
 
     /// Every tool this session can run, before the lean surface defers any of them.
@@ -2638,8 +2646,27 @@ impl Session {
     /// skill's methodology) as persisted system messages, and biases routing with an optional
     /// `tier_override` (the command/skill `tier:` hint). `run_turn(p)` is exactly
     /// `run_turn_with(p, &[], None)` — the agent loop, tools, permission broker, pricing and
-    /// persistence are otherwise unchanged.
+    /// persistence are otherwise unchanged. A grant queued with [`Session::grant_next_turn`]
+    /// applies to this turn only, and may hand the whole turn to a subagent (`context: fork`).
     pub async fn run_turn_with(
+        &mut self,
+        prompt: &str,
+        guidance: &[String],
+        tier_override: Option<TaskTier>,
+    ) -> Result<LoopOutcome, CoreError> {
+        // Boxed: nesting the loop's future one level deeper inline pushes callers such as
+        // `forge bench` past the compiler's layout depth limit.
+        let outcome = match self.begin_turn_grant() {
+            Some(fork) => {
+                Box::pin(self.run_forked_turn(prompt, guidance, tier_override, fork)).await
+            }
+            None => Box::pin(self.run_turn_inner(prompt, guidance, tier_override)).await,
+        };
+        self.end_turn_grant();
+        outcome
+    }
+
+    async fn run_turn_inner(
         &mut self,
         prompt: &str,
         guidance: &[String],
@@ -2875,7 +2902,8 @@ impl Session {
         //
         // Resolved against the ROUTED model's provider ladder — the pin may have just changed which
         // model this is — so an exact rung can never name something the provider does not offer.
-        if let Some(exact) = self.exact_effort {
+        // An invoked skill's `effort:` outranks the session rung for its one turn.
+        if let Some(exact) = self.turn_effort().or(self.exact_effort) {
             decision.effort = forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
         }
         // After every pin backstop: a session pin the router never saw must not reach a retaining
@@ -3326,6 +3354,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
         let specs = if self.tools_advertised_once
             || self.mid_task()
+            || !guidance.is_empty()
             || Self::should_advertise_tools(decision.tier, prompt)
         {
             self.tools_advertised_once = true;
@@ -4333,7 +4362,12 @@ pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> T
         .into_iter()
         .map(|(name, desc)| {
             let desc = forge_skills::summarize_description(&desc, SKILL_SUMMARY_CHARS);
-            format!("- {name}: {desc}")
+            // A `paths:` skill is for matching files; say so, since the listing is all the model
+            // sees before it decides to load one.
+            match catalog.skill_paths(&name) {
+                [] => format!("- {name}: {desc}"),
+                paths => format!("- {name}: {desc} (for files: {})", paths.join(", ")),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -5003,6 +5037,9 @@ mod tests {
 
     #[path = "plan_shell.rs"]
     mod plan_shell_tests;
+
+    #[path = "turn_grant.rs"]
+    mod turn_grant_tests;
 
     #[path = "security_floor.rs"]
     mod security_floor_tests;

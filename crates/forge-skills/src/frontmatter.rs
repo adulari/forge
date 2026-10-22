@@ -34,6 +34,56 @@ impl Frontmatter {
             _ => Vec::new(),
         }
     }
+
+    /// A YAML-style boolean: `true/false`, `yes/no`, `on/off`, `1/0` in any case. `None` when the
+    /// key is absent or the value is none of those.
+    pub fn flag(&self, key: &str) -> Option<bool> {
+        match self.scalar(key)?.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => Some(true),
+            "false" | "no" | "off" | "0" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// A tool list in any of Claude Code's spellings: a YAML list, or one string separated by
+    /// spaces and/or commas. Separators inside parentheses stay part of the entry, so
+    /// `Bash(git log:*) Read` is two entries.
+    pub fn tool_list(&self, key: &str) -> Vec<String> {
+        self.list(key)
+            .iter()
+            .flat_map(|item| split_tool_list(item))
+            .collect()
+    }
+}
+
+/// Split `"Bash(git log:*) Read,Edit"` into entries, keeping spaces and commas that sit inside
+/// parentheses.
+pub fn split_tool_list(value: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ' ' | ',' | '\t' if depth == 0 => {
+                if !current.is_empty() {
+                    entries.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        entries.push(current);
+    }
+    entries
 }
 
 /// Split a file into its `---`-fenced frontmatter (if any) and the body. A file without a valid
@@ -154,6 +204,28 @@ mod tests {
         assert!(fm.is_none());
         assert_eq!(body, "just a prompt body");
         assert!(!body.starts_with('\u{feff}'));
+    }
+
+    #[test]
+    fn flags_accept_yaml_spellings() {
+        let fm = parse("a: yes\nb: OFF\nc: 1\nd: maybe\n").unwrap();
+        assert_eq!(fm.flag("a"), Some(true));
+        assert_eq!(fm.flag("b"), Some(false));
+        assert_eq!(fm.flag("c"), Some(true));
+        assert_eq!(fm.flag("d"), None);
+        assert_eq!(fm.flag("missing"), None);
+    }
+
+    #[test]
+    fn tool_lists_split_strings_and_keep_parenthesised_separators() {
+        let fm = parse(
+            "a: Bash(git log:*) Read,Edit\nb:\n  - Bash(gh pr view, *)\n  - Grep\nc: [Read, Glob]\n",
+        )
+        .unwrap();
+        assert_eq!(fm.tool_list("a"), ["Bash(git log:*)", "Read", "Edit"]);
+        assert_eq!(fm.tool_list("b"), ["Bash(gh pr view, *)", "Grep"]);
+        assert_eq!(fm.tool_list("c"), ["Read", "Glob"]);
+        assert!(fm.tool_list("missing").is_empty());
     }
 
     #[test]

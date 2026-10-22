@@ -13,8 +13,10 @@ use forge_types::{
 use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
+mod agent_builtins;
 pub mod agents;
 pub mod browser;
+pub mod cc_rules;
 pub mod codemode;
 mod commit_policy;
 mod compact_model;

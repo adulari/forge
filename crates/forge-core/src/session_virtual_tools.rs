@@ -307,14 +307,17 @@ impl Session {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim();
-        let (result, ok) = match self
-            .skills
-            .as_ref()
-            .and_then(|c| c.skill_guidance(name, self.commands_trust_project()))
-        {
-            Some(guidance) => {
-                self.presenter
-                    .emit(PresenterEvent::Warning(format!("⚒ skill loaded · {name}")));
+        let (result, ok) = match self.load_skill_for_model(name) {
+            Some((guidance, grant)) => {
+                // The skill's `allowed-tools`/`disallowed-tools` hold for the rest of this turn.
+                let granted = grant.describe();
+                self.extend_turn_grant(grant);
+                let note = if granted.is_empty() {
+                    format!("⚒ skill loaded · {name}")
+                } else {
+                    format!("⚒ skill loaded · {name} · {granted}")
+                };
+                self.presenter.emit(PresenterEvent::Warning(note));
                 (
                     format!("Loaded the '{name}' skill. Apply this methodology now:\n\n{guidance}"),
                     true,

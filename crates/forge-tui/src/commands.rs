@@ -154,6 +154,8 @@ pub enum CommandAction {
     /// model pin — `/subagents free` / `/subagents pinned`. `None` = bare `/subagents`, which
     /// toggles and reports the resulting state.
     Subagents(Option<bool>),
+    /// List the subagent types `spawn_agents` can use (`/agents`): built-ins plus agent files.
+    Agents,
     /// Enter planning mode (`/plan <task>`): read-only investigation that proposes a plan.
     Plan(String),
     /// Approve the proposed plan and execute it (`/execute`): switches to Auto-edit and builds it.
@@ -378,6 +380,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "subagents" | "subagent" => {
             CommandAction::Subagents(subagent_args::parse_subagents_arg(&arg))
         }
+        "agents" => CommandAction::Agents,
         "remember" => CommandAction::Remember(arg.to_string()),
         "memories" => CommandAction::Memories,
         "self-mcp" | "self" => {
@@ -806,6 +809,12 @@ mod tests {
                 args: String::new(),
             })
         );
+    }
+
+    #[test]
+    fn parses_agents_command() {
+        assert_eq!(parse_command("/agents"), CommandAction::Agents);
+        assert!(COMMANDS.iter().any(|c| c.name == "agents"));
     }
 
     #[test]

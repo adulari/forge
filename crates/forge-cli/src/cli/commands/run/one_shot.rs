@@ -88,6 +88,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     } else {
         expand_one_shot_slash(&prompt)?
     };
+    // A skill's methodology, grant and fork live in this process: handed to a daemon session they
+    // would be dropped and only the typed argument would run.
+    let carries_skill = !command_guidance.is_empty() || super::skill_invoke::grant_pending();
     let mut guidance = system;
     guidance.extend(command_guidance);
     let at_images = if goal_spec.is_none() {
@@ -118,7 +121,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         &prompt,
         pin.as_deref(),
         publish_to_fleet,
-        local_only || usage_json.is_some() || resume.is_some(),
+        local_only || carries_skill || usage_json.is_some() || resume.is_some(),
         output_format,
     )
     .await
@@ -137,7 +140,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
             None => Ok(()),
         }
     };
-    let first = (!prompt.is_empty()).then(|| OneTurn {
+    let first = (!prompt.is_empty() || carries_skill).then(|| OneTurn {
         prompt: prompt.clone(),
         guidance: guidance.clone(),
         tier,
@@ -490,7 +493,11 @@ async fn publish_run_to_fleet(
 /// - `//foo` escapes to a literal `/foo` prompt (mirrors chat).
 /// - A command expands to its prompt (+ guidance/tier); a skill with a task runs the task under
 ///   the skill's methodology.
-/// - A bare skill or missing args is a usage error — one-shot has no "next turn" to prime.
+/// - A bare skill or missing args is a usage error — one-shot has no "next turn" to prime —
+///   unless the skill runs in a subagent (`context: fork`), whose body is the whole task.
+/// - The definition's frontmatter grant (`allowed-tools`, `effort`, `context: fork`) is handed to
+///   the session for this run's turn, and `` !`cmd` `` injections run first (trusted projects).
+///   `${CLAUDE_SESSION_ID}` stays literal: the session is built after this expansion.
 /// - Project-scope definitions require `[commands] trust_project = true`: the interactive
 ///   run-again-to-confirm gate has no headless equivalent, so default-deny with a pointer.
 /// - Anything unresolved (absolute paths, unknown tokens, TUI-only builtins) passes through
@@ -509,8 +516,29 @@ pub(super) fn expand_one_shot_slash(
     let trust_project = forge_config::load()
         .map(|c| c.commands.trust_project)
         .unwrap_or(false);
+    let workspace = std::env::current_dir().unwrap_or_default();
+    // The session does not exist yet, so `${CLAUDE_SESSION_ID}` stays as written here.
+    let vars = forge_skills::TemplateVars {
+        project_dir: Some(workspace.display().to_string()),
+        ..Default::default()
+    };
+    use super::skill_invoke;
     use forge_skills::Resolved;
-    match catalog.resolve(t) {
+    let finish = |prompt: String, guidance: Vec<String>, grant: forge_core::TurnGrant| {
+        let (prompt, guidance) = if skill_invoke::needs_shell(&prompt, &guidance) {
+            let policy = skill_invoke::one_shot_policy(&grant, &workspace);
+            skill_invoke::run_injections(&prompt, &guidance, &policy).map_err(anyhow::Error::msg)?
+        } else {
+            (prompt, guidance)
+        };
+        let summary = grant.describe();
+        if !summary.is_empty() {
+            eprintln!("↳ {summary}");
+        }
+        skill_invoke::stash_one_shot_grant(grant);
+        Ok::<_, anyhow::Error>((prompt, guidance))
+    };
+    match catalog.resolve_with(t, &vars) {
         Resolved::Command {
             cmd,
             prompt,
@@ -524,6 +552,16 @@ pub(super) fn expand_one_shot_slash(
                 );
             }
             eprintln!("⚒ command · /{} ({})", cmd.name, cmd.scope.label());
+            let grant = skill_invoke::grant_for(
+                &format!("/{}", cmd.name),
+                &cmd.invocation,
+                cmd.scope,
+                cmd.model.as_deref(),
+                t,
+                &workspace,
+                &vars,
+            );
+            let (prompt, guidance) = finish(prompt, guidance, grant)?;
             Ok((prompt, guidance, cmd.tier))
         }
         Resolved::Skill { meta, prompt } => {
@@ -534,7 +572,7 @@ pub(super) fn expand_one_shot_slash(
                     meta.name
                 );
             }
-            if prompt.trim().is_empty() {
+            if prompt.trim().is_empty() && meta.invocation.fork.is_none() {
                 anyhow::bail!(
                     "skill /{name} needs a task in one-shot mode — usage: forge run \
                      \"/{name} <task>\"",
@@ -546,7 +584,21 @@ pub(super) fn expand_one_shot_slash(
                 eprintln!("⚠ {w}");
             }
             eprintln!("⚒ skill · {} ({})", meta.name, meta.scope.label());
-            Ok((prompt, vec![skill.guidance()], meta.tier))
+            let guidance = vec![skill.render(Some(&prompt), &vars)];
+            let grant = skill_invoke::grant_for(
+                &format!("skill {}", meta.name),
+                &meta.invocation,
+                meta.scope,
+                meta.model.as_deref(),
+                t,
+                &workspace,
+                &vars.for_skill_dir(&meta.dir),
+            );
+            let (prompt, guidance) = finish(prompt, guidance, grant)?;
+            Ok((prompt, guidance, meta.tier))
+        }
+        Resolved::NotUserInvocable(name) => {
+            anyhow::bail!("/{name} is for the model only (user-invocable: false)")
         }
         Resolved::MissingArgs { name, missing } => {
             let need = missing

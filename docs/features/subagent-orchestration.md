@@ -414,3 +414,36 @@ that builds the specs, a synthesis system prompt, and a report renderer — no n
 Subagent batches print as a `◆ Agents` group with faint `├`/`└` branches and a count footer; the
 live list sits in the tasks and agents band (`Ctrl+O`), or the details rail from 150 columns. See
 `docs/features/tui-panels.md`.
+
+## Agent types
+
+`spawn_agents` takes an `agent` name. The types come from Forge's built-ins, then `~/.claude/agents`,
+`~/.forge/agents`, the project's `.claude/agents` and its `[mesh.subagents] agents_dir`, later layers
+replacing earlier ones by name (`forge_config::load_agents_layered`). `/agents` lists them with where
+each came from and what it sets. A name matches case-insensitively, so Claude Code's `Explore` and
+`Plan` reach the built-ins.
+
+Built-in types, replaceable by a file of the same name:
+
+| name | tools | tier | temper |
+| --- | --- | --- | --- |
+| `explore` | `read_file`, `list_dir`, `search`, `glob`, read-only `shell` | trivial | `plan` |
+| `plan` | same | mesh-routed | `plan` |
+| `general-purpose` | the default read-only set (no file needed) | mesh-routed | the parent's |
+
+An agent file is Markdown with front matter (the body is the system prompt). Besides `name`,
+`description`, `tools`, `tier` and `model`, Claude Code's fields are read:
+
+| field | effect |
+| --- | --- |
+| `disallowedTools` | removed from the child's tool set, including the default one; naming `spawn_agents` stops it recursing |
+| `permissionMode` | the child's temper, applied only when stricter than the parent's (`plan`, `default`); a wider mode is ignored so a cloned repo cannot widen what a child does unasked |
+| `maxTurns` | the child's model-step cap, never above `[mesh] max_steps` |
+| `skills` | each listed skill's methodology is appended to the child's system prompt (skipped when the model could not load it: `disable-model-invocation`, or a project skill in an untrusted project) |
+| `effort` | the reasoning rung sent with the child's model calls, resolved against the routed model |
+| `isolation: worktree` | the child runs in its own git worktree even when `worktree_isolation` is off |
+| `mcpServers`, `color` | recorded and shown by `/agents`; children have no MCP tool surface yet, so servers are not connected |
+
+A child whose temper is `plan` cannot write whatever its tools are, so it is never given a worktree.
+`context: fork` in a skill (see `command-skill-system.md`) runs the skill as one child of the type its
+`agent:` names.

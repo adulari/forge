@@ -11,14 +11,18 @@
 //! into Forge scopes is a separate import layer.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use forge_types::TaskTier;
 
 mod builtin;
 pub mod from_session;
 pub mod frontmatter;
+pub mod inline_shell;
+mod invocation;
 pub mod normalize;
+mod parse;
+mod skill;
 mod summary;
 mod template;
 
@@ -26,9 +30,11 @@ pub use from_session::{
     assemble_skill_md, build_distillation_prompt, derive_slug, parse_model_output, write_skill,
     TranscriptEntry,
 };
+pub use invocation::{ForkSpec, Invocation};
 pub use normalize::normalize_skill_content;
+pub use skill::Skill;
 pub use summary::summarize_description;
-pub use template::expand;
+pub use template::{expand, split_args, TemplateVars};
 
 /// Where a definition came from. Precedence: `Project` > `User` > `Builtin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -82,11 +88,16 @@ pub struct Command {
     pub body: String,
     pub scope: Scope,
     pub path: PathBuf,
+    pub invocation: Invocation,
 }
 
 impl Command {
-    /// A one-line `<a> [b]` hint of the declared args (empty when none).
+    /// The palette's argument hint: the `argument-hint:` text when set, else `<a> [b]` derived
+    /// from the declared args (empty when none).
     pub fn arg_hint(&self) -> String {
+        if let Some(hint) = &self.invocation.argument_hint {
+            return hint.clone();
+        }
         self.args
             .iter()
             .map(|a| {
@@ -114,82 +125,11 @@ pub struct SkillMeta {
     /// For a built-in skill compiled into the binary, its methodology body (there is no `dir` to
     /// read from). `None` for on-disk skills, whose body + resources load from `dir` at use time.
     pub body: Option<String>,
-}
-
-/// A fully-loaded skill: the methodology body plus any readable bundled resources. Built by
-/// [`Skill::load`] at invoke time only.
-#[derive(Debug, Clone)]
-pub struct Skill {
-    pub meta: SkillMeta,
-    pub body: String,
-    /// `(name, contents)` for each resource that loaded; missing ones are skipped + warned.
-    pub resources: Vec<(String, String)>,
-    pub warnings: Vec<String>,
-}
-
-impl Skill {
-    /// Read the skill body + resources from disk (progressive disclosure). Never fails: a
-    /// missing/unreadable resource is recorded as a warning and the skill still runs.
-    pub fn load(meta: &SkillMeta) -> Skill {
-        let mut warnings = Vec::new();
-        // A built-in skill carries its body inline (no dir to read); on-disk skills read SKILL.md.
-        let body = match &meta.body {
-            Some(b) => b.clone(),
-            None => match std::fs::read_to_string(meta.dir.join("SKILL.md")) {
-                Ok(raw) => frontmatter::split(&raw).1.trim().to_string(),
-                Err(e) => {
-                    warnings.push(format!("skill {}: cannot read SKILL.md ({e})", meta.name));
-                    String::new()
-                }
-            },
-        };
-        let mut resources = Vec::new();
-        for res in &meta.resources {
-            let Some(path) = safe_resource_path(&meta.dir, res) else {
-                warnings.push(format!(
-                    "skill {}: resource path escapes skill dir: {res}",
-                    meta.name
-                ));
-                continue;
-            };
-            match std::fs::read_to_string(path) {
-                Ok(c) => resources.push((res.clone(), c)),
-                Err(_) => warnings.push(format!("skill {}: missing resource {res}", meta.name)),
-            }
-        }
-        Skill {
-            meta: meta.clone(),
-            body,
-            resources,
-            warnings,
-        }
-    }
-
-    /// The full guidance block injected into the turn: the methodology body followed by each
-    /// loaded resource under a header. Rebranded so an imported skill presents as Forge-native
-    /// (see [`forge_native`]).
-    pub fn guidance(&self) -> String {
-        let mut out = self.body.clone();
-        for (name, contents) in &self.resources {
-            out.push_str(&format!("\n\n--- resource: {name} ---\n{contents}"));
-        }
-        forge_native(&out)
-    }
-}
-
-fn safe_resource_path(dir: &Path, res: &str) -> Option<PathBuf> {
-    let rel = Path::new(res);
-    if rel.is_absolute() {
-        return None;
-    }
-    rel.components()
-        .all(|c| {
-            matches!(
-                c,
-                std::path::Component::Normal(_) | std::path::Component::CurDir
-            )
-        })
-        .then(|| dir.join(rel))
+    /// Claude Code's `model:` — with `context: fork` it picks the forked subagent's model.
+    pub model: Option<String>,
+    /// Claude Code's `arguments:` names, mapped to positions for `$name` substitution.
+    pub arg_names: Vec<String>,
+    pub invocation: Invocation,
 }
 
 /// The outcome of resolving a submitted line against the catalog.
@@ -207,6 +147,8 @@ pub enum Resolved {
     Unknown(String),
     /// A command invoked without its required args; no model call should be made.
     MissingArgs { name: String, missing: Vec<String> },
+    /// A definition marked `user-invocable: false`: only the model may load it.
+    NotUserInvocable(String),
     /// Not a slash invocation (or an escaped `//literal`): pass straight to `run_turn`.
     Plain(String),
 }
@@ -220,6 +162,8 @@ pub struct Entry {
     pub is_skill: bool,
     /// True when this definition shadows a lower-scope one of the same name.
     pub shadows: bool,
+    /// The argument hint for the palette (`argument-hint:` or the declared args); may be empty.
+    pub hint: String,
 }
 
 /// The merged, precedence-resolved index, built once per session. Construction never fails;
@@ -454,22 +398,31 @@ impl Catalog {
     /// no duplicate appears there.
     pub fn entries(&self) -> Vec<Entry> {
         let mut out: Vec<Entry> = Vec::new();
+        // `user-invocable: false` hides a definition from the palette and listings.
         for cmd in self.commands.values() {
+            if !cmd.invocation.user_invocable {
+                continue;
+            }
             out.push(Entry {
                 name: cmd.name.clone(),
                 description: self.display_description(cmd),
                 scope: cmd.scope,
                 is_skill: false,
                 shadows: self.shadows(&cmd.name, cmd.scope),
+                hint: cmd.arg_hint(),
             });
         }
         for meta in self.skills.values() {
+            if !meta.invocation.user_invocable {
+                continue;
+            }
             out.push(Entry {
                 name: meta.name.clone(),
                 description: forge_native(&meta.description),
                 scope: meta.scope,
                 is_skill: true,
                 shadows: self.shadows(&meta.name, meta.scope),
+                hint: meta.invocation.argument_hint.clone().unwrap_or_default(),
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -509,6 +462,12 @@ impl Catalog {
 
     /// Resolve a submitted line into an actionable [`Resolved`].
     pub fn resolve(&self, line: &str) -> Resolved {
+        self.resolve_with(line, &TemplateVars::default())
+    }
+
+    /// [`Catalog::resolve`] with session variables (`${CLAUDE_SESSION_ID}`, …) substituted into an
+    /// expanded command. A skill's body is rendered later, by [`Skill::render`].
+    pub fn resolve_with(&self, line: &str, vars: &TemplateVars) -> Resolved {
         let line = line.trim();
         if !line.starts_with('/') {
             return Resolved::Plain(line.to_string());
@@ -526,6 +485,7 @@ impl Catalog {
             let sname = sp.next().unwrap_or("").to_string();
             let sprompt = sp.next().unwrap_or("").trim().to_string();
             return match self.skills.get(&sname) {
+                Some(meta) if !meta.invocation.user_invocable => Resolved::NotUserInvocable(sname),
                 Some(meta) => Resolved::Skill {
                     meta: meta.clone(),
                     prompt: sprompt,
@@ -535,11 +495,11 @@ impl Catalog {
         }
 
         if let Some(cmd) = self.commands.get(&name) {
-            let positional: Vec<&str> = if rest.is_empty() {
-                Vec::new()
-            } else {
-                rest.split_whitespace().collect()
-            };
+            if !cmd.invocation.user_invocable {
+                return Resolved::NotUserInvocable(name);
+            }
+            let words = split_args(&rest);
+            let positional: Vec<&str> = words.iter().map(String::as_str).collect();
             let missing: Vec<String> = cmd
                 .args
                 .iter()
@@ -568,11 +528,11 @@ impl Catalog {
                     )
                 })
                 .collect();
-            let mut prompt = template::expand(&cmd.body, &positional, &named, &rest);
+            let mut prompt = vars.apply(&template::expand(&cmd.body, &positional, &named, &rest));
             // A command that delegates to a skill ("Use the **debugging** skill …", the
             // Claude-Code wrapper pattern) must actually load that skill's methodology, not just
             // name it — otherwise invoking the command does nothing useful.
-            let guidance = self.referenced_skill_guidance(&cmd.body);
+            let guidance = self.referenced_skill_guidance(&cmd.body, vars);
             // Don't silently drop a typed task when the body has no $ARGUMENTS/$N to receive it.
             if !rest.is_empty() && !template::uses_args(&cmd.body, &named) {
                 let trimmed = prompt.trim_end().to_string();
@@ -590,6 +550,9 @@ impl Catalog {
         }
 
         if let Some(meta) = self.skills.get(&name) {
+            if !meta.invocation.user_invocable {
+                return Resolved::NotUserInvocable(name);
+            }
             return Resolved::Skill {
                 meta: meta.clone(),
                 prompt: rest,
@@ -610,7 +573,7 @@ impl Catalog {
         let mut out: Vec<(String, String)> = self
             .skills
             .keys()
-            .filter_map(|name| self.visible_skill(name, allow_project))
+            .filter_map(|name| self.model_skill(name, allow_project))
             .map(|m| (m.name.clone(), forge_native(&m.description)))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -623,9 +586,35 @@ impl Catalog {
     /// `allow_project` gates PROJECT-scope skills for the same reason as [`Self::skill_listing`].
     /// Loading returns the skill's FULL body as authoritative methodology, so an untrusted project
     /// skill here is direct instruction injection from a cloned repo.
+    /// A skill marked `disable-model-invocation: true` is refused here, as Claude Code does.
     pub fn skill_guidance(&self, name: &str, allow_project: bool) -> Option<String> {
+        self.skill_guidance_with(name, allow_project, &TemplateVars::default())
+    }
+
+    /// [`Catalog::skill_guidance`] with session variables substituted into the body.
+    pub fn skill_guidance_with(
+        &self,
+        name: &str,
+        allow_project: bool,
+        vars: &TemplateVars,
+    ) -> Option<String> {
+        self.model_skill(name, allow_project)
+            .map(|m| Skill::load(m).render(None, vars))
+    }
+
+    /// The `paths:` globs a skill is meant for (empty = any file), for the model-facing listing.
+    pub fn skill_paths(&self, name: &str) -> &[String] {
+        self.skills
+            .get(name)
+            .map(|m| m.invocation.paths.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The skill the MODEL may load under `name`: visible under the trust gate and not marked
+    /// `disable-model-invocation`.
+    pub fn model_skill(&self, name: &str, allow_project: bool) -> Option<&SkillMeta> {
         self.visible_skill(name, allow_project)
-            .map(|m| Skill::load(m).guidance())
+            .filter(|m| m.invocation.model_invocable)
     }
 
     /// Methodology guidance for every known skill that `body` references as a markdown-bold token
@@ -634,13 +623,13 @@ impl Catalog {
     /// name (`/orchestrate` → `orchestrate` skill); that is the intended case, not recursion —
     /// skill guidance is inert text, never re-dispatched — so same-named delegation IS injected.
     /// Empty when the body references no known skill.
-    fn referenced_skill_guidance(&self, body: &str) -> Vec<String> {
+    fn referenced_skill_guidance(&self, body: &str, vars: &TemplateVars) -> Vec<String> {
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for tok in bold_tokens(body) {
             if let Some(meta) = self.skills.get(&tok) {
                 if seen.insert(tok) {
-                    out.push(Skill::load(meta).guidance());
+                    out.push(Skill::load(meta).render(None, vars));
                 }
             }
         }
@@ -735,74 +724,9 @@ pub fn parse_tier(s: &str) -> Option<TaskTier> {
     }
 }
 
-fn parse_command(raw: &str, stem: &str, scope: Scope, path: &Path) -> Result<Command, String> {
-    let (fm_text, body) = frontmatter::split(raw);
-    let fm = frontmatter::parse(fm_text.unwrap_or(""))?;
-    let body = body.trim().to_string();
-    if body.is_empty() {
-        return Err("empty command body".into());
-    }
-    let name = fm.scalar("name").unwrap_or_else(|| stem.to_string());
-    let description = fm
-        .scalar("description")
-        .unwrap_or_else(|| first_line(&body, 60));
-    let args = fm
-        .list("args")
-        .into_iter()
-        .map(|a| {
-            let required = !a.ends_with('?');
-            ArgSpec {
-                name: a.trim_end_matches('?').to_string(),
-                required,
-            }
-        })
-        .collect();
-    let tier = fm.scalar("tier").and_then(|t| parse_tier(&t));
-    let model = fm.scalar("model");
-    Ok(Command {
-        name,
-        description,
-        args,
-        tier,
-        model,
-        body,
-        scope,
-        path: path.to_path_buf(),
-    })
-}
-
-fn parse_skill_meta(raw: &str, stem: &str, scope: Scope, dir: &Path) -> Result<SkillMeta, String> {
-    let (fm_text, body) = frontmatter::split(raw);
-    let fm = frontmatter::parse(fm_text.unwrap_or(""))?;
-    let name = fm.scalar("name").unwrap_or_else(|| stem.to_string());
-    let description = fm
-        .scalar("description")
-        .unwrap_or_else(|| first_line(body.trim(), 60));
-    let tier = fm.scalar("tier").and_then(|t| parse_tier(&t));
-    let resources = fm.list("resources");
-    Ok(SkillMeta {
-        name,
-        description,
-        tier,
-        resources,
-        dir: dir.to_path_buf(),
-        scope,
-        body: None,
-    })
-}
-
 pub use builtin::orchestrate_system_guidance;
 use builtin::{builtin_orchestrate_command, builtin_rust_command, builtin_skills};
-
-fn first_line(body: &str, max: usize) -> String {
-    let line = body.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let line = line.trim();
-    if line.chars().count() > max {
-        line.chars().take(max).collect::<String>() + "…"
-    } else {
-        line.to_string()
-    }
-}
+use parse::{parse_command, parse_skill_meta};
 
 #[cfg(test)]
 mod tests;

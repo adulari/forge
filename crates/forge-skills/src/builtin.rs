@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use forge_types::TaskTier;
 
-use crate::{frontmatter, parse_tier, Command, Scope, SkillMeta};
+use crate::{frontmatter, parse_tier, Command, Invocation, Scope, SkillMeta};
 
 /// The skills compiled into the binary. Each carries its methodology inline (`body: Some`) so it
 /// loads with no filesystem access — available even on a fresh install with empty user/project
@@ -39,6 +39,9 @@ fn parse_builtin_skill(name: &str, raw: &str) -> Option<SkillMeta> {
         dir: PathBuf::from(format!("<builtin>/skills/{name}")),
         scope: Scope::Builtin,
         body: Some(body.trim().to_string()),
+        model: None,
+        arg_names: Vec::new(),
+        invocation: Invocation::from_frontmatter(&fm),
     })
 }
 
@@ -62,6 +65,7 @@ pub(crate) fn builtin_rust_command() -> Command {
         .to_string(),
         scope: Scope::Builtin,
         path: PathBuf::from("<builtin>/commands/rust.md"),
+        invocation: Invocation::default(),
     }
 }
 
@@ -104,6 +108,7 @@ pub(crate) fn builtin_orchestrate_command() -> Command {
         .to_string(),
         scope: Scope::Builtin,
         path: PathBuf::from("<builtin>/commands/orchestrate.md"),
+        invocation: Invocation::default(),
     }
 }
 
