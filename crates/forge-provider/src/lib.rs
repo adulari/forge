@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 mod bridge_answer;
 mod cache_hints;
 mod claude_bridge_home;
+pub use claude_bridge_home::real_claude_config_dir;
 mod cli_provider;
 mod codex_oauth;
 mod codex_websocket;
@@ -40,9 +41,9 @@ pub mod wire_params;
 mod xai_oauth;
 
 pub use cli_provider::{
-    codex_cli_detected_plan, codex_rollout_is_account_wide, BridgeModelSource, BridgeModels,
-    ClaudeInitialization, ClaudeModelCapability, CliKind, CliProvider, BRIDGE_CLASSIFIER_MODEL_ENV,
-    SUBAGENT_SINK_ENV,
+    claude_bridge_env, codex_cli_detected_plan, codex_rollout_is_account_wide, BridgeModelSource,
+    BridgeModels, ClaudeInitialization, ClaudeModelCapability, CliKind, CliProvider,
+    BRIDGE_CLASSIFIER_MODEL_ENV, BRIDGE_PROVIDER_KEYS_ENV, SUBAGENT_SINK_ENV,
 };
 
 mod bridge_login;
@@ -689,6 +690,10 @@ pub enum StreamEvent {
         tool: String,
         side_effect: forge_types::SideEffect,
         answer_path: std::path::PathBuf,
+        /// The call's arguments, so the prompt names what it acts on (the file, the command).
+        args: Option<serde_json::Value>,
+        /// The change a write would make, so the prompt shows the same diff a native write does.
+        diff: Option<Box<forge_types::FileDiff>>,
     },
 }
 

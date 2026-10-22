@@ -26,6 +26,8 @@ mod system_prompt_overrides;
 use system_prompt_overrides::resolve_system_prompt_overrides;
 pub mod goal;
 mod harness_profile;
+mod key_adoption;
+pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
 mod lsp_diagnostics;
 pub mod mcp;
 pub mod notifications;
@@ -4259,11 +4261,7 @@ pub fn delete_secret(key: &str) -> Result<bool, ConfigError> {
 /// single key; the provider client rotates across the full list separately (see `api_keys`).
 /// Best-effort — providers without a stored key are simply left unset.
 pub fn inject_provider_keys() {
-    // Variables this function itself populated. Tracked so a re-run (a long-running session
-    // noticing `forge auth` in another terminal) can refresh or clear them, while a variable the
-    // user exported is never touched.
-    static INJECTED: std::sync::Mutex<std::collections::BTreeSet<String>> =
-        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    use key_adoption::INJECTED;
     let injected = |var: &str| {
         INJECTED
             .lock()
@@ -4332,11 +4330,11 @@ pub fn inject_provider_keys() {
             None => {}
         }
     }
+    key_adoption::mark_resolved();
 }
 
 #[cfg(test)]
 mod tests {
-
     #[test]
     fn tui_look_settings_default_to_auto_and_parse_from_toml() {
         let cfg = TuiConfig::default();

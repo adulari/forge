@@ -45,16 +45,35 @@ pub(crate) fn prompt_names_workspace_file(prompt: &str, root: &Path) -> bool {
     })
 }
 
-/// The project's `CLAUDE.md` already carries `agents_md` (identical text, or it imports
-/// `@AGENTS.md`). A bridged claude loads `CLAUDE.md` itself, so injecting the same instructions
-/// again doubles them on every request of its loop.
+/// A `CLAUDE.md` that a bridged claude loads itself already carries `agents_md`, so injecting the
+/// same instructions again doubles them on every request of its loop. That is the project's
+/// `CLAUDE.md` (identical text, or it imports `@AGENTS.md`), or the user memory in claude's own
+/// config dir: with no project instruction file Forge falls back to `~/.claude/CLAUDE.md`, which
+/// the bridge home mirrors, so the user's global instructions used to arrive twice.
 pub(crate) fn claude_md_covers(root: &Path, agents_md: &str) -> bool {
-    [root.join("CLAUDE.md"), root.join(".claude/CLAUDE.md")]
+    claude_md_covers_with(root, agents_md, claude_user_memory().as_deref())
+}
+
+fn claude_md_covers_with(root: &Path, agents_md: &str, user_memory: Option<&Path>) -> bool {
+    let project = [root.join("CLAUDE.md"), root.join(".claude/CLAUDE.md")]
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
         .any(|claude| {
             claude.trim() == agents_md.trim() || claude.lines().any(|l| l.trim() == "@AGENTS.md")
-        })
+        });
+    project
+        || user_memory
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .is_some_and(|claude| claude.trim() == agents_md.trim())
+}
+
+/// The user memory file a bridged claude reads from its config dir.
+fn claude_user_memory() -> Option<std::path::PathBuf> {
+    // Unit tests must not read the developer's real claude config.
+    if cfg!(test) {
+        return None;
+    }
+    forge_provider::real_claude_config_dir().map(|dir| dir.join("CLAUDE.md"))
 }
 
 #[cfg(test)]
@@ -112,5 +131,31 @@ mod tests {
         assert!(!claude_md_covers(dir.path(), "other rules"));
         std::fs::write(dir.path().join("CLAUDE.md"), "# Project\n@AGENTS.md\n").unwrap();
         assert!(claude_md_covers(dir.path(), "other rules"));
+    }
+
+    #[test]
+    fn the_bridged_claudes_user_memory_counts_as_already_loaded() {
+        let project = tempfile::tempdir().unwrap();
+        let claude_home = tempfile::tempdir().unwrap();
+        let memory = claude_home.path().join("CLAUDE.md");
+        std::fs::write(&memory, "# Global rules\n- be brief\n").unwrap();
+        assert!(claude_md_covers_with(
+            project.path(),
+            "# Global rules\n- be brief",
+            Some(&memory)
+        ));
+        assert!(!claude_md_covers_with(
+            project.path(),
+            "# Other rules",
+            Some(&memory)
+        ));
+        // `@AGENTS.md` in the user memory resolves against ~/.claude, not the project.
+        std::fs::write(&memory, "@AGENTS.md\n").unwrap();
+        assert!(!claude_md_covers_with(
+            project.path(),
+            "project rules",
+            Some(&memory)
+        ));
+        assert!(!claude_md_covers_with(project.path(), "rules", None));
     }
 }

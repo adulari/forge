@@ -44,6 +44,27 @@ pub(crate) fn ensure_pin_providers_known(pin: &str) -> Result<()> {
                  Run `forge models` to see usable ids, or `forge auth` to add a provider."
             );
         }
+        // An alias the installed claude advertised (cached by discovery) is valid even when
+        // Forge's own alias table predates it.
+        if prefix == forge_provider::CliKind::ClaudeCode.prefix()
+            && super::pin_check::unknown_claude_bridge_model(
+                &id,
+                forge_provider::CliKind::ClaudeCode.routable(),
+            )
+            && !crate::cli::commands::models::load_cached_catalog()
+                .is_some_and(|catalog| catalog.models().contains(&id))
+        {
+            anyhow::bail!(
+                "unknown model '{id}': the claude CLI has no such model and would silently run \
+                 its default one instead. Use one of {}, or a full `claude-…` model name.",
+                forge_provider::CliKind::ClaudeCode
+                    .default_models()
+                    .iter()
+                    .map(|m| format!("claude-cli::{m}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -669,13 +690,13 @@ fn deprioritize_current_thread() {}
 
 /// Startup phase timer: one debug line per phase (`RUST_LOG=forge=debug`), so a slow launch can
 /// be attributed to a phase instead of guessed at. Costs one `Instant::now()` per mark.
-struct StartupClock {
+pub(crate) struct StartupClock {
     started: std::time::Instant,
     last: std::time::Instant,
 }
 
 impl StartupClock {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let now = std::time::Instant::now();
         Self {
             started: now,
@@ -683,7 +704,7 @@ impl StartupClock {
         }
     }
 
-    fn mark(&mut self, phase: &str) {
+    pub(crate) fn mark(&mut self, phase: &str) {
         let now = std::time::Instant::now();
         tracing::debug!(
             target: "forge::startup",

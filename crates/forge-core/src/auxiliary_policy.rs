@@ -6,7 +6,7 @@ use super::*;
 use crate::compaction_policy::record_model_failure_in;
 use crate::spend_guard::priced;
 
-fn report_auxiliary_persistence_failure(
+pub(crate) fn report_auxiliary_persistence_failure(
     session_id: &str,
     purpose: &str,
     error: &dyn std::fmt::Display,
@@ -24,20 +24,6 @@ fn report_auxiliary_persistence_failure(
 }
 
 impl Session {
-    const RECAP_SYSTEM: &'static str = "You are a one-line summarizer for a coding assistant. \
-Given the user's request and the assistant's response, write a SINGLE sentence (≤12 words, \
-past tense, no punctuation at end) describing ONLY what the assistant's RESPONSE actually shows it \
-did — never assume the request was fulfilled. If the response does not clearly show completed \
-work (it stalled, errored, only planned, or asked a question), say that instead (e.g. \
-\"stalled without completing the task\"). Do not invent success. \
-Output ONLY that sentence — no preamble, no quotation marks.";
-
-    const SUGGEST_SYSTEM: &'static str = "You are predicting a coding assistant user's NEXT \
-prompt, Claude-Code-style. Given the user's last request and the tail of the assistant's \
-response, propose the SINGLE most likely next thing this user will ask for: a short imperative \
-instruction, ≤120 characters, no quotation marks, no markdown, no preamble. Output ONLY the \
-prompt text, nothing else.";
-
     /// Mark this session as serving one invocation that exits once its turn is answered
     /// (`forge run`). Its post-turn side calls are skipped: nobody sees a recap or a suggestion
     /// after the process is gone, and a memory capture would hold the exit for a model round-trip
@@ -47,8 +33,9 @@ prompt text, nothing else.";
     }
 
     /// Optional side calls after a turn whose result has already been emitted. A channel-backed
-    /// surface detaches them, so input frees at once and their results land a moment later; a
-    /// synchronous surface runs them inline after the answer is shown; a one-shot run skips them.
+    /// surface detaches them (model choice included, see `post_turn_calls`), so input frees at
+    /// once and their results land a moment later; a synchronous surface runs them inline after
+    /// the answer is shown; a one-shot run skips them.
     pub(crate) async fn run_post_turn_side_calls(
         &mut self,
         prompt: &str,
@@ -57,472 +44,32 @@ prompt text, nothing else.";
     ) {
         // A tripped session spend cap ends the turn; optional side calls must not keep spending.
         let spend_ok = self.session_spend_refusal().is_none();
+        let detached = self.presenter.recap_sink().is_some();
         if spend_ok && !self.one_shot {
-            self.generate_recap(prompt, final_text, tasks_before).await;
-            self.generate_suggestion(prompt, final_text).await;
+            if detached {
+                self.spawn_post_turn_calls(prompt, final_text, tasks_before);
+            } else {
+                self.generate_recap(prompt, final_text, tasks_before).await;
+                self.generate_suggestion(prompt, final_text).await;
+            }
         }
         // Continual Harness auto-refine gate (`harness.auto_refine = "turns"`, refinement.rs).
         // Inline, not detached: it mutates durable harness state and its own presenter note should
         // land in order with the turn it concluded, not race a later turn's output.
         self.auto_refine_after_turns().await;
-        if !spend_ok || (self.one_shot && !self.config.mesh.auto_memory_one_shot) {
+        // The detached batch above already carries the memory capture.
+        let captured_by_detached_batch = detached && !self.one_shot;
+        if !spend_ok
+            || captured_by_detached_batch
+            || (self.one_shot && !self.config.mesh.auto_memory_one_shot)
+        {
             return;
         }
         // Dropping the JoinHandle detaches (does not cancel) the capture; a synchronous surface
         // awaits it so persistence has finished when the turn returns.
         if let Some(handle) = self.capture_memories(prompt, final_text).await {
-            if self.presenter.recap_sink().is_none() {
+            if !detached {
                 let _ = handle.await;
-            }
-        }
-    }
-
-    /// After a turn completes, make one cheap trivial-tier call to generate a one-line recap,
-    /// emitted via [`PresenterEvent::Recap`]. Best-effort: silently skipped on budget exhaustion
-    /// or any model error so it can never derail the session.
-    pub(crate) const MEMORY_CAPTURE_SYSTEM: &'static str =
-        "You extract DURABLE facts worth remembering across FUTURE sessions in this project: user \
-         preferences, project decisions/conventions, key architecture or config, and stable \
-         constraints. Output 0 to 3 lines, each exactly `kind: fact`, where kind is one of \
-         preference, decision, fact, reference. Skip transient task details, one-off actions, and \
-         anything specific to only this turn. If nothing is durable, output NOTHING at all.";
-
-    /// After a turn, make one cheap trivial-tier call to extract 0-3 DURABLE facts and persist them
-    /// as project-scoped memories (dedup + salience handled by the store). Best-effort: any
-    /// budget/model failure is silently skipped so it can never derail the session. Recall of these
-    /// happens at the start of a later session (see `run_turn_with`).
-    // Spawns memory capture so it doesn't block turn completion — the spinner clears when the AI
-    // response finishes. Returns a JoinHandle so the caller can await it in one-shot mode (forge
-    // run) before the process exits; interactive turns drop the handle and it runs in background.
-    pub(crate) async fn capture_memories(
-        &mut self,
-        prompt: &str,
-        final_text: &str,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        if !self.config.mesh.auto_memory || final_text.trim().is_empty() {
-            return None;
-        }
-        let budget = BudgetState {
-            spent_today_usd: self.store.spend_today_usd().unwrap_or(0.0),
-            daily_cap_usd: self.config.mesh.daily_budget_usd,
-            spent_week_usd: self.store.spend_this_week_usd().unwrap_or(0.0),
-            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
-            spent_month_usd: self.store.spend_this_month_usd().unwrap_or(0.0),
-            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
-            warn_fraction: self.config.mesh.warn_threshold,
-            min_context_tokens: None,
-        };
-        if budget.status() == BudgetStatus::Exhausted {
-            return None;
-        }
-        let readiness = self.provider_readiness();
-        let health = readiness.health;
-        let quota = readiness.quota;
-        let provider = self.provider.clone();
-        let store = self.store.clone();
-        let pricing = self.pricing.clone();
-        let router = self.router.clone();
-        let id = self.id.clone();
-        let config = self.config.clone();
-        let cooldown = std::time::Duration::from_secs(config.mesh.failover_cooldown_secs);
-        let pinned_effort = self.pinned_effort;
-        let project = self.project.clone();
-        let user_snippet: String = prompt.chars().take(500).collect();
-        let assistant_snippet: String = final_text.chars().take(1200).collect();
-        let workspace = self.workspace.clone();
-        let mut warning_sink = self.presenter.recap_sink();
-        // Routed here, not inside the spawned task, so a session pin goes through the same
-        // side-call filter as recap/suggestion: a benched or unreachable model is never used, and
-        // a subscription bridge the user did not point the session at is skipped.
-        let decision = router
-            .route_hinted(
-                "extract durable facts",
-                false,
-                budget,
-                &health,
-                &quota,
-                Some(TaskTier::Trivial),
-                pinned_effort,
-                &project,
-            )
-            .await;
-        let model = self.post_turn_auxiliary_model(&decision)?;
-        Some(tokio::spawn(async move {
-            let messages = vec![
-                Message::system(Session::MEMORY_CAPTURE_SYSTEM),
-                Message::user(format!(
-                    "User request:\n{user_snippet}\n\nAssistant response:\n{assistant_snippet}"
-                )),
-            ];
-            let mut on_event = |_: StreamEvent| {};
-            let completion_opts = Session::auxiliary_completion_options(&id, "memory");
-            let r = match provider
-                .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
-                .await
-            {
-                Ok(r) => r,
-                Err(error) => {
-                    record_model_failure_in(&store, &model, &error, cooldown);
-                    return;
-                }
-            };
-            if let Err(error) = store.record_side_call_usage_for(
-                &id,
-                "memory",
-                Some(&model),
-                &priced(&pricing, &model, &r.usage),
-            ) {
-                report_auxiliary_persistence_failure(&id, "memory usage", &error, |warning| {
-                    if let Some(sink) = warning_sink.as_mut() {
-                        sink.emit(PresenterEvent::Warning(warning));
-                    }
-                });
-            }
-            let scope = memory_scope_at(workspace.root());
-            // Collect lines into owned Strings before the per-line await to avoid holding
-            // a borrow across the embed_one await point.
-            // The extractor quotes whatever the turn contained, and a stored memory is injected
-            // into every later prompt of the project: mask credentials before they persist.
-            let redactor = tokio::task::spawn_blocking(crate::redact::Redactor::from_environment)
-                .await
-                .unwrap_or_default();
-            let lines: Vec<String> = r
-                .content
-                .lines()
-                .take(3)
-                .map(|line| redactor.redact(line).into_owned())
-                .collect();
-            for raw in lines {
-                let line = raw.trim().trim_start_matches(['-', '*', '•']).trim();
-                let Some((kind, text)) = line.split_once(':') else {
-                    continue;
-                };
-                let kind_norm = kind.trim().to_lowercase();
-                let kind_cat = match kind_norm.as_str() {
-                    "preference" | "decision" | "fact" | "reference" => kind_norm.as_str(),
-                    _ => "fact",
-                };
-                let text = text.trim();
-                if text.len() >= 4 {
-                    match embed_one(&config.lattice.embeddings, text).await {
-                        Some(emb) => {
-                            if let Err(error) =
-                                store.add_memory_with_embedding(&scope, kind_cat, text, &id, &emb)
-                            {
-                                report_auxiliary_persistence_failure(
-                                    &id,
-                                    "memory",
-                                    &error,
-                                    |warning| {
-                                        if let Some(sink) = warning_sink.as_mut() {
-                                            sink.emit(PresenterEvent::Warning(warning));
-                                        }
-                                    },
-                                );
-                            }
-                        }
-                        None => {
-                            if let Err(error) = store.add_memory(&scope, kind_cat, text, &id) {
-                                report_auxiliary_persistence_failure(
-                                    &id,
-                                    "memory",
-                                    &error,
-                                    |warning| {
-                                        if let Some(sink) = warning_sink.as_mut() {
-                                            sink.emit(PresenterEvent::Warning(warning));
-                                        }
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            crate::memory_scope::align_memory_scopes(&store, workspace.root());
-        }))
-    }
-
-    pub(crate) async fn generate_recap(
-        &mut self,
-        prompt: &str,
-        final_text: &str,
-        tasks_before: &[forge_types::TodoItem],
-    ) {
-        if !self.config.recap.enabled || !self.presenter.consumes_recap() {
-            return;
-        }
-        // A stalled turn (empty-response give-up, hard failover exhaustion) leaves `final_text`
-        // empty: there is nothing the assistant actually did to summarize. Recapping anyway makes
-        // the trivial-tier summarizer lean on the *request* and invent success ("Fixed the bug…")
-        // for a turn that accomplished nothing — so skip it outright.
-        if final_text.trim().is_empty() {
-            return;
-        }
-        if let Some(text) = completed_tasks_recap(tasks_before, &self.tasks, final_text) {
-            self.presenter.emit(PresenterEvent::Recap { text });
-            return;
-        }
-        let budget = BudgetState {
-            spent_today_usd: self.store.spend_today_usd().unwrap_or(0.0),
-            daily_cap_usd: self.config.mesh.daily_budget_usd,
-            spent_week_usd: self.store.spend_this_week_usd().unwrap_or(0.0),
-            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
-            spent_month_usd: self.store.spend_this_month_usd().unwrap_or(0.0),
-            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
-            warn_fraction: self.config.mesh.warn_threshold,
-            min_context_tokens: None,
-        };
-        if budget.status() == BudgetStatus::Exhausted {
-            return;
-        }
-        let readiness = self.provider_readiness();
-        let health = readiness.health;
-        let quota = readiness.quota;
-        let decision = self
-            .router
-            .route_hinted(
-                "summarize in one sentence",
-                false,
-                budget,
-                &health,
-                &quota,
-                Some(TaskTier::Trivial),
-                self.pinned_effort,
-                &self.project,
-            )
-            .await;
-        let Some(model) = self.post_turn_auxiliary_model(&decision) else {
-            return;
-        };
-        let user_snippet: String = prompt.chars().take(1000).collect();
-        // A long answer ends with its conclusion, which is what a recap is about: keep the tail.
-        let assistant_snippet: String = if final_text.chars().count() > 2000 {
-            let head: String = final_text.chars().take(600).collect();
-            let tail: Vec<char> = final_text.chars().rev().take(1400).collect();
-            format!("{head} … {}", tail.into_iter().rev().collect::<String>())
-        } else {
-            final_text.to_string()
-        };
-        let messages = vec![
-            Message::system(Self::RECAP_SYSTEM),
-            Message::user(format!(
-                "User request:\n{user_snippet}\n\nAssistant response:\n{assistant_snippet}"
-            )),
-        ];
-        // Routing above is local/fast; the only slow part is the provider completion. If the
-        // presenter can hand out a Send sink (the channel-backed TUI), run that completion on a
-        // DETACHED task and return now — so the turn ends, the spinner stops, and input frees the
-        // instant the response is done; the recap streams in a moment later. Synchronous presenters
-        // (headless / tests) have no sink, so it runs inline exactly as before.
-        let provider = self.provider.clone();
-        let store = self.store.clone();
-        let pricing = self.pricing.clone();
-        let id = self.id.clone();
-        let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
-        match self.presenter.recap_sink() {
-            Some(mut sink) => {
-                tokio::spawn(async move {
-                    let mut on_event = |_: StreamEvent| {};
-                    let completion_opts = Session::auxiliary_completion_options(&id, "recap");
-                    let r = match provider
-                        .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(error) => {
-                            record_model_failure_in(&store, &model, &error, cooldown);
-                            return;
-                        }
-                    };
-                    {
-                        if let Err(error) = store.record_side_call_usage_for(
-                            &id,
-                            "recap",
-                            Some(&model),
-                            &priced(&pricing, &model, &r.usage),
-                        ) {
-                            report_auxiliary_persistence_failure(
-                                &id,
-                                "recap usage",
-                                &error,
-                                |warning| sink.emit(PresenterEvent::Warning(warning)),
-                            );
-                        }
-                        if let Some(text) = recap_line(&r.content) {
-                            sink.emit(PresenterEvent::Recap { text });
-                        }
-                    }
-                });
-            }
-            None => {
-                let mut on_event = |_: StreamEvent| {};
-                let completion_opts = Session::auxiliary_completion_options(&id, "recap");
-                // Best-effort and inline (headless exit waits on it): a slow model must not hold
-                // the process open, so give up after a short bound.
-                let call =
-                    provider.complete_with(&model, &messages, &[], &completion_opts, &mut on_event);
-                let r = match tokio::time::timeout(std::time::Duration::from_secs(20), call).await {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(error)) => {
-                        record_model_failure_in(&store, &model, &error, cooldown);
-                        return;
-                    }
-                    Err(_) => return,
-                };
-                {
-                    if let Err(error) = store.record_side_call_usage_for(
-                        &id,
-                        "recap",
-                        Some(&model),
-                        &priced(&pricing, &model, &r.usage),
-                    ) {
-                        report_auxiliary_persistence_failure(
-                            &id,
-                            "recap usage",
-                            &error,
-                            |warning| self.presenter.emit(PresenterEvent::Warning(warning)),
-                        );
-                    }
-                    if let Some(text) = recap_line(&r.content) {
-                        self.presenter.emit(PresenterEvent::Recap { text });
-                    }
-                }
-            }
-        }
-    }
-
-    /// After a turn completes, make one cheap trivial-tier call predicting the user's likely
-    /// next prompt, emitted via [`PresenterEvent::SuggestionReady`] and shown as dim ghost text
-    /// in an empty, idle input box (Tab accepts it — editable, never auto-sent). Best-effort:
-    /// silently skipped on budget exhaustion or any model error, exactly like `generate_recap`,
-    /// whose detachment pattern (and reasoning) this mirrors.
-    pub(crate) async fn generate_suggestion(&mut self, prompt: &str, final_text: &str) {
-        if !self.config.suggest.enabled || !self.presenter.consumes_suggestions() {
-            return;
-        }
-        if final_text.trim().is_empty() {
-            return;
-        }
-        let budget = BudgetState {
-            spent_today_usd: self.store.spend_today_usd().unwrap_or(0.0),
-            daily_cap_usd: self.config.mesh.daily_budget_usd,
-            spent_week_usd: self.store.spend_this_week_usd().unwrap_or(0.0),
-            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
-            spent_month_usd: self.store.spend_this_month_usd().unwrap_or(0.0),
-            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
-            warn_fraction: self.config.mesh.warn_threshold,
-            min_context_tokens: None,
-        };
-        if budget.status() == BudgetStatus::Exhausted {
-            return;
-        }
-        let readiness = self.provider_readiness();
-        let health = readiness.health;
-        let quota = readiness.quota;
-        let decision = self
-            .router
-            .route_hinted(
-                "propose the next likely user prompt",
-                false,
-                budget,
-                &health,
-                &quota,
-                Some(TaskTier::Trivial),
-                self.pinned_effort,
-                &self.project,
-            )
-            .await;
-        let Some(model) = self.post_turn_auxiliary_model(&decision) else {
-            return;
-        };
-        let user_snippet: String = prompt.chars().take(400).collect();
-        // The TAIL of the response (not the head, unlike the recap's snippet) is what best
-        // predicts a likely follow-up — it's what the user is looking at right now.
-        let assistant_chars: Vec<char> = final_text.chars().collect();
-        let tail_start = assistant_chars.len().saturating_sub(2000);
-        let assistant_snippet: String = assistant_chars[tail_start..].iter().collect();
-        let messages = vec![
-            Message::system(Self::SUGGEST_SYSTEM),
-            Message::user(format!(
-                "User's last prompt:\n{user_snippet}\n\nAssistant response (tail):\n{assistant_snippet}"
-            )),
-        ];
-        // Same detached-task reasoning as `generate_recap`: hand off to a channel-backed
-        // presenter's sink when available so the turn ends and input frees immediately, with the
-        // suggestion landing a moment later.
-        let provider = self.provider.clone();
-        let store = self.store.clone();
-        let pricing = self.pricing.clone();
-        let id = self.id.clone();
-        let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
-        let prev_prompt = prompt.to_string();
-        match self.presenter.recap_sink() {
-            Some(mut sink) => {
-                tokio::spawn(async move {
-                    let mut on_event = |_: StreamEvent| {};
-                    let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
-                    let r = match provider
-                        .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(error) => {
-                            record_model_failure_in(&store, &model, &error, cooldown);
-                            return;
-                        }
-                    };
-                    {
-                        if let Err(error) = store.record_side_call_usage_for(
-                            &id,
-                            "suggest",
-                            Some(&model),
-                            &priced(&pricing, &model, &r.usage),
-                        ) {
-                            report_auxiliary_persistence_failure(
-                                &id,
-                                "suggestion usage",
-                                &error,
-                                |warning| sink.emit(PresenterEvent::Warning(warning)),
-                            );
-                        }
-                        if let Some(text) = sanitize_suggestion(&r.content, &prev_prompt) {
-                            sink.emit(PresenterEvent::SuggestionReady { text });
-                        }
-                    }
-                });
-            }
-            None => {
-                let mut on_event = |_: StreamEvent| {};
-                let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
-                let r = match provider
-                    .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(error) => {
-                        record_model_failure_in(&store, &model, &error, cooldown);
-                        return;
-                    }
-                };
-                {
-                    if let Err(error) = store.record_side_call_usage_for(
-                        &id,
-                        "suggest",
-                        Some(&model),
-                        &priced(&pricing, &model, &r.usage),
-                    ) {
-                        report_auxiliary_persistence_failure(
-                            &id,
-                            "suggestion usage",
-                            &error,
-                            |warning| self.presenter.emit(PresenterEvent::Warning(warning)),
-                        );
-                    }
-                    if let Some(text) = sanitize_suggestion(&r.content, &prev_prompt) {
-                        self.presenter
-                            .emit(PresenterEvent::SuggestionReady { text });
-                    }
-                }
             }
         }
     }

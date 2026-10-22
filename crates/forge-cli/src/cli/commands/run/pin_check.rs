@@ -16,15 +16,37 @@ pub(super) enum PinVerdict {
     Unknown,
 }
 
+/// Aliases `claude --model` accepts beyond the documented tiers in [`CliKind::default_models`]:
+/// `default` is what claude's own model list advertises first, `best` and `opusplan` are its
+/// selector aliases.
+const CLAUDE_SELECTOR_ALIASES: &[&str] = &["default", "best", "opusplan"];
+
 /// True when `model` (the part after `provider::`) looks like a full model name for `kind`'s
 /// vendor, which the CLI accepts even though the alias table predates it.
 fn plausible_full_id(kind: CliKind, model: &str) -> bool {
-    let stem = match kind {
-        CliKind::ClaudeCode => "claude-",
-        CliKind::Codex => "gpt-",
-        CliKind::Antigravity => "gemini-",
-    };
-    model.starts_with(stem)
+    match kind {
+        CliKind::ClaudeCode => {
+            // `sonnet[1m]` / `claude-sonnet-…[1m]` select the long-context variant.
+            let base = model.strip_suffix("[1m]").unwrap_or(model);
+            base.starts_with("claude-")
+                || CLAUDE_SELECTOR_ALIASES.contains(&base)
+                || kind.default_models().contains(&base)
+        }
+        CliKind::Codex => model.starts_with("gpt-"),
+        CliKind::Antigravity => model.starts_with("gemini-"),
+    }
+}
+
+/// A pinned `claude-cli::<model>` that claude cannot run. In the streaming mode the bridge drives,
+/// claude does not reject an unknown `--model`: the turn runs on the account's default model and
+/// exits 0, so a typo silently spent the subscription on the wrong model. Refused before anything
+/// is spawned instead. Codex and agy keep the soft warning.
+pub(super) fn unknown_claude_bridge_model(id: &str, claude_routable: bool) -> bool {
+    id.starts_with("claude-cli::")
+        && claude_routable
+        && judge_pin(id, CliKind::ClaudeCode.prefix(), false, |k| {
+            k == CliKind::ClaudeCode
+        }) == PinVerdict::Unknown
 }
 
 pub(super) fn judge_pin(
@@ -114,6 +136,41 @@ mod tests {
             judge_pin("groq::nope", "groq", false, YES),
             PinVerdict::Unknown
         );
+    }
+
+    #[test]
+    fn claude_selector_aliases_and_long_context_variants_are_known() {
+        for id in [
+            "claude-cli::default",
+            "claude-cli::opusplan",
+            "claude-cli::sonnet[1m]",
+            "claude-cli::claude-opus-5-5[1m]",
+        ] {
+            assert_eq!(
+                judge_pin(id, "claude-cli", false, YES),
+                PinVerdict::Ok,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_unexplainable_claude_pin_is_refused() {
+        assert!(unknown_claude_bridge_model("claude-cli::opuss", true));
+        assert!(unknown_claude_bridge_model(
+            "claude-cli::not-a-real-model-xyz",
+            true
+        ));
+        assert!(!unknown_claude_bridge_model("claude-cli::haiku", true));
+        assert!(!unknown_claude_bridge_model("claude-cli::", true));
+        assert!(!unknown_claude_bridge_model(
+            "claude-cli::claude-haiku-5-5",
+            true
+        ));
+        // Not installed: the spawn reports that itself.
+        assert!(!unknown_claude_bridge_model("claude-cli::opuss", false));
+        // Other bridges keep the soft warning.
+        assert!(!unknown_claude_bridge_model("codex-cli::nope", true));
     }
 
     #[test]

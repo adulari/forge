@@ -1327,6 +1327,20 @@ fn push_bridge_classifier_model(env: &mut Vec<(String, String)>, kind: CliKind) 
             BRIDGE_CLASSIFIER_MODEL_ENV.to_string(),
             "claude-cli::haiku".to_string(),
         ));
+        push_bridge_provider_keys(env, forge_config::injected_provider_key_vars());
+    }
+}
+
+/// Env var listing the provider-key variables the parent resolved (names only, never values).
+pub const BRIDGE_PROVIDER_KEYS_ENV: &str = "FORGE_BRIDGE_PROVIDER_KEYS";
+
+/// claude passes its whole environment to its MCP servers, so the bridge's `forge mcp-serve`
+/// inherits every key the parent resolved; naming them lets it skip its own secret-store lookups
+/// (see `forge_config::adopt_parent_provider_keys`). Claude only: codex hands MCP servers a curated
+/// environment without the keys, so its child must keep resolving them itself.
+fn push_bridge_provider_keys(env: &mut Vec<(String, String)>, resolved: Option<Vec<String>>) {
+    if let Some(vars) = resolved {
+        env.push((BRIDGE_PROVIDER_KEYS_ENV.to_string(), vars.join(",")));
     }
 }
 
@@ -3239,23 +3253,39 @@ fn apply_claude_bridge_home(kind: CliKind, cmd: &mut Command) {
     if kind != CliKind::ClaudeCode {
         return;
     }
-    // Headroom routing (docs/features/token-savings.md): the claude CLI honours
-    // `ANTHROPIC_BASE_URL`, so the bridge's own API traffic goes through the same proxy the direct
-    // path uses. Decided once at startup by `headroom::configure`.
+    for (key, value) in claude_bridge_env() {
+        cmd.env(key, value);
+    }
+}
+
+/// The environment of every `claude` process Forge drives: bridge turns, model probes and the quota
+/// probe.
+///
+/// - `CLAUDE_CONFIG_DIR`: the hook-free mirror of the user's claude config dir.
+/// - `ANTHROPIC_BASE_URL`: the Headroom proxy when one is configured (docs/features/
+///   token-savings.md); the claude CLI honours it, so the bridge's own API traffic goes through
+///   the same proxy the direct path uses.
+/// - `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, unless the user set it: Forge owns session memory
+///   (`remember`, pinned memories). claude's auto memory added ~2.3k characters of instructions to
+///   every request for a memory directory its disabled Write tool cannot reach, plus the project's
+///   `MEMORY.md` index (up to 25 KB).
+pub fn claude_bridge_env() -> Vec<(&'static str, std::ffi::OsString)> {
+    let mut env = Vec::new();
     if let Some(proxy) = forge_config::headroom_route() {
-        cmd.env("ANTHROPIC_BASE_URL", proxy);
+        env.push(("ANTHROPIC_BASE_URL", proxy.into()));
+    }
+    if std::env::var_os(CLAUDE_AUTO_MEMORY_ENV).is_none() {
+        env.push((CLAUDE_AUTO_MEMORY_ENV, "1".into()));
     }
     let Some(real_home) = crate::claude_bridge_home::real_claude_config_dir() else {
-        return;
+        return env;
     };
     let Some(base) = forge_config::config_dir() else {
-        return;
+        return env;
     };
     let isolated_dir = base.join(crate::claude_bridge_home::BRIDGE_HOME_DIR_NAME);
     match crate::claude_bridge_home::prepare_claude_bridge_home(&real_home, &isolated_dir) {
-        Ok(()) => {
-            cmd.env("CLAUDE_CONFIG_DIR", &isolated_dir);
-        }
+        Ok(()) => env.push(("CLAUDE_CONFIG_DIR", isolated_dir.into_os_string())),
         Err(e) => {
             tracing::warn!(
                 "failed to prepare isolated claude bridge home ({e}); running with the user's own \
@@ -3263,7 +3293,10 @@ claude config (hooks may fire)"
             );
         }
     }
+    env
 }
+
+const CLAUDE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 
 async fn terminate(child: &mut Child, pgid: Option<i32>) {
     #[cfg(unix)]
@@ -3839,6 +3872,8 @@ mod tests {
                 tool,
                 side_effect,
                 answer_path,
+                args,
+                diff,
             }) => {
                 assert_eq!(tool, "write_file");
                 assert_eq!(side_effect, forge_types::SideEffect::Write);
@@ -3846,8 +3881,27 @@ mod tests {
                     answer_path,
                     std::path::PathBuf::from("/tmp/sink.permission-1")
                 );
+                assert!(
+                    args.is_none() && diff.is_none(),
+                    "older children send neither"
+                );
             }
             other => panic!("expected PermissionRequest, got {other:?}"),
+        }
+        // A current child names the call and the change, so the prompt can show path + diff.
+        match parse_sink_line(
+            r#"{"k":"permission","tool":"edit_file","side_effect":"Write","answer":"/tmp/a","args":{"path":"src/a.rs","old":"x","new":"y"},"diff":{"path":"src/a.rs","kind":"Modified","old":"x\n","new":"y\n","lang":"rust","binary":false}}"#,
+        ) {
+            Some(StreamEvent::PermissionRequest {
+                args: Some(args),
+                diff: Some(diff),
+                ..
+            }) => {
+                assert_eq!(args["path"], "src/a.rs");
+                assert_eq!(diff.path, "src/a.rs");
+                assert_eq!(diff.new.as_deref(), Some("y\n"));
+            }
+            other => panic!("expected PermissionRequest with args and diff, got {other:?}"),
         }
         assert!(
             parse_sink_line(r#"{"k":"permission","tool":"write_file","side_effect":"Write"}"#)
@@ -4946,6 +5000,29 @@ mod tests {
         assert!(!persisted.contains("email"));
         assert!(!persisted.contains("must-not-be-persisted"));
         assert!(!persisted.contains("\"pid\""));
+    }
+
+    /// claude passes its environment to `forge mcp-serve`, so the child is told which keys it
+    /// already holds (names only); a parent that never resolved keys says nothing.
+    #[test]
+    fn bridge_child_learns_the_resolved_key_names_but_never_values() {
+        let mut env = Vec::new();
+        push_bridge_provider_keys(&mut env, None);
+        assert!(env.is_empty());
+        push_bridge_provider_keys(
+            &mut env,
+            Some(vec!["GROQ_API_KEY".into(), "OPENAI_API_KEY".into()]),
+        );
+        assert_eq!(
+            env,
+            vec![(
+                BRIDGE_PROVIDER_KEYS_ENV.to_string(),
+                "GROQ_API_KEY,OPENAI_API_KEY".to_string()
+            )]
+        );
+        let mut empty = Vec::new();
+        push_bridge_provider_keys(&mut empty, Some(Vec::new()));
+        assert_eq!(empty[0].1, "", "no keys found is still an answer");
     }
 
     #[test]

@@ -72,7 +72,10 @@ pub(super) fn handle_stream_event(
                 .entry(name.clone())
                 .or_default()
                 .push_back(completion::classify_tool(&name, &args));
-            presenter.emit(PresenterEvent::ToolStart { name, args })
+            presenter.emit(PresenterEvent::ToolStart {
+                name: forge_tool_name(name),
+                args,
+            })
         }
         StreamEvent::ToolFinished { name, ok, summary } => {
             bridge_trace.lock().unwrap().finished(&name, ok, &summary);
@@ -94,7 +97,7 @@ pub(super) fn handle_stream_event(
             // A CLI bridge reports only a summary line for its own tool calls — there is no raw
             // output to hand a surface, so an expandable card here stays header-only.
             presenter.emit(PresenterEvent::ToolResult {
-                name,
+                name: forge_tool_name(name),
                 ok,
                 summary,
                 detail: None,
@@ -154,10 +157,17 @@ pub(super) fn handle_stream_event(
             tool,
             side_effect,
             answer_path,
+            args,
+            diff,
         } => {
+            // Same order as a native write: the diff first, then the question about it.
+            if let Some(diff) = diff {
+                presenter.emit(PresenterEvent::Diff(*diff));
+            }
+            let args = args.unwrap_or(serde_json::Value::Null);
             // One word, and on a deny the user's note on the lines after it (the relay's refusal
             // carries it to the bridged model).
-            let reply = presenter.confirm_reply(&tool, side_effect);
+            let reply = permission::confirm_call(presenter, &tool, &args, side_effect);
             let answer = match (reply.outcome, reply.note) {
                 (forge_types::ConfirmOutcome::AlwaysAllow, _) => "always".to_string(),
                 (forge_types::ConfirmOutcome::AllowSession, _) => "session".to_string(),
@@ -171,5 +181,31 @@ pub(super) fn handle_stream_event(
                 )));
             }
         }
+    }
+}
+
+/// A bridge reports Forge's own tools under claude's MCP namespace (`mcp__forge__edit_file`).
+/// Surfaces key cards, headlines and the permission prompt on the tool's own name, so a bridged
+/// card is named exactly like a native one; other MCP servers keep their namespace.
+fn forge_tool_name(name: String) -> String {
+    match name.strip_prefix("mcp__forge__") {
+        Some(tool) if !tool.is_empty() => tool.to_string(),
+        _ => name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forge_tool_name;
+
+    #[test]
+    fn bridged_forge_tools_carry_their_native_names() {
+        assert_eq!(forge_tool_name("mcp__forge__edit_file".into()), "edit_file");
+        assert_eq!(forge_tool_name("edit_file".into()), "edit_file");
+        assert_eq!(
+            forge_tool_name("mcp__helm__search".into()),
+            "mcp__helm__search"
+        );
+        assert_eq!(forge_tool_name("mcp__forge__".into()), "mcp__forge__");
     }
 }

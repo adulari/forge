@@ -25,8 +25,7 @@ use anyhow::{Context, Result};
 use forge_config::Config;
 use forge_core::hooks;
 use forge_core::permission;
-use forge_core::subagent::{self, AgentCtx};
-use forge_mesh::pricing::Pricing;
+use forge_core::subagent;
 use forge_store::Store;
 use forge_tools::ToolRegistry;
 use forge_types::{PermissionDecision, PermissionMode, PermissionRule};
@@ -94,7 +93,7 @@ mod fleet;
 mod hook_payload;
 
 mod subagents;
-use subagents::SubagentSupport;
+use subagents::LazySubagents;
 
 struct ForgeMcp {
     registry: ToolRegistry,
@@ -104,7 +103,7 @@ struct ForgeMcp {
     rules: Vec<PermissionRule>,
     config: Config,
     /// Present when subagents are enabled here (subagents on + `depth <= max_depth`).
-    subagents: Option<SubagentSupport>,
+    subagents: Option<LazySubagents>,
     /// Store used by the `update_tasks` virtual tool to persist the bridge turn's task list,
     /// keyed by the parent session id the parent's `run_turn` exported via `ENV_SESSION`.
     tasks_store: Arc<Store>,
@@ -516,7 +515,19 @@ impl ForgeMcp {
             Ok(settled) => settled,
             Err(refusal) => return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)])),
         };
-        if let Err(refusal) = gate(decision, &name, tool.side_effect(), mode).await {
+        // A write that needs the user's answer carries its diff, as the native prompt does.
+        let diff = if decision == PermissionDecision::Ask
+            && tool.side_effect() == forge_types::SideEffect::Write
+        {
+            tool.preview(&args).await
+        } else {
+            None
+        };
+        let prompt = permission_relay::Prompt {
+            args: Some(&args),
+            diff,
+        };
+        if let Err(refusal) = gate(decision, (&name, tool.side_effect(), mode), prompt).await {
             return Ok(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
 
@@ -633,7 +644,11 @@ impl ForgeMcp {
 
         let mode = self.effective_mode();
         let decision = permission::decide(mode, side_effect, name, &effective_args, &self.rules);
-        if let Err(refusal) = gate(decision, name, side_effect, mode).await {
+        let prompt = permission_relay::Prompt {
+            args: Some(&effective_args),
+            diff: None,
+        };
+        if let Err(refusal) = gate(decision, (name, side_effect, mode), prompt).await {
             return Some(CallToolResult::error(vec![ContentBlock::text(refusal)]));
         }
         let out = m.call(name, &effective_args).await;
@@ -705,7 +720,7 @@ impl ForgeMcp {
         // Advertise the subagent virtual tools only when enabled here — spawn_agents for fresh
         // fan-out, send_to_agent for follow-ups to persisted children (persistent subagents).
         if let Some(s) = &self.subagents {
-            let spec = subagent::spawn_agents_spec_with(s.max_agents, &s.ctx.agents);
+            let spec = subagent::spawn_agents_spec_with(s.max_agents, &s.agents);
             let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
             let follow = subagent::send_to_agent_spec();
@@ -806,9 +821,15 @@ fn enter_bridge_workspace() {
 /// (the CLI-bridge default); `http=true` serves the SAME tool surface over streamable-HTTP on
 /// `bind`, behind a bearer token (`FORGE_MCP_SERVE_TOKEN`) for remote/multi-machine orchestration.
 pub async fn run(http: bool, bind: String) -> Result<()> {
+    let mut clock = crate::cli::commands::run::session::StartupClock::start();
     enter_bridge_workspace();
-    forge_config::inject_provider_keys();
+    match std::env::var(forge_provider::BRIDGE_PROVIDER_KEYS_ENV) {
+        Ok(names) => forge_config::adopt_parent_provider_keys(&names),
+        Err(_) => forge_config::inject_provider_keys(),
+    }
+    clock.mark("mcp-serve: provider keys");
     let mut config = forge_config::load().unwrap_or_else(|_| Config::default());
+    clock.mark("mcp-serve: config load");
     // The parent hands us its CURRENT runtime temper in OUR env, set explicitly on this child's
     // `Command` at the bridge spawn site (`CompletionOptions::checkpoint` → `bridge_mcp_env`).
     // Honor it over the on-disk config mode so the permission gate matches the UI: after the user
@@ -836,62 +857,11 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
     // (the same hazard class the explicit `CheckpointContext` threading removed for
     // FORGE_CHECKPOINT_*).
     std::env::set_var(crate::FORGE_SUBAGENT_DEPTH_ENV, (depth + 1).to_string());
-    let subagents = if config.mesh.subagents.enabled && depth <= config.mesh.subagents.max_depth {
-        // Same global store the parent uses — NOT a relative `.forge/forge.db`, which is a DIFFERENT
-        // file (the parent's store lives in the per-user data dir). The divergence created spurious
-        // empty sessions and broke the bridge task round-trip (the parent reloaded tasks from the
-        // global db but mcp-serve wrote them to the project-local one).
-        let store = Arc::new(crate::open_store()?);
-        let repo_key = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let repo_boosts = store.duel_boosts(&repo_key).unwrap_or_default();
-        let (provider, router) = crate::build_provider_and_router(
-            &config,
-            false,
-            None,
-            None,
-            Default::default(),
-            repo_boosts,
-        );
-        let parent_id = store.create_session(".", &format!("{:?}", config.permission_mode))?;
-        let agents = Arc::new(forge_config::load_agents_layered(
-            &std::env::current_dir().unwrap_or_default(),
-            &config.mesh.subagents.agents_dir,
-        ));
-        let ctx = AgentCtx {
-            provider,
-            router,
-            store,
-            config: config.clone(),
-            pricing: Pricing::from_config(&config),
-            mode: config.permission_mode,
-            rules: config.permission_rules(),
-            depth,
-            max_depth: config.mesh.subagents.max_depth,
-            agents,
-            worktree_root: None,
-            repo_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            effective_pin: None,
-            inherit_pin: config.mesh.subagents.inherit_pin,
-        };
-        Some(SubagentSupport {
-            ctx,
-            parent_id,
-            max_agents: config.mesh.subagents.max_agents,
-            max_concurrency: config.mesh.subagents.max_concurrency,
-            detached_registry: subagent::DetachedRegistry::new(),
-        })
-    } else {
-        None
-    };
-
-    // Reuse the subagent store if present, else open the SAME global store the parent uses, so the
-    // bridge turn's `update_tasks` persists where the parent's post-turn reload reads it.
-    let tasks_store = match &subagents {
-        Some(s) => Arc::clone(&s.ctx.store),
-        None => Arc::new(crate::open_store()?),
-    };
+    // The store every bridge tool writes through (`update_tasks`, memory, subagents): the SAME
+    // global store the parent uses, so the parent's post-turn reload reads what this child wrote.
+    let tasks_store = Arc::new(crate::open_store()?);
+    let subagents = LazySubagents::new(&config, depth, Arc::clone(&tasks_store));
+    clock.mark("mcp-serve: store");
     // External project MCP servers (dual-graph/token-counter/helm/…) are ON on the bridge by
     // default. Each connects concurrently in the background under a bounded handshake/discovery
     // timeout, so a slow/auth-gated server is skipped without wedging the tool-using turn. Set
@@ -923,7 +893,9 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         } else {
             None
         };
+    clock.mark("mcp-serve: external mcp");
     let skills = Arc::new(forge_skills::Catalog::load(&forge_config::command_sources()));
+    clock.mark("mcp-serve: skills");
     let lean = bridge_budget::bridge_lean_enabled(config.mesh.bridge_lean);
     let workspace = std::env::current_dir()
         .and_then(|cwd| cwd.canonicalize())
@@ -951,10 +923,12 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         lean,
         auto_classify: Default::default(),
     };
+    clock.mark("mcp-serve: registry");
     if http {
         return serve_http(server, &bind).await;
     }
     let service = server.serve(stdio()).await?;
+    clock.mark("mcp-serve: handshake");
     service.waiting().await?;
     Ok(())
 }
