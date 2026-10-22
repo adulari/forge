@@ -48,6 +48,16 @@ pub(crate) fn ensure_pin_providers_known(pin: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether the startup "N model(s) benched" notice is worth printing. It is advice for a person
+/// (`forge models --probe`), so an unattended run (`forge run` from a script, `bench tasks`, the
+/// JSON outputs) printed it to stderr on every invocation as pure noise. It still shows there when
+/// it bears on the run: a benched model the run is pinned to is called anyway, and is the likeliest
+/// reason the run is about to fail.
+fn benched_notice_due(attended: bool, benched: &[String], pin: Option<&str>) -> bool {
+    !benched.is_empty()
+        && (attended || pin.is_some_and(|pin| pin_members(pin).iter().any(|m| benched.contains(m))))
+}
+
 fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
     if mock {
         return false;
@@ -279,11 +289,15 @@ pub(crate) async fn build_session_with_self_mcp(
     // (docs/features/mesh-routing.md — we never auto-probe, so a stale bench is the user's to clear).
     let mut presenter = presenter;
     if let Ok(report) = store.current_benched_report() {
-        if !report.is_empty() {
-            presenter.emit(forge_tui::PresenterEvent::Warning(format!(
-                "{} model(s) benched (rate-limited/unavailable) — `forge models --probe` to recheck",
-                report.len()
-            )));
+        let benched: Vec<String> = report.into_iter().map(|(model, _, _)| model).collect();
+        let notice = format!(
+            "{} model(s) benched (rate-limited/unavailable) — `forge models --probe` to recheck",
+            benched.len()
+        );
+        if benched_notice_due(presenter.is_attended(), &benched, pin.as_deref()) {
+            presenter.emit(forge_tui::PresenterEvent::Warning(notice));
+        } else if !benched.is_empty() {
+            tracing::info!("{notice}");
         }
     }
     // A provider-wide exclusion deserves its own line: it silently removes an entire subscription
@@ -383,6 +397,21 @@ pub(crate) async fn build_session_with_self_mcp(
 
     let catalog = catalog
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
+    let unknown_windows =
+        pin_window::learn_pinned_windows(&store, &config, pin.as_deref(), mock).await;
+    if !unknown_windows.is_empty() {
+        let notice = format!(
+            "context window of {} is unknown — requests and auto-compaction are sized for {} \
+             tokens; set `[mesh.context_windows]` to the real window",
+            unknown_windows.join(", "),
+            forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW
+        );
+        if presenter.is_attended() {
+            presenter.emit(forge_tui::PresenterEvent::Warning(notice));
+        } else {
+            tracing::warn!("{notice}");
+        }
+    }
     let ctx_windows = store.all_model_contexts().unwrap_or_default();
     clock.mark("calibration + context windows");
     let repo_key = workspace_cwd.clone();
@@ -693,6 +722,23 @@ pub(crate) async fn build_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_benched_notice_is_for_people_or_for_a_pin_it_affects() {
+        let benched = vec!["groq::llama-3.1-8b-instant".to_string()];
+        assert!(benched_notice_due(true, &benched, None));
+        assert!(
+            !benched_notice_due(false, &benched, Some("inferhub::cb/deepseek-v4.1-flash")),
+            "a scripted run pinned elsewhere gets no stderr noise"
+        );
+        assert!(!benched_notice_due(false, &benched, None));
+        assert!(benched_notice_due(
+            false,
+            &benched,
+            Some("inferhub::glm-5.3-flash,groq::llama-3.1-8b-instant")
+        ));
+        assert!(!benched_notice_due(true, &[], None));
+    }
 
     #[test]
     fn a_resumed_session_keeps_its_stored_pin_unless_model_is_given() {

@@ -1,5 +1,5 @@
-//! Memory capture is an optional side call: under a session pin it must use the same filtered
-//! model as recap/suggestion, not the routed (pinned) model.
+//! Memory capture is an optional side call: under a session pin it stays on the pin, and a
+//! subscription pin skips it rather than leave the pin or spend the plan.
 
 use super::*;
 
@@ -34,7 +34,7 @@ impl Provider for RecordingProvider {
 }
 
 #[tokio::test]
-async fn memory_capture_under_a_pin_uses_the_filtered_side_call_model() {
+async fn memory_capture_under_a_pin_stays_on_the_pin_or_is_skipped() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.mesh.auto_memory = true;
@@ -58,25 +58,29 @@ async fn memory_capture_under_a_pin_uses_the_filtered_side_call_model() {
         dir.path().to_str().unwrap(),
     )
     .unwrap();
-    session.pin_model(Some("codex-oauth::gpt-5.6-sol".into()));
     session.set_catalog(Some(ModelCatalog::new(vec!["ollama::qwen3:4b".into()])));
 
+    session.pin_model(Some("inferhub::cb/deepseek-v4.1-flash".into()));
     let handle = session
         .capture_memories("remember this", "noted")
         .await
-        .expect("a usable side-call model exists");
+        .expect("an API pin serves its own side calls");
     handle.await.unwrap();
     assert_eq!(
         *memory_models.lock().unwrap(),
-        vec!["ollama::qwen3:4b".to_string()],
-        "the pinned subscription model must not serve the optional memory call"
+        vec!["inferhub::cb/deepseek-v4.1-flash".to_string()],
+        "a pinned run never reaches another provider, even for an optional call"
     );
 
-    session.set_catalog(Some(ModelCatalog::new(vec![])));
+    session.pin_model(Some("codex-oauth::gpt-5.6-sol".into()));
+    assert!(
+        session.capture_memories("again", "noted").await.is_none(),
+        "a subscription pin skips the optional call rather than spend its plan or leave the pin"
+    );
     session.pin_model(Some("claude-cli::sonnet".into()));
     assert!(
         session.capture_memories("again", "noted").await.is_none(),
-        "a bridge-only pin leaves no suitable side-call model, so memory capture is skipped"
+        "a bridge pin skips it too"
     );
 }
 
@@ -150,4 +154,64 @@ async fn an_auto_extracted_memory_never_stores_a_credential() {
         stored[0].text
     );
     assert!(stored[0].text.contains("always deploy"));
+}
+
+/// Records every model asked to diagnose a failed shell command.
+struct DiagnosisRecorder {
+    models: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for DiagnosisRecorder {
+    async fn complete(
+        &self,
+        model: &str,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _on_event: &mut forge_provider::EventSink<'_>,
+    ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+        self.models.lock().unwrap().push(model.to_string());
+        Ok(forge_provider::ModelResponse {
+            content: "the build script exited early".into(),
+            ..Default::default()
+        })
+    }
+}
+
+/// The measured leak: a run pinned to deepseek sent its shell-error diagnosis to
+/// `groq::llama-3.1-8b-instant`, the first usable trivial-tier model.
+#[tokio::test]
+async fn a_pinned_runs_shell_diagnosis_stays_on_the_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.mesh.models.insert(
+        TaskTier::Trivial.as_str().to_string(),
+        forge_config::OneOrMany::Many(vec!["ollama::qwen3:4b".into()]),
+    );
+    let models = Arc::new(Mutex::new(Vec::new()));
+    let mut session = Session::start(
+        Arc::new(Store::open_in_memory().unwrap()),
+        Arc::new(DiagnosisRecorder {
+            models: models.clone(),
+        }),
+        Arc::new(FixedRouter {
+            model: "inferhub::cb/deepseek-v4.1-flash".into(),
+            fallbacks: vec![],
+        }),
+        ToolRegistry::with_core_tools_in(dir.path()),
+        Box::new(HeadlessPresenter::new(false)),
+        config,
+        dir.path().to_str().unwrap(),
+    )
+    .unwrap();
+    session.set_catalog(Some(ModelCatalog::new(vec!["ollama::qwen3:4b".into()])));
+    session.pin_model(Some("inferhub::cb/deepseek-v4.1-flash".into()));
+
+    session
+        .diagnose_shell_error("./build.sh", "shell: exit 3 in 12ms\nstage two aborted")
+        .await;
+    assert_eq!(
+        *models.lock().unwrap(),
+        vec!["inferhub::cb/deepseek-v4.1-flash".to_string()]
+    );
 }

@@ -405,11 +405,20 @@ Rules:\n\
 
     /// The model for a cheap side call (recap, suggestion, memory, shell diagnosis, compaction's
     /// routed hop). A pinned session — the router's `--model` pin or the in-session `/model` pin,
-    /// which the router does not see — prefers the first usable trivial model that is not a
-    /// subscription, then its own pin; a routed session uses what routing chose. A subscription
-    /// model the session is not itself running on is never picked here: side calls are optional
-    /// and must not spend a plan the user did not point this session at.
+    /// which the router does not see — keeps it on its own pin
+    /// ([`crate::btw_policy::strict_pin_side_call_model`]); a routed session uses what routing
+    /// chose. With `mesh.pin_failover` on, a pinned session prefers the first usable trivial model
+    /// that is not a subscription, then its own pin. A subscription model the session is not
+    /// itself running on is never picked here: side calls are optional and must not spend a plan
+    /// the user did not point this session at.
     pub(crate) fn auxiliary_model(&self, routed: &forge_mesh::RoutingDecision) -> String {
+        if let Some(own) = crate::btw_policy::strict_pin_side_call_model(
+            &self.config,
+            self.pinned_model.as_ref(),
+            routed,
+        ) {
+            return own;
+        }
         crate::btw_policy::side_call_model(
             &self.config,
             &self.provider_readiness().health,
@@ -423,10 +432,19 @@ Rules:\n\
     /// appropriate for the primary coding turn, but not for best-effort recap/suggestion/error
     /// side calls: three extra bridge launches made a completed `forge run` linger until its outer
     /// timeout. Prefer a lightweight routed model when available; otherwise omit the optional call.
+    /// A pinned session whose pin is a subscription (a bridge, a ChatGPT plan) skips these calls
+    /// too: they may neither leave the pin nor spend a plan on optional work.
     pub(crate) fn post_turn_auxiliary_model(
         &self,
         routed: &forge_mesh::RoutingDecision,
     ) -> Option<String> {
+        if let Some(own) = crate::btw_policy::strict_pin_side_call_model(
+            &self.config,
+            self.pinned_model.as_ref(),
+            routed,
+        ) {
+            return (!forge_mesh::catalog::is_subscription(&own)).then_some(own);
+        }
         let model = self.auxiliary_model(routed);
         (!forge_provider::is_cli_bridge(&model)).then_some(model)
     }

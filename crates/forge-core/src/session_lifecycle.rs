@@ -258,6 +258,8 @@ impl Session {
             git_hygiene: crate::git_hygiene::Tracker::default(),
             stale_tasks: crate::task_staleness::Tracker::default(),
             history_epoch: 0,
+            transcript_origin: 0,
+            compactions: 0,
             cache: Default::default(),
             context_floor: Default::default(),
             context_trim: Default::default(),

@@ -74,6 +74,9 @@ pub struct UpdateStats {
     pub files_pruned: usize,
 }
 
+/// How many files `update` indexes between checks that its root still exists.
+const ROOT_CHECK_EVERY: usize = 32;
+
 /// Hard per-file budget for the synchronous parser. A generated or accidentally vendored
 /// multi-megabyte source file should not make the first interactive index/search look hung.
 pub const MAX_INDEX_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -229,14 +232,9 @@ impl Lattice {
                 )));
             }
         }
-        for path in &candidates {
-            seen.insert(self.rel_path(path));
-            // A single file's store error (e.g. a transient SQLite lock) shouldn't abort the
-            // whole walk — log it and keep indexing the rest, matching index_file's own
-            // best-effort handling of unreadable files.
-            if let Err(e) = self.index_file(path, &mut stats) {
-                tracing::warn!(file = %path.display(), error = %e, "lattice: failed to index file, skipping");
-            }
+        if !self.index_candidates(&root, &candidates, &mut seen, &mut stats) {
+            tracing::debug!(root = %self.repo_root, "lattice: root vanished mid-update, stopping");
+            return Ok(stats);
         }
         // Purge files that vanished from the walk (deleted, or now under a skipped/nested-git dir).
         // Best-effort: a failure here is logged rather than propagated, leaving stale rows for the
@@ -274,6 +272,32 @@ impl Lattice {
             let _ = self.recompute_pagerank();
         }
         Ok(stats)
+    }
+
+    /// Index `candidates`, or stop and return `false` once `root` no longer exists. A workspace
+    /// deleted mid-walk (a finished bench task's tempdir, a removed worktree) turned every
+    /// remaining file into a missing-file delete, back to back on the store's write lock, for rows
+    /// the next session's stale-root prune removes anyway.
+    fn index_candidates(
+        &self,
+        root: &Path,
+        candidates: &[std::path::PathBuf],
+        seen: &mut HashSet<String>,
+        stats: &mut UpdateStats,
+    ) -> bool {
+        for (i, path) in candidates.iter().enumerate() {
+            if i % ROOT_CHECK_EVERY == 0 && !root.is_dir() {
+                return false;
+            }
+            seen.insert(self.rel_path(path));
+            // A single file's store error (e.g. a transient SQLite lock) shouldn't abort the
+            // whole walk — log it and keep indexing the rest, matching index_file's own
+            // best-effort handling of unreadable files.
+            if let Err(e) = self.index_file(path, stats) {
+                tracing::warn!(file = %path.display(), error = %e, "lattice: failed to index file, skipping");
+            }
+        }
+        true
     }
 
     /// (Re)index a single file (e.g. after the agent edits it). No-op for unsupported files.
@@ -812,6 +836,19 @@ mod tests {
     fn lattice(root: &Path) -> Lattice {
         let store = Arc::new(Store::open_in_memory().unwrap());
         Lattice::new(store, root)
+    }
+
+    #[test]
+    fn an_update_whose_root_was_deleted_stops_instead_of_deleting_file_by_file() {
+        let t = Tmp::new();
+        t.write("src/a.rs", "pub fn a() {}\n");
+        t.write("src/b.rs", "pub fn b() {}\n");
+        let lat = lattice(&t.root);
+        let candidates = vec![t.root.join("src/a.rs"), t.root.join("src/b.rs")];
+        std::fs::remove_dir_all(&t.root).unwrap();
+        let (mut seen, mut stats) = (HashSet::new(), UpdateStats::default());
+        assert!(!lat.index_candidates(&t.root, &candidates, &mut seen, &mut stats));
+        assert!(seen.is_empty(), "no file of the vanished root was visited");
     }
 
     #[test]

@@ -233,19 +233,8 @@ pub(crate) fn side_call_model(
     catalog: Option<&ModelCatalog>,
     routed: &forge_mesh::RoutingDecision,
 ) -> String {
-    let session_pin = pinned_model.and_then(|set| set.first().cloned());
-    if !(routed.pinned || session_pin.is_some()) {
+    let Some(own) = pinned_own_model(pinned_model, routed) else {
         return routed.model.clone();
-    }
-    // With a multi-model pin set, the model that actually served the turn is the session's own
-    // model, not whichever member happens to be listed first.
-    let own = match session_pin {
-        Some(first) if pinned_model.is_some_and(|set| set.contains(&routed.model)) => {
-            let _ = first;
-            routed.model.clone()
-        }
-        Some(first) => first,
-        None => routed.model.clone(),
     };
     // `credit_mode = strict` means free/subscription only: a pin set must not smuggle a paid
     // model in through the side-call chain.
@@ -268,6 +257,41 @@ pub(crate) fn side_call_model(
         })
         .find(|m| forge_config::has_api_key(forge_config::provider_of(m)))
         .unwrap_or(own)
+}
+
+/// The model a pinned session runs on, `None` when the session is not pinned. With a multi-model
+/// pin set, the model that actually served the turn is the session's own model, not whichever
+/// member happens to be listed first.
+fn pinned_own_model(
+    pinned_model: Option<&Vec<String>>,
+    routed: &forge_mesh::RoutingDecision,
+) -> Option<String> {
+    match pinned_model.and_then(|set| set.first()) {
+        Some(_) if pinned_model.is_some_and(|set| set.contains(&routed.model)) => {
+            Some(routed.model.clone())
+        }
+        Some(first) => Some(first.clone()),
+        None => routed.pinned.then(|| routed.model.clone()),
+    }
+}
+
+/// The model an automatic side call (recap, memory, shell diagnosis, the auto-mode classifier,
+/// hooks) of a pinned session must use: the pin itself. A pinned run is a promise that one model
+/// does the work; a shell-error diagnosis sent to `groq::llama-3.1-8b-instant` from a session
+/// pinned to `inferhub::cb/deepseek-v4.1-flash` broke it, and left the pinned arm's tokens and cost
+/// incomplete. A subscription pin skips the optional calls instead (see
+/// `Session::post_turn_auxiliary_model`). `mesh.pin_failover = true`, the escape hatch that lets a
+/// pinned turn switch models, restores the cheaper trivial-model choice for side calls too. `None`
+/// when the session is not pinned or the escape hatch is on.
+pub(crate) fn strict_pin_side_call_model(
+    config: &Config,
+    pinned_model: Option<&Vec<String>>,
+    routed: &forge_mesh::RoutingDecision,
+) -> Option<String> {
+    if config.mesh.pin_failover {
+        return None;
+    }
+    pinned_own_model(pinned_model, routed)
 }
 
 impl Session {

@@ -737,7 +737,38 @@ struct AgentRun<'a> {
 
 /// Run one agent turn in `run.dir` (the caller has already made it the process CWD) and return
 /// the resources it took. The patch and wall time are left for the caller.
+///
+/// A panic inside the turn becomes a failed attempt instead of unwinding through the suite loop:
+/// results are written once every task has run, so one panicking task used to take the whole
+/// run's unrecorded attempts down with it.
 async fn run_agent(run: &AgentRun<'_>) -> Result<RunOutcome> {
+    // Boxed: the whole session turn nested inside `CatchUnwind` overflows the compiler's layout
+    // query depth for `run_swe`.
+    panics_as_failures(Box::pin(run_agent_turn(run))).await
+}
+
+async fn panics_as_failures(
+    turn: impl std::future::Future<Output = Result<RunOutcome>>,
+) -> Result<RunOutcome> {
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(turn).catch_unwind().await {
+        Ok(outcome) => outcome,
+        Err(panic) => Ok(RunOutcome::failed(format!(
+            "agent turn panicked: {}",
+            panic_text(panic.as_ref())
+        ))),
+    }
+}
+
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic payload")
+}
+
+async fn run_agent_turn(run: &AgentRun<'_>) -> Result<RunOutcome> {
     let outcome = match run.agent {
         Agent::Forge => {
             // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
@@ -836,6 +867,23 @@ async fn run_agent(run: &AgentRun<'_>) -> Result<RunOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_turn_is_recorded_as_a_failed_attempt() {
+        let outcome = panics_as_failures(async {
+            if std::hint::black_box(true) {
+                panic!("range start index 16 out of range for slice of length 7");
+            }
+            Ok(RunOutcome::default())
+        })
+        .await
+        .expect("a panic is an outcome, not an error");
+        let error = outcome.error.expect("the attempt is marked failed");
+        assert!(
+            error.starts_with("agent turn panicked: range start index 16"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn load_instances_parses_jsonl_and_array() {

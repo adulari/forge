@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 mod assay_store;
 mod automation_store;
 mod bench_solve_store;
+mod busy;
 mod checkpoint_store;
 mod codemode_store;
 mod detached_child_store;
@@ -89,7 +90,7 @@ const SCHEMA_VERSION: i64 = 45;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
-/// `busy_timeout` covers ordinary lock waits but NOT `SQLITE_BUSY_SNAPSHOT`, so we retry the whole
+/// the busy handler covers ordinary lock waits but NOT `SQLITE_BUSY_SNAPSHOT`, so we retry the whole
 /// transaction a bounded number of times with a short backoff rather than dropping the row.
 const BUSY_RETRY_MAX: u32 = 8;
 
@@ -502,9 +503,11 @@ impl r2d2::ManageConnection for SqliteManager {
             ConnSource::File(p) => Connection::open(p)?,
             ConnSource::Memory => Connection::open_in_memory()?,
         };
-        // WAL still allows only one writer; without a busy_timeout a concurrent writer (the TUI vs
-        // the mcp-serve bridge, or now two pooled connections) hits SQLITE_BUSY immediately.
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // WAL still allows only one writer; without a busy handler a concurrent writer (the TUI vs
+        // the mcp-serve bridge, or now two pooled connections) hits SQLITE_BUSY immediately. Ours
+        // polls in milliseconds rather than SQLite's 100 ms, so a writer committing in a loop
+        // cannot starve the rest (busy.rs).
+        conn.busy_handler(Some(busy::wait_for_lock))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Performance pragmas — safe with WAL mode:
         //   synchronous=NORMAL: WAL already guarantees crash recovery; FULL adds extra fsyncs
@@ -5741,12 +5744,11 @@ mod tests {
 
     #[test]
     fn live_event_append_outlasts_a_writer_stall_longer_than_busy_timeout() {
-        // A foreign writer that holds the single WAL write lock for longer than the 5s
-        // `busy_timeout` — a VACUUM, or a large lattice indexing batch — makes the IMMEDIATE BEGIN
-        // in `append_live_event` fail with SQLITE_BUSY once the handler gives up. The append must
-        // still land, otherwise the session's live feed goes dark while the agent keeps working.
-        // Held 6.5s: past the 5s timeout (so the first attempt is certain to fail) but well inside
-        // the retry's remaining budget (so the second attempt is certain to succeed).
+        // A foreign writer that holds the single WAL write lock for seconds — a VACUUM, or a
+        // large lattice indexing batch — must not make the IMMEDIATE BEGIN in `append_live_event`
+        // fail. The append must still land, otherwise the session's live feed goes dark while the
+        // agent keeps working. Held 6.5s: past the old 5s `busy_timeout` this test was written
+        // against, inside the busy handler's budget and the retry on top of it.
         let path = temp_db_path();
         let store = Store::open(&path).unwrap();
         let sid = store.create_session("/tmp", "default").unwrap();

@@ -1108,6 +1108,19 @@ pin and a pin set share ONE representation and ONE selection path.
   (benched/rate-limited/unhealthy) are skipped during ranking. If every member is unusable, the
   first member is dispatched anyway so the provider's real, actionable error surfaces.
 
+**Side calls stay on the pin.** The automatic side calls a turn makes — the shell-error diagnosis,
+recap, next-prompt suggestion, memory capture, the auto-mode command classifier, `prompt`/`agent`
+hooks and the goal evaluator — use the pinned model too (the member that served the turn, for a
+set), and a subscription pin (a CLI bridge, a ChatGPT plan) skips them rather than spend the
+plan or start another agent process (`strict_pin_side_call_model`,
+`crates/forge-core/src/btw_policy.rs`). Before, a pinned session
+sent them to the first usable trivial-tier model, so a run pinned to
+`inferhub::cb/deepseek-v4.1-flash` diagnosed a failed command on `groq::llama-3.1-8b-instant`,
+which broke the pin and left the pinned arm's token and cost totals incomplete. With
+`mesh.pin_failover = true` side calls go back to preferring that cheaper trivial model. A `/btw`
+question, which you ask yourself, keeps its own choice, and compaction keeps its own chain (the
+pin first, see context-compaction.md).
+
 What a mid-turn provider error may do is decided by exactly one chooser, `failover_policy`
 (`crates/forge-core/src/lib.rs:434`):
 

@@ -30,6 +30,7 @@ mod adaptive_effort;
 mod build_command;
 pub mod git_attribution;
 mod memory_scope;
+mod transcript_mark;
 
 /// Create `dir` and keep it out of the user's `git status`: a `*` ignore file inside the directory
 /// ignores everything under it, itself included, so nothing the user owns is edited. Never
@@ -1775,6 +1776,11 @@ pub struct Session {
     /// Bumped whenever the transcript is rewritten from outside the model loop (rewind, uncompact,
     /// full reload) — see [`forge_provider::CheckpointContext::epoch`].
     history_epoch: u64,
+    /// Absolute position of `transcript[0]`: compaction moves it forward so a `TranscriptMark`
+    /// taken before a fold still finds the messages after it (transcript_mark.rs).
+    transcript_origin: usize,
+    /// Compactions this session has applied, to tell their `history_epoch` bumps from rewrites.
+    compactions: u64,
     /// Prompt-cache attribution: the previous request's wire fingerprint per model.
     cache: cache_instrument::CacheInstrument,
     /// Transcript index below which old tool output may be shortened; only moves forward within a
@@ -3546,7 +3552,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         } else {
             None
         };
-        let primary_transcript_start = self.transcript.len();
+        let primary_transcript_start = self.transcript_mark();
         let outcome = self
             .run_model_loop(
                 edit_model,
@@ -3801,14 +3807,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     || self.last_turn_contract.requires_changed_artifact()));
         let primary_changed_paths =
             changed_paths_from_status(working_tree_status(Some(self.workspace.root())).as_deref());
-        // Overflow compaction can replace the transcript with a shorter summary while the
-        // primary model loop is running. In that case the old start offset is no longer a
-        // valid boundary, and the safe result is "no proof that the migration sweep was
-        // complete" so the bounded audit remains eligible.
-        let primary_turn_messages = self
-            .transcript
-            .get(primary_transcript_start..)
-            .unwrap_or_default();
+        // Compaction inside the primary loop folds part of it into a summary; only what survived
+        // counts as evidence, so a folded sweep reads as "no proof that the migration sweep was
+        // complete" and the bounded audit remains eligible.
+        let primary_turn_messages = self.transcript_since(primary_transcript_start);
         let primary_identifier_matches = completeness_production_identifier_search_matches(
             primary_turn_messages,
             self.workspace.root(),
@@ -3853,7 +3855,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             )?;
             self.transcript
                 .push(Message::system(DIRECT_COMPLETENESS_PROMPT));
-            let audit_transcript_start = self.transcript.len();
+            let audit_transcript_start = self.transcript_mark();
             let review_specs = self.tool_specs();
             let review = self
                 .run_model_loop(
@@ -3872,7 +3874,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             halted_by_loop_guard = review.halted_by_loop_guard;
             hard_guard_abort |= review.hard_guard_abort;
 
-            let audit_messages = &self.transcript[audit_transcript_start..];
+            let audit_messages = self.transcript_since(audit_transcript_start);
             let repository_search_ran = completeness_repository_search_ran(audit_messages);
             let empty_search = completeness_search_reported_no_matches(audit_messages);
             if !repository_search_ran
@@ -3958,7 +3960,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             );
             let unresolved_paths = unresolved_completeness_production_paths(
                 &primary_opened_identifier_paths,
-                &self.transcript[audit_transcript_start..],
+                self.transcript_since(audit_transcript_start),
                 self.workspace.root(),
                 &changed_paths,
             );
@@ -5069,6 +5071,9 @@ mod tests {
 
     #[path = "compaction_summary.rs"]
     mod compaction_summary_tests;
+
+    #[path = "transcript_mark.rs"]
+    mod transcript_mark_tests;
 
     #[path = "pinned_context.rs"]
     mod pinned_context_tests;
@@ -7641,7 +7646,7 @@ mod tests {
     }
 
     #[test]
-    fn auxiliary_calls_escape_explicit_subscription_pin() {
+    fn auxiliary_calls_stay_on_an_explicit_pin() {
         let mut config = Config::default();
         config.mesh.models.insert(
             TaskTier::Trivial.as_str().to_string(),
@@ -7658,8 +7663,74 @@ mod tests {
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
-        let mut live_catalog = ModelCatalog::new(vec!["ollama::qwen3:4b".into()]);
-        session.set_catalog(Some(live_catalog.clone()));
+        session.set_catalog(Some(ModelCatalog::new(vec!["ollama::qwen3:4b".into()])));
+        let pinned = forge_mesh::RoutingDecision {
+            effort: None,
+            tier: TaskTier::Trivial,
+            model: "inferhub::cb/deepseek-v4.1-flash".into(),
+            rationale: "explicit pin".into(),
+            fallbacks: vec![],
+            pinned: true,
+            unroutable: false,
+        };
+        let routed = forge_mesh::RoutingDecision {
+            pinned: false,
+            model: "codex-oauth::gpt-5.6-sol".into(),
+            ..pinned.clone()
+        };
+        assert_eq!(
+            session.auxiliary_model(&pinned),
+            "inferhub::cb/deepseek-v4.1-flash",
+            "a pinned run's side calls (shell diagnosis, recap, memory) stay on the pin"
+        );
+        assert_eq!(
+            session.post_turn_auxiliary_model(&pinned).as_deref(),
+            Some("inferhub::cb/deepseek-v4.1-flash")
+        );
+        assert_eq!(session.auxiliary_model(&routed), "codex-oauth::gpt-5.6-sol");
+
+        session.pin_model(Some("inferhub::glm-5.3-flash".into()));
+        assert_eq!(
+            session.auxiliary_model(&routed),
+            "inferhub::glm-5.3-flash",
+            "the in-session /model pin is a pin too, even though the router does not see it"
+        );
+        session.pin_model(None);
+
+        for subscription in ["claude-cli::sonnet", "codex-oauth::gpt-5.6-sol"] {
+            let pinned_subscription = forge_mesh::RoutingDecision {
+                model: subscription.into(),
+                ..pinned.clone()
+            };
+            assert_eq!(
+                session.post_turn_auxiliary_model(&pinned_subscription),
+                None,
+                "a subscription pin skips optional side work rather than spend its plan, launch \
+                 another CLI agent or leave its pin ({subscription})"
+            );
+        }
+    }
+
+    #[test]
+    fn pin_failover_lets_side_calls_escape_the_pin_as_before() {
+        let mut config = Config::default();
+        config.mesh.pin_failover = true;
+        config.mesh.models.insert(
+            TaskTier::Trivial.as_str().to_string(),
+            forge_config::OneOrMany::Many(vec!["ollama::qwen3:4b".into()]),
+        );
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            store,
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        session.set_catalog(Some(ModelCatalog::new(vec!["ollama::qwen3:4b".into()])));
         let pinned = forge_mesh::RoutingDecision {
             effort: None,
             tier: TaskTier::Trivial,
@@ -7669,36 +7740,12 @@ mod tests {
             pinned: true,
             unroutable: false,
         };
-        let routed = forge_mesh::RoutingDecision {
-            effort: None,
-            pinned: false,
-            ..pinned.clone()
-        };
         assert_eq!(session.auxiliary_model(&pinned), "ollama::qwen3:4b");
-        assert_eq!(session.auxiliary_model(&routed), "codex-oauth::gpt-5.6-sol");
+        session.set_catalog(Some(ModelCatalog::new(vec![
+            "groq::llama-3.1-8b-instant".into()
+        ])));
         assert_eq!(
-            session.post_turn_auxiliary_model(&pinned).as_deref(),
-            Some("ollama::qwen3:4b"),
-            "a lightweight configured model remains suitable for optional side calls"
-        );
-
-        let pinned_again = pinned.clone();
-        let claude_bridge = forge_mesh::RoutingDecision {
-            effort: None,
-            model: "claude-cli::sonnet".into(),
-            pinned: false,
-            ..pinned
-        };
-        assert_eq!(
-            session.post_turn_auxiliary_model(&claude_bridge),
-            None,
-            "a completed turn must not launch another full CLI agent for optional side work"
-        );
-
-        live_catalog = ModelCatalog::new(vec!["groq::llama-3.1-8b-instant".into()]);
-        session.set_catalog(Some(live_catalog));
-        assert_eq!(
-            session.auxiliary_model(&pinned_again),
+            session.auxiliary_model(&pinned),
             "codex-oauth::gpt-5.6-sol",
             "a local server absent from the discovered catalog is not used; fall back to the pin"
         );

@@ -22,6 +22,10 @@ fix.
   skipped when the budget is exhausted, and any model error is swallowed silently — it can
   never derail or fail the turn.
 - Gated by `[shell] explain_errors` (default `true`).
+- **A pinned session diagnoses on its pin.** With `--model` or `/model`, the call goes to the
+  pinned model (or is skipped when the pin is a subscription) instead of the cheapest trivial-tier
+  route, so a pinned run never reaches another provider (see mesh-routing.md, "Side calls stay on
+  the pin"; `mesh.pin_failover = true` restores the trivial-tier route).
 
 ## Design
 
