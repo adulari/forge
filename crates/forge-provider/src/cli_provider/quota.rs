@@ -154,6 +154,26 @@ pub fn codex_cli_detected_plan() -> Option<String> {
     forge_config::provider_oauth::extract_chatgpt_plan_type(access_token)
 }
 
+/// Whether the `codex` CLI is signed in with a ChatGPT account (its `auth.json` holds OAuth
+/// `tokens`) rather than an API key. The two see different models — a ChatGPT login is refused
+/// `gpt-5.4-mini`, an API key is not — so a list the CLI advertised only describes `codex-oauth`
+/// when this is true. `false` when the file is missing or unreadable; never logs token material.
+pub(crate) fn codex_cli_uses_chatgpt_login() -> bool {
+    let Some(path) = codex_auth_json_path() else {
+        return false;
+    };
+    let Some(auth) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+    else {
+        return false;
+    };
+    auth.get("tokens")
+        .and_then(|tokens| tokens.get("access_token"))
+        .and_then(Value::as_str)
+        .is_some_and(|token| !token.is_empty())
+}
+
 /// Find the rollout file for a codex thread (`rollout-<ts>-<thread_id>.jsonl`) under the sessions
 /// dir (organised `YYYY/MM/DD/`). Bounded recursion; returns the first match.
 pub(super) fn find_codex_rollout(thread_id: &str) -> Option<std::path::PathBuf> {

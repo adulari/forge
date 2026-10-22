@@ -269,16 +269,19 @@ impl CliKind {
             // `claude --model` aliases (claude 2.1 --help names fable/opus/sonnet; haiku is the
             // documented fast tier); they span the capability tiers.
             CliKind::ClaudeCode => &["fable", "opus", "sonnet", "haiku"],
-            // `codex --model` (codex 0.13x model picker). gpt-5.4-mini is the fast/cheap tier.
+            // The models the Codex backend itself listed for a ChatGPT login, in its own order
+            // (`codex debug models`). `gpt-5.4-mini` is deliberately absent: a ChatGPT account is
+            // refused it ("not supported when using Codex with a ChatGPT account"), so seeding it
+            // sent failover to a model that cannot answer. An API-key login still reaches it — the
+            // live probe above is the primary source and reports whatever that login can run.
             CliKind::Codex => &[
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.5",
-                "gpt-5.3-codex",
-                "gpt-5.2",
-                "gpt-5.4",
-                "gpt-5.4-mini",
             ],
             // `agy --model` (Antigravity 1.0.8 `agy models`). Free Gemini tiers: flash = fast/cheap
             // (trivial/standard), pro = the capable tier (complex). Verified accepted live.
@@ -861,7 +864,7 @@ fn probe_failure_message(stderr: &[u8], stdout: &[u8]) -> String {
 /// itself lists are usable aliases: the catalog also carries hidden internal entries
 /// (`gpt-reserve`, `codex-auto-review`) that are not user-selectable models. An older codex has no
 /// `debug models` subcommand at all, which surfaces as a probe failure and the static fallback.
-fn parse_codex_catalog_models(out: &str) -> Vec<String> {
+pub(crate) fn parse_codex_catalog_models(out: &str) -> Vec<String> {
     let Ok(catalog) = serde_json::from_str::<Value>(out) else {
         return Vec::new();
     };
@@ -1808,6 +1811,7 @@ enum Parsed {
 }
 
 mod quota;
+pub(crate) use quota::codex_cli_uses_chatgpt_login;
 pub use quota::{codex_cli_detected_plan, codex_rollout_is_account_wide};
 use quota::{codex_quota_from_rollout, find_codex_rollout, normalize_window, quota_status_from};
 
@@ -3643,15 +3647,17 @@ mod tests {
         );
         let codex = CliKind::Codex.default_models();
         assert!(
-            codex.contains(&"gpt-5.5") && codex.contains(&"gpt-5.4-mini"),
-            "{codex:?}"
-        );
-        assert!(
             codex.contains(&"gpt-5.6-sol")
                 && codex.contains(&"gpt-5.6-terra")
                 && codex.contains(&"gpt-5.6-luna"),
             "{codex:?}"
         );
+        assert!(
+            codex.contains(&"gpt-6-luna") && codex.contains(&"gpt-6-sol"),
+            "the fallback must carry the current family, not the one it replaced: {codex:?}"
+        );
+        // A ChatGPT login is refused this one; seeding it sends failover to a model that cannot answer.
+        assert!(!codex.contains(&"gpt-5.4-mini"), "{codex:?}");
         // A model alias namespaces into a full Forge id under the bridge prefix.
         assert_eq!(
             format!("{}::{}", CliKind::ClaudeCode.prefix(), claude[0]),
@@ -5564,6 +5570,23 @@ mod tests {
         with_fake_codex_home(Some(auth_json), || {
             assert_eq!(codex_cli_detected_plan(), None);
         });
+    }
+
+    /// A ChatGPT login and an API key see different models (`gpt-5.4-mini` is refused to the
+    /// former), so the CLI's advertised list only describes `codex-oauth` for the former.
+    #[test]
+    fn codex_cli_login_kind_separates_a_chatgpt_account_from_an_api_key() {
+        let chatgpt = r#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"a","refresh_token":"r"}}"#;
+        with_fake_codex_home(Some(chatgpt), || assert!(codex_cli_uses_chatgpt_login()));
+
+        let api_key = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test","tokens":null}"#;
+        with_fake_codex_home(Some(api_key), || assert!(!codex_cli_uses_chatgpt_login()));
+
+        with_fake_codex_home(None, || assert!(!codex_cli_uses_chatgpt_login()));
+        with_fake_codex_home(
+            Some("not json"),
+            || assert!(!codex_cli_uses_chatgpt_login()),
+        );
     }
 
     /// Captured live from `claude -p --output-format stream-json --verbose

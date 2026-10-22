@@ -195,7 +195,7 @@ pub fn probe_claude_limits() -> Vec<(String, f64, Option<i64>)> {
 }
 
 /// Read the active Codex OAuth account's authoritative, account-wide quota headers. The Codex
-/// backend has no quota-only endpoint, so this is one tiny `gpt-5.4-mini` request with a
+/// backend has no quota-only endpoint, so this is one tiny `gpt-5.6-luna` request with a
 /// one-character reply. Callers gate it on freshness; an unavailable OAuth session intentionally
 /// yields no observation so the CLI-bridge rollout fallback remains available.
 pub async fn probe_codex_limits() -> Vec<forge_types::QuotaHint> {

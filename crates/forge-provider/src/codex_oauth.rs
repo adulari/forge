@@ -1,4 +1,4 @@
-//! ChatGPT subscription OAuth provider (`codex-oauth::<model>`, e.g. `codex-oauth::gpt-5.5`).
+//! ChatGPT subscription OAuth provider (`codex-oauth::<model>`, e.g. `codex-oauth::gpt-6-luna`).
 //! Signs in with a ChatGPT Plus/Pro account via OAuth 2.0 PKCE (official Codex public client) and
 //! talks to ChatGPT's Codex Responses backend. Usage bills to the subscription ($0 in Forge).
 //!
@@ -30,11 +30,12 @@ pub const CODEX_OAUTH_NAMESPACE: &str = "codex-oauth";
 /// Hardcoded ChatGPT Codex backend — deliberately NOT read from config/env.
 const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
-// `gpt-5.4-mini` is the lowest-cost Codex model, but its HTTP quota headers can describe the
-// mini tier rather than the account's shared Codex allowance (observed as 0% while the normal
-// Codex route reported the actual weekly usage). Luna's normal WebSocket route emits the shared
-// `codex.rate_limits` frame, so it is the smallest reliable account-wide probe despite not being
-// the cheapest model. The prompt still makes this one short completion every freshness interval.
+// A mini model's HTTP quota headers can describe the mini tier rather than the account's shared
+// Codex allowance (observed as 0% while the normal Codex route reported the actual weekly usage),
+// and `gpt-5.4-mini` is refused outright for ChatGPT accounts. Luna's normal WebSocket route emits
+// the shared `codex.rate_limits` frame, so it is the smallest reliable account-wide probe despite
+// not being the cheapest model. The prompt still makes this one short completion every freshness
+// interval.
 const QUOTA_PROBE_MODEL: &str = "codex-oauth::gpt-5.6-luna";
 const QUOTA_PROBE_PROMPT: &str = "Reply only with .";
 
@@ -60,10 +61,7 @@ pub fn is_pinned_codex_url(url: &str) -> bool {
     )
 }
 
-fn responses_url() -> String {
-    format!("{CODEX_API_BASE}/responses")
-}
-
+mod models;
 mod quota_headers;
 pub(crate) use quota_headers::parse_codex_quota_headers;
 mod refresh;
@@ -685,152 +683,38 @@ pub fn detected_plan() -> Option<String> {
     provider_oauth::extract_chatgpt_plan_type(&tokens.access_token)
 }
 
-const CODEX_OAUTH_SEED_MODELS: &[&str] = &[
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.3-codex",
-    "gpt-5.2",
-    "gpt-5.4-mini",
-];
-
-/// Seed model ids as `codex-oauth::<id>` (no public `/models` on the ChatGPT backend).
+/// The `codex-oauth::<id>` models this account can run. The ChatGPT backend publishes the list
+/// itself (see [`models`]), so a fresh install sees the same models the Codex CLI does without
+/// waiting for a Forge release; if it cannot be asked, the last list it gave (or the bundled seeds)
+/// stands in.
 pub async fn list_models() -> Result<Vec<String>, ProviderError> {
     if !has_session() {
         return Err(ProviderError::Auth(
             "no Codex OAuth session — run `forge auth codex-oauth` to sign in".to_string(),
         ));
     }
-    Ok(seed_models())
-}
-
-/// The ChatGPT backend has no public `/models`, so this list used to be the bundled seeds alone —
-/// and went stale the moment OpenAI shipped a model to subscribers. `gpt-6-astra` was the case in
-/// point: `codex-cli` advertised it the day it landed while `codex-oauth`, on the SAME account and
-/// the same backend, could not see it until Forge cut a release.
-///
-/// The Codex CLI's own advertised list is that missing endpoint. Reading its probe cache lets a
-/// newly shipped model appear on both paths at once. The seeds stay as a floor rather than being
-/// replaced: they include ids (`gpt-5.4`, `gpt-5.2`, `gpt-5.3-codex`) the CLI no longer lists but
-/// the OAuth backend still serves, and dropping those would break anyone who pins one.
-fn seed_models() -> Vec<String> {
-    merge_advertised(
-        CODEX_OAUTH_SEED_MODELS,
-        &remembered_bridge_models("codex-cli"),
+    let live = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        CodexOauthProvider::new().fetch_catalog(),
     )
-}
-
-/// The bare model names `prefix`'s CLI last advertised, from its probe cache. This is the
-/// `/models` endpoint the ChatGPT backend does not offer: codex-cli and codex-oauth are the same
-/// account, so what one is told the other can use.
-fn remembered_bridge_models(prefix: &str) -> Vec<String> {
-    crate::cli_provider::bridge_model_cache_path()
-        .map(|path| remembered_bridge_models_at(&path, prefix))
-        .unwrap_or_default()
-}
-
-fn remembered_bridge_models_at(path: &std::path::Path, prefix: &str) -> Vec<String> {
-    crate::cli_provider::read_bridge_model_cache(path)
-        .remove(prefix)
-        .map(|entry| entry.models)
-        .unwrap_or_default()
-}
-
-/// Seeds first (stable order, and a floor), then anything the CLI advertises that they missed.
-fn merge_advertised(seeds: &[&str], advertised: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = seeds.iter().map(|m| (*m).to_string()).collect();
-    for model in advertised {
-        let model = model.trim();
-        if !model.is_empty() && !names.iter().any(|n| n == model) {
-            names.push(model.to_string());
+    .await;
+    let listed = match live {
+        Ok(Ok(models)) => {
+            models::remember_listed(&models);
+            models
         }
-    }
-    names
-        .into_iter()
-        .map(|m| format!("{CODEX_OAUTH_NAMESPACE}::{m}"))
-        .collect()
-}
-
-#[cfg(test)]
-mod dynamic_model_tests {
-    use super::*;
-
-    /// The defect: `codex-cli` advertised `gpt-6-astra` the day it shipped, while `codex-oauth` —
-    /// same account, same backend — could not see it until Forge cut a release, because its list
-    /// was a bundled constant.
-    #[test]
-    fn a_model_the_cli_advertises_appears_on_the_oauth_path_too() {
-        let advertised = vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()];
-        let merged = merge_advertised(CODEX_OAUTH_SEED_MODELS, &advertised);
-
-        assert!(
-            merged.contains(&"codex-oauth::gpt-6-astra".to_string()),
-            "a newly shipped model must appear without a Forge release: {merged:?}"
-        );
-        assert_eq!(
-            merged
-                .iter()
-                .filter(|m| *m == "codex-oauth::gpt-5.6-sol")
-                .count(),
-            1,
-            "a model on both lists is not duplicated"
-        );
-    }
-
-    /// The seeds are a floor, not a default: they carry ids the CLI no longer lists but the OAuth
-    /// backend still serves, so replacing the list outright would break anyone pinning one.
-    #[test]
-    fn seeds_survive_models_the_cli_no_longer_advertises() {
-        let merged = merge_advertised(CODEX_OAUTH_SEED_MODELS, &["gpt-6-astra".to_string()]);
-        for retired in ["gpt-5.4", "gpt-5.2", "gpt-5.3-codex"] {
-            assert!(
-                merged.contains(&format!("codex-oauth::{retired}")),
-                "{retired} must survive: {merged:?}"
+        Ok(Err(error)) => {
+            tracing::debug!(
+                "codex-oauth model catalog unavailable, using the last known list: {error}"
             );
+            models::fallback_models()
         }
-    }
-
-    /// codex-oauth reads this cache to learn about models shipped after the last Forge release,
-    /// so a reader that silently returns nothing would restore the stale hardcoded behaviour it
-    /// exists to replace.
-    #[test]
-    fn the_cache_round_trips_what_the_cli_advertised() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bridge-models.json");
-        let advertised = vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()];
-
-        crate::cli_provider::remember_bridge_models_at(
-            &path,
-            "codex-cli",
-            &advertised,
-            1_788_000_000,
-        );
-
-        assert_eq!(remembered_bridge_models_at(&path, "codex-cli"), advertised);
-        assert!(
-            remembered_bridge_models_at(&path, "claude-cli").is_empty(),
-            "an unprobed bridge reads as empty, not as another bridge's list"
-        );
-    }
-
-    #[test]
-    fn a_missing_cache_file_is_empty_not_an_error() {
-        assert!(remembered_bridge_models_at(
-            std::path::Path::new("/nonexistent/forge/bridge-models.json"),
-            "codex-cli",
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn no_cli_probe_yet_leaves_the_seeds_untouched() {
-        assert_eq!(
-            merge_advertised(CODEX_OAUTH_SEED_MODELS, &[]).len(),
-            CODEX_OAUTH_SEED_MODELS.len()
-        );
-    }
+        Err(_) => {
+            tracing::debug!("codex-oauth model catalog timed out, using the last known list");
+            models::fallback_models()
+        }
+    };
+    Ok(models::namespaced(&listed))
 }
 
 /// Exchange an authorization code for tokens (PKCE).
@@ -880,19 +764,45 @@ fn classify_entitlement_status(status: u16, body: &str) -> crate::EntitlementSta
 /// The ChatGPT Codex backend serves the Responses endpoint over SSE only and answers `stream:
 /// false` with `400 {"detail":"Stream must be set to true"}`, so the probe MUST stream. Only the
 /// response status is inspected; the SSE body is dropped unread.
+///
+/// The model is chosen from the catalog the backend returns for this very account
+/// ([`models::probe_model`]), never a fixed id: a model the plan cannot run is answered with a 400
+/// that said nothing about the login, and hard-coding `gpt-5.4-mini` made every ChatGPT sign-in end
+/// on that error. The list it fetched is remembered, so the models are visible straight away.
 pub async fn probe_entitlement(
     access_token: &str,
     chatgpt_account_id: &str,
 ) -> anyhow::Result<crate::EntitlementStatus> {
+    let (status, listed) =
+        probe_entitlement_at(CODEX_API_BASE, access_token, chatgpt_account_id).await?;
+    if !listed.is_empty() {
+        models::remember_listed(&listed);
+    }
+    Ok(status)
+}
+
+/// [`probe_entitlement`] against `base`, also returning the model ids the catalog listed (empty
+/// when it could not be read, in which case the probe falls back to a bundled seed).
+async fn probe_entitlement_at(
+    base: &str,
+    access_token: &str,
+    chatgpt_account_id: &str,
+) -> anyhow::Result<(crate::EntitlementStatus, Vec<String>)> {
     let http = bundled_http_client();
+    // The catalog only picks the probe's model; the verdict still comes from the completion
+    // endpoint, so a catalog that is down or odd can never read as a dead login.
+    let listed = models::get_catalog(&http, base, access_token, chatgpt_account_id)
+        .await
+        .map(|reply| reply.models)
+        .unwrap_or_default();
     let body = serde_json::json!({
-        "model": "gpt-5.4-mini",
+        "model": models::probe_model(&listed),
         "input": [{"role": "user", "content": "Reply with OK."}],
         "stream": true,
         "store": false,
     });
     let resp = http
-        .post(responses_url())
+        .post(format!("{}/responses", base.trim_end_matches('/')))
         .bearer_auth(access_token)
         .header(reqwest::header::ACCEPT, "text/event-stream")
         .header("ChatGPT-Account-Id", chatgpt_account_id)
@@ -905,7 +815,7 @@ pub async fn probe_entitlement(
     } else {
         resp.text().await.unwrap_or_default()
     };
-    Ok(classify_entitlement_status(status, &text))
+    Ok((classify_entitlement_status(status, &text), listed))
 }
 
 /// Read the active ChatGPT subscription's current Codex quota with the smallest reliable request.
@@ -1179,23 +1089,11 @@ mod tests {
         };
         let mut sink = |_: StreamEvent| {};
         let first = provider
-            .complete_with(
-                "codex-oauth::gpt-5.4-mini",
-                &messages,
-                &[],
-                &opts,
-                &mut sink,
-            )
+            .complete_with("codex-oauth::gpt-6-luna", &messages, &[], &opts, &mut sink)
             .await
             .expect("first live completion");
         let second = provider
-            .complete_with(
-                "codex-oauth::gpt-5.4-mini",
-                &messages,
-                &[],
-                &opts,
-                &mut sink,
-            )
+            .complete_with("codex-oauth::gpt-6-luna", &messages, &[], &opts, &mut sink)
             .await
             .expect("second live completion");
         eprintln!(
@@ -1902,27 +1800,6 @@ mod tests {
             fill_subscription_usage(reported, &body).usage.input_tokens,
             123
         );
-    }
-
-    #[test]
-    fn seed_models_are_namespaced() {
-        let seeds = seed_models();
-        assert!(!seeds.is_empty());
-        for id in &seeds {
-            assert!(id.starts_with("codex-oauth::"));
-            assert!(!forge_config::is_non_chat_model(id), "{id}");
-        }
-    }
-
-    #[test]
-    fn seed_models_include_gpt_5_6_family() {
-        let seeds = seed_models();
-        for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
-            assert!(
-                seeds.contains(&format!("codex-oauth::{id}")),
-                "{id} missing from {seeds:?}"
-            );
-        }
     }
 
     #[test]

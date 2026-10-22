@@ -230,18 +230,67 @@ async fn session_control_tools_and_recursion_are_refused_inside_a_script() {
     let asks = Arc::clone(&presenter.asks);
     let mut session = session_in(&dir, PermissionMode::AcceptEdits, presenter);
     let code = "const out = [];\n\
-        for (const name of ['ask_user', 'run_code', 'update_tasks']) {\n\
+        for (const name of ['ask_user', 'run_code', 'present_plan']) {\n\
           try { await tools[name]({}); out.push(name + ' ran'); }\n\
           catch (e) { out.push(name + ' refused'); }\n\
         }\n\
         return out.join(', ');";
     let (msg_id, result) = step(&mut session, &Ledgers::new(), run_code_call(code, None)).await;
     assert!(
-        result.starts_with("ask_user refused, run_code refused, update_tasks refused"),
+        result.starts_with("ask_user refused, run_code refused, present_plan refused"),
         "{result}"
     );
     assert_eq!(asks.load(Ordering::SeqCst), 0, "the user was never asked");
     assert_eq!(audit(&session, &msg_id).len(), 1, "only the outer row");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The defect: gpt-6-luna led a script with `tools.update_tasks(...)` and then read files in the
+/// same script. `update_tasks` was on the script deny list, so the script died on its first line
+/// ("0 tool calls") and the whole step, reads included, was wasted.
+#[tokio::test]
+async fn update_tasks_runs_inside_a_script_beside_the_calls_batched_with_it() {
+    let dir = workspace("tasks");
+    std::fs::write(dir.join("a.txt"), "alpha").unwrap();
+    let mut session = session_in(&dir, PermissionMode::AcceptEdits, Approver::default());
+    let ledgers = Ledgers::new();
+    let code = "const t = await tools.update_tasks({tasks: [\n\
+          {title: 'Read the spec', status: 'in_progress'},\n\
+          {title: 'Implement it', status: 'pending'}]});\n\
+        const a = await tools.read_file({path: 'a.txt'});\n\
+        return t.split('\\n')[0] + ' | ' + (a.includes('alpha') ? 'read ok' : a);";
+    let (msg_id, result) = step(&mut session, &ledgers, run_code_call(code, None)).await;
+
+    assert!(
+        result.starts_with("task list updated: 2 task(s) — 0 done, 1 in progress | read ok"),
+        "{result}"
+    );
+    assert!(
+        result.contains("[run_code: 2 tool calls, 2 ok, 0 failed"),
+        "{result}"
+    );
+    let titles: Vec<(&str, forge_types::TodoStatus)> = session
+        .tasks
+        .iter()
+        .map(|t| (t.title.as_str(), t.status))
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            ("Read the spec", forge_types::TodoStatus::InProgress),
+            ("Implement it", forge_types::TodoStatus::Pending),
+        ],
+        "the script's update is the session's task list"
+    );
+    assert_eq!(
+        audit(&session, &msg_id),
+        vec![
+            ("update_tasks".to_string(), "ok".to_string()),
+            ("read_file".to_string(), "ok".to_string()),
+            ("run_code".to_string(), "ok".to_string()),
+        ],
+        "the task update is audited like any other inner call"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

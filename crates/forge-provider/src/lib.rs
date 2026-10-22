@@ -73,7 +73,7 @@ pub use xai_oauth::{
 };
 
 /// Normalize legacy underscore-prefixed bridge/provider ids to the canonical hyphen form so
-/// `codex_cli::gpt-5.4-mini` / `claude_cli::opus` / `xai_oauth::grok-4` work identically to their
+/// `codex_cli::gpt-5.6-luna` / `claude_cli::opus` / `xai_oauth::grok-4` work identically to their
 /// hyphen forms.
 pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
     if let Some(rest) = model.strip_prefix("claude_cli::") {
