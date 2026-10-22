@@ -38,6 +38,15 @@ impl ClaudeStreamState {
         due
     }
 
+    /// Count a model message once. Messages a sub-agent produced (they carry the id of the tool
+    /// call that started them) are that sub-agent's calls, not the CLI's own loop.
+    fn note_message(&mut self, event: &Value, id: Option<&Value>) {
+        let own_loop = event.get("parent_tool_use_id").is_none_or(Value::is_null);
+        if let (true, Some(id)) = (own_loop, id.and_then(Value::as_str)) {
+            self.message_ids.insert(id.to_string());
+        }
+    }
+
     fn parse_line_inner(&mut self, line: &str) -> Vec<Parsed> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
@@ -50,6 +59,7 @@ impl ClaudeStreamState {
                 };
                 match event.get("type").and_then(Value::as_str) {
                     Some("message_start") => {
+                        self.note_message(&v, event.pointer("/message/id"));
                         self.text.clear();
                         self.reasoning.clear();
                         self.tool_ids.clear();
@@ -138,6 +148,7 @@ impl ClaudeStreamState {
             }
             // Consolidated assistant message: emit only bytes that were not already streamed.
             Some("assistant") => {
+                self.note_message(&v, v.pointer("/message/id"));
                 let belongs_to_stream_message = self.stream_message_active;
                 if let Some(blocks) = v
                     .get("message")
@@ -240,6 +251,13 @@ impl ClaudeStreamState {
                 self.tool_ids.clear();
                 if let Some(usage) = v.get("usage").map(claude_usage_from) {
                     out.push(Parsed::Usage(usage));
+                }
+                let calls = match self.message_ids.drain().count() as u64 {
+                    0 => v.get("num_turns").and_then(Value::as_u64).unwrap_or(0),
+                    seen => seen,
+                };
+                if calls > 0 {
+                    out.push(Parsed::ModelCalls(calls));
                 }
                 let result_text = v.get("result").and_then(Value::as_str).map(str::to_string);
                 if let Some(final_text) = &result_text {

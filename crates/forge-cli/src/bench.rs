@@ -135,6 +135,17 @@ pub struct InstanceMetric {
     /// heuristic: stop reasons do not reach `ModelResponse`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome_detail: Option<String>,
+    /// Wall time of the agent turn alone. `wall_secs` also covers setup, grading and cloning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_secs: Option<f64>,
+    /// Claude Code only: its own time to first token and total `duration_ms` for the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Tool calls that came back as errors (Claude Code only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_errors: Option<u64>,
 }
 
 impl InstanceMetric {
@@ -196,6 +207,10 @@ struct RunOutcome {
     model_calls: Option<u64>,
     tool_calls: Option<u64>,
     notional_cost_usd: Option<f64>,
+    agent_secs: Option<f64>,
+    ttft_ms: Option<u64>,
+    duration_ms: Option<u64>,
+    tool_errors: Option<u64>,
     /// The agent's last answer, read only for refusal detection.
     final_text: Option<String>,
     /// Why the instance could not run or the turn failed.
@@ -311,18 +326,20 @@ fn prepare_repo(inst: &SweInstance, root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// The model's patch: the diff of TRACKED files after the agent's edits. We deliberately do NOT
-/// `git add -A` first — that swept in untracked junk an agent run leaves in the repo (`__pycache__`
-/// from running python, Forge's own `.forge/forge.db` store, etc.), which bloated and invalidated
-/// the patch. SWE-bench gold patches edit existing source/test files, so a tracked-file diff is
-/// what the evaluator expects; brand-new untracked files (rare) are intentionally excluded as the
-/// safe default. As a belt-and-braces guard, junk paths are excluded via pathspec too.
-fn extract_patch(dir: &Path) -> Result<String> {
-    // STAGE everything first (including NEW files), then diff the index against HEAD. A plain
-    // `git diff` ignores untracked files, so a solution that ADDS a file (very common in SWE-bench —
-    // new modules, regression tests) produced an EMPTY patch and was scored unresolved even though
-    // the agent did the work. `git add -A` + `git diff --cached` captures additions, modifications,
-    // and deletions alike. Excludes keep Forge's own dir / pycache out of the patch.
+/// The model's patch: everything that differs from `base` in the working tree, new files
+/// included. A plain `git diff` ignores untracked files, so a solution that ADDS a file (very
+/// common in SWE-bench: new modules, regression tests) produced an EMPTY patch and scored
+/// unresolved even though the agent did the work. Staging with `git add -A` first and diffing the
+/// index captures additions, modifications and deletions alike.
+///
+/// The staging is visible afterwards: the index of the attempt's workspace holds the agent's
+/// work when `test.sh` runs, so a script that wants "what changed" must use `git diff --cached`
+/// (or `git diff HEAD`), not a bare `git diff`. Forge's own `.forge/` directory and Python
+/// bytecode are excluded from the patch (and left unstaged).
+///
+/// `base` is the commit the attempt started from, not `HEAD`: an agent that commits its work moves
+/// `HEAD`, and a diff against it would report the finished fix as an empty patch.
+fn extract_patch_since(dir: &Path, base: &str) -> Result<String> {
     let pathspec = [
         "--",
         ".",
@@ -333,9 +350,14 @@ fn extract_patch(dir: &Path) -> Result<String> {
     let mut add = vec!["add", "-A"];
     add.extend_from_slice(&pathspec);
     run_git(dir, &add)?;
-    let mut diff = vec!["diff", "--cached"];
+    let mut diff = vec!["diff", "--cached", base];
     diff.extend_from_slice(&pathspec);
     run_git(dir, &diff)
+}
+
+#[cfg(test)]
+fn extract_patch(dir: &Path) -> Result<String> {
+    extract_patch_since(dir, "HEAD")
 }
 
 /// Insert `.seed<k>` before the extension of `out` (e.g. `preds.jsonl` → `preds.seed2.jsonl`), so
@@ -591,6 +613,10 @@ async fn run_one_sweep(
             notional_cost_usd: outcome.notional_cost_usd,
             outcome: attempt_outcome,
             outcome_detail,
+            agent_secs: outcome.agent_secs,
+            ttft_ms: outcome.ttft_ms,
+            duration_ms: outcome.duration_ms,
+            tool_errors: outcome.tool_errors,
         });
         preds.push(Prediction {
             instance_id: inst.instance_id.clone(),
@@ -691,6 +717,8 @@ mod routing_record;
 pub(crate) use recall::{run_recall, RecallOptions};
 mod scoring;
 mod suite;
+mod suite_report;
+mod suite_select;
 pub(crate) use suite::{run_tasks, TasksOptions};
 
 /// Prepare one instance's repo, run a single headless turn in it, and return the diff plus the
@@ -712,6 +740,7 @@ async fn prepare_and_run(
         model,
         timeout_secs,
         mock: false,
+        clean: false,
         // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
         // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
         // "implement it, don't describe it" push-back instead of scoring an empty patch.
@@ -719,7 +748,7 @@ async fn prepare_and_run(
     })
     .await?;
     outcome.wall_secs = started.elapsed().as_secs_f64();
-    outcome.patch = extract_patch(&dir)?;
+    outcome.patch = extract_patch_since(&dir, &inst.base_commit)?;
     Ok(outcome)
 }
 
@@ -732,6 +761,8 @@ struct AgentRun<'a> {
     timeout_secs: u64,
     /// Offline deterministic provider (tests and suite smokes); Forge agent only.
     mock: bool,
+    /// Run Claude Code without the user's hooks, settings and MCP servers.
+    clean: bool,
     expect_code_change: bool,
 }
 
@@ -769,7 +800,8 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
 }
 
 async fn run_agent_turn(run: &AgentRun<'_>) -> Result<RunOutcome> {
-    let outcome = match run.agent {
+    let started = std::time::Instant::now();
+    let mut outcome = match run.agent {
         Agent::Forge => {
             // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
             // edits the freshly-reset working tree; we read the diff back out afterwards.
@@ -846,6 +878,7 @@ async fn run_agent_turn(run: &AgentRun<'_>) -> Result<RunOutcome> {
                 run.dir,
                 run.model.as_deref(),
                 run.timeout_secs,
+                run.clean,
             )
             .await?;
             // An external CLI runs its OWN tools (not Forge's mcp-serve), so tools_unavailable
@@ -859,11 +892,17 @@ async fn run_agent_turn(run: &AgentRun<'_>) -> Result<RunOutcome> {
                 cached_input_tokens: ext.usage.cached_input_tokens,
                 cache_write_tokens: ext.usage.cache_write_tokens,
                 notional_cost_usd: ext.usage.notional_cost_usd,
+                model_calls: ext.stats.num_turns,
+                tool_calls: ext.stats.tool_calls,
+                tool_errors: ext.stats.tool_errors,
+                duration_ms: ext.stats.duration_ms,
+                ttft_ms: ext.stats.ttft_ms,
                 final_text: ext.final_text,
                 ..RunOutcome::default()
             }
         }
     };
+    outcome.agent_secs = Some(started.elapsed().as_secs_f64());
     Ok(outcome)
 }
 
@@ -1063,6 +1102,40 @@ mod tests {
             patch.contains("tracked.txt"),
             "the modified file is also present"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn patch_is_taken_against_the_baseline_and_leaves_the_work_staged() {
+        // An agent that commits its fix moves HEAD; a diff against HEAD would call the finished
+        // work an empty patch (a live claude-code run scored `patched: false` while test.sh passed).
+        let dir = std::env::temp_dir().join(format!("forge-bench-base-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |args: &[&str]| run_git(&dir, args).expect("git");
+        g(&["init", "-q"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "base"]);
+        let base = g(&["rev-parse", "HEAD"]).trim().to_string();
+
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        g(&["commit", "-q", "-am", "agent commit"]);
+        std::fs::write(dir.join("b.txt"), "uncommitted\n").unwrap();
+
+        let patch = extract_patch_since(&dir, &base).unwrap();
+        assert!(patch.contains("+two") && patch.contains("b.txt"), "{patch}");
+        assert!(
+            extract_patch(&dir).unwrap().contains("b.txt")
+                && !extract_patch(&dir).unwrap().contains("+two"),
+            "against HEAD the committed fix would be missing"
+        );
+        assert!(
+            g(&["diff"]).is_empty(),
+            "everything is staged afterwards, so a bare `git diff` in test.sh sees nothing"
+        );
+        assert!(g(&["diff", "--cached", "--name-only"]).contains("b.txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

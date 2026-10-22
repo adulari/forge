@@ -462,6 +462,7 @@ impl LiveSession {
                         on_event(StreamEvent::ToolFinished { name, ok, summary });
                     }
                     Parsed::Usage(u) => data.usage = u,
+                    Parsed::ModelCalls(n) => on_event(StreamEvent::ModelCalls(n)),
                     Parsed::Quota {
                         window,
                         status,

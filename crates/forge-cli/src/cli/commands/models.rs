@@ -146,6 +146,9 @@ fn discovery_status_line(status: &ProviderDiscoveryStatus) -> String {
     }
 }
 
+/// The model id `--mock` sessions route to.
+const MOCK_MODEL: &str = "mock::mock";
+
 pub(crate) fn build_provider_and_router(
     config: &forge_config::Config,
     mock: bool,
@@ -166,6 +169,14 @@ pub(crate) fn build_provider_and_router(
     };
     // Callers without a Session (mcp-serve's auto-classifier) use this provider directly.
     let provider = forge_core::zero_retention::guard(provider, config);
+    // The offline provider answers whatever it is asked, so there is no model to choose: pin a
+    // stand-in. Left to the mesh, `--mock` routed to the user's real default (`claude-cli`),
+    // printed the CLI-bridge terms notice and spent calls on an LLM tier classifier.
+    let pin = if mock {
+        pin.or(Some(MOCK_MODEL.to_string()))
+    } else {
+        pin
+    };
     let mut heuristic = HeuristicRouter::new(config.clone())
         .with_pricing(pricing_with_fetched_rates(config))
         .with_live_catalog(live_catalog())
@@ -177,27 +188,24 @@ pub(crate) fn build_provider_and_router(
     } else if !mock && config.mesh.auto_discover {
         heuristic = heuristic.with_seed_only_catalog();
     }
-    let router: Arc<dyn Router> = if matches!(
-        config.mesh.classifier,
-        ClassifierKind::Llm | ClassifierKind::Hybrid
-    ) {
+    let router: Arc<dyn Router> = if !mock
+        && matches!(
+            config.mesh.classifier,
+            ClassifierKind::Llm | ClassifierKind::Hybrid
+        ) {
         // A cheap model labels every unhinted tier; the deterministic router only performs
         // pin/budget/cost-aware model selection. Heuristic tier classification is reserved for
         // the final availability fallback after every LLM candidate fails.
-        let classify_provider: Arc<dyn Provider> = if mock {
-            Arc::new(MockProvider)
-        } else {
-            // classification needs no tools/harness; cap output (one tier word) so a free
-            // classifier model isn't 402'd on a huge default max-token request.
-            Arc::new(
-                DispatchProvider::new(false)
-                    .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
-            )
-        };
+        // classification needs no tools/harness; cap output (one tier word) so a free
+        // classifier model isn't 402'd on a huge default max-token request.
+        let classify_provider: Arc<dyn Provider> = Arc::new(
+            DispatchProvider::new(false)
+                .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
+        );
         let classify_provider = forge_core::zero_retention::guard(classify_provider, config);
         Arc::new(LlmRouter::new(
             classify_provider,
-            classifier_candidates(config, mock),
+            classifier_candidates(config, false),
             heuristic,
         ))
     } else {

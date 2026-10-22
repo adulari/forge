@@ -18,6 +18,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use super::suite_report::{compose_reason, failure_reason, summary_table, verdict_line};
+use super::suite_select::select_tasks;
 use super::{metrics_path, metrics_to_jsonl, outcome, seed_path, Agent, InstanceMetric};
 
 pub struct TasksOptions {
@@ -29,6 +31,14 @@ pub struct TasksOptions {
     pub mock: bool,
     pub attempts: usize,
     pub timeout_secs: u64,
+    /// Task names or globs to run (all when empty); applied before `limit`.
+    pub tasks: Vec<String>,
+    /// Task names or globs to leave out.
+    pub skip: Vec<String>,
+    /// Where attempt workspaces are created; the system temp dir (`TMPDIR`) when unset.
+    pub workdir: Option<PathBuf>,
+    /// `--agent claude-code` without the user's hooks, settings and MCP servers.
+    pub clean: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +63,16 @@ pub(super) struct TaskResult {
     pub test_timed_out: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Wall time of the agent turn alone; `None` when setup failed and the agent never ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_secs: Option<f64>,
+    /// Wall time of `test.sh`; `None` when it did not run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_secs: Option<f64>,
+    /// Why an unsolved attempt is unsolved: the line of `test.sh` output that says so, or what
+    /// stopped the attempt before grading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Every task directory under `suite` (those holding `instruction.md`), sorted by name.
@@ -220,44 +240,74 @@ async fn run_script(
     }
 }
 
-/// Commit the post-setup state so the agent's changes can be read back as a diff.
-fn baseline_commit(workspace: &Path) -> Result<()> {
-    if workspace.join(".git").exists() {
-        return Ok(());
+/// Commit the post-setup state so the agent's changes can be read back as a diff, and return the
+/// commit the diff is taken against. Taking it against this commit rather than `HEAD` keeps an
+/// agent that commits its own work from hiding it.
+fn baseline_commit(workspace: &Path) -> Result<String> {
+    if !workspace.join(".git").exists() {
+        super::run_git(workspace, &["init", "-q"])?;
+        super::run_git(workspace, &["add", "-A"])?;
+        super::run_git(
+            workspace,
+            &[
+                "-c",
+                "user.email=bench@forge.invalid",
+                "-c",
+                "user.name=forge-bench",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "task baseline",
+            ],
+        )?;
     }
-    super::run_git(workspace, &["init", "-q"])?;
-    super::run_git(workspace, &["add", "-A"])?;
-    super::run_git(
-        workspace,
-        &[
-            "-c",
-            "user.email=bench@forge.invalid",
-            "-c",
-            "user.name=forge-bench",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "task baseline",
-        ],
-    )?;
-    Ok(())
+    Ok(super::run_git(workspace, &["rev-parse", "HEAD"])
+        .map(|sha| sha.trim().to_string())
+        .unwrap_or_else(|_| "HEAD".to_string()))
 }
 
 pub(crate) async fn run_tasks(opts: TasksOptions) -> Result<()> {
     if opts.mock && opts.agent != Agent::Forge {
         anyhow::bail!("--mock only applies to --agent forge");
     }
+    if opts.clean && opts.agent != Agent::ClaudeCode {
+        anyhow::bail!("--clean only applies to --agent claude-code");
+    }
     // The scripts and the agent run with the task workspace as the process CWD, so a relative
     // `--out` (the default `tasks.jsonl`) would resolve its log paths inside the workspace.
+    let workdir = match &opts.workdir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating workdir {}", dir.display()))?;
+            Some(
+                std::fs::canonicalize(dir)
+                    .with_context(|| format!("resolving workdir {}", dir.display()))?,
+            )
+        }
+        None => None,
+    };
     let opts = TasksOptions {
         out: std::path::absolute(&opts.out)
             .with_context(|| format!("resolving {}", opts.out.display()))?,
+        workdir,
         ..opts
     };
-    let mut tasks = discover(&opts.suite)?;
+    let mut tasks = select_tasks(discover(&opts.suite)?, &opts.tasks, &opts.skip)?;
     if let Some(n) = opts.limit {
         tasks.truncate(n);
+    }
+    eprintln!(
+        "workspaces under {} (--workdir or TMPDIR changes this)",
+        opts.workdir
+            .clone()
+            .unwrap_or_else(std::env::temp_dir)
+            .display()
+    );
+    if opts.mock {
+        eprintln!(
+            "--mock: offline provider; this exercises the suite, it does not measure an agent"
+        );
     }
     let attempts = opts.attempts.max(1);
     for seed in 1..=attempts {
@@ -287,15 +337,7 @@ async fn run_suite_once(
         eprintln!("[{}/{}] {}", i + 1, tasks.len(), task.name);
         let (result, metric) = run_task(task, opts, attempt, &logs).await;
         let _ = std::env::set_current_dir(&orig_cwd);
-        eprintln!(
-            "  {} test.sh {}",
-            if result.solved { "✓" } else { "✗" },
-            match (result.test_exit, result.test_timed_out) {
-                (_, true) => "timed out".to_string(),
-                (Some(code), _) => format!("exited {code}"),
-                (None, _) => "did not run".to_string(),
-            }
-        );
+        eprintln!("{}", verdict_line(&result));
         results.push(result);
         metrics.push(metric);
     }
@@ -311,6 +353,7 @@ async fn run_suite_once(
         serde_json::to_string_pretty(&eval).expect("eval serializes") + "\n",
     )
     .with_context(|| format!("writing {}", eval_out.display()))?;
+    eprint!("\n{}", summary_table(&results));
     let solved = results.iter().filter(|r| r.solved).count();
     eprintln!(
         "solved {solved}/{} · results → {} · metrics → {} · eval → {} · logs → {}",
@@ -320,6 +363,48 @@ async fn run_suite_once(
         eval_out.display(),
         logs.display()
     );
+    Ok(())
+}
+
+/// Grade the workspace with `test.sh`: exit code, duration and, for a failure, the output line
+/// that says why.
+async fn grade(
+    task: &SuiteTask,
+    workspace: &Path,
+    logs: &Path,
+    attempt: usize,
+    opts: &TasksOptions,
+    groups: &mut Groups,
+    result: &mut TaskResult,
+) -> Result<()> {
+    let log = logs.join(format!("{}.attempt{attempt}.test.log", task.name));
+    let started = std::time::Instant::now();
+    let run = run_script(
+        &task.test,
+        task,
+        workspace,
+        &log,
+        Duration::from_secs(opts.timeout_secs),
+        groups,
+    )
+    .await?;
+    result.test_secs = Some(started.elapsed().as_secs_f64());
+    result.test_exit = run.exit;
+    result.test_timed_out = run.timed_out;
+    result.solved = !run.timed_out && run.exit == Some(0);
+    if !result.solved {
+        let from_output = std::fs::read_to_string(&log)
+            .ok()
+            .and_then(|out| failure_reason(&out));
+        result.reason = Some(if run.timed_out {
+            format!("test.sh timed out after {}s", opts.timeout_secs)
+        } else {
+            from_output.unwrap_or_else(|| match run.exit {
+                Some(code) => format!("test.sh exited {code} and printed nothing"),
+                None => "test.sh was killed by a signal and printed nothing".to_string(),
+            })
+        });
+    }
     Ok(())
 }
 
@@ -337,16 +422,23 @@ async fn run_task(
         test_exit: None,
         test_timed_out: false,
         session_id: None,
+        agent_secs: None,
+        test_secs: None,
+        reason: None,
     };
     let mut groups = Groups::default();
     let timeout = Duration::from_secs(opts.timeout_secs);
     let log = |kind: &str| logs.join(format!("{}.attempt{attempt}.{kind}.log", task.name));
     let started = std::time::Instant::now();
     let run = async {
-        let tmp = tempfile::Builder::new()
-            .prefix(&format!("forge-task-{}-", task.name))
-            .tempdir()
-            .context("creating task workspace")?;
+        let prefix = format!("forge-task-{}-", task.name);
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(&prefix);
+        let tmp = match &opts.workdir {
+            Some(dir) => builder.tempdir_in(dir),
+            None => builder.tempdir(),
+        }
+        .context("creating task workspace")?;
         let workspace = std::fs::canonicalize(tmp.path())?;
         if let Some(setup) = &task.setup {
             let s =
@@ -363,7 +455,7 @@ async fn run_task(
                 );
             }
         }
-        baseline_commit(&workspace)?;
+        let baseline = baseline_commit(&workspace)?;
         std::env::set_current_dir(&workspace).context("entering task workspace")?;
         let mut outcome = super::run_agent(&super::AgentRun {
             agent: opts.agent,
@@ -372,33 +464,31 @@ async fn run_task(
             model: opts.model.clone(),
             timeout_secs: opts.timeout_secs,
             mock: opts.mock,
+            clean: opts.clean,
             expect_code_change: false,
         })
         .await
         .unwrap_or_else(|e| super::RunOutcome::failed(format!("{e:#}")));
-        outcome.patch = super::extract_patch(&workspace).unwrap_or_default();
+        result.agent_secs = outcome.agent_secs;
+        // Staging here is visible to `test.sh`: see docs/features/bench-tasks-and-export.md.
+        outcome.patch = super::extract_patch_since(&workspace, &baseline).unwrap_or_default();
         // A grader that cannot start is recorded on the attempt, but must not discard the agent
         // turn's session id and usage, which already happened.
-        match run_script(
-            &task.test,
+        if let Err(e) = grade(
             task,
             &workspace,
-            &log("test"),
-            timeout,
+            logs,
+            attempt,
+            opts,
             &mut groups,
+            &mut result,
         )
         .await
         {
-            Ok(t) => {
-                result.test_exit = t.exit;
-                result.test_timed_out = t.timed_out;
-                result.solved = !t.timed_out && t.exit == Some(0);
-            }
-            Err(e) => {
-                outcome
-                    .error
-                    .get_or_insert_with(|| format!("test.sh: {e:#}"));
-            }
+            result.reason = Some(format!("test.sh did not run: {e:#}"));
+            outcome
+                .error
+                .get_or_insert_with(|| format!("test.sh: {e:#}"));
         }
         Ok::<_, anyhow::Error>(outcome)
     };
@@ -409,6 +499,15 @@ async fn run_task(
     outcome.wall_secs = started.elapsed().as_secs_f64();
     if let Some(err) = &outcome.error {
         eprintln!("  ✗ {err}");
+    }
+    if !result.solved {
+        // Before grading nothing set a reason: setup failed or the workspace could not be made.
+        let test_reason = result.reason.take();
+        let agent_error = outcome
+            .error
+            .as_deref()
+            .filter(|_| result.test_secs.is_some());
+        result.reason = compose_reason(agent_error, test_reason).or_else(|| outcome.error.clone());
     }
     result.session_id = outcome.session_id.clone();
     let patched = !outcome.patch.is_empty();
@@ -442,6 +541,10 @@ async fn run_task(
         notional_cost_usd: outcome.notional_cost_usd,
         outcome: attempt_outcome,
         outcome_detail,
+        agent_secs: outcome.agent_secs,
+        ttft_ms: outcome.ttft_ms,
+        duration_ms: outcome.duration_ms,
+        tool_errors: outcome.tool_errors,
     };
     (result, metric)
 }
@@ -559,6 +662,9 @@ mod tests {
             test_exit: Some(if solved { 0 } else { 1 }),
             test_timed_out: false,
             session_id: None,
+            agent_secs: None,
+            test_secs: None,
+            reason: None,
         };
         let v = eval_json(&[row("a", true), row("b", false)]);
         assert_eq!(v["resolved_ids"], serde_json::json!(["a"]));

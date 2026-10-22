@@ -101,7 +101,10 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     -- Subsets of input_tokens / output_tokens; NULL = the provider did not report the split.
     cache_write_tokens INTEGER,
-    reasoning_tokens   INTEGER
+    reasoning_tokens   INTEGER,
+    -- Model round trips this row stands for; NULL = one. A CLI-bridge turn records its whole agent
+    -- loop as one row.
+    api_calls          INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage(created_at);
 -- Speeds up spend-by-model JOINs: `JOIN message m ON m.id = u.message_id`.

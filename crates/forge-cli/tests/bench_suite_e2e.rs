@@ -64,7 +64,18 @@ fn bench_tasks_runs_the_example_suite_and_export_writes_redacted_trajectories() 
         assert!(m["session_id"].is_string(), "{m}");
         assert_eq!(m["attempt"], 1);
         assert!(m["model_calls"].as_u64().unwrap() >= 1, "{m}");
+        assert!(m["agent_secs"].as_f64().is_some(), "{m}");
     }
+    let outcome = |id: &str| {
+        let row = metrics.iter().find(|m| m["instance_id"] == id).unwrap();
+        row["outcome"].as_str().unwrap().to_string()
+    };
+    assert_eq!(outcome("write-note"), "ok", "the mock wrote the file");
+    assert_eq!(
+        outcome("needs-fix"),
+        "no_change",
+        "a turn that left the workspace untouched must not read as ok"
+    );
     assert!(ws.join("tasks.logs/write-note.attempt1.setup.log").exists());
     assert!(ws.join("tasks.logs/write-note.attempt1.test.log").exists());
 
@@ -93,6 +104,99 @@ fn bench_tasks_runs_the_example_suite_and_export_writes_redacted_trajectories() 
         "the mock's write_file call is in the trajectory: {body}"
     );
     assert!(traj.join("needs-fix.attempt1.jsonl").exists());
+}
+
+#[test]
+fn bench_tasks_selects_tasks_places_workspaces_and_explains_the_failure() {
+    let tmp = tempfile::tempdir().expect("temp workspace");
+    let ws = tmp.path();
+    let work = ws.join("work");
+    let output = forge(ws)
+        .args([
+            "bench",
+            "tasks",
+            "--suite",
+            suite().to_str().unwrap(),
+            "--mock",
+            "--tasks",
+            "needs-*",
+            "--workdir",
+            work.to_str().unwrap(),
+            "--out",
+            "tasks.jsonl",
+        ])
+        .output()
+        .expect("spawn forge");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "forge failed: {stderr}");
+
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(ws.join("tasks.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "--tasks needs-* leaves write-note out: {rows:?}"
+    );
+    let row = &rows[0];
+    assert_eq!(row["task"], "needs-fix");
+    assert_eq!(row["solved"], false);
+    assert!(row["agent_secs"].as_f64().is_some(), "{row}");
+    assert!(row["test_secs"].as_f64().is_some(), "{row}");
+    assert!(
+        row["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("test.sh exited 1")),
+        "{row}"
+    );
+    assert!(
+        stderr.contains("FAIL"),
+        "the summary table says FAIL: {stderr}"
+    );
+    assert!(stderr.contains("test.sh exited 1"), "{stderr}");
+    assert!(
+        stderr.contains(work.to_str().unwrap()),
+        "the run names the directory the workspaces go in: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&work).unwrap().count(),
+        0,
+        "the attempt's workspace was created under --workdir and removed afterwards"
+    );
+
+    assert!(
+        stdout.contains("mock::mock"),
+        "--mock pins the offline provider instead of routing through the mesh: {stdout}"
+    );
+    for forbidden in ["claude-cli", "CLI-bridge", "llm classify"] {
+        assert!(
+            !stdout.contains(forbidden) && !stderr.contains(forbidden),
+            "--mock must not route to a real model ({forbidden}): {stdout}{stderr}"
+        );
+    }
+
+    let misspelt = forge(ws)
+        .args([
+            "bench",
+            "tasks",
+            "--suite",
+            suite().to_str().unwrap(),
+            "--mock",
+            "--tasks",
+            "needs-fxi",
+        ])
+        .output()
+        .expect("spawn forge");
+    assert!(!misspelt.status.success());
+    let stderr = String::from_utf8_lossy(&misspelt.stderr);
+    assert!(stderr.contains("no task matches 'needs-fxi'"), "{stderr}");
+    assert!(
+        stderr.contains("write-note"),
+        "it lists the choices: {stderr}"
+    );
 }
 
 #[test]

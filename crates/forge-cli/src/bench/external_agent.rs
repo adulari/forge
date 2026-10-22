@@ -30,9 +30,24 @@ pub(super) struct ExternalUsage {
     pub notional_cost_usd: Option<f64>,
 }
 
+/// What the agent's own machine output says about how the turn went (Claude Code only).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct ExternalStats {
+    /// Model round trips: the result object's `num_turns`, else the assistant messages seen.
+    pub num_turns: Option<u64>,
+    /// `tool_use` blocks in the stream; `None` when the output carried no stream to count.
+    pub tool_calls: Option<u64>,
+    /// Tool results that came back flagged as errors.
+    pub tool_errors: Option<u64>,
+    /// The CLI's own timing of the turn, from the result object.
+    pub duration_ms: Option<u64>,
+    pub ttft_ms: Option<u64>,
+}
+
 /// What one external-agent run produced besides the working-tree diff.
 pub(super) struct ExternalRun {
     pub usage: ExternalUsage,
+    pub stats: ExternalStats,
     pub timed_out: bool,
     /// The agent's last answer, used only for refusal detection.
     pub final_text: Option<String>,
@@ -53,18 +68,21 @@ pub(super) async fn run_external_agent(
     dir: &Path,
     model: Option<&str>,
     timeout_secs: u64,
+    clean: bool,
 ) -> Result<ExternalRun> {
     use tokio::io::AsyncWriteExt;
 
     let (bin, mut args): (&str, Vec<String>) = match agent {
         // `-p` reads the prompt from stdin; skip-permissions so edits + shell run unattended.
-        // `--output-format json` makes claude emit a final result object with `usage` + cost.
+        // `stream-json --verbose` emits every message and ends with the result object (`usage`,
+        // cost, `num_turns`, timings); the messages are where the tool calls are counted from.
         Agent::ClaudeCode => (
             "claude",
             vec![
                 "-p".into(),
                 "--output-format".into(),
-                "json".into(),
+                "stream-json".into(),
+                "--verbose".into(),
                 "--dangerously-skip-permissions".into(),
             ],
         ),
@@ -81,6 +99,10 @@ pub(super) async fn run_external_agent(
         ),
         Agent::Forge => unreachable!("forge takes the in-process path"),
     };
+    if clean && agent == Agent::ClaudeCode {
+        // No user hooks, CLAUDE.md, skills or MCP servers: only what the workspace itself holds.
+        args.extend(["--setting-sources", "project", "--strict-mcp-config"].map(String::from));
+    }
     if let Some(m) = model {
         args.push("--model".into());
         args.push(m.to_string());
@@ -129,6 +151,7 @@ pub(super) async fn run_external_agent(
             let stdout = String::from_utf8_lossy(&buf);
             Ok(ExternalRun {
                 usage: parse_external_usage(agent, &stdout),
+                stats: parse_external_stats(agent, &stdout),
                 timed_out: false,
                 final_text: parse_final_text(agent, &stdout),
             })
@@ -142,12 +165,14 @@ pub(super) async fn run_external_agent(
             let _ = child.start_kill();
             let _ = child.wait().await;
             // The kill closed stdout, so the reader finishes with whatever streamed before the
-            // timeout — codex's JSONL usage often parses from a partial stream; claude's single
-            // final JSON object won't (metrics_complete stays honest either way).
+            // timeout — codex's JSONL usage often parses from a partial stream; claude's usage
+            // comes only with its final result line, so a killed run keeps its tool and turn
+            // counts but not its tokens (metrics_complete stays honest either way).
             let buf = reader.await.unwrap_or_default();
             let stdout = String::from_utf8_lossy(&buf);
             Ok(ExternalRun {
                 usage: parse_external_usage(agent, &stdout),
+                stats: parse_external_stats(agent, &stdout),
                 timed_out: true,
                 final_text: parse_final_text(agent, &stdout),
             })
@@ -156,8 +181,8 @@ pub(super) async fn run_external_agent(
 }
 
 /// Best-effort token/cost extraction from an external agent's machine output.
-/// - claude (`--output-format json`): a single JSON object with `usage.{input_tokens,output_tokens,
-///   cache_read_input_tokens}` and `total_cost_usd`.
+/// - claude (`--output-format stream-json`, or the older single-object `json`): the `result` object
+///   with `usage.{input_tokens,output_tokens,cache_read_input_tokens}` and `total_cost_usd`.
 /// - codex (`--json`): a JSONL event stream; we take the LAST object carrying token fields
 ///   (`input_tokens`/`output_tokens`, possibly nested under `usage`/`token_usage`/`info`).
 ///
@@ -205,8 +230,7 @@ fn parse_external_usage(agent: Agent, stdout: &str) -> ExternalUsage {
     }
 
     match agent {
-        Agent::ClaudeCode => serde_json::from_str::<serde_json::Value>(stdout.trim())
-            .ok()
+        Agent::ClaudeCode => claude_result(stdout)
             .and_then(|v| from_obj(&v, false))
             .map(|usage| ExternalUsage {
                 notional_cost_usd: Some(usage.cost_usd),
@@ -224,12 +248,85 @@ fn parse_external_usage(agent: Agent, stdout: &str) -> ExternalUsage {
     }
 }
 
+/// Claude Code's `result` object from its output: the whole document in `--output-format json`
+/// mode, the last `{"type":"result"}` line of a `stream-json` run. `None` when the run never got
+/// that far (killed, or not JSON at all).
+fn claude_result(stdout: &str) -> Option<serde_json::Value> {
+    if let Ok(whole) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        return whole.is_object().then_some(whole);
+    }
+    stdout
+        .lines()
+        .filter(|l| l.contains(r#""type":"result""#) || l.contains(r#""type": "result""#))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .rfind(|v| v.get("type").and_then(|t| t.as_str()) == Some("result"))
+}
+
+/// Turns, tool calls and timings of a Claude Code run, from its `stream-json` output. A run that
+/// was killed before its result line still has every message it printed, so its tool calls and
+/// assistant turns are counted from those.
+fn parse_external_stats(agent: Agent, stdout: &str) -> ExternalStats {
+    if agent != Agent::ClaudeCode {
+        return ExternalStats::default();
+    }
+    let mut tool_ids = std::collections::HashSet::new();
+    let mut message_ids = std::collections::HashSet::new();
+    let mut errors = 0u64;
+    let mut streamed = false;
+    for line in stdout.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let kind = event.get("type").and_then(|t| t.as_str());
+        streamed |= matches!(kind, Some("system" | "assistant" | "user"));
+        // Sub-agent traffic is nested under the tool call that started it; only the main
+        // conversation's calls are this agent's.
+        if !event.get("parent_tool_use_id").is_none_or(|p| p.is_null()) {
+            continue;
+        }
+        let blocks = event
+            .pointer("/message/content")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten();
+        match kind {
+            Some("assistant") => {
+                if let Some(id) = event.pointer("/message/id").and_then(|i| i.as_str()) {
+                    message_ids.insert(id.to_string());
+                }
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        let id = block.get("id").and_then(|i| i.as_str()).unwrap_or_default();
+                        tool_ids.insert(id.to_string());
+                    }
+                }
+            }
+            Some("user") => {
+                errors += blocks
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
+                    .filter(|b| b.get("is_error").and_then(|e| e.as_bool()) == Some(true))
+                    .count() as u64;
+            }
+            _ => {}
+        }
+    }
+    let result = claude_result(stdout);
+    let field = |key: &str| result.as_ref().and_then(|r| r.get(key)?.as_u64());
+    ExternalStats {
+        num_turns: field("num_turns")
+            .or_else(|| (!message_ids.is_empty()).then_some(message_ids.len() as u64)),
+        tool_calls: streamed.then_some(tool_ids.len() as u64),
+        tool_errors: streamed.then_some(errors),
+        duration_ms: field("duration_ms"),
+        ttft_ms: field("ttft_ms"),
+    }
+}
+
 /// The agent's final answer: claude's `result` field, or the text of codex's last
 /// `agent_message` item.
 fn parse_final_text(agent: Agent, stdout: &str) -> Option<String> {
     match agent {
-        Agent::ClaudeCode => serde_json::from_str::<serde_json::Value>(stdout.trim())
-            .ok()?
+        Agent::ClaudeCode => claude_result(stdout)?
             .get("result")?
             .as_str()
             .map(str::to_string),
@@ -317,6 +414,88 @@ mod tests {
         assert!(
             !u.complete,
             "unparseable output → metrics_complete=false, not a lie"
+        );
+    }
+
+    /// A trimmed real `claude -p --output-format stream-json --verbose` run: one assistant message
+    /// split over two lines (same id), two tool calls (one fails), a final message, the result.
+    const CLAUDE_STREAM: &str = concat!(
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"hm"}]}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}"#,
+        "\n",
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"ok"}]}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{}}]}}"#,
+        "\n",
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":"boom"}]}}"#,
+        "\n",
+        r#"{"type":"assistant","parent_tool_use_id":"t2","message":{"id":"sub1","content":[{"type":"tool_use","id":"t9","name":"Read","input":{}}]}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"done"}]}}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"done","num_turns":3,"duration_ms":4200,"ttft_ms":900,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn stream_json_gives_turns_tool_calls_errors_and_timings() {
+        let stats = parse_external_stats(Agent::ClaudeCode, CLAUDE_STREAM);
+        assert_eq!(
+            stats,
+            ExternalStats {
+                num_turns: Some(3),
+                tool_calls: Some(2),
+                tool_errors: Some(1),
+                duration_ms: Some(4200),
+                ttft_ms: Some(900),
+            },
+            "the sub-agent call (parent_tool_use_id) is not this agent's"
+        );
+        let usage = parse_external_usage(Agent::ClaudeCode, CLAUDE_STREAM);
+        assert!(usage.complete);
+        assert_eq!(usage.input_tokens, 110, "input + cache read");
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(
+            parse_final_text(Agent::ClaudeCode, CLAUDE_STREAM).as_deref(),
+            Some("done")
+        );
+    }
+
+    #[test]
+    fn a_killed_stream_keeps_its_counts_but_claims_no_tokens() {
+        let killed: String = CLAUDE_STREAM
+            .lines()
+            .filter(|l| !l.contains(r#""type":"result""#))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let stats = parse_external_stats(Agent::ClaudeCode, &killed);
+        assert_eq!(stats.tool_calls, Some(2));
+        assert_eq!(stats.tool_errors, Some(1));
+        assert_eq!(
+            stats.num_turns,
+            Some(3),
+            "distinct assistant message ids m1..m3"
+        );
+        assert_eq!((stats.duration_ms, stats.ttft_ms), (None, None));
+        assert!(!parse_external_usage(Agent::ClaudeCode, &killed).complete);
+    }
+
+    #[test]
+    fn the_older_single_object_output_still_parses_without_tool_counts() {
+        let old = r#"{"type":"result","result":"x","num_turns":2,"duration_ms":10,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let stats = parse_external_stats(Agent::ClaudeCode, old);
+        assert_eq!(stats.num_turns, Some(2));
+        assert_eq!(stats.duration_ms, Some(10));
+        assert_eq!(
+            stats.tool_calls, None,
+            "nothing streamed, so nothing to count"
+        );
+        assert_eq!(
+            parse_external_stats(Agent::Codex, CLAUDE_STREAM),
+            ExternalStats::default()
         );
     }
 

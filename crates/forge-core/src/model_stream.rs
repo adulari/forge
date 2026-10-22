@@ -25,6 +25,7 @@ pub(super) fn handle_stream_event(
         >,
     >,
     tools_unavailable: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    bridge_trace: &std::sync::Arc<std::sync::Mutex<crate::bridge_trace::BridgeTrace>>,
 ) {
     act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match ev {
@@ -42,6 +43,7 @@ pub(super) fn handle_stream_event(
         }
         StreamEvent::Reasoning(t) => presenter.emit(PresenterEvent::Reasoning(t)),
         StreamEvent::ToolStarted { name, args } => {
+            bridge_trace.lock().unwrap().started(&name, &args);
             active.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tools.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Bookkeeping tools don't count as a real inspection — the
@@ -64,6 +66,7 @@ pub(super) fn handle_stream_event(
             presenter.emit(PresenterEvent::ToolStart { name, args })
         }
         StreamEvent::ToolFinished { name, ok, summary } => {
+            bridge_trace.lock().unwrap().finished(&name, ok, &summary);
             let _ = active.fetch_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
@@ -88,6 +91,7 @@ pub(super) fn handle_stream_event(
                 detail: None,
             })
         }
+        StreamEvent::ModelCalls(calls) => bridge_trace.lock().unwrap().add_model_calls(calls),
         StreamEvent::SubagentStarted { id, agent, task } => {
             presenter.emit(PresenterEvent::SubagentStart {
                 id,
