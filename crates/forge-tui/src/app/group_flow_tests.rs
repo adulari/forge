@@ -230,7 +230,8 @@ fn a_failed_call_stays_on_screen_under_the_summary() {
     finish(&mut app, "shell", false, Some("test failed"));
     tool(&mut app, "shell", r#"{"command":"git status"}"#);
     let screen = rows(&app, 100, 30);
-    let summary = row_of(&screen, "Ran 3 shell commands").expect("summary");
+    // The failure is not counted as done: it is the red count and the row under the summary.
+    let summary = row_of(&screen, "Ran 2 shell commands").expect("summary");
     assert!(screen[summary as usize].contains("1 failed"), "{screen:#?}");
     let failed = row_of(&screen, "cargo test -p upload").expect("the failure is named");
     assert_eq!(failed, summary + 1);
@@ -417,4 +418,112 @@ fn a_running_call_inside_an_open_group_keeps_its_status_on_screen() {
     let at = row_of(&screen, "cargo test").unwrap() as usize;
     assert!(screen[at].starts_with(" ▏   "), "indented: {screen:#?}");
     assert!(screen[at].trim_end().ends_with("running"), "{screen:#?}");
+}
+
+fn edit_with_diff(app: &mut App, path: &str, old: &str, new: &str) {
+    start(app, "edit_file", &format!(r#"{{"path":"{path}"}}"#));
+    app.apply(PresenterEvent::Diff(forge_types::FileDiff {
+        path: path.into(),
+        kind: forge_types::DiffKind::Modified,
+        old: Some(old.into()),
+        new: Some(new.into()),
+        lang: None,
+        binary: false,
+    }));
+    finish(app, "edit_file", true, None);
+}
+
+fn summaries_built() -> usize {
+    tool_groups::SUMMARIZED.with(std::cell::Cell::get)
+}
+
+#[test]
+fn a_rewrap_rebuilds_only_the_summaries_whose_cards_changed() {
+    // Forty edits to a 4000-line file, each its own group: before summaries were memoised and
+    // stats cached, every streamed line re-diffed all forty files (92 ms per rewrap in release).
+    let mut app = fold_app();
+    let big: String = (0..4000).map(|i| format!("line {i}\n")).collect();
+    let changed = big.replacen("line 7\n", "line seven\n", 1);
+    for i in 0..40 {
+        edit_with_diff(&mut app, &format!("src/f{i}.rs"), &big, &changed);
+        prose(&mut app, &format!("Step {i} done."));
+    }
+    let _ = rows(&app, 100, 30);
+    assert_eq!(app.tool_cards[0].diff_counts, (1, 1));
+    tool_groups::SUMMARIZED.with(|n| n.set(0));
+    prose(&mut app, "One more line.");
+    let _ = rows(&app, 100, 30);
+    assert_eq!(summaries_built(), 0, "every settled group is reused");
+    // Frames with nothing new build nothing either.
+    let _ = rows(&app, 100, 30);
+    assert_eq!(summaries_built(), 0);
+    // A new call builds its own group's summary, and no other.
+    tool(&mut app, "shell", r#"{"command":"ls"}"#);
+    let _ = rows(&app, 100, 30);
+    assert_eq!(summaries_built(), 1);
+    let screen = rows(&app, 100, 30);
+    assert!(
+        screen
+            .iter()
+            .any(|r| r.contains("Edited src/f39.rs (+1 −1)")),
+        "{screen:#?}"
+    );
+}
+
+#[test]
+fn a_running_group_animates_without_rebuilding_its_summary_each_frame() {
+    let mut app = fold_app();
+    tool(&mut app, "read_file", r#"{"path":"a.rs"}"#);
+    start(&mut app, "shell", r#"{"command":"cargo test"}"#);
+    let _ = rows(&app, 100, 30);
+    tool_groups::SUMMARIZED.with(|n| n.set(0));
+    for _ in 0..5 {
+        app.tick += 1;
+        let _ = rows(&app, 100, 30);
+    }
+    assert_eq!(summaries_built(), 0, "the spinner reuses the summary");
+}
+
+#[test]
+fn only_the_newest_folded_group_says_how_to_open_it() {
+    let mut app = fold_app();
+    explore(&mut app);
+    prose(&mut app, "Next.");
+    tool(&mut app, "shell", r#"{"command":"cargo fmt"}"#);
+    let screen = rows(&app, 120, 30);
+    let hinted: Vec<&String> = screen.iter().filter(|r| r.contains("to expand")).collect();
+    assert_eq!(hinted.len(), 1, "{screen:#?}");
+    assert!(
+        hinted[0].contains("Ran cargo fmt  click or Alt+O to expand"),
+        "{screen:#?}"
+    );
+    // Opened, it has nothing left to say.
+    let group = app.tool_cards.last().unwrap().batch.unwrap();
+    app.set_group_anchored(group, true);
+    let open = rows(&app, 120, 30);
+    assert!(!open.iter().any(|r| r.contains("to expand")), "{open:#?}");
+}
+
+#[test]
+fn cards_in_an_open_group_keep_their_tool_and_target_at_60_columns() {
+    let mut app = fold_app();
+    tool(&mut app, "read_file", r#"{"path":"a.rs"}"#);
+    start(&mut app, "shell", r#"{"command":"cargo test -p upload"}"#);
+    app.apply(PresenterEvent::ToolResult {
+        name: "shell".into(),
+        ok: false,
+        summary: "error: tool execution failed after the process exited".into(),
+        detail: None,
+    });
+    let _ = app.drain_flush();
+    let _ = rows(&app, 60, 30);
+    let group = app.tool_cards[0].batch.unwrap();
+    app.set_group_anchored(group, true);
+    let screen = rows(&app, 60, 30);
+    let at = row_of(&screen, "✗").expect("the failed card") as usize;
+    assert!(
+        screen[at].contains("Run") && screen[at].contains("cargo"),
+        "the label and target come before the preview: {screen:#?}"
+    );
+    assert!(screen[at].contains("error"), "{screen:#?}");
 }

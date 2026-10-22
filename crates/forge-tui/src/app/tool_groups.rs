@@ -35,22 +35,79 @@ pub(crate) enum Category {
     Other(String),
 }
 
+impl Category {
+    /// Whether the summary counts what the calls touched rather than the calls: three reads of
+    /// one file are "read 1 file", three edits to it "edited 1 file".
+    fn by_subject(&self) -> bool {
+        matches!(
+            self,
+            Self::Read
+                | Self::List
+                | Self::Search
+                | Self::Created
+                | Self::Edited
+                | Self::Deleted
+                | Self::Fetch
+        )
+    }
+}
+
 /// The calls of one category, in the order the category first appeared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tally {
     pub(crate) category: Category,
-    pub(crate) count: usize,
+    /// Calls, or for an agents call the agents it spawned.
+    pub(crate) calls: usize,
+    /// The distinct files, directories, patterns or pages touched, for a category counted by
+    /// what it touched.
+    pub(crate) subjects: Vec<String>,
+    /// Calls of such a category with nothing to tell them apart; each counts on its own.
+    pub(crate) unnamed: usize,
     pub(crate) adds: usize,
     pub(crate) dels: usize,
-    /// The target of the first call, for a group of one call (`Ran cargo test`).
+    /// The target of the first call, for a tally of one (`Ran cargo test`).
     pub(crate) target: String,
+}
+
+impl Tally {
+    fn new(category: Category, target: String) -> Self {
+        Self {
+            category,
+            calls: 0,
+            subjects: Vec::new(),
+            unnamed: 0,
+            adds: 0,
+            dels: 0,
+            target,
+        }
+    }
+
+    /// The number the summary says.
+    pub(crate) fn count(&self) -> usize {
+        if self.category.by_subject() {
+            self.subjects.len() + self.unnamed
+        } else {
+            self.calls
+        }
+    }
+
+    fn touch(&mut self, subject: Option<String>) {
+        match subject {
+            Some(s) if self.subjects.contains(&s) => {}
+            Some(s) => self.subjects.push(s),
+            None => self.unnamed += 1,
+        }
+    }
 }
 
 /// Everything the summary row says about a group.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Summary {
-    /// Finished calls, by category.
+    /// Calls that succeeded, by category.
     pub(crate) tallies: Vec<Tally>,
+    /// Calls that failed, by category. They never count as done: the summary only falls back to
+    /// them ("Tried to edit sample.rs") when nothing in the group succeeded.
+    pub(crate) failed_tallies: Vec<Tally>,
     pub(crate) finished: usize,
     pub(crate) failed: usize,
     pub(crate) running: usize,
@@ -88,27 +145,56 @@ pub(crate) fn category(card: &ToolCard) -> Category {
     }
 }
 
-/// How many units a call counts for: a read group card holds several reads, an agents call
-/// spawns several agents.
-fn units(card: &ToolCard, category: &Category) -> usize {
-    match category {
-        Category::Read => card.group.len() + 1,
-        Category::Agents => serde_json::from_str::<Value>(&card.args)
-            .ok()
-            .and_then(|v| {
-                ["agents", "tasks", "items"]
-                    .iter()
-                    .find_map(|k| v.get(*k).and_then(Value::as_array).map(Vec::len))
-            })
-            .filter(|n| *n > 0)
-            .unwrap_or(1),
-        _ => 1,
-    }
+/// What one call touched, so repeats of it count once: the path (`./src/a.rs` and `src/a.rs`
+/// are the same file), the pattern searched for, the page fetched.
+fn subject(category: &Category, args: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(args).ok()?;
+    let get = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| value.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let found = match category {
+        Category::Search => get(&["pattern", "query"])?.to_string(),
+        Category::Fetch => get(&["url"])?.to_string(),
+        _ => {
+            let path = get(&["path", "file_path", "notebook_path"])?;
+            let mut path = path;
+            while let Some(rest) = path.strip_prefix("./") {
+                path = rest;
+            }
+            path.to_string()
+        }
+    };
+    Some(found)
+}
+
+/// How many agents an agents call spawned.
+fn agents_spawned(args: &str) -> usize {
+    serde_json::from_str::<Value>(args)
+        .ok()
+        .and_then(|v| {
+            ["agents", "tasks", "items"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(Value::as_array).map(Vec::len))
+        })
+        .filter(|n| *n > 0)
+        .unwrap_or(1)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread built a summary, so a test can prove a rewrap reuses them.
+    pub(crate) static SUMMARIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Fold the cards of a group into a summary. Running calls are counted but not tallied: the
-/// summary speaks in the past tense, and the running call has a row of its own.
+/// summary speaks in the past tense, and the running call has a row of its own. File stats come
+/// from each card's cached counts; nothing here diffs a file.
 pub(crate) fn summarize<'a>(cards: impl IntoIterator<Item = &'a ToolCard>) -> Summary {
+    #[cfg(test)]
+    SUMMARIZED.with(|n| n.set(n.get() + 1));
     let mut out = Summary::default();
     for card in cards {
         if card.status == CardStatus::Running {
@@ -116,34 +202,44 @@ pub(crate) fn summarize<'a>(cards: impl IntoIterator<Item = &'a ToolCard>) -> Su
             continue;
         }
         out.finished += 1;
-        if card.status == CardStatus::Failed {
-            out.failed += 1;
-        }
         out.ms += card.ms.unwrap_or(0) + card.group.iter().filter_map(|m| m.ms).sum::<u128>();
+        let failed = card.status == CardStatus::Failed;
+        let tallies = if failed {
+            out.failed += 1;
+            &mut out.failed_tallies
+        } else {
+            &mut out.tallies
+        };
         let category = category(card);
-        let n = units(card, &category);
-        let (adds, dels) = card
-            .diff
-            .as_ref()
-            .map(crate::render::diff_stat)
-            .unwrap_or((0, 0));
-        match out.tallies.iter_mut().find(|t| t.category == category) {
-            Some(t) => {
-                t.count += n;
-                t.adds += adds;
-                t.dels += dels;
+        let at = match tallies.iter().position(|t| t.category == category) {
+            Some(at) => at,
+            None => {
+                let target = tool_cards::headline(&card.name, &card.args);
+                tallies.push(Tally::new(category.clone(), target));
+                tallies.len() - 1
             }
-            None => out.tallies.push(Tally {
-                target: if card.group.is_empty() {
-                    tool_cards::headline(&card.name, &card.args)
-                } else {
-                    String::new()
-                },
-                category,
-                count: n,
-                adds,
-                dels,
-            }),
+        };
+        let tally = &mut tallies[at];
+        match &category {
+            Category::Agents => tally.calls += agents_spawned(&card.args),
+            // A read card holds the earlier reads folded into it.
+            Category::Read => {
+                tally.calls += card.group.len() + 1;
+                for args in card.group.iter().map(|m| m.args.as_str()) {
+                    tally.touch(subject(&category, args));
+                }
+                tally.touch(subject(&category, &card.args));
+            }
+            c if c.by_subject() => {
+                tally.calls += 1;
+                let from_diff = card.diff.as_ref().map(|d| d.path.trim().to_string());
+                tally.touch(subject(c, &card.args).or(from_diff));
+            }
+            _ => tally.calls += 1,
+        }
+        if !failed {
+            tally.adds += card.diff_counts.0;
+            tally.dels += card.diff_counts.1;
         }
     }
     out
@@ -164,59 +260,177 @@ fn stat(t: &Tally) -> String {
     }
 }
 
-/// One category in words, counted: `ran 4 shell commands`.
-fn counted(t: &Tally) -> String {
-    let n = t.count;
+/// Past tense for what was done, the infinitive after "Tried to" for what failed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tense {
+    Past,
+    Tried,
+}
+
+/// One category in words, counted: `ran 4 shell commands`, or `run 4 shell commands` after
+/// "Tried to".
+fn counted(t: &Tally, tense: Tense) -> String {
+    let n = t.count();
+    let verb = |past: &str, inf: &str| -> String {
+        if tense == Tense::Past {
+            past.to_string()
+        } else {
+            inf.to_string()
+        }
+    };
     match &t.category {
-        Category::Read => format!("read {}", plural(n, "file", "files")),
-        Category::List => format!("listed {}", plural(n, "directory", "directories")),
-        Category::Search => format!("searched {}", plural(n, "pattern", "patterns")),
-        Category::Shell => format!("ran {}", plural(n, "shell command", "shell commands")),
-        Category::Script => format!("ran {}", plural(n, "script", "scripts")),
-        Category::Created => format!("created {}{}", plural(n, "file", "files"), stat(t)),
-        Category::Edited => format!("edited {}{}", plural(n, "file", "files"), stat(t)),
-        Category::Deleted => format!("deleted {}{}", plural(n, "file", "files"), stat(t)),
-        Category::Fetch => format!("fetched {}", plural(n, "page", "pages")),
-        Category::WebSearch => format!("ran {}", plural(n, "web search", "web searches")),
-        Category::Agents => format!("ran {}", plural(n, "agent", "agents")),
+        Category::Read => format!("{} {}", verb("read", "read"), plural(n, "file", "files")),
+        Category::List => format!(
+            "{} {}",
+            verb("listed", "list"),
+            plural(n, "directory", "directories")
+        ),
+        Category::Search => format!(
+            "{} {}",
+            verb("searched for", "search for"),
+            plural(n, "pattern", "patterns")
+        ),
+        Category::Shell => format!(
+            "{} {}",
+            verb("ran", "run"),
+            plural(n, "shell command", "shell commands")
+        ),
+        Category::Script => format!("{} {}", verb("ran", "run"), plural(n, "script", "scripts")),
+        Category::Created => format!(
+            "{} {}{}",
+            verb("created", "create"),
+            plural(n, "file", "files"),
+            stat(t)
+        ),
+        Category::Edited => format!(
+            "{} {}{}",
+            verb("edited", "edit"),
+            plural(n, "file", "files"),
+            stat(t)
+        ),
+        Category::Deleted => format!(
+            "{} {}{}",
+            verb("deleted", "delete"),
+            plural(n, "file", "files"),
+            stat(t)
+        ),
+        Category::Fetch => format!(
+            "{} {}",
+            verb("fetched", "fetch"),
+            plural(n, "page", "pages")
+        ),
+        Category::WebSearch => format!(
+            "{} {}",
+            verb("ran", "run"),
+            plural(n, "web search", "web searches")
+        ),
+        Category::Agents => format!("{} {}", verb("ran", "run"), plural(n, "agent", "agents")),
+        Category::Tasks if tense == Tense::Tried => "update the task list".to_string(),
         Category::Tasks if n == 1 => "updated the task list".to_string(),
         Category::Tasks => format!("updated the task list {n} times"),
         Category::Mcp(name) | Category::Other(name) => {
-            format!("called {name} {}", plural(n, "time", "times"))
+            format!(
+                "{} {name} {}",
+                verb("called", "call"),
+                plural(n, "time", "times")
+            )
         }
     }
 }
 
-/// The one call of a single-call group, by what it touched: `ran cargo test -p upload`. `None`
-/// when the call has no target worth naming, so the counted form is used instead.
-fn single(t: &Tally) -> Option<String> {
+/// A tally of one thing, by what it touched: `ran cargo test -p upload`, `read src/big.rs` for
+/// three slices of that file. `None` when there is no target worth naming, so the counted form
+/// is used instead.
+fn single(t: &Tally, tense: Tense) -> Option<String> {
     let target = t.target.trim();
-    if target.is_empty() || t.count != 1 {
+    if target.is_empty() || t.count() != 1 {
         return None;
     }
-    Some(match &t.category {
-        Category::Read => format!("read {target}"),
-        Category::List => format!("listed {target}"),
-        Category::Search => format!("searched for {target}"),
-        Category::Shell => format!("ran {target}"),
-        Category::Created => format!("created {target}{}", stat(t)),
-        Category::Edited => format!("edited {target}{}", stat(t)),
-        Category::Deleted => format!("deleted {target}"),
-        Category::Fetch => format!("fetched {target}"),
-        Category::WebSearch => format!("searched the web for {target}"),
+    let past = tense == Tense::Past;
+    let (done, tried) = match &t.category {
+        Category::Read => ("read", "read"),
+        Category::List => ("listed", "list"),
+        Category::Search => ("searched for", "search for"),
+        Category::Shell => ("ran", "run"),
+        Category::Created => ("created", "create"),
+        Category::Edited => ("edited", "edit"),
+        Category::Deleted => ("deleted", "delete"),
+        Category::Fetch => ("fetched", "fetch"),
+        Category::WebSearch => ("searched the web for", "search the web for"),
         _ => return None,
-    })
+    };
+    let verb = if past { done } else { tried };
+    let stat = match t.category {
+        Category::Created | Category::Edited => stat(t),
+        _ => String::new(),
+    };
+    Some(format!("{verb} {target}{stat}"))
+}
+
+/// The tallies the summary speaks of, and how: what succeeded, or what was tried when nothing
+/// did.
+fn spoken(s: &Summary) -> (&[Tally], Tense) {
+    if s.tallies.is_empty() {
+        (&s.failed_tallies, Tense::Tried)
+    } else {
+        (&s.tallies, Tense::Past)
+    }
 }
 
 /// The summary in natural English, categories in order of first appearance, the first word
-/// capitalised: `Read 3 files, searched 2 patterns, ran 4 shell commands`.
+/// capitalised: `Read 3 files, searched for 2 patterns, ran 4 shell commands`. Failed calls are
+/// left out (the row counts them in red); a group where nothing succeeded says what it tried.
 pub(crate) fn summary_text(s: &Summary) -> String {
-    let text = match s.tallies.as_slice() {
+    let (tallies, tense) = spoken(s);
+    let text = match tallies {
         [] => String::new(),
-        [only] if s.finished == 1 => single(only).unwrap_or_else(|| counted(only)),
-        many => many.iter().map(counted).collect::<Vec<_>>().join(", "),
+        [only] => single(only, tense).unwrap_or_else(|| counted(only, tense)),
+        many => many
+            .iter()
+            .map(|t| counted(t, tense))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let text = if tense == Tense::Tried && !text.is_empty() {
+        format!("tried to {text}")
+    } else {
+        text
     };
     capitalise(&text)
+}
+
+/// One category as a short count, for a terminal too narrow for the sentence: `4 commands`.
+fn short(t: &Tally) -> String {
+    let n = t.count();
+    let stat = match t.category {
+        Category::Created | Category::Edited | Category::Deleted => stat(t),
+        _ => String::new(),
+    };
+    match &t.category {
+        Category::Read => plural(n, "file read", "files read"),
+        Category::List => plural(n, "dir", "dirs"),
+        Category::Search => plural(n, "search", "searches"),
+        Category::Shell => plural(n, "command", "commands"),
+        Category::Script => plural(n, "script", "scripts"),
+        Category::Created => format!("{}{stat}", plural(n, "new file", "new files")),
+        Category::Edited => format!("{}{stat}", plural(n, "file edited", "files edited")),
+        Category::Deleted => format!("{}{stat}", plural(n, "file deleted", "files deleted")),
+        Category::Fetch => plural(n, "page", "pages"),
+        Category::WebSearch => plural(n, "web search", "web searches"),
+        Category::Agents => plural(n, "agent", "agents"),
+        Category::Tasks => "task list".to_string(),
+        Category::Mcp(name) | Category::Other(name) => format!("{name} ×{n}"),
+    }
+}
+
+/// The summary as counts only (`1 dir, 2 searches, 4 commands`), for a row too narrow
+/// for [`summary_text`]. A single named call keeps its sentence, which is short already.
+pub(crate) fn summary_text_short(s: &Summary) -> String {
+    let (tallies, tense) = spoken(s);
+    match tallies {
+        [only] if single(only, tense).is_some() => summary_text(s),
+        many => many.iter().map(short).collect::<Vec<_>>().join(", "),
+    }
 }
 
 fn capitalise(text: &str) -> String {
@@ -228,7 +442,7 @@ fn capitalise(text: &str) -> String {
 }
 
 /// How a summary row is drawn.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct RowState {
     pub(crate) expanded: bool,
     /// The animation tick while the group still has a call running and is collapsed.
@@ -237,6 +451,16 @@ pub(crate) struct RowState {
     pub(crate) focused: bool,
     /// A narrow terminal: the duration gives its cells to the summary.
     pub(crate) compact: bool,
+    /// The cells the row may use; 0 for no limit. A summary that does not fit switches to its
+    /// short form before anything is cut.
+    pub(crate) width: usize,
+    /// How to open the group (`click or Alt+O to expand`), shown faint after the summary when it
+    /// fits whole.
+    pub(crate) hint: Option<String>,
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(Span::width).sum()
 }
 
 /// The summary row: a disclosure triangle (or the spinner while it runs), the summary in the
@@ -252,22 +476,17 @@ pub(crate) fn summary_row(s: &Summary, state: RowState) -> TextLine<'static> {
         None if state.expanded => (glyphs.disclose_open.to_string(), styles::muted()),
         None => (glyphs.disclose_closed.to_string(), styles::muted()),
     };
-    let mut text = summary_text(s);
-    if text.is_empty() {
-        text = "Working".to_string();
-    }
     let text_style = if state.focused {
         styles::fg().bold()
     } else {
         styles::muted()
     };
-    let mut spans = rail::rail_spans(rail::BAKED);
-    spans.push(Span::styled(mark, mark_style));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(text, text_style));
-    spans.push(copy_mark::right_marker());
     let sep = format!(" {} ", glyphs.sep);
+    // The failure count stays on the right in every state, focus included.
     let mut right: Vec<Span<'static>> = Vec::new();
+    if s.failed > 0 {
+        right.push(Span::styled(format!("{} failed", s.failed), styles::err()));
+    }
     if state.focused {
         let toggle = if state.expanded { "collapse" } else { "expand" };
         let hints: &[(&str, &str)] = if state.compact {
@@ -275,18 +494,47 @@ pub(crate) fn summary_row(s: &Summary, state: RowState) -> TextLine<'static> {
         } else {
             &[("Enter", toggle), (glyphs.up_down, "move"), ("Esc", "done")]
         };
-        right.extend(styles::hint_row(hints));
-    } else {
-        if s.failed > 0 {
-            right.push(Span::styled(format!("{} failed", s.failed), styles::err()));
+        if !right.is_empty() {
+            right.push(Span::styled(sep.clone(), styles::faint()));
         }
-        if s.ms > 0 && state.spinner.is_none() && !state.compact {
-            if !right.is_empty() {
-                right.push(Span::styled(sep.clone(), styles::faint()));
-            }
-            right.push(Span::styled(tool_cards::fmt_ms(s.ms), styles::faint()));
+        right.extend(styles::hint_row(hints));
+    } else if s.ms > 0 && state.spinner.is_none() && !state.compact {
+        if !right.is_empty() {
+            right.push(Span::styled(sep.clone(), styles::faint()));
+        }
+        right.push(Span::styled(tool_cards::fmt_ms(s.ms), styles::faint()));
+    }
+    let mut spans = rail::rail_spans(rail::BAKED);
+    spans.push(Span::styled(mark, mark_style));
+    spans.push(Span::raw(" "));
+    // What the summary may use: the row less its head, the gap before the right-hand side, and
+    // that side.
+    let room = match state.width {
+        0 => usize::MAX,
+        w => w.saturating_sub(spans_width(&spans) + 2 + spans_width(&right)),
+    };
+    let mut text = summary_text(s);
+    if text.is_empty() {
+        text = "Working".to_string();
+    }
+    if Span::raw(text.as_str()).width() > room {
+        let short = summary_text_short(s);
+        if !short.is_empty() {
+            text = short;
         }
     }
+    let used = Span::raw(text.as_str()).width();
+    spans.push(Span::styled(text, text_style));
+    if let Some(hint) = state
+        .hint
+        .filter(|_| !state.focused && state.spinner.is_none())
+    {
+        let hint = format!("  {hint}");
+        if used + Span::raw(hint.as_str()).width() <= room {
+            spans.push(Span::styled(hint, styles::faint()));
+        }
+    }
+    spans.push(copy_mark::right_marker());
     spans.extend(right);
     let line = TextLine::from(spans);
     if state.focused {

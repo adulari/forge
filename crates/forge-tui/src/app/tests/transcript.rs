@@ -84,14 +84,15 @@ fn previous_message_jump_walks_user_messages_upward() {
     app.transcript_to_bottom();
     let screen = screen_wh(&app, 80, 13);
     assert!(
-        !screen.contains("Previous message") && !screen.contains("Jump to bottom"),
+        !screen.contains("Ctrl+Home") && !screen.contains("Jump to bottom"),
         "{screen}"
     );
     assert!(!app.prev_bar_hit(79 - 10, 1) && !app.jump_bar_hit(40, 7));
     // Scrolled up, both are drawn, name their chords, and take a click.
     app.transcript_scroll_up(2);
     let screen = screen_wh(&app, 80, 13);
-    assert!(screen.contains("Previous message · Ctrl+Home"), "{screen}");
+    // The top pill quotes the message it goes to.
+    assert!(screen.contains("↑ prompt 1 · Ctrl+Home"), "{screen}");
     assert!(screen.contains("Jump to bottom · Ctrl+End"), "{screen}");
     assert!(
         app.prev_bar_hit(79 - 10, 1),
@@ -100,7 +101,7 @@ fn previous_message_jump_walks_user_messages_upward() {
     // Back at the bottom they are gone the same frame.
     app.transcript_to_bottom();
     let screen = screen_wh(&app, 80, 13);
-    assert!(!screen.contains("Previous message"), "{screen}");
+    assert!(!screen.contains("Ctrl+Home"), "{screen}");
 }
 
 #[test]

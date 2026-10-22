@@ -65,6 +65,14 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `voice` | Ctrl-V | Open the `/voice` recording overlay |
 | `kill_line_forward` | Alt-K | Delete from the cursor to the end of the line |
 
+**Alt chords on macOS.** Alt-O, Alt-↑/↓ and the other Alt binds reach Forge only when the terminal
+sends Option as Meta (Escape+key). Without that, Option+O types `ø` and Option+↑ may move by
+paragraph instead. Turn it on in Terminal.app (Settings → Profiles → Keyboard → "Use Option as Meta
+key"), iTerm2 (Profiles → Keys → Left/Right Option key → "Esc+"), Ghostty (`macos-option-as-alt =
+true`), kitty (`macos_option_as_alt yes`), WezTerm (`send_composed_key_when_left_alt_is_pressed =
+false`) or Alacritty (`option_as_alt = "Both"`), or rebind the action to a Ctrl chord. A tool group
+can always be opened with a click.
+
 ## 3. Implementation
 
 - **`forge-config`** — `KeyCombo`, `KeybindsConfig` (`BTreeMap<String, KeyCombo>`), a `Default`

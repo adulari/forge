@@ -101,7 +101,15 @@ picked clear of Forge's own bindings and of Claude Code's defaults (`Ctrl+O`, `C
 
 The "↑ Previous message · Ctrl+Home" pill (top right) and the "↓ Jump to bottom · Ctrl+End" pill
 (bottom centre) show only while the transcript is scrolled up, and vanish the frame you are back at
-the bottom. Both take a click. Below about 34 columns they shorten to the arrow and the chord.
+the bottom. Both take a click. The top pill quotes the start of the message it goes to
+(`↑ fix the login redirect… · Ctrl+Home`), the way Claude Code's sticky header shows the previous
+prompt; the quote takes at most 36 cells and never more than half the row, and the pill falls back
+to "Previous message" when the row is too narrow for a useful quote or the message has no text.
+Below about 34 columns both pills shorten to the arrow and the chord.
+
+The newest folded group ends its summary with a faint `click or Alt+O to expand`, so the fold is
+discoverable without the help screen. On macOS the Alt chords need the terminal's "Option as Meta"
+setting ([keybinds.md](keybinds.md)).
 
 ## Compatibility
 

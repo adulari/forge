@@ -2982,9 +2982,7 @@ impl App {
         // have rows left to own.
         let queued: Vec<u64> = self.pending_card_marks.iter().map(|m| m.1).collect();
         self.tool_cards.retain(|c| queued.contains(&c.id));
-        self.fold_ui.focus = None;
-        self.fold_ui.flipped.clear();
-        self.fold_ui.rev += 1;
+        self.fold_ui.clear();
         self.subagents.clear();
         self.assay_critics.clear();
         self.assay_verifying = None;

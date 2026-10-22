@@ -8,10 +8,13 @@
 //! wrapped: a collapsed group's lines are replaced by its summary row (plus its failures and its
 //! running call), an open group gets the summary as a header above its cards. The wrap is
 //! memoised on the log revision and the fold state, so a fold costs one pass over the log per
-//! change, the same as the wrap it rides on, and nothing per frame. Only the rows that animate
-//! (a running summary's spinner, the running call) are rebuilt at draw time.
+//! change, the same as the wrap it rides on. Each group's summary is memoised on its cards
+//! (`FoldUi::summary`), so that pass rebuilds only the group whose cards changed, and a card's
+//! file stat is counted once when its diff attaches. Only the rows that animate (a running
+//! summary's spinner, the running call) or have focus are rebuilt at draw time.
 
 use ratatui::text::Line as TextLine;
+use std::collections::HashSet;
 
 use super::tool_cards::{self, CardStatus, ToolCard};
 use super::tool_groups::{self, RowState, Summary};
@@ -198,21 +201,29 @@ impl App {
             .is_some()
             .then(|| self.newest_running())
             .flatten();
+        let spans = self.group_spans();
+        // The newest group says how to open it while it is folded, the way Claude Code's
+        // `(ctrl+o to expand)` does; older rows stay quiet.
+        let hinted = spans
+            .last()
+            .filter(|s| !self.group_expanded(s.id))
+            .map(|s| s.id);
         let mut at = 0;
-        for span in self.group_spans() {
+        for span in &spans {
             if span.start < at {
                 continue;
             }
             b.log_lines(at, span.start);
             at = span.end;
             let cards: Vec<&ToolCard> = span.cards.iter().map(|&i| &self.tool_cards[i]).collect();
-            let summary = tool_groups::summarize(cards.iter().copied());
+            let summary = self.fold_ui.summary(span.id, &cards);
             let first = b.rows.len();
             let compact = b.width < COMPACT_WIDTH;
             if self.group_expanded(span.id) {
                 let state = RowState {
                     expanded: true,
                     compact,
+                    width: b.width,
                     ..RowState::default()
                 };
                 b.row(
@@ -231,13 +242,18 @@ impl App {
                 }
                 continue;
             }
-            self.collapsed_rows(&mut b, &span, &cards, &summary, awaiting);
+            let hint = (hinted == Some(span.id))
+                .then(|| self.expand_hint())
+                .flatten();
+            self.collapsed_rows(&mut b, span, &cards, &summary, awaiting, hint);
             b.hits.push(GroupHit {
                 first,
                 rows: b.rows.len() - first,
                 group: span.id,
             });
         }
+        let live: HashSet<u64> = spans.iter().map(|s| s.id).collect();
+        self.fold_ui.keep_summaries(|group| live.contains(&group));
         b.log_lines(at, self.main_log.len());
         cache.rows = b.rows;
         cache.origins = b.origins;
@@ -255,11 +271,15 @@ impl App {
         cards: &[&ToolCard],
         summary: &Summary,
         awaiting: Option<u64>,
+        hint: Option<String>,
     ) {
         let has_summary = summary.finished > 0;
         if has_summary {
             let state = RowState {
                 compact: b.width < COMPACT_WIDTH,
+                width: b.width,
+                // A group still running has nothing to open yet.
+                hint: hint.filter(|_| summary.running == 0),
                 ..RowState::default()
             };
             b.row(
@@ -331,12 +351,16 @@ impl App {
                 if !focused && !spinning {
                     return None;
                 }
-                let summary = tool_groups::summarize(self.group_cards(fold.group));
+                let cards: Vec<&ToolCard> = self.group_cards(fold.group).collect();
+                let summary = self.fold_ui.summary(fold.group, &cards);
+                let wrap = width.saturating_sub(1) as usize;
                 let state = RowState {
                     expanded,
                     spinner: spinning.then_some(self.tick),
                     focused,
-                    compact: (width.saturating_sub(1) as usize) < COMPACT_WIDTH,
+                    compact: wrap < COMPACT_WIDTH,
+                    width: wrap,
+                    hint: None,
                 };
                 tool_groups::summary_row(&summary, state)
             }
@@ -358,6 +382,19 @@ impl App {
         crate::transcript::wrap_lines(&[line], width.saturating_sub(1) as usize)
             .into_iter()
             .next()
+    }
+
+    /// How a folded group opens, in the keys the user has bound: `click or Alt+O to expand`.
+    fn expand_hint(&self) -> Option<String> {
+        let chord = self
+            .keybinds
+            .binds
+            .get("toggle_tool_groups")
+            .map(crate::keybinds::combo_display);
+        Some(match chord {
+            Some(chord) => format!("click or {chord} to expand"),
+            None => "click to expand".to_string(),
+        })
     }
 
     /// The group whose clickable block holds wrapped row `row`.

@@ -260,7 +260,7 @@ fn clicking_a_folded_tool_group_opens_it_and_clicking_again_folds_it() {
     let rows = s.wait_until("the turn to finish", |r| has(r, "Done. I explored"));
 
     // Folded: one summary row for the exploring calls, the calls themselves out of sight.
-    let summary = "Listed 1 directory, searched 2 patterns, read 1 file, ran 3 shell commands";
+    let summary = "Listed 1 directory, searched for 2 patterns, read 1 file, ran 2 shell commands";
     let at =
         row_with(&rows, summary).unwrap_or_else(|| panic!("summary row:\n{}", rows.join("\n")));
     assert!(rows[at].contains('▸'), "{}", rows.join("\n"));

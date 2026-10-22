@@ -146,19 +146,23 @@ pub(crate) fn plan(line: &Line<'_>) -> RowPlan {
 }
 
 /// Lay a right-aligned line out as ONE row of exactly `width` cells: the left part, padding, the
-/// right part flush at the margin. A left part too long to leave room is cut with an ellipsis;
-/// when even that cannot fit the right part, the right part is dropped.
+/// right part flush at the margin. A left part too long to leave room is cut with an ellipsis,
+/// but never below half the row: past that the right part is cut instead, because the left names
+/// the row (a card's tool and target) and the right only says how it went. When not even a few
+/// cells of the right part fit, it is dropped.
 pub(crate) fn fit_right(line: &Line<'_>, at: usize, width: usize) -> Line<'static> {
     let left: Vec<Span<'static>> = line.spans[..at]
         .iter()
         .map(|s| Span::styled(s.content.to_string(), s.style))
         .collect();
-    let right: Vec<Span<'static>> = line.spans[at + 1..]
+    let mut right: Vec<Span<'static>> = line.spans[at + 1..]
         .iter()
         .map(|s| Span::styled(s.content.to_string(), s.style))
         .collect();
     let lw: usize = left.iter().map(span_w).sum();
     let rw: usize = right.iter().map(span_w).sum();
+    // The cells the left part keeps however long the right part is.
+    let keep = lw.min(width / 2);
     let mut spans = left;
     if lw + 2 + rw <= width {
         spans.push(Span::styled(
@@ -166,11 +170,21 @@ pub(crate) fn fit_right(line: &Line<'_>, at: usize, width: usize) -> Line<'stati
             Style::default().add_modifier(NO_COPY),
         ));
         spans.extend(right);
-    } else if rw + 6 <= width {
+    } else if rw + 2 + keep <= width {
         spans = cut_spans(spans, width - rw - 2);
         let used: usize = spans.iter().map(span_w).sum();
         spans.push(Span::styled(
             " ".repeat(width - used - rw),
+            Style::default().add_modifier(NO_COPY),
+        ));
+        spans.extend(right);
+    } else if keep + 2 + MIN_RIGHT <= width {
+        spans = cut_spans(spans, keep);
+        let used: usize = spans.iter().map(span_w).sum();
+        right = cut_spans(right, width.saturating_sub(used + 2));
+        let rw: usize = right.iter().map(span_w).sum();
+        spans.push(Span::styled(
+            " ".repeat(width.saturating_sub(used + rw)),
             Style::default().add_modifier(NO_COPY),
         ));
         spans.extend(right);
@@ -179,6 +193,9 @@ pub(crate) fn fit_right(line: &Line<'_>, at: usize, width: usize) -> Line<'stati
     }
     Line::from(spans).style(line.style)
 }
+
+/// The fewest cells a cut right part is worth showing in (`exit…`).
+const MIN_RIGHT: usize = 6;
 
 /// Cut `spans` to `max` cells, ending in `…` when anything was dropped. Decoration spans are kept
 /// whole (the head of a row is never what gets cut).
@@ -392,5 +409,38 @@ mod tests {
         let r = rows("```\n日本語abc\n```", 80);
         // gutter 1 + three 2-cell glyphs = cell 7 is the start of "abc".
         assert_eq!(copy(&r, (1, 7), (1, usize::MAX)), "abc");
+    }
+
+    fn flat(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    fn header(left: &str, right: &str) -> Line<'static> {
+        Line::from(vec![
+            Span::raw(left.to_string()),
+            right_marker(),
+            Span::raw(right.to_string()),
+        ])
+    }
+
+    #[test]
+    fn a_long_right_part_is_cut_before_the_left_drops_below_half() {
+        let line = header(
+            "✗ Run    cargo test -p upload",
+            "error: tool execution failed",
+        );
+        let row = flat(&fit_right(&line, 1, 40));
+        assert_eq!(row.chars().count(), 40, "{row:?}");
+        assert!(row.starts_with("✗ Run    cargo test"), "{row:?}");
+        assert!(row.contains("error"), "{row:?}");
+        assert!(row.ends_with('…'), "the preview is what gets cut: {row:?}");
+    }
+
+    #[test]
+    fn a_short_right_part_still_stays_whole() {
+        let line = header("Listed 1 directory, searched for 2 patterns", "1 failed");
+        let row = flat(&fit_right(&line, 1, 30));
+        assert!(row.ends_with("1 failed"), "{row:?}");
+        assert!(row.contains('…'), "{row:?}");
     }
 }

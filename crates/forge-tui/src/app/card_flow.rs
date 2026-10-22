@@ -99,7 +99,7 @@ impl App {
         else {
             return false;
         };
-        card.diff = Some(diff);
+        card.set_diff(diff);
         let (id, interactive) = (card.id, card.interactive);
         if interactive {
             self.redraw_tool_card(id);

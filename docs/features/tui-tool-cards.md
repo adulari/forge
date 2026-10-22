@@ -61,11 +61,13 @@ card that is newer always wins.
 
 ```
  ▏ I'll get my bearings in the project first.
- ▏ ▸ Listed 1 directory, searched 2 patterns, read 1 file, ran 3 shell commands     1 failed · 3.3s
+ ▏ ▸ Listed 1 directory, searched for 2 patterns, read 1 file, ran 2 shell commands  1 failed · 3.3s
  ▏   ✗ Run    echo 'probe: missing fixture' >&2; exit 3                               exit 3 · 18ms
  ▏ The checks pass apart from one probe. Writing the summary now.
  ▏ ⠧ Created 1 file (+13), edited 1 file (+1 −1)
  ▏   ⠧ Run    wc -l mock-summary.md                                                         running
+ ▏ Done.
+ ▏ ▸ Read src/big.rs, ran cargo check  click or Alt+O to expand                             1.2s
 ```
 
 A **group** is a maximal run of tool calls inside one turn with no other row between them: a card
@@ -75,21 +77,39 @@ shell diagnosis, a new turn). Subagent and task calls are calls like any other a
 words.
 
 - **Collapsed** (the default), a group is one dim row: a `▸`, the summary, and on the right the
-  failures and the total duration. The summary counts finished calls by category in the order they
-  first appeared, in plain English with plurals: `Read 3 files, searched 2 patterns, ran 4 shell
-  commands`, `Listed 1 directory, ran 2 shell commands`, `Edited 2 files (+41 −7)`. Created,
-  edited and deleted files are separate categories, each with its own `(+a −d)`, so a deletion is
-  never folded into "edited". A group of one call names it: `Ran cargo test -p upload`,
-  `Read Cargo.toml`, `Created notes.md (+2)`. Categories: read, listed, searched (grep, glob,
-  search), ran shell commands, ran scripts (`run_code`), created / edited / deleted files, fetched
-  pages, ran web searches, ran agents (`spawn_agents` counts its agents), updated the task list,
-  and `called <server|tool> N times` for MCP and anything else.
-- **Failures stay visible.** The row says `N failed` in the error colour on the right, which is the
-  part a narrow terminal never cuts, and each failed call (the newest three) stays listed under the
-  summary as its one-line card header. Why: a failed call is the one thing a reader needs without
+  failures and the total duration. The summary counts the calls that succeeded by category in the
+  order they first appeared, in plain English with plurals: `Read 3 files, searched for 2 patterns,
+  ran 4 shell commands`, `Listed 1 directory, ran 2 shell commands`, `Edited 2 files (+41 −7)`.
+  Files, directories, patterns and pages are counted by what was touched, not by call: three
+  `read_file` slices of `src/big.rs` and three edits to it are `Read 1 file, edited 1 file (+12 −3)`
+  (`./src/a.rs` and `src/a.rs` are one file; a read card that folded several reads counts its
+  distinct paths). Shell commands, scripts, agents and other tools count calls. Created, edited and
+  deleted files are separate categories, each with its own `(+a −d)`, so a deletion is never folded
+  into "edited". A group that touched one thing names it: `Ran cargo test -p upload`,
+  `Read Cargo.toml`, `Read src/big.rs` (however many slices), `Created notes.md (+2)`.
+  Categories: read, listed, searched for (grep, glob, search), ran shell commands, ran scripts
+  (`run_code`), created / edited / deleted files, fetched pages, ran web searches, ran agents
+  (`spawn_agents` counts its agents), updated the task list, and `called <server|tool> N times` for
+  MCP and anything else.
+- **Failures stay visible, and are never counted as done.** A failed call is left out of the
+  sentence and adds nothing to the `(+a −d)`: a failed `edit_file` next to a no-op write reads
+  `Edited notes.md` with `1 failed` beside it, not `Edited 2 files`. The row says `N failed` in the
+  error colour on the right, which is the part a narrow terminal never cuts (a focused row keeps it
+  too), and each failed call (the newest three) stays listed under the summary as its one-line card
+  header. A group where nothing succeeded says what it tried: `Tried to edit sample.rs`,
+  `Tried to run 2 shell commands`. Why: a failed call is the one thing a reader needs without
   asking (the agent may have moved on without fixing it), and its header costs one row. A
   destructive call is not hidden either: a deletion is its own category, and the permission
   prompt, which is where a destructive shell command is decided, is never folded.
+- **How to open it.** The newest group, while folded and finished, ends its summary with a faint
+  `click or Alt+O to expand` (the chord is whatever `toggle_tool_groups` is bound to), the way
+  Claude Code's collapsed line says `(ctrl+o to expand)`. Older rows stay quiet, and the hint is
+  dropped rather than cut when the row has no room for it.
+- **Narrow terminals.** A summary that does not fit its row switches to counts before anything is
+  cut: `1 dir, 2 searches, 1 file read, 2 commands` instead of the sentence, and below 80 columns the
+  duration gives up its cells. Card headers inside an open group keep their tool and target: a
+  right-hand preview too long for the row is cut before the left side drops below half the row
+  (`copy_mark::fit_right`).
 - **Running.** While any call in the group runs, the summary row shows the spinner instead of the
   `▸` and lists what has finished; the call in flight hangs under it with its own spinner (the
   first call of a group shows alone until it finishes). A call waiting for permission also shows
@@ -120,11 +140,21 @@ log, the remote transcript or the activity viewer changes. The fold happens wher
 wrapped for the transcript (`ensure_wrapped_main` -> `App::wrap_folded`, `app/group_flow.rs`):
 each group's line range is replaced by its summary rows (collapsed) or prefixed with the header
 (open). The wrap is memoised on the log revision, the width and a fold key (fold enabled, a
-revision bumped by every toggle, and whether a permission prompt is open), so folding costs one
-pass over the log per change, the same pass the wrap already made, and nothing per frame. Only the
-rows that animate (a running summary's spinner, the running call, the focused row) are rebuilt at
-draw time, from a small sorted list of fold rows. The summary text and rows are pure functions in
-`app/tool_groups.rs`.
+revision bumped by every toggle, and whether a permission prompt is open), so folding rides the
+pass over the log the wrap already makes on every change. That pass runs on every committed
+streamed line, so nothing in it may cost more than the group's rows:
+
+- Each group's `Summary` is memoised in `FoldUi::summary`, keyed on the group id and checked against
+  its cards' `(id, status, folded reads, has diff)`. A rewrap rebuilds only the group whose cards
+  changed (in practice the running one), and groups that left the log are dropped from the memo.
+- A card's `(+a −d)` is counted once, when its diff attaches (`ToolCard::set_diff` ->
+  `diff_counts`). The diff holds both whole files, so counting it again per rewrap was a full-file
+  diff per edit per streamed line: 40 edits to a 4000-line file cost 92 ms per rewrap in release
+  before this, against 1.6 ms unfolded. Card headers read the same cached counts.
+
+Only the rows that animate (a running summary's spinner, the running call) or have focus are
+rebuilt at draw time, from a small sorted list of fold rows, and they reuse the memoised summary.
+The summary text and rows are pure functions in `app/tool_groups.rs`.
 
 > One transcript row per tool call, click (or `Ctrl+T`) to open it, and a full-screen viewer for
 > everything it printed. Touches `forge-types` (`PresenterEvent::ToolResult.detail`,
@@ -271,11 +301,14 @@ closed.
 ## 5. Tests
 
 `crates/forge-tui/src/app/tool_groups_tests.rs` covers the summary (aggregation in order of first
-appearance, plurals, combined diff stats, deletions kept apart, single-call wording, the failure
-count surviving a narrow row), `crates/forge-tui/src/app/group_flow_tests.rs` the fold (membership,
-prose splitting groups, click and keyboard toggles keeping the row in place, expansion surviving
-resize and scroll, the running and awaiting-permission rows, failures under the summary, the off
-switch, Alt+O, Ctrl+T's cycle), and `crates/forge-cli/tests/tui_fold_e2e.rs` drives a real
+appearance, plurals, combined diff stats, deletions kept apart, single-call wording, distinct files
+for chunked reads and repeated edits, failed calls left out of the sentence and the stat, the
+"Tried to" wording, the cached stat, the short form and the hint on narrow rows, the failure count
+surviving a narrow row and focus), `crates/forge-tui/src/app/group_flow_tests.rs` the fold
+(membership, prose splitting groups, click and keyboard toggles keeping the row in place,
+expansion surviving resize and scroll, the running and awaiting-permission rows, failures under the
+summary, the off switch, Alt+O, Ctrl+T's cycle, a rewrap and a spinner frame rebuilding no settled
+summary, the hint on the newest group only, card headers at 60 columns), and `crates/forge-cli/tests/tui_fold_e2e.rs` drives a real
 full-screen `forge chat --mock` over a PTY, clicks a summary with an SGR mouse report and reads the
 screen back (`--ignored`).
 `crates/forge-tui/src/app/tool_cards.rs` covers the rendering (one row collapsed, full arguments

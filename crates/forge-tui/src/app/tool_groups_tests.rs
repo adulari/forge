@@ -17,7 +17,7 @@ fn failed(name: &str, args: &str) -> ToolCard {
 
 fn change(name: &str, path: &str, kind: DiffKind, old: Option<&str>, new: &str) -> ToolCard {
     let mut c = done(name, &format!(r#"{{"path":"{path}"}}"#));
-    c.diff = Some(FileDiff {
+    c.set_diff(FileDiff {
         path: path.into(),
         kind,
         old: old.map(str::to_string),
@@ -51,7 +51,7 @@ fn categories_aggregate_in_order_of_first_appearance_with_plurals() {
     ];
     assert_eq!(
         text(&cards),
-        "Read 3 files, searched 2 patterns, ran 4 shell commands"
+        "Read 3 files, searched for 2 patterns, ran 4 shell commands"
     );
 }
 
@@ -179,7 +179,8 @@ fn failures_and_running_calls_are_counted_not_hidden() {
     ];
     let s = summarize(&cards);
     assert_eq!((s.finished, s.failed, s.running), (2, 1, 1));
-    assert_eq!(summary_text(&s), "Ran 2 shell commands");
+    // The failed call is not counted as run: the row says so in red instead.
+    assert_eq!(summary_text(&s), "Ran ls");
     let row = row_text(&summary_row(&s, RowState::default()));
     assert!(row.contains("1 failed"), "{row}");
     assert!(row.contains('▸'), "collapsed groups offer to open: {row}");
@@ -265,4 +266,224 @@ fn a_narrow_row_gives_the_duration_up_but_keeps_the_failures() {
         },
     ));
     assert!(row.contains("1 failed") && !row.contains("200ms"), "{row}");
+}
+
+fn read(path: &str, offset: usize) -> ToolCard {
+    done(
+        "read_file",
+        &format!(r#"{{"path":"{path}","offset":{offset}}}"#),
+    )
+}
+
+fn edit(path: &str, old: &str, new: &str) -> ToolCard {
+    change("edit_file", path, DiffKind::Modified, Some(old), new)
+}
+
+#[test]
+fn chunked_reads_and_repeated_edits_of_one_file_count_it_once() {
+    let cards = [
+        read("src/big.rs", 0),
+        read("src/big.rs", 200),
+        read("./src/big.rs", 400),
+        done("shell", r#"{"command":"cargo check"}"#),
+        edit("src/big.rs", "a\n", "b\n"),
+        edit("src/big.rs", "c\n", "d\ne\n"),
+        edit("src/big.rs", "f\n", "g\n"),
+    ];
+    assert_eq!(
+        text(&cards),
+        "Read 1 file, ran 1 shell command, edited 1 file (+4 −3)"
+    );
+    let reads = [read("src/big.rs", 0), read("src/big.rs", 200)];
+    assert_eq!(
+        text(&reads),
+        "Read src/big.rs",
+        "one file is named, however many slices"
+    );
+    let edits = [edit("a.rs", "1\n", "2\n"), edit("a.rs", "3\n", "4\n")];
+    assert_eq!(text(&edits), "Edited a.rs (+2 −2)");
+}
+
+#[test]
+fn the_same_pattern_searched_twice_is_one_pattern() {
+    let cards = [
+        done("grep", r#"{"pattern":"fn main","path":"src"}"#),
+        done("grep", r#"{"pattern":"fn main","path":"tests"}"#),
+        done("list_dir", r#"{"path":"src"}"#),
+        done("list_dir", r#"{"path":"./src"}"#),
+    ];
+    assert_eq!(text(&cards), "Searched for 1 pattern, listed 1 directory");
+}
+
+#[test]
+fn a_read_group_card_counts_the_distinct_files_it_holds() {
+    let mut c = done("read_file", r#"{"path":"a.rs"}"#);
+    for p in ["a.rs", "b.rs", "a.rs"] {
+        c.group.push(Member {
+            name: "read_file".into(),
+            args: format!(r#"{{"path":"{p}"}}"#),
+            summary: String::new(),
+            ms: Some(50),
+        });
+    }
+    assert_eq!(summary_text(&summarize([&c])), "Read 2 files");
+}
+
+#[test]
+fn a_failed_call_is_never_tallied_as_done() {
+    let mut no_op = done("write_file", r#"{"path":"notes.md","content":""}"#);
+    no_op.summary = "unchanged".into();
+    let cards = [
+        failed("edit_file", r#"{"path":"sample.rs","old":"x","new":"y"}"#),
+        no_op,
+    ];
+    let s = summarize(&cards);
+    assert_eq!(summary_text(&s), "Edited notes.md");
+    assert_eq!(s.failed, 1);
+}
+
+#[test]
+fn a_failed_change_adds_nothing_to_the_stat() {
+    let mut bad = edit("b.rs", "1\n", "2\n3\n");
+    bad.status = CardStatus::Failed;
+    let cards = [edit("a.rs", "1\n", "2\n"), bad];
+    assert_eq!(text(&cards), "Edited a.rs (+1 −1)");
+}
+
+#[test]
+fn a_group_where_nothing_succeeded_says_what_it_tried() {
+    assert_eq!(
+        text(&[failed(
+            "edit_file",
+            r#"{"path":"sample.rs","old":"x","new":"y"}"#
+        )]),
+        "Tried to edit sample.rs"
+    );
+    assert_eq!(
+        text(&[
+            failed("shell", r#"{"command":"false"}"#),
+            failed("shell", r#"{"command":"exit 3"}"#),
+        ]),
+        "Tried to run 2 shell commands"
+    );
+    assert_eq!(
+        text(&[
+            failed("read_file", r#"{"path":"gone.rs"}"#),
+            failed("shell", r#"{"command":"false"}"#),
+        ]),
+        "Tried to read 1 file, run 1 shell command"
+    );
+}
+
+#[test]
+fn the_stat_is_the_count_cached_when_the_diff_attached() {
+    let mut c = edit("a.rs", "1\n", "2\n");
+    assert_eq!(c.diff_counts, (1, 1));
+    // The summary never diffs the file again: whatever was counted at attach time is used.
+    c.diff_counts = (7, 3);
+    assert_eq!(text(&[c]), "Edited a.rs (+7 −3)");
+}
+
+#[test]
+fn a_narrow_row_switches_to_counts_before_cutting_words() {
+    let cards = [
+        done("list_dir", r#"{"path":"."}"#),
+        done("glob", r#"{"pattern":"**/*.rs"}"#),
+        done("grep", r#"{"pattern":"fn main"}"#),
+        read("sample.rs", 0),
+        done("shell", r#"{"command":"ls"}"#),
+        failed("shell", r#"{"command":"exit 3"}"#),
+        done("shell", r#"{"command":"pwd"}"#),
+    ];
+    let s = summarize(&cards);
+    assert_eq!(
+        summary_text_short(&s),
+        "1 dir, 2 searches, 1 file read, 2 commands"
+    );
+    let row = summary_row(
+        &s,
+        RowState {
+            compact: true,
+            width: 59,
+            ..RowState::default()
+        },
+    );
+    let fitted = row_text(&crate::transcript::wrap_lines(&[row], 59)[0]);
+    assert!(
+        fitted.contains("1 dir, 2 searches, 1 file read, 2 commands")
+            && fitted.contains("1 failed"),
+        "{fitted}"
+    );
+    assert!(!fitted.contains('…'), "nothing is cut: {fitted}");
+    // Wide enough for the sentence, the sentence it is.
+    let wide = row_text(&summary_row(
+        &s,
+        RowState {
+            width: 120,
+            ..RowState::default()
+        },
+    ));
+    assert!(
+        wide.contains("Listed 1 directory, searched for 2 patterns, read 1 file, ran 2 shell"),
+        "{wide}"
+    );
+}
+
+#[test]
+fn the_expand_hint_shows_only_when_it_fits_whole() {
+    let s = summarize(&[done("shell", r#"{"command":"ls"}"#)]);
+    let hint = Some("click or Alt+O to expand".to_string());
+    let roomy = row_text(&summary_row(
+        &s,
+        RowState {
+            width: 100,
+            hint: hint.clone(),
+            ..RowState::default()
+        },
+    ));
+    assert!(
+        roomy.contains("Ran ls  click or Alt+O to expand"),
+        "{roomy}"
+    );
+    let tight = row_text(&summary_row(
+        &s,
+        RowState {
+            width: 30,
+            hint: hint.clone(),
+            ..RowState::default()
+        },
+    ));
+    assert!(!tight.contains("click"), "{tight}");
+    let focused = row_text(&summary_row(
+        &s,
+        RowState {
+            width: 100,
+            hint,
+            focused: true,
+            ..RowState::default()
+        },
+    ));
+    assert!(
+        !focused.contains("click"),
+        "focus shows its own keys: {focused}"
+    );
+}
+
+#[test]
+fn a_focused_row_keeps_its_failure_count() {
+    let cards = [
+        done("shell", r#"{"command":"ls"}"#),
+        failed("shell", r#"{"command":"false"}"#),
+    ];
+    let row = row_text(&summary_row(
+        &summarize(&cards),
+        RowState {
+            focused: true,
+            ..RowState::default()
+        },
+    ));
+    assert!(
+        row.contains("1 failed") && row.contains("Enter expand"),
+        "{row}"
+    );
 }

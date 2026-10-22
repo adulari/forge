@@ -142,50 +142,88 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     // bottom there is nowhere to jump to, and a pill there would only cover the newest rows.
     let scrolled_up = scroll < max_scroll;
     // "Previous message" at the top right, while a user message starts above the view; pressing
-    // or clicking it again walks to the one before.
-    let prev = (scrolled_up && area.height > 2 && app.has_user_message_above())
-        .then(|| nav_pill(frame, area, NavPill::Previous));
+    // or clicking it again walks to the one before. It quotes the start of that message, the way
+    // Claude Code's sticky prompt header does, so you know where it goes before you press it.
+    let prev = if scrolled_up && area.height > 2 {
+        message_above(app, scroll).map(|preview| nav_pill(frame, area, NavPill::Previous(preview)))
+    } else {
+        None
+    };
     app.prev_bar_geom.set(prev.flatten());
     // "Jump to bottom" centred on the last row.
     let jump = (scrolled_up && area.height > 0).then(|| nav_pill(frame, area, NavPill::Bottom));
     app.jump_bar_geom.set(jump.flatten());
 }
 
-#[derive(Clone, Copy)]
+/// The user message "Previous message" goes to: `None` when none starts above the row at the
+/// top, else the start of its text when it has any to show.
+fn message_above(app: &App, scroll: usize) -> Option<Option<String>> {
+    let rows = app.user_message_rows();
+    let &target = rows.iter().rev().find(|&&r| r < scroll)?;
+    let label = *app.wrap_cache.borrow().origins.get(target)?;
+    let text: String = app
+        .main_log
+        .get(label + 1)
+        .map(|line| {
+            line.spans
+                .iter()
+                .filter(|s| !crate::copy_mark::is_decor(s.style.add_modifier))
+                .map(|s| s.content.as_ref())
+                .collect()
+        })
+        .unwrap_or_default();
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some((!text.is_empty()).then_some(text))
+}
+
 enum NavPill {
-    Previous,
+    /// With the start of the message it goes to, when there is one.
+    Previous(Option<String>),
     Bottom,
 }
+
+/// The most cells a quoted message takes in the "previous message" pill.
+const PREVIEW_CELLS: usize = 36;
 
 /// Draw one navigation pill and return where it landed `(row, col, width)` for hit-testing. The
 /// label names its chord; a terminal too narrow for the full label gets the short one, and one
 /// too narrow for that gets none.
 fn nav_pill(frame: &mut Frame, area: Rect, pill: NavPill) -> Option<(u16, u16, u16)> {
     let glyphs = crate::theme::glyphs::g();
-    let (full, short, role) = match pill {
-        NavPill::Previous => (
-            format!(" {} Previous message {} Ctrl+Home ", glyphs.up, glyphs.sep),
-            format!(" {} Ctrl+Home ", glyphs.up),
-            styles::user(),
-        ),
+    let width = area.width as usize;
+    let cells = |label: &str| Span::raw(label).width();
+    let top = matches!(pill, NavPill::Previous(_));
+    let (labels, role) = match pill {
+        NavPill::Previous(preview) => {
+            let full = format!(" {} Previous message {} Ctrl+Home ", glyphs.up, glyphs.sep);
+            let short = format!(" {} Ctrl+Home ", glyphs.up);
+            // The quote gets what is left of half the row after the arrow and the chord, so the
+            // pill never covers most of the top row.
+            let chrome = cells(&short) + 3;
+            let room = (width / 2).saturating_sub(chrome).min(PREVIEW_CELLS);
+            let quoted = preview.filter(|_| room >= 12).map(|text| {
+                let text = crate::app::tool_cards::truncate_cells(&text, room);
+                format!(" {} {text} {} Ctrl+Home ", glyphs.up, glyphs.sep)
+            });
+            (
+                quoted.into_iter().chain([full, short]).collect::<Vec<_>>(),
+                styles::user(),
+            )
+        }
         NavPill::Bottom => (
-            format!(" {} Jump to bottom {} Ctrl+End ", glyphs.down, glyphs.sep),
-            format!(" {} Ctrl+End ", glyphs.down),
+            vec![
+                format!(" {} Jump to bottom {} Ctrl+End ", glyphs.down, glyphs.sep),
+                format!(" {} Ctrl+End ", glyphs.down),
+            ],
             styles::brand(),
         ),
     };
-    let fits = |label: &str| label.chars().count() as u16 + 2 <= area.width;
-    let label = if fits(&full) {
-        full
-    } else if fits(&short) {
-        short
+    let label = labels.into_iter().find(|l| cells(l) + 2 <= width)?;
+    let w = cells(&label) as u16;
+    let (x, y) = if top {
+        (area.x + area.width - w - 1, area.y)
     } else {
-        return None;
-    };
-    let w = label.chars().count() as u16;
-    let (x, y) = match pill {
-        NavPill::Previous => (area.x + area.width - w - 1, area.y),
-        NavPill::Bottom => (area.x + (area.width - w) / 2, area.y + area.height - 1),
+        (area.x + (area.width - w) / 2, area.y + area.height - 1)
     };
     let bar = Paragraph::new(TextLine::from(Span::styled(label, styles::pill(role))));
     frame.render_widget(bar, Rect::new(x, y, w, 1));
