@@ -1,0 +1,490 @@
+{
+ "schema": 1,
+ "commitment": {
+  "what": "SHA-256 of a deterministic tar of the task directory (instruction, setup, hidden grader, reference solution, negative controls). The directories are not published.",
+  "command": "cd <suite root>/<suite letter dir> && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - <dir basename> | sha256sum",
+  "tar": "tar (GNU tar) 1.35",
+  "suite_letter_dirs": "a, b, c, d; the `dir` field gives <letter>/<dir basename>. Task ids for a, b and d are the letter plus the directory name."
+ },
+ "tasks": [
+  {
+   "id": "a01-fix-back-to-back-conflicts",
+   "suite": "a",
+   "dir": "a/01-fix-back-to-back-conflicts",
+   "language": "Python",
+   "type": "bugfix",
+   "summary": "A room scheduler reports back-to-back bookings as conflicts; fix it to match the README without editing existing tests.",
+   "sha256": "6d37af256130cad6f1a61ddf892c83eb318badb86cee4526fdcf35c2bf8b1134"
+  },
+  {
+   "id": "a02-sliding-window-limiter",
+   "suite": "a",
+   "dir": "a/02-sliding-window-limiter",
+   "language": "Python",
+   "type": "feature",
+   "summary": "Implement a sliding-window rate limiter from an approved spec, following the layout of the existing TokenBucket.",
+   "sha256": "27bc87268066f290ccfb6fa6411661ca8c0bd5ad0f1daa1c43cfaafaa8ea2dd6"
+  },
+  {
+   "id": "a03-refactor-order-pricing",
+   "suite": "a",
+   "dir": "a/03-refactor-order-pricing",
+   "language": "JavaScript",
+   "type": "refactor",
+   "summary": "Split a 170-line order-total function into discount, tax and shipping modules behind a short orchestrator.",
+   "sha256": "bb04dcb738d4f752d9c1330143acf8509f64b0af81f08d561091654c00b9704d"
+  },
+  {
+   "id": "a04-debug-nightly-export-crash",
+   "suite": "a",
+   "dir": "a/04-debug-nightly-export-crash",
+   "language": "Python",
+   "type": "debugging",
+   "summary": "Find and fix the root cause of a nightly export crash on a finance CSV; no skipped rows, input untouched.",
+   "sha256": "285e403ad302c8def34909624d4964c514e882d7b7cd779a600b969b070a42e9"
+  },
+  {
+   "id": "a05-mailer-options-object",
+   "suite": "a",
+   "dir": "a/05-mailer-options-object",
+   "language": "TypeScript",
+   "type": "refactor",
+   "summary": "Replace sendMail's six positional parameters with one options object and update every call site.",
+   "sha256": "cd387626fafe83d3a8840ef891f08e6075f42e05cfde13c73a6afab891a1191c"
+  },
+  {
+   "id": "a06-answer-retry-policy",
+   "suite": "a",
+   "dir": "a/06-answer-retry-policy",
+   "language": "JavaScript",
+   "type": "code reading (no edits)",
+   "summary": "Read a sync agent and answer questions about its production retry policy in ANSWER.md; change no code.",
+   "sha256": "4c4982e1cfe46f1b859b667d57fbb1b24bc34f18e54b0b2095f4ce413f7bd080"
+  },
+  {
+   "id": "a07-speed-up-log-report",
+   "suite": "a",
+   "dir": "a/07-speed-up-log-report",
+   "language": "Python",
+   "type": "performance",
+   "summary": "Make an access-log report fast on ~100k lines with byte-identical output, standard library only.",
+   "sha256": "4e337e2800fa7df8dd3de05aca4868096edb7b23f8fa80524a46037e067f2943"
+  },
+  {
+   "id": "a08-signup-validation-constraints",
+   "suite": "a",
+   "dir": "a/08-signup-validation-constraints",
+   "language": "JavaScript",
+   "type": "feature",
+   "summary": "Add input validation to a signup handler (name, email, password rules; case-insensitive duplicate check).",
+   "sha256": "f1a91a8616d9f13ded9dcaeefc3fdc33cbc5d1058fbcdfc9c00becb159549662"
+  },
+  {
+   "id": "a09-layered-config-cli",
+   "suite": "a",
+   "dir": "a/09-layered-config-cli",
+   "language": "Python",
+   "type": "feature",
+   "summary": "Layer a CLI's settings (flags, environment, TOML file, defaults) and add a command to show the resolved values.",
+   "sha256": "986c9bc215c39302b013af2a40cc8c2b12b1d70e52c71af250ea176f29d95755"
+  },
+  {
+   "id": "b01-stockctl-longhorizon",
+   "suite": "b",
+   "dir": "b/01-stockctl-longhorizon",
+   "language": "Rust",
+   "type": "multi-step feature",
+   "summary": "Five ordered requests to a Rust CLI: --min-qty filter, per-category summary, export command, format error, README and tests.",
+   "sha256": "4c0c5f5f0b9eb2ceb6858c91f26cb9f42dad45932f4dfa0c3a33db8a85f37c6d"
+  },
+  {
+   "id": "b02-ttlcache-expiry-trap",
+   "suite": "b",
+   "dir": "b/02-ttlcache-expiry-trap",
+   "language": "Go",
+   "type": "bugfix",
+   "summary": "Make Cache.Get never return an expired entry, keeping existing tests green.",
+   "sha256": "365e6daaf1491d25404c50513b4570762418edb20ad084169f70b06f28616fa0"
+  },
+  {
+   "id": "b03-rename-account-wire-frozen",
+   "suite": "b",
+   "dir": "b/03-rename-account-wire-frozen",
+   "language": "Go",
+   "type": "cross-cutting refactor",
+   "summary": "Rename the User concept to Account across a billing service while it still builds and tests pass.",
+   "sha256": "67bbce1f5d379af1521936a485a8858668349615ed2dc26fa322a95d9851729b"
+  },
+  {
+   "id": "b04-batch-run-concurrency",
+   "suite": "b",
+   "dir": "b/04-batch-run-concurrency",
+   "language": "Go",
+   "type": "bugfix (concurrency)",
+   "summary": "Make batch.Run preserve order, pass the race detector and stop hanging after a failed call, without changing its signature.",
+   "sha256": "5a7db22c1dc8b936c0df856ee33afefce3948c3495ade67e9b7bc440f0ad13bb"
+  },
+  {
+   "id": "b05-minimd-broken-merge",
+   "suite": "b",
+   "dir": "b/05-minimd-broken-merge",
+   "language": "Rust",
+   "type": "merge repair",
+   "summary": "Repair a broken merge so the project builds and tests pass offline, with blockquotes behaving as the README says.",
+   "sha256": "08cb81edb54373de72072970b150ab7e30c047ecba609f341d732dd905323104"
+  },
+  {
+   "id": "b06-semver-regression-archaeology",
+   "suite": "b",
+   "dir": "b/06-semver-regression-archaeology",
+   "language": "Go",
+   "type": "git archaeology + bugfix",
+   "summary": "Find the commit that broke release-candidate ordering, fix it without reverting newer work, add a test and a changelog line.",
+   "sha256": "d65d7e474d0460e23e54e7cfafd867687532d46ace18eecacae3325d3112bf2e"
+  },
+  {
+   "id": "b07-ledger-rollup-awk",
+   "suite": "b",
+   "dir": "b/07-ledger-rollup-awk",
+   "language": "Bash/awk",
+   "type": "scripting",
+   "summary": "Write a plain bash and POSIX-tools script that rolls bank-export CSVs up into monthly category totals.",
+   "sha256": "85c1a4b8f3836ffae58f2f588099b0779b652680b970b9b070b97f65701a1f02"
+  },
+  {
+   "id": "b08-scaffold-service-noninteractive",
+   "suite": "b",
+   "dir": "b/08-scaffold-service-noninteractive",
+   "language": "Go + shell",
+   "type": "tooling",
+   "summary": "Create a new service through the repo's scaffolding script (next free port, owners) and make the registry check pass.",
+   "sha256": "5f9e8d6e56f8b4ea6a0a888daecdd7d55b5c0a75f17e7caa7bc2ed85ed7966dc"
+  },
+  {
+   "id": "b09-fsweep-docs-drift",
+   "suite": "b",
+   "dir": "b/09-fsweep-docs-drift",
+   "language": "Rust",
+   "type": "documentation sync",
+   "summary": "Bring README, usage docs and --help text in line with what the tool actually does, without changing behaviour.",
+   "sha256": "4f3f01cd5826f230ff5c912cde20d945df7984766ff8d22fac37d61be0553191"
+  },
+  {
+   "id": "c01-pinned-429-wait-budget",
+   "suite": "c",
+   "dir": "c/c01-pinned-429-wait-budget",
+   "language": "Rust (Forge snapshot)",
+   "type": "code reading + computation",
+   "summary": "Answer questions about the retry and wait budget for rate-limited pinned requests across three crates (ANSWER.md).",
+   "sha256": "5e2e61f9dd046eede9cb94a9a2971568cdc886db58d0a8d1726c2f1edaaeb28a"
+  },
+  {
+   "id": "c02-compaction-trigger-budget",
+   "suite": "c",
+   "dir": "c/c02-compaction-trigger-budget",
+   "language": "Rust (Forge snapshot)",
+   "type": "code reading + computation",
+   "summary": "Trace the compaction trigger from its config default to the token budgets and compute them for a given window (ANSWER.md).",
+   "sha256": "5f7367e4a5ff24e52bad9bde9e6802eaab20ce06cf21883979970ff287529191"
+  },
+  {
+   "id": "c03-provider-implementors",
+   "suite": "c",
+   "dir": "c/c03-provider-implementors",
+   "language": "Rust (Forge snapshot)",
+   "type": "exhaustive search + counts",
+   "summary": "Enumerate the production implementors of the Provider trait and answer count questions (ANSWER.md).",
+   "sha256": "bf0a8078b14c7779ce1c0c692644fc8b0945329949742a3a9591ab29f87a46b7"
+  },
+  {
+   "id": "c04-claude-bridge-spawn-path",
+   "suite": "c",
+   "dir": "c/c04-claude-bridge-spawn-path",
+   "language": "Rust (Forge snapshot)",
+   "type": "data-flow tracing",
+   "summary": "Trace how a model id becomes the arguments and environment of the spawned claude process (ANSWER.md).",
+   "sha256": "b170a97aeaf9a820c10b69987dc64d8794757b4b71092fe5ac6746226f9ed679"
+  },
+  {
+   "id": "c05-effort-ceiling-value-rung",
+   "suite": "c",
+   "dir": "c/c05-effort-ceiling-value-rung",
+   "language": "Rust (Forge snapshot)",
+   "type": "bugfix (silent tests)",
+   "summary": "Find and fix an off-by-one in an effort-ceiling selection function that the existing tests do not catch.",
+   "sha256": "04eeca5f5949bbf1157880ac6f254f2a67bb0486b03d87b3ff70be57f35042bf"
+  },
+  {
+   "id": "c06-rename-config-provider-of",
+   "suite": "c",
+   "dir": "c/c06-rename-config-provider-of",
+   "language": "Rust (Forge snapshot)",
+   "type": "cross-crate rename",
+   "summary": "Rename one config function across crates without touching same-named functions elsewhere; the crate must still compile.",
+   "sha256": "03d47a76b59032ac900e39fa61c3f594a4482a92eb8a8d4276d759ee4ab0ab20"
+  },
+  {
+   "id": "c07-http-conditional-leap-march",
+   "suite": "c",
+   "dir": "c/c07-http-conditional-leap-march",
+   "language": "Python (Twisted)",
+   "type": "bugfix (deep call chain)",
+   "summary": "Fix wrong HTTP conditional-request behaviour reported only as a symptom.",
+   "sha256": "9f5c28693997f75e5d1bc5a6978ef9a8cf6f2ce1e23df65950ebb4dc50c9f5fe"
+  },
+  {
+   "id": "c08-gitignore-negation-parent-dir",
+   "suite": "c",
+   "dir": "c/c08-gitignore-negation-parent-dir",
+   "language": "Python (dulwich)",
+   "type": "bugfix (deep call chain)",
+   "summary": "Fix a .gitignore negation behaviour reported only as a symptom; the prompt says not to edit existing files under dulwich/tests.",
+   "sha256": "365133ff474dc136c8bdc0c66a0812950404ae79e25adf36d84d32eac7aef79a"
+  },
+  {
+   "id": "c09-npm-config-hash-value",
+   "suite": "c",
+   "dir": "c/c09-npm-config-hash-value",
+   "language": "JavaScript (npm)",
+   "type": "bugfix (deep call chain)",
+   "summary": "Fix an npm config round trip that breaks on a value containing a hash character.",
+   "sha256": "eec473797289d98a4bdf52aefb44cc977c3dcc2be8bc51270352a121758fe4b7"
+  },
+  {
+   "id": "c10-dulwich-commit-to-loose-object",
+   "suite": "c",
+   "dir": "c/c10-dulwich-commit-to-loose-object",
+   "language": "Python (dulwich)",
+   "type": "data-flow tracing",
+   "summary": "Trace the path from creating a commit to the loose object file on disk (ANSWER.md).",
+   "sha256": "012895e532c74282902cef155233c60d731b98a8a91cd6442140086a75632b81"
+  },
+  {
+   "id": "c11-tool-output-truncation",
+   "suite": "c",
+   "dir": "c/c11-tool-output-truncation",
+   "language": "Rust (Forge snapshot)",
+   "type": "code reading + computation",
+   "summary": "Compare two tool-output truncation functions and compute how each counts lines (ANSWER.md).",
+   "sha256": "bf1ff0f4a3f16f04f7724758bb27cbf3a89f793df6e0d1e6905a515f1099899f"
+  },
+  {
+   "id": "d01-interactive-test-runner",
+   "suite": "d",
+   "dir": "d/01-interactive-test-runner",
+   "language": "Python + shell",
+   "type": "robustness (interactive prompt)",
+   "summary": "Fix a duration parser so the project's own test runner passes; the runner prompts interactively unless told not to.",
+   "sha256": "6b6cf640ce3614567da35c11e0d43b77e07a9fa0dbe9957a40dfd6dab425586e"
+  },
+  {
+   "id": "d02-huge-output-needle",
+   "suite": "d",
+   "dir": "d/02-huge-output-needle",
+   "language": "shell + Python",
+   "type": "robustness (huge output)",
+   "summary": "Find one failing batch id in a tens-of-megabytes trace and write it to answer.txt.",
+   "sha256": "4e772aa08c9d52bb310f293108cf97d564a42a1356f5413b4649279fa086de51"
+  },
+  {
+   "id": "d03-flaky-loading-cache",
+   "suite": "d",
+   "dir": "d/03-flaky-loading-cache",
+   "language": "Python",
+   "type": "robustness (flaky test, race)",
+   "summary": "A test fails about one run in three; fix the real race in the library, not the test.",
+   "sha256": "916478c57e26a1d24553ccaf99a5071a3a6849bf48b9dc20cc6cbc69b50335bb"
+  },
+  {
+   "id": "d04-long-build-await",
+   "suite": "d",
+   "dir": "d/04-long-build-await",
+   "language": "shell",
+   "type": "robustness (long-running command)",
+   "summary": "Cut a release: set version and channel, run the multi-minute build and leave a complete dist/.",
+   "sha256": "f3d7e0474d108496f805b40ffbacef9314ed8d78afc9b66f6990f02377517f0e"
+  },
+  {
+   "id": "d05-background-server-roundtrip",
+   "suite": "d",
+   "dir": "d/05-background-server-roundtrip",
+   "language": "Python",
+   "type": "robustness (process lifecycle)",
+   "summary": "Start a local service, fetch a token from its API, save it, and shut the service down cleanly.",
+   "sha256": "de86baa0b67581dcd93a36816bdc9ac89b3c132d8440cd0e1785610e707d71cc"
+  },
+  {
+   "id": "d06-readonly-config-files",
+   "suite": "d",
+   "dir": "d/06-readonly-config-files",
+   "language": "shell",
+   "type": "robustness (file permissions)",
+   "summary": "Raise a limit in a config file that is mode 0444 and make the checker print OK.",
+   "sha256": "a781b87ac5b9be6e8c2438e328aca233f9d3626b4edd5f3df2a46e79e13def56"
+  },
+  {
+   "id": "d07-binary-neighbor-schema",
+   "suite": "d",
+   "dir": "d/07-binary-neighbor-schema",
+   "language": "text + binary data",
+   "type": "robustness (large binary neighbour)",
+   "summary": "Update a stale schema document to match a large binary data file's header, touching nothing else.",
+   "sha256": "a397c32ab95e8a068efba631f178929b1c72147eb1f9f3ba2c71676e5c21ee9f"
+  },
+  {
+   "id": "d08-bsd-sed-make-target",
+   "suite": "d",
+   "dir": "d/08-bsd-sed-make-target",
+   "language": "Make + YAML",
+   "type": "robustness (portability)",
+   "summary": "Set every service to debug logging through a make target that was written for BSD sed and date.",
+   "sha256": "dcba03563e932479f77a408914dcb3de351806488d6547e2b05bd6b63b2b293c"
+  }
+ ],
+ "shared_inputs": [
+  {
+   "path": "suite/a/_src",
+   "kind": "directory",
+   "sha256": "cf2a5c9c17aec7c25cd9e93cd7a217d7852a904a829f865207d83a6779e0054f"
+  },
+  {
+   "path": "suite/a/_tools",
+   "kind": "directory",
+   "sha256": "6222d82c8ac107d200bb6624e10f2ba89ae59ac64d55e4063e9359870acdd310"
+  },
+  {
+   "path": "suite/b/_tools",
+   "kind": "directory",
+   "sha256": "8aa3824fcbf495b9cdb2e68c4e574040567b3f61c8d56690d76e74a12a32f7a0"
+  },
+  {
+   "path": "suite/c/_tools",
+   "kind": "directory",
+   "sha256": "863a0fc5c1cd33d8e1cf7d9f2af1a6b9e77f6075c3aaf4440ba8f293cac20d68"
+  },
+  {
+   "path": "suite/c/_src/dulwich.tar.gz",
+   "kind": "file",
+   "sha256": "1715dcbe9fb086c5c11a9c427852ed2ec75856f19a21b4ab8d74126454d02ec0"
+  },
+  {
+   "path": "suite/c/_src/forge-snapshot.sha",
+   "kind": "file",
+   "sha256": "bea81a95ceb5a8c8b5d2919c2bbd11590dceb50d976dc6879aeccc3a93f58558"
+  },
+  {
+   "path": "suite/c/_src/forge-snapshot.tar.gz",
+   "kind": "file",
+   "sha256": "0384dd455f5bd76cc9621bd04dc892da79562614aa66133e48a10291de15bda6"
+  },
+  {
+   "path": "suite/c/_src/npm.tar.gz",
+   "kind": "file",
+   "sha256": "287ecc3bfec9f9a62e36f7e66317f22a179289f13f4006611cf465cabe79b2f9"
+  },
+  {
+   "path": "suite/c/_src/twisted.tar.gz",
+   "kind": "file",
+   "sha256": "c98a204bd9ec3d30714ce04b0327c8a2b84a147e3e3c9385d28766787346fcf3"
+  }
+ ],
+ "multiturn": [
+  {
+   "id": "S1-tasklog",
+   "language": "Python",
+   "summary": "Seven prompts building a task tracker CLI feature by feature under a standing constraint set in prompt 2.",
+   "dir": "multiturn/sessions/S1-tasklog",
+   "sha256": "5f956fe461014b3af46ad7c48f43e340fafe0dfeefdf4e7018d25dfe6d85f82a"
+  },
+  {
+   "id": "S2-fxbatch",
+   "language": "Python",
+   "summary": "Seven prompts on a batch currency converter; prompt 5 reverses an earlier design decision.",
+   "dir": "multiturn/sessions/S2-fxbatch",
+   "sha256": "df4970c2d8d5b12283f1ff720fb14c1e5f8237c49ae2dc51bf0f8c624259fb3c"
+  },
+  {
+   "id": "S3-invoicer",
+   "language": "Python",
+   "summary": "Seven prompts debugging three reported bugs, with later prompts referring back to earlier findings.",
+   "dir": "multiturn/sessions/S3-invoicer",
+   "sha256": "4e77e7936cb948086782ab94daaf9f684492a16b52a28673067a68191993d8b8"
+  }
+ ],
+ "swe": {
+  "dataset": "SWE-bench Verified, 10 instances (public)",
+  "instances_sha256": "7a808cff01bccf7c53b31374a7afc4ac0a6cfa0d464b56448f1b81aa4c94fef6",
+  "instances": [
+   {
+    "id": "django__django-13821",
+    "repo": "django/django",
+    "version": "3.2",
+    "difficulty": "<15 min fix",
+    "language": "Python"
+   },
+   {
+    "id": "sympy__sympy-13877",
+    "repo": "sympy/sympy",
+    "version": "1.1",
+    "difficulty": "15 min - 1 hour",
+    "language": "Python"
+   },
+   {
+    "id": "astropy__astropy-13033",
+    "repo": "astropy/astropy",
+    "version": "4.3",
+    "difficulty": "15 min - 1 hour",
+    "language": "Python"
+   },
+   {
+    "id": "pytest-dev__pytest-8399",
+    "repo": "pytest-dev/pytest",
+    "version": "6.3",
+    "difficulty": "15 min - 1 hour",
+    "language": "Python"
+   },
+   {
+    "id": "psf__requests-1921",
+    "repo": "psf/requests",
+    "version": "2.3",
+    "difficulty": "<15 min fix",
+    "language": "Python"
+   },
+   {
+    "id": "sphinx-doc__sphinx-8638",
+    "repo": "sphinx-doc/sphinx",
+    "version": "4.0",
+    "difficulty": "15 min - 1 hour",
+    "language": "Python"
+   },
+   {
+    "id": "scikit-learn__scikit-learn-25973",
+    "repo": "scikit-learn/scikit-learn",
+    "version": "1.3",
+    "difficulty": "<15 min fix",
+    "language": "Python"
+   },
+   {
+    "id": "matplotlib__matplotlib-22865",
+    "repo": "matplotlib/matplotlib",
+    "version": "3.5",
+    "difficulty": "15 min - 1 hour",
+    "language": "Python"
+   },
+   {
+    "id": "pydata__xarray-6461",
+    "repo": "pydata/xarray",
+    "version": "2022.03",
+    "difficulty": "<15 min fix",
+    "language": "Python"
+   },
+   {
+    "id": "django__django-13343",
+    "repo": "django/django",
+    "version": "3.2",
+    "difficulty": "15 min - 1 hour",
+    "language": "Python"
+   }
+  ]
+ }
+}

@@ -1,0 +1,13 @@
+{
+  "arm": "FD-deepseek",
+  "agent": "forge",
+  "model": "inferhub::cb/deepseek-v4.1-flash",
+  "timeout_secs": 1500,
+  "finished_at": "2026-10-22T16:27:11+0200",
+  "forge": "forge 2.21.0",
+  "claude": "2.1.308 (Claude Code)",
+  "instances_sha256": "7a808cff01bccf7c53b31374a7afc4ac0a6cfa0d464b56448f1b81aa4c94fef6",
+  "isolation": "synthetic single-commit base, no remotes, integrity preamble, patch re-captured vs base",
+  "claude_flags": null,
+  "forge_effort_env": null
+}

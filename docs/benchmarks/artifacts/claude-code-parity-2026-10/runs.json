@@ -1,0 +1,45 @@
+{
+ "schema": 1,
+ "study": "claude-code-parity-2026-10",
+ "note": "The first run set is the baseline. Append a run set per measured Forge build (same file shapes, same arm ids) and run render.py; see README.md in this directory.",
+ "runs": [
+  {
+   "id": "baseline",
+   "label": "Baseline (Forge 2.21.0)",
+   "date": "2026-10-22",
+   "forge_version": "2.21.0",
+   "forge_commit": "8b18cad8",
+   "claude_code_version": "2.1.308",
+   "files": {
+    "suites_abd": "baseline/suites-abd.json",
+    "suite_c": "baseline/suite-c.json",
+    "multiturn": {
+     "FD-deepseek": "baseline/multiturn-FD-deepseek.json",
+     "CC-deepseek": "baseline/multiturn-CC-deepseek.json"
+    },
+    "swe": {
+     "FD-deepseek": {
+      "report": "baseline/swe/FD-deepseek/FD-deepseek.eval_814181b7.json",
+      "predictions": "baseline/swe/FD-deepseek/predictions.jsonl",
+      "metrics": "baseline/swe/FD-deepseek/predictions.metrics.jsonl",
+      "integrity": "baseline/swe/FD-deepseek/predictions.integrity.jsonl",
+      "summary_tsv": "baseline/swe/FD-deepseek/summary.tsv",
+      "run_meta": "baseline/swe/FD-deepseek/run-meta.json"
+     },
+     "CC-deepseek": {
+      "report": "baseline/swe/CC-deepseek/CC-deepseek.eval_fe4d3fcb.json",
+      "predictions": "baseline/swe/CC-deepseek/predictions.jsonl",
+      "metrics": "baseline/swe/CC-deepseek/predictions.metrics.jsonl",
+      "integrity": "baseline/swe/CC-deepseek/predictions.integrity.jsonl",
+      "summary_tsv": "baseline/swe/CC-deepseek/summary.tsv",
+      "run_meta": "baseline/swe/CC-deepseek/run-meta.json"
+     }
+    },
+    "tasks": "baseline/tasks.json",
+    "environment": "baseline/environment.json",
+    "parity": "baseline/PARITY.md"
+   }
+  }
+ ],
+ "ledger": "fixes.json"
+}
