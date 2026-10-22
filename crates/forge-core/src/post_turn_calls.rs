@@ -81,6 +81,15 @@ impl SideModelInputs {
                     .await
             }
         };
+        // Same rules as `Session::post_turn_auxiliary_model`: a pinned run keeps its own model
+        // and skips the call when that is a subscription, otherwise a bridge is never used.
+        if let Some(own) = crate::btw_policy::strict_pin_side_call_model(
+            &self.config,
+            self.pinned_model.as_ref(),
+            &decision,
+        ) {
+            return (!forge_mesh::catalog::is_subscription(&own)).then_some(own);
+        }
         let model = crate::btw_policy::side_call_model(
             &self.config,
             &readiness.health,
