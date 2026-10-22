@@ -122,8 +122,9 @@ ones by `run/print_run.rs`.
 
 | Flag | Effect |
 |---|---|
-| `-p`, `--print` | print mode: stdout carries only the final answer (one line per turn, nothing on failure). The trace (session, routing, narration, tool calls, cost) goes to stderr when stderr is a terminal, or with `--verbose`; errors always reach stderr. Without `-p`, `forge run` keeps its streamed line view |
-| `--verbose` | with `-p`, write the trace to stderr even when it is not a terminal; accepted with `stream-json` |
+| `-p`, `--print` | print mode: stdout carries only the final answer (one line per turn, nothing on failure). The trace (session, routing, narration, tool calls, cost) goes to stderr when stderr is a terminal, or with `--verbose`; errors always reach stderr. Without `-p`, `forge run` streams its line view to a terminal and behaves as `-p` whenever stdout is a pipe or a file (and then stays in this process instead of being handed to a `forge serve` daemon); `/goal` keeps its progress lines |
+| `--verbose` | with text output, write the trace to stderr even when it is not a terminal; with `stream-json`, add `system/status` events (see [stream-json](#stream-json-output)) |
+| `--quiet` | print mode with no trace at all, not even at a terminal; errors still reach stderr. Conflicts with `--verbose`; accepted and ignored with `json` and `stream-json` |
 | `--output-format text\|json\|stream-json` | see [stream-json](#stream-json-output) below |
 | `--include-partial-messages` | with `stream-json`, also emit token-level `stream_event` lines |
 | `--input-format text\|stream-json` | `stream-json`: one JSON user message per stdin line (Claude Code's SDK shape, string or text-block content), each run as a turn of the same session with its own `result`; `control_request` `initialize` is answered with success, other control requests with an error |
@@ -174,9 +175,21 @@ Shapes follow `claude -p --output-format stream-json` (`crates/forge-tui/src/str
   (model calls), `total_cost_usd` and `usage` for that turn only (restored totals of a resumed
   session are the baseline; `input_tokens` excludes cache reads, as Anthropic reports it),
   `permission_denials` and `session_id`.
+  `usage` is Anthropic's shape: `input_tokens` excludes both cache counts, so `input_tokens +
+  cache_read_input_tokens + cache_creation_input_tokens` is the total sent. `modelUsage` has one
+  object per model that served calls during the turn (side calls included), keyed by Forge's
+  model id: `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheCreationInputTokens`,
+  `webSearchRequests` (always 0) and `costUSD`. Cache writes and the split are read from the
+  session's store (`usage_source.rs`); a run with no store reader falls back to the turn's cost
+  events under the model it was routed to, with cache writes at 0. A run that fails before its
+  first turn ends with the same fields zeroed.
 - Every event carries `session_id`; `assistant`, `user` and `stream_event` carry
-  `parent_tool_use_id: null` and a `uuid`. Forge adds `system/routing`, `system/usage`,
-  `system/warning`, `system/error` and `system/tool_output`, which Claude Code consumers ignore.
+  `parent_tool_use_id: null` and a `uuid`. Forge adds `system/routing`, `system/usage` (the running
+  session total, sent once per change), `system/warning`, `system/error` and `system/tool_output`,
+  which Claude Code consumers ignore.
+- `--verbose` adds one `system/status` (`{"status": "requesting"}`) before every model call, as
+  Claude Code's verbose stream does. Claude Code refuses `stream-json` without `--verbose`; Forge
+  does not need it.
 
 `--output-format json` prints the same `result` object once.
 

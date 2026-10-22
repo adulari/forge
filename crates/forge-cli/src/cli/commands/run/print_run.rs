@@ -141,6 +141,29 @@ fn cc_permission_mode(mode: forge_types::PermissionMode) -> &'static str {
     }
 }
 
+/// A reader over the session's per-model usage, for `usage.cache_creation_input_tokens` and
+/// `modelUsage` in the machine-format results.
+pub(crate) fn usage_source(session: &Session) -> forge_tui::UsageSource {
+    let store = std::sync::Arc::clone(&session.store);
+    let id = session.session_id().to_string();
+    std::sync::Arc::new(move || {
+        store
+            .session_usage_by_model(&id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| forge_tui::ModelUsage {
+                model: row.model.unwrap_or_else(|| "unknown".to_string()),
+                calls: row.calls,
+                input_tokens: row.usage.input_tokens,
+                cache_read_tokens: row.usage.cached_input_tokens.unwrap_or(0),
+                cache_write_tokens: row.usage.cache_write_tokens.unwrap_or(0),
+                output_tokens: row.usage.output_tokens,
+                cost_usd: row.usage.cost_usd,
+            })
+            .collect()
+    })
+}
+
 /// The session's metadata for stream-json's `system/init`.
 pub(crate) fn stream_init(session: &Session) -> forge_tui::StreamInit {
     let catalog =
