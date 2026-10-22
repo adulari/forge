@@ -5003,6 +5003,9 @@ mod tests {
     #[path = "deferred_dispatch.rs"]
     mod deferred_dispatch_tests;
 
+    #[path = "placeholder_args.rs"]
+    mod placeholder_args_tests;
+
     #[path = "completeness_gate.rs"]
     mod completeness_gate_tests;
 

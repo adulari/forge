@@ -22,7 +22,9 @@ pub(super) async fn execute_tool(
     msg_id: &str,
     call: &forge_types::ToolCall,
 ) -> Result<String, CoreError> {
-    let args_json = serde_json::to_string(&call.args)?;
+    // A child's model fills in optional properties like any other: judge and run the call it meant.
+    let args = registry.normalize_args(&call.name, &call.args);
+    let args_json = serde_json::to_string(&args)?;
     let Some(tool) = registry.get(&call.name) else {
         let result = format!("error: tool '{}' is not available to subagents", call.name);
         ctx.store
@@ -34,7 +36,7 @@ pub(super) async fn execute_tool(
         ctx.mode,
         side_effect,
         &call.name,
-        &call.args,
+        &args,
         &ctx.rules,
         Some(ctx.worktree_root.as_deref().unwrap_or(&ctx.repo_root)),
     ) {
@@ -47,7 +49,7 @@ pub(super) async fn execute_tool(
         // to the daemon process cwd: read-only children use the session repo, isolated writers use
         // their worktree, and shell receives an explicit cwd in both cases.
         let root = ctx.worktree_root.as_deref().unwrap_or(&ctx.repo_root);
-        let mut effective_args = rewrite_args_for_root(&call.args, root);
+        let mut effective_args = rewrite_args_for_root(&args, root);
         // An isolated child's worktree must not be bypassed by absolute paths of the checkout it
         // was branched from: those would edit the very tree the isolation protects.
         if ctx.worktree_root.is_some() {

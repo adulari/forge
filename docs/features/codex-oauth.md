@@ -82,6 +82,14 @@ that is retired or unavailable to your plan cannot fail the sign-in.
 in the mesh (`is_subscription`), not free and not a CLI bridge (`is_cli_bridge` is false — tool
 calls surface to Forge’s own loop).
 
+## Tool schemas
+
+Every function tool is sent with `"strict": false`. The Responses API reads a missing `strict` as
+`true`, which asks the model to fill in every property of a tool (`commands: []`, `path: ""`), and
+Forge's schemas are not in the strict subset. The Codex CLI sends `strict: false` for the same
+reason. Whatever the model still sends for an optional property it is not using is removed before
+the call runs; see [tool-argument-placeholders.md](tool-argument-placeholders.md).
+
 ## Security
 
 Bearer tokens are only attached to host-pinned `https://chatgpt.com/...` URLs. Tokens live in the

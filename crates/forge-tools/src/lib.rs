@@ -19,6 +19,7 @@ tokio::task_local! {
     pub(crate) static SESSION_EXTRA_ROOTS: Vec<std::path::PathBuf>;
 }
 
+mod arg_shape;
 mod browser;
 mod core_tools;
 mod device;
@@ -48,6 +49,7 @@ pub(crate) mod test_state {
     }
 }
 
+pub use arg_shape::normalize_args;
 pub use browser::{set_attach_endpoint, BrowserNetworkTool, BrowserTool};
 pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
@@ -250,6 +252,16 @@ impl ToolRegistry {
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.tools.keys().map(String::as_str)
+    }
+
+    /// `args` as the named tool's own schema reads them: the placeholder values a strict-mode
+    /// model fills in for absent optional properties are removed (see [`normalize_args`]). An
+    /// unknown tool's args come back unchanged.
+    pub fn normalize_args(&self, name: &str, args: &Value) -> Value {
+        match self.get(name) {
+            Some(tool) => normalize_args(&tool.schema(), args),
+            None => args.clone(),
+        }
     }
 }
 

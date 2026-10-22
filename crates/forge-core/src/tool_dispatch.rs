@@ -153,8 +153,9 @@ impl Session {
         msg_id: &str,
         call: &forge_types::ToolCall,
     ) -> Result<String, CoreError> {
-        // Idempotent: the model loop already resolved `tool_call`, so its counters saw the same call.
-        let call = &self.resolve_deferred_call(call);
+        // Idempotent: the model loop already resolved `tool_call` and removed the placeholder
+        // values, so its counters saw the same call.
+        let call = &self.resolve_model_call(call);
         // Snapshot args before hooks so the audit row preserves exactly what the model requested.
         let call_args_json = serde_json::to_string(&call.args)?;
         if let Some(scope) = self

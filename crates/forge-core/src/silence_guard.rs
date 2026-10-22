@@ -177,7 +177,7 @@ impl Session {
         let calls: Vec<forge_types::ToolCall> = resp
             .tool_calls
             .iter()
-            .map(|call| self.resolve_deferred_call(call))
+            .map(|call| self.resolve_model_call(call))
             .collect();
         match tracker.observe(visible_text, &calls, wrote, std::time::Instant::now()) {
             Some(nudge) => self.deliver_silence_nudge(nudge),

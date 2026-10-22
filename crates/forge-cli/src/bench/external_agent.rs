@@ -86,16 +86,20 @@ pub(super) async fn run_external_agent(
                 "--dangerously-skip-permissions".into(),
             ],
         ),
-        // `exec` is codex's non-interactive mode; `--full-auto` = workspace-write + never-ask.
-        // `--json` emits a JSONL event stream we scan for a token-count event (best-effort).
+        // `exec` is codex's non-interactive mode; the unattended flags depend on the installed
+        // codex ([`codex_unattended_args`]). `--json` emits a JSONL event stream we scan for a
+        // token-count event (best-effort).
         Agent::Codex => (
             "codex",
-            vec![
-                "exec".into(),
-                "--json".into(),
-                "--skip-git-repo-check".into(),
-                "--full-auto".into(),
-            ],
+            [
+                vec![
+                    "exec".to_string(),
+                    "--json".to_string(),
+                    "--skip-git-repo-check".to_string(),
+                ],
+                codex_unattended_args().to_vec(),
+            ]
+            .concat(),
         ),
         Agent::Forge => unreachable!("forge takes the in-process path"),
     };
@@ -178,6 +182,45 @@ pub(super) async fn run_external_agent(
             })
         }
     }
+}
+
+/// The flags that let `codex exec` edit files and run commands with nobody to answer a prompt:
+/// workspace-write sandbox (the clone and `/tmp`, network off) and no approval prompts.
+///
+/// Codex used to spell that `--full-auto`; 0.163 removed the flag and `exec` now exits with
+/// "unexpected argument" if it is passed. So the installed codex decides: `--full-auto` when its
+/// `exec --help` still lists it, otherwise the two settings it stood for. Asked once per process.
+/// The sandbox is deliberately kept: it is what `--full-auto` meant. A run that needs the shell to
+/// reach the network or write outside the workspace needs a different mode (codex's
+/// `--dangerously-bypass-approvals-and-sandbox`), which is a choice for the person running it, not
+/// something this driver widens on its own.
+fn codex_unattended_args() -> &'static [String] {
+    static ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ARGS.get_or_init(|| {
+        let help = std::process::Command::new("codex")
+            .args(["exec", "--help"])
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+            .unwrap_or_default();
+        codex_unattended_flags(&help)
+    })
+}
+
+/// [`codex_unattended_args`] for a given `codex exec --help` text.
+fn codex_unattended_flags(exec_help: &str) -> Vec<String> {
+    if exec_help.contains("--full-auto") {
+        return vec!["--full-auto".to_string()];
+    }
+    [
+        "--sandbox",
+        "workspace-write",
+        "-c",
+        "approval_policy=\"never\"",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// Best-effort token/cost extraction from an external agent's machine output.
@@ -439,6 +482,31 @@ mod tests {
         r#"{"type":"result","subtype":"success","is_error":false,"result":"done","num_turns":3,"duration_ms":4200,"ttft_ms":900,"total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100}}"#,
         "\n",
     );
+
+    #[test]
+    fn codex_without_full_auto_gets_the_settings_the_flag_stood_for() {
+        let codex_0163 = "Usage: codex exec [OPTIONS] [PROMPT]\n\nOptions:\n  -s, --sandbox <SANDBOX_MODE>\n      --approve-for-me\n      --dangerously-bypass-approvals-and-sandbox\n";
+        assert_eq!(
+            codex_unattended_flags(codex_0163),
+            [
+                "--sandbox",
+                "workspace-write",
+                "-c",
+                "approval_policy=\"never\""
+            ],
+        );
+        assert_eq!(
+            codex_unattended_flags(""),
+            codex_unattended_flags(codex_0163),
+            "no help text (codex missing or silent) means a current codex"
+        );
+    }
+
+    #[test]
+    fn a_codex_that_still_lists_full_auto_gets_it() {
+        let older = "Options:\n      --full-auto\n          Convenience alias for low-friction sandboxed automatic execution\n";
+        assert_eq!(codex_unattended_flags(older), ["--full-auto"]);
+    }
 
     #[test]
     fn stream_json_gives_turns_tool_calls_errors_and_timings() {

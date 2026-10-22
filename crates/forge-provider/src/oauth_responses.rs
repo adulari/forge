@@ -233,11 +233,16 @@ pub fn build_responses_request(
             tools
                 .iter()
                 .map(|t| {
+                    // The Responses API reads a missing `strict` as `true`, which asks the model to
+                    // fill in every property of the schema (`commands: []`, `path: ""`) and holds
+                    // Forge's loosely-typed schemas to the strict subset. Say `false`, as Codex's
+                    // own tools and the other OpenAI paths do.
                     serde_json::json!({
                         "type": "function",
                         "name": t.name,
                         "description": t.description,
                         "parameters": t.schema,
+                        "strict": false,
                     })
                 })
                 .collect(),
@@ -679,6 +684,27 @@ mod tests {
             ])
         );
         assert_eq!(body["input"][3]["content"], "and now?");
+    }
+
+    #[test]
+    fn function_tools_are_sent_non_strict() {
+        let tools = vec![ToolSpec {
+            name: "shell".into(),
+            description: "run a command".into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "command": { "type": "string" } }
+            }),
+        }];
+        let body = build_responses_request(
+            "codex-oauth::gpt-6-luna",
+            &[Message::user("hi")],
+            &tools,
+            &CompletionOptions::default(),
+            0,
+        );
+        assert_eq!(body["tools"][0]["strict"], serde_json::json!(false));
+        assert_eq!(body["tools"][0]["parameters"], tools[0].schema);
     }
 
     #[test]

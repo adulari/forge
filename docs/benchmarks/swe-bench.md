@@ -84,7 +84,7 @@ forge bench swe --dataset swe-lite.jsonl --agent forge       --out preds-forge.j
 # Claude Code's own harness (claude -p --dangerously-skip-permissions)
 forge bench swe --dataset swe-lite.jsonl --agent claude-code --out preds-claude.jsonl --limit 20 --model opus
 
-# Codex's own harness (codex exec --full-auto)
+# Codex's own harness (codex exec, workspace-write sandbox, never ask)
 forge bench swe --dataset swe-lite.jsonl --agent codex       --out preds-codex.jsonl  --limit 20 --model gpt-5-codex
 ```
 
@@ -98,6 +98,15 @@ for a in forge claude codex; do
     --predictions_path preds-$a.jsonl --run_id $a
 done
 ```
+
+For Codex, "unattended" means the mode `--full-auto` used to select: the `workspace-write`
+sandbox (the clone and temp directories are writable, the shell has no network) and no approval
+prompts. Codex 0.163 removed `exec --full-auto`, so the driver asks the installed codex
+(`codex exec --help`): it passes `--full-auto` while codex still lists it, and otherwise
+`--sandbox workspace-write -c approval_policy="never"`. The sandbox stays on; an instance whose
+tests need network access from the agent's shell needs codex's own
+`--dangerously-bypass-approvals-and-sandbox`, which this driver never adds for you. Say which one
+you used when you publish a comparison.
 
 Use the **same model family** across agents (e.g. Forge pinned to `anthropic::claude-…` vs
 `--agent claude-code --model …`) to isolate the harness from the model.

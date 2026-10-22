@@ -26,7 +26,7 @@ pub enum Agent {
     Forge,
     /// Anthropic's Claude Code CLI (`claude -p --dangerously-skip-permissions`).
     ClaudeCode,
-    /// OpenAI's Codex CLI (`codex exec --full-auto`).
+    /// OpenAI's Codex CLI (`codex exec`, unattended in its workspace-write sandbox).
     Codex,
 }
 

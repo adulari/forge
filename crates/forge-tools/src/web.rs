@@ -146,7 +146,7 @@ impl Tool for WebFetchTool {
             "type": "object",
             "properties": {
                 "url": { "type": "string", "description": "The http(s) URL to fetch." },
-                "max_chars": { "type": "integer", "description": "Characters to return (default 10000, max 100000)." },
+                "max_chars": { "type": "integer", "minimum": 1, "description": "Characters to return (default 10000, max 100000)." },
                 "offset": { "type": "integer", "description": "Character offset to start from, for reading past the first window (default 0)." }
             },
             "required": ["url"]
@@ -601,7 +601,7 @@ impl Tool for WebSearchTool {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "The search query." },
-                "count": { "type": "integer", "description": "How many results (default 5, max 10)." },
+                "count": { "type": "integer", "minimum": 1, "description": "How many results (default 5, max 10)." },
                 "allowed_domains": { "type": "array", "items": { "type": "string" }, "description": "Only return results from these domains (subdomains included), e.g. [\"docs.rs\"]." },
                 "blocked_domains": { "type": "array", "items": { "type": "string" }, "description": "Never return results from these domains." }
             },

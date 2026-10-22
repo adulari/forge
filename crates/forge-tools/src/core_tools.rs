@@ -308,11 +308,13 @@ impl Tool for ReadFileTool {
                 },
                 "start_line": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "First line to read (1-indexed, inclusive). Default: 1. \
                                     Single-file (`path`) only."
                 },
                 "end_line": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "Last line to read (1-indexed, inclusive). Default: end of file. \
                                     Single-file (`path`) only."
                 }
@@ -325,7 +327,7 @@ impl Tool for ReadFileTool {
             .and_then(Value::as_array)
             .filter(|paths| !paths.is_empty())
         {
-            if args.get("path").is_some() || args.get("file_path").is_some() {
+            if named_path(args).is_some() {
                 return Err(ToolError::BadArgs(
                     "read_file: pass either `path` or `paths`, not both (put every file in \
                      `paths` to read several)"
@@ -334,9 +336,8 @@ impl Tool for ReadFileTool {
             }
             return Ok(read_many(paths).await);
         }
-        let path = match args.get("file_path").and_then(Value::as_str) {
-            Some(p) if args.get("path").is_none() => p,
-            _ => str_arg(args, "path")?,
+        let Some(path) = named_path(args) else {
+            return Err(ToolError::BadArgs("expected string 'path'".to_string()));
         };
         confine_read(path)?;
         check_readable_size(path).await?;
@@ -381,11 +382,26 @@ impl Tool for ReadFileTool {
     }
 }
 
+/// The file `path` (or its `file_path` alias) names. An empty string is a model that had to fill in
+/// every property saying it is not using that one.
+fn named_path(args: &Value) -> Option<&str> {
+    ["path", "file_path"]
+        .into_iter()
+        .filter_map(|key| args.get(key).and_then(Value::as_str))
+        .find(|path| !path.trim().is_empty())
+}
+
 /// The requested line range. Models trained on Claude Code's Read tool send `offset`/`limit`
 /// (start line, line count) instead of `start_line`/`end_line`; ignoring them returned the whole
 /// file for every "page", which a live loop re-read a dozen times at 50K characters each.
 fn read_range(args: &Value) -> (Option<usize>, Option<usize>) {
-    let num = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n as usize);
+    // Lines count from 1, so 0 is a model that had to fill in every property saying "not given".
+    let num = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
+            .map(|n| n as usize)
+    };
     let start = num("start_line").or_else(|| num("offset").map(|n| n.max(1)));
     let end = num("end_line").or_else(|| {
         num("limit")
@@ -1651,6 +1667,41 @@ mod tests {
             .unwrap();
 
         assert_eq!(out, "actual contents");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_file_treats_blank_and_zero_placeholders_as_not_given() {
+        let dir = temp_dir("read-placeholders");
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        std::fs::write(&a, "alpha-body\nsecond line").unwrap();
+        std::fs::write(&b, "beta-body").unwrap();
+
+        // `path: ""` next to a batch is just the batch (it used to fail as "both").
+        let out = ReadFileTool
+            .run(&json!({ "path": "", "paths": [a.to_str().unwrap(), b.to_str().unwrap()] }))
+            .await
+            .unwrap();
+        assert!(
+            out.contains("alpha-body") && out.contains("beta-body"),
+            "{out}"
+        );
+
+        // Line numbers start at 1: 0 means "not given", not "an empty range".
+        let out = ReadFileTool
+            .run(&json!({ "path": a.to_str().unwrap(), "start_line": 0, "end_line": 0 }))
+            .await
+            .unwrap();
+        assert_eq!(out, "alpha-body\nsecond line");
+
+        // Nothing named at all still says what is missing.
+        let err = ReadFileTool
+            .run(&json!({ "path": "  ", "paths": [] }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected string 'path'"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
