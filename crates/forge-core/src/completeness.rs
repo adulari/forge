@@ -16,6 +16,19 @@ never edit the file that declares it. "
     };
 }
 
+/// What a task that names places and kinds of fact must leave behind. One text shared by the
+/// first-pass guidance and the audit, for the same reason as `frozen_contract!`.
+macro_rules! named_coverage {
+    () => {
+        "When the task names several places (documents, help text, files, API surfaces) and \
+several kinds of fact or change for them (options, defaults, environment variables, output lines, \
+exit codes, types, errors, comments), every named kind belongs in every named place. A place that \
+never mentions a named kind is a gap, and so is a section that exists but stops short of what the \
+code does. Take the facts from the code, never from the old text, and do not change the program's \
+behaviour to make a document true unless the task asks for it. "
+    };
+}
+
 /// Injected for the self-review pass (mesh.self_review): the same model critically re-checks the
 /// edits it just made before the turn ends. Framed to FIND real defects (the common failure is a
 /// fix that's plausible but wrong/incomplete), but to stop cleanly when the work is sound — so it
@@ -56,8 +69,12 @@ different call shape or downstream consumer does not exempt that path. A plain r
 alias unless the task asks for compatibility. ", frozen_contract!(), "Do not finish with an \
 unhandled occurrence that is not exempt. Passing existing tests alone is not proof: hidden tests \
 often exercise an omitted sibling path.
-4. If one is missing, fix that specific omission and run focused verification. If the sweep reveals \
-no concrete omission, make NO further edits and finish.
+4. Coverage check: list the places and the kinds of fact the task names, then check each place \
+against each kind in the final files, not in your memory of the diff. ", named_coverage!(), "Fix \
+every gap with a focused edit.
+5. If the sweep found an omitted production path, fix that specific omission and run focused \
+verification. If neither the sweep nor the coverage check reveals a concrete omission or gap, make \
+NO further edits and finish.
 
 Do not broadly re-explore or refactor, and do not modify existing tests to hide a failure. This is \
 one evidence check, not an invitation to second-guess a complete fix.");
@@ -138,6 +155,9 @@ the replacement while retaining the old alias as a fallback unless removal is ex
 different call shape or downstream consumer does not exempt that path. A plain rename needs no \
 alias unless the task asks for compatibility. ",
     frozen_contract!(),
+    "
+- ",
+    named_coverage!(),
     "
 
 Keep the sweep bounded; do not broadly review or refactor unrelated code."
