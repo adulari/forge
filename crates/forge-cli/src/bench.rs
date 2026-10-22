@@ -777,6 +777,9 @@ async fn run_agent_turn(run: &AgentRun<'_>) -> Result<RunOutcome> {
                 crate::build_session(run.mock, Some(Mode::Bypass), false, None, run.model.clone())
                     .await
                     .context("building session")?;
+            // One attempt per session, scored on the tree it leaves: per-unit commits are pure
+            // overhead, as they are for `forge run`.
+            session.set_default_commit_policy(forge_config::CommitPolicy::End);
             if run.expect_code_change {
                 session.set_expect_code_change(true);
             }

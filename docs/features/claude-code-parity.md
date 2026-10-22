@@ -96,10 +96,11 @@ each type with its description and tools and accepts `subagent_type` as an alias
 
 ## `[git] commit_policy`
 
-`unit` (default, unchanged), `end` (one commit when the task is complete) or `never` (leave
-changes in the tree). It swaps the system prompt's version-control paragraph
-(`commit_policy.rs`) and silences the git-hygiene reminders for anything but `unit`. The
-never-push rule is kept by every policy.
+`auto` (default: `unit` in an interactive session, `end` for a headless one-shot run: `forge run`,
+`forge run -p`, `forge bench`), `unit` (commit each verified unit), `end` (one commit when the task
+is complete) or `never` (leave changes in the tree). It swaps the system prompt's version-control
+paragraph (`commit_policy.rs`) and silences the git-hygiene reminders for anything but `unit`. The
+never-push rule is kept by every policy. Setting any value explicitly overrides the `auto` choice.
 
 ## Logged-in browser attach
 

@@ -25,11 +25,27 @@ const NEVER_COMMIT: &str = "\
 tree for the user to review and commit themselves. Reading git state (status, diff, log) is fine.
 ";
 
+impl crate::Session {
+    /// The policy this session acts on: the configured one, with `auto` resolved to the surface's
+    /// default (`unit`, or `end` once a headless one-shot run has said so).
+    pub(crate) fn commit_policy(&self) -> CommitPolicy {
+        self.config.git.commit_policy.or(self.default_commit_policy)
+    }
+
+    /// What `[git] commit_policy = "auto"` means for this session. Headless one-shot runs
+    /// (`forge run`, `forge bench`) pass `End`: nobody reviews per-unit commits there, and each
+    /// one costs a model round trip. An explicit `commit_policy` in the config still wins.
+    pub fn set_default_commit_policy(&mut self, policy: CommitPolicy) {
+        self.default_commit_policy = policy;
+    }
+}
+
 /// `base` with the version-control paragraph rewritten for `policy`. `unit` (and a base that has
-/// no such paragraph, e.g. a user-supplied override) is returned untouched.
+/// no such paragraph, e.g. a user-supplied override) is returned untouched, as is an unresolved
+/// `auto`.
 pub(crate) fn apply(base: &str, policy: CommitPolicy) -> Cow<'_, str> {
     let replacement = match policy {
-        CommitPolicy::Unit => return Cow::Borrowed(base),
+        CommitPolicy::Unit | CommitPolicy::Auto => return Cow::Borrowed(base),
         CommitPolicy::End => COMMIT_AT_END,
         CommitPolicy::Never => NEVER_COMMIT,
     };

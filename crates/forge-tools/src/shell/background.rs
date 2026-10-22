@@ -699,6 +699,10 @@ impl Tool for ShellJobTool {
     }
 }
 
+/// How a started job's result tells the model to follow up. A surface that does not list
+/// `shell_job` (the bridge's lean tool list) rewrites exactly this text, so it is shared.
+pub const JOB_HINT: &str = "Check on it with shell_job: ";
+
 /// Start a long-lived job and describe it in the terms the next call needs: the id to ask about
 /// it with, and where its output is going.
 pub(super) async fn start_background(
@@ -710,7 +714,7 @@ pub(super) async fn start_background(
     match start(command, cwd, workspace, policy).await {
         Ok(job) => format!(
             "shell: started background job {} (pid {})\n  log: {}\n  \
-             Check on it with shell_job: {{\"action\": \"log\", \"id\": {}}}, stop it with \
+             {JOB_HINT}{{\"action\": \"log\", \"id\": {}}}, stop it with \
              {{\"action\": \"stop\", \"id\": {}}}. It keeps running until stopped.",
             job.pid,
             job.pid,

@@ -7,6 +7,16 @@ use super::*;
 mod piped_stdin;
 use piped_stdin::with_piped_stdin;
 
+/// Marks a session as serving one invocation that exits once its turn is answered. Beyond the
+/// skipped post-turn side calls, `[git] commit_policy = "auto"` means `end` here: a headless run
+/// has nobody to review per-unit commits, and each one costs a model round trip.
+pub(crate) fn mark_one_shot(session: &mut Session, one_shot: bool) {
+    session.set_one_shot(one_shot);
+    if one_shot {
+        session.set_default_commit_policy(forge_config::CommitPolicy::End);
+    }
+}
+
 /// Everything one `forge run` invocation asked for.
 pub(crate) struct RunRequest {
     pub(crate) prompt: String,
@@ -175,7 +185,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
             return Err(e);
         }
         session.attach_images(at_images);
-        session.set_one_shot(true);
+        mark_one_shot(&mut session, true);
         let before = session.session_usage_detail();
         // A resumed session's restored totals arrive before routing; the presenter keeps them as
         // a baseline so `usage` reports this invocation, as `claude -p` does.
@@ -201,7 +211,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         return Err(e);
     }
     session.attach_images(at_images);
-    session.set_one_shot(!tui);
+    mark_one_shot(&mut session, !tui);
     let before = session.session_usage_detail();
 
     // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.

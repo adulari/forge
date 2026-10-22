@@ -78,3 +78,20 @@ lean_core_extra = ["web_fetch"]  # deferred tools to keep advertised
 
 A/B with the same pinned model: `FORGE_DIRECT_LEAN=0` vs default under `forge bench`. Compare
 input tokens per attempt, cache hit rate, resolve rate and how often `tool_search` was called.
+
+## Bridge: `shell_job` is deferred, so `shell` points at `tool_call`
+
+`shell` starts a background job and says the job is managed with `shell_job`. On the bridge's lean
+surface `shell_job` is deferred, so a model that took that sentence literally called
+`mcp__forge__shell_job` and got "No such tool available" (one haiku run, task d05). `forge mcp-serve`
+now rewrites, on the lean surface only, `shell`'s description and the "Check on it with shell_job:"
+line of a started job's result to say the call goes through `tool_call {"name": "shell_job", ...}`
+(`crates/forge-cli/src/mcp_serve/deferred.rs`; the shared hint text is `forge_tools::JOB_HINT`, so a
+reworded result fails a test instead of silently skipping the rewrite). The full surface
+(`mesh.bridge_lean = false`) lists `shell_job` and is left as it was.
+
+Five other bridged calls failed with "could not be parsed as JSON". Those never reached Forge:
+claude rejected the model's own tool input, a raw tab (three `multi_edit` calls on Go and Makefile
+text) or raw newline (two `shell` `commands` calls) inside a JSON string of a nested array. The
+`edits` and `commands` parameter descriptions now begin with the escape reminder, which survives the
+lean surface's first-sentence cut; whether that lowers the rate is not measured.

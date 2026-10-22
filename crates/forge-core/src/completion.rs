@@ -42,6 +42,9 @@ pub(crate) struct VerificationLedger {
     /// Observation counter at the most recent successful artifact mutation. Evidence at or before
     /// this point is stale: a write after a passing check must be followed by another check.
     last_mutation_checkpoint: u64,
+    /// A test, lint, typecheck or build passed after the latest successful artifact edit. Stricter
+    /// than [`Self::verified_since`], which any successful read satisfies.
+    checked_since_edit: bool,
 }
 
 impl VerificationLedger {
@@ -55,6 +58,7 @@ impl VerificationLedger {
             VerificationObservation::Mutation => {
                 if ok {
                     self.last_mutation_checkpoint = self.successful_observations;
+                    self.checked_since_edit = false;
                 }
             }
             VerificationObservation::Generic => {
@@ -66,6 +70,7 @@ impl VerificationLedger {
                 if ok {
                     self.unresolved.remove(&family);
                     self.successful_observations = self.successful_observations.saturating_add(1);
+                    self.checked_since_edit = true;
                 } else {
                     self.unresolved.insert(family);
                 }
@@ -76,6 +81,16 @@ impl VerificationLedger {
     pub(crate) fn verified_since(&self, checkpoint: u64) -> bool {
         self.unresolved.is_empty()
             && self.successful_observations > checkpoint.max(self.last_mutation_checkpoint)
+    }
+
+    /// A real check (not just a read) passed after the latest edit and none is still failing.
+    pub(crate) fn checked_since_edit(&self) -> bool {
+        self.checked_since_edit && self.unresolved.is_empty()
+    }
+
+    /// A check family failed and has not passed since.
+    pub(crate) fn has_failing_check(&self) -> bool {
+        !self.unresolved.is_empty()
     }
 
     pub(crate) fn unresolved_summary(&self) -> Option<String> {
@@ -614,6 +629,36 @@ mod tests {
             true,
         );
         assert!(ledger.verified_since(0));
+    }
+
+    #[test]
+    fn a_passing_check_after_the_last_edit_is_tracked_apart_from_plain_reads() {
+        let check = classify_tool("shell", r#"{"command":"cargo test"}"#);
+        let read = classify_tool("read_file", "{}");
+        let mut ledger = VerificationLedger::default();
+        assert!(!ledger.checked_since_edit());
+
+        ledger.observe(VerificationObservation::Mutation, true);
+        ledger.observe(read, true);
+        assert!(
+            ledger.verified_since(0),
+            "a read is evidence for the completion gate"
+        );
+        assert!(!ledger.checked_since_edit(), "but it is not a check");
+
+        ledger.observe(check, true);
+        assert!(ledger.checked_since_edit());
+        ledger.observe(VerificationObservation::Mutation, true);
+        assert!(
+            !ledger.checked_since_edit(),
+            "an edit makes the last check stale"
+        );
+
+        ledger.observe(check, false);
+        assert!(ledger.has_failing_check());
+        ledger.observe(check, true);
+        assert!(!ledger.has_failing_check());
+        assert!(ledger.checked_since_edit());
     }
 
     #[test]

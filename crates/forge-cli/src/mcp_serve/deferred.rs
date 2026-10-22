@@ -68,6 +68,42 @@ pub(super) fn slim(mut tool: Tool) -> Tool {
     tool
 }
 
+const JOB_TOOL: &str = "shell_job";
+
+/// `shell` tells the model that background jobs are managed with `shell_job`, a tool this lean
+/// surface defers behind `tool_search`/`tool_call`. A model that takes the sentence literally calls
+/// `mcp__forge__shell_job` and is told no such tool exists (a haiku run did, on d05). Point the
+/// description at the route that works. Only call this when `shell_job` is deferred.
+pub(super) fn route_job_tool(mut tool: Tool) -> Tool {
+    if tool.name == "shell" && !is_core(JOB_TOOL) {
+        if let Some(description) = tool.description.take() {
+            tool.description = Some(
+                description
+                    .replace(
+                        "the `shell_job` tool",
+                        "`shell_job` (not listed here: load it with tool_search, run it with tool_call)",
+                    )
+                    .into(),
+            );
+        }
+    }
+    tool
+}
+
+/// The same correction for a started job's result, which names the follow-up call.
+pub(super) fn route_job_hint(tool: &str, text: String) -> String {
+    if tool != "shell" || is_core(JOB_TOOL) || !text.contains(forge_tools::JOB_HINT) {
+        return text;
+    }
+    text.replace(
+        forge_tools::JOB_HINT,
+        &format!(
+            "{JOB_TOOL} is not in your tool list: run it as tool_call {{\"name\": \"{JOB_TOOL}\", \
+             \"arguments\": ...}}. Check on it with arguments "
+        ),
+    )
+}
+
 /// Render the deferred tools matching `query` (exact names, or keywords against name/description).
 pub(super) fn search(deferred: &[Tool], query: &str) -> String {
     let specs: Vec<ToolSpec> = deferred.iter().map(to_spec).collect();
@@ -166,5 +202,69 @@ mod tests {
         let multi = search(&deferred, "device, browser");
         assert!(multi.contains("## device") && multi.contains("## browser"));
         assert!(search(&deferred, "nonsense").contains("Available: browser, device"));
+    }
+
+    fn real_shell() -> Tool {
+        let registry = forge_tools::ToolRegistry::with_core_tools();
+        let shell = registry.get("shell").unwrap();
+        Tool::new(
+            "shell",
+            shell.description().to_string(),
+            schema(shell.schema()),
+        )
+    }
+
+    #[test]
+    fn the_deferred_job_tool_is_reached_through_tool_call_not_by_name() {
+        let original = real_shell().description.unwrap().to_string();
+        assert!(
+            original.contains("the `shell_job` tool"),
+            "shell's own wording changed; update route_job_tool: {original}"
+        );
+        let routed = route_job_tool(slim(real_shell()))
+            .description
+            .unwrap()
+            .to_string();
+        assert!(!routed.contains("the `shell_job` tool"), "{routed}");
+        assert!(
+            routed.contains("tool_search") && routed.contains("tool_call"),
+            "{routed}"
+        );
+        assert!(routed.contains("`shell_job`"), "{routed}");
+    }
+
+    #[test]
+    fn only_shell_is_rewritten() {
+        let other = tool("read_file", "manage it with the `shell_job` tool");
+        assert_eq!(
+            route_job_tool(other).description.unwrap(),
+            "manage it with the `shell_job` tool"
+        );
+        let result = format!("note: {}x", forge_tools::JOB_HINT);
+        assert_eq!(route_job_hint("read_file", result.clone()), result);
+    }
+
+    #[test]
+    fn a_started_jobs_result_names_the_call_that_works() {
+        let started = format!(
+            "shell: started background job 7 (pid 7)\n  log: /tmp/7.log\n  {}{{\"action\": \"log\", \"id\": 7}}, stop it with {{\"action\": \"stop\", \"id\": 7}}. It keeps running until stopped.",
+            forge_tools::JOB_HINT
+        );
+        let routed = route_job_hint("shell", started.clone());
+        assert!(!routed.contains(forge_tools::JOB_HINT), "{routed}");
+        assert!(routed.contains("tool_call"), "{routed}");
+        assert!(routed.contains(r#"{"action": "log", "id": 7}"#), "{routed}");
+        assert!(
+            routed.contains(r#"{"action": "stop", "id": 7}"#),
+            "{routed}"
+        );
+        assert!(
+            routed.starts_with("shell: started background job 7"),
+            "{routed}"
+        );
+        assert_eq!(
+            route_job_hint("shell", "shell: exit 0".to_string()),
+            "shell: exit 0"
+        );
     }
 }
