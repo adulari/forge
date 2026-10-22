@@ -399,8 +399,12 @@ full output in scrollback independent of the model budget.
   2. **A log file and on-disk records, not an in-memory `JobRegistry` with a ring buffer.** The
      point of a background job is that a LATER call finds it, and the failure mode being fixed was
      precisely that nothing survived the call. In-memory state dies with Forge; a ring buffer
-     silently drops the output you needed. A file under `.forge/jobs/` survives a restart, holds
-     the whole log, and can be `tail -f`'d by the human sitting next to the agent.
+     silently drops the output you needed. A file under the workspace's `jobs/` state folder (see
+     [workspace-state.md](workspace-state.md); it was `.forge/jobs/` in the project until the state
+     moved out of the user's tree) survives a restart, holds the whole log, and can be `tail -f`'d
+     by the human sitting next to the agent. `read_file` may read this workspace's job logs even
+     though they sit outside the project; jobs recorded under the old `.forge/jobs/` are still
+     listed, tailed and stopped.
   3. **Jobs are NOT killed on shutdown** (the checklist below said they would be). An emulator that
      took two minutes to boot must not die because a turn ended; that is the entire use case.
      `shell_job stop` is how a job ends, and `list` is how a later session finds one to stop.
@@ -608,7 +612,7 @@ in `forge_tools::tunnel` (`crates/forge-tools/src/tunnel.rs`); forge-cli's `remo
 - **Kill switch.** `[preview] enabled = false` refuses the action outright. It defaults to `true`
   because every expose is already approval-gated.
 - **The result warns.** The tool result says the URL is public and unauthenticated.
-- **Lifetime.** The tunnel is detached (own session, output on `.forge/jobs/<id>.tunnel.log`) so it
+- **Lifetime.** The tunnel is detached (own session, output on `<state>/jobs/<id>.tunnel.log`) so it
   survives the turn like the dev server does. Its pid, start time, port and URL are recorded under
   `"tunnel"` in the job's `<id>.json`. It is stopped when:
   - `shell_job stop` stops the job, or the job exits while the Forge that started it is running;

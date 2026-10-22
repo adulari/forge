@@ -5,6 +5,10 @@
 //! the turn by copying the blobs back (and deleting files the turn *created*). This never touches
 //! the user's git state — it's a self-contained, runs-anywhere safety net. Only files a turn
 //! actually writes are copied, so the cost is the changed set, not the tree.
+//!
+//! The root is not in the user's tree: [`default_root`] puts it in Forge's data directory, keyed
+//! by workspace (`forge_config::workspace_state_dir`), and moves snapshots an earlier version left
+//! in `<workspace>/.forge/checkpoints/` across, so `/undo` and `/rewind` still reach them.
 
 use std::path::{Path, PathBuf};
 
@@ -209,17 +213,20 @@ pub(crate) fn changed_files_this_turn(root: &Path, session: &str, seq: i64) -> V
         .collect()
 }
 
-/// Keep checkpoint blobs out of the user's `git status`. A `*` ignore file inside the directory
-/// ignores everything under it (itself included), so nothing the user owns is edited and the model
-/// stops reporting a stray untracked `.forge/` as if it were part of its change.
-fn ensure_git_ignored(root: &Path) {
-    let _ = crate::ensure_dir_git_ignored(root);
+/// Where a session in `workspace` keeps its shadow snapshots: Forge's own data directory, never
+/// the project tree, so a strict tree check or a broad `git add` can never pick them up. Snapshots
+/// an earlier version left under `<workspace>/.forge/checkpoints/` are adopted on first use.
+pub(crate) fn default_root(workspace: &Path) -> PathBuf {
+    #[cfg(test)]
+    crate::test_state::isolate();
+    let _ = forge_config::prepare_workspace_state(workspace);
+    forge_config::adopt_legacy_state(workspace, "checkpoints");
+    forge_config::state_subdir(workspace, "checkpoints")
 }
 
 fn save_manifest(root: &Path, session: &str, seq: i64, m: &Manifest) -> std::io::Result<()> {
     let dir = turn_dir(root, session, seq);
     std::fs::create_dir_all(&dir)?;
-    ensure_git_ignored(root);
     let json = serde_json::to_string_pretty(m).unwrap_or_default();
     std::fs::write(manifest_path(root, session, seq), json)
 }
@@ -257,7 +264,6 @@ pub fn snapshot_before_write(
         let blob = format!("{idx}.blob");
         let dir = turn_dir(root, session, seq);
         std::fs::create_dir_all(&dir)?;
-        ensure_git_ignored(root);
         std::fs::copy(&path, dir.join(&blob))?;
         FileEntry {
             path: key,
@@ -293,6 +299,18 @@ pub fn record_post_write(root: &Path, session: &str, seq: i64, path: &Path) -> s
     Ok(())
 }
 
+/// Put a blob's bytes back at `path`. A file the edit tools wrote through an owner-read-only bit
+/// (mode 444) is still read-only now, and a plain copy onto it would fail; the restore goes
+/// through the same lift-and-restore the tools use, so `/undo` works on those files too.
+fn restore_blob(blob: &Path, path: &Path) -> std::io::Result<()> {
+    match std::fs::copy(blob, path) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            forge_tools::fs_write::write_through(path, &std::fs::read(blob)?).map_err(|_| error)
+        }
+        other => other.map(|_| ()),
+    }
+}
+
 /// Restore a turn's files to their pre-turn state. `modified` → prior bytes copied back;
 /// `created` → file deleted. Files whose current bytes differ from what Forge wrote get a warning
 /// (the user changed them by hand) but are still restored. Empty report if the turn has no snapshot.
@@ -321,7 +339,7 @@ pub fn restore_turn(root: &Path, session: &str, seq: i64) -> std::io::Result<Res
                     // on one file (permission denied, disk full, blob deleted) must not stop the
                     // remaining files in this turn from being restored, and must not skip the
                     // manifest cleanup below.
-                    if let Err(e) = std::fs::copy(dir.join(blob), path) {
+                    if let Err(e) = restore_blob(&dir.join(blob), path) {
                         report.failed.push(format!("{}: {e}", entry.path));
                         continue;
                     }
@@ -364,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_dir_ignores_itself_so_git_status_stays_clean() {
+    fn default_root_is_outside_the_workspace_so_the_tree_stays_clean() {
         let repo = root();
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
@@ -378,19 +396,74 @@ mod tests {
         let file = repo.join("a.txt");
         std::fs::write(&file, "original").unwrap();
 
-        snapshot_before_write(&repo.join(".forge/checkpoints"), "sess", 1, &file).unwrap();
+        let checkpoints = default_root(&repo);
+        assert!(!checkpoints.starts_with(&repo), "{}", checkpoints.display());
+        snapshot_before_write(&checkpoints, "sess", 1, &file).unwrap();
         std::fs::write(&file, "edited").unwrap();
 
         let status = String::from_utf8(git(&["status", "--porcelain", "-uall"]).stdout).unwrap();
-        assert!(
-            !status.contains(".forge"),
-            "checkpoint files leaked: {status}"
+        assert_eq!(
+            status.trim(),
+            "?? a.txt",
+            "only the user's own file shows: {status}"
         );
+        assert!(!repo.join(".forge").exists(), "no .forge/ in the workspace");
+        restore_turn(&checkpoints, "sess", 1).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A user upgrading mid-session: the snapshots the old version wrote in the workspace must
+    /// still be what `/undo` and `/rewind` restore from.
+    #[test]
+    fn snapshots_an_earlier_version_left_in_the_workspace_still_restore() {
+        let repo = root();
+        std::fs::create_dir_all(&repo).unwrap();
+        let file = repo.join("a.txt");
+        std::fs::write(&file, "original").unwrap();
+        let legacy = repo.join(".forge/checkpoints");
+        snapshot_before_write(&legacy, "old-sess", 4, &file).unwrap();
+        std::fs::write(&file, "edited by the old version").unwrap();
+        std::fs::write(legacy.join(".gitignore"), "*\n").unwrap();
+
+        let checkpoints = default_root(&repo);
+        assert_eq!(turn_seqs_from(&checkpoints, "old-sess", 0), vec![4]);
+        let report = restore_turn(&checkpoints, "old-sess", 4).unwrap();
+        assert_eq!(report.restored.len(), 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
         assert!(
-            status.contains("a.txt"),
-            "the user's own file still shows: {status}"
+            !repo.join(".forge").exists(),
+            "the old folder was cleared away"
         );
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// d06's files are `chmod 444`; the edit tools write through that bit, so undo has to as well.
+    #[test]
+    #[cfg(unix)]
+    fn undo_restores_a_file_that_is_read_only_again() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = root();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let file = work.join("limits.conf");
+        std::fs::write(&file, "max = 100").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        snapshot_before_write(&root, "sess", 1, &file).unwrap();
+        forge_tools::fs_write::write_through(&file, b"max = 250").unwrap();
+        let report = restore_turn(&root, "sess", 1).unwrap();
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "max = 100");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

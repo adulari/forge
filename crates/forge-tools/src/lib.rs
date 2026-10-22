@@ -24,6 +24,7 @@ mod core_tools;
 mod device;
 mod discovery_tools;
 pub mod evidence;
+pub mod fs_write;
 mod lattice_tool;
 mod open_pr;
 mod proxy;
@@ -32,6 +33,21 @@ mod shell;
 pub mod tunnel;
 mod web;
 mod workspace;
+
+/// Tests that touch per-workspace state (evidence, background jobs) point it at a throwaway
+/// folder once per process, so a test run never writes into the real data directory.
+#[cfg(test)]
+pub(crate) mod test_state {
+    pub(crate) fn isolate() {
+        static STATE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        STATE.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("state dir");
+            std::env::set_var(forge_config::STATE_DIR_ENV, dir.path());
+            dir
+        });
+    }
+}
+
 pub use browser::{set_attach_endpoint, BrowserNetworkTool, BrowserTool};
 pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,

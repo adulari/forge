@@ -33,11 +33,15 @@ HEAD>` (the turn's `TaskScope.base_head`), which sees staged, unstaged and commi
 
 ### Restoring
 
-- Uncommitted edits are stashed (`git stash push -- <paths>`); the push-back says
-  `git stash pop` re-applies them.
-- Committed edits give `git stash` nothing to save. The edits are written to
-  `<git-dir>/forge-test-edits-<n>.patch`, the files are checked out from the turn-start commit,
-  and the push-back says `git apply <patch>` re-applies them.
+The model's edits, committed or not, are written as a patch (`git diff --binary <turn-start HEAD>`
+over the test paths) to `<state>/test-edits/<n>.patch` in the workspace's folder under Forge's data
+directory (see [workspace-state.md](workspace-state.md)). The files are then checked out from the
+turn-start commit, and the push-back says `git apply <patch>` re-applies them. Nothing is written
+into the repository: no `refs/stash`, no entry on the user's own stash stack (an earlier version
+used `git stash push`, which left `refs/stash` in 8 of 10 benchmark repos and would have handed the
+user Forge's test edits at their next `git stash pop`), no object and nothing under `.git/`. If the
+patch cannot be written or git refuses the checkout, the tree is left untouched and the guard does
+not fire.
 
 The push-back for `expect_code_change` keeps the "hidden evaluation uses the original tests"
 wording. For a person's request it says the request asked for the tests to be kept and does not

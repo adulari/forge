@@ -131,11 +131,11 @@ impl Tool for MultiEditTool {
             staged.push((path, original, updated, steps.len()));
         }
         for (written, (path, _, updated, _)) in staged.iter().enumerate() {
-            if let Err(error) = tokio::fs::write(path, updated).await {
+            if let Err(error) = crate::fs_write::write(path, updated).await {
                 for (path, original, _, _) in &staged[..written] {
-                    let _ = tokio::fs::write(path, original).await;
+                    let _ = crate::fs_write::write(path, original).await;
                 }
-                return Err(error.into());
+                return Err(error);
             }
         }
         let total: usize = staged.iter().map(|(.., n)| n).sum();

@@ -112,8 +112,9 @@ only the notice lands. Like `/compact`, it is refused while a turn is running.
   startup.
 - **LSP, project config, evidence ledger, turn contract**: derived from the live workspace root
   on every session build or turn; nothing is persisted per host.
-- **Checkpoints / undo snapshots**: stored under `<workspace>/.forge/checkpoints` and do not travel
-  with the store, so `/undo` of a turn from before the move restores nothing rather than writing to
+- **Checkpoints / undo snapshots**: stored in the workspace's folder under Forge's data directory
+  (`<data>/workspaces/<name>-<hash>/checkpoints`, see [workspace-state.md](workspace-state.md)) and do
+  not travel with the store, so `/undo` of a turn from before the move restores nothing rather than writing to
   old paths.
 - **`worktree_path`**: cleared on resume when it does not exist on this host.
 - **Auto-memory**: scoped by project path. After a cwd relocation, memories scoped to the old path

@@ -270,7 +270,7 @@ impl Session {
             .map_err(|_| CoreError::Internal("session workspace binding poisoned".to_string()))? =
             self.workspace.root().to_path_buf();
         if !self.checkpoint_root_custom {
-            self.checkpoint_root = self.workspace.root().join(".forge/checkpoints");
+            self.checkpoint_root = crate::snapshot::default_root(self.workspace.root());
         }
         self.cached_git_branch = current_git_branch(self.workspace.root());
         self.set_instructions(crate::instructions::load(self.workspace.root()));

@@ -12,6 +12,7 @@ name = "forge_tools"
 
 [dependencies]
 forge-browser.workspace = true
+forge-config.workspace = true
 forge-device.workspace = true
 forge-proxy.workspace = true
 forge-types.workspace = true

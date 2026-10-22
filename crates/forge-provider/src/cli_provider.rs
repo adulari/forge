@@ -1313,6 +1313,13 @@ fn bridge_mcp_env(
             env.push((key.to_string(), val));
         }
     }
+    // Evidence and background-job files live in a per-workspace state folder the child resolves
+    // from its own environment. Handing it the parent's resolved root keeps both sides on one
+    // folder even when the CLI scrubs the env it passes on or `FORGE_DB` differs.
+    env.push((
+        forge_config::STATE_DIR_ENV.to_string(),
+        forge_config::workspace_state_root().display().to_string(),
+    ));
     env
 }
 
@@ -4535,6 +4542,29 @@ mod tests {
     }
 
     #[test]
+    fn the_bridge_child_is_told_where_the_workspace_state_lives() {
+        let ctx = CheckpointContext {
+            session: "s".to_string(),
+            seq: 1,
+            root: "/state/checkpoints".to_string(),
+            workspace: "/tmp/workspace".to_string(),
+            mode: "default".to_string(),
+            epoch: 0,
+        };
+        for env in [bridge_mcp_env(None, Some(&ctx)), bridge_mcp_env(None, None)] {
+            let told = env
+                .iter()
+                .find(|(key, _)| key == forge_config::STATE_DIR_ENV)
+                .map(|(_, value)| value.as_str());
+            assert_eq!(
+                told,
+                Some(forge_config::workspace_state_root().to_str().unwrap()),
+                "{env:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_parked_bridge_process_is_not_reused_after_the_session_changes_root() {
         let ctx = |workspace: &str| CheckpointContext {
             session: "s".to_string(),
@@ -6261,11 +6291,7 @@ done
             checkpoint: Some(CheckpointContext {
                 session: "workspace-session".to_string(),
                 seq: 1,
-                root: workspace
-                    .path()
-                    .join(".forge/checkpoints")
-                    .display()
-                    .to_string(),
+                root: workspace.path().join("checkpoints").display().to_string(),
                 workspace: workspace.path().display().to_string(),
                 mode: "bypass".to_string(),
                 epoch: 0,

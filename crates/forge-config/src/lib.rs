@@ -44,6 +44,7 @@ pub mod quota_status;
 pub mod secret_health;
 pub mod secret_store;
 mod vision_fallback;
+mod workspace_state;
 pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
@@ -69,6 +70,10 @@ pub use paths::{
 };
 pub use project_dirs::{project_resource_dirs, repo_top};
 pub use vision_fallback::VisionFallback;
+pub use workspace_state::{
+    adopt_legacy_state, legacy_state_subdir, prepare_workspace_state, state_subdir,
+    workspace_state_dir, workspace_state_root, STATE_DIR_ENV,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

@@ -276,7 +276,7 @@ pub(super) async fn apply(patch: &str, cwd: &Path) -> Result<String, ToolError> 
                 if let Some(parent) = full.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
-                tokio::fs::write(full, content).await?;
+                crate::fs_write::write(full, content).await?;
             }
             None => {
                 tokio::fs::remove_file(full).await.map_err(|e| {

@@ -1,5 +1,5 @@
 //! Production-faithful check of code-checkpoint restore: the *default* checkpoint root
-//! (`.forge/checkpoints`, relative) + a relative file path, run from a real working directory —
+//! (`default_root`) + a relative file path, run from a real working directory —
 //! exactly how `forge chat` is wired. Reproduces the "file changes didn't revert" report.
 
 use std::sync::Arc;
@@ -54,11 +54,13 @@ impl Provider for WriteOnceProvider {
 
 #[tokio::test]
 async fn undo_reverts_files_with_the_default_relative_checkpoint_root() {
-    // Run from a fresh temp cwd so relative `.forge/checkpoints` + a relative file path behave
+    // Run from a fresh temp cwd so a relative file path behaves
     // exactly as in production (this test owns the process cwd; it's the only one here).
     let dir = std::env::temp_dir().join(format!("forge-cwd-{}", forge_types::new_id()));
     std::fs::create_dir_all(&dir).unwrap();
     let _cwd_guard = test_cwd_guard(&dir);
+    let state = std::env::temp_dir().join(format!("forge-cwd-state-{}", forge_types::new_id()));
+    std::env::set_var(forge_config::STATE_DIR_ENV, &state);
 
     std::fs::write("notes.txt", "ORIGINAL").unwrap();
 
@@ -111,6 +113,13 @@ async fn undo_reverts_files_with_the_default_relative_checkpoint_root() {
         "undo reverts the file with the default relative checkpoint root"
     );
 
+    assert!(
+        !dir.join(".forge").exists(),
+        "no checkpoints (or anything else) land in the workspace"
+    );
+    assert!(session.checkpoint_root().starts_with(&state));
+
     drop(_cwd_guard);
     std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&state).ok();
 }

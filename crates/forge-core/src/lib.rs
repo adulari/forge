@@ -33,6 +33,8 @@ mod window_lookup;
 pub use window_lookup::WindowLookup;
 mod build_command;
 mod test_guard;
+#[cfg(test)]
+mod test_state;
 pub use test_guard::is_test_path;
 pub mod git_attribution;
 mod memory_scope;
@@ -243,7 +245,9 @@ const SHELL_DIAGNOSE_SYSTEM: &str = "A shell command run by a coding agent just 
 Respond with exactly one or two lines:\n\
 Line 1: the most likely cause in one terse sentence (no preamble, no restating the command).\n\
 Line 2 (optional): if a single shell command fixes it, write exactly: FIX: <the command>. \
-Omit line 2 if no single command fixes it.";
+Omit line 2 if no single command fixes it. Never suggest sudo, su or pkexec, and never suggest \
+chmod or chown unless running a script that lacks its execute bit is the whole task; when \
+permissions or ownership are what blocks the work, name that as the cause and omit line 2.";
 
 /// Shell diagnosis is optional context, never part of the user's requested work. Bound both its
 /// silent-stream interval and total wall time so an unhealthy auxiliary provider cannot hold the
@@ -1520,7 +1524,8 @@ pub struct Session {
     rules: Vec<PermissionRule>,
     transcript: Vec<Message>,
     seq: i64,
-    /// Where code shadow-snapshots live (RFC PR3); defaults to `.forge/checkpoints`.
+    /// Where code shadow-snapshots live (RFC PR3); defaults to the workspace's folder in Forge's
+    /// data directory (`snapshot::default_root`), never inside the project.
     checkpoint_root: std::path::PathBuf,
     checkpoint_root_custom: bool,
     /// The seq that began the current turn (its user message), keying this turn's snapshot dir.
@@ -3592,7 +3597,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // A turn whose diff REWRITES existing test files is the xarray-3364 failure shape: the
         // model changes test expectations to match its own behavior, the evaluator restores the
         // pristine tests, and the run fails. Before the turn completes: put the originals back
-        // (stash, or a patch when the model already committed the edits) and push back ONCE —
+        // (the edits are kept as a patch outside the repo, never stashed) and push back ONCE —
         // re-verify against the originals, shrink the fix rather than editing tests. The diff is
         // taken against the commit the turn started on, because the harness has the model commit
         // each verified unit and `git status` is then clean. Armed by `expect_code_change`, an
@@ -9474,10 +9479,32 @@ mod tests {
         assert!(pattern_diagnose("bash: docker: command not found").is_some());
         assert!(pattern_diagnose("ls: /tmp/missing: No such file or directory").is_some());
         assert!(pattern_diagnose("chmod: cannot access 'x.sh': Permission denied").is_some());
+        assert!(pattern_diagnose("sh: ./run.sh: Operation not permitted").is_some());
         assert!(pattern_diagnose("bind: address already in use").is_some());
         assert!(pattern_diagnose("curl: (7) Failed to connect: Connection refused").is_some());
         assert!(pattern_diagnose("cp: error writing 'x': No space left on device").is_some());
         assert!(pattern_diagnose("Cannot allocate memory").is_some());
+    }
+
+    /// d06: a Forge run was told to `chmod +x` or `sudo` its way past a read-only config file.
+    #[test]
+    fn permission_denied_diagnosis_never_offers_sudo_or_blanket_chmod() {
+        for result in [
+            "bash: ./deploy.sh: Permission denied",
+            "cp: cannot create regular file 'config/limits.conf': Permission denied",
+            "sed: couldn't open temporary file ./sedX: Operation not permitted",
+            "Permission denied (os error 13)",
+        ] {
+            let said = pattern_diagnose(result).unwrap();
+            assert!(said.contains("ls -ld"), "{said}");
+            assert!(said.contains("Do not use `sudo`"), "{said}");
+            assert!(!said.contains("try `chmod +x"), "{said}");
+            assert!(!said.contains("prefix with"), "{said}");
+        }
+        assert!(
+            SHELL_DIAGNOSE_SYSTEM.contains("Never suggest sudo"),
+            "the model-written diagnosis is held to the same rule"
+        );
     }
 
     #[test]
@@ -13915,7 +13942,7 @@ mod tests {
         git(&["init", "-q"]);
         // Pin line-ending handling so the repo is byte-deterministic regardless of the host's
         // global git config. Windows CI images default to `core.autocrlf=true`, which rewrites
-        // LF→CRLF on checkout — so a `git stash push` restore of a file this test wrote with LF
+        // LF→CRLF on checkout — so a restore of a file this test wrote with LF
         // would come back with CRLF and fail the byte-equality asserts. Disabling autocrlf keeps
         // the on-disk bytes exactly what the test committed on every platform.
         git(&["config", "core.autocrlf", "false"]);
@@ -14765,12 +14792,19 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
+        // This prompt arms the existing-tests guard, which restores modified test files in the
+        // session's workspace. Left on the checkout the tests run in, it reverted whoever had
+        // uncommitted edits to a `tests/` file (and stashed them before that); a scratch repo it
+        // can only ever look at keeps `cargo test` from touching the developer's work.
+        let scratch = clean_git_repo();
+        session.workspace = WorkspaceContext::new(&scratch).unwrap();
 
         session
             .run_turn("Review the suite and keep existing tests unchanged.")
             .await
             .unwrap();
         session.run_turn("Continue the same review.").await.unwrap();
+        let _ = std::fs::remove_dir_all(&scratch);
 
         let guidance_positions = session
             .transcript
@@ -14877,7 +14911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn modified_existing_tests_are_stashed_and_the_model_pushed_back_once() {
+    async fn modified_existing_tests_are_restored_and_the_model_pushed_back_once() {
         let dir = repo_with_modified_test();
         let provider = Arc::new(DescribeOnlyProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -14901,22 +14935,14 @@ mod tests {
              pristine-test guard re-drive"
         );
         assert_eq!(answer, "still only describing");
-        // The pristine test was restored (the stash took the rewritten expectations with it)…
+        // The pristine test was restored (the rewritten expectations were taken out of the tree)…
         assert_eq!(
             std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
             "assert fix() == 1\n",
             "the test file must be back at its committed content"
         );
         // …and the edits are recoverable, not destroyed.
-        let stashes = std::process::Command::new("git")
-            .args(["stash", "list"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(
-            !stashes.stdout.is_empty(),
-            "the test edits must be stashed, not discarded"
-        );
+        crate::test_state::assert_test_edits_kept_as_patch(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -14946,17 +14972,12 @@ mod tests {
             "assert fix() == 1\n",
             "explicit session contract must restore committed tests without bench mode"
         );
-        let stashes = std::process::Command::new("git")
-            .args(["stash", "list"])
-            .current_dir(&dir)
-            .output()
-            .unwrap();
-        assert!(!stashes.stdout.is_empty());
+        crate::test_state::assert_test_edits_kept_as_patch(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn bridge_modified_tests_are_stashed_and_pushed_back_once() {
+    async fn bridge_modified_tests_are_restored_and_pushed_back_once() {
         // Wave 6: the pristine-test guard is git-tree-based (it inspects the working tree, not
         // `resp.tool_calls`), so it already covers a CLI-BRIDGE turn — whose file edits happen in
         // the `forge mcp-serve` subprocess and only ever show up as a tree change. Proven here: a

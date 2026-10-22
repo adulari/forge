@@ -338,7 +338,7 @@ impl Tool for ReadFileTool {
             Some(p) if args.get("path").is_none() => p,
             _ => str_arg(args, "path")?,
         };
-        confine(path)?;
+        confine_read(path)?;
         check_readable_size(path).await?;
         let (start_line, end_line) = read_range(args);
 
@@ -542,7 +542,7 @@ async fn read_many(paths: &[Value]) -> String {
         };
         let (path, range) = split_line_range(requested);
         out.push_str(&format!("===== {} =====\n", shown(requested)));
-        if let Err(e) = confine(path) {
+        if let Err(e) = confine_read(path) {
             out.push_str(&format!("[error: {e}]\n"));
             continue;
         }
@@ -686,7 +686,7 @@ impl Tool for WriteFileTool {
         let content = str_arg(args, "content")?;
         confine(path)?;
         create_parent_dirs(path).await?;
-        tokio::fs::write(path, content).await?;
+        crate::fs_write::write(path, content).await?;
         Ok(format!("wrote {} bytes to {}", content.len(), shown(path)))
     }
 
@@ -756,13 +756,24 @@ impl Tool for AppendFileTool {
         let content = str_arg(args, "content")?;
         confine(path)?;
         create_parent_dirs(path).await?;
-        let mut file = tokio::fs::OpenOptions::new()
+        match tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .await?;
-        file.write_all(content.as_bytes()).await?;
-        file.flush().await?;
+            .await
+        {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes()).await?;
+                file.flush().await?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                // An owner-read-only file refuses an append too; rewrite it with the text added.
+                let mut whole = tokio::fs::read(path).await.map_err(|_| error)?;
+                whole.extend_from_slice(content.as_bytes());
+                crate::fs_write::write(path, whole).await?;
+            }
+            Err(error) => return Err(error.into()),
+        }
         Ok(format!(
             "appended {} bytes to {}",
             content.len(),
@@ -856,7 +867,7 @@ impl Tool for EditFileTool {
         };
         let (updated, note) = apply_edit_mode(&content, old, new, replace_all)
             .map_err(|e| ToolError::Failed(format!("{e} (in {path})")))?;
-        tokio::fs::write(path, &updated).await?;
+        crate::fs_write::write(path, &updated).await?;
         let plural = if replacements == 1 { "" } else { "s" };
         Ok(format!(
             "edited {} ({replacements} replacement{plural}){note}{}",
@@ -905,6 +916,9 @@ mod codex_patch;
 
 mod notebook;
 pub use notebook::NotebookEditTool;
+
+mod state_read;
+use state_read::confine_read;
 
 /// Apply a unified diff, or a Codex-style `*** Begin Patch` envelope, to the workspace. Mutates
 /// the workspace.
