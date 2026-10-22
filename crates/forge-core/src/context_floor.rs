@@ -432,11 +432,15 @@ impl Session {
         model: &str,
         specs: &[forge_provider::ToolSpec],
     ) -> Vec<Message> {
+        // The first request of a session waits for the startup window lookup right here, before
+        // anything is sized from a window the store may not know yet.
+        self.settle_window_lookup().await;
         let mut sent = self.transcript_with_preamble_and_tools(model, specs);
         if self.trim_calls_for_compaction() && self.compact_instead_of_trim(model).await {
             sent = self.transcript_with_preamble_and_tools(model, specs);
         }
         self.note_window_trim();
+        crate::turn_trace::dispatching(model);
         sent
     }
 

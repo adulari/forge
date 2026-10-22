@@ -1887,6 +1887,15 @@ impl Provider for CliProvider {
         guard.session.as_ref()?.context_fill
     }
 
+    async fn prewarm(
+        &self,
+        model: &str,
+        checkpoint: &CheckpointContext,
+        effort: Option<EffortLevel>,
+    ) {
+        self.prewarm_live(model, checkpoint, effort).await;
+    }
+
     async fn complete(
         &self,
         model: &str,
@@ -2746,6 +2755,7 @@ fn finish_persistent_turn(binary: &str, turn: TurnData) -> Result<ModelResponse,
 
 mod images;
 mod live;
+mod prewarm;
 mod proc_tree;
 use live::*;
 
@@ -2825,6 +2835,7 @@ impl CliProvider {
         apply_claude_bridge_home(self.kind, &mut cmd);
         put_in_own_process_group(&mut cmd);
 
+        tracing::debug!(target: "forge::turn", "bridge: spawn claude");
         let mut child = cmd.spawn()?;
         let pgid = child.id().map(|id| id as i32);
         let stdin = child.stdin.take().expect("piped stdin");
@@ -2857,6 +2868,7 @@ impl CliProvider {
             claude_session: resume.map(|(id, _, _)| id.to_string()),
             resumed: resume.is_some(),
             needs_init: true,
+            unused: false,
             effort,
             sink_path,
             sub_rx,
@@ -2894,16 +2906,25 @@ impl CliProvider {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .slot_for(owner);
-        // Never queue behind another call's turn (see `PersistentTurn::Busy`).
-        let Ok(mut guard) = slot.try_lock() else {
-            return Err(PersistentTurn::Busy);
+        // Never queue behind another call's turn (see `PersistentTurn::Busy`). The one thing worth
+        // waiting for is this conversation's own bridge process being warmed: it is the process
+        // this turn would otherwise spawn a second time.
+        let mut guard = match slot.try_lock() {
+            Ok(guard) => guard,
+            Err(_) if self.is_warming(owner) => {
+                match tokio::time::timeout(prewarm::PREWARM_WAIT, slot.lock()).await {
+                    Ok(guard) => guard,
+                    Err(_) => return Err(PersistentTurn::Busy),
+                }
+            }
+            Err(_) => return Err(PersistentTurn::Busy),
         };
 
         // Reuse only a session that matches the model and effort, has strictly grown (a shrink →
         // its in-process context is stale after a compaction/reset), is on the same history epoch,
         // and isn't mid-turn from a prior call that never finished (see `turn_in_flight`).
         let reuse = matches!(&guard.session, Some(s)
-            if s.model == bare && s.sent > 0 && resume::locate_sent(s.sent, s.mark, messages).is_some() && s.epoch == epoch && s.effort == effort && !s.turn_in_flight
+            if s.model == bare && (s.unused || (s.sent > 0 && resume::locate_sent(s.sent, s.mark, messages).is_some())) && s.epoch == epoch && s.effort == effort && !s.turn_in_flight
                 && live::same_workspace(s.workspace.as_deref(), checkpoint));
         let mut resume_plan: Option<(String, usize, Option<resume::SentMark>)> = None;
         let mut resume_pinned: Option<u64> = None;
@@ -2951,7 +2972,8 @@ impl CliProvider {
             let sess = session
                 .as_mut()
                 .expect("live session present after (re)spawn");
-            let fresh = sess.needs_init;
+            let needs_init = sess.needs_init;
+            let fresh = needs_init || sess.unused;
             let resumed = sess.resumed;
 
             // A resumed spawn that dies before producing output is retried ONCE as a fresh spawn
@@ -2973,12 +2995,14 @@ impl CliProvider {
                 }};
             }
 
-            if fresh && self.harness {
+            if needs_init && self.harness {
                 // Bound startup independently from a potentially long model turn. Respect a
                 // shorter provider timeout in tests/operator overrides, but never spend more than
                 // 30 seconds waiting for a local stdio MCP process to initialize.
                 let startup_timeout = self.timeout.min(Duration::from_secs(30));
-                if let Err(e) = sess.initialize_forge_mcp(startup_timeout).await {
+                let mcp_init = sess.initialize_forge_mcp(startup_timeout).await;
+                tracing::debug!(target: "forge::turn", "bridge: forge mcp ready");
+                if let Err(e) = mcp_init {
                     retry_fresh_or!(
                         return Err(PersistentTurn::Failed(ProviderError::Unavailable(format!(
                             "`{}` Forge MCP startup failed: {e}",
@@ -3033,6 +3057,7 @@ impl CliProvider {
             // Mark mid-turn BEFORE the writes/reads that can span minutes, so a cancelled caller
             // leaves this flag set and the next call refuses to reuse the session.
             sess.turn_in_flight = true;
+            sess.unused = false;
             // Arm a process-GROUP kill for the mid-turn window. A dropped future here does NOT
             // drop the `LiveSession` (it stays parked in the slot), so its `kill_on_drop` child
             // never fires — the whole bridge process TREE would leak. Disarmed once the turn ends.
@@ -3057,6 +3082,7 @@ impl CliProvider {
                 });
             }
 
+            tracing::debug!(target: "forge::turn", "bridge: prompt written");
             let drive_result = sess.drive_turn(self.timeout, self.kind, on_event).await;
             // The turn finished (Ok/Err) — it was NOT cancelled mid-flight — so disarm the group
             // kill: a successful turn KEEPS the live process, and the error paths tear it down.
@@ -3245,7 +3271,19 @@ async fn terminate(child: &mut Child, pgid: Option<i32>) {
         if let Some(pg) = pgid {
             let orphans = proc_tree::Descendants::snapshot(Some(pg));
             unsafe { libc::kill(-pg, libc::SIGTERM) };
-            tokio::time::sleep(KILL_GRACE).await;
+            // The grace is a ceiling, not a fixed wait: sleeping all of it made every teardown cost
+            // KILL_GRACE even for a process that exits at once, and the first prompt after an Esc
+            // waited it out before its replacement could even spawn.
+            let deadline = tokio::time::Instant::now() + KILL_GRACE;
+            while tokio::time::Instant::now() < deadline {
+                let child_gone = matches!(child.try_wait(), Ok(Some(_)));
+                // Signal 0 only asks whether any process of the group is still there.
+                let group_gone = unsafe { libc::kill(-pg, 0) } != 0;
+                if child_gone && group_gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
             orphans.kill();
             unsafe { libc::kill(-pg, libc::SIGKILL) };
         }
@@ -6190,6 +6228,214 @@ done
             "the first prompt must be written only after `initialize` and an `mcp_status` poll that \
              reports Forge connected"
         );
+    }
+
+    #[cfg(unix)]
+    fn warm_checkpoint(workspace: &std::path::Path) -> CheckpointContext {
+        CheckpointContext {
+            session: "warm-session".to_string(),
+            seq: 1,
+            root: workspace.join(".forge/checkpoints").display().to_string(),
+            workspace: workspace.display().to_string(),
+            mode: "bypass".to_string(),
+            epoch: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    fn warm_provider(fake: &str) -> CliProvider {
+        CliProvider::claude_code()
+            .with_harness(true)
+            .with_persistent(true)
+            .with_binary(fake)
+            .with_timeout(Duration::from_secs(60))
+    }
+
+    /// The process is started and handshaken before any prompt exists, and the first turn then
+    /// takes it over: one spawn, one handshake, the prompt written last.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prewarmed_process_serves_the_first_turn_without_a_second_spawn() {
+        let recorder = tempfile::tempdir().expect("handshake recorder");
+        let handshake = recorder.path().join("handshake.log");
+        let fake = make_fake_delayed_mcp_cli(&handshake);
+        let workspace = tempfile::tempdir().expect("session workspace");
+        let provider = warm_provider(&fake);
+        let checkpoint = warm_checkpoint(workspace.path());
+
+        provider
+            .prewarm("claude-cli::sonnet", &checkpoint, None)
+            .await;
+        let before: Vec<String> = std::fs::read_to_string(&handshake)
+            .expect("the warm-up spawned the fake CLI")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            before,
+            [
+                "transport:persistent",
+                "initialize",
+                "mcp_status",
+                "mcp_status"
+            ],
+            "the warm-up handshakes and writes no prompt"
+        );
+
+        let options = CompletionOptions {
+            checkpoint: Some(checkpoint),
+            ..CompletionOptions::default()
+        };
+        let mut sink = |_e: StreamEvent| {};
+        let response = provider
+            .complete_with(
+                "claude-cli::sonnet",
+                &[Message::user("use a Forge tool")],
+                &[],
+                &options,
+                &mut sink,
+            )
+            .await
+            .expect("the first turn runs on the warmed process");
+        assert_eq!(
+            response.content.trim(),
+            format!("ready:{}", workspace.path().display())
+        );
+        let steps: Vec<String> = std::fs::read_to_string(&handshake)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "transport:persistent",
+                "initialize",
+                "mcp_status",
+                "mcp_status",
+                "prompt"
+            ],
+            "no second process, no second handshake"
+        );
+    }
+
+    /// A prompt typed while the warm-up is still handshaking waits for that process instead of
+    /// being turned away as busy or starting a second one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_that_arrives_mid_warm_up_waits_for_it() {
+        let recorder = tempfile::tempdir().expect("handshake recorder");
+        let handshake = recorder.path().join("handshake.log");
+        let fake = make_fake_delayed_mcp_cli(&handshake);
+        let workspace = tempfile::tempdir().expect("session workspace");
+        let provider = std::sync::Arc::new(warm_provider(&fake));
+        let checkpoint = warm_checkpoint(workspace.path());
+
+        let warm = tokio::spawn({
+            let provider = std::sync::Arc::clone(&provider);
+            let checkpoint = checkpoint.clone();
+            async move {
+                provider
+                    .prewarm("claude-cli::sonnet", &checkpoint, None)
+                    .await
+            }
+        });
+        // Let the warm-up take the conversation's slot and start its handshake.
+        for _ in 0..200 {
+            if provider.is_warming(Some("warm-session")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(provider.is_warming(Some("warm-session")));
+
+        let options = CompletionOptions {
+            checkpoint: Some(checkpoint),
+            ..CompletionOptions::default()
+        };
+        let mut sink = |_e: StreamEvent| {};
+        let response = provider
+            .complete_with(
+                "claude-cli::sonnet",
+                &[Message::user("use a Forge tool")],
+                &[],
+                &options,
+                &mut sink,
+            )
+            .await
+            .expect("the turn waits for the warm-up and runs on its process");
+        warm.await.unwrap();
+        assert_eq!(
+            response.content.trim(),
+            format!("ready:{}", workspace.path().display())
+        );
+        let spawns = std::fs::read_to_string(&handshake)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "transport:persistent")
+            .count();
+        assert_eq!(spawns, 1, "the turn must not start a second process");
+        assert!(!provider.is_warming(Some("warm-session")));
+    }
+
+    /// A warmed process is only worth keeping for the turn it was started for: another rung means
+    /// another process, and the abandoned one is torn down rather than reused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_prewarmed_process_is_not_reused_for_another_rung() {
+        let recorder = tempfile::tempdir().expect("handshake recorder");
+        let handshake = recorder.path().join("handshake.log");
+        let fake = make_fake_delayed_mcp_cli(&handshake);
+        let workspace = tempfile::tempdir().expect("session workspace");
+        let provider = warm_provider(&fake);
+        let checkpoint = warm_checkpoint(workspace.path());
+
+        provider
+            .prewarm("claude-cli::sonnet", &checkpoint, None)
+            .await;
+        let options = CompletionOptions {
+            checkpoint: Some(checkpoint),
+            effort: Some(EffortLevel::High),
+            ..CompletionOptions::default()
+        };
+        let mut sink = |_e: StreamEvent| {};
+        provider
+            .complete_with(
+                "claude-cli::sonnet",
+                &[Message::user("use a Forge tool")],
+                &[],
+                &options,
+                &mut sink,
+            )
+            .await
+            .expect("the turn spawns the process it needs");
+        let spawns = std::fs::read_to_string(&handshake)
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "transport:persistent")
+            .count();
+        assert_eq!(spawns, 2, "warmed at the default rung, needed at high");
+    }
+
+    /// Teardown waits for the process group to exit, not for the whole grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_returns_when_the_process_is_gone_not_after_the_grace() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").kill_on_drop(true);
+        put_in_own_process_group(&mut cmd);
+        let mut child = cmd.spawn().expect("spawn sleep");
+        let pgid = child.id().map(|id| id as i32);
+
+        let started = std::time::Instant::now();
+        terminate(&mut child, pgid).await;
+
+        assert!(
+            started.elapsed() < KILL_GRACE / 2,
+            "SIGTERM ends `sleep` at once; terminate took {:?}",
+            started.elapsed()
+        );
+        assert!(child.try_wait().unwrap().is_some(), "the child is reaped");
     }
 
     /// A fake persistent claude whose FIRST turn replies normally but whose SECOND turn reads the

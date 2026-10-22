@@ -326,13 +326,17 @@ pub(crate) async fn build_session_with_self_mcp(
     // falls back to the seeds, and then it says so — here and in every routing rationale.
     let catalog = if !mock && config.mesh.auto_discover {
         let mut cached = read_cached_catalog();
-        if cached.is_none() {
+        // A pinned session routes nothing through the catalog, and an attended one outlives the
+        // detached refresh below, so one that is both has no reason to hold the first frame for the
+        // network (up to 12 s on a machine's first launch).
+        let routes_by_catalog = pin.is_none() || !presenter.is_attended();
+        if cached.is_none() && routes_by_catalog {
             // No catalog at all: the seed fallback can pick a disabled/unreachable provider, and a
             // one-shot run exits before a detached refresh lands. Wait (bounded) just this once.
             crate::cli::commands::models::first_run_discovery(&config).await;
             cached = read_cached_catalog();
         }
-        if cached.is_none() {
+        if cached.is_none() && routes_by_catalog {
             presenter.emit(forge_tui::PresenterEvent::Warning(
                 "no model catalog yet: built-in seed candidates for this session — discovery is \
                  running in the background and the next turn routes from the real catalog"
@@ -397,21 +401,10 @@ pub(crate) async fn build_session_with_self_mcp(
 
     let catalog = catalog
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
-    let unknown_windows =
-        pin_window::learn_pinned_windows(&store, &config, pin.as_deref(), mock).await;
-    if !unknown_windows.is_empty() {
-        let notice = format!(
-            "context window of {} is unknown — requests and auto-compaction are sized for {} \
-             tokens; set `[mesh.context_windows]` to the real window",
-            unknown_windows.join(", "),
-            forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW
-        );
-        if presenter.is_attended() {
-            presenter.emit(forge_tui::PresenterEvent::Warning(notice));
-        } else {
-            tracing::warn!("{notice}");
-        }
-    }
+    // A pinned model nothing on this machine knows the window of is looked up beside startup; the
+    // session's first request waits for it (see `forge_core::WindowLookup`), startup does not.
+    let window_lookup =
+        pin_window::start_pinned_window_lookup(&store, &config, pin.as_deref(), mock);
     let ctx_windows = store.all_model_contexts().unwrap_or_default();
     clock.mark("calibration + context windows");
     let repo_key = workspace_cwd.clone();
@@ -526,6 +519,7 @@ pub(crate) async fn build_session_with_self_mcp(
         )
         .context("starting session")?,
     };
+    session.set_window_lookup(window_lookup);
     clock.mark("tools + lattice + session start");
     if mock {
         // The router still names a real seed model; the mock provider answers regardless, so file

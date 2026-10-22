@@ -40,8 +40,10 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   and a run pinned to `inferhub::cb/deepseek-v4.1-flash` (1,048,576 tokens) compacted 13 messages
   down to 7 three or four times per question on a 390k-line repository, clipped tool output and
   trimmed messages from the request. A session now looks up the window of any pinned model nothing
-  knows yet before it starts (one bounded sweep, at most 6 s, `run/pin_window.rs`), and says so
-  when the window is still unknown afterwards, naming `[mesh.context_windows]`.
+  knows yet (one bounded sweep, at most 6 s, `run/pin_window.rs`) and its first request waits for
+  that lookup before it is sized, so the request never goes out on the floor; startup itself does
+  not wait (see [turn-latency.md](turn-latency.md)). It says so when the window is still unknown
+  afterwards, naming `[mesh.context_windows]`.
 - **An empty summary is never committed.** The summary replaces every message it folds, and the
   `session_compaction` row is upserted, so an empty one would erase the history *and* the previous
   real summary. Observed 2026-09-16: a summarizer answered 52K tokens of transcript with 13 tokens

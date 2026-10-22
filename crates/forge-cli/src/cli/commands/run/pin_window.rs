@@ -1,4 +1,6 @@
-//! Learn a pinned model's context window before the session sizes its first request.
+//! Learn a pinned model's context window before the session sizes its first request, without
+//! holding startup for it: the lookup runs in the background and the first request waits for it
+//! (`forge_core::WindowLookup`), by which time a person has typed a prompt.
 //!
 //! Context windows live in the store, written by the catalog sweep (`context_windows.rs`). A store
 //! that has never been swept — a scratch `FORGE_DB`, which is how `forge bench tasks` isolates each
@@ -11,7 +13,7 @@
 
 use super::*;
 
-/// Ceiling on the inline lookup. Every probe in the sweep runs concurrently under a 4 s timeout,
+/// Ceiling on the lookup. Every probe in the sweep runs concurrently under a 4 s timeout,
 /// so this only bounds a pathological resolver.
 const WINDOW_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(6);
 
@@ -45,32 +47,46 @@ fn pins_without_window(
         .collect()
 }
 
-/// Fetch the windows of pinned models nothing knows yet, bounded by [`WINDOW_LOOKUP_BUDGET`].
-/// Returns the members still unknown afterwards, which run on the conservative floor.
-pub(super) async fn learn_pinned_windows(
-    store: &Store,
+/// Start fetching the windows of pinned models nothing knows yet and return at once. `None` when
+/// nothing needs fetching; otherwise the handle the session's first request waits on, which carries
+/// the members still unknown afterwards (they run on the conservative floor).
+pub(super) fn start_pinned_window_lookup(
+    store: &Arc<Store>,
     config: &forge_config::Config,
     pin: Option<&str>,
     mock: bool,
-) -> Vec<String> {
-    let Some(pin) = pin.filter(|_| !mock) else {
-        return Vec::new();
-    };
-    let missing = pins_without_window(config, &store.all_model_contexts().unwrap_or_default(), pin);
+) -> Option<forge_core::WindowLookup> {
+    let pin = pin.filter(|_| !mock)?.to_string();
+    let missing = pins_without_window(
+        config,
+        &store.all_model_contexts().unwrap_or_default(),
+        &pin,
+    );
     if missing.is_empty() {
-        return missing;
+        return None;
     }
-    let lookup = crate::context_windows::fetch_and_persist(&missing);
-    if tokio::time::timeout(WINDOW_LOOKUP_BUDGET, lookup)
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            ?missing,
-            "context-window lookup for the pinned model timed out"
+    let (tx, lookup) = forge_core::WindowLookup::channel();
+    let store = Arc::clone(store);
+    let config = config.clone();
+    tokio::spawn(async move {
+        let fetch = crate::context_windows::fetch_and_persist(&missing);
+        if tokio::time::timeout(WINDOW_LOOKUP_BUDGET, fetch)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                ?missing,
+                "context-window lookup for the pinned model timed out"
+            );
+        }
+        let unknown = pins_without_window(
+            &config,
+            &store.all_model_contexts().unwrap_or_default(),
+            &pin,
         );
-    }
-    pins_without_window(config, &store.all_model_contexts().unwrap_or_default(), pin)
+        let _ = tx.send(Some(unknown));
+    });
+    Some(lookup)
 }
 
 #[cfg(test)]
@@ -113,15 +129,19 @@ mod tests {
 
     #[tokio::test]
     async fn a_mock_or_unpinned_run_never_looks_anything_up() {
-        let store = Store::open_in_memory().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let config = forge_config::Config::default();
-        assert!(learn_pinned_windows(&store, &config, None, false)
-            .await
-            .is_empty());
+        assert!(start_pinned_window_lookup(&store, &config, None, false).is_none());
+        assert!(start_pinned_window_lookup(&store, &config, Some("inferhub::x"), true).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pin_with_a_known_window_starts_no_lookup() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let config = forge_config::Config::default();
         assert!(
-            learn_pinned_windows(&store, &config, Some("inferhub::x"), true)
-                .await
-                .is_empty()
+            start_pinned_window_lookup(&store, &config, Some("claude-cli::sonnet"), false)
+                .is_none()
         );
     }
 }

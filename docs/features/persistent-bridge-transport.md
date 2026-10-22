@@ -90,6 +90,21 @@ transcript shrink (compaction), a workspace change (the session moved into or ou
 they were spawned in), a dead process, or the idle reaper. The reaper tears a parked
 process down after 20 minutes idle (`FORGE_BRIDGE_IDLE_TTL_SECS` overrides).
 
+**Prewarm.** A first turn would otherwise start `claude`, which starts `forge mcp-serve`, and wait
+for the tool server to report connected before the prompt can be written (1.0-1.5 s of "nothing
+happens"). A new conversation pinned to exactly one `claude-cli::` model starts that process when
+the TUI starts (`Session::prewarm_pinned_bridge` -> `Provider::prewarm` -> `CliProvider::prewarm_live`)
+and parks it in the conversation's slot marked `unused`: handshaken, holding no history. The first
+turn takes it over like a fresh spawn (full transcript), provided the model, effort, epoch and
+workspace match; otherwise it is torn down and the turn spawns as before. The warm-up holds the slot
+and marks the owner as warming, so a prompt typed before it finishes waits for it rather than being
+turned away as `Busy` or spawning a second process. Conversations with history are not warmed (they
+resume claude's session). The idle reaper covers a warmed process nobody uses.
+
+**Teardown is bounded by exit, not by a fixed sleep.** SIGTERM goes to the process group, then Forge
+polls for the group to be gone and sends SIGKILL after the 2 s grace at the latest. Interrupted
+turns used to pay the whole grace before the replacement process could spawn.
+
 **Respawn restores claude's own history.** claude's `session_id` is captured from the stream
 (`system/init`, `result`) into the live session and the shared resume state. A respawn for the
 same owner/model/epoch passes `--resume <id>` and sends only `render_resume_delta` of the messages

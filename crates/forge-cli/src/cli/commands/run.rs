@@ -637,7 +637,14 @@ pub(crate) async fn run_chat_tui(
                 }
             }
         });
-        if claude_quota_is_stale(&session, 300).await {
+        // A pinned session never routes on quota (a pin bypasses mesh selection), so the probe could
+        // only cost it a real model turn and a `claude` process beside its first prompt.
+        let pinned = {
+            let s = session.lock().await;
+            s.prewarm_pinned_bridge();
+            s.pinned_model().is_some()
+        };
+        if !pinned && claude_quota_is_stale(&session, 300).await {
             tokio::spawn({
                 let s = session.clone();
                 async move { refresh_claude_quota(&s).await }

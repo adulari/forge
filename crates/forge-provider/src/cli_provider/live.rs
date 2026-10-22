@@ -35,6 +35,9 @@ pub(super) struct LiveSession {
     pub(super) claude_session: Option<String>,
     /// Set at spawn, cleared once the Forge MCP handshake (harness mode) has completed.
     pub(super) needs_init: bool,
+    /// Handshaken ahead of any turn (see `prewarm`) and not yet given one: it holds no history,
+    /// so a turn takes it over as it would a fresh spawn, with the full transcript.
+    pub(super) unused: bool,
     /// Spawned with `--resume`: a failure before any output falls back to a fresh full-transcript
     /// spawn instead of failing the turn.
     pub(super) resumed: bool,
@@ -125,9 +128,26 @@ pub(super) type SlotRef = std::sync::Arc<tokio::sync::Mutex<LiveSlot>>;
 #[derive(Default)]
 pub(super) struct LiveMap {
     pub(super) slots: Vec<(Option<String>, SlotRef, std::time::Instant)>,
+    /// Owners whose process is being warmed ahead of a turn (see `prewarm`). The warm-up holds the
+    /// owner's slot for its whole run, so a turn that finds the slot locked and its owner here
+    /// waits for the process instead of being turned away.
+    warming: std::collections::HashSet<String>,
 }
 
 impl LiveMap {
+    /// Mark `owner` as warming; `false` when it already is.
+    pub(super) fn begin_warming(&mut self, owner: &str) -> bool {
+        self.warming.insert(owner.to_string())
+    }
+
+    pub(super) fn end_warming(&mut self, owner: &str) {
+        self.warming.remove(owner);
+    }
+
+    pub(super) fn is_warming(&self, owner: Option<&str>) -> bool {
+        owner.is_some_and(|owner| self.warming.contains(owner))
+    }
+
     /// The slot for `owner` if one exists — unlike [`Self::slot_for`] never creates or evicts.
     pub(super) fn peek(&self, owner: &str) -> Option<SlotRef> {
         self.slots
@@ -370,6 +390,7 @@ impl LiveSession {
         // streams real progress — is never truncated; only a genuinely stuck turn trips it.
         let max_claude_silence = idle.saturating_mul(6);
         let mut last_line = std::time::Instant::now();
+        let mut first_line = true;
         enum Ev {
             Line(std::io::Result<Option<String>>),
             Sub(StreamEvent),
@@ -409,6 +430,10 @@ impl LiveSession {
                     continue;
                 }
                 Ok(Ev::Line(Ok(Some(l)))) => {
+                    if first_line {
+                        first_line = false;
+                        tracing::debug!(target: "forge::turn", "bridge: first line from claude");
+                    }
                     last_line = std::time::Instant::now();
                     l
                 }
