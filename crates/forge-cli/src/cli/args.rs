@@ -312,13 +312,17 @@ pub(crate) enum Command {
         #[command(flatten)]
         session: Box<SessionFlags>,
     },
-    /// Start an interactive multi-turn chat session.
+    /// Start an interactive multi-turn chat session (bare `forge` on a terminal does the same).
     ///
     /// Surface: the interactive TUI by default; add `--plain` for line output (`--tui` is accepted
     /// too, for symmetry with `forge run`). Session continuity: `--resume <id>` reattaches by id,
     /// `--continue` reattaches the most-recent session of this directory (`--all-dirs`: of any
     /// directory), and a bare `--resume` opens the picker.
+    /// A trailing PROMPT is sent as the first message, like `claude "prompt"`.
     Chat {
+        /// First message, sent as soon as the session is up; the chat stays open afterwards.
+        #[arg(value_name = "PROMPT")]
+        prompt: Vec<String>,
         /// Use the offline deterministic mock provider.
         #[arg(long)]
         mock: bool,

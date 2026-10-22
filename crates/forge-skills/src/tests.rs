@@ -902,3 +902,38 @@ fn a_user_rust_skill_overrides_the_builtin() {
 }
 
 mod claude_frontmatter;
+
+#[test]
+fn claude_code_review_commands_are_builtin_and_overridable() {
+    let t = Tmp::new();
+    let cat = t.load();
+    for name in ["review", "code-review", "security-review"] {
+        let cmd = cat
+            .command(name)
+            .unwrap_or_else(|| panic!("/{name} builtin"));
+        assert_eq!(cmd.scope, Scope::Builtin);
+    }
+    match cat.resolve("/review 1234") {
+        Resolved::Command { prompt, cmd, .. } => {
+            assert_eq!(cmd.name, "review");
+            assert!(prompt.contains("Target: 1234"), "{prompt}");
+            assert!(prompt.contains("gh pr diff"));
+        }
+        other => panic!("expected the builtin /review, got {other:?}"),
+    }
+    match cat.resolve("/security-review") {
+        Resolved::Command { prompt, .. } => assert!(prompt.contains("merge-base")),
+        other => panic!("expected the builtin /security-review, got {other:?}"),
+    }
+
+    // An imported Claude Code `/review` replaces the builtin.
+    let t = Tmp::new();
+    t.cmd(
+        "project",
+        "review",
+        "---\ndescription: team review\n---\nOUR REVIEW $ARGUMENTS",
+    );
+    let cat = t.load();
+    assert_eq!(cat.command("review").unwrap().scope, Scope::Project);
+    assert_eq!(cat.command("code-review").unwrap().scope, Scope::Builtin);
+}

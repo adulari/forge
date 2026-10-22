@@ -5,37 +5,54 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Subcommand)]
 pub(crate) enum McpCmd {
-    /// Add an MCP server to the config (compatible with `claude mcp add` / `codex mcp add`).
+    /// Add an MCP server to the config. Takes `claude mcp add` syntax unchanged:
+    /// `add [options] <name> <commandOrUrl> [args...]` (and `codex mcp add`'s `-- <command>`).
     ///
     /// Examples:
-    ///   forge mcp add myserver -- npx -y @scope/mcp-server
-    ///   forge mcp add myserver --transport http --url https://api.example.com/mcp
-    ///   forge mcp add myserver -e API_KEY=secret -- node server.js
+    ///   forge mcp add sentry --transport http https://mcp.sentry.dev/mcp
+    ///   forge mcp add corridor -t http https://app.corridor.dev/api/mcp -H "Authorization: Bearer ..."
+    ///   forge mcp add myserver -e API_KEY=secret -- npx -y @scope/mcp-server
+    ///   forge mcp add myserver node server.js
     Add {
         /// Unique name for the server.
         name: String,
-        /// Transport protocol.
-        #[arg(long, default_value = "stdio")]
-        transport: McpTransportArg,
+        /// Transport protocol. Defaults to `stdio`, or `http` when the target is an http(s) URL.
+        #[arg(long, short = 't')]
+        transport: Option<McpTransportArg>,
         /// Config scope: `local`/`project` → `.forge/mcp.toml`; `user` → `~/.config/forge/mcp.toml`.
         #[arg(long, short = 's', default_value = "local")]
         scope: Scope,
         /// Environment variables to pass to the stdio process (KEY=VALUE).
         #[arg(long, short = 'e', value_name = "KEY=VALUE")]
         env: Vec<String>,
-        /// HTTP headers to add to requests (KEY=VALUE).
-        #[arg(long, value_name = "KEY=VALUE")]
+        /// HTTP headers to add to requests (`"Name: value"` or `Name=value`).
+        #[arg(long, short = 'H', value_name = "HEADER")]
         header: Vec<String>,
-        /// HTTP/SSE server URL (required for `--transport http` or `--transport sse`).
+        /// HTTP/SSE server URL; the positional URL form is the same thing.
         #[arg(long)]
         url: Option<String>,
         /// Environment variable holding the bearer token for auth.
         #[arg(long, value_name = "ENV_VAR")]
         bearer_token_env_var: Option<String>,
-        /// Command and arguments for stdio servers (everything after `--`).
-        #[arg(last = true, value_name = "COMMAND")]
+        /// The server URL (http/sse), or the stdio command and its arguments. Put a command whose
+        /// arguments start with `-` after `--`.
+        #[arg(value_name = "COMMAND_OR_URL")]
         command: Vec<String>,
     },
+    /// Add an MCP server from a JSON object, as `claude mcp add-json` does
+    /// (e.g. `'{"type":"http","url":"https://...","headers":{...}}'`). Secrets go to the keyring.
+    AddJson {
+        /// Unique name for the server.
+        name: String,
+        /// The server's JSON config (`command`/`args`/`env`, or `type` + `url`/`headers`).
+        json: String,
+        /// Config scope: `local`/`project` → `.forge/mcp.toml`; `user` → `~/.config/forge/mcp.toml`.
+        #[arg(long, short = 's', default_value = "local")]
+        scope: Scope,
+    },
+    /// List the configured MCP servers and their connection status (same as bare `forge mcp`).
+    #[command(visible_alias = "ls")]
+    List,
     /// Remove an MCP server from the config.
     Remove {
         /// Server name to remove.

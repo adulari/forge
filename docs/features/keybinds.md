@@ -50,7 +50,8 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `prev_tool_group` | Alt-↑ | Full-screen: focus the previous tool group; then ↑/↓ move, Enter or Space toggle, Esc lets go |
 | `next_tool_group` | Alt-↓ | Full-screen: focus the next tool group (same keys as above) |
 | `undo` | Ctrl-Z | Undo last file write (`/undo`) |
-| `compact` | Ctrl-L | Compact/summarize conversation (`/compact`) |
+| `compact` | Alt-L | Compact/summarize conversation (`/compact`). Was Ctrl-L until v2.21: a config that still binds it to Ctrl-L is moved to Alt-L on load while `redraw` keeps Ctrl-L |
+| `redraw` | Ctrl-L | Repaint the screen, as in a shell or Claude Code (session and transcript untouched) |
 | `model_picker` | Alt-M | Open model picker overlay |
 | `effort_cycle` | Alt-E | Cycle effort low→medium→high→xhigh→unset |
 | `temper_cycle` | Alt-T | Cycle temper/mode |
@@ -76,7 +77,7 @@ can always be opened with a click.
 ## 3. Implementation
 
 - **`forge-config`** — `KeyCombo`, `KeybindsConfig` (`BTreeMap<String, KeyCombo>`), a `Default`
-  with the binds above (the shipped default map has 26), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
+  with the binds above (the shipped default map has 27), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
   preserving all other config keys). `Config` gains a `keybinds` field.
 - **`forge-tui/keybinds.rs`** — `matches(combo, key_event)` compares a combo against a crossterm
   `KeyEvent`; `resolve_action()` returns the `KeyKind` for the first matching configured action.

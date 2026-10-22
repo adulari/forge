@@ -162,7 +162,7 @@ fn mcp_add_preserves_transport_and_stdio_command_tail() {
         cli.command.unwrap(),
         Command::Mcp {
             cmd: Some(McpCmd::Add {
-                transport: McpTransportArg::Stdio,
+                transport: Some(McpTransportArg::Stdio),
                 env,
                 command,
                 ..
@@ -187,13 +187,119 @@ fn mcp_add_preserves_transport_and_stdio_command_tail() {
         cli.command.unwrap(),
         Command::Mcp {
             cmd: Some(McpCmd::Add {
-                transport: McpTransportArg::Http,
+                transport: Some(McpTransportArg::Http),
                 url: Some(ref url),
                 header,
                 ..
             })
         } if url == "https://mcp.example" && header == ["X-Test=yes"]
     ));
+}
+
+#[test]
+fn mcp_add_accepts_claude_mcp_add_syntax() {
+    // `claude mcp add --transport http sentry https://mcp.sentry.dev/mcp --header "..."`.
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "sentry",
+        "https://mcp.sentry.dev/mcp",
+        "--header",
+        "Authorization: Bearer abc",
+    ])
+    .expect("claude-style HTTP add");
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Mcp {
+            cmd: Some(McpCmd::Add {
+                ref name,
+                transport: Some(McpTransportArg::Http),
+                url: None,
+                ref header,
+                ref command,
+                ..
+            })
+        } if name == "sentry"
+            && command == &["https://mcp.sentry.dev/mcp"]
+            && header == &["Authorization: Bearer abc"]
+    ));
+    // Short flags `-t`, `-H`, and a positional stdio command without `--`.
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "add",
+        "-t",
+        "sse",
+        "-H",
+        "X-Key: 1",
+        "legacy",
+        "https://x/sse",
+    ])
+    .expect("short flags");
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Mcp {
+            cmd: Some(McpCmd::Add {
+                transport: Some(McpTransportArg::Sse),
+                ref header,
+                ..
+            })
+        } if header == &["X-Key: 1"]
+    ));
+    let cli = Cli::try_parse_from(["forge", "mcp", "add", "fs", "npx", "server"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Mcp {
+            cmd: Some(McpCmd::Add { transport: None, ref command, .. })
+        } if command == &["npx", "server"]
+    ));
+}
+
+#[test]
+fn mcp_list_and_add_json_parse() {
+    for list in ["list", "ls"] {
+        let cli = Cli::try_parse_from(["forge", "mcp", list]).unwrap();
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Mcp {
+                cmd: Some(McpCmd::List)
+            }
+        ));
+    }
+    let cli = Cli::try_parse_from([
+        "forge",
+        "mcp",
+        "add-json",
+        "srv",
+        r#"{"type":"http","url":"https://x"}"#,
+        "-s",
+        "user",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Mcp {
+            cmd: Some(McpCmd::AddJson {
+                ref name,
+                scope: Scope::User,
+                ..
+            })
+        } if name == "srv"
+    ));
+}
+
+#[test]
+fn chat_takes_a_first_prompt() {
+    let cli = Cli::try_parse_from(["forge", "chat", "--mock", "explain", "this repo"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Chat { ref prompt, mock: true, .. } if prompt == &["explain", "this repo"]
+    ));
+    let cli = Cli::try_parse_from(["forge", "chat"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Command::Chat { ref prompt, .. } if prompt.is_empty()));
 }
 
 #[test]

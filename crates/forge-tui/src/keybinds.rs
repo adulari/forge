@@ -108,6 +108,7 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
         "next_tool_group" => Some(KeyKind::NextToolGroup),
         "undo" => Some(KeyKind::UndoWrite),
         "compact" => Some(KeyKind::CompactSession),
+        "redraw" => Some(KeyKind::Redraw),
         "model_picker" => Some(KeyKind::ModelPicker),
         "effort_cycle" => Some(KeyKind::EffortCycle),
         "temper_cycle" => Some(KeyKind::TemperCycle),
@@ -269,6 +270,16 @@ mod tests {
         assert_eq!(resolve_action(&kb, &ctrl_r), Some(KeyKind::ToggleReasoning));
         let alt_r = ev(KeyCode::Char('r'), KeyModifiers::ALT);
         assert_eq!(resolve_action(&kb, &alt_r), Some(KeyKind::ReloadConfig));
+    }
+
+    /// Ctrl+L repaints as in a shell; compaction (a model call) moved to Alt+L.
+    #[test]
+    fn ctrl_l_redraws_and_alt_l_compacts() {
+        let kb = KeybindsConfig::default();
+        let ctrl_l = ev(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert_eq!(resolve_action(&kb, &ctrl_l), Some(KeyKind::Redraw));
+        let alt_l = ev(KeyCode::Char('l'), KeyModifiers::ALT);
+        assert_eq!(resolve_action(&kb, &alt_l), Some(KeyKind::CompactSession));
     }
 
     #[test]

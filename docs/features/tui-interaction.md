@@ -37,7 +37,7 @@ when it scrolls, and a detail line for the selected row.
 
 A framed popup attached to the composer, at most eight list rows plus a detail line that shows the
 selected command's usage. An empty query lists the commands you ran most recently first (the title
-says `recent first`), then the registry order. Shortcuts (`F1`, `Alt+M`, `Ctrl+L`) are on the right;
+says `recent first`), then the registry order. Shortcuts (`F1`, `Alt+M`, `Alt+L`) are on the right;
 skills carry a `skill` tag and file commands a `command` tag. Enter runs, Tab completes into the
 composer, Esc closes.
 

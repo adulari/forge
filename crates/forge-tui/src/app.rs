@@ -444,6 +444,8 @@ pub struct App {
     last_tool_output: Option<(String, forge_types::ToolOutputRef)>,
     /// The full-output viewer, while open (`/output`, or a card's "view full output" row).
     pub output_view: Option<OutputView>,
+    /// Results of background slash commands (`/doctor`, `/diff`), drained every frame.
+    deferred: DeferredInbox,
     /// Attachment blocks shown inline as placeholders (pasted text or images): the placeholder
     /// lives in `input`, the backing content here. On submit, `resolve_paste_blocks()` substitutes
     /// text back inline and pulls images out as vision input.
@@ -915,6 +917,8 @@ pub enum KeyKind {
     UndoWrite,
     /// Compact/summarize the conversation.
     CompactSession,
+    /// Repaint the whole screen (Ctrl+L, as in a shell); the transcript and session are untouched.
+    Redraw,
     /// Hot-reload config without restarting.
     ReloadConfig,
     /// Ctrl+V (configurable) — open the `/voice` recording overlay, same as typing `/voice`.
@@ -1146,6 +1150,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::NewSession
         | KeyKind::UndoWrite
         | KeyKind::CompactSession
+        | KeyKind::Redraw
         | KeyKind::ReloadConfig
         | KeyKind::ToggleVoice => InputOutcome::Editing,
     }
@@ -3445,8 +3450,10 @@ use lines::{
 };
 mod idle_interrupt;
 pub use idle_interrupt::IdleInterrupt;
+mod deferred;
 mod harness_notice;
 mod job_notice;
+pub use deferred::{Deferred, DeferredInbox};
 mod output_view;
 mod render;
 mod screen_select;

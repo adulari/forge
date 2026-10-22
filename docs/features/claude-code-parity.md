@@ -198,3 +198,39 @@ Shapes follow `claude -p --output-format stream-json` (`crates/forge-tui/src/str
 A write to a closed stdout (`forge mcp tools | head`) exits 141 quietly; any other stdout/stderr
 write failure (`> /dev/full`) prints one `error:` line and exits 1. Neither changes how the daemon
 handles SIGPIPE.
+
+## Entry points
+
+- Bare `forge` on an interactive terminal starts `forge chat`, as bare `claude` starts a session,
+  once a provider is configured. With no provider, or when stdin or stdout is not a terminal (a
+  pipe, CI, `TERM=dumb`), it prints the short setup or common-commands panel and exits 0 as before
+  (`first_run.rs`).
+- `forge chat "prompt"` sends the prompt as the first message as soon as the session is up and
+  leaves the chat open, like `claude "prompt"`. It dispatches like typed input, so a `/command`
+  works too; when the automatic project setup starts first, the prompt queues behind it. With
+  `--plain` the prompt runs first and stdin takes over afterwards.
+- `forge mcp add` takes `claude mcp add` syntax: `forge mcp add [options] <name> <commandOrUrl>
+  [args...]` with `-t/--transport`, `-H/--header "Name: value"` (Forge's older `Name=value` still
+  works; the first separator wins, so `Bearer abc==` keeps its padding), `-e/--env` and `-s/--scope`.
+  A URL target with no transport means `http`, where Claude Code would try to spawn the URL as a
+  stdio command. `--url` and `-- <command>` still work. `forge mcp list` (alias `ls`) is bare
+  `forge mcp`. `forge mcp add-json <name> '<json>'` takes one server's `.mcp.json` entry; a token in
+  its env or headers goes to the keyring, as with `forge mcp import`.
+  Not mapped: `--client-id`, `--client-secret`, `--callback-port` (OAuth client settings live in
+  `mcp.toml`, see mcp-client.md), `add-from-claude-desktop` (`forge mcp import` scans Claude
+  Desktop), `reset-project-choices`, and `serve` (`forge mcp agent`).
+
+## Slash commands and keys from Claude Code
+
+| Claude Code | Forge |
+|---|---|
+| `/clear` (`/reset`, `/new`) | starts a new conversation with an empty context, same as `/new`. Clearing only the screen is now `/cls` (it was `/clear` before v2.21) |
+| `/context` | the next request's estimated size by category (system prompt, tool definitions, project instructions, memory/goal/tasks, your messages, replies, tool results, harness notes), with a bar and percentages when the model's window is known, plus the provider's count for the last request. A text breakdown, not CC's coloured grid |
+| `/diff [path]` | the uncommitted changes against `HEAD`, staged or not, with untracked files listed: the searchable full-screen viewer with diff colours, scrollback lines in `--inline` mode. Runs git off the render loop, so it works while a turn runs |
+| `/permissions` (`/allowed-tools`) | the temper and every allow/ask/deny rule with where it came from (config, an always-allow answer, this session); built-in safety rules are counted. `/permissions allow\|ask\|deny Bash(git log:*) Read` adds rules for this session in CC syntax. No interactive editor and no removal: persistent rules stay in `[[permissions.rules]]` |
+| `/mcp reconnect [server]` | drops and re-establishes one configured server, or all of them, in the background; `/mcp` still lists |
+| `/add-dir <path>` | the file tools may work in that directory for the rest of the session exactly as with a `[tools] extra_roots` entry (reachable when confined; inside the project for Auto-edit). Session-only, and bridged `claude-cli::`/`codex-cli::` turns keep the roots their tool server started with |
+| `/doctor` | `forge doctor`'s local checks (config, credentials, model health, daemon, Anywhere, language servers, Ollama, store, environment) in the full-screen viewer. Provider reachability and bridge round-trips stay with the CLI command, since they make network calls and spend quota; nothing is auto-fixed |
+| `/rename <title>` | names the session in `/sessions`, the resume picker and the apps; bare `/rename` shows the current name |
+| `/review`, `/code-review`, `/security-review` | built-in commands: a correctness review of the uncommitted diff, a PR number, a branch or a path (`--fix` applies verified fixes), and a security review of the branch against the remote default branch. A user or project command with the same name replaces them; CC's effort levels and `--comment` are not supported |
+| Ctrl+L | repaints the screen. Compaction moved from Ctrl+L to Alt+L (`[keybinds.binds] compact`); a config that still binds `compact` to Ctrl+L is moved on load while `redraw` keeps Ctrl+L |

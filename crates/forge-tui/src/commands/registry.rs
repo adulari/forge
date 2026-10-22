@@ -26,6 +26,16 @@ pub const COMMANDS: &[Command] = &[
         usage: "/status",
     },
     Command {
+        name: "context",
+        desc: "what fills the context window: system prompt, tools, instructions, conversation, free space",
+        usage: "/context",
+    },
+    Command {
+        name: "diff",
+        desc: "the working tree's uncommitted changes (git diff, untracked files listed)",
+        usage: "/diff [path]",
+    },
+    Command {
         name: "sessions",
         desc: "browse & resume past sessions",
         usage: "/sessions",
@@ -109,8 +119,23 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "mcp",
-        desc: "list connected MCP servers (or one server's tools: /mcp <server>)",
-        usage: "/mcp [server]",
+        desc: "list connected MCP servers, one server's tools (/mcp <server>), or reconnect them",
+        usage: "/mcp [server] | /mcp reconnect [server]",
+    },
+    Command {
+        name: "permissions",
+        desc: "list the permission rules in force; add a session rule with allow/ask/deny",
+        usage: "/permissions [allow|ask|deny <Tool(pattern)>]",
+    },
+    Command {
+        name: "add-dir",
+        desc: "let file tools work in another directory this session, like the workspace",
+        usage: "/add-dir <path>",
+    },
+    Command {
+        name: "doctor",
+        desc: "check config, providers, store and daemon without leaving the session",
+        usage: "/doctor",
     },
     Command {
         name: "init",
@@ -124,8 +149,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "new",
-        desc: "start a fresh session",
+        desc: "start a fresh session (also /clear, /reset)",
         usage: "/new",
+    },
+    Command {
+        name: "rename",
+        desc: "name this session (shown in /sessions and the resume picker)",
+        usage: "/rename <title>",
     },
     Command {
         name: "rewind",
@@ -224,8 +254,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "clear",
-        desc: "clear the screen (keep the session)",
+        desc: "start a new conversation with an empty context, as in Claude Code (same as /new)",
         usage: "/clear",
+    },
+    Command {
+        name: "cls",
+        desc: "clear the screen and keep the session",
+        usage: "/cls",
     },
     Command {
         name: "usage",

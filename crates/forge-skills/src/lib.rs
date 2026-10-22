@@ -352,6 +352,11 @@ impl Catalog {
         if !self.commands.contains_key("rust") {
             self.insert_command(builtin_rust_command());
         }
+        for command in builtin_review::builtin_review_commands() {
+            if !self.commands.contains_key(&command.name) {
+                self.insert_command(command);
+            }
+        }
     }
 
     /// Register the skills compiled into the binary (methodology bundled inline, no `dir` to read).
@@ -724,6 +729,7 @@ pub fn parse_tier(s: &str) -> Option<TaskTier> {
     }
 }
 
+mod builtin_review;
 pub use builtin::orchestrate_system_guidance;
 use builtin::{builtin_orchestrate_command, builtin_rust_command, builtin_skills};
 use parse::{parse_command, parse_skill_meta};

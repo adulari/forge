@@ -5,6 +5,17 @@ use std::io::IsTerminal;
 use crate::doctor::{check, Check, Status};
 
 pub(crate) fn environment_checks() -> Vec<Check> {
+    environment_checks_with(true)
+}
+
+/// The checks for `/doctor` inside the running TUI. The raw-mode probe is skipped: entering then
+/// leaving raw mode would switch the live session's terminal to cooked mode (keys echo and wait
+/// for Enter), and a TUI that is drawing has already shown that raw mode works.
+pub(crate) fn environment_checks_in_tui() -> Vec<Check> {
+    environment_checks_with(false)
+}
+
+fn environment_checks_with(probe_raw_mode: bool) -> Vec<Check> {
     let mut out = Vec::new();
 
     // git
@@ -44,7 +55,7 @@ pub(crate) fn environment_checks() -> Vec<Check> {
     // More authoritative than the TERM heuristic — a box where this fails genuinely can't run the
     // full-screen UI, while one where it succeeds can (even with an odd TERM). Only meaningful on an
     // interactive stdout, so it's gated on `tty`.
-    let raw_probe = tty.then(raw_mode_probe);
+    let raw_probe = (tty && probe_raw_mode).then(raw_mode_probe);
     let (status, detail, fix) = if !tty {
         (Status::Info, "non-interactive (piped/CI)".to_string(), None)
     } else if let Some(Err(e)) = &raw_probe {

@@ -619,6 +619,26 @@ impl McpManager {
         self.conns.lock().remove(name);
     }
 
+    /// The enabled, allowed servers from config, by name (what `/mcp reconnect` reconnects).
+    pub fn configured_servers(&self) -> Vec<String> {
+        self.config
+            .active_servers()
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    /// Drop a configured server's connection and connect it again (`/mcp reconnect <name>`).
+    pub async fn reconnect_server(&self, name: &str) -> Result<(), String> {
+        let server = self
+            .config
+            .active_servers()
+            .find(|s| s.name == name)
+            .cloned()
+            .ok_or_else(|| format!("no enabled MCP server named '{name}' in the config"))?;
+        self.disconnect(name);
+        self.connect_one(&server).await
+    }
+
     /// The tools advertised to the model: just the fixed meta-tools (search / call / resources /
     /// prompt). Server tools are reached *through* `mcp_call`, never advertised individually — so
     /// the per-turn tool list stays tiny regardless of how many tools a server has (a 313-tool
@@ -1241,6 +1261,34 @@ mod tests {
 
     async fn manager_with_test_server(config: McpConfig) -> McpManager {
         testsupport::manager_with_echo(&config).await
+    }
+
+    #[tokio::test]
+    async fn reconnect_retries_a_configured_server_and_refuses_unknown_names() {
+        let config = McpConfig {
+            servers: vec![forge_config::McpServerConfig {
+                name: "ghost".into(),
+                transport: forge_config::McpTransport::Stdio {
+                    command: "/nonexistent/forge-mcp-ghost".into(),
+                    args: vec![],
+                    env: Default::default(),
+                },
+                auth: None,
+                secret_env: vec![],
+                enabled: true,
+                shared: None,
+            }],
+            ..McpConfig::default()
+        };
+        let mgr = McpManager::connect_all(&config).await;
+        assert_eq!(mgr.configured_servers(), vec!["ghost".to_string()]);
+        assert!(
+            mgr.reconnect_server("ghost").await.is_err(),
+            "still cannot spawn"
+        );
+        assert_eq!(mgr.status_lines()[0].status, "failed");
+        let unknown = mgr.reconnect_server("nope").await.unwrap_err();
+        assert!(unknown.contains("no enabled MCP server named 'nope'"));
     }
 
     #[tokio::test]

@@ -41,7 +41,10 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::ToolOutput
         | CommandAction::Image(_)
         | CommandAction::Statusline(_)
-        | CommandAction::Voice => Immediate,
+        | CommandAction::Voice
+        // Neither takes the session lock: git and the checks run on their own thread.
+        | CommandAction::Diff(_)
+        | CommandAction::Doctor => Immediate,
         CommandAction::Dispatch(_)
         | CommandAction::PinModel(_)
         | CommandAction::ListModels
@@ -77,6 +80,11 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Workflow(_)
         | CommandAction::Heartbeat(_)
         | CommandAction::Duel(_)
+        | CommandAction::Context
+        | CommandAction::Permissions(_)
+        | CommandAction::McpReconnect(_)
+        | CommandAction::AddDir(_)
+        | CommandAction::Rename(_)
         // A file command/skill; `route_busy_line` refines this once the catalog says which.
         | CommandAction::Unknown(_) => Queue,
         // Resume/Undo/Checkpoints pick a different point of the conversation to return to, which
@@ -183,7 +191,9 @@ mod tests {
             "/sessions",
             "/board",
             "/config",
-            "/clear",
+            "/cls",
+            "/diff",
+            "/doctor",
             "/btw why is the sky blue",
             "/side hi",
             "/remote",
@@ -200,7 +210,13 @@ mod tests {
             "/model groq::x",
             "/models",
             "/mcp",
+            "/mcp reconnect",
             "/new",
+            "/clear",
+            "/context",
+            "/permissions",
+            "/add-dir ../lib",
+            "/rename x",
             "/mode",
             "/assay",
             "/checkpoint x",

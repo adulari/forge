@@ -114,6 +114,7 @@ mod hooks_turn;
 mod hooks_worktree;
 pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
+pub mod context_report;
 mod file_restore;
 mod instructions;
 pub mod job_wake;
@@ -158,6 +159,7 @@ mod session_lifecycle;
 mod session_restore;
 mod session_rewind;
 pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};
+pub mod session_slash_controls;
 mod session_usage_detail;
 mod session_virtual_tools;
 mod session_worktree;
@@ -4967,6 +4969,8 @@ mod tests {
 
     #[path = "bridge_trace.rs"]
     mod bridge_trace_tests;
+    #[path = "session_slash_controls.rs"]
+    mod session_slash_controls_tests;
 
     #[path = "compaction_summary.rs"]
     mod compaction_summary_tests;
