@@ -18,8 +18,6 @@ impl crate::Session {
     }
 
     pub(crate) fn commit_nudges_on(&self) -> bool {
-        self.config.git.commit_nudge
-            && self.config.git.commit_policy.nudges()
-            && self.advisory_nudges_on()
+        self.config.git.commit_nudge && self.commit_policy().nudges() && self.advisory_nudges_on()
     }
 }

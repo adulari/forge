@@ -252,7 +252,7 @@ impl Session {
         let cwd = self.workspace.display();
         let os = std::env::consts::OS;
         let env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n</env>");
-        let base = crate::commit_policy::apply(FORGE_SYSTEM, self.config.git.commit_policy);
+        let base = crate::commit_policy::apply(FORGE_SYSTEM, self.commit_policy());
         let mut msgs = vec![Message::system(base.as_ref()), Message::system(env)];
         // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
         // context, so it reaches direct AND bridge providers without touching the bridge preamble.

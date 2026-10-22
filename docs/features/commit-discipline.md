@@ -56,6 +56,16 @@ edit-20 reminder for a single file used to vanish.
 `git commit -a`) and never to pass `--no-verify`/`-n`: a failing pre-commit hook is fixed, not
 skipped.
 
+## Commit policy (`[git] commit_policy`)
+
+`auto` (the default) is `unit` in an interactive session and `end` in a headless one-shot run
+(`forge run`, `forge run -p`, `forge bench`). Nobody reviews per-unit commits there, and each one is
+a model round trip: the baseline parity run saw a commit-only call in 25 to 27 of 26 tasks per
+bridged haiku seed (50 calls, a median 1.2 s each), where Claude Code committed nothing. `end` keeps
+one commit at the end of the task; `never` leaves the tree dirty. An explicit `unit`, `end` or
+`never` in the config always wins over `auto`. A run handed to the daemon (`forge run` without
+`--no-publish-to-fleet`) is a daemon session someone may follow, so it stays interactive.
+
 ## Commit attribution (`[git] coauthor = true`)
 
 The system prompt promises "a Co-Authored-By: Forge trailer is added automatically by a git hook"
@@ -114,3 +124,6 @@ The system-prompt guidance stays on regardless; it is part of what Forge is. A m
   a temp repository: the mid-turn reminder lands right after the edit that made it due; the next
   turn opens by naming the uncommitted file until it is committed outside Forge; `commit_nudge =
   false` silences everything.
+- `tests::commit_nudge_tests::auto_is_unit_until_a_one_shot_run_says_otherwise_and_an_explicit_choice_always_wins`
+  and `a_one_shot_default_silences_the_reminders_that_an_interactive_auto_session_gets` — the
+  resolved policy decides the system prompt's version-control paragraph and the reminders.

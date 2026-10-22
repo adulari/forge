@@ -549,6 +549,11 @@ impl ForgeMcp {
             }
             Err(e) => (format!("error: {e}"), false),
         };
+        let out = if self.lean {
+            deferred::route_job_hint(&name, out)
+        } else {
+            out
+        };
         let out = permission::with_withheld_note(out, withheld.as_ref(), ok);
         if ok {
             forge_core::evidence_capture::record_bridge_verification_proof(&name, &args, &out);
@@ -674,7 +679,10 @@ impl ForgeMcp {
             return tools;
         }
         let (core, deferred) = deferred::partition(tools);
-        let mut core: Vec<Tool> = core.into_iter().map(deferred::slim).collect();
+        let mut core: Vec<Tool> = core
+            .into_iter()
+            .map(|tool| deferred::route_job_tool(deferred::slim(tool)))
+            .collect();
         core.extend(deferred::meta_tools(&deferred).into_iter().flatten());
         core
     }
@@ -1529,6 +1537,23 @@ mod tests {
             bytes(&lean),
             bytes(&full)
         );
+    }
+
+    #[test]
+    fn the_lean_shell_tool_does_not_send_the_model_to_an_unlisted_shell_job() {
+        let shell_description = |lean: bool| {
+            test_server(lean)
+                .tool_list()
+                .into_iter()
+                .find(|t| t.name == "shell")
+                .and_then(|t| t.description)
+                .unwrap()
+                .to_string()
+        };
+        assert!(shell_description(false).contains("the `shell_job` tool"));
+        let lean = shell_description(true);
+        assert!(!lean.contains("the `shell_job` tool"), "{lean}");
+        assert!(lean.contains("tool_call"), "{lean}");
     }
 
     #[test]

@@ -1790,6 +1790,8 @@ pub struct Session {
     /// The process exits once its turn is answered (`forge run`): post-turn side calls are skipped
     /// (see `run_post_turn_side_calls`).
     one_shot: bool,
+    /// What `[git] commit_policy = "auto"` resolves to (see `Session::set_default_commit_policy`).
+    default_commit_policy: forge_config::CommitPolicy,
     /// Pinned ids no discovered catalog lists (startup warned "unknown model"). One fast provider
     /// rejection of such an id ends the turn instead of waiting out an outage backoff.
     pub(crate) unverified_models: Vec<String>,

@@ -49,7 +49,7 @@ pub use sandbox::{ApplyResult, SandboxPolicy};
 pub use shell::{
     reap_orphan_tunnels, scope_job_exit_sink, set_preview_settings, JobExit, JobExitSink,
     PreviewSettings, ReapReason, ReapReport, ReapedTunnel, RtkRewriter, ShellJobTool, ShellTool,
-    TunnelRecord,
+    TunnelRecord, JOB_HINT,
 };
 pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,

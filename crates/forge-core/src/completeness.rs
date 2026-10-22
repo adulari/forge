@@ -672,16 +672,27 @@ pub(crate) fn adopt_redrive_text(final_text: &mut String, redrive_text: String) 
 }
 
 /// One-shot review pushed before a changed turn ends. `git diff` alone never lists a NEW untracked
-/// file, so a turn that only created files saw an empty diff and reviewed from memory.
-pub(crate) const COMPLETENESS_NUDGE: &str = "Before finishing, do ONE final review (a \
-        single bounded pass — do NOT re-explore the codebase): run `git status --short` and \
-        `git diff HEAD` once to see your COMPLETE change (a new untracked file is absent from \
-        the diff, so read each one the status lists), re-read the original request and write the \
-        distinct requirements/cases it lists (issues routinely specify several, \
-        e.g. \"reject a dotted blueprint name AND a dotted endpoint\"), and for \
-        each confirm your change already handles it. Only if the change is MISSING a \
-        requirement, add that specific fix — otherwise finish. A change that \
-        handles only the first of several cases is INCOMPLETE.";
+/// file, so a turn that only created files saw an empty diff and reviewed from memory. The diff is
+/// taken against the commit the turn started from: a model that committed its work first would
+/// otherwise see an empty `git diff HEAD` and spend an extra call finding its own commit.
+pub(crate) fn completeness_nudge(turn_start: Option<&str>) -> String {
+    let diff = match turn_start {
+        Some(sha) => format!(
+            "`git diff {sha}` (everything since this turn began, commits you made included)"
+        ),
+        None => "`git diff HEAD`".to_string(),
+    };
+    format!(
+        "Before finishing, do ONE final review (a single bounded pass — do NOT re-explore the \
+         codebase): run `git status --short` and {diff} once to see your COMPLETE change (a new \
+         untracked file is absent from the diff, so read each one the status lists), re-read the \
+         original request and write the distinct requirements/cases it lists (issues routinely \
+         specify several, e.g. \"reject a dotted blueprint name AND a dotted endpoint\"), and for \
+         each confirm your change already handles it. Only if the change is MISSING a \
+         requirement, add that specific fix — otherwise finish. A change that handles only the \
+         first of several cases is INCOMPLETE."
+    )
+}
 
 impl crate::Session {
     /// The turn's answer once any review or verification re-drive has finished. An unresolved
@@ -723,22 +734,33 @@ impl crate::Session {
             "completeness check — reviewing the change against every requirement before finishing"
                 .to_string(),
         ));
+        let nudge = completeness_nudge(self.turn_start_head());
         let nseq = self.next_seq();
         let _ = self
             .store
-            .add_message(&self.id, nseq, Role::System, COMPLETENESS_NUDGE, None);
-        self.transcript.push(Message::system(COMPLETENESS_NUDGE));
+            .add_message(&self.id, nseq, Role::System, &nudge, None);
+        self.transcript.push(Message::system(nudge));
     }
 }
 
 #[cfg(test)]
 mod review_answer_tests {
-    use super::{answer_after_review, COMPLETENESS_NUDGE};
+    use super::{answer_after_review, completeness_nudge};
 
     #[test]
     fn review_nudge_points_at_untracked_files_not_just_the_tracked_diff() {
-        assert!(COMPLETENESS_NUDGE.contains("git status --short"));
-        assert!(COMPLETENESS_NUDGE.contains("untracked"));
+        let nudge = completeness_nudge(None);
+        assert!(nudge.contains("git status --short"));
+        assert!(nudge.contains("untracked"));
+    }
+
+    #[test]
+    fn review_nudge_diffs_against_the_turn_start_when_it_is_known() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let nudge = completeness_nudge(Some(sha));
+        assert!(nudge.contains(&format!("`git diff {sha}`")), "{nudge}");
+        assert!(!nudge.contains("git diff HEAD"), "{nudge}");
+        assert!(completeness_nudge(None).contains("`git diff HEAD`"));
     }
 
     #[test]

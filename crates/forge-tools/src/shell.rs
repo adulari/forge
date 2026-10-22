@@ -49,7 +49,7 @@ mod preview_links;
 pub use preview_links::live_preview_urls;
 mod pty;
 mod rtk;
-pub use background::ShellJobTool;
+pub use background::{ShellJobTool, JOB_HINT};
 pub use rtk::RtkRewriter;
 mod batch;
 mod capture;
@@ -161,7 +161,7 @@ impl Tool for ShellTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "POSIX sh -c command line. Required unless `commands` is given." },
-                "commands": { "type": "array", "items": { "type": "string" }, "maxItems": 20, "description": "Several command lines to run IN ORDER in one call (instead of `command`), e.g. [\"cargo build\", \"cargo test -p x\", \"git status --short\"]. Each runs like a separate call (own exit code, own timeout) and the result has one section per command. Stops at the first failure unless stop_on_error is false. Not combinable with background, pty or poll mode." },
+                "commands": { "type": "array", "items": { "type": "string" }, "maxItems": 20, "description": "Command lines to run IN ORDER (instead of `command`); write newlines and tabs inside them as \\n and \\t. E.g. [\"cargo build\", \"cargo test -p x\", \"git status --short\"]. Each runs like a separate call (own exit code, own timeout) and the result has one section per command. Stops at the first failure unless stop_on_error is false. Not combinable with background, pty or poll mode." },
                 "stop_on_error": { "type": "boolean", "description": "With `commands`: stop at the first command that fails (default true)." },
                 "cwd": { "type": "string", "description": "Working directory; defaults to the project root." },
                 "timeout_secs": { "type": "integer", "minimum": 1, "description": "Default 120; clamped to 600. In poll mode this is the per-call budget, clamped to 100s." },
@@ -1423,6 +1423,7 @@ mod tests {
             .await
             .unwrap();
         assert!(started.contains("started background job"), "{started}");
+        assert!(started.contains(JOB_HINT), "{started}");
         let pid: u32 = started
             .split("job ")
             .nth(1)

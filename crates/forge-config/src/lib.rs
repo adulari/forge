@@ -1443,8 +1443,9 @@ pub struct GitConfig {
     /// asks the model to offer the user a push (Forge never pushes on its own). `0` disables it.
     #[serde(default = "default_push_nudge_ahead")]
     pub push_nudge_ahead: u32,
-    /// `unit` (default), `end`, or `never`: swaps the system prompt's version-control paragraph
-    /// and, for anything but `unit`, silences the commit/push reminders above.
+    /// `auto` (default: `unit` interactively, `end` for headless one-shot runs), `unit`, `end`, or
+    /// `never`: swaps the system prompt's version-control paragraph and, for anything but `unit`,
+    /// silences the commit/push reminders above.
     #[serde(default)]
     pub commit_policy: CommitPolicy,
 }

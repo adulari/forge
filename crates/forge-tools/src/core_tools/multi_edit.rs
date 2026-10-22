@@ -91,8 +91,9 @@ impl Tool for MultiEditTool {
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Edits applied in order; each is {old, new} (same rules as \
-                                    edit_file), optionally with its own `path`.",
+                    "description": "Edits in order, each {old, new} with optional `path`; write tabs \
+                                    and newlines inside strings as \\t and \\n. Same rules as \
+                                    edit_file.",
                     "items": {
                         "type": "object",
                         "properties": {
