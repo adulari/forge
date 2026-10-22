@@ -486,8 +486,8 @@ impl Session {
         &self.checkpoint_root
     }
 
-    /// Override where code shadow-snapshots are stored (default `.forge/checkpoints`). Used by the
-    /// composition root to anchor them under the project `.forge/`, and by tests for isolation.
+    /// Override where code shadow-snapshots are stored (default: the workspace's folder in Forge's
+    /// data directory, see `snapshot::default_root`). Used by tests for isolation.
     pub fn set_checkpoint_root(&mut self, root: impl Into<std::path::PathBuf>) {
         let root = root.into();
         self.checkpoint_root = if root.is_absolute() {

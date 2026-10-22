@@ -332,71 +332,52 @@ pub(crate) fn modified_existing_tests(
         .collect()
 }
 
-/// How the model's test edits were taken out of the tree, so the push-back can say how to get
-/// them back.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Restored {
-    Stashed,
-    Patch(PathBuf),
-}
-
-/// Stash the given pathspecs at `root` (`git stash push -- <paths>`), restoring those files to
-/// their committed state while keeping the edits recoverable via `git stash pop`. Returns whether
-/// the stash actually succeeded — the guard only fires on success (a failed stash leaves the tree
-/// untouched, and claiming "tests restored" would then be a lie).
-fn stash_paths(root: Option<&Path>, paths: &[String]) -> bool {
-    let mut args = vec!["stash", "push", "--quiet", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git_output(root, &args).is_some()
-}
-
-/// Whether `paths` differ between `base` and `HEAD`, i.e. the model committed edits to them.
-fn committed_since(root: Option<&Path>, base: &str, paths: &[String]) -> bool {
-    let mut args = vec!["diff", "--name-only", "--relative", base, "HEAD", "--"];
-    args.extend(paths.iter().map(String::as_str));
-    git_output(root, &args).is_none_or(|out| !out.is_empty())
-}
-
-/// Put the tests in `paths` back to their state at `base`. Uncommitted edits are stashed; when the
-/// model committed them, `git stash` has nothing to save, so the edits are written to a patch in
-/// the git directory and the files are checked out from `base`. `None` when the tree was left
-/// untouched.
+/// Put the tests in `paths` back to their state at `base` (`HEAD` when unknown) and keep the
+/// model's edits as a patch in Forge's state folder for the workspace. Returns that patch, or
+/// `None` when the tree was left untouched (nothing differed, or git or the disk refused): the
+/// guard only fires when the originals are really back, since claiming "tests restored" over an
+/// untouched tree would be a lie.
+///
+/// The edits are deliberately not stashed. `git stash push` writes `refs/stash` and pushes onto
+/// the user's own stash stack, so the user's next `git stash pop` would hand them Forge's test
+/// edits, and a benchmark's strict repo check sees a ref nobody asked for. A patch file outside
+/// the repository leaves no ref, no object and nothing under `.git/`; it also covers edits the
+/// model committed, which a stash cannot hold.
 pub(crate) fn restore_originals(
     root: Option<&Path>,
     base: Option<&str>,
     paths: &[String],
-) -> Option<Restored> {
-    let Some(base) = base.filter(|base| committed_since(root, base, paths)) else {
-        return stash_paths(root, paths).then_some(Restored::Stashed);
-    };
+) -> Option<PathBuf> {
+    #[cfg(test)]
+    crate::test_state::isolate();
+    let base = base.unwrap_or("HEAD");
     let mut diff = vec!["diff", "--binary", "--relative", base, "--"];
     diff.extend(paths.iter().map(String::as_str));
     let patch = git_output(root, &diff).filter(|patch| !patch.is_empty())?;
-    let git_dir = String::from_utf8(git_output(root, &["rev-parse", "--git-dir"])?).ok()?;
-    let git_dir = root.map_or_else(
-        || PathBuf::from(git_dir.trim()),
-        |root| root.join(git_dir.trim()),
-    );
+    let workspace = root.unwrap_or(Path::new("."));
+    forge_config::prepare_workspace_state(workspace).ok()?;
+    let dir = forge_config::state_subdir(workspace, "test-edits");
+    std::fs::create_dir_all(&dir).ok()?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let file = git_dir.join(format!("forge-test-edits-{stamp}.patch"));
+    let file = dir.join(format!("{stamp}.patch"));
     std::fs::write(&file, patch).ok()?;
     let mut checkout = vec!["checkout", base, "--"];
     checkout.extend(paths.iter().map(String::as_str));
-    git_output(root, &checkout)?;
-    Some(Restored::Patch(file))
+    if git_output(root, &checkout).is_none() {
+        let _ = std::fs::remove_file(&file);
+        return None;
+    }
+    Some(file)
 }
 
 /// The instruction pushed back at the model after its test edits were taken out.
-pub(crate) fn push_back(expect_code_change: bool, edits: &[String], restored: &Restored) -> String {
-    let recover = match restored {
-        Restored::Stashed => "Your test edits are stashed (`git stash pop` re-applies them)".into(),
-        Restored::Patch(path) => format!(
-            "Your test edits are saved as a patch (`git apply {}` re-applies them)",
-            path.display()
-        ),
-    };
+pub(crate) fn push_back(expect_code_change: bool, edits: &[String], patch: &Path) -> String {
+    let recover = format!(
+        "Your test edits are saved as a patch (`git apply {}` re-applies them)",
+        patch.display()
+    );
     let (head, tail) = if expect_code_change {
         (
             SPEC_HEAD,

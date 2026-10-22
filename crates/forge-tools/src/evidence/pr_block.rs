@@ -36,7 +36,7 @@ fn render_ledger(ledger: &Ledger, options: &PrBlockOptions<'_>) -> Option<String
     if items.is_empty() {
         return None;
     }
-    let rel_dir = format!(".forge/evidence/{session}");
+    let rel_dir = format!("evidence/{session}");
     let mut block = String::from("### Evidence (captured, not reviewed)\n");
     let of_kind = |kind: EvidenceKind| -> Vec<&EvidenceItem> {
         items.iter().filter(|item| item.kind == kind).collect()

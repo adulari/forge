@@ -622,6 +622,19 @@ impl ToolFailureTracker {
     }
 }
 
+/// What a permission failure is worth saying without knowing which of its causes it was. It must
+/// hold for all of them: a script that lacks its execute bit, a file somebody else owns, a
+/// read-only mount, a protected path. So it points at how to look (`ls -ld`) rather than at one
+/// fix, never offers `sudo` (an agent has no business escalating, and a session without a
+/// terminal cannot answer its password prompt), and keeps `chmod` for the one case it fits: a
+/// script the task means to run. Files the user owns but marked read-only (`chmod 444`) are
+/// handled by the edit tools themselves, which write through the bit and keep the mode.
+const PERMISSION_DENIED_DIAGNOSIS: &str =
+    "Permission denied — look at the target's owner and mode \
+(`ls -ld <path>`). `chmod +x` is only right for a script the task means to run. Do not use `sudo` \
+or change ownership; if the file belongs to someone else, the mount is read-only or the path is \
+protected, report that blocker instead of working around it.";
+
 /// Match common, unambiguous failure patterns in the tool output and return a pre-canned
 /// diagnosis — skipping the model call entirely (free, instant). Returns `None` when the
 /// failure is unusual enough to need the model. Checked case-insensitively on the full result.
@@ -639,7 +652,7 @@ pub(crate) fn pattern_diagnose(result: &str) -> Option<&'static str> {
         return Some("File or directory does not exist — verify the path with `ls` or `pwd`.");
     }
     if has("permission denied") || has("operation not permitted") {
-        return Some("Permission denied — try `chmod +x <file>` or prefix with `sudo`.");
+        return Some(PERMISSION_DENIED_DIAGNOSIS);
     }
     if has("address already in use") {
         return Some(

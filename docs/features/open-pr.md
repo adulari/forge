@@ -53,9 +53,9 @@ The result names the PR URL, the branch and base, the commit count, and what evi
 ---
 ### Evidence (captured, not reviewed)
 Checks that passed during the session:
-- `cargo test -p shop` — exit 0 at … (`.forge/evidence/<id>/0002-shell.txt`, sha256 `…`)
+- `cargo test -p shop` — exit 0 at … (`evidence/<id>/0002-shell.txt`, sha256 `…`)
 Screenshots:
-- `.forge/evidence/<id>/0001-browser.png` (browser, http://localhost:3000/cart, sha256 `…`) — empty cart
+- `evidence/<id>/0001-browser.png` (browser, http://localhost:3000/cart, sha256 `…`) — empty cart
   ![empty cart](https://github.com/acme/shop/blob/<commit>/<id>/0001-browser.png?raw=true)
 Preview URLs (temporary public tunnels; they close with the dev server or after their TTL):
 - https://x.trycloudflare.com (job 4242 port 5173, opened …)

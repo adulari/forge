@@ -13,8 +13,9 @@
 //! a pipe, so there is no descriptor for anything to hold open. The job then survives not just the
 //! call but the Forge process itself.
 //!
-//! State lives on disk under `<workspace>/.forge/jobs/` — one `<pid>.json` record and one
-//! `<pid>.log` per job — so a later call, a later turn, or a whole new session can still find,
+//! State lives on disk under the workspace's folder in Forge's data directory
+//! (`<state>/jobs/`, see [`forge_config::workspace_state_dir`]; never the user's tree) — one
+//! `<pid>.json` record and one `<pid>.log` per job — so a later call, a later turn, or a whole new session can still find,
 //! read, and stop what an earlier one started. The job id IS the pid: there is no second
 //! identifier to keep straight, and `kill <id>` from a human's terminal means the same thing.
 
@@ -64,25 +65,39 @@ pub async fn scope_job_exit_sink<F: std::future::Future>(sink: JobExitSink, fut:
     JOB_EXIT_SINK.scope(sink, fut).await
 }
 
-/// Where job records and logs live for a workspace.
-///
-/// Project-local rather than a global state dir: the log of a dev server belongs next to the
-/// project it serves, and a human debugging the same problem finds it without knowing Forge's
-/// platform directories.
-pub fn jobs_dir(workspace: Option<&Path>, cwd: &str) -> PathBuf {
-    let root = workspace
+fn workspace_root(workspace: Option<&Path>, cwd: &str) -> PathBuf {
+    #[cfg(test)]
+    crate::test_state::isolate();
+    workspace
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(cwd));
-    root.join(".forge").join("jobs")
+        .unwrap_or_else(|| PathBuf::from(cwd))
 }
 
-/// Keep job records and logs out of `git status`: a `*` ignore file inside the directory ignores
-/// everything under it without touching the user's own `.gitignore`.
-fn ensure_jobs_git_ignored(dir: &Path) {
-    let ignore = dir.join(".gitignore");
-    if !ignore.exists() {
-        let _ = std::fs::write(ignore, "*\n");
+/// Where job records and logs live for a workspace: Forge's own data directory, keyed by the
+/// workspace, so a job's files never appear in the user's project tree.
+pub fn jobs_dir(workspace: Option<&Path>, cwd: &str) -> PathBuf {
+    forge_config::state_subdir(&workspace_root(workspace, cwd), "jobs")
+}
+
+/// Where earlier versions kept job records: `<workspace>/.forge/jobs/`. Jobs recorded there are
+/// still found, listed and stopped; new ones are never written there. Their logs sit beside them,
+/// and a running one holds its log open, so they are left where they are rather than moved.
+fn legacy_jobs_dir(workspace: Option<&Path>, cwd: &str) -> PathBuf {
+    forge_config::legacy_state_subdir(&workspace_root(workspace, cwd), "jobs")
+}
+
+/// The folder holding job `id`'s record: the current one, else the legacy one that has it.
+pub(super) fn job_dir(workspace: Option<&Path>, cwd: &str, id: u32) -> PathBuf {
+    let record = format!("{id}.json");
+    let current = jobs_dir(workspace, cwd);
+    if current.join(&record).is_file() {
+        return current;
     }
+    let legacy = legacy_jobs_dir(workspace, cwd);
+    if legacy.join(&record).is_file() {
+        return legacy;
+    }
+    current
 }
 
 /// A job as it exists on disk.
@@ -157,8 +172,9 @@ pub async fn start(
         );
     }
     let dir = jobs_dir(workspace, cwd);
+    forge_config::prepare_workspace_state(&workspace_root(workspace, cwd))
+        .map_err(|e| format!("create {}: {e}", dir.display()))?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    ensure_jobs_git_ignored(&dir);
 
     // The log has to exist before the spawn (it is the child's stdout), but the id is the pid,
     // which only exists after it. Open under a provisional name and rename once the pid is known —
@@ -249,22 +265,26 @@ pub async fn start(
 
 /// Every job recorded for this workspace, newest first.
 pub fn list(workspace: Option<&Path>, cwd: &str) -> Vec<Job> {
-    let dir = jobs_dir(workspace, cwd);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut jobs: Vec<Job> = entries
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|entry| read_record(&entry.path()))
-        .collect();
+    let mut jobs: Vec<Job> = Vec::new();
+    for dir in [jobs_dir(workspace, cwd), legacy_jobs_dir(workspace, cwd)] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let found = entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .filter_map(|entry| read_record(&entry.path()))
+            .filter(|job| !jobs.iter().any(|known| known.pid == job.pid))
+            .collect::<Vec<_>>();
+        jobs.extend(found);
+    }
     jobs.sort_by_key(|job| std::cmp::Reverse(job.started_at));
     jobs
 }
 
 /// One job by id (its pid).
 pub fn get(workspace: Option<&Path>, cwd: &str, id: u32) -> Option<Job> {
-    read_record(&jobs_dir(workspace, cwd).join(format!("{id}.json")))
+    read_record(&job_dir(workspace, cwd, id).join(format!("{id}.json")))
 }
 
 /// The last `lines` lines of a job's log.
@@ -306,7 +326,8 @@ pub async fn stop(workspace: Option<&Path>, cwd: &str, id: u32) -> Result<String
     let Some(job) = get(workspace, cwd, id) else {
         return Err(format!("no background job {id} in this workspace"));
     };
-    let tunnel_dir = jobs_dir(workspace, cwd);
+    let dir = job_dir(workspace, cwd, id);
+    let tunnel_dir = dir.clone();
     let _ =
         tokio::task::spawn_blocking(move || super::preview::stop_job_tunnel(&tunnel_dir, id)).await;
     if !job.is_running() {
@@ -319,13 +340,13 @@ pub async fn stop(workspace: Option<&Path>, cwd: &str, id: u32) -> Result<String
     let deadline = std::time::Instant::now() + STOP_GRACE;
     while std::time::Instant::now() < deadline {
         if !pid_alive(id) {
-            record_exit(&jobs_dir(workspace, cwd), id, -1);
+            record_exit(&dir, id, -1);
             return Ok(format!("job {id} stopped"));
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     signal_group(id, SIGKILL);
-    record_exit(&jobs_dir(workspace, cwd), id, -1);
+    record_exit(&dir, id, -1);
     Ok(format!(
         "job {id} killed (did not stop within {STOP_GRACE:?})"
     ))
@@ -414,8 +435,21 @@ pub(super) fn write_record(dir: &Path, job: &Job) -> Result<(), String> {
         "tunnel": job.tunnel.as_ref().map(super::preview::TunnelRecord::to_json),
     });
     let path = dir.join(format!("{}.json", job.pid));
-    std::fs::write(&path, format!("{record:#}\n"))
-        .map_err(|e| format!("write {}: {e}", path.display()))
+    // Written whole and renamed into place: readers poll this file while an exit or a tunnel
+    // change rewrites it, and a half-written record reads as "no such job".
+    static TEMP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let temp = dir.join(format!(
+        ".{}.json.{}-{}.tmp",
+        job.pid,
+        std::process::id(),
+        TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&temp, format!("{record:#}\n"))
+        .and_then(|()| std::fs::rename(&temp, &path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            format!("write {}: {e}", path.display())
+        })
 }
 
 pub(super) fn read_record(path: &Path) -> Option<Job> {
@@ -821,6 +855,75 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         panic!("the exit code of a finished job was never recorded");
+    }
+
+    /// The a08 failure: a strict tree check saw `.forge/jobs/` and counted it as the agent's edit.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_jobs_files_live_in_forges_state_folder_not_the_workspace() {
+        let dir = workspace();
+        let cwd = dir.path().display().to_string();
+        let job = start(
+            "sleep 30",
+            &cwd,
+            Some(dir.path()),
+            &SandboxPolicy::default(),
+        )
+        .await
+        .expect("start");
+        let jobs = jobs_dir(Some(dir.path()), &cwd);
+        assert!(!jobs.starts_with(dir.path()), "{}", jobs.display());
+        assert!(job.log.starts_with(&jobs), "{}", job.log.display());
+        assert!(jobs.join(format!("{}.json", job.pid)).is_file());
+        assert!(
+            !dir.path().join(".forge").exists(),
+            "the workspace must hold no Forge state"
+        );
+        stop(Some(dir.path()), &cwd, job.pid).await.unwrap();
+    }
+
+    /// Jobs an earlier version recorded under `.forge/jobs/` stay visible and stoppable.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_job_recorded_in_the_workspace_by_an_earlier_version_is_still_found() {
+        let dir = workspace();
+        let cwd = dir.path().display().to_string();
+        let legacy = dir.path().join(".forge/jobs");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let old = Job {
+            pid: 4_100_001,
+            command: "npm run dev".into(),
+            cwd: cwd.clone(),
+            log: legacy.join("4100001.log"),
+            started_at: 1,
+            start_ticks: None,
+            exit: Some(0),
+            tunnel: None,
+        };
+        write_record(&legacy, &old).unwrap();
+
+        let found = get(Some(dir.path()), &cwd, 4_100_001).expect("legacy record is found");
+        assert_eq!(found.command, "npm run dev");
+        assert!(list(Some(dir.path()), &cwd)
+            .iter()
+            .any(|j| j.pid == 4_100_001));
+        assert_eq!(job_dir(Some(dir.path()), &cwd, 4_100_001), legacy);
+        let said = stop(Some(dir.path()), &cwd, 4_100_001).await.unwrap();
+        assert!(said.contains("already exited 0"), "{said}");
+
+        let fresh = start(
+            "sleep 30",
+            &cwd,
+            Some(dir.path()),
+            &SandboxPolicy::default(),
+        )
+        .await
+        .expect("start");
+        assert!(fresh.log.starts_with(jobs_dir(Some(dir.path()), &cwd)));
+        assert!(!legacy.join(format!("{}.json", fresh.pid)).exists());
+        let all = list(Some(dir.path()), &cwd);
+        assert!(all.iter().any(|j| j.pid == fresh.pid) && all.iter().any(|j| j.pid == 4_100_001));
+        stop(Some(dir.path()), &cwd, fresh.pid).await.unwrap();
     }
 
     #[test]

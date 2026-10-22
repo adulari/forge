@@ -158,7 +158,7 @@ impl Tool for NotebookEditTool {
         let content = tokio::fs::read_to_string(path).await?;
         let updated = apply_notebook_edit(&content, cell, source, cell_type, mode)
             .map_err(|e| ToolError::Failed(format!("{e} (in {path})")))?;
-        tokio::fs::write(path, &updated).await?;
+        crate::fs_write::write(path, &updated).await?;
         let verb = match mode {
             NotebookMode::Replace => "replaced",
             NotebookMode::Insert => "inserted",

@@ -5,7 +5,8 @@ in the loop.
 
 ## What gets recorded
 
-Everything lands in `<workspace>/.forge/evidence/<session-id>/`:
+Everything lands in `<state>/evidence/<session-id>/`, where `<state>` is the workspace's folder under
+Forge's data directory (see [workspace-state.md](workspace-state.md)), never inside the project:
 
 - **Screenshots.** `browser` and `device` `screenshot` actions write `0001-browser.png`,
   `0002-device.png`, … Names are monotonic and claimed with `create_new`, so a later shot never
@@ -29,8 +30,9 @@ Each capture appends one line to `manifest.jsonl`:
 ```
 
 `sha256` is the hash of the stored file. A torn last line (a crash mid-append) is skipped, not
-fatal. The first capture writes `.forge/evidence/.gitignore` containing `*`, so evidence never
-shows up in `git status` and the user's own `.gitignore` is untouched.
+fatal. Evidence is outside the repository, so it never shows up in `git status` and the user's own
+`.gitignore` is untouched. Evidence an earlier version left in `<workspace>/.forge/evidence/` is moved
+into the state folder the first time the ledger is opened, history and numbering intact.
 
 Outside any session (a bare tool call), screenshots go to a per-process temp file with a counter
 in the name, as before but without overwriting.
@@ -57,9 +59,9 @@ from the manifest:
 ---
 ### Evidence (captured, not reviewed)
 Checks that passed during the session:
-- `cargo test -p shop` — exit 0 at 2026-10-14T10:01:00Z (`.forge/evidence/<id>/0002-shell.txt`, sha256 `fedcba987654`)
+- `cargo test -p shop` — exit 0 at 2026-10-14T10:01:00Z (`evidence/<id>/0002-shell.txt`, sha256 `fedcba987654`)
 Screenshots:
-- `.forge/evidence/<id>/0001-browser.png` (browser, http://localhost:3000/cart, sha256 `0123456789ab`) — empty cart
+- `evidence/<id>/0001-browser.png` (browser, http://localhost:3000/cart, sha256 `0123456789ab`) — empty cart
   ![empty cart](https://github.com/<owner>/<repo>/blob/<commit>/<id>/0001-browser.png?raw=true)
 Preview URLs (temporary public tunnels; they close with the dev server or after their TTL):
 - https://x.trycloudflare.com (job 4242 port 5173, opened 2026-10-14T10:02:00Z)

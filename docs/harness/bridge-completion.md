@@ -136,7 +136,10 @@ BRIDGE_MODEL=claude-cli::sonnet scripts/bridge-e2e.sh
   is in the subprocess lifecycle, so the test must spawn the real CLI.
 - **Isolated store.** The harness sets `FORGE_DB` to its temporary root and the bridge forwards that
   override to `mcp-serve`. Tests therefore cannot contend with or mutate the operator's live history,
-  model benches, task lists, or active Serve Anywhere daemon.
+  model benches, task lists, or active Serve Anywhere daemon. The bridge also hands `mcp-serve` the
+  resolved per-workspace state root (`FORGE_STATE_DIR`, which defaults to a folder beside that
+  `FORGE_DB`), so checkpoints, evidence and job logs land in the temporary root too and never in the
+  workspace under test; see [workspace-state.md](../features/workspace-state.md).
 - **Async case A is genuinely external.** Forge's shell intentionally kills background descendants
   when the tool call exits, even if they use `setsid`/`nohup`; leaked jobs must not retain processes
   or output pipes. The harness therefore owns the delayed writer as a sibling of Forge (modeling an

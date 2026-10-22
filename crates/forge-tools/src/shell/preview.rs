@@ -18,7 +18,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::background::{
-    detach_into_new_session, get, jobs_dir, now_secs, pid_alive, proc_start_ticks, read_record,
+    detach_into_new_session, get, job_dir, now_secs, pid_alive, proc_start_ticks, read_record,
     signal_group, write_record, SIGKILL, SIGTERM,
 };
 use crate::tunnel::{self, TunnelConfig};
@@ -150,7 +150,7 @@ pub(super) async fn expose(
             job.status()
         ));
     }
-    let dir = jobs_dir(workspace, cwd);
+    let dir = job_dir(workspace, cwd, id);
     if let Some(existing) = job.tunnel.take() {
         if existing.is_alive() && existing.port == port {
             return Ok(exposed_text(id, &existing, settings.ttl, true));

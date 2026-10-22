@@ -1,4 +1,4 @@
-use super::super::background::{start, stop};
+use super::super::background::{jobs_dir, start, stop};
 use super::*;
 use crate::sandbox::SandboxPolicy;
 

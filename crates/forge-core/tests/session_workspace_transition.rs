@@ -90,6 +90,8 @@ async fn reset_resumed_rebinds_provider_tools_to_persisted_workspace() {
         std::fs::create_dir_all(root).unwrap();
     }
     let _cwd_guard = test_cwd_guard(&sentinel);
+    let state = base.join("state");
+    std::env::set_var(forge_config::STATE_DIR_ENV, &state);
     let store = Arc::new(Store::open_in_memory().unwrap());
     let cfg = config();
     let persisted = Session::start(
@@ -126,11 +128,13 @@ async fn reset_resumed_rebinds_provider_tools_to_persisted_workspace() {
     assert_eq!(live.workspace_root(), b.canonicalize().unwrap());
     assert_eq!(
         live.checkpoint_root().display().to_string(),
-        b.canonicalize()
-            .unwrap()
-            .join(".forge/checkpoints")
+        forge_config::state_subdir(&b.canonicalize().unwrap(), "checkpoints")
             .display()
             .to_string()
+    );
+    assert!(
+        live.checkpoint_root().starts_with(&state),
+        "checkpoints follow the workspace but live outside it"
     );
     live.run_turn("write b").await.unwrap();
     assert_eq!(std::fs::read_to_string(b.join("marker.txt")).unwrap(), "b");

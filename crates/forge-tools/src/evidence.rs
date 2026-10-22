@@ -1,7 +1,8 @@
 //! Evidence ledger: what a session captured as proof of its work.
 //!
 //! Screenshots from `browser`/`device` and the output of passing verification commands land in
-//! `<workspace>/.forge/evidence/<session>/` with monotonic names, and every capture appends one
+//! `<state>/evidence/<session>/` with monotonic names (`<state>` is the workspace's folder under
+//! Forge's data directory, see [`forge_config::workspace_state_dir`]; never the user's tree), and every capture appends one
 //! line to `manifest.jsonl` there (timestamp, kind, file, caption, page URL without its query
 //! string, sha256 of the file). `open_pr` renders the manifest into the PR body, so the proof a
 //! reviewer sees is what was recorded, never what the model says it did.
@@ -29,6 +30,9 @@ tokio::task_local! {
 pub const SESSION_ENV: &str = "FORGE_CHECKPOINT_SESSION";
 
 pub const MANIFEST: &str = "manifest.jsonl";
+
+/// The folder name under the workspace's state directory.
+const KIND: &str = "evidence";
 
 /// Lines of command output kept as test proof.
 pub const TEST_TAIL_LINES: usize = 40;
@@ -101,7 +105,7 @@ pub struct Capture<'a> {
 /// One session's evidence directory.
 #[derive(Debug, Clone)]
 pub struct Ledger {
-    root: PathBuf,
+    workspace: PathBuf,
     dir: PathBuf,
 }
 
@@ -110,10 +114,12 @@ impl Ledger {
         if !valid_session_id(session) {
             return None;
         }
-        let root = workspace.join(".forge").join("evidence");
+        #[cfg(test)]
+        crate::test_state::isolate();
+        forge_config::adopt_legacy_state(workspace, KIND);
         Some(Self {
-            dir: root.join(session),
-            root,
+            dir: forge_config::state_subdir(workspace, KIND).join(session),
+            workspace: workspace.to_path_buf(),
         })
     }
 
@@ -143,8 +149,8 @@ impl Ledger {
         bytes: &[u8],
         capture: Capture<'_>,
     ) -> std::io::Result<(PathBuf, EvidenceItem)> {
+        forge_config::prepare_workspace_state(&self.workspace)?;
         std::fs::create_dir_all(&self.dir)?;
-        ensure_git_ignored(&self.root);
         let (path, mut file) = self.create_next(source, extension)?;
         file.write_all(bytes)?;
         let item = EvidenceItem {
@@ -271,15 +277,6 @@ impl Ledger {
                     .unwrap_or(0)
             })
             .unwrap_or(0)
-    }
-}
-
-/// Keep evidence out of `git status`, the way checkpoints are: a `*` ignore file inside the
-/// directory ignores everything under it without touching the user's own `.gitignore`.
-fn ensure_git_ignored(root: &Path) {
-    let ignore = root.join(".gitignore");
-    if !ignore.exists() {
-        let _ = std::fs::write(ignore, "*\n");
     }
 }
 
@@ -439,23 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_root_is_git_ignored() {
-        let (dir, ledger) = ledger();
-        ledger
-            .record(
-                EvidenceKind::Screenshot,
-                "browser",
-                "png",
-                b"x",
-                Capture::default(),
-            )
-            .unwrap();
-        let ignore = dir.path().join(".forge/evidence/.gitignore");
-        assert_eq!(std::fs::read_to_string(ignore).unwrap(), "*\n");
-    }
-
-    #[test]
-    fn recorded_evidence_never_shows_in_git_status() {
+    fn evidence_never_lands_in_the_workspace() {
         let (dir, ledger) = ledger();
         let git = |args: &[&str]| {
             std::process::Command::new("git")
@@ -464,9 +445,7 @@ mod tests {
                 .output()
                 .unwrap()
         };
-        if !git(&["init", "-q"]).status.success() {
-            return;
-        }
+        let in_repo = git(&["init", "-q"]).status.success();
         ledger
             .record(
                 EvidenceKind::Screenshot,
@@ -477,9 +456,52 @@ mod tests {
             )
             .unwrap();
         ledger.record_test_output("cargo test", 0, "ok").unwrap();
-        git(&["add", "-A"]);
-        let status = git(&["status", "--porcelain", "-uall"]);
-        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+        assert!(!ledger.dir().starts_with(dir.path()), "{:?}", ledger.dir());
+        assert!(ledger.dir().join(MANIFEST).is_file());
+        assert!(
+            !dir.path().join(".forge").exists(),
+            "the workspace has no .forge/ for evidence"
+        );
+        if in_repo {
+            git(&["add", "-A"]);
+            let status = git(&["status", "--porcelain", "-uall"]);
+            assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+        }
+    }
+
+    #[test]
+    fn evidence_an_earlier_version_left_in_the_workspace_is_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join(".forge/evidence/sess-old");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("0001-browser.png"), b"png").unwrap();
+        std::fs::write(
+            old.join(MANIFEST),
+            r#"{"ts":"2026-10-14T10:00:00Z","kind":"screenshot","file":"0001-browser.png","sha256":"abc","source":"browser"}"#.to_string() + "\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".forge/evidence/.gitignore"), "*\n").unwrap();
+
+        let ledger = Ledger::new(dir.path(), "sess-old").unwrap();
+        assert_eq!(ledger.items().len(), 1, "history survives the move");
+        assert_eq!(
+            std::fs::read(ledger.dir().join("0001-browser.png")).unwrap(),
+            b"png"
+        );
+        let (_, next) = ledger
+            .record(
+                EvidenceKind::Screenshot,
+                "browser",
+                "png",
+                b"y",
+                Capture::default(),
+            )
+            .unwrap();
+        assert_eq!(next.file, "0002-browser.png", "numbering continues");
+        assert!(
+            !dir.path().join(".forge").exists(),
+            "the old folder is gone"
+        );
     }
 
     #[test]
@@ -529,7 +551,10 @@ mod tests {
     #[test]
     fn pr_block_over_a_fake_manifest_is_golden() {
         let dir = tempfile::tempdir().unwrap();
-        let session_dir = dir.path().join(".forge/evidence/abc123");
+        let session_dir = Ledger::new(dir.path(), "abc123")
+            .unwrap()
+            .dir()
+            .to_path_buf();
         std::fs::create_dir_all(&session_dir).unwrap();
         let manifest = [
             r#"{"ts":"2026-10-14T10:00:00Z","kind":"screenshot","file":"0001-browser.png","caption":"empty cart","url":"http://localhost:3000/cart","sha256":"0123456789abcdef0123","source":"browser"}"#,
@@ -543,10 +568,10 @@ mod tests {
             block,
             "### Evidence (captured, not reviewed)\n\
              Checks that passed during the session:\n\
-             - `cargo test -p shop` — exit 0 at 2026-10-14T10:01:00Z (`.forge/evidence/abc123/0002-shell.txt`, sha256 `fedcba987654`)\n\
+             - `cargo test -p shop` — exit 0 at 2026-10-14T10:01:00Z (`evidence/abc123/0002-shell.txt`, sha256 `fedcba987654`)\n\
              Screenshots:\n\
-             - `.forge/evidence/abc123/0001-browser.png` (browser, http://localhost:3000/cart, sha256 `0123456789ab`) — empty cart\n\
-             - `.forge/evidence/abc123/0003-device.png` (device, sha256 `aaaaaaaaaaaa`)\n"
+             - `evidence/abc123/0001-browser.png` (browser, http://localhost:3000/cart, sha256 `0123456789ab`) — empty cart\n\
+             - `evidence/abc123/0003-device.png` (device, sha256 `aaaaaaaaaaaa`)\n"
         );
         assert!(!block.contains("verified"));
     }

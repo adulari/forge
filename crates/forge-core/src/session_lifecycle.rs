@@ -190,7 +190,7 @@ impl Session {
         };
         // Resumed sessions already have AGENTS.md in the stored transcript; don't re-inject.
         let project_prompt_injected = !transcript.is_empty();
-        let checkpoint_root = workspace.root().join(".forge/checkpoints");
+        let checkpoint_root = crate::snapshot::default_root(workspace.root());
         let cached_git_branch = current_git_branch(workspace.root());
         let instructions = crate::instructions::load(workspace.root());
         let agents_md_fingerprint = Some(crate::instructions::fingerprint(&instructions.watched));

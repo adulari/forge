@@ -5,7 +5,7 @@ use super::*;
 use crate::test_guard::{
     guidance, level, modified_existing_tests, parse_name_status,
     prompt_expects_green_existing_tests, prompt_requires_pristine_existing_tests, push_back,
-    restore_originals, sentences, Level, Restored, KEEP_TESTS_GUIDANCE, PRISTINE_TEST_GUIDANCE,
+    restore_originals, sentences, Level, KEEP_TESTS_GUIDANCE, PRISTINE_TEST_GUIDANCE,
 };
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
@@ -255,8 +255,49 @@ fn a_committed_test_edit_is_only_visible_against_the_turn_start_commit() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The SWE-bench repos Forge worked in all ended with `refs/stash` (8 of 10): the guard stashed the
+/// model's test edits. A stash is a ref in the user's repo and an entry on the user's own stash
+/// stack, so the originals are restored from a patch kept outside the repository instead.
 #[test]
-fn uncommitted_test_edits_are_stashed_and_restored() {
+fn uncommitted_test_edits_are_restored_and_leave_nothing_behind_in_the_repo() {
+    let dir = repo_with_committed_test();
+    let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    let rewritten = original.replace("== 1", "== 2");
+    std::fs::write(dir.join("tests/test_foo.py"), &rewritten).unwrap();
+    let paths = vec!["tests/test_foo.py".to_string()];
+    let start = git(&dir, &["rev-parse", "HEAD"]);
+    let refs_before = git(&dir, &["for-each-ref"]);
+    let objects_before = git(&dir, &["count-objects", "-v"]);
+
+    let patch = restore_originals(Some(&dir), Some(&start), &paths).expect("restored");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+        original
+    );
+    assert!(git(&dir, &["stash", "list"]).is_empty(), "no stash entry");
+    assert_eq!(git(&dir, &["for-each-ref"]), refs_before, "no new ref");
+    assert_eq!(
+        git(&dir, &["count-objects", "-v"]),
+        objects_before,
+        "no new object"
+    );
+    assert_eq!(git(&dir, &["status", "--porcelain"]), "", "a clean tree");
+    assert!(
+        !patch.starts_with(&dir),
+        "the patch lives outside the repo: {patch:?}"
+    );
+    git(&dir, &["apply", patch.to_str().unwrap()]);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+        rewritten,
+        "applying the patch gives the model its edit back"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn without_a_turn_start_commit_the_edits_are_diffed_against_head() {
     let dir = repo_with_committed_test();
     let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
     std::fs::write(
@@ -265,16 +306,20 @@ fn uncommitted_test_edits_are_stashed_and_restored() {
     )
     .unwrap();
     let paths = vec!["tests/test_foo.py".to_string()];
-    let start = git(&dir, &["rev-parse", "HEAD"]);
-    assert_eq!(
-        restore_originals(Some(&dir), Some(&start), &paths),
-        Some(Restored::Stashed)
-    );
+    assert!(restore_originals(Some(&dir), None, &paths).is_some());
     assert_eq!(
         std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
         original
     );
-    assert!(!git(&dir, &["stash", "list"]).is_empty());
+    assert!(git(&dir, &["stash", "list"]).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn nothing_is_claimed_restored_when_nothing_differs() {
+    let dir = repo_with_committed_test();
+    let paths = vec!["tests/test_foo.py".to_string()];
+    assert_eq!(restore_originals(Some(&dir), None, &paths), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -288,7 +333,7 @@ fn committed_test_edits_are_restored_and_kept_as_a_patch() {
     git(&dir, &["commit", "-qam", "make the tests agree"]);
     let paths = vec!["tests/test_foo.py".to_string()];
 
-    let Some(Restored::Patch(patch)) = restore_originals(Some(&dir), Some(&start), &paths) else {
+    let Some(patch) = restore_originals(Some(&dir), Some(&start), &paths) else {
         panic!("a committed edit must be restored through a patch");
     };
     assert_eq!(
@@ -308,18 +353,19 @@ fn committed_test_edits_are_restored_and_kept_as_a_patch() {
 #[test]
 fn the_push_back_says_how_to_get_the_edits_back_and_matches_the_run() {
     let edits = vec!["tests/test_foo.py".to_string()];
-    let stashed = push_back(true, &edits, &Restored::Stashed);
-    assert!(stashed.contains("Hidden evaluation uses the ORIGINAL tests"));
-    assert!(stashed.contains("`git stash pop`") && stashed.contains("tests/test_foo.py"));
-    let patched = push_back(
-        false,
-        &edits,
-        &Restored::Patch(std::path::PathBuf::from("/repo/.git/x.patch")),
-    );
-    assert!(!patched.contains("Hidden evaluation"), "{patched}");
+    let patch = std::path::Path::new("/state/test-edits/1.patch");
+    let spec = push_back(true, &edits, patch);
+    assert!(spec.contains("Hidden evaluation uses the ORIGINAL tests"));
     assert!(
-        patched.contains("`git apply /repo/.git/x.patch`"),
-        "{patched}"
+        spec.contains("`git apply /state/test-edits/1.patch`")
+            && spec.contains("tests/test_foo.py")
+    );
+    assert!(!spec.contains("stash"), "{spec}");
+    let requested = push_back(false, &edits, patch);
+    assert!(!requested.contains("Hidden evaluation"), "{requested}");
+    assert!(
+        requested.contains("`git apply /state/test-edits/1.patch`"),
+        "{requested}"
     );
 }
 
