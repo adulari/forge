@@ -128,6 +128,11 @@ pub(crate) async fn build_session_with_self_mcp(
     session_cwd: Option<&str>,
 ) -> Result<Session> {
     let mut clock = StartupClock::start();
+    // The first turn's routing reads both before its first token: the tokenizer vocabulary
+    // (~150 ms to build) and the Codex plan (an OS keyring round trip). Start them now so they
+    // overlap the rest of startup instead of adding to the first token.
+    forge_core::tokens::warm_in_background();
+    std::thread::spawn(forge_provider::detect_subscription_plans);
     let store = Arc::new(open_store()?);
     if let Some(session_id) = resume.as_deref() {
         if store
@@ -259,11 +264,15 @@ pub(crate) async fn build_session_with_self_mcp(
         clock.mark("codex quota refresh");
     }
     // OpenCode Go's and Kimi Code's windows only move when polled — their chat completions carry
-    // no rate-limit headers — so the same pre-routing refresh keeps pacing off stale data. Each
-    // helper's own freshness gate bounds this to one request every few minutes.
+    // no rate-limit headers. Each helper's own freshness gate bounds this to one request every few
+    // minutes. It runs in the background: awaiting it held every unpinned first token for the
+    // usage GET (~0.9 s measured, up to its 5 s timeout), while the stored reading it refreshes is
+    // at most one freshness window old. Later routes read the new reading from the store.
     if should_refresh_opencode_go_quota(mock, pin.as_deref()) {
-        crate::cli::commands::models::refresh_polled_quotas(&store).await;
-        clock.mark("polled subscription quota refresh");
+        let store = Arc::clone(&store);
+        tokio::spawn(async move {
+            crate::cli::commands::models::refresh_polled_quotas(&store).await;
+        });
     }
     let store_for_lattice = Arc::clone(&store);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
@@ -341,6 +350,7 @@ pub(crate) async fn build_session_with_self_mcp(
     if let Some(pin) = pin.as_deref() {
         ensure_pin_providers_known(pin)?;
     }
+    let mut unverified_pins = Vec::new();
     for id in pin.as_deref().map(pin_members).unwrap_or_default() {
         let id = id.as_str();
         let prefix = forge_config::provider_of(id);
@@ -366,6 +376,7 @@ pub(crate) async fn build_session_with_self_mcp(
                 presenter.emit(forge_tui::PresenterEvent::Warning(format!(
                     "unknown model '{id}' — {hint}"
                 )));
+                unverified_pins.push(id.to_string());
             }
         }
     }
@@ -562,6 +573,7 @@ pub(crate) async fn build_session_with_self_mcp(
         }
     }
     session.set_lattice(lattice);
+    session.set_unverified_models(unverified_pins);
 
     // Attach the command/skill catalog so the model can discover + load Forge's own skills via
     // the `use_skill` tool (instead of hunting ~/.claude). Cheap, sync, pure.

@@ -51,11 +51,25 @@ pub(crate) fn any_credentials_available() -> bool {
         || forge_provider::any_bridge_logged_in()
 }
 
-pub(crate) fn in_set_advance_reason(rejected_twice: bool) -> &'static str {
-    if rejected_twice {
-        "the provider rejected this model twice in a row"
+/// The warning for a pinned model whose fast failure is a refusal, not an outage: the same error
+/// twice in a row, or one refusal of an id no discovered catalog lists (startup already warned).
+pub(crate) fn rejection_warning(model: &str, message: &str, repeated: bool) -> String {
+    let why = if repeated {
+        format!("the provider rejected this model twice in a row ({message})")
     } else {
-        "still unreachable after backoff retries"
+        format!("the provider rejected this model ({message}), and no discovered catalog lists it")
+    };
+    format!(
+        "{model}: {why} — not waiting for an outage that isn't one (pinned model; `/model` to \
+         unpin, or set `mesh.pin_failover = true` to allow mesh fallback)"
+    )
+}
+
+pub(crate) fn in_set_advance_reason(rejected: bool, repeated: bool) -> &'static str {
+    match (rejected, repeated) {
+        (true, true) => "the provider rejected this model twice in a row",
+        (true, false) => "the provider rejected this model, and no discovered catalog lists it",
+        (false, _) => "still unreachable after backoff retries",
     }
 }
 

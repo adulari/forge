@@ -262,6 +262,12 @@ impl Session {
         self.mode
     }
 
+    /// Record the pinned ids that startup could not find in the discovered catalog (composition
+    /// root). A fast provider rejection of one of them ends the turn at once.
+    pub fn set_unverified_models(&mut self, models: Vec<String>) {
+        self.unverified_models = models;
+    }
+
     /// Attach connected MCP servers (composition root). Their tools become advertisable via
     /// `tool_specs` and callable through `invoke_tool`, gated by the permission broker.
     pub fn set_mcp(&mut self, mcp: Option<Arc<forge_mcp::McpManager>>) {

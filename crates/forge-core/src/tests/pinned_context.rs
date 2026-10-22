@@ -668,6 +668,40 @@ async fn a_stored_memory_message_keeps_the_recalled_memories_out_of_the_block() 
 }
 
 #[tokio::test]
+async fn the_recall_embedding_starts_before_routing_only_when_there_is_something_to_recall() {
+    let dir = workspace(None);
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let provider = Arc::new(Recorder::default());
+    let mut config = quiet_config();
+    config.mesh.auto_memory = true;
+    config.lattice.embeddings.enabled = false;
+    let mut session = start(&store, &dir, &provider, config);
+    session.prefetch_recall_embedding("how do we deploy?");
+    assert!(
+        session.pinned.recall_prefetch.is_none(),
+        "an empty memory store has nothing to recall, so nothing is embedded"
+    );
+
+    store
+        .add_memory(
+            &memory_scope_at(session.workspace.root()),
+            "fact",
+            "DEPLOYFACT deploys go through the blue cluster",
+            "s0",
+        )
+        .unwrap();
+    session.prefetch_recall_embedding("how do we deploy?");
+    assert!(session.pinned.recall_prefetch.is_some());
+    session.run_turn("how do we deploy?").await.unwrap();
+    assert!(
+        session.pinned.recall_prefetch.is_none(),
+        "the recall consumed the embedding started before routing"
+    );
+    assert_eq!(holding(&provider.last(), "DEPLOYFACT"), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn global_memories_are_recalled_alongside_the_projects() {
     let dir = workspace(None);
     let store = Arc::new(Store::open_in_memory().unwrap());

@@ -105,7 +105,11 @@ the model see?" was answered in more places.
   - **Memories**: recalled with the goal plus the person's request (top 6) on a session's first
     turn, on the first turn after a resume, and again after every compaction
     (`recall_pinned_memories`; the compaction recall uses the latest real user request still in
-    the transcript). Auto-memory off leaves the section out.
+    the transcript). Auto-memory off leaves the section out. The query embedding starts before
+    routing (`prefetch_recall_embedding`) so its round trip overlaps the route, and a store with
+    no project or global memories embeds nothing. An embedding model that rejects a request (a
+    4xx other than a rate limit, e.g. the retired `gemini::text-embedding-004`) is not asked again
+    in that process; recall and hybrid code retrieval take their keyword/structural path.
   - **Goal**: `Session::set_active_goal`, set by `/goal` and cleared when the goal run stops.
   - **Plan**: the plan the person approved (`activate_plan_tasks`); in memory only.
   - **Task list**: a snapshot taken at the start of each turn and after each compaction, not live.

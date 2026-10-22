@@ -1923,6 +1923,12 @@ pub struct Session {
     /// Completed turns since the last Continual Harness refinement (refinement.rs). Drives
     /// `harness.auto_refine = "turns"`; reset whenever [`Session::refine`] runs, manual or auto.
     turns_since_refine: u32,
+    /// The process exits once its turn is answered (`forge run`): post-turn side calls are skipped
+    /// (see `run_post_turn_side_calls`).
+    one_shot: bool,
+    /// Pinned ids no discovered catalog lists (startup warned "unknown model"). One fast provider
+    /// rejection of such an id ends the turn instead of waiting out an outage backoff.
+    pub(crate) unverified_models: Vec<String>,
     /// `(unanswered continue-nudges, tasks done)` carried across turns; see `model_loop`.
     idle_nudge_carry: (usize, usize),
     /// Stale-path guard armed when the session moved hosts (host_move.rs).
@@ -2852,6 +2858,9 @@ impl Session {
         // goes through the ordinary session queue (a persisted message + transcript push), not a
         // new presenter surface.
         self.deliver_pending_detached_results()?;
+        // A new or resumed session owes a memory recall this turn; its query embedding is a
+        // provider round trip, so start it now and let it overlap routing.
+        self.prefetch_recall_embedding(prompt);
         // No reclaim here: old tool output is shortened only when the elision floor advances
         // (context_floor.rs), in blocks, so a short turn appends to the cached prompt instead of
         // rewriting the previous turn's results.
@@ -4378,45 +4387,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             tier: decision.tier,
             code_heavy: RouteHints::from_context(prompt, &routing_context).code_heavy,
         });
-        // A channel-backed interactive surface can keep receiving detached auxiliary results after
-        // the main turn is done. Remember that capability before launching the side calls so the
-        // input is never held hostage by recap/suggestion/memory provider latency.
-        let detach_post_turn_work = self.presenter.recap_sink().is_some();
-        if detach_post_turn_work {
-            self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
-        }
-        // A tripped session spend cap ends the turn; optional side calls must not keep spending.
-        let spend_ok = self.session_spend_refusal().is_none();
-        if spend_ok {
-            self.generate_recap(prompt, &final_text, &recap_tasks_before)
-                .await;
-            self.generate_suggestion(prompt, &final_text).await;
-        }
-        // Continual Harness auto-refine gate (`harness.auto_refine = "turns"`, refinement.rs).
-        // Runs inline (unlike recap/suggestion) rather than detaching onto the presenter's sink:
-        // it mutates durable harness state and its own presenter note should land in order with
-        // the turn it concluded, not race a later turn's output.
-        self.auto_refine_after_turns().await;
-        // One-shot/headless mode must await memory persistence before the process exits. In the
-        // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
-        // the completed answer and input become usable immediately while persistence finishes.
-        if let Some(handle) = if spend_ok {
-            self.capture_memories(prompt, &final_text).await
-        } else {
-            None
-        } {
-            if detach_post_turn_work {
-                drop(handle);
-            } else {
-                let _ = handle.await;
-            }
-        }
-        if !detach_post_turn_work {
-            // Headless callers await auxiliary memory persistence, so emit their terminal usage
-            // only after those provider calls are in the Store ledger. Keep Done last: JSONL
-            // consumers commonly stop reading at the result event.
-            self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
-        }
+        // The answer is final: every surface gets its result before any optional side call, so a
+        // recap/suggestion/memory provider round-trip never delays the user, a JSONL consumer
+        // reading up to `result`, or a one-shot process exit.
+        self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
+        self.run_post_turn_side_calls(prompt, &final_text, &recap_tasks_before)
+            .await;
         // The returned outcome carries the SAME `stop_reason` the presenter was told, so a headless
         // caller (`forge run`, the MCP `forge_chat` tool, a subagent) cannot read a no-output turn
         // as a final answer while the TUI shows it as failed.
@@ -11486,18 +11462,18 @@ mod tests {
         assert_eq!((tokens_in, tokens_out), (120, 30));
     }
 
-    #[tokio::test]
-    async fn headless_terminal_cost_includes_awaited_memory_and_done_is_last() {
-        let store = Arc::new(Store::open_in_memory().unwrap());
+    fn terminal_usage_session(
+        store: &Arc<Store>,
+        provider: &Arc<TerminalUsageProvider>,
+    ) -> (Session, Arc<Mutex<Vec<PresenterEvent>>>) {
         let mut config = Config::default();
         config.recap.enabled = false;
         config.suggest.enabled = false;
         config.mesh.auto_memory = true;
         let capture = CapturePresenter::default();
-        let captured_events = Arc::clone(&capture.events);
-        let provider = Arc::new(TerminalUsageProvider::default());
-        let mut session = Session::start(
-            Arc::clone(&store),
+        let events = Arc::clone(&capture.events);
+        let session = Session::start(
+            Arc::clone(store),
             provider.clone(),
             Arc::new(FixedRouter {
                 model: "mock::terminal-usage".to_string(),
@@ -11509,6 +11485,17 @@ mod tests {
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
+        (session, events)
+    }
+
+    /// The result reaches a synchronous surface before the memory side call runs, so a JSONL
+    /// consumer reading up to `result` never waits on it; the capture is still awaited before the
+    /// turn returns, so its usage is in the ledger afterwards.
+    #[tokio::test]
+    async fn headless_result_precedes_the_awaited_memory_side_call() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let provider = Arc::new(TerminalUsageProvider::default());
+        let (mut session, captured_events) = terminal_usage_session(&store, &provider);
 
         let outcome = session
             .run_turn("check the project manifest")
@@ -11520,18 +11507,8 @@ mod tests {
             2,
             "one main completion plus one awaited memory completion"
         );
-
-        // The provider spends 72/30 tokens on the main turn and 30/12 on the awaited memory
-        // extraction side call. The terminal event must reflect the complete Store ledger.
-        assert_eq!(
-            store.session_tokens(session.id()).unwrap(),
-            (72, 30),
-            "active-transcript usage intentionally excludes synthetic side calls"
-        );
         let consumed = store.session_token_usage(session.id()).unwrap();
         assert_eq!((consumed.input_tokens, consumed.output_tokens), (102, 42));
-        assert_eq!(consumed.cached_input_tokens, Some(30));
-        assert_eq!(session.session_usage_db(), (102, 42, 0.0));
         let events = captured_events.lock().unwrap();
         let done_index = events
             .iter()
@@ -11543,20 +11520,52 @@ mod tests {
             .filter_map(|(index, event)| match event {
                 PresenterEvent::Cost {
                     session_in,
-                    session_cached_in,
                     session_out,
                     ..
-                } => Some((index, (*session_in, *session_cached_in, *session_out))),
+                } => Some((index, (*session_in, *session_out))),
                 _ => None,
             })
             .next_back()
             .expect("turn emits Cost");
-        assert_eq!(event_tokens, (102, Some(30), 42));
-        assert!(cost_index < done_index, "terminal Cost must precede Done");
         assert_eq!(
-            done_index,
-            events.len() - 1,
-            "Done must remain the final headless event"
+            event_tokens,
+            (72, 30),
+            "the result reports the answered turn"
+        );
+        assert!(cost_index < done_index, "terminal Cost must precede Done");
+    }
+
+    /// A one-shot run (`forge run`) makes no post-turn side call: its process exits once the
+    /// result is out, so a memory capture would only hold the exit for a model round-trip.
+    #[tokio::test]
+    async fn a_one_shot_turn_makes_no_side_calls_unless_memory_is_opted_in() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let provider = Arc::new(TerminalUsageProvider::default());
+        let (mut session, captured_events) = terminal_usage_session(&store, &provider);
+        session.config.recap.enabled = true;
+        session.set_one_shot(true);
+        session
+            .run_turn("check the project manifest")
+            .await
+            .unwrap();
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            captured_events.lock().unwrap().last(),
+            Some(PresenterEvent::Done { .. })
+        ));
+
+        let provider = Arc::new(TerminalUsageProvider::default());
+        let (mut session, _) = terminal_usage_session(&store, &provider);
+        session.config.mesh.auto_memory_one_shot = true;
+        session.set_one_shot(true);
+        session
+            .run_turn("check the project manifest")
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the opted-in capture still runs, after the result"
         );
     }
 
@@ -13550,6 +13559,43 @@ mod tests {
                 |e| matches!(e, PresenterEvent::Warning(w) if w.contains("still unreachable"))
             ),
             "must not run to outage-budget exhaustion"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_pin_fails_on_its_first_instant_rejection() {
+        // `forge chat --model nonexistent-model-xyz`: startup already warned that no catalog lists
+        // the id, so one instant refusal is the answer. Waiting the first outage backoff step
+        // (~5 s) for a second identical refusal was the whole delay before the error.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 600;
+        session.set_unverified_models(vec!["pin::model".to_string()]);
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let started = std::time::Instant::now();
+        let err = session.run_turn("fix the bug").await.unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "must not wait for a second refusal, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            err.to_string().contains("502"),
+            "real error surfaces: {err}"
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("no discovered catalog lists it") && w.contains("502"))),
+            "the warning says why one refusal was enough and quotes the error"
         );
     }
 

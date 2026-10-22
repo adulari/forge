@@ -23,6 +23,18 @@ fn bpe() -> &'static CoreBPE {
     BPE.get_or_init(|| o200k_base().expect("bundled o200k_base vocabulary always loads"))
 }
 
+/// Build the vocabulary on a background thread. Loading `o200k_base` takes ~150 ms of CPU, and the
+/// first count happens while the first turn routes, so a surface that is about to run a turn calls
+/// this at startup to take that load off the first token. A count that arrives while the thread is
+/// still building waits for it instead of building a second copy.
+pub fn warm_in_background() {
+    let _ = std::thread::Builder::new()
+        .name("forge-tokenizer-warm".into())
+        .spawn(|| {
+            bpe();
+        });
+}
+
 fn cache() -> &'static Mutex<HashMap<u64, usize>> {
     static CACHE: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))

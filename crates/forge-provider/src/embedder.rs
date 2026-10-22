@@ -9,7 +9,25 @@ use forge_config::EmbeddingsConfig;
 use forge_index::{Embedder, LatticeError, OllamaEmbedder};
 use genai::Client;
 
-use crate::genai_provider::{build_client, to_genai_model};
+use crate::genai_provider::{build_client, embed_failure_is_final, to_genai_model};
+
+/// Embedding models that rejected a request in this process. A retired model (Gemini's
+/// `text-embedding-004` now answers 404) fails identically every time, and its callers sit in
+/// front of the first token: memory recall at session start, hybrid code retrieval on every turn.
+/// Once rejected, the model is treated as unavailable here and callers take their keyword or
+/// structural path at once instead of waiting on another round trip.
+fn rejected_models() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static REJECTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    REJECTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn is_rejected(model: &str) -> bool {
+    rejected_models().contains(model)
+}
 
 /// genai-backed embedder. `model` is a Forge `provider::model` id (e.g. `gemini::text-embedding-004`);
 /// genai resolves the adapter + endpoint + API-key env var from the namespace, exactly like chat.
@@ -38,7 +56,18 @@ impl Embedder for GenaiEmbedder {
             .client
             .embed_batch(model.as_str(), texts.to_vec(), None)
             .await
-            .map_err(|e| LatticeError::Io(format!("embed via {}: {e}", self.model)))?;
+            .map_err(|e| {
+                // Debug, not warn: callers already fall back quietly, and a headless run must not
+                // print the provider's error body on every invocation.
+                if embed_failure_is_final(&e) && rejected_models().insert(self.model.clone()) {
+                    tracing::debug!(
+                        model = %self.model,
+                        error = %e,
+                        "embedding model rejected the request; embeddings stay off for this process"
+                    );
+                }
+                LatticeError::Io(format!("embed via {}: {e}", self.model))
+            })?;
         let vecs = resp.into_vectors();
         if vecs.len() != texts.len() {
             return Err(LatticeError::Io(format!(
@@ -86,6 +115,9 @@ pub fn select_embedder(cfg: &EmbeddingsConfig) -> Option<(Box<dyn Embedder>, Str
             } else {
                 format!("{provider}::{}", cfg.model)
             };
+            if is_rejected(&model) {
+                return None;
+            }
             let label = model.clone();
             Some((Box::new(GenaiEmbedder::new(&model)), label))
         }
@@ -94,6 +126,9 @@ pub fn select_embedder(cfg: &EmbeddingsConfig) -> Option<(Box<dyn Embedder>, Str
 
 fn auto_embedder(cfg: &EmbeddingsConfig) -> Option<(Box<dyn Embedder>, String)> {
     match auto_candidate(forge_config::has_api_key) {
+        // A rejected pick means no embeddings rather than the next (paid) candidate: callers
+        // already treated its failure as "no embedder", and they keep doing so without the call.
+        Some(model) if is_rejected(model) => None,
         Some(model) => Some((Box::new(GenaiEmbedder::new(model)), model.to_string())),
         None => ollama_embedder(cfg),
     }
@@ -165,5 +200,29 @@ mod tests {
     #[test]
     fn auto_no_cloud_key_means_ollama_fallback() {
         assert_eq!(auto_candidate(|_| false), None);
+    }
+
+    #[test]
+    fn a_model_that_rejected_a_request_is_not_selected_again() {
+        // An unknown namespace needs no key, so selection reaches the rejection check.
+        let mut config = cfg(true, "rejecting-test-provider");
+        config.model = "embed-v1".to_string();
+        assert!(select_embedder(&config).is_some());
+        rejected_models().insert("rejecting-test-provider::embed-v1".to_string());
+        assert!(select_embedder(&config).is_none());
+    }
+
+    #[test]
+    fn only_a_rejected_request_is_final() {
+        let http = |status: u16, body: &str| genai::Error::HttpError {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            canonical_reason: String::new(),
+            body: body.to_string(),
+        };
+        let retired = r#"{"error":{"code":404,"message":"models/text-embedding-004 is not found for API version v1beta, or is not supported for embedContent.","status":"NOT_FOUND"}}"#;
+        assert!(embed_failure_is_final(&http(404, retired)));
+        assert!(embed_failure_is_final(&http(401, "unauthorized")));
+        assert!(!embed_failure_is_final(&http(429, "rate limited")));
+        assert!(!embed_failure_is_final(&http(503, "overloaded")));
     }
 }
