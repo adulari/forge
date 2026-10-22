@@ -53,6 +53,7 @@ pub mod assay;
 pub mod auto_classifier;
 mod auxiliary_candidates;
 mod auxiliary_policy;
+mod bridge_trace;
 mod btw_policy;
 pub mod goal_evaluator;
 mod goal_evidence;
@@ -1708,6 +1709,8 @@ pub struct Session {
     /// `turn_input_tokens` — is what `mesh.max_turn_input_tokens` bounds, because that ceiling
     /// exists to stop runaway spend and a cache read is not spend at anything like full rate.
     turn_billable_input_tokens: u64,
+    /// Tool calls and model calls a bridged CLI reported while the current response streamed.
+    bridge_trace: Arc<std::sync::Mutex<bridge_trace::BridgeTrace>>,
     /// Latched when a hard guard (unattended step ceiling or per-turn input-token ceiling) ended
     /// this turn. Every later re-drive pass must return immediately: the guards exist to stop
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
@@ -3067,6 +3070,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
         self.turn_billable_input_tokens = 0;
+        *self.bridge_trace.lock().unwrap() = Default::default();
         self.turn_hard_guard_abort = false;
         self.turn_run_budget_hit = false;
         self.empty_reply_nudged = false;
@@ -4938,6 +4942,9 @@ mod tests {
 
     #[path = "mid_intent.rs"]
     mod mid_intent_tests;
+
+    #[path = "bridge_trace.rs"]
+    mod bridge_trace_tests;
 
     #[path = "compaction_summary.rs"]
     mod compaction_summary_tests;

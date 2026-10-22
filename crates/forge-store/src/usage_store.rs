@@ -66,11 +66,13 @@ impl Store {
     }
 
     /// Every provider call in a session (side calls and deactivated turns included, as in
-    /// [`Store::session_token_usage`]) grouped by model and by zero/non-zero recorded cost.
+    /// [`Store::session_token_usage`]) grouped by model and by zero/non-zero recorded cost. A
+    /// usage row counts as the model round trips it stands for (`usage.api_calls`, else one).
     pub fn session_usage_by_model(&self, session_id: &str) -> Result<Vec<ModelUsageRow>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT COALESCE(u.model, m.model) AS mdl, u.cost_usd = 0 AS zero, COUNT(*),
+            "SELECT COALESCE(u.model, m.model) AS mdl, u.cost_usd = 0 AS zero,
+                    SUM(COALESCE(u.api_calls, 1)),
                     SUM(u.input_tokens), SUM(u.cached_input_tokens), SUM(u.cache_write_tokens),
                     SUM(u.reasoning_tokens), SUM(u.output_tokens), COALESCE(SUM(u.cost_usd), 0.0)
              FROM usage u JOIN message m ON m.id = u.message_id
@@ -98,6 +100,17 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Record that the usage row(s) of `message_id` stand for `calls` model round trips (a
+    /// CLI-bridge turn runs its whole agent loop inside one provider call). A no-op when the
+    /// message has no usage row.
+    pub fn set_usage_api_calls(&self, message_id: &str, calls: u64) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE usage SET api_calls = ?1 WHERE message_id = ?2",
+            (calls as i64, message_id),
+        )?;
+        Ok(())
     }
 
     /// Number of tool calls recorded in a session, across every turn.
@@ -344,6 +357,66 @@ mod tests {
                 ],
                 "{pass}"
             );
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[test]
+    fn a_bridge_row_counts_as_the_model_calls_it_stands_for() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            ..Default::default()
+        };
+        let looped = store
+            .add_message(&sid, 0, Role::Assistant, "a", Some("claude-cli::sonnet"))
+            .unwrap();
+        store
+            .record_usage(&sid, &looped, &usage, Some("claude-cli::sonnet"))
+            .unwrap();
+        let plain = store
+            .add_message(&sid, 1, Role::Assistant, "b", Some("claude-cli::sonnet"))
+            .unwrap();
+        store
+            .record_usage(&sid, &plain, &usage, Some("claude-cli::sonnet"))
+            .unwrap();
+        let calls = || store.session_usage_by_model(&sid).unwrap()[0].calls;
+        assert_eq!(
+            calls(),
+            2,
+            "one call per row until the bridge says otherwise"
+        );
+        store.set_usage_api_calls(&looped, 7).unwrap();
+        assert_eq!(calls(), 8, "7 round trips in one row + 1 in the other");
+        store.set_usage_api_calls("no-such-message", 3).unwrap();
+        assert_eq!(calls(), 8);
+    }
+
+    #[test]
+    fn migration_46_adds_a_nullable_api_calls_column_to_an_existing_store() {
+        let path = std::env::temp_dir().join(format!("forge-m46-{}.db", forge_types::new_id()));
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(schema::SCHEMA).unwrap();
+            conn.execute_batch("ALTER TABLE usage DROP COLUMN api_calls;")
+                .unwrap();
+            conn.pragma_update(None, "user_version", 45i64).unwrap();
+        }
+        for pass in ["first open (migrates)", "second open (idempotent)"] {
+            let store = Store::open(&path).unwrap_or_else(|e| panic!("{pass}: {e:?}"));
+            let conn = store.lock().unwrap();
+            let notnull: i64 = conn
+                .query_row(
+                    "SELECT \"notnull\" FROM pragma_table_info('usage') WHERE name = 'api_calls'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or_else(|e| panic!("{pass}: column missing: {e}"));
+            assert_eq!(notnull, 0, "{pass}");
         }
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

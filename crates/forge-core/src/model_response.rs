@@ -92,6 +92,7 @@ impl Session {
             }
         }
         self.record_main_usage(&msg_id, &resp.usage, active_model)?;
+        self.record_bridge_trace(&msg_id, active_model);
         self.turn_input_tokens = self
             .turn_input_tokens
             .saturating_add(resp.usage.input_tokens);

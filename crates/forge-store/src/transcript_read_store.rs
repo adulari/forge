@@ -595,7 +595,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.tool_calls_json,
-                    u.input_tokens, u.output_tokens, u.cost_usd, m.visibility
+                    u.input_tokens, u.output_tokens, u.cost_usd, m.visibility, m.id
              FROM message m LEFT JOIN usage u ON u.message_id = m.id
              WHERE m.session_id = ?1 AND m.active = 1 ORDER BY m.seq",
         )?;
@@ -619,14 +619,22 @@ impl Store {
                     cost_usd: row.get(8)?,
                 },
                 visibility,
+                row.get::<_, String>(10)?,
             ))
         })?;
+        // A CLI-bridge turn runs its tools inside the bridged CLI, so the assistant message holds
+        // no tool calls of its own; the audit ledger does. Fill those in so a replay (and a bench
+        // export) shows what the agent did.
+        let mut bridged = self.bridged_tool_calls(&conn, session_id)?;
         // A finished turn stores its answer twice: the provider-continuity `llm_only` row (which
         // carries the usage) and the published `ui` copy. Replay is one entry per answer, so the
         // published copy is dropped when it repeats the row right before it.
         let mut out: Vec<ReplayEntry> = Vec::new();
         for item in rows {
-            let (entry, visibility) = item.map_err(StoreError::from)?;
+            let (mut entry, visibility, message_id) = item.map_err(StoreError::from)?;
+            if entry.role == Role::Assistant && entry.tool_calls.is_empty() {
+                entry.tool_calls = bridged.remove(&message_id).unwrap_or_default();
+            }
             let published_twin = visibility == "ui"
                 && entry.role == Role::Assistant
                 && out.last().is_some_and(|prev| {
@@ -637,6 +645,37 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// The audit-ledger rows of a session's assistant messages, by message id, as tool calls.
+    fn bridged_tool_calls(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<std::collections::HashMap<String, Vec<ToolCall>>> {
+        let mut stmt = conn.prepare(
+            "SELECT t.message_id, t.id, t.tool_name, t.args_json
+             FROM tool_call t JOIN message m ON m.id = t.message_id
+             WHERE m.session_id = ?1 ORDER BY t.rowid",
+        )?;
+        let mut by_message: std::collections::HashMap<String, Vec<ToolCall>> = Default::default();
+        for row in stmt.query_map([session_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })? {
+            let (message_id, id, name, args_json) = row.map_err(StoreError::from)?;
+            let args =
+                serde_json::from_str(&args_json).unwrap_or(serde_json::Value::String(args_json));
+            by_message
+                .entry(message_id)
+                .or_default()
+                .push(ToolCall { id, name, args });
+        }
+        Ok(by_message)
     }
 }
 
@@ -675,6 +714,64 @@ mod tests {
         let contents: Vec<&str> = entries.iter().map(|e| e.content.as_str()).collect();
         assert_eq!(contents, ["hello", "hi there", "something else"]);
         assert_eq!(entries[1].model.as_deref(), Some("m-1"));
+    }
+
+    /// A bridged turn's tools ran inside the CLI: the assistant message has none of its own and
+    /// the audit ledger holds them. Replay shows them; a message with its own calls keeps those.
+    #[test]
+    fn replay_fills_a_bridged_turns_tool_calls_from_the_audit_ledger() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/tmp", "default").unwrap();
+        store
+            .add_message(&session, 0, Role::User, "fix it", None)
+            .unwrap();
+        let bridged = store
+            .add_llm_only_message_full(&session, 1, Role::Assistant, "fixed", Some("m"), &[], None)
+            .unwrap();
+        store
+            .record_tool_call(
+                &bridged,
+                "mcp__forge__read_file",
+                "{\"path\":\"a.rs\"}",
+                "ok",
+                "bridge",
+                "ok",
+            )
+            .unwrap();
+        store
+            .record_tool_call(
+                &bridged,
+                "mcp__forge__shell",
+                "not json",
+                "boom",
+                "bridge",
+                "error",
+            )
+            .unwrap();
+        let own = forge_types::ToolCall {
+            id: "c1".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({"path": "b.rs"}),
+        };
+        let native = store
+            .add_message_full(&session, 2, Role::Assistant, "", Some("m"), &[own], None)
+            .unwrap();
+        store
+            .record_tool_call(&native, "read_file", "{}", "ok", "allowed", "ok")
+            .unwrap();
+        let entries = store.load_replay(&session).unwrap();
+        let names = |e: &super::ReplayEntry| -> Vec<String> {
+            e.tool_calls.iter().map(|c| c.name.clone()).collect()
+        };
+        assert_eq!(
+            names(&entries[1]),
+            ["mcp__forge__read_file", "mcp__forge__shell"]
+        );
+        assert_eq!(entries[1].tool_calls[0].args["path"], "a.rs");
+        assert_eq!(entries[1].tool_calls[1].args, "not json");
+        assert_eq!(names(&entries[2]), ["read_file"], "its own call list wins");
+        assert_eq!(entries[2].tool_calls[0].id, "c1");
+        assert!(entries[0].tool_calls.is_empty());
     }
 
     #[test]

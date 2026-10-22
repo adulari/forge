@@ -641,6 +641,10 @@ pub enum StreamEvent {
         ok: bool,
         summary: String,
     },
+    /// How many model calls the bridged CLI's own agent loop made inside the turn that just
+    /// finished (Claude Code; the whole loop is one `complete()` here, so one response and one
+    /// usage row would otherwise be all a session could ever count).
+    ModelCalls(u64),
     /// A subagent was spawned. Emitted by the CLI bridge by tailing the out-of-band event sink
     /// that `forge mcp-serve` writes (so bridge-spawned subagents are visible in the TUI just
     /// like native ones — RFC subagent-orchestration Phase 3c).

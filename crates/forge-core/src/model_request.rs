@@ -221,6 +221,8 @@ pub(super) async fn request_provider_response(
             let pending_observations = std::sync::Arc::clone(bridge_observations);
             let tools_unavailable = std::sync::Arc::clone(mcp_tools_unavailable);
             let suppress_assistant_text = verify_attempts > 0;
+            // A failed attempt's events belong to no response: each attempt starts a fresh trace.
+            *session.bridge_trace.lock().unwrap() = Default::default();
             let mut sink = |ev: StreamEvent| {
                 handle_stream_event(
                     ev,
@@ -237,6 +239,7 @@ pub(super) async fn request_provider_response(
                     &verification,
                     &pending_observations,
                     &tools_unavailable,
+                    &session.bridge_trace,
                 );
             };
             let completion_opts = CompletionOptions {
@@ -274,17 +277,7 @@ pub(super) async fn request_provider_response(
             .await
         };
         if let Err(error) = &result {
-            let error_kind = if error.is_auth() {
-                "auth"
-            } else if error.is_rate_limited() {
-                "rate_limited"
-            } else if error.is_context_overflow() {
-                "context_overflow"
-            } else if error.is_permanent() {
-                "permanent"
-            } else {
-                "transient"
-            };
+            let error_kind = crate::model_failure_record::error_kind(error);
             let _ = session.store.record_mesh_outcome(&MeshOutcome {
                 session_id: session.id.clone(),
                 model: active_model.clone(),

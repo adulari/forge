@@ -77,15 +77,43 @@ All new `InstanceMetric` fields are `#[serde(default)]`, so older sidecars load 
 - `session_id`: the Forge session that ran the attempt (Forge agent only).
 - `cached_input_tokens`, `cache_write_tokens`, `reasoning_tokens`: subsets of input/output.
   `None` means the provider did not report the split.
-- `model_calls`, `tool_calls`: provider calls and tool calls in the session (Forge agent only).
+- `model_calls`, `tool_calls`: provider calls and tool calls in the session (Forge agent), or
+  Claude Code's own `num_turns` and counted `tool_use` blocks (`--agent claude-code`).
+- `tool_errors`, `duration_ms`, `ttft_ms`: Claude Code only. Tool results flagged as errors, and
+  the CLI's own timing of the turn and time to first token, from its `stream-json` output.
+- `agent_secs`: wall time of the agent turn alone (`wall_secs` also covers cloning, setup and
+  grading), every agent.
 - `notional_cost_usd`: see below.
-- `outcome`, `outcome_detail`: `ok`, `refused`, `integrity_fail`, `tools_unavailable`,
-  `timed_out`. `integrity_fail` is reserved for the post-hoc integrity checks.
+- `outcome`, `outcome_detail`: `ok`, `no_change`, `refused`, `integrity_fail`,
+  `tools_unavailable`, `timed_out`. `no_change` means the turn ended with the workspace exactly
+  as it started and nothing else explains it; it is scored like `ok`. `integrity_fail` is
+  reserved for the post-hoc integrity checks.
 
 For the Forge agent these come from `Session::session_usage_detail()`
 (`crates/forge-core/src/session_usage_detail.rs`), backed by `Store::session_usage_by_model` and
 `Store::session_tool_call_count`. Like `session_usage_db`, it counts every call in the session,
 including side calls and deactivated turns.
+
+## Bridged CLI sessions
+
+A `claude-cli` / `codex-cli` bridge runs its whole agent loop inside one provider call, so before
+this change a bridged session counted one model call and no tool calls however much the CLI did,
+and `forge replay` and `bench export` showed an assistant message with no tool calls. The session
+now keeps what the CLI streamed while the response was recorded
+(`crates/forge-core/src/bridge_trace.rs`):
+
+- the tools the CLI ran go into the audit ledger (`tool_call`, permission `bridge`), named as the
+  CLI named them (`Bash`, `mcp__forge__read_file`). That is what `session_tool_call_count`,
+  `load_replay` and the export read. A call with no result is stored with status `unfinished`.
+  Only a bridge model's events are stored; a failed or retried attempt's events are dropped.
+- the number of model calls goes onto the response's usage row as `usage.api_calls` (store
+  migration 46, nullable and purely additive; NULL means one call, as for every direct provider
+  call and every row written before). Claude Code reports it as the distinct model message ids it
+  streamed, else the result's `num_turns`; sub-agent messages (`parent_tool_use_id`) are not this
+  loop's calls. `session_usage_by_model` sums `COALESCE(api_calls, 1)`.
+
+Codex's bridge streams its tool calls, so they are recorded the same way, but it reports no model
+call count and keeps one call per usage row.
 
 ## Notional cost
 

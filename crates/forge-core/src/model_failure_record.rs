@@ -2,6 +2,21 @@
 
 use super::compaction_policy::{model_health_reason, record_auth_failure_in};
 
+/// The class recorded with a failed attempt in the mesh outcome ledger.
+pub(crate) fn error_kind(error: &forge_provider::ProviderError) -> &'static str {
+    if error.is_auth() {
+        "auth"
+    } else if error.is_rate_limited() {
+        "rate_limited"
+    } else if error.is_context_overflow() {
+        "context_overflow"
+    } else if error.is_permanent() {
+        "permanent"
+    } else {
+        "transient"
+    }
+}
+
 /// Store-level body of [`Session::record_model_failure`], free so a detached side-call task that
 /// owns only an `Arc<Store>` records failures through the SAME classifier as the main path.
 pub fn record_model_failure_in(

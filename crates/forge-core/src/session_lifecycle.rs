@@ -279,6 +279,7 @@ impl Session {
             mutations_this_turn: 0,
             turn_input_tokens: 0,
             turn_billable_input_tokens: 0,
+            bridge_trace: Default::default(),
             turn_output_tokens: 0,
             turn_hard_guard_abort: false,
             run_budget: None,

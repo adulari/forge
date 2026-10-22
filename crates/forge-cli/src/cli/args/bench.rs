@@ -65,15 +65,31 @@ pub(crate) enum BenchCmd {
         /// Where to write the per-attempt results (sidecars are named after it).
         #[arg(long, default_value = "tasks.jsonl")]
         out: std::path::PathBuf,
-        /// Only run the first N tasks (in name order).
+        /// Only run the first N of the selected tasks (in name order).
         #[arg(long)]
         limit: Option<usize>,
+        /// Only run these tasks: names or globs (`*`, `?`), comma-separated or repeated. A pattern
+        /// that matches no task is an error.
+        #[arg(long, value_delimiter = ',')]
+        tasks: Vec<String>,
+        /// Leave these tasks out (same syntax as `--tasks`; applied after it).
+        #[arg(long, value_delimiter = ',')]
+        skip: Vec<String>,
+        /// Create attempt workspaces here instead of under `TMPDIR` (the system temp dir, a RAM
+        /// disk on many systems).
+        #[arg(long)]
+        workdir: Option<std::path::PathBuf>,
         /// Pin a model (see `bench swe --model`).
         #[arg(long)]
         model: Option<String>,
         /// Which agent solves each task.
         #[arg(long, value_enum, default_value_t = bench::Agent::Forge)]
         agent: bench::Agent,
+        /// Run Claude Code without your hooks, user settings and MCP servers
+        /// (`--setting-sources project --strict-mcp-config`), so only the workspace configures it.
+        /// `--agent claude-code` only.
+        #[arg(long)]
+        clean: bool,
         /// Use the offline deterministic mock provider (suite smoke tests; Forge agent only).
         #[arg(long)]
         mock: bool,

@@ -1768,6 +1768,9 @@ enum Parsed {
         summary: String,
     },
     Usage(Usage),
+    /// Model calls the CLI made inside this turn (Claude's distinct assistant message ids, else
+    /// the `result`'s `num_turns`).
+    ModelCalls(u64),
     /// A subscription quota observation (Claude's `rate_limit_event`) — window/status/reset, for
     /// quota-aware routing (L3). The provider prefix is filled in by `complete`.
     Quota {
@@ -1849,6 +1852,9 @@ struct ClaudeStreamState {
     thinking_tokens: u64,
     /// Throttle for progress items: when and at what size the last one was emitted.
     last_progress: Option<(std::time::Instant, usize)>,
+    /// Ids of the model messages seen this turn: one per model call, however many events and
+    /// content blocks Claude splits it into.
+    message_ids: std::collections::HashSet<String>,
 }
 
 mod cli_stream;
@@ -2269,6 +2275,7 @@ impl CliProvider {
                                     on_event(StreamEvent::ToolFinished { name, ok, summary });
                                 }
                                 Parsed::Usage(u) => usage = u,
+                                Parsed::ModelCalls(n) => on_event(StreamEvent::ModelCalls(n)),
                                 Parsed::Quota {
                                     window,
                                     status,
@@ -5159,6 +5166,32 @@ mod tests {
             reasoning_tokens: None,
         })));
         assert!(items.contains(&Parsed::Final("hello".into())));
+    }
+
+    #[test]
+    fn claude_result_reports_the_model_calls_its_loop_made() {
+        // Three model messages (one split over two events, one streamed AND consolidated), plus a
+        // sub-agent's message that is not this loop's call.
+        let lines = [
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}"#,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"x"}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Read","input":{}}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"t2","message":{"id":"sub","content":[{"type":"text","text":"s"}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"done"}]}}"#,
+        ];
+        let mut stream = ClaudeStreamState::default();
+        for line in lines {
+            stream.parse_line(line);
+        }
+        let result = r#"{"type":"result","result":"done","num_turns":99,"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let items = stream.parse_line(result);
+        assert!(items.contains(&Parsed::ModelCalls(3)), "{items:?}");
+        // The count is per turn: the next result starts from zero and falls back to `num_turns`.
+        let again = stream.parse_line(result);
+        assert!(again.contains(&Parsed::ModelCalls(99)), "{again:?}");
+        let bare = parse_claude_line(r#"{"type":"result","result":"x"}"#);
+        assert!(!bare.iter().any(|i| matches!(i, Parsed::ModelCalls(_))));
     }
 
     #[test]

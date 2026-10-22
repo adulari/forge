@@ -10,12 +10,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How an attempt ended. `ok` covers every attempt the evaluator should simply score.
+/// How an attempt ended. `ok` covers every attempt that changed the workspace and that the
+/// evaluator should simply score.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptOutcome {
     #[default]
     Ok,
+    /// The turn ended with the workspace exactly as it started: no patch, and no refusal, timeout
+    /// or tool outage to explain it. The attempt is still scored; this keeps a run that did nothing
+    /// (the mock provider, an agent that only talked) from reading as an ordinary `ok`.
+    NoChange,
     Refused,
     /// Failed a post-hoc integrity check (test tampering, history leak). Scored 0.
     IntegrityFail,
@@ -86,6 +91,13 @@ pub(super) fn classify(signals: &AttemptSignals<'_>) -> (AttemptOutcome, Option<
     if signals.timed_out {
         return (AttemptOutcome::TimedOut, None);
     }
+    if !signals.patched {
+        let detail = match signals.error {
+            Some(error) => format!("workspace unchanged; the turn failed: {error}"),
+            None => "workspace unchanged after the turn".to_string(),
+        };
+        return (AttemptOutcome::NoChange, Some(detail));
+    }
     (AttemptOutcome::Ok, None)
 }
 
@@ -120,11 +132,26 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_miss_stays_ok_and_a_timeout_is_recorded() {
+    fn a_turn_that_changed_nothing_is_no_change_not_ok_and_a_timeout_is_recorded() {
+        let (outcome, detail) = classify(&signals(false, Some("The fix is in parser.py.")));
+        assert_eq!(outcome, AttemptOutcome::NoChange);
         assert_eq!(
-            classify(&signals(false, Some("The fix is in parser.py."))).0,
+            detail.as_deref(),
+            Some("workspace unchanged after the turn")
+        );
+        assert_eq!(
+            classify(&signals(true, Some("Fixed."))).0,
             AttemptOutcome::Ok
         );
+        let failed = AttemptSignals {
+            error: Some("running the agent turn: boom"),
+            ..signals(false, None)
+        };
+        let (outcome, detail) = classify(&failed);
+        assert_eq!(outcome, AttemptOutcome::NoChange);
+        assert!(detail
+            .unwrap()
+            .ends_with("the turn failed: running the agent turn: boom"));
         let timed = AttemptSignals {
             timed_out: true,
             ..signals(true, None)
