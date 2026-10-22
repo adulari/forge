@@ -89,6 +89,18 @@ for it are removed) so an interactive update cannot spend an unbounded amount of
 inside a parser. `forge lattice update` reports how many files were skipped for this reason; the
 existing root file-count ceiling and ignored/generated-directory rules remain in force.
 
+## Grammars compile when a file needs them
+
+Each language's tags query is compiled once per process, on the first file of that language that
+actually has to be parsed. Detecting a file's language (`lang_for_path`, the `forge lattice status`
+language count) compiles nothing. The queries used to be compiled for all 19 languages on a
+thread's first call to either, so an index run with nothing to parse (every start of the TUI in an
+already-indexed project, 1.5 s after the first frame) cost ~0.6 s of CPU and ~40 MB, and every other
+thread that touched Lattice paid it again. Measured on a 2-file project, `forge lattice update` went
+from 0.63 s wall / 79 MB to 0.04 s / 35 MB, and `forge lattice status` from 0.72 s / 74 MB to 0.03 s /
+34 MB. A test keeps every language's query compiling, since an unsupported query is now found on use
+rather than at the first call.
+
 ## Retrieval body-read budget and per-file cache
 
 The parser budget above bounds *indexing*. Retrieval has its own bound, because injecting bodies

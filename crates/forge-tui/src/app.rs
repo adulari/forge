@@ -1344,6 +1344,7 @@ impl App {
                 self.push_error(&body);
             }
             PresenterEvent::ToolStart { name, args } => {
+                let name = tool_cards::bare_tool_name(&name).to_string();
                 self.model_search = None;
                 if self.streaming_active {
                     self.finish_streaming_text();
@@ -1375,6 +1376,7 @@ impl App {
                 summary,
                 detail,
             } => {
+                let name = tool_cards::bare_tool_name(&name).to_string();
                 self.set_turn_activity(
                     TurnPhase::ProcessingToolResult,
                     format!(
@@ -1396,7 +1398,9 @@ impl App {
                     self.print_orphan_result(&name, ok, &summary, detail);
                 }
             }
-            PresenterEvent::ToolOutput { name, output } => self.attach_tool_output(&name, output),
+            PresenterEvent::ToolOutput { name, output } => {
+                self.attach_tool_output(tool_cards::bare_tool_name(&name), output)
+            }
             PresenterEvent::ContextInjected {
                 symbols,
                 files,

@@ -62,9 +62,20 @@ skipped.
 (`forge run`, `forge run -p`, `forge bench`). Nobody reviews per-unit commits there, and each one is
 a model round trip: the baseline parity run saw a commit-only call in 25 to 27 of 26 tasks per
 bridged haiku seed (50 calls, a median 1.2 s each), where Claude Code committed nothing. `end` keeps
-one commit at the end of the task; `never` leaves the tree dirty. An explicit `unit`, `end` or
-`never` in the config always wins over `auto`. A run handed to the daemon (`forge run` without
+one commit at the end of the task; `never` leaves the tree dirty. An explicit `unit`, `end`, `never`
+or `request` in the config always wins over `auto`. A run handed to the daemon (`forge run` without
 `--no-publish-to-fleet`) is a daemon session someone may follow, so it stays interactive.
+
+An interactive `auto` session is `unit` only while committing is free for the user. When the
+permission broker would stop at the model's own `git add && git commit` (the Ask posture with no
+allow rule for them), `auto` resolves to **`request`**: the system prompt tells the model not to
+commit on its own initiative, the reminders stay quiet, and `/commit` or "commit this" still
+commits. Measured on `forge chat` with a fresh permission config, a one-line fix through the
+claude-cli bridge raised three prompts (the edit, the model's own check, the commit); Claude Code
+raised one. The commit was the one prompt Forge added by policy. An allow rule for both commands, "Allow
+shell for this session", or a posture that runs shell unasked (auto-edit, auto, full) restores `unit`;
+the choice is re-read every request, so switching mode mid-session switches the wording at once.
+`commit_policy = "unit"` keeps the old behaviour in every posture.
 
 ## Commit attribution (`[git] coauthor = true`)
 

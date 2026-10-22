@@ -20,6 +20,14 @@ one focused conventional-commit message (feat/fix/refactor/docs/test/chore), and
 changes in the tree alone. If the work is not ready to commit, say so.
 ";
 
+const COMMIT_ON_REQUEST: &str = "\
+- In a git repository, do not commit on your own initiative: the user approves each command here \
+and has not asked for a commit. Leave your edits in the working tree. When the user asks you to \
+commit (or runs /commit), stage the specific files you changed (never `git add -A`), write one \
+focused conventional-commit message (feat/fix/refactor/docs/test/chore), and never pass \
+`--no-verify`.
+";
+
 const NEVER_COMMIT: &str = "\
 - Do not create commits. Never run `git commit` or `git add`; leave every change in the working \
 tree for the user to review and commit themselves. Reading git state (status, diff, log) is fine.
@@ -27,9 +35,37 @@ tree for the user to review and commit themselves. Reading git state (status, di
 
 impl crate::Session {
     /// The policy this session acts on: the configured one, with `auto` resolved to the surface's
-    /// default (`unit`, or `end` once a headless one-shot run has said so).
+    /// default (`unit`, or `end` once a headless one-shot run has said so). An interactive `auto`
+    /// session whose own commit would stop at a permission prompt resolves to `request` instead:
+    /// the model that commits "each verified unit" costs the user an extra approval after every
+    /// edit, where Claude Code commits nothing unasked. An allow rule for `git add`/`git commit`,
+    /// "allow for this session", or a mode that runs shell without asking brings `unit` back, so
+    /// the discipline stays wherever committing is free.
     pub(crate) fn commit_policy(&self) -> CommitPolicy {
-        self.config.git.commit_policy.or(self.default_commit_policy)
+        let chosen = self.config.git.commit_policy.or(self.default_commit_policy);
+        if self.config.git.commit_policy == CommitPolicy::Auto
+            && chosen == CommitPolicy::Unit
+            && self.model_commit_would_ask()
+        {
+            return CommitPolicy::Request;
+        }
+        chosen
+    }
+
+    /// Whether the permission broker would stop to ask before the model's own commit.
+    fn model_commit_would_ask(&self) -> bool {
+        let workspace = self.workspace_binding.read().ok().map(|g| g.clone());
+        let stage_and_commit = serde_json::json!({
+            "command": "git add file && git commit -m message"
+        });
+        crate::permission::decide_in(
+            self.mode,
+            forge_types::SideEffect::Shell,
+            "shell",
+            &stage_and_commit,
+            &self.rules,
+            workspace.as_deref(),
+        ) == forge_types::PermissionDecision::Ask
     }
 
     /// What `[git] commit_policy = "auto"` means for this session. Headless one-shot runs
@@ -47,6 +83,7 @@ pub(crate) fn apply(base: &str, policy: CommitPolicy) -> Cow<'_, str> {
     let replacement = match policy {
         CommitPolicy::Unit | CommitPolicy::Auto => return Cow::Borrowed(base),
         CommitPolicy::End => COMMIT_AT_END,
+        CommitPolicy::Request => COMMIT_ON_REQUEST,
         CommitPolicy::Never => NEVER_COMMIT,
     };
     let (Some(start), Some(end)) = (base.find(START), base.find(END)) else {

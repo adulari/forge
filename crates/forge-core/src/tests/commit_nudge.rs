@@ -70,13 +70,22 @@ fn repo_session_with(
     every: u32,
     policy: forge_config::CommitPolicy,
 ) -> (tempfile::TempDir, Session) {
+    repo_session_in(PermissionMode::Bypass, final_on, every, policy)
+}
+
+fn repo_session_in(
+    mode: PermissionMode,
+    final_on: usize,
+    every: u32,
+    policy: forge_config::CommitPolicy,
+) -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
     std::fs::write(dir.path().join("README.md"), "hi\n").unwrap();
     git(dir.path(), &["add", "README.md"]);
     git(dir.path(), &["commit", "-q", "-m", "init"]);
     let mut config = Config {
-        permission_mode: PermissionMode::Bypass,
+        permission_mode: mode,
         ..Config::default()
     };
     config.recap.enabled = false;
@@ -193,6 +202,7 @@ async fn end_and_never_policies_silence_every_reminder_across_turns() {
     for policy in [
         forge_config::CommitPolicy::End,
         forge_config::CommitPolicy::Never,
+        forge_config::CommitPolicy::Request,
     ] {
         let (_dir, mut session) = repo_session_with(3, 1, policy);
         session.run_turn("take notes").await.unwrap();
@@ -214,6 +224,87 @@ fn the_system_preamble_follows_the_commit_policy() {
     assert!(wording(forge_config::CommitPolicy::Unit).contains("commit each verified unit"));
     assert!(wording(forge_config::CommitPolicy::End).contains("commit once"));
     assert!(wording(forge_config::CommitPolicy::Never).contains("Never run `git commit`"));
+    assert!(wording(forge_config::CommitPolicy::Request).contains(REQUEST_WORDING));
+}
+
+const UNIT_WORDING: &str = "commit each verified unit";
+const REQUEST_WORDING: &str = "do not commit on your own initiative";
+
+fn preamble(session: &Session) -> String {
+    session.system_preamble()[0].content.clone()
+}
+
+fn allow_shell(session: &mut Session, patterns: &[&str]) {
+    session.rules.push(forge_types::PermissionRule {
+        tool: "shell".into(),
+        patterns: patterns.iter().map(ToString::to_string).collect(),
+        decision: forge_types::PermissionDecision::Allow,
+        source: forge_types::RuleSource::Configured,
+        reason: None,
+    });
+}
+
+#[test]
+fn auto_waits_for_a_request_while_the_models_own_commit_would_stop_at_a_prompt() {
+    // One edit, then `git add && git commit` after it: in the Ask posture that is a second and a
+    // third approval the user never asked for, where Claude Code commits nothing unasked.
+    let (_dir, session) = repo_session_in(
+        PermissionMode::Default,
+        0,
+        10,
+        forge_config::CommitPolicy::Auto,
+    );
+    let text = preamble(&session);
+    assert!(text.contains(REQUEST_WORDING), "{text}");
+    assert!(!text.contains(UNIT_WORDING), "{text}");
+    assert!(!session.commit_policy().nudges());
+}
+
+#[test]
+fn auto_keeps_unit_commits_wherever_committing_is_free() {
+    let unit = |session: &Session| {
+        let text = preamble(session);
+        text.contains(UNIT_WORDING) && !text.contains(REQUEST_WORDING)
+    };
+    for mode in [
+        PermissionMode::Bypass,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Auto,
+    ] {
+        let (_dir, session) = repo_session_in(mode, 0, 10, forge_config::CommitPolicy::Auto);
+        assert!(unit(&session), "{mode:?}");
+    }
+    // The user's own allow rules for the two commands make them free in the Ask posture too.
+    let (_dir, mut session) = repo_session_in(
+        PermissionMode::Default,
+        0,
+        10,
+        forge_config::CommitPolicy::Auto,
+    );
+    allow_shell(&mut session, &["git add *"]);
+    assert!(!unit(&session), "staging alone still asks, so commits wait");
+    allow_shell(&mut session, &["git commit *"]);
+    assert!(unit(&session));
+    // An explicit choice is never second-guessed.
+    let (_dir, session) = repo_session_in(
+        PermissionMode::Default,
+        0,
+        10,
+        forge_config::CommitPolicy::Unit,
+    );
+    assert!(unit(&session));
+}
+
+#[test]
+fn a_one_shot_default_is_not_replaced_by_the_prompt_aware_one() {
+    let (_dir, mut session) = repo_session_in(
+        PermissionMode::Default,
+        0,
+        10,
+        forge_config::CommitPolicy::Auto,
+    );
+    session.set_default_commit_policy(forge_config::CommitPolicy::End);
+    assert!(preamble(&session).contains("commit once"));
 }
 
 #[tokio::test]
