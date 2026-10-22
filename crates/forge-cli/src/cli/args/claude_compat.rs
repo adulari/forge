@@ -25,14 +25,19 @@ fn parse_budget(raw: &str) -> Result<f64, String> {
 #[derive(Args, Clone, Debug, Default)]
 pub(crate) struct ClaudeCompat {
     /// Print mode, as in `claude -p`: stdout carries only the final answer. Progress goes to
-    /// stderr when it is a terminal (or with `--verbose`). Without `-p`, `forge run` keeps its
-    /// streamed line view.
+    /// stderr when it is a terminal (or with `--verbose`). Without `-p`, `forge run` streams its
+    /// line view to a terminal and prints like `-p` when stdout is a pipe or a file.
     #[arg(short = 'p', long = "print", conflicts_with = "tui")]
     pub(crate) print: bool,
-    /// With `-p`, also write the progress trace to stderr when stderr is not a terminal. Accepted
-    /// with `--output-format stream-json`, whose event stream is always complete.
+    /// Write the progress trace to stderr even when it is not a terminal (text output), or add
+    /// `system/status` events to `--output-format stream-json`.
     #[arg(long)]
     pub(crate) verbose: bool,
+    /// Print only the final answer: never write the progress trace, not even at a terminal.
+    /// Errors still reach stderr. Implies `-p`; accepted and ignored with `--output-format json`
+    /// and `stream-json`.
+    #[arg(long, conflicts_with_all = ["verbose", "tui"])]
+    pub(crate) quiet: bool,
     /// Input format: `text` (the prompt argument, plus piped stdin) or `stream-json` (one JSON user
     /// message per stdin line, each run as a turn of the same session).
     #[arg(long, value_enum, value_name = "FORMAT")]
@@ -57,6 +62,7 @@ impl ClaudeCompat {
     /// Whether a daemon-hosted run could not honour these flags, so the run must stay local.
     pub(crate) fn needs_local_session(&self) -> bool {
         self.print
+            || self.quiet
             || self.input_format == Some(InputFormat::StreamJson)
             || self.max_turns.is_some()
             || self.max_budget_usd.is_some()

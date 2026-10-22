@@ -10,11 +10,16 @@ use std::time::{Duration, Instant};
 
 use forge_types::{PresenterEvent, StopReason};
 
+use crate::usage_source::{self, ModelUsage, UsageSlot};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Totals {
     usd: f64,
     input: u64,
     cached: u64,
+    /// Tokens written into the prompt cache (a subset of `input`). Not on the `Cost` event: read
+    /// from the usage slot, so 0 when none is attached.
+    cache_write: u64,
     output: u64,
 }
 
@@ -24,6 +29,7 @@ impl Totals {
             usd: (self.usd - base.usd).max(0.0),
             input: self.input.saturating_sub(base.input),
             cached: self.cached.saturating_sub(base.cached),
+            cache_write: self.cache_write.saturating_sub(base.cache_write),
             output: self.output.saturating_sub(base.output),
         }
     }
@@ -52,6 +58,10 @@ pub(crate) struct ResultTotals {
     last_call: Totals,
     last_error: Option<String>,
     denials: Vec<serde_json::Value>,
+    usage_slot: Option<UsageSlot>,
+    /// The session's per-model usage when this turn was routed: `modelUsage` is what came after.
+    model_base: Vec<ModelUsage>,
+    last_model: Option<String>,
 }
 
 impl ResultTotals {
@@ -69,7 +79,19 @@ impl ResultTotals {
             last_call: Totals::default(),
             last_error: None,
             denials: Vec::new(),
+            usage_slot: None,
+            model_base: Vec::new(),
+            last_model: None,
         }
+    }
+
+    /// Read cache-write tokens and the per-model split from this slot (see [`UsageSlot`]).
+    pub(crate) fn set_usage_slot(&mut self, slot: UsageSlot) {
+        self.usage_slot = Some(slot);
+    }
+
+    fn model_snapshot(&self) -> Option<Vec<ModelUsage>> {
+        self.usage_slot.as_ref().and_then(UsageSlot::snapshot)
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -79,8 +101,12 @@ impl ResultTotals {
     pub(crate) fn observe(&mut self, event: &PresenterEvent) {
         match event {
             PresenterEvent::SessionStarted { id } => self.session_id = id.clone(),
-            PresenterEvent::Routing { .. } => {
+            PresenterEvent::Routing { model, .. } => {
+                if !self.routed {
+                    self.model_base = self.model_snapshot().unwrap_or_default();
+                }
                 self.routed = true;
+                self.last_model = Some(model.clone());
                 self.turn_started.get_or_insert_with(Instant::now);
             }
             PresenterEvent::ProviderRequest { step, .. } => {
@@ -102,6 +128,9 @@ impl ResultTotals {
                     usd: *session_total_usd,
                     input: *session_in,
                     cached: session_cached_in.unwrap_or(0),
+                    cache_write: self
+                        .model_snapshot()
+                        .map_or(0, |usage| usage_source::cache_writes(&usage)),
                     output: *session_out,
                 };
                 if !self.routed && self.model_calls == 0 {
@@ -153,9 +182,33 @@ impl ResultTotals {
             "session_id": self.session_id,
             "total_cost_usd": spent.usd,
             "usage": usage_json(spent),
+            "modelUsage": self.model_usage(spent),
             "permission_denials": self.denials,
             "uuid": forge_types::new_id(),
         })
+    }
+
+    /// Claude Code's `modelUsage`. From the session's store when a slot is attached; otherwise the
+    /// turn's totals under the model it was last routed to.
+    fn model_usage(&self, spent: Totals) -> serde_json::Value {
+        if let Some(now) = self.model_snapshot() {
+            let usage = usage_source::since(&now, &self.model_base);
+            if !usage.is_empty() {
+                return usage_source::model_usage_json(&usage);
+            }
+        }
+        let Some(model) = &self.last_model else {
+            return serde_json::json!({});
+        };
+        usage_source::model_usage_json(&[ModelUsage {
+            model: model.clone(),
+            calls: self.model_calls,
+            input_tokens: spent.input,
+            cache_read_tokens: spent.cached,
+            cache_write_tokens: spent.cache_write,
+            output_tokens: spent.output,
+            cost_usd: spent.usd,
+        }])
     }
 
     /// Close the turn: the next result reports only what happens after this point.
@@ -169,15 +222,18 @@ impl ResultTotals {
         self.turn_started = None;
         self.last_error = None;
         self.denials.clear();
+        self.last_model = None;
     }
 }
 
-/// Anthropic's `usage` shape. Its `input_tokens` excludes cache reads, which Forge counts inside
-/// `input`, so a consumer summing `input_tokens + cache_read_input_tokens` (as Claude Code
-/// integrations do) gets the real total instead of counting the cached prefix twice.
+/// Anthropic's `usage` shape. Its `input_tokens` excludes both cache counts, which Forge counts
+/// inside `input`, so a consumer summing `input_tokens + cache_read_input_tokens +
+/// cache_creation_input_tokens` (as Claude Code integrations do) gets the real total instead of
+/// counting the cached prefix twice.
 fn usage_json(t: Totals) -> serde_json::Value {
     serde_json::json!({
-        "input_tokens": t.input.saturating_sub(t.cached),
+        "input_tokens": t.input.saturating_sub(t.cached).saturating_sub(t.cache_write),
+        "cache_creation_input_tokens": t.cache_write,
         "cache_read_input_tokens": t.cached,
         "output_tokens": t.output,
     })
@@ -258,6 +314,63 @@ mod tests {
         assert_eq!(second["usage"]["input_tokens"], 40);
         assert_eq!(second["usage"]["output_tokens"], 6);
         assert_eq!(second["num_turns"], 1);
+    }
+
+    fn row(model: &str, calls: u64, input: u64, read: u64, write: u64, out: u64) -> ModelUsage {
+        ModelUsage {
+            model: model.into(),
+            calls,
+            input_tokens: input,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            output_tokens: out,
+            cost_usd: 0.0,
+        }
+    }
+
+    #[test]
+    fn cache_writes_and_the_model_split_come_from_the_usage_slot() {
+        use std::sync::{Arc, Mutex};
+        let rows = Arc::new(Mutex::new(vec![row("old", 1, 50, 0, 0, 5)]));
+        let slot = UsageSlot::default();
+        let shared = Arc::clone(&rows);
+        slot.fill(Arc::new(move || shared.lock().unwrap().clone()));
+        let mut t = ResultTotals::new();
+        t.set_usage_slot(slot);
+
+        t.observe(&routing());
+        t.observe(&request(0));
+        rows.lock().unwrap().push(row("m", 1, 1_000, 600, 300, 20));
+        t.observe(&cost(0.0, 1_000, 600, 20));
+        let r = t.result("ok", StopReason::FinalAnswer);
+
+        assert_eq!(r["usage"]["cache_creation_input_tokens"], 300);
+        assert_eq!(
+            r["usage"]["input_tokens"], 100,
+            "uncached: neither the reads nor the writes"
+        );
+        assert_eq!(r["usage"]["cache_read_input_tokens"], 600);
+        let models = r["modelUsage"].as_object().unwrap();
+        assert_eq!(
+            models.len(),
+            1,
+            "the model that served earlier turns is not this turn's"
+        );
+        assert_eq!(models["m"]["cacheCreationInputTokens"], 300);
+        assert_eq!(models["m"]["inputTokens"], 100);
+    }
+
+    #[test]
+    fn without_a_usage_slot_the_turn_is_attributed_to_the_routed_model() {
+        let mut t = ResultTotals::new();
+        for e in [routing(), request(0), cost(0.2, 100, 40, 7)] {
+            t.observe(&e);
+        }
+        let r = t.result("ok", StopReason::FinalAnswer);
+        assert_eq!(r["usage"]["cache_creation_input_tokens"], 0);
+        assert_eq!(r["modelUsage"]["m"]["inputTokens"], 60);
+        assert_eq!(r["modelUsage"]["m"]["cacheReadInputTokens"], 40);
+        assert_eq!(r["modelUsage"]["m"]["costUSD"], 0.2);
     }
 
     #[test]

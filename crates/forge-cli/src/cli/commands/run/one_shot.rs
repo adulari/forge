@@ -36,6 +36,8 @@ pub(crate) struct RunRequest {
     /// `-p`: stdout carries only the final answer.
     pub(crate) print: bool,
     pub(crate) verbose: bool,
+    /// `--quiet`: print mode with no trace at all.
+    pub(crate) quiet: bool,
     pub(crate) partial_messages: bool,
     /// `--input-format stream-json`: further prompts arrive as JSON lines on stdin.
     pub(crate) stream_input: bool,
@@ -59,6 +61,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         usage_json,
         print,
         verbose,
+        quiet,
         partial_messages,
         stream_input,
         never_ask,
@@ -93,6 +96,11 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         ),
         _ => {}
     }
+    // Output that is not going to a terminal belongs to a program, which gets the answer and
+    // nothing else, exactly as `-p` gives it; the streamed line view is for a person watching.
+    let print = print
+        || quiet
+        || (goal_spec.is_none() && !tui && !std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let (prompt, command_guidance, tier) = if goal_spec.is_some() || prompt.trim().is_empty() {
         (prompt.trim().to_string(), Vec::new(), None)
     } else {
@@ -131,7 +139,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         &prompt,
         pin.as_deref(),
         publish_to_fleet,
-        local_only || carries_skill || usage_json.is_some() || resume.is_some(),
+        local_only || print || carries_skill || usage_json.is_some() || resume.is_some(),
         output_format,
     )
     .await
@@ -160,12 +168,17 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     // Machine formats: a JSON result (`json`) or NDJSON events (`stream-json`) on stdout — no
     // TUI, no heartbeat, stdout stays machine-readable. Ctrl-C still returns partial output.
     if output_format.is_machine() {
+        let usage_slot = forge_tui::UsageSlot::default();
         let (presenter, init): (Box<dyn Presenter>, Option<forge_tui::StreamInitSlot>) =
             if output_format == OutputFormat::Json {
-                (Box::new(forge_tui::JsonResultPresenter::new()), None)
+                let presenter =
+                    forge_tui::JsonResultPresenter::new().with_usage_slot(usage_slot.clone());
+                (Box::new(presenter), None)
             } else {
                 let (presenter, slot) = forge_tui::StreamJsonPresenter::new()
                     .with_partial_messages(partial_messages)
+                    .with_verbose(verbose)
+                    .with_usage_slot(usage_slot.clone())
                     .with_deferred_init();
                 (Box::new(presenter), Some(slot))
             };
@@ -176,6 +189,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
                 return Err(e);
             }
         };
+        usage_slot.fill(super::print_run::usage_source(&session));
         if let Some(slot) = init {
             slot.fill(super::print_run::stream_init(&session));
         }
@@ -198,8 +212,13 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         anyhow::bail!("`forge run --tui` does not run /goal as a loop — use `forge chat`");
     }
     let mut session = if print {
-        let presenter = Box::new(forge_tui::PrintPresenter::new(verbose, !never_ask));
-        build_session_with(presenter, mock, mode, resume, pin, true).await?
+        let presenter = forge_tui::PrintPresenter::new(verbose, !never_ask);
+        let presenter = if quiet {
+            presenter.without_trace()
+        } else {
+            presenter
+        };
+        build_session_with(Box::new(presenter), mock, mode, resume, pin, true).await?
     } else if never_ask && !tui {
         let presenter = Box::new(forge_tui::HeadlessPresenter::new(false));
         build_session_with(presenter, mock, mode, resume, pin, false).await?

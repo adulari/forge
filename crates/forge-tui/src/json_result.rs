@@ -5,6 +5,7 @@ use std::io::Write;
 use forge_types::{SideEffect, StopReason};
 
 use crate::result_totals::ResultTotals;
+use crate::usage_source::UsageSlot;
 use crate::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, NO_ANSWER};
 
 /// Buffers a whole turn and prints a single Claude-Code-shaped `result` object when it ends, so
@@ -17,6 +18,7 @@ pub struct JsonResultPresenter {
 
 /// The terminal `result` line for a run that failed before (or without) the presenter's `Done`:
 /// a machine consumer must see `is_error: true`, not an empty stdout it cannot tell from a crash.
+/// It carries the same fields as a finished run's result, zeroed, as Claude Code's does.
 pub fn error_result_line(message: &str) -> String {
     let value = serde_json::json!({
         "type": "result",
@@ -24,6 +26,19 @@ pub fn error_result_line(message: &str) -> String {
         "is_error": true,
         "result": message,
         "stop_reason": "error",
+        "uuid": forge_types::new_id(),
+        "duration_ms": 0,
+        "duration_api_ms": 0,
+        "num_turns": 0,
+        "total_cost_usd": 0.0,
+        "usage": {
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 0,
+        },
+        "modelUsage": {},
+        "permission_denials": [],
     });
     value.to_string()
 }
@@ -44,6 +59,13 @@ impl JsonResultPresenter {
             out,
             totals: ResultTotals::new(),
         }
+    }
+
+    /// Fill `usage.cache_creation_input_tokens` and `modelUsage` from the session's store (see
+    /// [`UsageSlot`]); without one they come from the turn's cost events alone.
+    pub fn with_usage_slot(mut self, slot: UsageSlot) -> Self {
+        self.totals.set_usage_slot(slot);
+        self
     }
 
     fn finish(&mut self, final_text: &str, stop_reason: StopReason) {
@@ -167,8 +189,12 @@ mod tests {
             "uncached input, as Anthropic reports it"
         );
         assert_eq!(r["usage"]["cache_read_input_tokens"], 40);
+        assert_eq!(r["usage"]["cache_creation_input_tokens"], 0);
         assert_eq!(r["usage"]["output_tokens"], 7);
         assert!(r["duration_ms"].is_u64());
+        assert_eq!(r["modelUsage"]["m"]["inputTokens"], 60);
+        assert_eq!(r["modelUsage"]["m"]["outputTokens"], 7);
+        assert!(r["uuid"].is_string() && r["permission_denials"].is_array());
     }
 
     #[test]
@@ -225,5 +251,8 @@ mod error_line_tests {
         let v: serde_json::Value = serde_json::from_str(&super::error_result_line("boom")).unwrap();
         assert_eq!(v["is_error"], true);
         assert_eq!(v["result"], "boom");
+        assert_eq!(v["usage"]["cache_creation_input_tokens"], 0);
+        assert!(v["uuid"].is_string() && v["modelUsage"].is_object());
+        assert_eq!(v["permission_denials"], serde_json::json!([]));
     }
 }

@@ -1,7 +1,8 @@
 //! `forge run -p`: Claude Code's print mode. stdout carries only the turn's final answer, so
 //! `answer=$(forge run -p "...")` and byte-for-byte comparisons against `claude -p` work. The
 //! trace (session, routing, narration, tool calls, cost) goes to stderr when a person is watching
-//! it (stderr is a terminal) or `--verbose` asks for it; errors always reach stderr.
+//! it (stderr is a terminal) or `--verbose` asks for it, and never under `--quiet`; errors always
+//! reach stderr.
 
 use std::io::{IsTerminal, Write};
 
@@ -31,6 +32,12 @@ impl PrintPresenter {
             trace,
             may_ask && std::io::stdin().is_terminal(),
         )
+    }
+
+    /// `--quiet`: nothing but the answer, even at a terminal. Errors still reach stderr.
+    pub fn without_trace(mut self) -> Self {
+        self.trace = None;
+        self
     }
 
     pub fn with_writers(
@@ -313,6 +320,20 @@ mod tests {
             !trace.contains("All good."),
             "the answer is not repeated: {trace}"
         );
+    }
+
+    #[test]
+    fn quiet_drops_the_trace_a_terminal_would_have_shown() {
+        let (out, trace) = (Buf::default(), Buf::default());
+        let mut p = PrintPresenter::with_writers(
+            Box::new(out.clone()),
+            Some(Box::new(trace.clone())),
+            false,
+        )
+        .without_trace();
+        turn(&mut p, StopReason::FinalAnswer);
+        assert_eq!(out.text(), "All good.\n");
+        assert_eq!(trace.text(), "");
     }
 
     #[test]

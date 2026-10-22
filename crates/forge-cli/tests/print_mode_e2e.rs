@@ -66,6 +66,116 @@ fn print_mode_stdout_is_exactly_the_final_answer() {
 }
 
 #[test]
+fn run_without_p_prints_only_the_answer_when_stdout_is_not_a_terminal() {
+    let ws = tempfile::tempdir().unwrap();
+    for extra in [&[][..], &["--quiet"][..], &["--output-format", "text"][..]] {
+        let out = ok(forge(ws.path())
+            .args(["run", "say hello", "--mock"])
+            .args(extra)
+            .output()
+            .unwrap());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{MOCK_ANSWER}\n"),
+            "{extra:?}"
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "{extra:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let verbose = ok(forge(ws.path())
+        .args(["run", "say hello", "--mock", "--verbose"])
+        .output()
+        .unwrap());
+    assert_eq!(
+        String::from_utf8_lossy(&verbose.stdout),
+        format!("{MOCK_ANSWER}\n")
+    );
+    assert!(String::from_utf8_lossy(&verbose.stderr).contains("↳ read_file"));
+}
+
+#[test]
+fn quiet_and_verbose_exclude_each_other() {
+    let ws = tempfile::tempdir().unwrap();
+    let out = forge(ws.path())
+        .args(["run", "hi", "--mock", "--quiet", "--verbose"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
+fn verbose_adds_status_events_to_the_stream_and_nothing_to_the_answer() {
+    let ws = tempfile::tempdir().unwrap();
+    let stream = |verbose: bool| {
+        let mut command = forge(ws.path());
+        command.args(["run", "hi", "--mock", "--output-format", "stream-json"]);
+        if verbose {
+            command.arg("--verbose");
+        }
+        events(&ok(command.output().unwrap()))
+    };
+    let kind = |e: &serde_json::Value| format!("{}/{}", e["type"], e["subtype"]);
+    let (plain, verbose) = (stream(false), stream(true));
+    assert!(!plain.iter().any(|e| e["subtype"] == "status"));
+    assert!(verbose.iter().any(|e| e["subtype"] == "status"));
+    let rest: Vec<String> = verbose
+        .iter()
+        .filter(|e| e["subtype"] != "status")
+        .map(kind)
+        .collect();
+    assert_eq!(rest, plain.iter().map(kind).collect::<Vec<_>>());
+    let usage = plain.iter().filter(|e| e["subtype"] == "usage").count() as u64;
+    let calls = plain.last().unwrap()["num_turns"].as_u64().unwrap();
+    assert_eq!(
+        usage, calls,
+        "one running total per model call, none repeated"
+    );
+}
+
+#[test]
+fn json_result_carries_claude_codes_usage_fields() {
+    let ws = tempfile::tempdir().unwrap();
+    let out = ok(forge(ws.path())
+        .args(["run", "hi", "--mock", "--output-format", "json"])
+        .output()
+        .unwrap());
+    let result = &events(&out)[0];
+    for field in [
+        "uuid",
+        "duration_ms",
+        "duration_api_ms",
+        "num_turns",
+        "total_cost_usd",
+    ] {
+        assert!(!result[field].is_null(), "{field}: {result}");
+    }
+    assert!(result["permission_denials"].is_array(), "{result}");
+    for field in [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+    ] {
+        assert!(result["usage"][field].is_u64(), "usage.{field}: {result}");
+    }
+    let models = result["modelUsage"].as_object().unwrap();
+    assert_eq!(models.len(), 1, "{result}");
+    let (_, usage) = models.iter().next().unwrap();
+    for field in [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadInputTokens",
+        "cacheCreationInputTokens",
+        "costUSD",
+    ] {
+        assert!(usage[field].is_number(), "modelUsage.{field}: {result}");
+    }
+}
+
+#[test]
 fn stream_json_matches_claude_code_shapes() {
     let ws = tempfile::tempdir().unwrap();
     let out = ok(forge(ws.path())

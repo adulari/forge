@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use crate::result_totals::ResultTotals;
 use crate::stream_json_message::{MessageAssembler, Out};
+use crate::usage_source::UsageSlot;
 use crate::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, NO_ANSWER};
 
 /// Session metadata for the `system/init` event, known only once the session is built.
@@ -69,6 +70,10 @@ pub struct StreamJsonPresenter {
     held: Vec<Value>,
     next_tool_id: u64,
     pending_tool_ids: VecDeque<(String, String)>,
+    /// `--verbose`: also emit Claude Code's `system/status` events.
+    verbose: bool,
+    /// The totals of the last `system/usage` event, so an unchanged total is not sent twice.
+    last_usage: Option<(u64, u64, Option<u64>, u64)>,
 }
 
 impl Default for StreamJsonPresenter {
@@ -92,7 +97,23 @@ impl StreamJsonPresenter {
             held: Vec::new(),
             next_tool_id: 0,
             pending_tool_ids: VecDeque::new(),
+            verbose: false,
+            last_usage: None,
         }
+    }
+
+    /// `--verbose`: add the diagnostic events Claude Code's verbose stream carries (a
+    /// `system/status` with `requesting` before every model call).
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Fill `usage.cache_creation_input_tokens` and `modelUsage` from the session's store (see
+    /// [`UsageSlot`]); without one they come from the turn's cost events alone.
+    pub fn with_usage_slot(mut self, slot: UsageSlot) -> Self {
+        self.totals.set_usage_slot(slot);
+        self
     }
 
     /// Also emit `stream_event` partials (`--include-partial-messages`).
@@ -252,6 +273,9 @@ impl Presenter for StreamJsonPresenter {
                 );
             }
             PresenterEvent::ProviderRequest { model, .. } => {
+                if self.verbose {
+                    self.system("status", json!({ "status": "requesting" }));
+                }
                 let usage = self.totals.last_call_usage();
                 let out = self.message.begin_call(&model, &usage);
                 self.send(out);
@@ -309,15 +333,24 @@ impl Presenter for StreamJsonPresenter {
                 let usage = self.totals.last_call_usage();
                 let out = self.message.flush(&usage);
                 self.send(out);
-                self.system(
-                    "usage",
-                    json!({
-                        "total_cost_usd": session_total_usd,
-                        "usage": { "input_tokens": session_in,
-                                   "cached_input_tokens": session_cached_in,
-                                   "output_tokens": session_out }
-                    }),
+                // A model call's cost and the end of its turn both report the same running total.
+                let key = (
+                    session_total_usd.to_bits(),
+                    session_in,
+                    session_cached_in,
+                    session_out,
                 );
+                if self.last_usage.replace(key) != Some(key) {
+                    self.system(
+                        "usage",
+                        json!({
+                            "total_cost_usd": session_total_usd,
+                            "usage": { "input_tokens": session_in,
+                                       "cached_input_tokens": session_cached_in,
+                                       "output_tokens": session_out }
+                        }),
+                    );
+                }
             }
             PresenterEvent::Warning(msg) => self.system("warning", json!({ "message": msg })),
             PresenterEvent::Error(msg) => self.system("error", json!({ "message": msg })),
@@ -363,5 +396,98 @@ impl Drop for StreamJsonPresenter {
         if matches!(self.init, Init::Deferred(_)) && !self.totals.session_id().is_empty() {
             self.release_init(true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn cost() -> PresenterEvent {
+        PresenterEvent::Cost {
+            session_total_usd: 0.25,
+            session_in: 100,
+            session_cached_in: Some(40),
+            session_out: 7,
+            context_tokens: 100,
+            context_limit: None,
+        }
+    }
+
+    fn run(verbose: bool) -> Vec<Value> {
+        let buf = Buf::default();
+        let mut p = StreamJsonPresenter::with_writer(Box::new(buf.clone())).with_verbose(verbose);
+        for e in [
+            PresenterEvent::SessionStarted { id: "s-1".into() },
+            PresenterEvent::Routing {
+                effort: None,
+                tier: "trivial".into(),
+                model: "m".into(),
+                rationale: "r".into(),
+            },
+            PresenterEvent::ProviderRequest {
+                model: "m".into(),
+                step: 0,
+            },
+            PresenterEvent::AssistantText("ok".into()),
+            cost(),
+            cost(),
+            PresenterEvent::Done {
+                final_text: "ok".into(),
+                stop_reason: StopReason::FinalAnswer,
+            },
+        ] {
+            p.emit(e);
+        }
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        text.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn kinds(events: &[Value]) -> Vec<String> {
+        events
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}/{}",
+                    e["type"].as_str().unwrap(),
+                    e["subtype"].as_str().unwrap_or("")
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn verbose_adds_claude_codes_status_events_and_nothing_else() {
+        let quiet = kinds(&run(false));
+        let verbose = kinds(&run(true));
+        assert!(!quiet.contains(&"system/status".to_string()), "{quiet:?}");
+        assert_eq!(verbose.iter().filter(|k| *k == "system/status").count(), 1);
+        let without_status: Vec<_> = verbose
+            .into_iter()
+            .filter(|k| k != "system/status")
+            .collect();
+        assert_eq!(without_status, quiet);
+    }
+
+    #[test]
+    fn an_unchanged_running_total_is_reported_once() {
+        let events = run(false);
+        let usage = events.iter().filter(|e| e["subtype"] == "usage").count();
+        assert_eq!(usage, 1, "{:?}", kinds(&events));
+        assert_eq!(events.last().unwrap()["type"], "result");
     }
 }
