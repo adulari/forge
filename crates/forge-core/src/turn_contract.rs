@@ -187,10 +187,9 @@ impl Default for TurnContract {
     }
 }
 
-/// Directive phrases that are imperative by construction, so they are safe to match anywhere in
-/// the prompt: no ordinary description of a system contains them.
-const READ_ONLY_DIRECTIVES: [&str; 20] = [
-    "do not make changes",
+/// Directive phrases that are imperative by construction and name no particular object, so they are
+/// safe to match anywhere in the prompt: no ordinary description of a system contains them.
+const READ_ONLY_DIRECTIVES: [&str; 17] = [
     "without changing files",
     "this is read-only",
     "this is read only",
@@ -201,8 +200,6 @@ const READ_ONLY_DIRECTIVES: [&str; 20] = [
     // turn inside a worktree session be re-driven as an implementation.
     "do not edit anything",
     "do not edit any files",
-    "do not edit",
-    "don't edit",
     "do not modify anything",
     "do not modify any files",
     "do not change any files",
@@ -213,6 +210,57 @@ const READ_ONLY_DIRECTIVES: [&str; 20] = [
     "do not write any files",
     "don't make any changes",
 ];
+
+/// Imperatives that only forbid writing when nothing narrower follows them. "Answer only, don't
+/// edit." is read-only; "fix the bug, and don't edit the existing tests" is a change request with
+/// one protected file, and treating it as read-only denied every write — the session diagnosed
+/// the bug and reported it lacked permission to fix it.
+const SCOPABLE_READ_ONLY_DIRECTIVES: [&str; 4] = [
+    "do not edit",
+    "don't edit",
+    "do not make changes",
+    "don't make changes",
+];
+
+/// Objects that keep a scopable directive universal: "don't edit the code" still forbids writing.
+const UNIVERSAL_OBJECTS: [&str; 12] = [
+    "anything",
+    "any file",
+    "files",
+    "file",
+    "code",
+    "the code",
+    "the repo",
+    "repository",
+    "codebase",
+    "project",
+    "nothing",
+    "it",
+];
+
+/// Whether the clause after a scopable directive leaves it universal: nothing follows before the
+/// clause ends, or what follows is one of [`UNIVERSAL_OBJECTS`].
+fn directive_stays_universal(rest: &str) -> bool {
+    let clause_end = rest
+        .find(['.', '!', '?', ';', ',', '\n', '\u{2014}', '(', ':'])
+        .unwrap_or(rest.len());
+    let object = rest[..clause_end].trim();
+    let object = object
+        .strip_prefix("any ")
+        .or_else(|| object.strip_prefix("the "))
+        .map_or(object, str::trim_start);
+    if object.is_empty() || object.starts_with("- ") || object.starts_with("just ") {
+        return true;
+    }
+    UNIVERSAL_OBJECTS.iter().any(|universal| {
+        let universal = universal.strip_prefix("the ").unwrap_or(universal);
+        object == universal
+            || object
+                .strip_prefix(universal)
+                .is_some_and(|tail| tail.starts_with(' ') || tail.starts_with('s'))
+                && !object.starts_with("its ")
+    })
+}
 
 /// Bare read-only tokens. These are ordinary technical vocabulary — a bug report says the sandbox
 /// stays read-only, or that a turn silently ran READ-ONLY — so they only count as a contract when
@@ -236,11 +284,18 @@ fn from_peer_agent(prompt: &str) -> bool {
 }
 
 fn explicitly_read_only(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
+    let lower = prompt.to_ascii_lowercase().replace('\u{2019}', "'");
     if READ_ONLY_DIRECTIVES
         .iter()
         .any(|needle| lower.contains(needle))
     {
+        return true;
+    }
+    if SCOPABLE_READ_ONLY_DIRECTIVES.iter().any(|needle| {
+        lower
+            .match_indices(needle)
+            .any(|(at, _)| directive_stays_universal(&lower[at + needle.len()..]))
+    }) {
         return true;
     }
     lower.split(['\n', '.', '!', '?', ';']).any(|segment| {
@@ -419,6 +474,37 @@ mod tests {
         );
         assert_eq!(contract.source(), ContractSource::HarnessExpectation);
         assert!(contract.requires_changed_artifact());
+    }
+
+    /// A protected file inside a change request is a constraint, not a read-only turn: the bench
+    /// tasks below were refused as `ReadOnlyReview` and ended with a diagnosis and no fix.
+    #[test]
+    fn a_scoped_dont_edit_inside_a_change_request_is_not_read_only() {
+        for prompt in [
+            "Please fix it so the library behaves the way the README says. Don't edit the existing tests.",
+            "Fix it properly: no skipping rows, and don't edit the incoming CSV, it comes from finance.",
+            "Standard library only, no new dependencies, and don't edit the existing tests.",
+            "Refactor the pricing module. Do not make changes to the public API.",
+            "Speed it up; don\u{2019}t edit tests/test_report.py.",
+        ] {
+            assert!(!explicitly_read_only(prompt), "wrongly read-only: {prompt}");
+            let contract = TurnContract::derive(prompt, PermissionMode::Default, false);
+            assert_ne!(contract.intent(), TaskIntent::ReadOnlyReview, "{prompt}");
+        }
+    }
+
+    #[test]
+    fn a_universal_dont_edit_is_still_read_only() {
+        for prompt in [
+            "Explain the parser. Don't edit.",
+            "Don't edit the code, just explain the flow.",
+            "Review this and do not edit any files.",
+            "Look, but do not make changes.",
+            "Explain it - don\u{2019}t edit anything.",
+            "Answer only \u{2014} don't edit \u{2014} then stop.",
+        ] {
+            assert!(explicitly_read_only(prompt), "not read-only: {prompt}");
+        }
     }
 
     #[test]

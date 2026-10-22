@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A change request that protects one file ("fix it, and don't edit the existing tests") is no longer treated as a read-only turn. `do not edit` / `don't edit` / `do not make changes` now only forbid writing when nothing narrower follows them; the scoped form had denied every write, so Forge diagnosed the bug and reported it lacked permission to fix it (3 of 26 benchmark tasks lost on DeepSeek).
+
 ### Added
 - **`web_fetch` returns Markdown and can page through long pages.** Pages are rendered from their `<main>`/`<article>` region with headings, links (made absolute) and code blocks kept, and navigation, scripts and page chrome dropped; before, every page was flattened to one line, and the 10k-character window was often spent on the menu. Plain-text, JSON and source files come back verbatim instead of having `<T>` generics stripped as tags. A new `offset` argument reads past the window, fetched pages are cached for 15 minutes so paging does not refetch, and `max_chars` goes up to 100k (`crates/forge-tools/src/web/page.rs`).
 - **`web_search` takes `allowed_domains` and `blocked_domains`.** Allowed domains are added to the query as `site:` operators and both lists filter the results (`crates/forge-tools/src/web.rs`).
