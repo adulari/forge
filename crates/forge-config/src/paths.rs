@@ -45,26 +45,14 @@ pub fn home_dir() -> Option<PathBuf> {
 /// Whether a project contains Forge-specific guidance, configuration, agents, skills, or commands.
 ///
 /// This is the canonical project-initialization check. Callers must pass the session's effective
-/// working directory so worktrees and multi-project servers are evaluated correctly.
+/// working directory so worktrees and multi-project servers are evaluated correctly. A
+/// subdirectory of a set-up repository counts as set up: its parents up to the repository top
+/// ([`crate::project_resource_dirs`]) are checked too, so `repo/pkg/` is not offered `/init` (or
+/// an automatic setup turn) when `repo/AGENTS.md` exists.
 pub fn project_initialization(cwd: &Path) -> ProjectInitialization {
-    let forge = cwd.join(".forge");
-    let initialized = [
-        cwd.join("AGENTS.md"),
-        cwd.join("FORGE.md"),
-        cwd.join("CLAUDE.md"),
-        forge.join("AGENTS.md"),
-        forge.join("FORGE.md"),
-        forge.join("config.toml"),
-        forge.join("agents.md"),
-        forge.join("mcp.toml"),
-        forge.join("settings.json"),
-    ]
-    .iter()
-    .any(|path| path.is_file())
-        || directory_has_entries(&forge.join("agents"))
-        || directory_has_entries(&forge.join("skills"))
-        || directory_has_entries(&forge.join("commands"))
-        || directory_has_entries(&cwd.join(".claude/agents"));
+    let initialized = crate::project_resource_dirs(cwd)
+        .iter()
+        .any(|dir| directory_is_set_up(dir));
 
     ProjectInitialization {
         initialized,
@@ -87,6 +75,27 @@ pub fn mark_project_auto_setup_attempted(cwd: &Path) -> std::io::Result<()> {
     let dir = cwd.join(".forge");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join(".auto-setup-attempted"), "auto setup attempted\n")
+}
+
+fn directory_is_set_up(dir: &Path) -> bool {
+    let forge = dir.join(".forge");
+    [
+        dir.join("AGENTS.md"),
+        dir.join("FORGE.md"),
+        dir.join("CLAUDE.md"),
+        forge.join("AGENTS.md"),
+        forge.join("FORGE.md"),
+        forge.join("config.toml"),
+        forge.join("agents.md"),
+        forge.join("mcp.toml"),
+        forge.join("settings.json"),
+    ]
+    .iter()
+    .any(|path| path.is_file())
+        || directory_has_entries(&forge.join("agents"))
+        || directory_has_entries(&forge.join("skills"))
+        || directory_has_entries(&forge.join("commands"))
+        || directory_has_entries(&dir.join(".claude/agents"))
 }
 
 fn directory_has_entries(path: &Path) -> bool {

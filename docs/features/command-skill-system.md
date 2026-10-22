@@ -79,6 +79,15 @@ of them, and it unlocks the import/migration story (a separate but dependent lay
   demand at invocation.
 - *Precedence & namespacing* — project scope overrides user scope on name collision; a
   loaded definition records its source so the resolver and `forge commands` can show it.
+- *Project scope reaches the repository top* — the project scope is `.forge/commands/` and
+  `.forge/skills/` in the working directory **and each parent up to the repository top** (the
+  nearest ancestor holding `.git`, `forge_config::project_resource_dirs`), so a session started
+  in `repo/pkg/` sees `repo/.forge/commands`. The nearest directory wins a collision. Trust is
+  honoured: in a trusted working directory an untrusted parent contributes nothing; in an
+  untrusted one the parents are equally untrusted and load behind the same first-use
+  confirmation. Agent definitions (`.claude/agents`, `agents_dir`) walk the same directories, and
+  a subdirectory of a set-up repository no longer counts as un-initialized (no `/init` hint or
+  automatic setup turn). Project `config.toml` stays cwd-only.
 - *Listing* — `forge commands` (CLI) and `/help` (in chat) list available commands + skills
   with name, description, scope, and a collision marker.
 - *Autocomplete in the TUI* — typing `/` at the start of the input opens a fuzzy command

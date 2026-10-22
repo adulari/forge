@@ -25,8 +25,9 @@ impl Session {
         self.lattice.as_deref().map(Lattice::repo_root)
     }
 
-    pub fn cached_agents_md(&self) -> Option<&str> {
-        self.cached_agents_md.as_deref()
+    /// The instruction files the pinned block carries, as a direct model reads them.
+    pub fn cached_agents_md(&self) -> Option<String> {
+        crate::instructions::render(&self.instructions.files, self.workspace.root())
     }
 
     /// The ordered context that Forge injected during the most recent turn.
@@ -56,29 +57,32 @@ impl Session {
         )
     }
 
-    /// Re-read the project `AGENTS.md` when it is new or has changed since the copy the pinned
-    /// block carries, and carry the new text from the next request on.
+    /// Reload the instruction files when any path the last load looked at was created, edited or
+    /// deleted since, and carry the new set from the next request on.
     ///
     /// Called once per turn from the post-persist window (never from the pre-persist site, whose
-    /// await-free invariant protects the abort-before-persist window). An unchanged file costs one
-    /// `stat`: the body is only read when the fingerprint moves.
+    /// await-free invariant protects the abort-before-persist window). An unchanged set costs one
+    /// batch of `stat`s on a blocking thread; the files are only read when one moved.
     pub(crate) async fn refresh_project_instructions(&mut self) {
         let root = self.workspace.root().to_path_buf();
-        let Some((path, modified, len)) = crate::project_agents_md_stat(&root).await else {
+        let watched = self.instructions.watched.clone();
+        let known = self.agents_md_fingerprint.clone();
+        let Ok(reloaded) = tokio::task::spawn_blocking(move || {
+            if known.is_some_and(|known| known == crate::instructions::fingerprint(&watched)) {
+                return None;
+            }
+            let loaded = crate::instructions::load(&root);
+            let fingerprint = crate::instructions::fingerprint(&loaded.watched);
+            Some((loaded, fingerprint))
+        })
+        .await
+        else {
             return;
         };
-        let fingerprint = (path, modified, len);
-        if self.agents_md_fingerprint.as_ref() == Some(&fingerprint) {
-            return;
+        if let Some((loaded, fingerprint)) = reloaded {
+            self.agents_md_fingerprint = Some(fingerprint);
+            self.set_instructions(loaded);
         }
-        self.agents_md_fingerprint = Some(fingerprint.clone());
-        let Ok(body) = tokio::fs::read_to_string(&fingerprint.0).await else {
-            return;
-        };
-        if body.trim().is_empty() {
-            return;
-        }
-        self.set_agents_md(Some(body));
     }
 
     /// Publish the one accepted terminal answer. Provider-visible provisional completions stay in

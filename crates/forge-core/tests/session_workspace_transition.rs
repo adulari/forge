@@ -243,10 +243,11 @@ async fn reset_fresh_rebinds_provider_tools_to_new_workspace() {
     .unwrap();
     live.reset_fresh(b.to_str().unwrap()).unwrap();
     assert_eq!(live.workspace_root(), b.canonicalize().unwrap());
-    assert_eq!(
-        live.cached_agents_md(),
-        Some("B guidance"),
-        "fresh transition replaces A project guidance with B guidance"
+    // The user's own global instruction files (if any) ride along; A's project file must not.
+    let guidance = live.cached_agents_md().unwrap_or_default();
+    assert!(
+        guidance.contains("B guidance") && !guidance.contains("A guidance"),
+        "fresh transition replaces A project guidance with B guidance: {guidance}"
     );
     assert_eq!(
         live.workspace_scope(),

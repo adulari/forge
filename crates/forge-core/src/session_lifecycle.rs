@@ -14,8 +14,8 @@ use forge_tools::ToolRegistry;
 use forge_types::{EffortLevel, Message, PermissionMode, Presenter, PresenterEvent};
 
 use crate::{
-    context_pack, current_git_branch, normalize_workspace_target, read_project_agents_md,
-    turn_contract, CoreError, EnvFightTracker, Session, ToolFailureTracker, WorkspaceContext,
+    context_pack, current_git_branch, normalize_workspace_target, turn_contract, CoreError,
+    EnvFightTracker, Session, ToolFailureTracker, WorkspaceContext,
 };
 
 impl Session {
@@ -192,7 +192,8 @@ impl Session {
         let project_prompt_injected = !transcript.is_empty();
         let checkpoint_root = workspace.root().join(".forge/checkpoints");
         let cached_git_branch = current_git_branch(workspace.root());
-        let cached_agents_md = read_project_agents_md(workspace.root());
+        let instructions = crate::instructions::load(workspace.root());
+        let agents_md_fingerprint = Some(crate::instructions::fingerprint(&instructions.watched));
         let (project, project_diagnostic) =
             crate::project_context::compute_with_diagnostic(workspace.root());
         if let Some(diagnostic) = project_diagnostic {
@@ -269,7 +270,8 @@ impl Session {
             always_compact_on_switch: false,
             bridge_context_tokens: 0,
             project_prompt_injected,
-            agents_md_fingerprint: None,
+            agents_md_fingerprint,
+            instruction_scope: Default::default(),
             pending_images: Vec::new(),
             vision: Default::default(),
             edits_this_turn: 0,
@@ -298,9 +300,8 @@ impl Session {
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch,
             attribution: Default::default(),
-            // Read AGENTS.md eagerly (sync, off the async path): the pinned block carries it on
-            // every request, a resumed session included.
-            cached_agents_md,
+            // Set below, through `set_instructions`.
+            instructions: Default::default(),
             compact_guard: Default::default(),
             pinned: Default::default(),
             recent_files: Default::default(),
@@ -317,8 +318,9 @@ impl Session {
             compact_timeout: crate::compaction_run::COMPACT_CALL_TIMEOUT,
         };
         s.pinned.recall_due = true;
-        let body = s.cached_agents_md.take();
-        s.set_agents_md(body);
+        // Read eagerly (sync, off the async path): the pinned block carries the instruction files
+        // on every request, a resumed session included.
+        s.set_instructions(instructions);
         s.refresh_pinned_tasks();
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });

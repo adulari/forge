@@ -88,8 +88,9 @@ the model see?" was answered in more places.
   `FilesRestored` note (the file text re-read after a compaction) is the exception to the floor
   rule: only the newest copy is ever sent, because a new one appears together with a compaction,
   which rewrote the prompt anyway.
-- **Standing context is pinned, not injected** (`pinned_context.rs`). The project instructions
-  (first non-empty of `.forge/AGENTS.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, then the user-global `<config>/forge/AGENTS.md`, `~/.forge/AGENTS.md`, `~/.claude/CLAUDE.md`), the memories recalled for the session, the active goal, the
+- **Standing context is pinned, not injected** (`pinned_context.rs`). The instruction files
+  (every user-global and project file, parents included, see
+  [instruction-files.md](instruction-files.md)), the memories recalled for the session, the active goal, the
   approved plan and the task list used to be ordinary system messages injected once, so a
   compaction folded them into the summary and nothing put them back. They are now one system
   message of kind `Pinned`, built fresh for every request (`Session::pinned_context_message`) and
@@ -98,10 +99,12 @@ the model see?" was answered in more places.
   the finalizer read). It is never stored and never in the in-memory transcript, so it can be
   neither folded nor duplicated, and its tokens are subtracted from the window budget and counted
   in `estimated_transcript_tokens`. Its inputs:
-  - **Project instructions**: `Session::cached_agents_md`, read at construction (resumed sessions
-    too) and re-read when the file's (path, mtime, length) fingerprint moves, checked with one
-    `stat` per turn (`refresh_project_instructions`). A bridged `claude-cli` leaves them out when
-    its own `CLAUDE.md` already carries them (`lean_context::claude_md_covers`).
+  - **Project instructions**: `Session::instructions` (`instructions.rs`), read at construction
+    (resumed sessions too) and reloaded when any path the load looked at (present or not,
+    imports and rule directories included) changes its (mtime, length), checked with one batch of
+    `stat`s per turn on a blocking thread (`refresh_project_instructions`). A bridged
+    `claude-cli` leaves out each file it reads itself (the `CLAUDE.md` family, `.claude/rules/`,
+    their imports, and an `AGENTS.md` its `CLAUDE.md` carries, `lean_context::claude_md_covers`).
   - **Memories**: recalled with the goal plus the person's request (top 6) on a session's first
     turn, on the first turn after a resume, and again after every compaction
     (`recall_pinned_memories`; the compaction recall uses the latest real user request still in
@@ -120,9 +123,9 @@ the model see?" was answered in more places.
     The per-turn `[task list]` note keeps its instruction (apply the new message to the list,
     do not start over) but no longer quotes the list a second time.
   - **Legacy sessions**: a session stored before the block existed carries the AGENTS.md text and
-    the memory block as persisted system messages. While the transcript still holds the exact
-    AGENTS.md body, or a message opening with the memory header, the block leaves that section
-    out; once a compaction folds the stored copy away, the block carries it.
+    the memory block as persisted system messages. While the transcript still holds an
+    instruction file's body, or a message opening with the memory header, the block leaves that
+    file or section out; once a compaction folds the stored copy away, the block carries it.
   - **Cache**: the block follows the stable prefix, so `forge_provider::cache_hints` marks a
     breakpoint at the end of the prompt/env prefix, one at the end of the block and one on the
     last message; the block changing re-bills the block and the conversation, not the prompt. It

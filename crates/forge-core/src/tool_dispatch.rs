@@ -112,6 +112,12 @@ impl Session {
             }
             let kept = self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
             let result = crate::tool_output::fit_for_model(result, kept.as_deref());
+            let result = if ok {
+                let touched = crate::instructions::touched_paths(&p.name, &p.args, None);
+                self.with_scoped_instructions(&touched, result)
+            } else {
+                result
+            };
             self.store.record_tool_call(
                 msg_id,
                 &p.name,
@@ -690,6 +696,16 @@ impl Session {
             if ok { "ok" } else { "error" },
         )?;
 
+        let result = if ok {
+            let touched = crate::instructions::touched_paths(
+                &call.name,
+                &effective_args,
+                write_path.as_deref(),
+            );
+            self.with_scoped_instructions(&touched, result)
+        } else {
+            result
+        };
         if ok {
             self.note_read_files(&call.name, &effective_args);
             self.failure_tracker
