@@ -79,14 +79,50 @@ fn previous_message_jump_walks_user_messages_upward() {
         !app.transcript_to_prev_user(),
         "nothing above the first prompt"
     );
-    // The bar is drawn only while there is somewhere to go.
+    // At the bottom neither pill is drawn: there is nowhere to jump to, and a pill there would
+    // only cover the newest rows.
     app.transcript_to_bottom();
     let screen = screen_wh(&app, 80, 13);
-    assert!(screen.contains("Previous message"), "{screen}");
+    assert!(
+        !screen.contains("Previous message") && !screen.contains("Jump to bottom"),
+        "{screen}"
+    );
+    assert!(!app.prev_bar_hit(79 - 10, 1) && !app.jump_bar_hit(40, 7));
+    // Scrolled up, both are drawn, name their chords, and take a click.
+    app.transcript_scroll_up(2);
+    let screen = screen_wh(&app, 80, 13);
+    assert!(screen.contains("Previous message · Ctrl+Home"), "{screen}");
+    assert!(screen.contains("Jump to bottom · Ctrl+End"), "{screen}");
     assert!(
         app.prev_bar_hit(79 - 10, 1),
         "the bar sits on the first row under the header"
     );
+    // Back at the bottom they are gone the same frame.
+    app.transcript_to_bottom();
+    let screen = screen_wh(&app, 80, 13);
+    assert!(!screen.contains("Previous message"), "{screen}");
+}
+
+#[test]
+fn the_pills_shorten_on_a_narrow_terminal_and_never_cover_the_whole_row() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    for i in 0..4 {
+        app.submit_user(&format!("prompt {i}"));
+        app.apply(PresenterEvent::AssistantText("a b c d".into()));
+        let _ = app.drain_flush();
+    }
+    app.transcript_to_bottom();
+    let _ = screen_wh(&app, 24, 13);
+    app.transcript_scroll_up(3);
+    let screen = screen_rows(&app, 24, 13);
+    assert!(
+        screen.iter().any(|r| r.contains("↑ Ctrl+Home")),
+        "the short label: {screen:#?}"
+    );
+    assert!(!screen.iter().any(|r| r.contains("Previous message")));
 }
 
 #[test]

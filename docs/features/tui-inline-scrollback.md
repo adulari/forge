@@ -24,6 +24,8 @@
 >   final one. An error with a known fix gets a `Next:` line.
 > - Inline mode prints a finished tool card once, when its result lands (see
 >   [tui-tool-cards.md](tui-tool-cards.md)); the running call is shown in the composer border.
+>   Full-screen folds each run of calls into one summary row that opens on a click; inline does
+>   not, because a row printed to native scrollback cannot be reopened.
 > - Reasoning is one faint italic line (`▸ Thought for 12s`); `/thinking` opens it behind an inner
 >   rail. A re-answer after the completeness review starts a new segment, and an identical
 >   duplicate is dropped. The recap row appears only after a long (over twelve rows) or tool-heavy

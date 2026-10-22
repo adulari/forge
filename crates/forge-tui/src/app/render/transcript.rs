@@ -76,10 +76,23 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     for i in scroll..(scroll + body_h).min(committed) {
         let mut row = cache.rows[i].clone();
         let src = cache.origins[i];
-        let first_of_line = i == 0 || cache.origins[i - 1] != src;
-        if let Some((_, header)) = live.iter().find(|(start, _)| *start == src) {
-            if first_of_line {
-                row = header.clone();
+        // A row a folded tool group put here animates (or shows focus) on its own terms; the
+        // card it summarises is not on screen to take the live header.
+        if let Some(fold) = App::fold_row_at(&cache, i) {
+            if let Some(live_row) = app.live_fold_row(fold, area.width) {
+                row = live_row;
+            }
+        } else {
+            let first_of_line =
+                i == 0 || cache.origins[i - 1] != src || App::fold_row_at(&cache, i - 1).is_some();
+            if let Some((_, header)) = live.iter().find(|(start, _)| *start == src) {
+                if first_of_line {
+                    let in_open_group = crate::app::tool_groups::is_indented(&row);
+                    row = header.clone();
+                    if in_open_group {
+                        row = crate::app::tool_groups::indented_fitted(row);
+                    }
+                }
             }
         }
         if let Some((from, style)) = hot {
@@ -125,38 +138,58 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Floating "previous message" bar at the top — only while a user message starts above the
-    // view. Pressing/clicking it again walks to the one before.
-    if area.height > 1 && app.has_user_message_above() {
-        let label = " ↑ Previous message · Ctrl+Home ";
-        let w = (label.chars().count() as u16).min(area.width);
-        let x = area.x + area.width.saturating_sub(w + 1);
-        let y = area.y;
-        let bar = Paragraph::new(TextLine::from(Span::styled(
-            label,
-            styles::pill(styles::user()),
-        )));
-        frame.render_widget(bar, Rect::new(x, y, w, 1));
-        app.prev_bar_geom.set(Some((y, x, w)));
-    } else {
-        app.prev_bar_geom.set(None);
-    }
+    // The two navigation pills exist only while the view is scrolled up off the tail: at the
+    // bottom there is nowhere to jump to, and a pill there would only cover the newest rows.
+    let scrolled_up = scroll < max_scroll;
+    // "Previous message" at the top right, while a user message starts above the view; pressing
+    // or clicking it again walks to the one before.
+    let prev = (scrolled_up && area.height > 2 && app.has_user_message_above())
+        .then(|| nav_pill(frame, area, NavPill::Previous));
+    app.prev_bar_geom.set(prev.flatten());
+    // "Jump to bottom" centred on the last row.
+    let jump = (scrolled_up && area.height > 0).then(|| nav_pill(frame, area, NavPill::Bottom));
+    app.jump_bar_geom.set(jump.flatten());
+}
 
-    // Floating "jump to bottom" bar — only while scrolled up off the tail.
-    if scroll < max_scroll && area.height > 0 {
-        let label = " ↓ Jump to bottom · Ctrl+End ";
-        let w = (label.chars().count() as u16).min(area.width);
-        let x = area.x + (area.width.saturating_sub(w)) / 2;
-        let y = area.y + area.height - 1;
-        let bar = Paragraph::new(TextLine::from(Span::styled(
-            label,
-            styles::pill(styles::brand()),
-        )));
-        frame.render_widget(bar, Rect::new(x, y, w, 1));
-        app.jump_bar_geom.set(Some((y, x, w)));
+#[derive(Clone, Copy)]
+enum NavPill {
+    Previous,
+    Bottom,
+}
+
+/// Draw one navigation pill and return where it landed `(row, col, width)` for hit-testing. The
+/// label names its chord; a terminal too narrow for the full label gets the short one, and one
+/// too narrow for that gets none.
+fn nav_pill(frame: &mut Frame, area: Rect, pill: NavPill) -> Option<(u16, u16, u16)> {
+    let glyphs = crate::theme::glyphs::g();
+    let (full, short, role) = match pill {
+        NavPill::Previous => (
+            format!(" {} Previous message {} Ctrl+Home ", glyphs.up, glyphs.sep),
+            format!(" {} Ctrl+Home ", glyphs.up),
+            styles::user(),
+        ),
+        NavPill::Bottom => (
+            format!(" {} Jump to bottom {} Ctrl+End ", glyphs.down, glyphs.sep),
+            format!(" {} Ctrl+End ", glyphs.down),
+            styles::brand(),
+        ),
+    };
+    let fits = |label: &str| label.chars().count() as u16 + 2 <= area.width;
+    let label = if fits(&full) {
+        full
+    } else if fits(&short) {
+        short
     } else {
-        app.jump_bar_geom.set(None);
-    }
+        return None;
+    };
+    let w = label.chars().count() as u16;
+    let (x, y) = match pill {
+        NavPill::Previous => (area.x + area.width - w - 1, area.y),
+        NavPill::Bottom => (area.x + (area.width - w) / 2, area.y + area.height - 1),
+    };
+    let bar = Paragraph::new(TextLine::from(Span::styled(label, styles::pill(role))));
+    frame.render_widget(bar, Rect::new(x, y, w, 1));
+    Some((y, x, w))
 }
 
 pub(crate) fn render_preview(frame: &mut Frame, area: Rect, app: &App) {

@@ -4,6 +4,9 @@
 > carry their own diff, and fold repeated reads. Section 0 is current; sections 1-5 describe the
 > mechanics (expansion, hit-testing, full output), which are unchanged except where section 0
 > says otherwise.
+>
+> **Tool groups update.** In full-screen, the cards of a run of calls fold into one summary row
+> (section 0a). An open group shows the cards exactly as below.
 
 ## 0. Forgeline card grammar
 
@@ -54,6 +57,75 @@ the scrollback scrolls natively and a phone reads the same rows). The remote tra
 hidden rows after the visible ones and never the fold hint. `Ctrl+T` opens the newest card that has a drawer, a folded turn included, so a tool
 card that is newer always wins.
 
+## 0a. Tool groups (full-screen)
+
+```
+ ▏ I'll get my bearings in the project first.
+ ▏ ▸ Listed 1 directory, searched 2 patterns, read 1 file, ran 3 shell commands     1 failed · 3.3s
+ ▏   ✗ Run    echo 'probe: missing fixture' >&2; exit 3                               exit 3 · 18ms
+ ▏ The checks pass apart from one probe. Writing the summary now.
+ ▏ ⠧ Created 1 file (+13), edited 1 file (+1 −1)
+ ▏   ⠧ Run    wc -l mock-summary.md                                                         running
+```
+
+A **group** is a maximal run of tool calls inside one turn with no other row between them: a card
+joins the open group when the group's last card is still the newest row of the log as the call
+starts. Assistant prose ends a group, and so does anything else that lands in the log (a notice, a
+shell diagnosis, a new turn). Subagent and task calls are calls like any other and get their own
+words.
+
+- **Collapsed** (the default), a group is one dim row: a `▸`, the summary, and on the right the
+  failures and the total duration. The summary counts finished calls by category in the order they
+  first appeared, in plain English with plurals: `Read 3 files, searched 2 patterns, ran 4 shell
+  commands`, `Listed 1 directory, ran 2 shell commands`, `Edited 2 files (+41 −7)`. Created,
+  edited and deleted files are separate categories, each with its own `(+a −d)`, so a deletion is
+  never folded into "edited". A group of one call names it: `Ran cargo test -p upload`,
+  `Read Cargo.toml`, `Created notes.md (+2)`. Categories: read, listed, searched (grep, glob,
+  search), ran shell commands, ran scripts (`run_code`), created / edited / deleted files, fetched
+  pages, ran web searches, ran agents (`spawn_agents` counts its agents), updated the task list,
+  and `called <server|tool> N times` for MCP and anything else.
+- **Failures stay visible.** The row says `N failed` in the error colour on the right, which is the
+  part a narrow terminal never cuts, and each failed call (the newest three) stays listed under the
+  summary as its one-line card header. Why: a failed call is the one thing a reader needs without
+  asking (the agent may have moved on without fixing it), and its header costs one row. A
+  destructive call is not hidden either: a deletion is its own category, and the permission
+  prompt, which is where a destructive shell command is decided, is never folded.
+- **Running.** While any call in the group runs, the summary row shows the spinner instead of the
+  `▸` and lists what has finished; the call in flight hangs under it with its own spinner (the
+  first call of a group shows alone until it finishes). A call waiting for permission also shows
+  its diff preview under it, because that is what the decision is about. When the last call ends,
+  the group folds to its single row.
+- **Open.** A click anywhere on a collapsed group, or on an open group's `▾` header, toggles it.
+  The cards of an open group hang two cells under the header and are today's cards: clicking one
+  still opens its arguments and output. The toggled row stays on the same screen row, so the
+  content under the pointer does not jump; following resumes only if that leaves the view at the
+  bottom.
+- **Keys.** `Alt+↑` / `Alt+↓` (`prev_tool_group` / `next_tool_group`) put the keyboard focus on a
+  group, starting from the ones on screen, and scroll it into view; the focused row is raised and
+  its right side reads `Enter expand · ↑↓ move · Esc done`. While a group has focus, `↑`/`↓` move,
+  `Enter` or `Space` toggle and `Esc` lets go; any other key lets go and is handled as usual, and a
+  permission prompt or question takes the keys back. `Alt+O` (`toggle_tool_groups`) opens every
+  group, including groups that arrive later, or folds them all; the row at the top of the view
+  stays put. `Ctrl+T` on a folded group opens it, then opens its newest call, then folds the group
+  again.
+- **State.** Which groups are open is kept by group id (the id of the group's first card), so it
+  survives scrolling, resizing and the log growing. `/clear` and a session switch forget it.
+- **Off switch.** `[tui] fold_tool_groups = false` (also in `/config`, applied immediately) shows
+  every call as its own card, exactly as before.
+- **Inline mode** does not fold: native scrollback cannot reopen a row, so a folded group there
+  would hide its calls for good.
+
+**How it works.** `main_log` keeps every card exactly as it renders unfolded; nothing about the
+log, the remote transcript or the activity viewer changes. The fold happens where the log is
+wrapped for the transcript (`ensure_wrapped_main` -> `App::wrap_folded`, `app/group_flow.rs`):
+each group's line range is replaced by its summary rows (collapsed) or prefixed with the header
+(open). The wrap is memoised on the log revision, the width and a fold key (fold enabled, a
+revision bumped by every toggle, and whether a permission prompt is open), so folding costs one
+pass over the log per change, the same pass the wrap already made, and nothing per frame. Only the
+rows that animate (a running summary's spinner, the running call, the focused row) are rebuilt at
+draw time, from a small sorted list of fold rows. The summary text and rows are pure functions in
+`app/tool_groups.rs`.
+
 > One transcript row per tool call, click (or `Ctrl+T`) to open it, and a full-screen viewer for
 > everything it printed. Touches `forge-types` (`PresenterEvent::ToolResult.detail`,
 > `PresenterEvent::ToolOutput`), `forge-tools` (`Tool::run_full`), `forge-store`
@@ -99,7 +171,8 @@ and the output:
 
 - **Click** anywhere on a card row to toggle it; the click is consumed, so no stray selection is
   left behind. **`Ctrl+T`** toggles the most recent card (rebindable as `toggle_tool_card`), which
-  is the path for terminals without mouse reporting.
+  is the path for terminals without mouse reporting. With tool groups folding, `Ctrl+T` opens the
+  newest group first (section 0a).
 - A call with no arguments and no output renders `·` instead of `▸`: the affordance never claims
   a drawer that is empty.
 - A running call shows `◍ running` until its result lands.
@@ -197,6 +270,14 @@ closed.
 
 ## 5. Tests
 
+`crates/forge-tui/src/app/tool_groups_tests.rs` covers the summary (aggregation in order of first
+appearance, plurals, combined diff stats, deletions kept apart, single-call wording, the failure
+count surviving a narrow row), `crates/forge-tui/src/app/group_flow_tests.rs` the fold (membership,
+prose splitting groups, click and keyboard toggles keeping the row in place, expansion surviving
+resize and scroll, the running and awaiting-permission rows, failures under the summary, the off
+switch, Alt+O, Ctrl+T's cycle), and `crates/forge-cli/tests/tui_fold_e2e.rs` drives a real
+full-screen `forge chat --mock` over a PTY, clicks a summary with an SGR mouse report and reads the
+screen back (`--ignored`).
 `crates/forge-tui/src/app/tool_cards.rs` covers the rendering (one row collapsed, full arguments
 and output when expanded, no triangle when there is nothing behind it, wrapping inside the row
 width, cwd-relative paths, malformed args, the view-full-output row and its line count, the diff

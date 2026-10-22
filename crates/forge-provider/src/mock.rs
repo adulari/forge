@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use crate::mock_goal;
 use crate::mock_long;
 use crate::mock_soak;
+use crate::mock_tools;
 use crate::{EventSink, ModelResponse, Provider, ProviderError, StreamEvent, ToolSpec};
 
 #[derive(Debug, Default)]
@@ -279,6 +280,23 @@ impl Provider for MockProvider {
                     let content = "Soak turn finished.";
                     stream_words(content, on_event).await;
                     resp(content, vec![], 42, 18)
+                }
+            });
+        }
+
+        // Mixed tool-heavy turn → explore, check, write, verify, with and without prose between.
+        if mock_tools::in_scenario(&lu) {
+            return Ok(match mock_tools::next_step(messages) {
+                Some(step) => {
+                    if let Some(thought) = step.reasoning {
+                        on_event(StreamEvent::Reasoning(thought.to_string()));
+                    }
+                    stream_words(step.content, on_event).await;
+                    resp(step.content, step.calls, 30, 12)
+                }
+                None => {
+                    stream_words(mock_tools::ANSWER, on_event).await;
+                    resp(mock_tools::ANSWER, vec![], 42, 18)
                 }
             });
         }

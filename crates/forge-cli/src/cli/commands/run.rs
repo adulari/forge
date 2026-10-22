@@ -506,6 +506,7 @@ pub(crate) async fn run_chat_tui(
         .context("initializing TUI")?;
     let mut app = App::default();
     app.fullscreen = fullscreen;
+    app.fold_tool_groups = tui_config.tui.fold_tool_groups;
     app.transcript_follow = true;
     // Wire statusline config from the loaded config.
     app.statusline_config = tui_config.statusline.clone();
@@ -1524,6 +1525,9 @@ pub(crate) async fn run_chat_tui(
                         };
                         match result {
                             Ok(()) => {
+                                if path == "tui.fold_tool_groups" {
+                                    app.fold_tool_groups = value.trim() != "false";
+                                }
                                 app.config_editor.rows = config_editor_rows();
                                 app.config_editor.status = Some(format!("✓ saved {path}"));
                             }
@@ -1538,6 +1542,9 @@ pub(crate) async fn run_chat_tui(
                         };
                         match forge_config::reset_config_value(scope, &path) {
                             Ok(()) => {
+                                if path == "tui.fold_tool_groups" {
+                                    app.fold_tool_groups = true;
+                                }
                                 app.config_editor.rows = config_editor_rows();
                                 app.config_editor.status =
                                     Some(format!("✓ reset {path} to default"));
@@ -2951,6 +2958,13 @@ pub(crate) async fn run_chat_tui(
                     }
                     _ => {}
                 }
+                dirty = true;
+                continue;
+            }
+
+            // Tool groups: Alt+↑/↓ focus a group, Alt+O opens or folds them all, and while a group
+            // has focus ↑/↓/Enter/Space/Esc drive it (any other key lets go and falls through).
+            if app.tool_group_key(key) {
                 dirty = true;
                 continue;
             }

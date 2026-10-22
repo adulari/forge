@@ -33,7 +33,7 @@ impl App {
 
     /// Where a card's rows end, for the "is it the newest thing in the log" test: the log
     /// position just past them.
-    fn card_is_last(&self, card: &ToolCard) -> bool {
+    pub(super) fn card_is_last(&self, card: &ToolCard) -> bool {
         match self
             .pending_card_marks
             .iter()
@@ -79,6 +79,7 @@ impl App {
             self.tool_cards.push(card);
             return;
         }
+        card.batch = Some(self.group_for_new_card(id));
         let lines = tool_cards::card_lines(&card, self.card_width());
         let len = lines.len();
         self.tool_cards.push(card);
@@ -323,6 +324,10 @@ impl App {
     /// Toggle the tool card under a screen cell. Returns true when a card was hit, so the caller
     /// treats the click as a card toggle instead of the start of a text selection.
     pub fn toggle_tool_card_at(&mut self, col: u16, row: u16) -> bool {
+        // A folded group, or the header of an open one, toggles the group.
+        if self.toggle_group_at(col, row) {
+            return true;
+        }
         let Some((wrapped_row, _)) = self.pointer_to_text(col, row) else {
             return false;
         };
@@ -351,16 +356,21 @@ impl App {
     /// for terminals without mouse reporting and for a quick look at what just ran. A folded
     /// user turn counts: it opens when nothing newer has a drawer.
     pub fn toggle_last_tool_card(&mut self) -> bool {
+        // With groups folding, the newest group is the target even when its newest call has no
+        // drawer of its own: opening the group is what shows it.
+        let grouped = self.fold_enabled();
         let Some(id) = self
             .tool_cards
             .iter()
             .rev()
-            .find(|c| c.has_detail())
+            .find(|c| c.has_detail() || (grouped && c.batch.is_some() && c.fold.is_none()))
             .map(|c| c.id)
         else {
             return false;
         };
-        self.toggle_tool_card(id);
+        if !self.cycle_group_of(id) {
+            self.toggle_tool_card(id);
+        }
         true
     }
 

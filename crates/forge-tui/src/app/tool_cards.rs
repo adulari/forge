@@ -92,6 +92,8 @@ pub(crate) struct ToolCard {
     pub(crate) fold: Option<UserFold>,
     /// Whether the card can be expanded (full-screen). Inline cards are printed once.
     pub(crate) interactive: bool,
+    /// The tool group this call belongs to (the id of the group's first card), full-screen only.
+    pub(crate) batch: Option<u64>,
 }
 
 impl ToolCard {
@@ -113,6 +115,7 @@ impl ToolCard {
             group: Vec::new(),
             fold: None,
             interactive: true,
+            batch: None,
         }
     }
 
