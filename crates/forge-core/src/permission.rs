@@ -327,9 +327,11 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
         let cmd_text = forge_types::shell_command_text(args);
         let cmd = cmd_text.as_deref().unwrap_or("");
         let (segments, parsed_ok) = effective_commands(cmd);
-        let any_glob = segments
-            .iter()
-            .any(|seg| rule.patterns.iter().any(|p| shell_match(p, seg)));
+        let any_glob = segments.iter().any(|seg| {
+            rule.patterns
+                .iter()
+                .any(|p| narrowing::glob_hits(rule, p, seg))
+        });
         if any_glob {
             return true;
         }
@@ -337,7 +339,11 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
             // Built-in denies also match against the *raw* command line. This catches
             // pipe-to-shell (`curl … | sh`) that segment-splitting would separate, and
             // other obfuscation the per-segment match misses.
-            if rule.patterns.iter().any(|p| shell_match(p, cmd)) {
+            if rule
+                .patterns
+                .iter()
+                .any(|p| narrowing::glob_hits(rule, p, cmd))
+            {
                 return true;
             }
             // Conservative floor: if extraction was imperfect, still catch a literal deny
@@ -354,7 +360,7 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
                 return rule
                     .patterns
                     .iter()
-                    .any(|p| !p.contains('*') && cmd.contains(p.as_str()));
+                    .any(|p| !p.contains('*') && narrowing::literal_hits(p, cmd));
             }
         }
         return false;
@@ -367,7 +373,7 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
         if rule
             .patterns
             .iter()
-            .any(|p| candidates.iter().any(|c| path_match(p, c)))
+            .any(|p| candidates.iter().any(|c| narrowing::path_hits(rule, p, c)))
         {
             return true;
         }
@@ -404,7 +410,11 @@ fn specificity(rule: &PermissionRule) -> usize {
 mod auto;
 mod auto_safe;
 mod catastrophic;
+mod narrowing;
 pub use catastrophic::privilege_escalation;
+pub use narrowing::{
+    append_withheld, narrow_read, split_denied_paths, with_withheld_note, DeniedPaths,
+};
 mod expose;
 pub use expose::{
     always_asks as is_public_expose, confirm_call, confirm_label, EXPOSE_PROMPT_PREFIX,

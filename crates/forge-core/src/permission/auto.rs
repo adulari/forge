@@ -411,7 +411,7 @@ fn credential_access(cmd: &str, rest: &[String]) -> Option<String> {
             return Some(format!("touches a credential path: {w}"));
         }
         let base = lower.rsplit('/').next().unwrap_or(&lower);
-        if base == ".env" || base.starts_with(".env.") {
+        if (base == ".env" || base.starts_with(".env.")) && !forge_types::is_dotenv_template(base) {
             return Some(format!("touches a dotenv file: {w}"));
         }
         if let Some(var) = lower.strip_prefix('$') {

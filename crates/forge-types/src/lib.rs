@@ -927,7 +927,7 @@ pub const PATH_ARG_KEYS: &[&str] = &[
 ];
 
 mod path_args;
-pub use path_args::all_path_args;
+pub use path_args::{all_path_args, is_dotenv_template, strip_line_range};
 
 /// Extract a tool call's target file path from any of the known [`PATH_ARG_KEYS`]. Returns the
 /// first present string value, or `None` if the args carry no recognizable path key (e.g. a shell
