@@ -55,16 +55,122 @@ pub(super) struct SubagentSupport {
     pub(super) detached_registry: subagent::DetachedRegistry,
 }
 
+/// Subagent support for one `forge mcp-serve` process, built on the first call that needs it.
+///
+/// Building it means a provider + router, a duel-boost read and a parent session row in the
+/// store: about 300 ms (debug build) that every bridge spawn used to pay before answering claude's
+/// MCP handshake, and so before the turn's first token, whether or not the model ever delegated.
+/// Only what the tool list shows (the agent types and the fan-out cap) is known up front.
+pub(super) struct LazySubagents {
+    pub(super) max_agents: usize,
+    pub(super) agents: std::sync::Arc<std::collections::HashMap<String, forge_config::AgentDef>>,
+    config: forge_config::Config,
+    depth: usize,
+    store: std::sync::Arc<forge_store::Store>,
+    built: tokio::sync::OnceCell<Result<SubagentSupport, String>>,
+}
+
+impl LazySubagents {
+    /// `None` when subagents are off here or the nesting budget is spent.
+    pub(super) fn new(
+        config: &forge_config::Config,
+        depth: usize,
+        store: std::sync::Arc<forge_store::Store>,
+    ) -> Option<Self> {
+        if !config.mesh.subagents.enabled || depth > config.mesh.subagents.max_depth {
+            return None;
+        }
+        let agents = std::sync::Arc::new(forge_config::load_agents_layered(
+            &std::env::current_dir().unwrap_or_default(),
+            &config.mesh.subagents.agents_dir,
+        ));
+        Some(Self {
+            max_agents: config.mesh.subagents.max_agents,
+            agents,
+            config: config.clone(),
+            depth,
+            store,
+            built: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    async fn get(&self) -> Result<&SubagentSupport, &str> {
+        self.built
+            .get_or_init(|| async { self.build().map_err(|error| format!("{error:#}")) })
+            .await
+            .as_ref()
+            .map_err(String::as_str)
+    }
+
+    fn build(&self) -> anyhow::Result<SubagentSupport> {
+        let config = &self.config;
+        // Same global store the parent uses — NOT a relative `.forge/forge.db`, which is a
+        // DIFFERENT file: the divergence created spurious empty sessions and broke the bridge task
+        // round-trip.
+        let store = std::sync::Arc::clone(&self.store);
+        let repo_key = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let repo_boosts = store.duel_boosts(&repo_key).unwrap_or_default();
+        let (provider, router) = crate::build_provider_and_router(
+            config,
+            false,
+            None,
+            None,
+            Default::default(),
+            repo_boosts,
+        );
+        let parent_id = store.create_session(".", &format!("{:?}", config.permission_mode))?;
+        let ctx = AgentCtx {
+            provider,
+            router,
+            store,
+            config: config.clone(),
+            pricing: forge_mesh::pricing::Pricing::from_config(config),
+            mode: config.permission_mode,
+            rules: config.permission_rules(),
+            depth: self.depth,
+            max_depth: config.mesh.subagents.max_depth,
+            agents: std::sync::Arc::clone(&self.agents),
+            worktree_root: None,
+            repo_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            effective_pin: None,
+            inherit_pin: config.mesh.subagents.inherit_pin,
+        };
+        Ok(SubagentSupport {
+            ctx,
+            parent_id,
+            max_agents: config.mesh.subagents.max_agents,
+            max_concurrency: config.mesh.subagents.max_concurrency,
+            detached_registry: subagent::DetachedRegistry::new(),
+        })
+    }
+}
+
 impl ForgeMcp {
+    /// The built subagent support, or the tool error for `tool` when subagents are unavailable
+    /// here or could not be set up.
+    async fn subagent_support(&self, tool: &str) -> Result<&SubagentSupport, CallToolResult> {
+        let Some(lazy) = &self.subagents else {
+            return Err(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{tool} is not available here"
+            ))]));
+        };
+        lazy.get().await.map_err(|error| {
+            CallToolResult::error(vec![ContentBlock::text(format!(
+                "error: {tool} unavailable: subagent setup failed: {error}"
+            ))])
+        })
+    }
+
     /// Bridge-side `send_to_agent`: resolve the child among the parent session's persisted
     /// children, rebuild its transcript, and continue it — the same semantics as the direct
     /// path's `Session::send_to_agent`, reported through the out-of-band sink instead of a
     /// presenter.
     pub(super) async fn handle_send_to_agent(&self, args: &Value) -> CallToolResult {
-        let Some(s) = &self.subagents else {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "send_to_agent is not available here",
-            )]);
+        let s = match self.subagent_support("send_to_agent").await {
+            Ok(s) => s,
+            Err(refusal) => return refusal,
         };
         let address = args
             .get("agent")
@@ -146,10 +252,9 @@ impl ForgeMcp {
     }
 
     pub(super) async fn handle_spawn_agents(&self, args: &Value) -> CallToolResult {
-        let Some(s) = &self.subagents else {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "spawn_agents is not available here",
-            )]);
+        let s = match self.subagent_support("spawn_agents").await {
+            Ok(s) => s,
+            Err(refusal) => return refusal,
         };
         let requests = match subagent::parse_requests(args, s.max_agents) {
             Ok(r) => r,
@@ -266,10 +371,9 @@ impl ForgeMcp {
 
     /// Bridge-side `list_subagents`: report every detached child spawned this parent session.
     pub(super) async fn handle_list_subagents(&self) -> CallToolResult {
-        let Some(s) = &self.subagents else {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "list_subagents is not available here",
-            )]);
+        let s = match self.subagent_support("list_subagents").await {
+            Ok(s) => s,
+            Err(refusal) => return refusal,
         };
         let children = s
             .ctx
@@ -285,10 +389,9 @@ impl ForgeMcp {
     /// path's `Session::cancel_subagent` semantics (best-effort in-process abort + the durable
     /// store transition; already-finished is reported, not an error).
     pub(super) async fn handle_cancel_subagent(&self, args: &Value) -> CallToolResult {
-        let Some(s) = &self.subagents else {
-            return CallToolResult::error(vec![ContentBlock::text(
-                "cancel_subagent is not available here",
-            )]);
+        let s = match self.subagent_support("cancel_subagent").await {
+            Ok(s) => s,
+            Err(refusal) => return refusal,
         };
         let address = args
             .get("agent")

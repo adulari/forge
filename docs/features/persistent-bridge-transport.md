@@ -148,6 +148,37 @@ per-re-drive latency saving that compounds with re-drive count, **not a headline
 token cost is unchanged (both transports already send deltas — one-shot via `--resume`, persistent
 via in-process context).
 
+**Startup and per-request overhead (2026-10).** Measured against `claude -p` on the same model
+with a local fake Anthropic API (debug build):
+
+- `forge mcp-serve` answered claude's MCP handshake after ~0.94 s: ~0.55 s re-resolving every
+  provider key over the secret store, ~0.3 s building subagent support (provider, router, a parent
+  session row). claude hands its MCP servers its whole environment, so the parent now passes the
+  *names* of the keys it resolved (`FORGE_BRIDGE_PROVIDER_KEYS`, claude only; codex curates its MCP
+  environment) and the child adopts them, registering them so its shell tool still strips them from
+  commands. Subagent support is built on the first `spawn_agents`/`send_to_agent` call. Handshake:
+  ~0.1 s. claude spawn → first request: 1.9 s → 1.5 s.
+- Every claude process Forge drives gets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (unless set): Forge owns
+  memory, and claude's auto-memory instructions (~2.3k chars per request) pointed at a directory its
+  disabled Write tool cannot reach, plus the project's `MEMORY.md` index (up to 25 KB).
+- When no project instruction file exists, Forge falls back to `~/.claude/CLAUDE.md`, which the
+  bridged claude also loads as user memory from the mirrored config dir. That copy is no longer sent
+  a second time (`lean_context::claude_md_covers`).
+- The quota probe (`bridge_stats::probe_claude_limits`) ran `claude --print .` with the user's whole
+  setup: every `~/.claude.json` MCP server, the SessionStart hooks, CLAUDE.md, the skill listing and
+  all tool schemas — a 107 KB request (~27k Haiku tokens) and ~1 GB of short-lived processes per
+  probe. It now runs in the bridge home with `--strict-mcp-config --tools "" --no-session-persistence`
+  and `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`: a 17 KB request.
+- Recap, next-prompt suggestion and memory capture each routed a side-call model on the turn task
+  after `Done`. With a real catalog that held the spinner ("Finishing") and the next queued prompt
+  for ~1 s per turn in release (10.8 s in a debug build). On an interactive surface they now choose
+  their model once, on a detached task (`post_turn_calls.rs`); under a single-model pin the choice
+  skips catalog ranking entirely.
+- `--model claude-cli::<unknown>` exits 1 before spawning: in stream-json mode claude silently runs
+  its default model for an unknown `--model`.
+- Bridged write prompts carry the call's arguments and diff, so the prompt names the file and shows
+  the change, as a native write does.
+
 ## codex — blocked upstream (investigated 2026-06-27, codex 0.141)
 
 codex has **no usable persistent transport** today:

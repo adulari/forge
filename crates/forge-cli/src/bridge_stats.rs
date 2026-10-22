@@ -58,6 +58,10 @@ pub struct BridgeStats {
 /// wrong to leak into a quota probe: a checkpoint id would attribute unrelated work, a sink path
 /// would inject lifecycle events into a session this probe has nothing to do with, and a permission
 /// mode would silently widen what that child may do.
+/// No MCP servers and no transcript left in ~/.claude/projects. The tool and setting-source
+/// switches are in `probe_command` ahead of the positional prompt.
+const PROBE_LEAN_ARGS: [&str; 2] = ["--strict-mcp-config", "--no-session-persistence"];
+
 const PROBE_SCRUBBED_ENV: [&str; 5] = [
     "FORGE_DB",
     "FORGE_SUBAGENT_SINK",
@@ -87,8 +91,15 @@ fn probe_command() -> std::process::Command {
         "--append-system-prompt",
         "Reply with a single period.",
     ])
+    // Only the response headers matter, so the turn carries nothing it does not need. Without
+    // these the probe ran with the user's whole claude setup: every MCP server in ~/.claude.json
+    // started (six `npx` servers here, ~1 GB of processes for a few seconds), the SessionStart
+    // hooks ran, and the request carried the CLAUDE.md files, the full skill listing and every
+    // tool schema — 107 KB, about 27k Haiku tokens of the user's subscription, per probe.
+    .args(PROBE_LEAN_ARGS)
     .arg(".")
     .env("ANTHROPIC_LOG", "debug")
+    .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
     .stdin(std::process::Stdio::null());
     for key in PROBE_SCRUBBED_ENV {
         cmd.env_remove(key);
@@ -122,8 +133,12 @@ pub fn probe_claude_limits() -> Vec<(String, f64, Option<i64>)> {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        #[allow(unused_mut)]
         let mut cmd = probe_command();
+        // The bridge's hook-free claude config dir (and its other bridge settings), so the
+        // user's SessionStart/UserPromptSubmit hooks do not run for a quota read.
+        for (key, value) in forge_provider::claude_bridge_env() {
+            cmd.env(key, value);
+        }
         // `--debug` makes the real `claude` CLI write verbose diagnostic output straight to the
         // controlling terminal via /dev/tty, bypassing stdout/stderr redirection entirely (a
         // common "always show this even if piped" pattern). Stdio::piped() (what `.output()`
@@ -831,6 +846,22 @@ mod tests {
         assert_eq!(value_of("--tools"), "");
         assert_eq!(value_of("--setting-sources"), "");
         assert_eq!(args.last().map(String::as_str), Some("."));
+    }
+
+    /// The probe reads response headers only: no MCP servers, tools, CLAUDE.md files or saved
+    /// transcript may ride along on the user's subscription.
+    #[test]
+    fn probe_turn_is_lean() {
+        let cmd = super::probe_command();
+        let args: Vec<&str> = cmd.get_args().filter_map(|a| a.to_str()).collect();
+        for flag in ["--strict-mcp-config", "--no-session-persistence"] {
+            assert!(args.contains(&flag), "{flag} missing from {args:?}");
+        }
+        let tools = args.iter().position(|a| *a == "--tools").expect("--tools");
+        assert_eq!(args[tools + 1], "", "built-in tools must be off");
+        assert!(cmd
+            .get_envs()
+            .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_CLAUDE_MDS" && v.is_some()));
     }
 
     /// A probe running in the project directory is what made `claude` load the project's .mcp.json

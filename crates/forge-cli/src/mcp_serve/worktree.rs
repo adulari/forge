@@ -34,7 +34,17 @@ impl ForgeMcp {
             args,
             &self.rules,
         );
-        if let Err(refusal) = gate(decision, worktree_ops::WORKTREE_TOOL, side_effect, mode).await {
+        let prompt = super::permission_relay::Prompt {
+            args: Some(args),
+            diff: None,
+        };
+        if let Err(refusal) = gate(
+            decision,
+            (worktree_ops::WORKTREE_TOOL, side_effect, mode),
+            prompt,
+        )
+        .await
+        {
             return CallToolResult::error(vec![ContentBlock::text(refusal)]);
         }
         let Ok(current) = std::env::current_dir().and_then(|d| d.canonicalize()) else {

@@ -41,6 +41,11 @@ pub(super) fn parse_sink_line(line: &str) -> Option<StreamEvent> {
                 tool: s("tool"),
                 side_effect: serde_json::from_value(v.get("side_effect")?.clone()).ok()?,
                 answer_path: std::path::PathBuf::from(answer),
+                args: v.get("args").filter(|a| a.is_object()).cloned(),
+                diff: v
+                    .get("diff")
+                    .and_then(|d| serde_json::from_value(d.clone()).ok())
+                    .map(Box::new),
             })
         }
         _ => None,
