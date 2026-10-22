@@ -2320,6 +2320,10 @@ pub struct MeshConfig {
     /// `forge memory` command still works for manual entries).
     #[serde(default = "default_auto_memory")]
     pub auto_memory: bool,
+    /// Also capture memories after a one-shot `forge run` turn. Off by default: the capture is a
+    /// model call the process waits on before it exits (run after the result is printed).
+    #[serde(default)]
+    pub auto_memory_one_shot: bool,
     /// Route direct-API model calls through a local Headroom proxy (`headroom proxy`, the
     /// context-optimization layer) so its compression/caching applies to Forge's traffic
     /// (docs/features/token-savings.md). `off` (default — measured on Forge's own traffic the
@@ -3088,6 +3092,7 @@ impl Default for Config {
                 max_output_tokens: default_max_output_tokens(),
                 credit_mode: CreditMode::Normal,
                 auto_memory: default_auto_memory(),
+                auto_memory_one_shot: false,
                 headroom: default_headroom_toggle(),
                 headroom_url: None,
                 auto_orchestrate: false,

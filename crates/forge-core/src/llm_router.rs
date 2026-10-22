@@ -201,13 +201,26 @@ impl LlmRouter {
     ) -> RoutingDecision {
         let activity = self.fallback.classification_activity(prompt);
         let hints = RouteHints::from_context(activity, context);
-        let mut deterministic = self
+        // Only the deterministic TIER is needed up front (the no-downgrade floor). The model is
+        // selected once, below, for whichever tier wins.
+        let (deterministic_tier, deterministic_reason) = self
             .fallback
-            .route_contextual(
-                activity, has_images, budget, health, quota, None, effort, project, context,
-            )
-            .await;
-        let deterministic_tier = deterministic.tier;
+            .contextual_tier(activity, effort, project, context);
+        // The floor is a maximum: no classifier verdict can move a Complex floor, so asking would
+        // only add a model round trip to the first token.
+        if deterministic_tier == TaskTier::Complex {
+            return self.decide_contextual(
+                deterministic_tier,
+                format!("{deterministic_reason} (deterministic floor is complex; classifier not consulted)"),
+                budget,
+                health,
+                hints,
+                quota,
+                effort,
+                has_images,
+                context,
+            );
+        }
         let classifier_prompt = context.classifier_prompt(activity);
         let key = prompt_hash(activity, &classifier_prompt);
         if let Some(llm_tier) = self.cached(key) {
@@ -257,6 +270,10 @@ impl LlmRouter {
                         frequency_penalty: None,
                         presence_penalty: None,
                         temperature: Some(0.0),
+                        // One word needs no deliberation. At the provider default a reasoning
+                        // classifier (gpt-oss) thinks before it answers, which sits in front of
+                        // the first token of every unpinned turn.
+                        effort: Some(EffortLevel::Low),
                         ..CompletionOptions::default()
                     },
                     &mut sink,
@@ -305,6 +322,17 @@ impl LlmRouter {
                 } else {
                     failures.join("; ")
                 };
+                let mut deterministic = self.decide_contextual(
+                    deterministic_tier,
+                    deterministic_reason,
+                    budget,
+                    health,
+                    hints,
+                    quota,
+                    effort,
+                    has_images,
+                    context,
+                );
                 deterministic.rationale.push_str(&format!(
                     " (llm classify unavailable → contextual heuristic: {why})"
                 ));
@@ -660,9 +688,7 @@ mod tests {
             .await;
 
         assert_eq!(decision.model, "ollama::wrapper-warm");
-        assert!(decision
-            .rationale
-            .contains("classified by classifier::model"));
+        assert!(decision.rationale.contains("classifier not consulted"));
         assert!(decision.rationale.contains("session affinity retained"));
         assert!(decision.rationale.contains("48000-token cold prefix"));
     }
@@ -748,8 +774,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_label_cannot_downgrade_deterministic_complexity() {
-        let router = llm_router(Ok("trivial"));
+    async fn a_complex_floor_routes_without_asking_the_classifier() {
+        // The deterministic tier is a no-downgrade floor, so once it is Complex no verdict can
+        // change the decision: the classifier round trip is skipped, not merely overruled.
+        let provider = Arc::new(SequenceProvider {
+            responses: Mutex::new(vec![Ok("trivial".into())]),
+            calls: Mutex::new(Vec::new()),
+        });
+        let router = LlmRouter::new(
+            provider.clone(),
+            vec!["classifier::model".into()],
+            HeuristicRouter::new(forge_config::Config::default()),
+        );
         let d = router
             .route(
                 "analyze the performance bottleneck in the authentication service",
@@ -766,12 +802,12 @@ mod tests {
             TaskTier::Complex,
             "a weak classifier must not downgrade deterministic complexity"
         );
-        assert!(d.rationale.contains("classified by"), "{}", d.rationale);
         assert!(
-            d.rationale.contains("deterministic floor: complex"),
+            d.rationale.contains("classifier not consulted"),
             "{}",
             d.rationale
         );
+        assert!(provider.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -810,14 +846,13 @@ mod tests {
             vec!["cache::model".into()],
             HeuristicRouter::new(forge_config::Config::default()),
         );
-        let complex = RoutingContext::from_messages(&[Message::user(
-            "audit the authorization paths for privilege escalation",
-        )]);
-        let standard = RoutingContext::from_messages(&[Message::user(
+        let tests =
+            RoutingContext::from_messages(&[Message::user("write unit tests for the date parser")]);
+        let retry = RoutingContext::from_messages(&[Message::user(
             "add a retry wrapper around the HTTP client",
         )]);
 
-        for context in [&complex, &standard] {
+        for context in [&tests, &retry] {
             let _ = router
                 .route_contextual(
                     "continue",
@@ -854,7 +889,7 @@ mod tests {
             vec!["context::model".into()],
             HeuristicRouter::new(forge_config::Config::default()),
         );
-        let huge = "design the scheduler and validate its concurrency invariants ".repeat(2_000);
+        let huge = "reword the intro paragraph of the onboarding guide ".repeat(2_000);
         let context =
             RoutingContext::from_messages(&[Message::user(&huge), Message::assistant(&huge)]);
 
@@ -1041,7 +1076,7 @@ mod tests {
     async fn falls_back_on_gibberish() {
         let d = llm_router(Ok("banana"))
             .route(
-                "design a lock-free queue",
+                "add a retry wrapper around the HTTP client",
                 false,
                 BudgetState::default(),
                 &ModelHealth::default(),
@@ -1050,8 +1085,6 @@ mod tests {
                 &ProjectContext::default(),
             )
             .await;
-        // heuristic catches the hard prompt
-        assert_eq!(d.tier, TaskTier::Complex);
         assert!(d.rationale.contains("heuristic"), "{}", d.rationale); // AC-B2
     }
 

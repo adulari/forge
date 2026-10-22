@@ -17,6 +17,7 @@ pub mod bench;
 mod calibration;
 pub mod capability;
 pub mod catalog;
+mod chain;
 mod classification;
 mod context;
 #[cfg(test)]
@@ -1564,6 +1565,21 @@ impl HeuristicRouter {
         )
     }
 
+    /// The tier [`Router::route_contextual`] gives `prompt` when no tier is forced, without
+    /// selecting a model. The LLM router needs only this as its no-downgrade floor; building the
+    /// whole decision as well ranked the catalog for a result it then rebuilt.
+    pub fn contextual_tier(
+        &self,
+        prompt: &str,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+        context: &RoutingContext,
+    ) -> (TaskTier, String) {
+        let activity = self.classification_activity(prompt);
+        let (tier, reason) = Self::classify_contextual(activity, project, context);
+        context.inherit_prior_tier(tier, reason, effort)
+    }
+
     /// Return the active portion of an unstructured prompt for classification. Role-aware callers
     /// should keep this compatibility switch off and pass the user task directly.
     pub fn classification_activity<'a>(&self, prompt: &'a str) -> &'a str {
@@ -2015,86 +2031,6 @@ impl HeuristicRouter {
             }
         }
         (usable, reasons)
-    }
-
-    /// Build the ordered failover chain for the routed tier: that tier's usable models first,
-    /// then the other tiers (Complex → Standard → Trivial) as cross-tier fallbacks, deduped.
-    #[allow(clippy::too_many_arguments)]
-    fn build_chain(
-        &self,
-        routed: TaskTier,
-        health: &ModelHealth,
-        hints: RouteHints,
-        quota: &SubscriptionQuota,
-        effort: Option<EffortLevel>,
-        min_context: Option<u32>,
-        has_images: bool,
-    ) -> Vec<String> {
-        let mut chain = self.ordered_usable_for_tier(
-            routed,
-            health,
-            hints,
-            quota,
-            effort,
-            min_context,
-            has_images,
-        );
-        for tier in [TaskTier::Complex, TaskTier::Standard, TaskTier::Trivial] {
-            if tier == routed {
-                continue;
-            }
-            for m in self.ordered_usable_for_tier(
-                tier,
-                health,
-                hints,
-                quota,
-                effort,
-                min_context,
-                has_images,
-            ) {
-                if !chain.contains(&m) {
-                    chain.push(m);
-                }
-            }
-        }
-        // A twin can appear in a different tier's configured list. Apply the same rule across
-        // the completed chain so a cross-tier fallback never reintroduces a bridge that has a
-        // usable OAuth surface elsewhere in this turn.
-        Self::suppress_usable_oauth_superseded_bridges(&mut chain);
-        chain
-    }
-
-    /// Build the ordered failover chain for a PIN SET: the set's members ranked by the mesh's
-    /// normal ordering (usable first, then by tier fit / cost / health / quota / benchmark), and
-    /// ONLY the set's members — failover never escapes the set. Usable members are ranked first;
-    /// unusable (benched/rate-limited/unhealthy) members are skipped during ranking. Returns
-    /// `Vec::new()` when no member is usable — the caller then dispatches the first member anyway
-    /// so the provider's real error surfaces (mirrors single-pin's "unavailable" behaviour).
-    #[allow(clippy::too_many_arguments)]
-    fn build_chain_restricted_to(
-        &self,
-        pin: &[String],
-        routed: TaskTier,
-        health: &ModelHealth,
-        hints: RouteHints,
-        quota: &SubscriptionQuota,
-        effort: Option<EffortLevel>,
-        min_context: Option<u32>,
-        has_images: bool,
-    ) -> Vec<String> {
-        let full = self.build_chain(
-            routed,
-            health,
-            hints,
-            quota,
-            effort,
-            min_context,
-            has_images,
-        );
-        // Preserve the mesh's ranked order over the full chain, restricted to the set. This ranks
-        // WITHIN the set exactly as the mesh ranks the full catalog (tier fit, cost, health,
-        // quota, benchmarks), and drops every member the set didn't pin.
-        full.into_iter().filter(|m| pin.contains(m)).collect()
     }
 
     fn affinity_quality(&self, model: &str, code_heavy: bool) -> Option<f64> {
@@ -2595,17 +2531,17 @@ impl HeuristicRouter {
                     }
                 }
             };
-            let mut chain = if pin.len() == 1 {
-                self.build_chain(
-                    classified_tier,
-                    health,
-                    hints,
-                    quota,
-                    effort,
-                    min_context,
-                    has_images,
-                )
-            } else {
+            // Strict pin semantics (harness-robustness wave 2, fix 2): a SINGLE pin gets NO
+            // cross-model fallback chain — mid-turn failover off a pinned model silently
+            // contaminated runs that depended on the exact model (the SWE-bench baseline switched
+            // 2 pinned instances to a different model). A rate limit is waited out on the SAME
+            // model (the pinned backoff in forge-core); a permanent error fails the turn with the
+            // real cause. `mesh.pin_failover = true` restores the old switch-away behaviour.
+            // A SET of two or more keeps its within-set chain (that is the whole point of pinning
+            // a set), which is still confined to the set and never escapes it.
+            // The strict single pin never builds the full chain: ranking the whole catalog only to
+            // discard it cost ~300 ms before every pinned turn's first token.
+            let mut chain = if pin.len() > 1 {
                 self.build_chain_restricted_to(
                     pin,
                     classified_tier,
@@ -2616,23 +2552,24 @@ impl HeuristicRouter {
                     min_context,
                     has_images,
                 )
+            } else if self.config.mesh.pin_failover {
+                self.build_chain(
+                    classified_tier,
+                    health,
+                    hints,
+                    quota,
+                    effort,
+                    min_context,
+                    has_images,
+                )
+            } else {
+                Vec::new()
             };
             chain.retain(|m| m != &model);
             // An explicit pin remains explicit even if the provider is currently unavailable;
             // dispatching it surfaces the provider's actionable error instead of silently changing
             // the user's requested model.
             let pinned = true;
-            // Strict pin semantics (harness-robustness wave 2, fix 2): a SINGLE pin gets NO
-            // cross-model fallback chain — mid-turn failover off a pinned model silently
-            // contaminated runs that depended on the exact model (the SWE-bench baseline switched
-            // 2 pinned instances to a different model). A rate limit is waited out on the SAME
-            // model (the pinned backoff in forge-core); a permanent error fails the turn with the
-            // real cause. `mesh.pin_failover = true` restores the old switch-away behaviour.
-            // A SET of two or more keeps its within-set chain (that is the whole point of pinning
-            // a set), which is still confined to the set and never escapes it.
-            if pin.len() == 1 && !self.config.mesh.pin_failover {
-                chain.clear();
-            }
             return RoutingDecision {
                 effort: None,
                 tier: classified_tier,
@@ -2670,8 +2607,16 @@ impl HeuristicRouter {
             min_context,
             has_images,
         );
-        let mut chain =
-            self.build_chain(tier, health, hints, quota, effort, min_context, has_images);
+        let mut chain = self.build_chain_from(
+            routed_usable.clone(),
+            tier,
+            health,
+            hints,
+            quota,
+            effort,
+            min_context,
+            has_images,
+        );
         match chain.first().cloned() {
             Some(model) => {
                 let explicit = self.explicit_for_tier(tier);

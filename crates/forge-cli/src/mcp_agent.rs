@@ -122,6 +122,15 @@ impl forge_tui::Presenter for AgentPresenter {
     fn read_line(&mut self) -> Option<String> {
         None
     }
+
+    // The MCP handler forwards neither, so each would be a wasted model call per `forge_chat`.
+    fn consumes_recap(&self) -> bool {
+        false
+    }
+
+    fn consumes_suggestions(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

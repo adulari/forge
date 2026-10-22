@@ -66,6 +66,9 @@ pub(crate) struct PinnedState {
     pub(crate) recall_due: bool,
     /// A recall already told the person it found memories; later refreshes stay quiet.
     pub(crate) recall_announced: bool,
+    /// The owed recall's query embedding, already in flight: started before routing so the
+    /// provider round trip overlaps the route instead of following it.
+    pub(crate) recall_prefetch: Option<(String, tokio::task::JoinHandle<Option<Vec<f32>>>)>,
     /// Hashes of the project-instruction and memory text last reported to the context pack.
     reported: (u64, u64),
     /// The project instructions are already in the project's `CLAUDE.md`, which a bridged claude
@@ -268,15 +271,53 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// Whether a recall in `scope` has anything to find. A new project, or a new store, has no
+    /// memories, and embedding the query then only puts a provider round trip in front of the
+    /// first token.
+    fn memories_to_recall(&self, scope: &str) -> bool {
+        [scope, GLOBAL_MEMORY_SCOPE]
+            .iter()
+            .any(|scope| self.store.count_memories(scope).is_ok_and(|n| n > 0))
+    }
+
+    /// Start embedding the owed recall's query now, before routing. The recall itself still runs
+    /// where it always did, after the prompt is persisted, and awaits this.
+    pub(crate) fn prefetch_recall_embedding(&mut self, prompt: &str) {
+        if !self.pinned.recall_due || !self.config.mesh.auto_memory {
+            return;
+        }
+        if !self.memories_to_recall(&memory_scope_at(self.workspace.root())) {
+            return;
+        }
+        let query = self.recall_query(prompt);
+        let config = self.config.lattice.embeddings.clone();
+        let text = query.clone();
+        let embedding = tokio::spawn(async move { embed_one(&config, &text).await });
+        self.pinned.recall_prefetch = Some((query, embedding));
+    }
+
     /// Recall the memories most relevant to `query` and put them in the block, replacing what an
     /// earlier recall found. Auto-memory off, or a store error, leaves the block as it was.
     pub(crate) async fn recall_pinned_memories(&mut self, query: &str) {
+        let prefetched = self
+            .pinned
+            .recall_prefetch
+            .take()
+            .filter(|(prefetched, _)| prefetched == query)
+            .map(|(_, embedding)| embedding);
         if !self.config.mesh.auto_memory {
             return;
         }
         memory_scope::align_memory_scopes(&self.store, self.workspace.root());
         let scope = memory_scope_at(self.workspace.root());
-        let embedding = embed_one(&self.config.lattice.embeddings, query).await;
+        if !self.memories_to_recall(&scope) {
+            self.pinned.memories = None;
+            return;
+        }
+        let embedding = match prefetched {
+            Some(embedding) => embedding.await.ok().flatten(),
+            None => embed_one(&self.config.lattice.embeddings, query).await,
+        };
         let recall = |scope: &str, limit: usize| match embedding.as_deref() {
             Some(embedding) => self.store.recall_semantic(scope, embedding, limit),
             None => self.store.recall_memories(scope, query, limit),

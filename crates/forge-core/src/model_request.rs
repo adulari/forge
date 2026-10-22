@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::failure_verdict::{
-    any_credentials_available, classify_attempt_failure, failure_verdict,
+    any_credentials_available, classify_attempt_failure, failure_verdict, in_set_advance_reason,
+    rejection_warning,
 };
 use crate::model_stream::handle_stream_event;
 
@@ -541,14 +542,13 @@ pub(super) async fn request_provider_response(
                         let repeated =
                             pinned_outage_last_error.as_deref() == Some(message.as_str());
                         *pinned_outage_last_error = fast.then(|| message.clone());
-                        let reject_advance = fast && repeated && !chain.as_slice().is_empty();
-                        if fast && repeated && !reject_advance {
-                            session.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model}: the provider rejected this model twice in a \
-                                 row ({message}) — not waiting for an outage that isn't one \
-                                 (pinned model; `/model` to unpin, or set \
-                                 `mesh.pin_failover = true` to allow mesh fallback)"
-                            )));
+                        // One fast refusal of a pin no catalog lists is already the answer.
+                        let unverified = session.unverified_models.contains(active_model);
+                        let rejected = fast && (repeated || unverified);
+                        let reject_advance = rejected && !chain.as_slice().is_empty();
+                        if rejected && !reject_advance {
+                            let warning = rejection_warning(active_model, &message, repeated);
+                            session.presenter.emit(PresenterEvent::Warning(warning));
                             return Err(e.into());
                         }
                         let attempt = *pinned_outage_attempts + 1;
@@ -598,7 +598,7 @@ pub(super) async fn request_provider_response(
                         if !chain.as_slice().is_empty() {
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model}: {} — moving to the next model in the pinned set",
-                                crate::failure_verdict::in_set_advance_reason(reject_advance)
+                                in_set_advance_reason(reject_advance, repeated)
                             )));
                             *pinned_outage_attempts = 0;
                             *pinned_outage_waited = std::time::Duration::ZERO;

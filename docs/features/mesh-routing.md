@@ -140,8 +140,14 @@ unrelated `continue` sharing one seed.
   15-second classification budget; an unavailable, benched, timed-out, or unparseable classifier
   falls back to the deterministic heuristic. The LLM can upgrade the deterministic contextual tier
   but cannot downgrade it; this prevents a weak classifier from turning a known Complex task's
-  `continue` into Trivial. Its in-session cache key covers the bounded relevant context and active
-  task.
+  `continue` into Trivial. Because of that floor, a turn whose deterministic tier is already
+  Complex is routed without the classifier call: no verdict could change it. The call asks for
+  low reasoning effort (one word needs no deliberation; a reasoning classifier at its default
+  effort thought before answering, in front of the first token). Its in-session cache key covers
+  the bounded relevant context and active task. Only the deterministic tier is computed before
+  the call; the model is selected once, for the winning tier.
+- A strict single pin (`--model x`, no `pin_failover`) never ranks the catalog: its failover
+  chain is empty by design, and building it only to discard it cost ~300 ms per turn.
 - `hybrid` — legacy alias for `llm`; it no longer skips LLM classification on any normal turn.
 
 All classifiers feed the same `HeuristicRouter::decide` selection path.

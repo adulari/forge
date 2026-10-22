@@ -307,6 +307,8 @@ impl Session {
             last_turn_contract: turn_contract::TurnContract::default(),
             detached_registry: crate::subagent::DetachedRegistry::new(),
             turns_since_refine: 0,
+            one_shot: false,
+            unverified_models: Vec::new(),
             idle_nudge_carry: (0, 0),
             host_guard: Default::default(),
             compact_directive: None,

@@ -38,6 +38,45 @@ response, propose the SINGLE most likely next thing this user will ask for: a sh
 instruction, ≤120 characters, no quotation marks, no markdown, no preamble. Output ONLY the \
 prompt text, nothing else.";
 
+    /// Mark this session as serving one invocation that exits once its turn is answered
+    /// (`forge run`). Its post-turn side calls are skipped: nobody sees a recap or a suggestion
+    /// after the process is gone, and a memory capture would hold the exit for a model round-trip
+    /// (`mesh.auto_memory_one_shot = true` keeps the capture).
+    pub fn set_one_shot(&mut self, one_shot: bool) {
+        self.one_shot = one_shot;
+    }
+
+    /// Optional side calls after a turn whose result has already been emitted. A channel-backed
+    /// surface detaches them, so input frees at once and their results land a moment later; a
+    /// synchronous surface runs them inline after the answer is shown; a one-shot run skips them.
+    pub(crate) async fn run_post_turn_side_calls(
+        &mut self,
+        prompt: &str,
+        final_text: &str,
+        tasks_before: &[forge_types::TodoItem],
+    ) {
+        // A tripped session spend cap ends the turn; optional side calls must not keep spending.
+        let spend_ok = self.session_spend_refusal().is_none();
+        if spend_ok && !self.one_shot {
+            self.generate_recap(prompt, final_text, tasks_before).await;
+            self.generate_suggestion(prompt, final_text).await;
+        }
+        // Continual Harness auto-refine gate (`harness.auto_refine = "turns"`, refinement.rs).
+        // Inline, not detached: it mutates durable harness state and its own presenter note should
+        // land in order with the turn it concluded, not race a later turn's output.
+        self.auto_refine_after_turns().await;
+        if !spend_ok || (self.one_shot && !self.config.mesh.auto_memory_one_shot) {
+            return;
+        }
+        // Dropping the JoinHandle detaches (does not cancel) the capture; a synchronous surface
+        // awaits it so persistence has finished when the turn returns.
+        if let Some(handle) = self.capture_memories(prompt, final_text).await {
+            if self.presenter.recap_sink().is_none() {
+                let _ = handle.await;
+            }
+        }
+    }
+
     /// After a turn completes, make one cheap trivial-tier call to generate a one-line recap,
     /// emitted via [`PresenterEvent::Recap`]. Best-effort: silently skipped on budget exhaustion
     /// or any model error so it can never derail the session.

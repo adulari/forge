@@ -169,6 +169,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
             return Err(e);
         }
         session.attach_images(at_images);
+        session.set_one_shot(true);
         let before = session.session_usage_detail();
         // A resumed session's restored totals arrive before routing; the presenter keeps them as
         // a baseline so `usage` reports this invocation, as `claude -p` does.
@@ -194,6 +195,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         return Err(e);
     }
     session.attach_images(at_images);
+    session.set_one_shot(!tui);
     let before = session.session_usage_detail();
 
     // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.
