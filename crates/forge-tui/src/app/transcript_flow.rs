@@ -95,6 +95,11 @@ impl App {
 
     /// Start a user turn: whatever turn was open ends here, and the per-turn state resets.
     pub(super) fn begin_user_turn(&mut self) {
+        // A stream still open here has no turn left to finish it; close it so the notices held
+        // behind it are not stranded.
+        if self.streaming_active {
+            self.finish_streaming_text();
+        }
         self.flush_notice_run();
         self.settle_running_cards();
         if self.transcript_ui.turn_open {
@@ -220,6 +225,13 @@ impl App {
             end: start + n,
             held: false,
         });
+    }
+
+    /// Print the notices the surface raised while the answer that just ended was streaming.
+    pub(super) fn flush_deferred_notices(&mut self) {
+        for (kind, text) in std::mem::take(&mut self.transcript_ui.deferred_notices) {
+            self.push_notice(kind, &text);
+        }
     }
 
     /// Print the held `×N` row of a notice that repeated inline, and forget the run.

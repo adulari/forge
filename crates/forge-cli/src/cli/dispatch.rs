@@ -16,6 +16,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             // no-op here (clap already rejects `--plain --tui` together).
             plain: _,
             r#continue,
+            all_dirs,
             resume,
             model,
             output_format,
@@ -39,7 +40,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             // Unified continuity with `chat`: --continue / --resume <id> / bare --resume (picker).
             // The picker needs the interactive TUI, so treat the headless run as "plain".
             let store = open_store()?;
-            let resume_id = match resolve_resume_mode(r#continue, resume, &store, !tui)? {
+            let resume_id = match resolve_resume_mode(r#continue, all_dirs, resume, &store, !tui)? {
                 ResumeMode::Id(id) => Some(id),
                 ResumeMode::Fresh => None,
                 ResumeMode::Picker => anyhow::bail!(
@@ -149,6 +150,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             mock,
             mode,
             r#continue,
+            all_dirs,
             resume,
             plain,
             // `chat` defaults to the TUI; `--tui` is accepted for symmetry with `run` and is a
@@ -159,7 +161,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             model,
         } => {
             let store = open_store()?;
-            let resume_mode = resolve_resume_mode(r#continue, resume, &store, plain)?;
+            let resume_mode = resolve_resume_mode(r#continue, all_dirs, resume, &store, plain)?;
             // Full-screen unless `--inline`; `--fullscreen` / `--inline` override the config default.
             let fullscreen = if inline {
                 false

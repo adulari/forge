@@ -15,6 +15,7 @@ use ratatui::Terminal;
 mod chrome;
 mod chrome_surfaces;
 mod interaction;
+mod notice_during_stream;
 mod panels;
 mod remote;
 mod state;

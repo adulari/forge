@@ -1,6 +1,7 @@
 use super::assay::bundle_source;
 use super::import::{convert_mdc_to_command_md, copy_catalog_assets};
 use super::local::bridge_plans;
+use super::replay::most_recent_to_continue;
 use super::run::{
     chat_action, expand_at_files, extract_code_blocks, loop_stop_reason, models_for_provider,
     models_provider_view, nth_assistant_response, ChatAction, LOOP_MAX_ITERS,
@@ -639,7 +640,7 @@ fn session_title_collapses_whitespace_truncates_and_falls_back() {
 #[test]
 fn resume_mode_neither_flag_gives_fresh() {
     let store = make_store_with_sessions(2);
-    let mode = resolve_resume_mode(false, None, &store, false).unwrap();
+    let mode = resolve_resume_mode(false, false, None, &store, false).unwrap();
     assert_eq!(mode, ResumeMode::Fresh);
 }
 
@@ -651,7 +652,7 @@ fn resume_mode_continue_returns_most_recent_id() {
     store.add_message(&a, 0, Role::User, "a", None).unwrap();
     let b = store.create_session("/b", "default").unwrap();
     store.add_message(&b, 0, Role::User, "b", None).unwrap();
-    let mode = resolve_resume_mode(true, None, &store, false).unwrap();
+    let mode = resolve_resume_mode(true, true, None, &store, false).unwrap();
     assert_eq!(mode, ResumeMode::Id(b.clone()));
     // a is not the most recent
     assert_ne!(mode, ResumeMode::Id(a));
@@ -669,15 +670,65 @@ fn resume_mode_continue_skips_a_session_that_was_never_used() {
         .add_message(&used, 0, Role::User, "real work", None)
         .unwrap();
     let _blank = store.create_session("/blank", "default").unwrap();
-    let mode = resolve_resume_mode(true, None, &store, false).unwrap();
+    let mode = resolve_resume_mode(true, true, None, &store, false).unwrap();
     assert_eq!(mode, ResumeMode::Id(used));
 }
 
 #[test]
 fn resume_mode_continue_with_no_sessions_errors() {
     let store = make_store_with_sessions(0);
-    let err = resolve_resume_mode(true, None, &store, false).unwrap_err();
+    let err = resolve_resume_mode(true, false, None, &store, false).unwrap_err();
     assert!(err.to_string().contains("no prior sessions"));
+}
+
+#[test]
+fn continue_stays_in_the_given_directory_unless_scope_is_lifted() {
+    use forge_types::Role;
+    let store = make_store_with_sessions(0);
+    let mine = store.create_session("/work/here", "default").unwrap();
+    store
+        .add_message(&mine, 0, Role::User, "mine", None)
+        .unwrap();
+    let elsewhere = store.create_session("/work/there", "default").unwrap();
+    store
+        .add_message(&elsewhere, 0, Role::User, "other", None)
+        .unwrap();
+    assert_eq!(
+        most_recent_to_continue(&store, Some("/work/here")).unwrap(),
+        mine
+    );
+    assert_eq!(most_recent_to_continue(&store, None).unwrap(), elsewhere);
+}
+
+#[test]
+fn continue_names_the_escape_hatch_when_only_other_directories_have_sessions() {
+    use forge_types::Role;
+    let store = make_store_with_sessions(0);
+    let elsewhere = store.create_session("/work/there", "default").unwrap();
+    store
+        .add_message(&elsewhere, 0, Role::User, "other", None)
+        .unwrap();
+    let message = most_recent_to_continue(&store, Some("/work/here"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains("no prior session in /work/here"),
+        "{message}"
+    );
+    assert!(message.contains("--all-dirs"), "{message}");
+    let empty = make_store_with_sessions(0);
+    let message = most_recent_to_continue(&empty, Some("/work/here"))
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("no prior sessions"), "{message}");
+}
+
+#[test]
+fn all_dirs_needs_continue() {
+    assert!(Cli::try_parse_from(["forge", "run", "task", "--all-dirs"]).is_err());
+    assert!(Cli::try_parse_from(["forge", "chat", "--all-dirs"]).is_err());
+    assert!(Cli::try_parse_from(["forge", "run", "task", "--continue", "--all-dirs"]).is_ok());
+    assert!(Cli::try_parse_from(["forge", "chat", "--continue", "--all-dirs"]).is_ok());
 }
 
 #[test]
@@ -685,7 +736,7 @@ fn resume_mode_resume_with_id_resolves_prefix() {
     let store = make_store_with_sessions(0);
     let id = store.create_session("/x", "default").unwrap();
     let prefix: String = id.chars().take(6).collect();
-    let mode = resolve_resume_mode(false, Some(Some(prefix)), &store, false).unwrap();
+    let mode = resolve_resume_mode(false, false, Some(Some(prefix)), &store, false).unwrap();
     assert_eq!(mode, ResumeMode::Id(id));
 }
 
@@ -693,7 +744,7 @@ fn resume_mode_resume_with_id_resolves_prefix() {
 fn resume_mode_bare_resume_plain_gives_error() {
     let store = make_store_with_sessions(1);
     // plain=true: headless, no TTY → should error
-    let err = resolve_resume_mode(false, Some(None), &store, true).unwrap_err();
+    let err = resolve_resume_mode(false, false, Some(None), &store, true).unwrap_err();
     assert!(err.to_string().contains("--resume <id>"));
 }
 

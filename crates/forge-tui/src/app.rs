@@ -2621,6 +2621,7 @@ impl App {
             self.push_answer_segment(&rest, rows);
         }
         self.streaming_active = false;
+        self.flush_deferred_notices();
     }
 
     /// Echo a prompt the running turn just picked up from the queue (`PresenterEvent::Steered`),
@@ -2646,8 +2647,17 @@ impl App {
     }
 
     /// Push a dim informational line into scrollback (command feedback, session lists, etc).
+    ///
+    /// A note comes from the surface (a queued prompt, a toggle), not from the turn, so it says
+    /// nothing about where the answer being streamed ends. The reply is rendered as one markdown
+    /// segment when it ends; closing it here would cut a sentence, a list or a code block in two
+    /// around the note. It is printed right after that segment instead.
     pub fn note(&mut self, text: &str) {
         let (kind, body) = lines::notice::classify(text, NoticeKind::Info);
+        if self.streaming_active && !self.streaming.is_empty() {
+            self.transcript_ui.deferred_notices.push((kind, body));
+            return;
+        }
         self.push_notice(kind, &body);
     }
 

@@ -129,24 +129,26 @@ pub(crate) enum ResumeMode {
 
 /// Resolve the `--continue` / `--resume` flags into a [`ResumeMode`].
 ///
-/// * `--continue`         → `Id(most_recent)` or a clean error when there are no sessions
+/// * `--continue`         → `Id(most_recent in this directory)`, or with `--all-dirs` the most
+///   recent of the whole store (like `claude -c`, which is per project); a clean error when none
 /// * `--resume <prefix>`  → resolve prefix → `Id`
 /// * `--resume` (bare)    → `Picker` (headless: bail with a clear message)
 /// * neither              → `Fresh`
 pub(crate) fn resolve_resume_mode(
     do_continue: bool,
+    all_dirs: bool,
     resume: Option<Option<String>>,
     store: &Store,
     plain: bool,
 ) -> Result<ResumeMode> {
     match (do_continue, resume) {
         (true, _) => {
-            let id = store
-                .most_recent_session_id()
-                .context("looking up most-recent session")?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("no prior sessions — run `forge chat` to start one")
-                })?;
+            let directory = if all_dirs {
+                None
+            } else {
+                Some(current_workspace()?)
+            };
+            let id = most_recent_to_continue(store, directory.as_deref())?;
             ensure_not_daemon_driven(store, &id)?;
             unarchive_on_resume(store, &id);
             Ok(ResumeMode::Id(id))
@@ -167,6 +169,39 @@ pub(crate) fn resolve_resume_mode(
         }
         (false, None) => Ok(ResumeMode::Fresh),
     }
+}
+
+/// The session `--continue` reattaches: the most recent one whose workspace is `directory`, or
+/// the most recent of the whole store when `directory` is `None`.
+pub(crate) fn most_recent_to_continue(store: &Store, directory: Option<&str>) -> Result<String> {
+    let anywhere = store
+        .most_recent_session_id()
+        .context("looking up most-recent session")?;
+    let Some(directory) = directory else {
+        return anywhere
+            .ok_or_else(|| anyhow::anyhow!("no prior sessions — run `forge chat` to start one"));
+    };
+    match store
+        .most_recent_session_id_in(directory)
+        .context("looking up most-recent session in this directory")?
+    {
+        Some(id) => Ok(id),
+        None if anywhere.is_some() => anyhow::bail!(
+            "no prior session in {directory} — `--continue` is per directory; add `--all-dirs` \
+             for the most recent session anywhere, or pick one with `forge sessions` and \
+             `--resume <id>`"
+        ),
+        None => anyhow::bail!("no prior sessions — run `forge chat` to start one"),
+    }
+}
+
+/// The current directory in the form a new session records as its workspace (not canonicalised:
+/// on Windows that adds a `\\?\` prefix no recorded workspace carries).
+fn current_workspace() -> Result<String> {
+    Ok(std::env::current_dir()
+        .context("resolving the current directory")?
+        .display()
+        .to_string())
 }
 
 /// Resolve a (possibly abbreviated) session id to a single full id, git-style. A value that

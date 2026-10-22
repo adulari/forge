@@ -253,8 +253,9 @@ pub(crate) enum Command {
     ///
     /// Surface: plain line output by default; add `--tui` for the interactive TUI (`--plain` is
     /// accepted too, for symmetry with `forge chat`). Session continuity mirrors `forge chat`:
-    /// `--resume <id>` reattaches by id, `--continue` reattaches the most-recent session, and a
-    /// bare `--resume` opens the interactive picker (TUI only).
+    /// `--resume <id>` reattaches by id, `--continue` reattaches the most-recent session of this
+    /// directory (`--all-dirs`: of any directory), and a bare `--resume` opens the interactive
+    /// picker (TUI only).
     Run {
         /// The prompt / task for the agent.
         prompt: Vec<String>,
@@ -271,9 +272,13 @@ pub(crate) enum Command {
         /// with `forge chat --plain`).
         #[arg(long)]
         plain: bool,
-        /// Reattach the most-recent session (cannot be combined with --resume). Same as `chat`.
+        /// Reattach the most-recent session of the current directory (cannot be combined with
+        /// --resume). Same as `chat`.
         #[arg(long, conflicts_with = "resume")]
         r#continue: bool,
+        /// With --continue: take the most-recent session of any directory, not just this one.
+        #[arg(long, requires = "continue")]
+        all_dirs: bool,
         /// Resume a session by id prefix, or open the interactive picker when no id is given
         /// (picker requires --tui). Cannot be combined with --continue.
         #[arg(long, num_args = 0..=1, value_name = "ID")]
@@ -311,7 +316,8 @@ pub(crate) enum Command {
     ///
     /// Surface: the interactive TUI by default; add `--plain` for line output (`--tui` is accepted
     /// too, for symmetry with `forge run`). Session continuity: `--resume <id>` reattaches by id,
-    /// `--continue` reattaches the most-recent session, and a bare `--resume` opens the picker.
+    /// `--continue` reattaches the most-recent session of this directory (`--all-dirs`: of any
+    /// directory), and a bare `--resume` opens the picker.
     Chat {
         /// Use the offline deterministic mock provider.
         #[arg(long)]
@@ -319,9 +325,13 @@ pub(crate) enum Command {
         /// Override the permission mode.
         #[arg(long, value_enum)]
         mode: Option<Mode>,
-        /// Reattach the most-recent session (cannot be combined with --resume).
+        /// Reattach the most-recent session of the current directory (cannot be combined with
+        /// --resume).
         #[arg(long, conflicts_with = "resume")]
         r#continue: bool,
+        /// With --continue: take the most-recent session of any directory, not just this one.
+        #[arg(long, requires = "continue")]
+        all_dirs: bool,
         /// Reattach a session by id prefix, or open an interactive picker when no id is given.
         /// Cannot be combined with --continue.
         #[arg(long, num_args = 0..=1, value_name = "ID")]
