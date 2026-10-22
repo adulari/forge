@@ -555,7 +555,7 @@ pub(crate) async fn auth_codex_oauth(
     match forge_provider::probe_codex_entitlement(&tokens.access_token, probe_id).await {
         Ok(forge_provider::EntitlementStatus::Entitled) => println!(
             "signed in to ChatGPT via OAuth as '{account_id}' — API access confirmed (tokens stored in the OS keyring)\n\
-             use models with the codex-oauth:: prefix, e.g.:  forge --model codex-oauth::gpt-5.5\n\
+             use models with the codex-oauth:: prefix — `forge models` lists the ones your plan can run\n\
              note: costs show as $0 — usage is billed to your ChatGPT subscription, not metered API credits\n\
              multiple accounts: `forge auth codex-oauth --list` · switch with `--switch --account <id>`"
         ),
@@ -572,12 +572,12 @@ pub(crate) async fn auth_codex_oauth(
             "signed in as '{account_id}'; the entitlement check was rate-limited (429) — assuming access is OK."
         ),
         Ok(forge_provider::EntitlementStatus::Other(status, msg)) => println!(
-            "signed in as '{account_id}'; entitlement check returned unexpected status ({status}: {msg}) — \
-             tokens are stored, try using codex-oauth:: models directly."
+            "signed in as '{account_id}' and the tokens are stored; only the optional access check got an \
+             unexpected answer ({status}: {msg}) — try a codex-oauth:: model from `forge models` directly."
         ),
         Err(e) => println!(
-            "signed in as '{account_id}', but the entitlement check itself failed ({e}) — tokens are stored, try \
-             using codex-oauth:: models directly."
+            "signed in as '{account_id}' and the tokens are stored; only the optional access check failed \
+             ({e}) — try a codex-oauth:: model from `forge models` directly."
         ),
     }
     Ok(())

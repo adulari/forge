@@ -99,7 +99,7 @@ models *refuse* to do that (see §3c).
 ### 3b. Live layer — `scripts/bridge-e2e.sh`
 
 Drives **real bridge turns** on the **cheapest subscription model** (`claude-cli::haiku`,
-`codex-cli::gpt-5.4-mini`) — **no direct-API credits** — and asserts on the **real filesystem + the run
+`codex-cli::gpt-5.6-luna`) — **no direct-API credits** — and asserts on the **real filesystem + the run
 log**. Each scenario forces a different bad path:
 
 | Case | Forced condition | What it proves |
@@ -114,8 +114,8 @@ Run it:
 ```bash
 cargo build --release -p forge-agent
 scripts/bridge-e2e.sh                 # claude-cli::haiku (cheapest)
-scripts/bridge-e2e.sh --both          # also codex-cli::gpt-5.4-mini
-BRIDGE_MODEL=codex-cli::gpt-5.4-mini scripts/bridge-e2e.sh
+scripts/bridge-e2e.sh --both          # also codex-cli::gpt-5.6-luna
+BRIDGE_MODEL=codex-cli::gpt-5.6-luna scripts/bridge-e2e.sh
 BRIDGE_MODEL=claude-cli::sonnet scripts/bridge-e2e.sh
 ```
 

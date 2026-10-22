@@ -65,9 +65,11 @@ There is no `fs`, `fetch`, `require` or timer API. The sandbox is the forge-work
 engine, whose only capability here is the `tools` bridge.
 
 Not callable from a script: `run_code` itself, `run_workflow`, `spawn_agents` and the other
-subagent tools, `ask_user`, `present_plan`, `update_tasks`, `use_skill`, `remember`, and the
-session messaging, dispatch, heartbeat, wakeup and push tools. They drive the session, not the
-workspace; call them as normal tools.
+subagent tools, `ask_user`, `present_plan`, `use_skill`, `remember`, and the session messaging,
+dispatch, heartbeat, wakeup and push tools. They drive the session, not the workspace; call them
+as normal tools. `update_tasks` is the exception: it only rewrites the task checklist, so a script
+can tick a task off and run the next calls in the same step. (It used to be denied, which killed a
+script that led with a task update on its first line and threw away every call batched after it.)
 
 ## Every inner call is a normal call
 

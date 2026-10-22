@@ -11,8 +11,11 @@ use serde_json::Value;
 
 use crate::{deferred_tools, Session};
 
-/// Tools a script may not call: they drive the session itself (prompts, plans, tasks, child
-/// agents, scheduling) or would recurse. Everything else in the directory is callable.
+/// Tools a script may not call: they drive the session itself (prompts, plans, child agents,
+/// scheduling) or would recurse. Everything else in the directory is callable, and so is
+/// `update_tasks`: it only rewrites the model's own checklist, and "tick this task off, then run
+/// the next calls" is exactly the step a script exists to batch. Denying it made a script that led
+/// with a task update die on its first line, discarding every call batched after it.
 const SCRIPT_DENY: &[&str] = &[
     super::RUN_CODE_TOOL,
     crate::workflow::RUN_WORKFLOW_TOOL,
@@ -22,7 +25,6 @@ const SCRIPT_DENY: &[&str] = &[
     crate::subagent::CANCEL_SUBAGENT_TOOL,
     crate::ASK_USER_TOOL,
     crate::PRESENT_PLAN_TOOL,
-    crate::UPDATE_TASKS_TOOL,
     crate::USE_SKILL_TOOL,
     crate::REMEMBER_TOOL,
     crate::fleet::MESSAGE_SESSION_TOOL,
@@ -233,6 +235,17 @@ mod tests {
             ),
             Resolved::Denied(_)
         ));
+    }
+
+    #[test]
+    fn update_tasks_is_a_plain_call_inside_a_script() {
+        let dir = Fixed(vec![]);
+        let args =
+            serde_json::json!({"tasks": [{"title": "Read the spec", "status": "in_progress"}]});
+        assert_eq!(
+            resolve("update_tasks", args.clone(), &dir),
+            Resolved::Call("update_tasks".into(), args)
+        );
     }
 
     #[test]

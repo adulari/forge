@@ -45,8 +45,9 @@ pub fn run_code_spec() -> ToolSpec {
             are callable by name too; `await tools.$search(\"keywords\")` returns matching \
             tools' names, descriptions and schemas. Calls run one at a time in order; permission \
             prompts and /undo snapshots work as for normal calls. `console.log(...)` lines are \
-            kept. No fs, fetch, require or timer API. Not callable from a script: run_code, \
-            run_workflow, spawn_agents, ask_user, present_plan, update_tasks and the other \
+            kept. No fs, fetch, require or timer API. update_tasks works here, so a step can \
+            tick a task off and run its next calls together. Not callable from a script: \
+            run_code, run_workflow, spawn_agents, ask_user, present_plan and the other \
             session-control tools."
             .to_string(),
         schema: serde_json::json!({

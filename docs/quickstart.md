@@ -66,7 +66,7 @@ Forge works with many providers. The easiest way to get started for free:
 Run Forge on top of your existing subscription — no new key needed:
 ```bash
 forge run --model claude-cli::sonnet "hello"   # uses your Claude subscription
-forge run --model codex-cli::gpt-5.4-mini "hello"   # uses your Codex subscription
+forge run --model codex-cli::gpt-5.6-luna "hello"   # uses your Codex subscription
 ```
 
 ### Option C: Run fully offline (no key, no internet)

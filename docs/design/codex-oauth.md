@@ -84,7 +84,7 @@ Host pin to `chatgpt.com` (mirror `is_pinned_xai_url`, `xai_oauth.rs:54–62`); 
 
 Namespace `codex-oauth::<model>` (normalize `codex_oauth::` like `xai_oauth::` at `lib.rs:46–48`).
 
-**Seed** (no public `/models` — same static table as codex CLI, `cli_provider.rs:101–110`): `gpt-5.6-sol` (flagship), `gpt-5.6-terra` (balanced), `gpt-5.6-luna` (fast/cheap), `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex` (coding), `gpt-5.2`, `gpt-5.4-mini` (fast).
+**Catalog** (`codex_oauth/models.rs`): the backend's own per-account `GET /backend-api/codex/models?client_version=…` (the list the Codex CLI caches in `~/.codex/models_cache.json`), visible entries only. Fallback chain when it cannot be reached: the last list it returned (`bridge-models.json`, key `codex-oauth`) → the Codex CLI's list when that CLI uses a ChatGPT login → bundled seeds (`gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`). The seeds must never hold an id the backend refuses for ChatGPT accounts (`gpt-5.4-mini`: `400 "not supported when using Codex with a ChatGPT account"`). The post-login entitlement probe picks its model from this list (`probe_model`), skipping WebSocket-only ids.
 
 Discovery only if session stored (`models.rs:223–228` pattern). Extend `is_subscription` (`catalog.rs:50–55`) with `codex-oauth::`. **Not** `is_cli_bridge` (`lib.rs:56–63`) — normal tool loop. KEYLESS (`run.rs:765`). Cost $0.
 

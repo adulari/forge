@@ -559,7 +559,7 @@ mod tests {
         assert!(!is_websocket_model("codex-oauth::gpt-5.6-sol"));
         assert!(!is_websocket_model("codex-oauth::gpt-5.6-terra"));
         assert!(!is_websocket_model("codex-oauth::gpt-5.5"));
-        assert!(!is_websocket_model("codex-oauth::gpt-5.4-mini"));
+        assert!(!is_websocket_model("codex-oauth::gpt-6-luna"));
     }
 
     #[test]

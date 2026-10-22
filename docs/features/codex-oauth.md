@@ -31,8 +31,10 @@ prints the authorize URL; open it on a machine that can reach this host’s port
 Once signed in:
 
 ```
-forge run --model codex-oauth::gpt-5.5
+forge run --model codex-oauth::gpt-6-luna
 ```
+
+`forge models` lists what your plan can run; the ids above are examples.
 
 Other commands:
 
@@ -52,10 +54,27 @@ auto-rotates round-robin per completion and hops once on 429 or connection-level
 
 ## Discovery
 
-`forge models` only probes `codex-oauth` when a session is stored. There is no public `/models`
-list on the ChatGPT backend — Forge seeds:
+`forge models` only probes `codex-oauth` when a session is stored. The models come from the
+backend itself: `GET /backend-api/codex/models` is the catalog the Codex CLI keeps in
+`~/.codex/models_cache.json`, and it is per account, so a model your plan cannot use (for example
+`gpt-5.4-mini`, which the backend refuses for ChatGPT logins) is not listed. A fresh install with
+no Codex CLI sees the same list, and a model OpenAI ships appears without a Forge release.
 
-- `gpt-5.6-sol` (flagship), `gpt-5.6-terra` (balanced), `gpt-5.6-luna` (fast/cheap), `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2`, `gpt-5.4-mini`
+If the backend cannot be reached the list falls back, in order, to:
+
+1. the last list it returned (kept in `bridge-models.json`, refreshed on every successful lookup
+   and at sign-in),
+2. the Codex CLI's own list, only when that CLI is signed in with a ChatGPT account,
+3. a bundled seed list of the models the backend listed for a ChatGPT account when the release was
+   cut: `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`,
+   `gpt-5.6-luna`.
+
+The lookup asks for the catalog as Codex CLI `0.163.0`; the backend hides models from clients it
+considers too old, so a model that needs a newer client appears once Forge raises that version.
+
+After sign-in Forge makes one tiny completion to confirm the account can use the API. It runs on
+a model from that list (a small tier when there is one, never a WebSocket-only id), so a model
+that is retired or unavailable to your plan cannot fail the sign-in.
 
 ## Cost & routing
 

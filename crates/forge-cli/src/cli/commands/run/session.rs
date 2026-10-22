@@ -860,7 +860,7 @@ mod tests {
         assert!(should_refresh_codex_quota(false, Some("bare-model")));
         assert!(!should_refresh_codex_quota(
             false,
-            Some("codex-cli::gpt-5.4-mini")
+            Some("codex-cli::gpt-5.6-luna")
         ));
         assert!(!should_refresh_codex_quota(
             false,
@@ -913,10 +913,10 @@ mod tests {
     #[test]
     fn every_member_of_a_set_gets_its_provider_prefix_normalized() {
         assert_eq!(
-            pin_members("claude_cli::sonnet,codex_cli::gpt-5.4-mini"),
+            pin_members("claude_cli::sonnet,codex_cli::gpt-5.6-luna"),
             vec![
                 "claude-cli::sonnet".to_string(),
-                "codex-cli::gpt-5.4-mini".to_string(),
+                "codex-cli::gpt-5.6-luna".to_string(),
             ]
         );
     }
