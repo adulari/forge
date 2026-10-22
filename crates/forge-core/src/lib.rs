@@ -100,8 +100,18 @@ mod harness_notes;
 mod harness_profile;
 pub mod heartbeat;
 pub mod hooks;
+mod hooks_async;
 mod hooks_cc;
+pub mod hooks_events;
+mod hooks_exec;
+mod hooks_http;
 pub mod hooks_llm;
+mod hooks_match;
+mod hooks_model;
+pub mod hooks_session;
+mod hooks_subagent;
+mod hooks_turn;
+mod hooks_worktree;
 pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
 mod file_restore;
@@ -2660,7 +2670,8 @@ impl Session {
     /// `run_turn_with(p, &[], None)` — the agent loop, tools, permission broker, pricing and
     /// persistence are otherwise unchanged. A grant queued with [`Session::grant_next_turn`]
     /// applies to this turn only, and may hand the whole turn to a subagent (`context: fork`).
-    pub async fn run_turn_with(
+    /// Wrapped by `run_turn_with` (hooks_turn.rs).
+    async fn run_turn_body(
         &mut self,
         prompt: &str,
         guidance: &[String],
@@ -5089,6 +5100,9 @@ mod tests {
     #[path = "hooks_parity.rs"]
     mod hooks_parity_tests;
 
+    #[path = "hooks_events.rs"]
+    mod hooks_events_tests;
+
     #[path = "spend_guard.rs"]
     mod spend_guard_tests;
 
@@ -7053,6 +7067,11 @@ mod tests {
         config.hooks = vec![forge_config::HookConfig {
             event: forge_config::HookEvent::Stop,
             kind: Default::default(),
+            if_rule: None,
+            url: None,
+            headers: Default::default(),
+            allowed_env_vars: Vec::new(),
+            run_async: false,
             matcher: None,
             command: command.into(),
             prompt: None,
@@ -11029,6 +11048,11 @@ mod tests {
             hooks: vec![forge_config::HookConfig {
                 event: forge_config::HookEvent::PreToolUse,
                 kind: Default::default(),
+                if_rule: None,
+                url: None,
+                headers: Default::default(),
+                allowed_env_vars: Vec::new(),
+                run_async: false,
                 matcher: Some("list_dir".into()),
                 #[cfg(not(windows))]
                 command: "echo blocked-by-test 1>&2; exit 1".into(),
@@ -18364,6 +18388,11 @@ mod tests {
                 forge_config::HookConfig {
                     event: forge_config::HookEvent::PreToolUse,
                     kind: Default::default(),
+                    if_rule: None,
+                    url: None,
+                    headers: Default::default(),
+                    allowed_env_vars: Vec::new(),
+                    run_async: false,
                     matcher: Some("list_dir".into()),
                     command: command.clone(),
                     prompt: None,
@@ -18374,6 +18403,11 @@ mod tests {
                 forge_config::HookConfig {
                     event: forge_config::HookEvent::PostToolUse,
                     kind: Default::default(),
+                    if_rule: None,
+                    url: None,
+                    headers: Default::default(),
+                    allowed_env_vars: Vec::new(),
+                    run_async: false,
                     matcher: Some("list_dir".into()),
                     command,
                     prompt: None,

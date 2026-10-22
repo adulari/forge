@@ -181,33 +181,9 @@ impl Session {
             if ok { "ok" } else { "error" },
         )?;
 
-        // PostToolUse hooks: observe only — notes surfaced, result unchanged.
-        if !self.config.hooks.is_empty() {
-            let payload = serde_json::json!({
-                "tool": call.name, "args": effective_args, "result": result, "ok": ok, "cwd": self.workspace.display(), "session_id": self.id
-            })
-            .to_string();
-            let runner = self.llm_hook_runner().await;
-
-            let outcome = crate::hooks_llm::with_runner(
-                runner,
-                hooks::run_hooks(
-                    &self.config.hooks,
-                    forge_config::HookEvent::PostToolUse,
-                    &call.name,
-                    &payload,
-                ),
-            )
+        // PostToolUse / PostToolUseFailure hooks: observe only — notes surfaced, result unchanged.
+        self.run_post_tool_hooks(call, &effective_args, &result, allowed, ok)
             .await;
-            for n in outcome.notes {
-                self.presenter.emit(PresenterEvent::Warning(n));
-            }
-            // Queue any hook-injected context as a model-visible system hint (drained into the
-            // transcript after the tool result), so a hook can feed the model extra context.
-            for ctx in outcome.injected_context {
-                self.pending_hints.push(ctx);
-            }
-        }
 
         Ok(result)
     }

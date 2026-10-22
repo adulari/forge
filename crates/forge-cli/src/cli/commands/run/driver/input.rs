@@ -366,12 +366,15 @@ impl DriverState {
                     open_models_provider(&self.session, &mut self.app, &row.id).await?;
                 } else if row.id.contains("::") && self.app.models_pin_mode {
                     let model_id = forge_provider::normalize_model_id(&row.id).into_owned();
+                    // PreModelSwitch hooks may refuse; the session says why.
                     if let Ok(mut s) = self.session.try_lock() {
-                        s.pin_model(Some(model_id.clone()));
+                        let _ = s.request_model_switch(Some(model_id.clone()), "sdk").await;
                     } else {
                         let s = self.session.clone();
                         let m = model_id.clone();
-                        tokio::spawn(async move { s.lock().await.pin_model(Some(m)) });
+                        tokio::spawn(async move {
+                            let _ = s.lock().await.request_model_switch(Some(m), "sdk").await;
+                        });
                     }
                     self.app.models_pin_mode = false;
                     self.app.models_drilled = None;

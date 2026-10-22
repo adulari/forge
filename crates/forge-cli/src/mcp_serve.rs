@@ -1307,14 +1307,9 @@ mod tests {
         command: &str,
     ) -> forge_config::HookConfig {
         forge_config::HookConfig {
-            event,
-            kind: Default::default(),
             matcher: Some(matcher.to_string()),
-            command: command.to_string(),
-            prompt: None,
-            model: None,
             timeout_secs: 10,
-            cc_compat: false,
+            ..forge_config::HookConfig::new(event, command)
         }
     }
 

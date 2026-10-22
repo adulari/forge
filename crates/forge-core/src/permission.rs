@@ -438,6 +438,16 @@ pub use auto::{accept_edits_risk, auto_risk, outside_workspace, AutoVerdict};
 pub(crate) use readonly_shell::{is_read_only_shell, plan_shell_denial, PLAN_SHELL_NOTE};
 use shell_commands::effective_commands;
 
+/// The commands a shell line runs, and whether the split was confident (a hook's `if` filter).
+pub(crate) fn shell_segments(cmd: &str) -> (Vec<String>, bool) {
+    effective_commands(cmd)
+}
+
+/// The permission rules' shell wildcard match, for a hook's `if` filter.
+pub(crate) fn shell_glob(pattern: &str, text: &str) -> bool {
+    shell_match(pattern, text)
+}
+
 /// Lexically normalized candidate forms of a path for matching secret-deny globs against:
 /// the raw path, a `~`-expanded form, and a `.`/`..`-collapsed form. (Symlink resolution is
 /// intentionally out of scope for this iteration; see the spec edge-case table.)

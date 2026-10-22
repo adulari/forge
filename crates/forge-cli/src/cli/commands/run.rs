@@ -41,6 +41,7 @@ pub(crate) use session::*;
 
 mod mcp_overlay;
 mod one_shot;
+mod one_shot_hooks;
 pub(crate) use one_shot::*;
 pub(crate) mod print_run;
 mod stream_input;
@@ -178,6 +179,7 @@ pub(crate) use rewind_menu::*;
 mod dispatch;
 mod heartbeat_cmd;
 mod mesh_overlay;
+mod model_switch;
 mod refine_cmd;
 pub(crate) use dispatch::*;
 pub(crate) mod driver;
@@ -699,30 +701,12 @@ pub(crate) async fn run_chat_tui(
     // Git attribution: install the commit hook up front when enabled (the session keeps the
     // hook's model file current itself, before every model request).
     maybe_install_git_hook(&tui_config);
+    // SessionStart (`startup`, or `resume` for a reopened conversation); never holds the lock
+    // while the hooks run.
+    forge_core::hooks_session::fire_session_start_shared(&session, None).await;
     let (sid, session_store) = {
-        let (hooks, sid, workspace, store) = {
-            let s = session.lock().await;
-            (
-                s.hooks().to_vec(),
-                s.session_id().to_string(),
-                s.workspace_root().to_path_buf(),
-                s.store.clone(),
-            )
-        };
-        let context = forge_core::hooks::run_session_hooks_in(
-            &hooks,
-            forge_config::HookEvent::SessionStart,
-            &sid,
-            Some(&workspace),
-        )
-        .await;
-        if !context.is_empty() {
-            let mut s = session.lock().await;
-            for c in &context {
-                s.inject_hook_context(c);
-            }
-        }
-        (sid, store)
+        let s = session.lock().await;
+        (s.session_id().to_string(), s.store.clone())
     };
 
     // Publish this terminal-local session into the shared store's presence table so a
@@ -2647,21 +2631,32 @@ pub(crate) async fn run_chat_tui(
                                     // as tier_up above; the picker is reachable mid-turn too.
                                     let model_id =
                                         forge_provider::normalize_model_id(&row.id).into_owned();
+                                    // PreModelSwitch hooks may refuse; the session says why.
+                                    let mut pinned = true;
                                     if let Ok(mut s) = session.try_lock() {
-                                        s.pin_model(Some(model_id.clone()));
+                                        pinned = s
+                                            .request_model_switch(Some(model_id.clone()), "picker")
+                                            .await
+                                            .is_ok();
                                     } else {
                                         let s = session.clone();
                                         let m = model_id.clone();
-                                        tokio::spawn(
-                                            async move { s.lock().await.pin_model(Some(m)) },
-                                        );
+                                        tokio::spawn(async move {
+                                            let _ = s
+                                                .lock()
+                                                .await
+                                                .request_model_switch(Some(m), "picker")
+                                                .await;
+                                        });
                                     }
                                     app.models_pin_mode = false;
                                     app.models_drilled = None;
                                     app.picker.close();
-                                    app.note(&format!(
-                                        "⊕ model pinned: {model_id} (clears with /model)"
-                                    ));
+                                    if pinned {
+                                        app.note(&format!(
+                                            "⊕ model pinned: {model_id} (clears with /model)"
+                                        ));
+                                    }
                                 }
                             }
                             continue;
@@ -2768,7 +2763,8 @@ pub(crate) async fn run_chat_tui(
                                     dirty = true;
                                     continue;
                                 };
-                                s.reset_resumed(&session_id)
+                                s.reset_resumed_hooked(&session_id)
+                                    .await
                                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                                 let (items, view) = (
                                     s.replay_items_tail(REPLAY_TAIL_MESSAGES).0,
@@ -5093,11 +5089,12 @@ pub(crate) async fn run_chat_tui(
                 s.workspace_root().to_path_buf(),
             )
         };
-        forge_core::hooks::run_session_hooks_in(
+        forge_core::hooks::run_session_hooks_with(
             &hooks,
             forge_config::HookEvent::SessionEnd,
             &sid,
             Some(&workspace),
+            "prompt_input_exit",
         )
         .await;
     }

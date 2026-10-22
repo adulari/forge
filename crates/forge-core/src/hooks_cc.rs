@@ -187,6 +187,14 @@ pub(crate) struct CcOutput {
     pub note: Option<String>,
     /// `{"continue":false}`: the hook wants the agent to stop whatever it was doing.
     pub halt: bool,
+    /// `stopReason` next to `continue:false`.
+    pub stop_reason: Option<String>,
+    /// `hookSpecificOutput.permissionDecision: "ask"` with its reason (`PreModelSwitch`).
+    pub ask: Option<String>,
+    /// `hookSpecificOutput.retry: true` (`PermissionDenied`: the model may try the call again).
+    pub retry: bool,
+    /// `hookSpecificOutput.worktreePath` (`WorktreeCreate` answered by an HTTP hook).
+    pub worktree_path: Option<String>,
 }
 
 /// Interpret a CC hook result: exit 2 blocks (stderr = reason); otherwise parse stdout for
@@ -231,19 +239,26 @@ pub(crate) fn parse_cc_output(code: i32, stdout: &str, stderr: &str) -> CcOutput
     }
     if v.get("continue").and_then(Value::as_bool) == Some(false) {
         out.halt = true;
+        out.stop_reason = non_blank(v.get("stopReason"));
         recognised = true;
     }
     if let Some(hso) = v.get("hookSpecificOutput").filter(|h| h.is_object()) {
         recognised = true;
-        if hso.get("permissionDecision").and_then(Value::as_str) == Some("deny") {
-            let reason = hso
-                .get("permissionDecisionReason")
-                .and_then(Value::as_str)
-                .unwrap_or("denied by hook");
-            out.block = Some(truncate(reason, 800));
+        let reason = || non_blank(hso.get("permissionDecisionReason"));
+        match hso.get("permissionDecision").and_then(Value::as_str) {
+            Some("deny") => {
+                out.block = Some(truncate(
+                    &reason().unwrap_or_else(|| "denied by hook".into()),
+                    800,
+                ))
+            }
+            Some("ask") => out.ask = Some(reason().unwrap_or_else(|| "a hook asks".into())),
+            _ => {}
         }
         out.updated_input = hso.get("updatedInput").filter(|i| i.is_object()).cloned();
         out.context = non_blank(hso.get("additionalContext"));
+        out.retry = hso.get("retry").and_then(Value::as_bool) == Some(true);
+        out.worktree_path = non_blank(hso.get("worktreePath"));
     }
     if out.context.is_none() {
         out.context = non_blank(v.get("additionalContext"));

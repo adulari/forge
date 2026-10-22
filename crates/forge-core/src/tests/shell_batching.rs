@@ -51,6 +51,11 @@ fn hook(event: forge_config::HookEvent) -> forge_config::HookConfig {
     forge_config::HookConfig {
         event,
         kind: Default::default(),
+        if_rule: None,
+        url: None,
+        headers: Default::default(),
+        allowed_env_vars: Vec::new(),
+        run_async: false,
         matcher: None,
         command: "true".into(),
         prompt: None,

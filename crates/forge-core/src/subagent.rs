@@ -598,13 +598,22 @@ pub async fn spawn_detached(
     let mode_label = format!("{:?}", ctx.mode);
     let mut handles = Vec::with_capacity(requests.len());
     for req in requests {
-        let resolved = resolve(&req, &ctx.agents);
+        let mut resolved = resolve(&req, &ctx.agents);
         let name = resolved.name.clone();
         let child_cwd = ctx.repo_root.to_string_lossy();
         let child_id = ctx
             .store
             .create_child_session(&child_cwd, &mode_label, parent_id)?;
         let _ = ctx.store.set_session_title(&child_id, &name);
+        resolved.task = crate::hooks_subagent::subagent_start_task(
+            &ctx.config.hooks,
+            parent_id,
+            &child_id,
+            &name,
+            &ctx.repo_root,
+            std::mem::take(&mut resolved.task),
+        )
+        .await;
         // Routed up front, same as the blocking path: deterministic, no API call, and the
         // admission handle can report the model immediately.
         let decision = route_child(ctx, &resolved, budget).await;
@@ -818,7 +827,7 @@ pub async fn orchestrate(
     // Create each child session + announce Start up front (so a UI shows the whole batch as
     // running immediately), then spawn the work bounded by a concurrency permit.
     for (i, req) in requests.into_iter().enumerate() {
-        let resolved = resolve(&req, &ctx.agents);
+        let mut resolved = resolve(&req, &ctx.agents);
         // A `?` here would abort the whole function — dropping `rx` and silently discarding the
         // results (and spend) of every sibling child already `tokio::spawn`ed above. Skip just
         // this request instead so the rest of the batch still runs and reports.
@@ -850,6 +859,15 @@ pub async fn orchestrate(
             task: &resolved.task,
             model: &child_model,
         });
+        resolved.task = crate::hooks_subagent::subagent_start_task(
+            &ctx.config.hooks,
+            parent_id,
+            &child_id,
+            &resolved.name,
+            &ctx.repo_root,
+            std::mem::take(&mut resolved.task),
+        )
+        .await;
         ids[i] = child_id.clone();
 
         // Resolve this child's provider semaphore (get-or-create), sized by `max_per_provider`.

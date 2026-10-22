@@ -155,9 +155,14 @@ impl Session {
         let tool_hooks = self.config.hooks.iter().any(|h| {
             matches!(
                 h.event,
-                forge_config::HookEvent::PreToolUse | forge_config::HookEvent::PostToolUse
+                forge_config::HookEvent::PreToolUse
+                    | forge_config::HookEvent::PostToolUse
+                    | forge_config::HookEvent::PostToolUseFailure
             )
         });
+        // `PostToolBatch` sees every call of the step with the result the model reads.
+        let batch_hooks = self.has_hooks_for(forge_config::HookEvent::PostToolBatch);
+        let mut batch: Vec<(&forge_types::ToolCall, String)> = Vec::new();
         let concurrent_batch =
             calls.len() >= 2 && !tool_hooks && calls.iter().all(|c| self.is_concurrent_readonly(c));
         if concurrent_batch {
@@ -179,6 +184,9 @@ impl Session {
                 }
             }
             for (call, (name, kind, result)) in calls.iter().zip(classified) {
+                if batch_hooks {
+                    batch.push((call, result.clone()));
+                }
                 ledgers
                     .observations
                     .push(crate::loop_progress::CallObservation::new(
@@ -222,6 +230,9 @@ impl Session {
                     self.invoke_tool(msg_id, call).await?
                 };
                 self.observe_tool_outcome(call, &result, &mut ledgers);
+                if batch_hooks {
+                    batch.push((call, result.clone()));
+                }
                 let seq = self.next_seq();
                 self.store.add_message_full(
                     &self.id,
@@ -240,6 +251,10 @@ impl Session {
                     let _ = self.push_note(forge_types::MessageKind::Hint, hint);
                 }
             }
+        }
+
+        if self.fire_post_tool_batch(&batch).await {
+            return Ok(true);
         }
 
         // Failure-loop guard: a tool that keeps failing the SAME way (across differing args) is

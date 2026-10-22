@@ -26,6 +26,7 @@ mod system_prompt_overrides;
 use system_prompt_overrides::resolve_system_prompt_overrides;
 pub mod goal;
 mod harness_profile;
+mod hooks;
 mod key_adoption;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
 mod lsp_diagnostics;
@@ -48,6 +49,7 @@ pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name,
 pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
+pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
     discover_import_sources, embeds_credentials, import_mcp_json, load_mcp_toml,
@@ -664,140 +666,6 @@ pub enum PricingStat {
     Official,
 }
 
-/// When a hook fires.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookEvent {
-    /// Before the tool runs; a non-zero exit blocks the call (stderr/stdout = the reason).
-    PreToolUse,
-    /// After the tool returns; output is surfaced as a note, exit code is advisory.
-    PostToolUse,
-    /// After the user submits a message, before the agent turn starts.
-    /// Hook receives `{"prompt": "<user message>"}` on stdin.
-    /// Exit 0 + non-empty stdout → stdout replaces the prompt.
-    /// Exit non-zero → turn is blocked; stderr/stdout shown as the reason.
-    UserPromptSubmit,
-    /// When a session starts (first turn or resume). Observe-only — exit code advisory.
-    /// Receives `{"session_id": "<id>", "event": "session_start"}` on stdin.
-    SessionStart,
-    /// When the session loop exits cleanly. Observe-only.
-    /// Receives `{"session_id": "<id>", "event": "session_end"}` on stdin.
-    SessionEnd,
-    /// The agent emitted a user-facing notification (e.g. a tool needs permission). Observe-only.
-    /// Claude-Code parity event (`Notification`).
-    Notification,
-    /// Just before context compaction runs (Claude-Code `PreCompact`). Observe-only.
-    PreCompact,
-    /// Just after context compaction completes. Observe-only. (Forge extension beyond CC, which
-    /// only fires `PreCompact`.)
-    PostCompact,
-    /// A turn is about to end (Claude-Code `Stop`). A hook that exits 2 or prints
-    /// `{"decision":"block","reason":…}` keeps the agent going with `reason` as its next
-    /// instruction, bounded by `stop_hook_max_blocks`.
-    Stop,
-    /// A subagent finished (Claude-Code `SubagentStop`). A block appends its reason to the
-    /// `spawn_agents` result the parent model reads.
-    SubagentStop,
-    /// A tool call is about to ask the user for permission (Claude-Code `PermissionRequest`). The
-    /// hook can answer for the user: allow (optionally with rewritten input) or deny (with a
-    /// message for the model, optionally interrupting the turn). No answer shows the prompt.
-    PermissionRequest,
-}
-
-impl HookEvent {
-    /// The Claude-Code event name for this hook (`PreToolUse`, `Notification`, …). Used to build
-    /// the CC stdin payload's `hook_event_name` and to translate CC settings.json config.
-    pub fn cc_name(self) -> &'static str {
-        match self {
-            HookEvent::PreToolUse => "PreToolUse",
-            HookEvent::PostToolUse => "PostToolUse",
-            HookEvent::UserPromptSubmit => "UserPromptSubmit",
-            HookEvent::SessionStart => "SessionStart",
-            HookEvent::SessionEnd => "SessionEnd",
-            HookEvent::Notification => "Notification",
-            HookEvent::PreCompact => "PreCompact",
-            HookEvent::PostCompact => "PostCompact",
-            HookEvent::Stop => "Stop",
-            HookEvent::SubagentStop => "SubagentStop",
-            HookEvent::PermissionRequest => "PermissionRequest",
-        }
-    }
-
-    /// Parse a Claude-Code event name into a [`HookEvent`]. `None` for an unknown name.
-    pub fn from_cc_name(name: &str) -> Option<HookEvent> {
-        Some(match name {
-            "PreToolUse" => HookEvent::PreToolUse,
-            "PostToolUse" => HookEvent::PostToolUse,
-            "UserPromptSubmit" => HookEvent::UserPromptSubmit,
-            "SessionStart" => HookEvent::SessionStart,
-            "SessionEnd" => HookEvent::SessionEnd,
-            "Notification" => HookEvent::Notification,
-            "PreCompact" => HookEvent::PreCompact,
-            "PostCompact" => HookEvent::PostCompact,
-            "Stop" => HookEvent::Stop,
-            "SubagentStop" => HookEvent::SubagentStop,
-            "PermissionRequest" => HookEvent::PermissionRequest,
-            _ => return None,
-        })
-    }
-}
-
-/// How a hook is evaluated (Claude-Code `type`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookKind {
-    /// Run `command` through the OS shell (the default).
-    #[default]
-    Command,
-    /// Ask a model to judge the event: `prompt` (with `$ARGUMENTS` replaced by the event JSON) is
-    /// sent to a fast side-call model, which answers `{"ok": true}` or `{"ok": false, "reason"}`.
-    Prompt,
-    /// Like `prompt`, but a read-only subagent (read_file/search/glob/list_dir in the workspace)
-    /// investigates before answering.
-    Agent,
-}
-
-/// One `[[hooks]]` entry: a shell command (or a model, see [`HookKind`]) run around tool calls
-/// matching `matcher` and around session lifecycle events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HookConfig {
-    pub event: HookEvent,
-    /// `command` (default), `prompt` or `agent`.
-    #[serde(default, rename = "type")]
-    pub kind: HookKind,
-    /// Tool-name filter for `pre_tool_use` / `post_tool_use`: absent or `"*"` = every tool;
-    /// otherwise a comma-separated list of exact tool names (e.g. `"shell"`).
-    /// Ignored for `user_prompt_submit`, `session_start`, `session_end`.
-    #[serde(default)]
-    pub matcher: Option<String>,
-    /// Shell command line (`command` hooks). Receives event data as JSON on stdin.
-    #[serde(default)]
-    pub command: String,
-    /// The instruction for a `prompt` / `agent` hook. `$ARGUMENTS` is replaced by the event JSON;
-    /// without it the JSON is appended.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    /// Model for a `prompt` / `agent` hook (`provider::model`). Default: the session's cheap
-    /// side-call model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Kill the hook after this many seconds (default 30).
-    #[serde(default = "default_hook_timeout")]
-    pub timeout_secs: u64,
-    /// Claude-Code compatibility mode. When true the hook speaks the CC protocol: it receives the
-    /// CC JSON payload on stdin (`{session_id, transcript_path, cwd, hook_event_name, tool_name,
-    /// tool_input, …}`) and its output is parsed CC-style (`{"decision":"block|approve","reason":…}`
-    /// / `hookSpecificOutput`) with exit-code 2 = block. The `matcher` is interpreted as a CC tool
-    /// matcher (`|`-separated names / `*`) against the CC tool-name alias. When false (default) the
-    /// hook keeps Forge's native protocol. Set automatically for hooks loaded from a CC settings.json.
-    #[serde(default)]
-    pub cc_compat: bool,
-}
-
-fn default_hook_timeout() -> u64 {
-    30
-}
-
 fn default_stop_hook_max_blocks() -> u32 {
     8
 }
@@ -844,113 +712,6 @@ pub fn forge_tool_from_cc(cc_tool: &str) -> &str {
         .into_iter()
         .next()
         .unwrap_or(cc_tool)
-}
-
-/// Claude Code treats a hook matcher as a regex. A matcher of plain names joined by `|` keeps its
-/// exact-name meaning; anything with another regex metacharacter (`.*`, `^Read$`, `mcp__.*`) is
-/// compiled and searched by `forge_core::hooks` (this crate has no regex dependency).
-pub fn is_regex_matcher(pattern: &str) -> bool {
-    pattern.chars().any(|c| ".*+?^$()[]{}\\".contains(c)) && pattern.trim() != "*"
-}
-
-impl HookConfig {
-    /// Whether this hook applies to `tool_name`. Native hooks use Forge's exact/comma-separated
-    /// matcher; CC-compat hooks treat the matcher as a `|`-separated CC matcher tested against both
-    /// the Forge tool name and its [`cc_tool_alias`] (so `"Write|Edit"` fires on `edit_file`).
-    pub fn matches(&self, tool_name: &str) -> bool {
-        match self.matcher.as_deref() {
-            None | Some("") | Some("*") => true,
-            Some(pattern) => {
-                if self.cc_compat {
-                    let alias = cc_tool_alias(tool_name);
-                    pattern.split('|').map(str::trim).any(|m| {
-                        m == "*"
-                            || m.eq_ignore_ascii_case(tool_name)
-                            || m.eq_ignore_ascii_case(alias)
-                    })
-                } else {
-                    pattern.split(',').any(|m| m.trim() == tool_name)
-                }
-            }
-        }
-    }
-}
-
-/// Translate a Claude-Code `settings.json` `hooks` object into a flat list of [`HookConfig`]s in
-/// CC-compat mode, so existing CC hook scripts run under Forge unmodified. The CC shape is:
-/// ```json
-/// { "PreToolUse": [ { "matcher": "Write|Edit",
-///                     "hooks": [ { "type": "command", "command": "./h.sh", "timeout": 10 } ] } ],
-///   "Notification": [ { "hooks": [ { "type": "command", "command": "notify" } ] } ] }
-/// ```
-/// `value` may be either the top-level settings object (we look up its `hooks` key) or the `hooks`
-/// object itself. `command`, `prompt` and `agent` hook types are read; unknown event names and
-/// other hook types are skipped.
-pub fn cc_hooks_from_settings(value: &serde_json::Value) -> Vec<HookConfig> {
-    let hooks_obj = value
-        .get("hooks")
-        .and_then(|h| h.as_object())
-        .or_else(|| value.as_object());
-    let Some(obj) = hooks_obj else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (event_name, groups) in obj {
-        let Some(event) = HookEvent::from_cc_name(event_name) else {
-            continue;
-        };
-        let Some(groups) = groups.as_array() else {
-            continue;
-        };
-        for group in groups {
-            let matcher = group
-                .get("matcher")
-                .and_then(|m| m.as_str())
-                .filter(|m| !m.is_empty() && *m != "*")
-                .map(str::to_string);
-            let Some(entries) = group.get("hooks").and_then(|h| h.as_array()) else {
-                continue;
-            };
-            for entry in entries {
-                let kind = match entry.get("type").and_then(|t| t.as_str()) {
-                    Some("command") => HookKind::Command,
-                    Some("prompt") => HookKind::Prompt,
-                    Some("agent") => HookKind::Agent,
-                    _ => continue,
-                };
-                let command = entry.get("command").and_then(|c| c.as_str());
-                let prompt = entry.get("prompt").and_then(|c| c.as_str());
-                match kind {
-                    HookKind::Command if command.is_none() => continue,
-                    HookKind::Prompt | HookKind::Agent if prompt.is_none() => continue,
-                    _ => {}
-                }
-                // Claude Code's defaults: 60 s for a command or agent hook, 30 s for a prompt hook.
-                let timeout_secs =
-                    entry
-                        .get("timeout")
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or(match kind {
-                            HookKind::Agent => 60,
-                            _ => default_hook_timeout(),
-                        });
-                out.push(HookConfig {
-                    event,
-                    kind,
-                    matcher: matcher.clone(),
-                    command: command.unwrap_or_default().to_string(),
-                    prompt: prompt.map(str::to_string),
-                    model: entry
-                        .get("model")
-                        .and_then(|m| m.as_str())
-                        .map(str::to_string),
-                    timeout_secs,
-                    cc_compat: true,
-                });
-            }
-        }
-    }
-    out
 }
 
 /// Settings for the Lattice code-intelligence subsystem.
@@ -5056,14 +4817,8 @@ auto = "local"
     #[test]
     fn hook_matcher_filters_by_tool_name() {
         let mk = |m: Option<&str>| HookConfig {
-            event: HookEvent::PreToolUse,
-            kind: Default::default(),
             matcher: m.map(String::from),
-            command: "true".into(),
-            prompt: None,
-            model: None,
-            timeout_secs: 30,
-            cc_compat: false,
+            ..HookConfig::new(HookEvent::PreToolUse, "true")
         };
         assert!(mk(None).matches("shell"), "no matcher = all tools");
         assert!(mk(Some("*")).matches("anything"));
@@ -5647,7 +5402,7 @@ reason = "no privilege escalation"
             ]}]
         }});
         let hooks = cc_hooks_from_settings(&settings);
-        assert_eq!(hooks.len(), 3, "{hooks:?}");
+        assert_eq!(hooks.len(), 4, "{hooks:?}");
         assert_eq!(hooks[0].event, HookEvent::PermissionRequest);
         assert!(hooks[0].matches("shell"));
         let prompt = hooks.iter().find(|h| h.kind == HookKind::Prompt).unwrap();

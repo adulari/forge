@@ -4,6 +4,7 @@
 
 use forge_skills::Resolved;
 
+use super::one_shot_hooks::expansion_gate;
 use super::skill_invoke;
 use super::*;
 
@@ -38,6 +39,9 @@ pub(crate) async fn dispatch_catalog(
             if !project_trust_ok(&cmd.name, cmd.scope, trust_project, armed, app) {
                 return Ok(DispatchOutcome::Handled);
             }
+            let Some(context) = expansion_gate(session, app, line, cmd.scope).await else {
+                return Ok(DispatchOutcome::Handled);
+            };
             app.note(&format!(
                 "⚒ command · /{} ({})",
                 cmd.name,
@@ -60,7 +64,7 @@ pub(crate) async fn dispatch_catalog(
             queue_grant(session, app, grant).await;
             Ok(DispatchOutcome::RunTurn {
                 prompt,
-                guidance,
+                guidance: [guidance, context].concat(),
                 tier: cmd.tier,
             })
         }
@@ -72,6 +76,9 @@ pub(crate) async fn dispatch_catalog(
             if !project_trust_ok(&meta.name, meta.scope, trust_project, armed, app) {
                 return Ok(DispatchOutcome::Handled);
             }
+            let Some(context) = expansion_gate(session, app, line, meta.scope).await else {
+                return Ok(DispatchOutcome::Handled);
+            };
             let skill = forge_skills::Skill::load(&meta);
             for w in &skill.warnings {
                 app.note(&format!("⚠ {w}"));
@@ -99,6 +106,7 @@ pub(crate) async fn dispatch_catalog(
             else {
                 return Ok(DispatchOutcome::Handled);
             };
+            let guidance = [guidance, context].concat();
             let forked = grant.fork.is_some();
             queue_grant(session, app, grant).await;
             if prompt.trim().is_empty() && !forked {
