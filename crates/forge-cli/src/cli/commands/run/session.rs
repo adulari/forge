@@ -326,13 +326,17 @@ pub(crate) async fn build_session_with_self_mcp(
     // falls back to the seeds, and then it says so — here and in every routing rationale.
     let catalog = if !mock && config.mesh.auto_discover {
         let mut cached = read_cached_catalog();
-        if cached.is_none() {
+        // A pinned session routes nothing through the catalog, and an attended one outlives the
+        // detached refresh below, so one that is both has no reason to hold the first frame for the
+        // network (up to 12 s on a machine's first launch).
+        let routes_by_catalog = pin.is_none() || !presenter.is_attended();
+        if cached.is_none() && routes_by_catalog {
             // No catalog at all: the seed fallback can pick a disabled/unreachable provider, and a
             // one-shot run exits before a detached refresh lands. Wait (bounded) just this once.
             crate::cli::commands::models::first_run_discovery(&config).await;
             cached = read_cached_catalog();
         }
-        if cached.is_none() {
+        if cached.is_none() && routes_by_catalog {
             presenter.emit(forge_tui::PresenterEvent::Warning(
                 "no model catalog yet: built-in seed candidates for this session — discovery is \
                  running in the background and the next turn routes from the real catalog"
