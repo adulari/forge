@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use forge_types::TaskTier;
 
-use crate::{Command, Scope};
+use crate::{Command, Invocation, Scope};
 
 const REVIEW_BODY: &str = "\
 Review code changes for correctness bugs. Report findings; do not edit files unless the target \
@@ -57,6 +57,7 @@ fn builtin(name: &str, description: &str, body: &str) -> Command {
         body: body.to_string(),
         scope: Scope::Builtin,
         path: PathBuf::from(format!("<builtin>/commands/{name}.md")),
+        invocation: Invocation::default(),
     }
 }
 

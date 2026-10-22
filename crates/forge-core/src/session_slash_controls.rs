@@ -43,11 +43,6 @@ impl Session {
         &self.config.tools.extra_roots
     }
 
-    /// Every permission rule in force, built-in floor first, in evaluation order.
-    pub fn permission_rules(&self) -> &[forge_types::PermissionRule] {
-        &self.rules
-    }
-
     /// Add a rule for the rest of this session (`/permissions allow Bash(git log:*)`).
     pub fn add_session_rule(
         &mut self,

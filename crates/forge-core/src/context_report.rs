@@ -41,7 +41,7 @@ impl Session {
         let specs = self.tool_specs();
         let pinned = self.pinned_tokens();
         let instructions = self
-            .cached_agents_md
+            .cached_agents_md()
             .as_deref()
             .map_or(0, tokens::count_text)
             .min(pinned);
