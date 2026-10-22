@@ -1,0 +1,11 @@
+instance_id	patch	wall_s	in_tok	out_tok	outcome	note	history
+astropy__astropy-13033	patched	920.7	1411068	122819	ok		ahead=0 refs=refs/stash
+django__django-13343	patched	413.9	965934	28866	ok		ahead=0 refs=-
+django__django-13821	patched	176.0	515918	27869	ok		ahead=0 refs=-
+matplotlib__matplotlib-22865	patched	1154.7	2420216	196438	ok		ahead=0 refs=refs/stash
+psf__requests-1921	patched	256.7	477425	30134	ok		ahead=0 refs=refs/stash
+pydata__xarray-6461	patched	714.4	1431171	64951	ok		ahead=0 refs=refs/stash
+pytest-dev__pytest-8399	patched	424.1	1495064	52623	ok		ahead=0 refs=refs/stash
+scikit-learn__scikit-learn-25973	patched	747.8	1105254	39357	ok		ahead=0 refs=refs/stash
+sphinx-doc__sphinx-8638	patched	1232.5	2921885	183451	ok		ahead=0 refs=refs/stash
+sympy__sympy-13877	patched	916.1	1254673	95108	ok		ahead=0 refs=refs/stash

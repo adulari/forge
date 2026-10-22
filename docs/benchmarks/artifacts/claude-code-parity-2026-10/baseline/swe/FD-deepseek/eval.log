@@ -1,0 +1,30 @@
+== evaluating /home/floris/.cache/forge-ops/ccbench/results/swe/FD-deepseek/predictions.jsonl as run_id=eval_814181b7 workers=4 (official swebench 4.1.0)
+Found 10 existing instance images. Will reuse them.
+Running 10 instances...
+
+All instances run.
+Cleaning cached images...
+Removed 0 images.
+Total instances: 10
+Instances submitted: 10
+Instances completed: 10
+Instances incomplete: 0
+Instances resolved: 10
+Instances unresolved: 0
+Instances with empty patches: 0
+Instances with errors: 0
+Unstopped containers: 0
+Unremoved images: 10
+Report written to FD-deepseek.eval_814181b7.json
+Exception ignored while finalizing file <urllib3.response.HTTPResponse object at 0x7f4bfc30fa90>:
+Traceback (most recent call last):
+  File "/home/floris/.cache/forge-ops/ccbench/swe/.venv/lib/python3.14/site-packages/urllib3/response.py", line 1313, in close
+    self._fp.close()
+  File "/home/floris/miniforge3/lib/python3.14/http/client.py", line 447, in close
+    super().close() # set "closed" flag
+  File "/home/floris/miniforge3/lib/python3.14/http/client.py", line 460, in flush
+    self.fp.flush()
+ValueError: I/O operation on closed file.
+
+FD-deepseek.eval_814181b7.json: resolved 10/10 (completed 10, unresolved 0, empty-patch 0, error 0)
+  resolved_ids: astropy__astropy-13033 django__django-13343 django__django-13821 matplotlib__matplotlib-22865 psf__requests-1921 pydata__xarray-6461 pytest-dev__pytest-8399 scikit-learn__scikit-learn-25973 sphinx-doc__sphinx-8638 sympy__sympy-13877

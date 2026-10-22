@@ -46,6 +46,16 @@ Terra on the two tasks.
 Read the **[canonical SWE-bench report](history-safe-pinned-mesh-2026-07.md)** and
 **[83-cell validity ledger](cell-validity-2026-07.md)**.
 
+## In progress: Claude Code parity study (October 2026)
+
+A same-model comparison of Forge 2.21.0 against Claude Code 2.1.308 (quality, speed, tokens,
+multi-turn, SWE-bench Verified) is under way. The 2026-10-22 baseline is recorded: on these small
+samples Forge is level with Claude Code within noise on the 26-task suites and SWE-bench, behind on the
+large-codebase suite, speed and output tokens, and no win is claimed; the fixes opened from it have not
+been re-measured yet. Read the
+**[baseline report](claude-code-parity-2026-10.md)**; its data, task commitments and table renderer are in
+[artifacts/claude-code-parity-2026-10](artifacts/claude-code-parity-2026-10/), and later runs append to the same report.
+
 ## Historical reports
 
 The [Claude 5 report](claude-code-claude5-2026-07.md) and
@@ -69,6 +79,9 @@ headlines are superseded where repositories were not history-isolated or Codex u
   same-model SWE-bench routing evidence.
 - [Cell-validity ledger](cell-validity-2026-07.md) — every retained formal cell, official outcome,
   integrity finding, and exclusion reason.
+- [Claude Code parity baseline, 2026-10](claude-code-parity-2026-10.md) — Forge against Claude Code
+  on the same models: suites, multi-turn and SWE-bench Verified, per-task matrix, findings and fix ledger,
+  with [per-run data and a table renderer](artifacts/claude-code-parity-2026-10/).
 - [Recall baseline, 2026-10](recall-baseline-2026-10.md) — how much of a long session survives
   compaction and resume, from `forge bench recall` (harness in
   [bench-recall](../features/bench-recall.md)).

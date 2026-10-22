@@ -1,0 +1,33 @@
+{
+ "schema": 1,
+ "state_as": "2026-10-22 evening, from gh pr view",
+ "prs": [
+  {"number": 1602, "title": "feat(cli): forge run -p is a drop-in for claude -p", "state": "merged",
+   "addresses": "Parity gaps G1 (print mode), G2 (stream-json shapes), headless half of G7 (flags); PARITY.md",
+   "status_of_evidence": "Before/after on the mock provider in the PR. No benchmark dimension measures it yet."},
+  {"number": 1603, "title": "fix(core): a scoped \"don't edit X\" no longer makes a change request read-only", "state": "merged",
+   "addresses": "F1: a01, a04, a07 (Forge arms) and c08 were run as read-only turns because the prompt says not to edit tests or a directory",
+   "status_of_evidence": "Unit tests of the phrase rule in the PR. The affected tasks have not been re-run, so the effect on pass rate is a hypothesis."},
+  {"number": 1604, "title": "feat(tui): fold tool runs into one summary row; nav pills only when scrolled up", "state": "open",
+   "addresses": "UI/UX parity with Claude Code's folded tool groups; a navigation pill that covered the newest rows",
+   "status_of_evidence": "Not measured: the scripted TUI comparison is pending."},
+  {"number": 1605, "title": "fix(cli,tui): bounded stdin wait, per-directory --continue, auth --list on stderr, notices never split an answer", "state": "merged",
+   "addresses": "Headless and TUI robustness defects found while driving both tools (a run that hung on an unclosed stdin pipe, --continue taking another project's session)",
+   "status_of_evidence": "Unit tests and before/after runs in the PR. Robustness is not a benchmarked dimension yet."},
+  {"number": 1606, "title": "perf(bridge): cut claude-cli bridge startup, prompt and post-turn overhead", "state": "open",
+   "addresses": "F4 (bridge token and latency overhead). Does not change F9, the benchmark isolation gap, because the baseline Forge arms already had a neutral project instruction file",
+   "status_of_evidence": "Local fake-API measurements in the PR (for example mcp-serve handshake 935 ms to 101 ms, system prompt 11,970 to 9,616 characters). The FB arms have not been re-run."},
+  {"number": 1607, "title": "fix(core): bench robustness: compaction-safe audit, store lock starvation, pinned windows and side calls", "state": "merged",
+   "addresses": "F2 (c06 panic), F6 (compaction churn and low cache hit on large codebases), F7 ('database is locked' at session start), side calls that ignored the pin",
+   "status_of_evidence": "Two live single runs in the PR (c01, c02): compactions 3 and 4 before, 0 after; c02 unsolved before, solved after. One sample each, not a re-run of the suite."},
+  {"number": 1608, "title": "perf(core): nothing optional runs before a turn's answer or its first token", "state": "merged",
+   "addresses": "Latency before the first token and after the answer (trivial-prompt latency, not yet benchmarked)",
+   "status_of_evidence": "Release-build timings in the PR. The latency benchmark is pending."},
+  {"number": 1609, "title": "feat(bench): task selection, failure reasons, Claude Code metrics, bridged-CLI tool counts", "state": "open",
+   "addresses": "Measurement gaps behind the tool-call comparability caveat and the missing failure reasons in this baseline",
+   "status_of_evidence": "Tooling change; it makes the next run set more comparable."},
+  {"number": 1610, "title": "feat(cli): bare forge starts chat, claude-style mcp add, /clear = new, Ctrl+L redraw, 9 Claude Code slash commands", "state": "open",
+   "addresses": "Parity gaps G6 (entry points), G10 (slash commands), G11 (/clear and Ctrl+L)",
+   "status_of_evidence": "Not measured: feature parity, no benchmark dimension."}
+ ]
+}

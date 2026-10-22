@@ -1,0 +1,45 @@
+{
+ "schema": 1,
+ "forge": {
+  "version": "2.21.0",
+  "commit": "8b18cad8",
+  "commit_provenance": "supplied by the study coordinator; the binary embeds no commit hash. Its build time (2026-10-21 11:00Z) is about four minutes after that commit merged (10:56Z)",
+  "binary": "ccbench/bin/forge (pinned copy of the release build used for every Forge arm)",
+  "binary_sha256": "9fd1225f2995fdadde8af7e05dc9361e6dbb6e15fa179747bd12451918f07b3b"
+ },
+ "claude_code": {
+  "version": "2.1.308 (Claude Code)"
+ },
+ "models_used": [
+  "cb/deepseek-v4.1-flash",
+  "claude-haiku-5-5",
+  "claude-sonnet-5-5",
+  "inferhub::cb/deepseek-v4.1-flash (Forge FD arm, provider id)"
+ ],
+ "deepseek_provider": "InferHub (https://api.inferhub.dev): Forge arm through its inferhub provider, Claude Code arm through InferHub's Anthropic-compatible /v1/messages endpoint",
+ "swebench": {
+  "version": "4.1.0",
+  "note": "official swebench.harness.run_evaluation, prebuilt instance images, 4 workers"
+ },
+ "docker": "29.8.0",
+ "python": "3.14.7 (host); 3.14.7 (SWE-bench venv)",
+ "host": {
+  "cpu": "13th Gen Intel(R) Core(TM) i9-13950HX",
+  "cores": 32,
+  "ram": "31 GiB",
+  "os": "Arch Linux",
+  "kernel": "Linux 7.2.6-arch2-1"
+ },
+ "dates": {
+  "window_utc": "2026-10-22, 12:21Z to 14:27Z",
+  "suites_abd": "2026-10-22 12:21Z to 2026-10-22 13:29Z",
+  "suite_c": "2026-10-22 13:25Z to 2026-10-22 13:56Z (CC and FD arms only)",
+  "multiturn": "finished 2026-10-22 13:39Z (CC), 2026-10-22 13:40Z (FD)",
+  "swe": "finished 2026-10-22 13:51Z (CC), 2026-10-22 14:27Z (FD)"
+ },
+ "concurrency": "The eight Haiku and DeepSeek arms of suites a+b+d were started within one millisecond of each other and ran side by side on this machine; the Sonnet pair ran afterwards, as a pair. In suite c the Claude Code and Forge chains ran side by side until the Claude Code chain ended; the SWE-bench and multi-turn arms of both harnesses were started together as well. The machine also hosted other agents' work, and load was not recorded, so absolute wall times carry noise.",
+ "private_archive": {
+  "file": "~/Documents/forge-benchmarks/cc-parity-2026-10/baseline-20261022T1457Z.tar.zst",
+  "sha256": "4449b48707e10132a8c0ef7cdee67c843e4931075d3b6b19c6cb5aa46d75951a"
+ }
+}
