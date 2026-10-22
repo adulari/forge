@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommitPolicy {
-    /// Not chosen by the user: `unit` in an interactive session, `end` for a headless one-shot
-    /// run (`forge run`, `forge run -p`, `forge bench`), which has nobody to review per-unit
-    /// commits and pays a model round trip for each one.
+    /// Not chosen by the user: `unit` in an interactive session (`request` while the model's own
+    /// commit would ask for approval), `end` for a headless one-shot run (`forge run`,
+    /// `forge run -p`, `forge bench`), which has nobody to review per-unit commits and pays a
+    /// model round trip for each one.
     #[default]
     Auto,
     /// Commit each verified unit of work as it is finished; the harness reminds the model about
@@ -19,6 +20,11 @@ pub enum CommitPolicy {
     End,
     /// Never commit or stage; leave the changes in the working tree. No harness reminders.
     Never,
+    /// Commit only when the user asks (or runs `/commit`), never on the model's own initiative. No
+    /// harness reminders. Not usually chosen: `auto` resolves to it for an interactive session in
+    /// which the model's own `git add` / `git commit` would stop at a permission prompt, so a
+    /// one-line fix does not cost the user a second and third approval.
+    Request,
 }
 
 impl CommitPolicy {
@@ -50,6 +56,7 @@ mod tests {
             ("unit", CommitPolicy::Unit),
             ("end", CommitPolicy::End),
             ("never", CommitPolicy::Never),
+            ("request", CommitPolicy::Request),
         ] {
             let cfg: GitConfig = toml::from_str(&format!("commit_policy = \"{raw}\"")).unwrap();
             assert_eq!(cfg.commit_policy, want);
@@ -64,7 +71,12 @@ mod tests {
             CommitPolicy::Auto.or(CommitPolicy::Unit),
             CommitPolicy::Unit
         );
-        for chosen in [CommitPolicy::Unit, CommitPolicy::End, CommitPolicy::Never] {
+        for chosen in [
+            CommitPolicy::Unit,
+            CommitPolicy::End,
+            CommitPolicy::Never,
+            CommitPolicy::Request,
+        ] {
             assert_eq!(chosen.or(CommitPolicy::End), chosen);
         }
     }

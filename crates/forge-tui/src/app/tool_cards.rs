@@ -168,6 +168,14 @@ impl ToolCard {
     }
 }
 
+/// A bridged turn names Forge's own tools `mcp__forge__<tool>`. Treat those as the plain tool: the
+/// card category, headline and permission prompt all key on the bare name, and with the namespace
+/// left on, a bridged edit prompted "Allow Edit of ?" with no file and its card read as
+/// `Called forge 2 times`. Any other server's tools keep their `mcp__<server>__` name.
+pub(crate) fn bare_tool_name(name: &str) -> &str {
+    name.strip_prefix("mcp__forge__").unwrap_or(name)
+}
+
 /// `read_file` → `Read`. An unknown tool shows its own name.
 pub(crate) fn verb(name: &str) -> String {
     let name = crate::app::tool_display_name(name);
@@ -649,11 +657,15 @@ fn arg_rows(args: &str) -> Vec<(String, String)> {
 /// home directory folded to `~`. A tool call's path is almost always inside the workspace, and
 /// repeating that prefix on every row costs the width the interesting tail needs.
 fn display_path(path: &str, cwd: Option<&str>) -> String {
-    if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-        if let Some(rest) = path.strip_prefix(cwd) {
-            let rest = rest.trim_start_matches('/');
+    // A bridged claude call carries absolute paths and no `cwd` of its own; the TUI's directory is
+    // the session's, so it stands in.
+    let own = std::env::current_dir().ok();
+    let own = own.as_deref().and_then(std::path::Path::to_str);
+    for cwd in [cwd, own].into_iter().flatten().filter(|c| !c.is_empty()) {
+        if let Ok(rest) = std::path::Path::new(path).strip_prefix(cwd) {
+            let rest = rest.to_string_lossy();
             if !rest.is_empty() {
-                return rest.to_string();
+                return rest.into_owned();
             }
         }
     }

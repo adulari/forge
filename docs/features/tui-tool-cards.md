@@ -101,6 +101,12 @@ words.
   asking (the agent may have moved on without fixing it), and its header costs one row. A
   destructive call is not hidden either: a deletion is its own category, and the permission
   prompt, which is where a destructive shell command is decided, is never folded.
+- **Bridged tools are plain tools.** A claude-cli turn names Forge's own tools `mcp__forge__<tool>`.
+  The TUI drops that namespace when the call arrives, so a bridged edit is an `edit_file` card like a
+  native one: it groups as `Edited calc.py`, not `Called forge 2 times`, and its permission prompt
+  names the file (`Allow Edit of calc.py?`) and shows the command to run, where it used to read
+  `Allow Edit of ?` and `Allow Shell to run this command?` over an empty box. Another MCP server's
+  tools keep their `mcp__<server>__` name and their server group.
 - **How to open it.** The newest group, while folded and finished, ends its summary with a faint
   `click or Alt+O to expand` (the chord is whatever `toggle_tool_groups` is bound to), the way
   Claude Code's collapsed line says `(ctrl+o to expand)`. Older rows stay quiet, and the hint is

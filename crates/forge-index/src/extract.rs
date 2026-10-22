@@ -3,11 +3,10 @@
 //! (graph nodes) and *references* (call/use sites → graph edges), uniformly across every language
 //! whose grammar ships a tags query. Pure: no I/O, no store; the caller reads files and persists.
 //!
-//! Adding a language is one row in [`LANGS`] (grammar `Language` + its bundled `TAGS_QUERY` +
+//! Adding a language is one row in [`LANG_SPECS`] (grammar `Language` + its bundled `TAGS_QUERY` +
 //! file extensions). The category strings come from the grammar's own `@definition.*` /
 //! `@reference.*` captures, so we stay grammar-driven rather than hand-classifying per language.
 
-use std::collections::HashMap;
 use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
 // Hand-crafted tags queries for grammars that ship a tags.scm but do not export it as a const,
@@ -113,14 +112,12 @@ pub struct Parsed {
     pub had_error: bool,
 }
 
-struct LangEntry {
+/// One supported language. `build` compiles its tags query, which costs tens of milliseconds, so it
+/// only runs for a language a file actually needs ([`LANGUAGES`] holds the compiled result).
+struct LangSpec {
     name: &'static str,
-    config: TagsConfiguration,
-}
-
-struct Registry {
-    entries: Vec<LangEntry>,
-    by_ext: HashMap<&'static str, usize>,
+    exts: &'static [&'static str],
+    build: fn() -> Option<TagsConfiguration>,
 }
 
 fn lang(language: tree_sitter::Language, tags: &str) -> Option<TagsConfiguration> {
@@ -140,180 +137,205 @@ fn ts_tags_query() -> String {
     )
 }
 
-thread_local! {
-    // `TagsConfiguration` is not `Sync`, so the compiled-query registry is cached per thread
-    // rather than in a global static. Build cost (query compilation) is paid once per thread.
-    static REGISTRY: Registry = build_registry();
+/// Every language Lattice can index. Adding one is a row here: its name, file extensions and the
+/// grammar plus bundled tags query.
+static LANG_SPECS: [LangSpec; 19] = [
+    LangSpec {
+        name: "rust",
+        exts: &["rs"],
+        build: || {
+            lang(
+                tree_sitter_rust::LANGUAGE.into(),
+                tree_sitter_rust::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "python",
+        exts: &["py", "pyi"],
+        build: || {
+            lang(
+                tree_sitter_python::LANGUAGE.into(),
+                tree_sitter_python::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "javascript",
+        exts: &["js", "jsx", "mjs", "cjs"],
+        build: || {
+            lang(
+                tree_sitter_javascript::LANGUAGE.into(),
+                tree_sitter_javascript::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "typescript",
+        exts: &["ts", "mts", "cts"],
+        build: || {
+            lang(
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                &ts_tags_query(),
+            )
+        },
+    },
+    LangSpec {
+        name: "tsx",
+        exts: &["tsx"],
+        build: || {
+            lang(
+                tree_sitter_typescript::LANGUAGE_TSX.into(),
+                &ts_tags_query(),
+            )
+        },
+    },
+    LangSpec {
+        name: "go",
+        exts: &["go"],
+        build: || lang(tree_sitter_go::LANGUAGE.into(), tree_sitter_go::TAGS_QUERY),
+    },
+    LangSpec {
+        name: "java",
+        exts: &["java"],
+        build: || {
+            lang(
+                tree_sitter_java::LANGUAGE.into(),
+                tree_sitter_java::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "c",
+        exts: &["c", "h"],
+        build: || lang(tree_sitter_c::LANGUAGE.into(), tree_sitter_c::TAGS_QUERY),
+    },
+    LangSpec {
+        name: "cpp",
+        exts: &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
+        build: || {
+            lang(
+                tree_sitter_cpp::LANGUAGE.into(),
+                tree_sitter_cpp::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "ruby",
+        exts: &["rb"],
+        build: || {
+            lang(
+                tree_sitter_ruby::LANGUAGE.into(),
+                tree_sitter_ruby::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "csharp",
+        exts: &["cs"],
+        build: || lang(tree_sitter_c_sharp::LANGUAGE.into(), CSHARP_TAGS_QUERY),
+    },
+    LangSpec {
+        name: "php",
+        exts: &["php"],
+        build: || {
+            lang(
+                tree_sitter_php::LANGUAGE_PHP.into(),
+                tree_sitter_php::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "elixir",
+        exts: &["ex", "exs"],
+        build: || {
+            lang(
+                tree_sitter_elixir::LANGUAGE.into(),
+                tree_sitter_elixir::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "lua",
+        exts: &["lua"],
+        build: || {
+            lang(
+                tree_sitter_lua::LANGUAGE.into(),
+                tree_sitter_lua::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "ocaml",
+        exts: &["ml", "mli"],
+        build: || {
+            lang(
+                tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+                tree_sitter_ocaml::TAGS_QUERY,
+            )
+        },
+    },
+    LangSpec {
+        name: "bash",
+        exts: &["sh", "bash"],
+        build: || lang(tree_sitter_bash::LANGUAGE.into(), BASH_TAGS_QUERY),
+    },
+    LangSpec {
+        name: "haskell",
+        exts: &["hs"],
+        build: || lang(tree_sitter_haskell::LANGUAGE.into(), HASKELL_TAGS_QUERY),
+    },
+    LangSpec {
+        name: "scala",
+        exts: &["scala"],
+        build: || lang(tree_sitter_scala::LANGUAGE.into(), SCALA_TAGS_QUERY),
+    },
+    LangSpec {
+        name: "kotlin",
+        exts: &["kt", "kts"],
+        build: || lang(tree_sitter_kotlin_ng::LANGUAGE.into(), KOTLIN_TAGS_QUERY),
+    },
+];
+
+/// Compiled tags queries, one cell per [`LANG_SPECS`] row, filled on first use and shared by every
+/// thread (`TagsConfiguration` is `Send + Sync`). The queries used to be compiled for ALL languages
+/// on a thread's first call to `lang_for_path`/`extract`, which made even an index run with
+/// nothing to parse spend ~0.5 s of CPU and ~35 MB, again on every other thread that touched it.
+static LANGUAGES: [std::sync::OnceLock<Option<TagsConfiguration>>; 19] =
+    [const { std::sync::OnceLock::new() }; 19];
+
+fn spec_for_ext(ext: &str) -> Option<usize> {
+    LANG_SPECS.iter().position(|spec| spec.exts.contains(&ext))
 }
 
-/// Build every supported language's [`TagsConfiguration`]. A grammar whose query fails to compile
-/// is skipped (logged) rather than panicking — degrade, don't crash.
-fn build_registry() -> Registry {
-    {
-        // (name, build TagsConfiguration, file extensions)
-        let specs: Vec<(
-            &'static str,
-            Option<TagsConfiguration>,
-            &'static [&'static str],
-        )> = vec![
-            (
-                "rust",
-                lang(
-                    tree_sitter_rust::LANGUAGE.into(),
-                    tree_sitter_rust::TAGS_QUERY,
-                ),
-                &["rs"],
-            ),
-            (
-                "python",
-                lang(
-                    tree_sitter_python::LANGUAGE.into(),
-                    tree_sitter_python::TAGS_QUERY,
-                ),
-                &["py", "pyi"],
-            ),
-            (
-                "javascript",
-                lang(
-                    tree_sitter_javascript::LANGUAGE.into(),
-                    tree_sitter_javascript::TAGS_QUERY,
-                ),
-                &["js", "jsx", "mjs", "cjs"],
-            ),
-            (
-                "typescript",
-                lang(
-                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                    &ts_tags_query(),
-                ),
-                &["ts", "mts", "cts"],
-            ),
-            (
-                "tsx",
-                lang(
-                    tree_sitter_typescript::LANGUAGE_TSX.into(),
-                    &ts_tags_query(),
-                ),
-                &["tsx"],
-            ),
-            (
-                "go",
-                lang(tree_sitter_go::LANGUAGE.into(), tree_sitter_go::TAGS_QUERY),
-                &["go"],
-            ),
-            (
-                "java",
-                lang(
-                    tree_sitter_java::LANGUAGE.into(),
-                    tree_sitter_java::TAGS_QUERY,
-                ),
-                &["java"],
-            ),
-            (
-                "c",
-                lang(tree_sitter_c::LANGUAGE.into(), tree_sitter_c::TAGS_QUERY),
-                &["c", "h"],
-            ),
-            (
-                "cpp",
-                lang(
-                    tree_sitter_cpp::LANGUAGE.into(),
-                    tree_sitter_cpp::TAGS_QUERY,
-                ),
-                &["cpp", "cc", "cxx", "hpp", "hh", "hxx"],
-            ),
-            (
-                "ruby",
-                lang(
-                    tree_sitter_ruby::LANGUAGE.into(),
-                    tree_sitter_ruby::TAGS_QUERY,
-                ),
-                &["rb"],
-            ),
-            (
-                "csharp",
-                lang(tree_sitter_c_sharp::LANGUAGE.into(), CSHARP_TAGS_QUERY),
-                &["cs"],
-            ),
-            (
-                "php",
-                lang(
-                    tree_sitter_php::LANGUAGE_PHP.into(),
-                    tree_sitter_php::TAGS_QUERY,
-                ),
-                &["php"],
-            ),
-            (
-                "elixir",
-                lang(
-                    tree_sitter_elixir::LANGUAGE.into(),
-                    tree_sitter_elixir::TAGS_QUERY,
-                ),
-                &["ex", "exs"],
-            ),
-            (
-                "lua",
-                lang(
-                    tree_sitter_lua::LANGUAGE.into(),
-                    tree_sitter_lua::TAGS_QUERY,
-                ),
-                &["lua"],
-            ),
-            (
-                "ocaml",
-                lang(
-                    tree_sitter_ocaml::LANGUAGE_OCAML.into(),
-                    tree_sitter_ocaml::TAGS_QUERY,
-                ),
-                &["ml", "mli"],
-            ),
-            (
-                "bash",
-                lang(tree_sitter_bash::LANGUAGE.into(), BASH_TAGS_QUERY),
-                &["sh", "bash"],
-            ),
-            (
-                "haskell",
-                lang(tree_sitter_haskell::LANGUAGE.into(), HASKELL_TAGS_QUERY),
-                &["hs"],
-            ),
-            (
-                "scala",
-                lang(tree_sitter_scala::LANGUAGE.into(), SCALA_TAGS_QUERY),
-                &["scala"],
-            ),
-            (
-                "kotlin",
-                lang(tree_sitter_kotlin_ng::LANGUAGE.into(), KOTLIN_TAGS_QUERY),
-                &["kt", "kts"],
-            ),
-        ];
-        let mut entries = Vec::new();
-        let mut by_ext = HashMap::new();
-        for (name, config, exts) in specs {
-            let Some(config) = config else {
-                tracing::warn!(language = name, "tags query failed to compile; skipping");
-                continue;
-            };
-            let idx = entries.len();
-            entries.push(LangEntry { name, config });
-            for ext in exts {
-                by_ext.insert(*ext, idx);
+/// The compiled grammar for `LANG_SPECS[idx]`, or `None` (logged once) if its query does not
+/// compile: degrade, don't crash.
+fn config_for(idx: usize) -> Option<&'static TagsConfiguration> {
+    LANGUAGES[idx]
+        .get_or_init(|| {
+            let spec = &LANG_SPECS[idx];
+            let config = (spec.build)();
+            if config.is_none() {
+                tracing::warn!(
+                    language = spec.name,
+                    "tags query failed to compile; skipping"
+                );
             }
-        }
-        Registry { entries, by_ext }
-    }
+            config
+        })
+        .as_ref()
 }
 
-/// The language name Lattice will record for a path, or `None` if unsupported.
+/// The language name Lattice will record for a path, or `None` if unsupported. Compiles nothing.
 pub fn lang_for_path(path: &str) -> Option<&'static str> {
     let ext = path.rsplit('.').next()?;
-    REGISTRY.with(|reg| reg.by_ext.get(ext).map(|&i| reg.entries[i].name))
+    spec_for_ext(ext).map(|idx| LANG_SPECS[idx].name)
 }
 
-/// Every language name with a working grammar (for `status` / diagnostics).
+/// Every language name Lattice supports (for `status` / diagnostics). Compiles nothing; a test
+/// keeps every row's query compiling.
 pub fn supported_languages() -> Vec<&'static str> {
-    REGISTRY.with(|reg| reg.entries.iter().map(|e| e.name).collect())
+    LANG_SPECS.iter().map(|spec| spec.name).collect()
 }
 
 /// Extract definitions + references from `src`, choosing the grammar by `path`'s extension.
@@ -322,12 +344,10 @@ pub fn extract(path: &str, src: &str) -> Parsed {
     let Some(ext) = path.rsplit('.').next() else {
         return Parsed::default();
     };
-    REGISTRY.with(|reg| {
-        let Some(&idx) = reg.by_ext.get(ext) else {
-            return Parsed::default();
-        };
-        extract_with(&reg.entries[idx].config, src)
-    })
+    let Some(config) = spec_for_ext(ext).and_then(config_for) else {
+        return Parsed::default();
+    };
+    extract_with(config, src)
 }
 
 fn extract_with(config: &TagsConfiguration, src: &str) -> Parsed {
@@ -634,6 +654,34 @@ pub fn helper() -> String { String::new() }
         assert_eq!(lang_for_path("a.hs"), Some("haskell"));
         assert_eq!(lang_for_path("a.scala"), Some("scala"));
         assert_eq!(lang_for_path("a.kt"), Some("kotlin"));
+    }
+
+    #[test]
+    fn every_language_row_compiles_and_no_extension_is_claimed_twice() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in &LANG_SPECS {
+            assert!(
+                (spec.build)().is_some(),
+                "{} tags query must compile",
+                spec.name
+            );
+            for ext in spec.exts {
+                assert!(seen.insert(*ext), ".{ext} is listed by two languages");
+            }
+        }
+    }
+
+    #[test]
+    fn detecting_a_language_compiles_nothing() {
+        // Only this test and `unsupported_or_empty_is_clean` touch scala, and neither extracts it,
+        // so its cell stays empty however the other tests interleave.
+        let scala = LANG_SPECS
+            .iter()
+            .position(|spec| spec.name == "scala")
+            .expect("scala row");
+        assert_eq!(lang_for_path("a.scala"), Some("scala"));
+        assert!(supported_languages().contains(&"scala"));
+        assert!(LANGUAGES[scala].get().is_none());
     }
 
     #[test]

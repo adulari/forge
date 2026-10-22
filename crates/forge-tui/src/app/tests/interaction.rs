@@ -916,6 +916,67 @@ mod blocks {
     }
 
     #[test]
+    fn a_bridged_forge_tool_prompts_with_its_file_and_its_command() {
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::ToolStart {
+            name: "mcp__forge__edit_file".into(),
+            args: r#"{"path":"calc.py","old":"a - b","new":"a + b"}"#.into(),
+        });
+        app.open_permission("edit_file", "Write");
+        let text = screen_rows(&app, 100, 24).join("\n");
+        assert!(text.contains("Allow Edit of calc.py?"), "{text}");
+        assert!(!text.contains("mcp__forge__"), "{text}");
+
+        // claude hands the bridge absolute paths; inside the session's directory they read as the
+        // short path a native call shows.
+        let absolute = std::env::current_dir().unwrap().join("src").join("calc.py");
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::ToolStart {
+            name: "mcp__forge__edit_file".into(),
+            args: serde_json::json!({ "path": absolute, "old": "a", "new": "b" }).to_string(),
+        });
+        app.open_permission("edit_file", "Write");
+        let text = screen_rows(&app, 100, 24).join("\n");
+        assert!(text.contains("Allow Edit of src/calc.py?"), "{text}");
+
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::ToolStart {
+            name: "mcp__forge__shell".into(),
+            args: r#"{"commands":["git diff -- calc.py","python3 -m py_compile calc.py"]}"#.into(),
+        });
+        app.open_permission("shell", "Shell");
+        let text = screen_rows(&app, 100, 24).join("\n");
+        assert!(text.contains("git diff -- calc.py"), "{text}");
+        assert!(text.contains("py_compile calc.py"), "{text}");
+    }
+
+    #[test]
+    fn a_bridged_forge_tool_is_a_plain_tool_card() {
+        let mut app = App {
+            fullscreen: true,
+            ..App::default()
+        };
+        for name in ["mcp__forge__read_file", "mcp__forge__edit_file"] {
+            app.apply(crate::PresenterEvent::ToolStart {
+                name: name.into(),
+                args: r#"{"path":"calc.py"}"#.into(),
+            });
+            app.apply(crate::PresenterEvent::ToolResult {
+                name: name.into(),
+                ok: true,
+                summary: String::new(),
+                detail: None,
+            });
+        }
+        let names: Vec<&str> = app.tool_cards.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["read_file", "edit_file"]);
+        assert!(app
+            .tool_cards
+            .iter()
+            .all(|c| c.status == crate::app::tool_cards::CardStatus::Ok));
+    }
+
+    #[test]
     fn the_permission_block_fits_the_inline_region_with_room_for_the_preview() {
         let app = shell_prompt("ls");
         assert!(
