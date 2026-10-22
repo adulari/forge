@@ -72,8 +72,17 @@ fn labelled(label: &str, runs: Vec<Span<'static>>) -> TextLine<'static> {
 }
 
 /// The key hints, dropping the least useful from the end until the row fits.
-fn keys_row(width: usize) -> TextLine<'static> {
-    let mut keys: Vec<(&str, &str)> = WELCOME_KEYS.to_vec();
+fn keys_row(width: usize, actions_chord: &str) -> TextLine<'static> {
+    let mut keys: Vec<(&str, &str)> = WELCOME_KEYS
+        .iter()
+        .map(|&(k, l)| {
+            if l == "actions" {
+                (actions_chord, l)
+            } else {
+                (k, l)
+            }
+        })
+        .collect();
     keys.insert(3, ("Shift+Tab", "mode"));
     let cost = |keys: &[(&str, &str)]| -> usize {
         keys.iter()
@@ -202,7 +211,7 @@ pub(crate) fn welcome_lines(app: &App, width: u16, height: u16) -> Vec<TextLine<
         lines.push(try_row(i == 0, example, focused, width));
     }
     lines.push(TextLine::default());
-    lines.push(keys_row(width));
+    lines.push(keys_row(width, &app.action_chord("command_center")));
     if let Some(recent) = recent_row(app, width) {
         lines.push(TextLine::default());
         lines.push(recent);

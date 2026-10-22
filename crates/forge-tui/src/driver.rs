@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::theme::backend::{stdout_backend, TermBackend};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+    EnableFocusChange, Event, KeyEventKind, MouseEventKind,
 };
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -22,6 +22,10 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::app::{self, App, KeyKind, LIVE_H};
 use crate::{Presenter, PresenterEvent};
+
+mod external;
+mod keymap;
+pub use external::{edit_in_external_editor, external_editor_command};
 
 /// Enable mouse reporting: button (`?1000h`) + drag-motion (`?1002h`) + SGR encoding (`?1006h`).
 /// Drag-motion is ON so Forge can do its OWN click-drag text selection (and copy to the clipboard),
@@ -275,10 +279,6 @@ fn install_terminate_restore() {
     }
 }
 
-fn alt_only(k: &crossterm::event::KeyEvent) -> bool {
-    k.modifiers.contains(KeyModifiers::ALT) && !k.modifiers.contains(KeyModifiers::CONTROL)
-}
-
 impl Tui {
     /// The built-in Ctrl+`ch` chord only applies while its action has not been rebound elsewhere,
     /// so rebinding releases the old key.
@@ -468,84 +468,9 @@ impl Tui {
                 if let Some(kind) = crate::keybinds::resolve_action(&self.keybinds, &k) {
                     return Ok(Some(InputEvent::Key(kind)));
                 }
-                let key = match k.code {
-                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::Interrupt
-                    }
-                    KeyCode::Char('o') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::ToggleSubagentDetail
-                    }
-                    KeyCode::Char('t') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::ToggleToolCard
-                    }
-                    KeyCode::Char('j') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::InsertNewline
-                    }
-                    KeyCode::Char('w') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::DeleteWordBack
-                    }
-                    KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::KillLineBack
-                    }
-                    KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::KillLineForward
-                    }
-                    KeyCode::Char('a') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::Home
-                    }
-                    KeyCode::Char('e') if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::End
-                    }
-                    KeyCode::Char('r')
-                        if k.modifiers.contains(KeyModifiers::CONTROL)
-                            && self.default_chord_unrebound("toggle_reasoning", 'r') =>
-                    {
-                        KeyKind::ToggleReasoning
-                    }
-                    KeyCode::Char('b') if alt_only(&k) => KeyKind::WordLeft,
-                    KeyCode::Char('f') if alt_only(&k) => KeyKind::WordRight,
-                    // An unbound Alt chord must not type its letter into the draft.
-                    KeyCode::Char(_) if alt_only(&k) => return Ok(None),
-                    KeyCode::Char(c) => KeyKind::Char(c),
-                    KeyCode::Backspace if alt_only(&k) => KeyKind::DeleteWordBack,
-                    KeyCode::Backspace => KeyKind::Backspace,
-                    KeyCode::Delete => KeyKind::DeleteForward,
-                    KeyCode::Enter
-                        if k.modifiers
-                            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-                    {
-                        KeyKind::InsertNewline
-                    }
-                    KeyCode::Enter => KeyKind::Enter,
-                    KeyCode::Esc => KeyKind::Esc,
-                    KeyCode::BackTab => KeyKind::CycleTemper,
-                    KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => {
-                        KeyKind::CycleTemper
-                    }
-                    KeyCode::Up => KeyKind::Up,
-                    KeyCode::Down => KeyKind::Down,
-                    KeyCode::Left if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::WordLeft
-                    }
-                    KeyCode::Left if alt_only(&k) => KeyKind::WordLeft,
-                    KeyCode::Left => KeyKind::Left,
-                    KeyCode::Right if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::WordRight
-                    }
-                    KeyCode::Right if alt_only(&k) => KeyKind::WordRight,
-                    KeyCode::Right => KeyKind::Right,
-                    KeyCode::Home if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::JumpPrevUser
-                    }
-                    KeyCode::Home => KeyKind::Home,
-                    KeyCode::End if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                        KeyKind::JumpBottom
-                    }
-                    KeyCode::End => KeyKind::End,
-                    KeyCode::PageUp => KeyKind::PageUp,
-                    KeyCode::PageDown => KeyKind::PageDown,
-                    KeyCode::Tab => KeyKind::Tab,
-                    _ => return Ok(None),
+                let ctrl_r_reasoning = self.default_chord_unrebound("toggle_reasoning", 'r');
+                let Some(key) = keymap::static_key(&k, ctrl_r_reasoning) else {
+                    return Ok(None);
                 };
                 return Ok(Some(InputEvent::Key(key)));
             }

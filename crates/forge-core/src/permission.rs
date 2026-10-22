@@ -411,7 +411,7 @@ mod auto;
 mod auto_safe;
 mod catastrophic;
 mod narrowing;
-pub use catastrophic::privilege_escalation;
+pub use catastrophic::{catastrophic_shell, privilege_escalation};
 pub use narrowing::{
     append_withheld, narrow_read, split_denied_paths, with_withheld_note, DeniedPaths,
 };

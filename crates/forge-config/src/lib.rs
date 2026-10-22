@@ -27,6 +27,7 @@ use system_prompt_overrides::resolve_system_prompt_overrides;
 pub mod goal;
 mod harness_profile;
 mod hooks;
+mod keybinds;
 mod key_adoption;
 mod keybind_migration;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
@@ -52,6 +53,7 @@ pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
+pub use keybinds::{write_keybind, write_keybind_preset, KeyCombo, KeybindPreset, KeybindsConfig};
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
     discover_import_sources, embeds_credentials, import_mcp_json, load_mcp_toml,
@@ -1088,6 +1090,10 @@ pub struct TuiConfig {
     /// Enter opens it). Default: true. False shows every call as its own card, as before.
     #[serde(default = "default_true")]
     pub fold_tool_groups: bool,
+    /// After a `!command` typed in the composer runs, have the model respond to its output (Claude
+    /// Code's `respondToBashCommands`). Default: true. False only adds the run to the context.
+    #[serde(default = "default_true")]
+    pub respond_to_bash: bool,
 }
 
 impl Default for TuiConfig {
@@ -1100,6 +1106,7 @@ impl Default for TuiConfig {
             glyphs: default_tui_auto(),
             reduce_motion: false,
             fold_tool_groups: true,
+            respond_to_bash: true,
         }
     }
 }
@@ -2693,95 +2700,6 @@ impl Default for StatuslineConfig {
     }
 }
 
-/// A key combination: a key name plus modifier flags.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct KeyCombo {
-    /// Key name: a single character (e.g. "c", "k", ","), or a named key
-    /// ("up", "down", "left", "right", "enter", "esc", "backspace", "delete",
-    /// "pageup", "pagedown", "home", "end", "tab", "f1"–"f12"); names are case-insensitive.
-    pub key: String,
-    #[serde(default)]
-    pub ctrl: bool,
-    #[serde(default)]
-    pub alt: bool,
-    #[serde(default)]
-    pub shift: bool,
-}
-
-/// Configurable keybind map: action name → key combination.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeybindsConfig {
-    #[serde(default)]
-    pub binds: std::collections::BTreeMap<String, KeyCombo>,
-}
-
-impl Default for KeybindsConfig {
-    fn default() -> Self {
-        let bind = |key: &str, ctrl: bool, alt: bool, shift: bool| KeyCombo {
-            key: key.to_string(),
-            ctrl,
-            alt,
-            shift,
-        };
-        let mut binds = std::collections::BTreeMap::new();
-        binds.insert("interrupt".into(), bind("c", true, false, false));
-        binds.insert("command_palette".into(), bind("/", false, false, false));
-        binds.insert("command_center".into(), bind("k", true, false, false));
-        binds.insert("skip_model".into(), bind("k", true, false, true));
-        binds.insert("tier_up".into(), bind("up", true, false, false));
-        binds.insert("tier_down".into(), bind("down", true, false, false));
-        binds.insert("toggle_reasoning".into(), bind("r", true, false, false));
-        binds.insert("toggle_tool_card".into(), bind("t", true, false, false));
-        binds.insert("toggle_tool_groups".into(), bind("o", false, true, false));
-        binds.insert("prev_tool_group".into(), bind("up", false, true, false));
-        binds.insert("next_tool_group".into(), bind("down", false, true, false));
-        binds.insert("undo".into(), bind("z", true, false, false));
-        binds.insert("compact".into(), bind("l", false, true, false));
-        binds.insert("redraw".into(), bind("l", true, false, false));
-        binds.insert("model_picker".into(), bind("m", false, true, false));
-        binds.insert("effort_cycle".into(), bind("e", false, true, false));
-        binds.insert("temper_cycle".into(), bind("t", false, true, false));
-        binds.insert("keybind_config".into(), bind(",", true, false, false));
-        binds.insert("new_session".into(), bind("n", true, false, false));
-        binds.insert("copy_last".into(), bind("c", true, false, true));
-        binds.insert("scroll_up".into(), bind("pageup", false, false, false));
-        binds.insert("scroll_down".into(), bind("pagedown", false, false, false));
-        binds.insert("help".into(), bind("f1", false, false, false));
-        binds.insert("checkpoint".into(), bind("s", true, false, false));
-        binds.insert("reload".into(), bind("r", false, true, false));
-        // Ctrl+V: free in the default keymap (paste arrives via bracketed-paste as a distinct
-        // terminal event, never as a Ctrl+V keystroke) — see voice.md.
-        binds.insert("voice".into(), bind("v", true, false, false));
-        binds.insert("kill_line_forward".into(), bind("k", false, true, false));
-        Self { binds }
-    }
-}
-
-/// Resolve the one default-key collision introduced by the command center. Config files deep-merge
-/// over defaults, so an older persisted default can retain `skip_model = Ctrl+K` alongside the new
-/// command center binding. Move only that legacy default; any other user-selected binding remains
-/// untouched and can still be adjusted in the keybind editor.
-fn migrate_legacy_keybinds(keybinds: &mut KeybindsConfig) {
-    let ctrl_k = KeyCombo {
-        key: "k".to_string(),
-        ctrl: true,
-        alt: false,
-        shift: false,
-    };
-    if keybinds.binds.get("command_center") == Some(&ctrl_k)
-        && keybinds.binds.get("skip_model") == Some(&ctrl_k)
-    {
-        keybinds.binds.insert(
-            "skip_model".to_string(),
-            KeyCombo {
-                shift: true,
-                ..ctrl_k
-            },
-        );
-    }
-    keybind_migration::move_compact_off_ctrl_l(keybinds);
-}
-
 impl Default for Config {
     fn default() -> Self {
         let mut models = HashMap::new();
@@ -3306,7 +3224,7 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
             .rules
             .extend(project_trust::user_rules_for(&cwd));
     }
-    migrate_legacy_keybinds(&mut config.keybinds);
+    keybinds::normalize(&mut config.keybinds);
     resolve_system_prompt_overrides(&mut config)?;
     // Project-local `.forge/mcp.toml` is the dedicated home for MCP server declarations; when
     // present it sets the whole `[mcp]` section (overriding any `[mcp]` in config.toml). Keeping
@@ -3547,23 +3465,6 @@ fn set_top_level_permission_mode(existing: &str, mode: &str) -> String {
     let mut body = out.join("\n");
     body.push('\n');
     body
-}
-
-/// Persist a single keybind to `[keybinds.binds]` in the user config TOML, preserving all other keys.
-pub fn write_keybind(action: &str, combo: &KeyCombo) -> Result<PathBuf, ConfigError> {
-    let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
-    std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
-    let path = dir.join("config.toml");
-    let mut doc = toml_write::load_doc(&path)?;
-    let binds = toml_write::table_at(&mut doc, &["keybinds", "binds"]);
-    let mut combo_t = toml_edit::InlineTable::new();
-    combo_t.insert("key", combo.key.as_str().into());
-    combo_t.insert("ctrl", combo.ctrl.into());
-    combo_t.insert("alt", combo.alt.into());
-    combo_t.insert("shift", combo.shift.into());
-    toml_write::put(binds, action, toml_edit::Item::Value(combo_t.into()));
-    toml_write::save_doc(&path, &doc)?;
-    Ok(path)
 }
 
 /// Append a `[[permissions.rules]]` allow entry for `tool` to the project `.forge/config.toml`.
@@ -4634,104 +4535,6 @@ auto = "local"
         )
         .unwrap();
         assert_eq!(c.remote.auto, RemoteAuto::Local);
-    }
-
-    #[test]
-    fn keybinds_default_has_all_actions() {
-        let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 27);
-        assert_eq!(
-            kb.binds["interrupt"],
-            KeyCombo {
-                key: "c".into(),
-                ctrl: true,
-                alt: false,
-                shift: false
-            }
-        );
-        assert_eq!(
-            kb.binds["copy_last"],
-            KeyCombo {
-                key: "c".into(),
-                ctrl: true,
-                alt: false,
-                shift: true
-            }
-        );
-        assert_eq!(
-            kb.binds["tier_up"],
-            KeyCombo {
-                key: "up".into(),
-                ctrl: true,
-                alt: false,
-                shift: false
-            }
-        );
-        assert_eq!(
-            kb.binds["help"],
-            KeyCombo {
-                key: "f1".into(),
-                ctrl: false,
-                alt: false,
-                shift: false
-            }
-        );
-        assert_eq!(
-            kb.binds["command_center"],
-            KeyCombo {
-                key: "k".into(),
-                ctrl: true,
-                alt: false,
-                shift: false
-            }
-        );
-    }
-
-    /// A partial `[keybinds.binds]` override in the user TOML must DEEP-MERGE over the serialized
-    /// defaults (keeping the other 21 binds), not replace the whole map. `write_keybind` writes a
-    /// single bind, so a replace would unbind everything else — this guards that regression.
-    #[test]
-    fn partial_keybind_override_deep_merges_over_defaults() {
-        use figment::providers::{Format, Toml};
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("c.toml");
-        std::fs::write(
-            &path,
-            "[keybinds.binds.toggle_reasoning]\nkey = \"x\"\nctrl = true\nalt = false\nshift = false\n",
-        )
-        .unwrap();
-        let fig = Figment::from(Serialized::defaults(Config::default())).merge(Toml::file(&path));
-        let cfg: Config = fig.extract().unwrap();
-        // The override took effect…
-        assert_eq!(cfg.keybinds.binds["toggle_reasoning"].key, "x");
-        // …and every other default bind survived the merge.
-        assert_eq!(cfg.keybinds.binds.len(), 27);
-        assert_eq!(cfg.keybinds.binds["interrupt"].key, "c");
-        assert_eq!(cfg.keybinds.binds["help"].key, "f1");
-    }
-
-    #[test]
-    fn legacy_ctrl_k_skip_binding_moves_to_shifted_chord() {
-        let mut keybinds = KeybindsConfig::default();
-        keybinds.binds.insert(
-            "skip_model".into(),
-            KeyCombo {
-                key: "k".into(),
-                ctrl: true,
-                alt: false,
-                shift: false,
-            },
-        );
-        migrate_legacy_keybinds(&mut keybinds);
-        assert_eq!(
-            keybinds.binds["skip_model"],
-            KeyCombo {
-                key: "k".into(),
-                ctrl: true,
-                alt: false,
-                shift: true,
-            }
-        );
     }
 
     #[test]

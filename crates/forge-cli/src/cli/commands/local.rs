@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 mod auth;
 pub(crate) use auth::{auth, auth_codex_oauth, auth_xai_oauth, clear_auth_exclusion_in};
+mod keybind_preset;
 
 /// Render a whole number of seconds as the coarsest useful unit (`"54m"`, `"3h"`, `"2d"`).
 fn human_secs(secs: i64) -> String {
@@ -505,10 +506,11 @@ pub(crate) fn init(invoked_as: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// `forge setup`: the full guided flow — the provider/plan wizard ([`init`]), then an optional
-/// local-LLM step. Used by `forge setup`, `forge init`, and the first-run prompt.
+/// `forge setup`: the full guided flow — the provider/plan wizard ([`init`]), the keybinding
+/// preset question, then an optional local-LLM step. Used by `forge setup`, `forge init`, and the first-run prompt.
 pub(crate) fn setup(invoked_as: &str) -> Result<()> {
     if init(invoked_as)? {
+        keybind_preset::offer_claude_code_keybinds();
         offer_local_setup();
     }
     Ok(())

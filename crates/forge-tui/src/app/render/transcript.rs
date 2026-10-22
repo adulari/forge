@@ -45,7 +45,10 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
                 "Plan a change before editing",
                 styles::muted(),
             )),
-            TextLine::from(Span::styled("Ctrl+K for all actions", styles::muted())),
+            TextLine::from(Span::styled(
+                format!("{} for all actions", app.action_chord("command_center")),
+                styles::muted(),
+            )),
         ];
         if show_readiness {
             lines.push(TextLine::from(Span::styled(

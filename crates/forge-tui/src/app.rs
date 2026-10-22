@@ -269,6 +269,8 @@ pub struct App {
     pub input: String,
     /// Byte offset of the text cursor within `input`. Always on a char boundary.
     pub input_cursor: usize,
+    /// Kill ring and undo history of the input line (`App::edit_key`).
+    pub input_edit: InputEditState,
     /// An AI-predicted next prompt (`SuggestionReady`), shown as dim ghost text when `input` is
     /// empty and idle; Tab moves it into `input` (editable, never auto-sent). Cleared at the start
     /// of every new turn (`on_turn_start`) and on session switch (`clear_transcript`) so a stale
@@ -288,6 +290,10 @@ pub struct App {
     /// When an idle Ctrl-C on an empty input armed the exit; a second press inside
     /// [`idle_interrupt::QUIT_DOUBLE_TAP`] quits.
     pub quit_armed: Option<std::time::Instant>,
+    /// The chord that armed `quit_armed` ("Ctrl+C" or "Ctrl+D"), named by the hint.
+    quit_chord: &'static str,
+    /// Set by `ctrl_d` so the arm it triggers names Ctrl+D.
+    next_quit_chord: Option<&'static str>,
     /// A startup phase label ("starting session…") shown with the spinner before the session
     /// exists, so the terminal is never blank while the store and providers come up.
     pub loading: Option<&'static str>,
@@ -923,6 +929,16 @@ pub enum KeyKind {
     ReloadConfig,
     /// Ctrl+V (configurable) — open the `/voice` recording overlay, same as typing `/voice`.
     ToggleVoice,
+    /// Ctrl+D — delete the character under the cursor; on an empty prompt, quit (see `App::ctrl_d`).
+    ExitOrDelete,
+    /// Ctrl+G — edit the draft in `$VISUAL` / `$EDITOR` (shell-handled).
+    ExternalEditor,
+    /// Ctrl+Y — insert the most recent Ctrl+K / Ctrl+U / Ctrl+W kill.
+    Yank,
+    /// Alt+Y right after Ctrl+Y — swap the yanked text for the next older kill.
+    YankPop,
+    /// Ctrl+_ — undo the last input edit.
+    UndoEdit,
 }
 
 /// The result of feeding a keystroke to the input line.
@@ -1085,7 +1101,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
                 InputOutcome::Submit(std::mem::take(input))
             }
         }
-        KeyKind::DeleteForward => {
+        KeyKind::DeleteForward | KeyKind::ExitOrDelete => {
             if *cursor < input.len() {
                 let next = next_char_boundary(input, *cursor);
                 input.drain(*cursor..next);
@@ -1152,11 +1168,20 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::CompactSession
         | KeyKind::Redraw
         | KeyKind::ReloadConfig
-        | KeyKind::ToggleVoice => InputOutcome::Editing,
+        | KeyKind::ToggleVoice
+        | KeyKind::ExternalEditor
+        | KeyKind::Yank
+        | KeyKind::YankPop
+        | KeyKind::UndoEdit => InputOutcome::Editing,
     }
 }
 
 impl App {
+    /// The chord bound to a configurable `action`, spelled for hints (`Ctrl+K`, `F2`).
+    pub(crate) fn action_chord(&self, action: &str) -> String {
+        crate::keybinds::action_label(&self.keybinds, action)
+    }
+
     fn set_turn_activity(&mut self, phase: TurnPhase, detail: impl Into<String>) {
         self.turn_activity.phase = phase;
         self.turn_activity.detail = detail.into();
@@ -3455,6 +3480,8 @@ use lines::{
 mod idle_interrupt;
 pub use idle_interrupt::IdleInterrupt;
 mod deferred;
+mod input_edit;
+pub use input_edit::InputEditState;
 mod harness_notice;
 mod job_notice;
 pub use deferred::{Deferred, DeferredInbox};
