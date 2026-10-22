@@ -707,7 +707,7 @@ forge chat --mock
 ```bash
 forge chat
 forge chat --resume abc123                      # resume a previous session
-forge chat --continue                           # resume the most recent session
+forge chat --continue                           # resume the most recent session of this directory (--all-dirs: of any)
 forge chat --model anthropic::claude-opus-5     # pin a model
 forge chat --mode accept-edits                  # auto-allow file writes
 forge chat --inline                             # inline scrollback instead of full-screen

@@ -4,6 +4,9 @@ use super::print_run::RunSetup;
 use super::stream_input::{parse_input_line, InputLine};
 use super::*;
 
+mod piped_stdin;
+use piped_stdin::with_piped_stdin;
+
 /// Everything one `forge run` invocation asked for.
 pub(crate) struct RunRequest {
     pub(crate) prompt: String,
@@ -375,41 +378,6 @@ async fn interrupt_signal() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
-}
-
-/// `cat file | forge run "summarize"` (like `claude -p`): piped stdin is appended to the prompt, or
-/// is the prompt when none was given. A terminal stdin is never read.
-fn with_piped_stdin(prompt: String) -> Result<String> {
-    use std::io::{IsTerminal, Read};
-    if std::io::stdin().is_terminal() {
-        return Ok(prompt);
-    }
-    let mut piped = String::new();
-    std::io::stdin()
-        .read_to_string(&mut piped)
-        .context("reading piped stdin")?;
-    Ok(combine_prompt_and_stdin(prompt, &piped))
-}
-
-fn combine_prompt_and_stdin(prompt: String, piped: &str) -> String {
-    let piped = piped.trim_end();
-    match (prompt.trim().is_empty(), piped.is_empty()) {
-        (_, true) => prompt,
-        (true, false) => piped.to_string(),
-        (false, false) => format!("{prompt}\n\n{piped}"),
-    }
-}
-
-#[cfg(test)]
-mod stdin_tests {
-    use super::combine_prompt_and_stdin as combine;
-
-    #[test]
-    fn stdin_becomes_or_extends_the_prompt() {
-        assert_eq!(combine(String::new(), "data\n"), "data");
-        assert_eq!(combine("sum".into(), "data\n"), "sum\n\ndata");
-        assert_eq!(combine("sum".into(), ""), "sum");
-    }
 }
 
 /// A headless one-shot run is unattended: a turn that stopped with tracked tasks still open has

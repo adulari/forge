@@ -17,6 +17,17 @@ impl Store {
     /// The id of the most-recent top-level session (excludes subagent children), or `None` if
     /// there are no sessions yet.
     pub fn most_recent_session_id(&self) -> Result<Option<String>> {
+        self.most_recent_session(None)
+    }
+
+    /// Like [`Store::most_recent_session_id`], but only sessions whose workspace is `workspace`
+    /// (its recorded cwd, or the git worktree it works in) — what `--continue` means in a
+    /// directory, as in `claude -c`. `workspace` is compared as recorded at creation.
+    pub fn most_recent_session_id_in(&self, workspace: &str) -> Result<Option<String>> {
+        self.most_recent_session(Some(workspace))
+    }
+
+    fn most_recent_session(&self, workspace: Option<&str>) -> Result<Option<String>> {
         let conn = self.lock()?;
         // Order by LAST ACTIVITY (newest message), not creation time, so `--continue` reattaches
         // the session the user actually used most recently — not whichever was created last.
@@ -24,11 +35,12 @@ impl Store {
             .query_row(
                 "SELECT s.id FROM session s WHERE s.parent_session_id IS NULL \
                  AND s.archived = 0 \
+                 AND (?1 IS NULL OR s.cwd = ?1 OR s.worktree_path = ?1) \
                  AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id AND m.role = 'user') \
                  ORDER BY COALESCE( \
                    (SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id), \
                    s.created_at) DESC, s.rowid DESC LIMIT 1",
-                [],
+                [workspace],
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
@@ -552,5 +564,61 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(n > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Store;
+    use forge_types::Role;
+
+    fn used_session(store: &Store, cwd: &str) -> String {
+        let id = store.create_session(cwd, "default").unwrap();
+        store.add_message(&id, 0, Role::User, "hi", None).unwrap();
+        id
+    }
+
+    #[test]
+    fn workspace_scoped_lookup_ignores_newer_sessions_of_other_directories() {
+        let store = Store::open_in_memory().unwrap();
+        let here = used_session(&store, "/work/here");
+        let there = used_session(&store, "/work/there");
+        assert_eq!(store.most_recent_session_id().unwrap(), Some(there));
+        assert_eq!(
+            store.most_recent_session_id_in("/work/here").unwrap(),
+            Some(here)
+        );
+        assert_eq!(store.most_recent_session_id_in("/work/none").unwrap(), None);
+    }
+
+    #[test]
+    fn workspace_scoped_lookup_matches_a_session_working_in_a_worktree_of_it() {
+        let store = Store::open_in_memory().unwrap();
+        let id = used_session(&store, "/work/repo");
+        store.set_session_worktree(&id, "/work/repo-wt").unwrap();
+        assert_eq!(
+            store.most_recent_session_id_in("/work/repo-wt").unwrap(),
+            Some(id.clone())
+        );
+        assert_eq!(
+            store.most_recent_session_id_in("/work/repo").unwrap(),
+            Some(id)
+        );
+    }
+
+    #[test]
+    fn workspace_scoped_lookup_skips_archived_blank_and_child_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let used = used_session(&store, "/work/here");
+        let archived = used_session(&store, "/work/here");
+        store.archive_session(&archived).unwrap();
+        let _blank = store.create_session("/work/here", "default").unwrap();
+        let _child = store
+            .create_child_session("/work/here", "default", &used)
+            .unwrap();
+        assert_eq!(
+            store.most_recent_session_id_in("/work/here").unwrap(),
+            Some(used)
+        );
     }
 }

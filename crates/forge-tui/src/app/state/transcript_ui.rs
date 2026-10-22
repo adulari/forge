@@ -47,6 +47,9 @@ pub(crate) struct TranscriptUi {
     pub(crate) reasoning_since: Option<Instant>,
     pub(crate) cooling: Option<Cooling>,
     pub(crate) notice_run: Option<NoticeRun>,
+    /// Notices that arrived while an answer was streaming. They print once the segment ends, so
+    /// a notice never lands in the middle of a line of the answer.
+    pub(crate) deferred_notices: Vec<(NoticeKind, String)>,
     /// The CLI-bridge notice has been shown this session (it prints once).
     pub(crate) bridge_notice_seen: bool,
 }

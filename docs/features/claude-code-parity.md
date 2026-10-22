@@ -138,7 +138,7 @@ ones by `run/print_run.rs`.
 | `--strict-mcp-config` | use only the `--mcp-config` servers (configured servers and Forge's own self-MCP server are dropped) |
 | `--setting-sources user,project,local` | which config layers load; `project` and `local` both mean the project's `.forge/` (config.toml, mcp.toml, settings.json); an empty list loads built-in defaults only |
 | `--fallback-model A,B` | models tried, in order, when the routed model is unavailable, before the mesh's own chain; with `--model` they are the only models the run may fall to |
-| `--continue`, `--resume`, `--model` | as before; a resumed run always stays in this process |
+| `--continue`, `--resume`, `--model` | as before; a resumed run always stays in this process. `--continue` takes the most recent session of the current directory, as `claude -c` does; `--all-dirs` takes the most recent of any |
 | `--permission-mode default\|acceptEdits\|bypassPermissions\|plan\|auto\|dontAsk` | same as `--mode`; conflicts with it. `dontAsk` is `default` that never prompts, even at a terminal: anything not pre-approved is denied (what a run without a terminal always does) |
 | `--dangerously-skip-permissions` | same as `--mode bypass` |
 | `--max-turns N` | caps model steps for the run (`mesh.max_steps` and `max_steps_unattended`) |
@@ -151,6 +151,11 @@ Not supported, and rejected by clap rather than ignored: `--fork-session`, `--js
 `--settings`, `--tools`, `--agents`, `--agent`, `--worktree`, `--bare`.
 `--allowedTools a b c` with several space-separated arguments is not accepted: pass one quoted
 string or repeat the flag.
+
+Piped stdin is appended to the prompt (`cat log | forge run -p "explain"`). A pipe that stays open
+and silent does not hang the run: with a prompt argument the read gives up after 3 s and the run
+goes ahead without it (a warning on stderr); with no prompt argument it waits 30 s for the prompt.
+A terminal stdin is never read, and neither is stdin under `--input-format stream-json`.
 
 ### stream-json output
 

@@ -146,12 +146,17 @@ fn test_built_binary_announces_its_blind_secret_store() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.contains("reading keys from: in-memory test store"),
-        "backend line missing: {stdout}"
+        stderr.contains("reading keys from: in-memory test store"),
+        "backend line missing: {stderr}"
     );
-    assert!(stdout.contains("test-secrets"), "{stdout}");
-    assert!(stdout.contains("cargo build --bin forge"), "{stdout}");
+    assert!(stderr.contains("test-secrets"), "{stderr}");
+    assert!(stderr.contains("cargo build --bin forge"), "{stderr}");
+    assert!(
+        !stdout.contains("reading keys from"),
+        "the backend diagnostic must stay off stdout so `--list` output is scriptable: {stdout}"
+    );
     assert!(
         stdout.contains("no opencode_go keys configured"),
         "the in-memory store must be empty: {stdout}"

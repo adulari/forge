@@ -56,7 +56,8 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
         );
     }
     if list {
-        println!(
+        // Diagnostic, not data: stdout stays just the key list so `--list` is scriptable.
+        eprintln!(
             "reading keys from: {}",
             forge_config::secret_store::backend().describe()
         );
