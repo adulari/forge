@@ -98,13 +98,12 @@ fn the_audit_and_first_pass_ask_for_every_named_kind_in_every_named_place() {
 }
 
 #[test]
-fn a_docs_sync_task_that_mentions_renamed_flags_reaches_the_coverage_audit() {
-    let prompt = "The docs drifted: we renamed flags and changed defaults. Update README.md, \
-docs/usage.md and the --help text: options, defaults, output lines and exit codes. Don't change \
-what the program does.";
+fn a_docs_sync_task_that_mentions_renamed_endpoints_reaches_the_coverage_audit() {
+    let prompt = "We renamed two endpoints and changed the page-size default last quarter. Bring \
+openapi.yaml, docs/api.md and the client's usage text up to date: endpoints, parameters, defaults, \
+status codes and error bodies. Keep the server's behaviour as it is.";
     assert!(direct_completeness_is_identifier_migration(prompt));
-    assert!(DIRECT_COMPLETENESS_PROMPT.contains("output lines"));
-    assert!(DIRECT_COMPLETENESS_PROMPT.contains("exit codes"));
+    assert!(DIRECT_COMPLETENESS_PROMPT.contains("every named kind belongs in every named place"));
 }
 
 #[test]
