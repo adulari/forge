@@ -128,25 +128,28 @@ impl Session {
         }
     }
 
-    /// The instruction file whose body the session carries: the first non-empty candidate, the
-    /// same choice the loader made.
+    /// The instruction files the session carries, each with Claude Code's `memory_type`.
     fn loaded_instruction_files(&self) -> Vec<(PathBuf, &'static str)> {
-        if self.cached_agents_md.is_none() || !self.has_hooks_for(HookEvent::InstructionsLoaded) {
+        use crate::instructions::Origin;
+        if !self.has_hooks_for(HookEvent::InstructionsLoaded) {
             return Vec::new();
         }
         let root = self.workspace.root();
-        crate::agents_md_candidates(root)
-            .into_iter()
-            .find(|path| std::fs::metadata(path).is_ok_and(|m| m.len() > 0))
-            .map(|path| {
-                let scope = if path.starts_with(root) {
-                    "Project"
-                } else {
-                    "User"
+        self.instructions
+            .files
+            .iter()
+            .filter(|file| !file.body.trim().is_empty())
+            .map(|file| {
+                let scope = match file.origin {
+                    Origin::User => "User",
+                    Origin::Local => "Local",
+                    Origin::Project => "Project",
+                    Origin::Rule if file.path.starts_with(root) => "Project",
+                    Origin::Rule => "User",
                 };
-                vec![(path, scope)]
+                (file.path.clone(), scope)
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Fire `SessionStart` and put what the hooks returned in front of the model.
