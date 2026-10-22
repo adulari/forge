@@ -238,9 +238,92 @@ const UNIVERSAL_OBJECTS: [&str; 12] = [
     "it",
 ];
 
+/// Verbs a prohibition lists after its first one: "do not edit, delete, or rename the existing tests".
+const COORDINATED_VERBS: [&str; 11] = [
+    "delete",
+    "remove",
+    "rename",
+    "modify",
+    "change",
+    "touch",
+    "overwrite",
+    "rewrite",
+    "refactor",
+    "move",
+    "alter",
+];
+
+/// Words that turn a universal object into a part of the tree: "files under tests/", "code outside
+/// src/", "any file except ANSWER.md".
+const NARROWING_WORDS: [&str; 17] = [
+    "in",
+    "inside",
+    "under",
+    "within",
+    "of",
+    "at",
+    "from",
+    "outside",
+    "except",
+    "other",
+    "besides",
+    "apart",
+    "beyond",
+    "named",
+    "called",
+    "matching",
+    "belonging",
+];
+
+/// The clause after "do not edit" with any coordinated verbs ("..., delete, or rename") removed, so
+/// the comma after the first verb no longer reads as the end of the clause. Text without such a
+/// verb list is returned as it came.
+fn after_coordinated_verbs(rest: &str) -> &str {
+    let mut cursor = rest;
+    let mut skipped_any = false;
+    loop {
+        let next = cursor.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+        let next = ["or ", "and ", "nor "]
+            .iter()
+            .find_map(|conjunction| next.strip_prefix(conjunction))
+            .unwrap_or(next);
+        let after_verb = COORDINATED_VERBS.iter().find_map(|verb| {
+            next.strip_prefix(verb)
+                .filter(|tail| !tail.starts_with(|c: char| c.is_alphanumeric()))
+        });
+        match after_verb {
+            Some(tail) => {
+                cursor = tail;
+                skipped_any = true;
+            }
+            None => return if skipped_any { cursor } else { rest },
+        }
+    }
+}
+
+/// Whether the words after a universal object narrow it: "files" + " under tests/". "In any way"
+/// and "in place" restate the prohibition instead.
+fn narrows_object(tail: &str) -> bool {
+    let tail = tail.strip_prefix('s').unwrap_or(tail);
+    let mut words = tail
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()));
+    match (words.next(), words.next(), words.next()) {
+        (Some("in"), Some("place"), _) => false,
+        (
+            Some("in"),
+            Some("any" | "every"),
+            Some("way" | "manner" | "form" | "fashion" | "case"),
+        ) => false,
+        (Some(word), _, _) => NARROWING_WORDS.contains(&word),
+        _ => false,
+    }
+}
+
 /// Whether the clause after a scopable directive leaves it universal: nothing follows before the
-/// clause ends, or what follows is one of [`UNIVERSAL_OBJECTS`].
+/// clause ends, or what follows is one of [`UNIVERSAL_OBJECTS`] that nothing narrows.
 fn directive_stays_universal(rest: &str) -> bool {
+    let rest = after_coordinated_verbs(rest);
     let clause_end = rest
         .find(['.', '!', '?', ';', ',', '\n', '\u{2014}', '(', ':'])
         .unwrap_or(rest.len());
@@ -255,10 +338,11 @@ fn directive_stays_universal(rest: &str) -> bool {
     UNIVERSAL_OBJECTS.iter().any(|universal| {
         let universal = universal.strip_prefix("the ").unwrap_or(universal);
         object == universal
-            || object
-                .strip_prefix(universal)
-                .is_some_and(|tail| tail.starts_with(' ') || tail.starts_with('s'))
-                && !object.starts_with("its ")
+            || object.strip_prefix(universal).is_some_and(|tail| {
+                (tail.starts_with(' ') || tail.starts_with('s'))
+                    && !object.starts_with("its ")
+                    && !narrows_object(tail)
+            })
     })
 }
 
@@ -493,10 +577,44 @@ mod tests {
         }
     }
 
+    /// The c08 bench instruction (dulwich ignore bug) is a change request with one protected tree.
+    /// Narrowed objects ("files under tests/") and verb lists ("edit, delete, or rename the
+    /// existing tests") used to read as a universal prohibition and denied every write.
+    #[test]
+    fn a_prohibition_narrowed_to_part_of_the_tree_is_not_read_only() {
+        for prompt in [
+            "Find the cause in the library source and fix it there. Keep the change minimal and do \
+             not edit existing files under `dulwich/tests`. A regression test of your own is welcome.",
+            "Fix the bug. Do not edit, delete, or rename the existing tests.",
+            "Fix the bug and don't edit, delete or rename existing test files.",
+            "Fix it. Do not edit files under tests/.",
+            "Fix it. Do not edit files in the tests directory.",
+            "Fix it. Do not edit any file under dulwich/tests.",
+            "Fix it. Do not edit the code in vendor/.",
+            "Fix it. Don't edit code outside src/parser.",
+            "Fix it. Don't edit files other than ANSWER.md.",
+            "Fix it. Don't edit the files in examples/ or the pyproject.",
+            "Fix it. Do not edit, delete, or rename files under tests/.",
+            "Fix it. Do not edit, rename, or delete any file except src/a.rs.",
+        ] {
+            assert!(!explicitly_read_only(prompt), "wrongly read-only: {prompt}");
+            let contract = TurnContract::derive(prompt, PermissionMode::Default, false);
+            assert_ne!(contract.intent(), TaskIntent::ReadOnlyReview, "{prompt}");
+        }
+    }
+
     #[test]
     fn a_universal_dont_edit_is_still_read_only() {
         for prompt in [
             "Explain the parser. Don't edit.",
+            "Explain it. Do not edit, delete, or rename anything.",
+            "Explain it. Do not edit, delete or rename files.",
+            "Explain it. Don't edit, rewrite or refactor - just explain.",
+            "Explain it. Don't edit, just explain.",
+            "Explain it. Don't edit files yet.",
+            "Explain it. Don't edit code yet.",
+            "Explain it. Don't edit it in any way.",
+            "Explain it. Do not edit files in place.",
             "Don't edit the code, just explain the flow.",
             "Review this and do not edit any files.",
             "Look, but do not make changes.",
