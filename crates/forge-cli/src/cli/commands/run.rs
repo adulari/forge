@@ -173,6 +173,8 @@ mod copy;
 pub(crate) use copy::*;
 mod pickers;
 pub(crate) use pickers::*;
+mod rewind_menu;
+pub(crate) use rewind_menu::*;
 mod dispatch;
 mod heartbeat_cmd;
 mod mesh_overlay;
@@ -283,7 +285,7 @@ pub(crate) fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
 /// Abort a turn and release any UI prompts that would otherwise hold its task mutex.
 pub(crate) fn abort_turn_before_quit(
     turn_handle: &mut Option<tokio::task::JoinHandle<()>>,
-    pending: &mut Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmOutcome>)>,
+    pending: &mut Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmReply>)>,
     pending_question: &mut Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>>,
     app: &mut forge_tui::App,
 ) {
@@ -547,7 +549,7 @@ pub(crate) async fn run_chat_tui(
                         match msg {
                             UiMsg::Event(e) => app.apply(e),
                             UiMsg::Permission { reply, .. } => {
-                                let _ = reply.send(ConfirmOutcome::Deny);
+                                let _ = reply.send(ConfirmOutcome::Deny.into());
                             }
                             UiMsg::Question { reply, .. } => {
                                 let _ = reply.send(Vec::new());
@@ -785,7 +787,7 @@ pub(crate) async fn run_chat_tui(
     let mut loop_state: Option<LoopState> = None;
     // `/goal` state: mirrors `loop_state`, driven off the tracked task plan instead of a sentinel.
     let mut goal_state: Option<GoalState> = None;
-    let mut pending: Option<(String, std::sync::mpsc::Sender<ConfirmOutcome>)> = None;
+    let mut pending: Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmReply>)> = None;
     let mut pending_question: Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>> = None;
     // `/duel`: the background task writes its finished report + still-alive worktree guards here
     // (it can't return a value through `turn_handle`, a `JoinHandle<()>`); the done-signal drain
@@ -2543,7 +2545,7 @@ pub(crate) async fn run_chat_tui(
             // The session/checkpoint picker is modal too: arrows navigate, typing filters, Enter
             // acts on the selection (resume / rewind), Esc cancels.
             if app.picker.open {
-                match key {
+                match app.picker.digit_shortcut(key) {
                     KeyKind::Esc => {
                         // In the models browser, Esc from a drilled-in provider steps back to the
                         // provider list rather than closing the whole picker.
@@ -2555,6 +2557,9 @@ pub(crate) async fn run_chat_tui(
                             // Step two is a drill-in: Esc goes back to the model list, matching
                             // how Esc behaves inside the models browser.
                             open_model_pin_picker(&session, &mut app, "").await?;
+                        } else if app.picker.kind == Some(forge_tui::PickerKind::RewindAction) {
+                            open_checkpoint_picker(&session, &mut app, "rewind to a message")
+                                .await?;
                         } else {
                             app.models_drilled = None;
                             app.models_pin_mode = false;
@@ -2772,9 +2777,20 @@ pub(crate) async fn run_chat_tui(
                                     last_event_id: start_event_id,
                                     last_poll: std::time::Instant::now(),
                                 });
-                            } else {
+                            } else if let Some(request) =
                                 picker_accept(kind, &row, &session, Some(&mut tui), &mut app)
-                                    .await?;
+                                    .await?
+                            {
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_summarize_from(
+                                    request,
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
                             }
                         }
                     }
@@ -2942,7 +2958,7 @@ pub(crate) async fn run_chat_tui(
                                         match msg {
                                             UiMsg::Event(e) => app.apply(e),
                                             UiMsg::Permission { reply, .. } => {
-                                                let _ = reply.send(ConfirmOutcome::Deny);
+                                                let _ = reply.send(ConfirmOutcome::Deny.into());
                                             }
                                             UiMsg::Question { reply, .. } => {
                                                 let _ = reply.send(Vec::new());
@@ -2987,7 +3003,8 @@ pub(crate) async fn run_chat_tui(
             // Esc / Ctrl-C: while a turn is running it INTERRUPTS the AI (stops the response,
             // keeps Forge alive); while idle it quits. Checked before any prompt handling so the
             // user can never get wedged — interrupting also clears a pending permission/question.
-            if matches!(key, KeyKind::Esc) {
+            // Esc inside a permission note closes the note; the prompt answers it below.
+            if matches!(key, KeyKind::Esc) && app.permission_note().is_none() {
                 if busy {
                     if let Some(h) = turn_handle.take() {
                         h.abort(); // cancel the turn task; its DoneGuard drop releases the lock
@@ -3043,26 +3060,19 @@ pub(crate) async fn run_chat_tui(
             }
             if let Some((tool, reply)) = pending.take() {
                 // Answering a permission prompt.
-                let outcome = match app.permission_key(key) {
-                    Some(outcome) => outcome,
+                let answer = match app.permission_key(key) {
+                    Some(answer) => answer,
                     None => {
                         pending = Some((tool, reply));
                         dirty = true;
                         continue;
                     }
                 };
-                let _ = reply.send(outcome);
+                // MCP tools get an in-memory rule only; the session core persists the rest.
+                let mcp = tool == forge_mcp::MCP_CALL || tool.contains("__");
+                app.note_permission_answer(&tool, &answer, mcp);
+                let _ = reply.send(answer);
                 app.prompt = None;
-                if outcome == ConfirmOutcome::AlwaysAllow {
-                    // The session core persists the rule, scoped to the command it approved.
-                    // MCP tools get an in-memory rule only; the session core persists the rest.
-                    let scope = if tool == forge_mcp::MCP_CALL || tool.contains("__") {
-                        "for this session"
-                    } else {
-                        "saved to .forge/config.toml"
-                    };
-                    app.note(&format!("✓ {tool} always allowed — {scope}"));
-                }
             } else if app.awaiting_question() {
                 // Answering an `ask_user` form (the turn task is blocked in `ask_form()`): the
                 // form owns the keyboard; Submit/Cancel reply on the channel.
@@ -4193,7 +4203,7 @@ pub(crate) async fn run_chat_tui(
                             } else {
                                 ConfirmOutcome::Deny
                             };
-                            let _ = reply.send(outcome);
+                            let _ = reply.send(outcome.into());
                             app.prompt = None;
                             if yes {
                                 app.note(&format!("✓ remote allowed {tool}"));

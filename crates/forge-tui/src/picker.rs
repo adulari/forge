@@ -35,6 +35,11 @@ pub enum PickerKind {
     /// `id` is the candidate's worktree branch. Enter merges the winner back and discards the
     /// rest; Esc discards every candidate (no merge, no routing-learning record).
     Duel,
+    /// Step two of a rewind: what to do with the chosen message (restore code and conversation,
+    /// the conversation only, the code only, summarize from here, never mind). Each row's `id` is
+    /// `action@seq`. The list is short, so typing never filters it: the text is the optional focus
+    /// for a summary, and a digit on an empty query picks that row.
+    RewindAction,
 }
 
 /// One row in an interactive picker: an opaque `id` the loop acts on, plus two display strings.
@@ -69,6 +74,9 @@ pub struct Picker {
     pub anim: f32,
     /// A one-line title shown above the list (e.g. "resume a session").
     pub heading: String,
+    /// The query when the picker last closed. The loop closes a picker before acting on the row,
+    /// so this is how an action reads what was typed (a summary's focus).
+    pub last_query: String,
 }
 
 impl Picker {
@@ -90,7 +98,7 @@ impl Picker {
         self.rows.clear();
         self.haystacks.clear();
         self.base_len = 0;
-        self.query.clear();
+        self.last_query = std::mem::take(&mut self.query);
         self.heading.clear();
         self.selected = 0;
         self.anim = 0.0;
@@ -98,7 +106,7 @@ impl Picker {
 
     /// Rows matching the current query (case-insensitive substring over id/title/subtitle).
     pub fn matches(&self) -> Vec<&PickerRow> {
-        if self.query.is_empty() {
+        if self.query.is_empty() || self.kind == Some(PickerKind::RewindAction) {
             return self.rows.iter().collect();
         }
         let q = self.query.to_lowercase();
@@ -182,9 +190,88 @@ impl Picker {
         self.matches().into_iter().nth(self.selected)
     }
 
+    /// On the rewind action list, a digit typed on an empty query selects that row and becomes
+    /// Enter; every other key comes back unchanged.
+    pub fn digit_shortcut(&mut self, key: crate::KeyKind) -> crate::KeyKind {
+        let crate::KeyKind::Char(c) = key else {
+            return key;
+        };
+        if self.kind != Some(PickerKind::RewindAction) || !self.query.is_empty() {
+            return key;
+        }
+        match c.to_digit(10).map(|d| d as usize) {
+            Some(n) if n >= 1 && n <= self.rows.len() => {
+                self.selected = n - 1;
+                crate::KeyKind::Enter
+            }
+            _ => key,
+        }
+    }
+
     pub fn tick_anim(&mut self) {
         if self.open && self.anim < 1.0 {
             self.anim = (self.anim + 0.34).min(1.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::KeyKind;
+
+    fn rows(ids: &[&str]) -> Vec<PickerRow> {
+        ids.iter()
+            .map(|id| PickerRow {
+                id: id.to_string(),
+                title: format!("title {id}"),
+                subtitle: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn typing_on_the_rewind_actions_never_filters_and_survives_close() {
+        let mut p = Picker::default();
+        p.open_with(
+            PickerKind::RewindAction,
+            "restore",
+            rows(&["all@1", "chat@1"]),
+        );
+        p.query = "keep the stack traces".into();
+        assert_eq!(
+            p.matches().len(),
+            2,
+            "the text is a summary focus, not a filter"
+        );
+        p.close();
+        assert_eq!(p.last_query, "keep the stack traces");
+        assert!(p.query.is_empty());
+    }
+
+    #[test]
+    fn a_digit_on_an_empty_query_picks_that_rewind_action() {
+        let mut p = Picker::default();
+        p.open_with(
+            PickerKind::RewindAction,
+            "restore",
+            rows(&["all@1", "chat@1", "back@1"]),
+        );
+        assert_eq!(p.digit_shortcut(KeyKind::Char('2')), KeyKind::Enter);
+        assert_eq!(p.selected_row().unwrap().id, "chat@1");
+        assert_eq!(p.digit_shortcut(KeyKind::Char('9')), KeyKind::Char('9'));
+        p.query = "x".into();
+        assert_eq!(
+            p.digit_shortcut(KeyKind::Char('1')),
+            KeyKind::Char('1'),
+            "once text is typed, digits are text"
+        );
+        let mut sessions = Picker::default();
+        sessions.open_with(PickerKind::Sessions, "resume", rows(&["a", "b"]));
+        assert_eq!(
+            sessions.digit_shortcut(KeyKind::Char('1')),
+            KeyKind::Char('1'),
+            "other pickers filter on digits as before"
+        );
     }
 }

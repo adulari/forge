@@ -450,8 +450,19 @@ impl DriverState {
         } else if kind == forge_tui::PickerKind::Sessions && row.id.starts_with("observe:") {
             self.app
                 .note("⚠ observing a live MCP session isn't available from the daemon page");
-        } else {
-            picker_accept(kind, &row, &self.session, None, &mut self.app).await?;
+        } else if let Some(request) =
+            picker_accept(kind, &row, &self.session, None, &mut self.app).await?
+        {
+            self.turn_gen += 1;
+            self.turn_handle = Some(spawn_summarize_from(
+                request,
+                &self.session,
+                &self.done_tx,
+                self.turn_gen,
+                &mut self.app,
+                &mut self.busy,
+                &mut self.busy_since,
+            ));
         }
         Ok(())
     }

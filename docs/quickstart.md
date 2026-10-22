@@ -124,7 +124,7 @@ This opens Forge's interactive TUI. You'll see the FORGE logo, your connected pr
 - `↑ / ↓` — scroll through the transcript
 - `/model` — switch models mid-session
 - `/` — open the command palette (all slash commands)
-- `y / n / a` — allow / deny / always-allow a permission prompt
+- `y / n / a / s` — allow / deny / always-allow / allow for this session a permission prompt (`Tab` adds a note the model reads)
 
 **Prefer a simpler view?** Use inline mode — output flows in your terminal's native scrollback:
 ```bash
@@ -207,8 +207,9 @@ Forge handles this automatically (waits out the reset and retries the best model
 
 **Permission prompts blocking everything**
 In chat, answer `a` (always) to allow that tool immediately and persist a project allow rule in
-`.forge/config.toml` for future turns and sessions, or run with `--mode accept-edits` to
-auto-approve file writes while continuing to ask before shell commands.
+`.forge/config.toml` for future turns and sessions (`s` allows it for this session only and saves
+nothing), or run with `--mode accept-edits` to auto-approve file writes while continuing to ask
+before shell commands.
 
 ---
 

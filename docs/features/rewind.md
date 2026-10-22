@@ -1,8 +1,10 @@
 # Feature: `/rewind` — one command that rewinds chat, context and files together
 
 > `/rewind` (alias `/undo`, or press **Esc twice** while idle) opens the message picker; choosing a
-> message rewinds the conversation to just before it, restores the files those turns wrote, and
-> puts the message back in the input box. Touches `forge-core` (`session_history.rs`), the CLI
+> message opens an action menu: restore code and chat (rewind the conversation to just before it,
+> put back the files those turns wrote, and put the message back in the input box), chat only,
+> code only, or summarize from there. Touches `forge-core` (`session_history.rs`,
+> `session_rewind.rs`), the CLI
 > bridge (`forge-provider/src/cli_provider/resume.rs`), and the TUI key handling.
 
 ## What "context" means here, and what used to leak
@@ -61,6 +63,35 @@ rewind the cursor is placed at the end of the restored prompt. The app's picker 
 (`RemoteSnapshot.overlay`) carries a 200-row window around the selection (`body` says "showing
 A-B of N"; `selected` indexes the window) rather than every row in every snapshot frame.
 
+## The action menu
+
+Choosing a message opens a second step (`PickerKind::RewindAction`,
+`crates/forge-cli/src/cli/commands/run/rewind_menu.rs`) that asks what to do with it. Pick a row
+with the arrows and Enter, or press its digit while the focus field is empty:
+
+| # | Row | What it does |
+|---|---|---|
+| 1 | Code and chat | The old single action: rewind the conversation to before the message and put back the files its turns wrote. Still first, so Enter Enter does what Enter did. |
+| 2 | Chat only | Rewind the conversation; the files stay as they are. |
+| 3 | Code only | Put the files back and keep the conversation. The model gets a note naming the files that went back (and the message they were put back to), so it reads them again instead of editing from memory. |
+| 4 | Summarize | Fold the message and everything after it into one summary and leave the files alone. The folded rows stay in the store, inactive. |
+| 5 | Never mind | Back to the message list (Esc does the same). |
+
+Rows 1 and 3 only appear when a turn from that message on left file snapshots to restore
+(`Session::has_file_changes_from`); without any, the menu is Chat only, Summarize, Never mind.
+Typing in the menu does not filter it: the text is an optional **focus** for the summary, like
+`/compact <focus>` (`keep the stack traces`).
+
+All of it goes through `Session::rewind_scoped(seq, RewindScope::{All, Conversation, Code})` and
+`Session::summarize_from(seq, focus)` (`crates/forge-core/src/session_rewind.rs`). `rewind_to`,
+which `/undo` calls, is `rewind_scoped(seq, All)`. A summary reuses the compaction pipeline
+(`Session::fold_summary`, the same budget, size directive and verbatim block `/compact` uses) over
+`Store::load_active_messages_from(seq)`, then deactivates those rows, reloads the transcript from
+the store and appends the summary as a note headed `[The conversation from this point on was
+summarized to save context]`. It runs as a background task with the spinner, and the message goes
+back into the input box. A target inside history an earlier compaction folded away reactivates it
+first, as for any rewind.
+
 ## Keys
 
 - **Esc Esc** (idle): open the rewind picker. A single Esc arms it and the statusline says
@@ -70,6 +101,11 @@ A-B of N"; `selected` indexes the window) rather than every row in every snapsho
 
 ## Tests
 
+`forge-core/src/tests/rewind_menu.rs`: chat only keeps the files, code only keeps the chat and
+tells the model, a code restore with nothing to put back adds no note, summarize folds the tail
+and keeps the head, summarize past the end does nothing. `forge-cli` (`run/rewind_menu.rs`): the
+rows round-trip their action and seq, and the code rows are hidden without snapshots.
+`forge-tui` (`picker.rs`): typing does not filter the menu and survives close, a digit picks a row.
 `forge-core/src/tests/steer_rewind.rs`: epoch/turn-seq/latch re-derivation, compaction-aware
 rewind. `forge-core/src/tests/rewind_seq_space.rs`: checkpoints sit on their user rows with side-call
 anchors in the way, rewind/undo deactivate exactly the right rows, rewind across a compaction

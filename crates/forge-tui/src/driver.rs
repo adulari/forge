@@ -93,7 +93,7 @@ pub enum UiMsg {
     Permission {
         tool: String,
         side_effect: SideEffect,
-        reply: Sender<crate::ConfirmOutcome>,
+        reply: Sender<crate::ConfirmReply>,
     },
     /// An interactive `ask_user` form: the loop shows the questions and replies with one
     /// [`forge_types::Answer`] per question (empty when dismissed).
@@ -141,6 +141,10 @@ impl Presenter for ChannelPresenter {
     }
 
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> crate::ConfirmOutcome {
+        self.confirm_reply(tool, side_effect).outcome
+    }
+
+    fn confirm_reply(&mut self, tool: &str, side_effect: SideEffect) -> crate::ConfirmReply {
         let (reply, answer) = std::sync::mpsc::channel();
         if self
             .tx
@@ -151,9 +155,9 @@ impl Presenter for ChannelPresenter {
             })
             .is_err()
         {
-            return crate::ConfirmOutcome::Deny;
+            return crate::ConfirmOutcome::Deny.into();
         }
-        recv_blocking(&answer).unwrap_or(crate::ConfirmOutcome::Deny)
+        recv_blocking(&answer).unwrap_or_else(|_| crate::ConfirmOutcome::Deny.into())
     }
 
     fn ask(&mut self, question: &str, options: &[crate::QChoice], allow_other: bool) -> String {

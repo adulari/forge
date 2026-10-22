@@ -332,14 +332,56 @@ pub enum PresenterEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmOutcome {
     Allow,
+    /// Allow this call and every later one it would match, until the session ends. Kept in
+    /// memory only; nothing is written to a config file.
+    AllowSession,
     AlwaysAllow,
     Deny,
+}
+
+impl ConfirmOutcome {
+    pub fn allows(self) -> bool {
+        self != ConfirmOutcome::Deny
+    }
+}
+
+/// A confirmation plus the note the user typed with it. The note reaches the model with the
+/// tool result: as the reason on a deny, after the output on an allow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmReply {
+    pub outcome: ConfirmOutcome,
+    pub note: Option<String>,
+}
+
+impl ConfirmReply {
+    /// `outcome` with `note`, where a blank note counts as none.
+    pub fn with_note(outcome: ConfirmOutcome, note: &str) -> Self {
+        let note = note.trim();
+        Self {
+            outcome,
+            note: (!note.is_empty()).then(|| note.to_string()),
+        }
+    }
+}
+
+impl From<ConfirmOutcome> for ConfirmReply {
+    fn from(outcome: ConfirmOutcome) -> Self {
+        Self {
+            outcome,
+            note: None,
+        }
+    }
 }
 
 /// Rendering and interaction interface implemented by every Forge surface adapter.
 pub trait Presenter: Send {
     fn emit(&mut self, event: PresenterEvent);
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmOutcome;
+    /// [`Presenter::confirm`] with the note the user typed alongside the answer. Surfaces with no
+    /// way to type one keep this default.
+    fn confirm_reply(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmReply {
+        self.confirm(tool, side_effect).into()
+    }
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String;
     /// Ask several questions as one form (multi-select, free text, notes). Surfaces without a
     /// form UI fall back to asking each question through [`Presenter::ask`], one at a time.

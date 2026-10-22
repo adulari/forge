@@ -26,7 +26,7 @@ pub use job_notice::{parse_job_notices, JobExitNotice, JobNotice};
 pub use permission_mode::PermissionMode;
 
 pub use interaction::{
-    Answer, ConfirmOutcome, Presenter, PresenterEvent, QChoice, Question, ReplayItem,
+    Answer, ConfirmOutcome, ConfirmReply, Presenter, PresenterEvent, QChoice, Question, ReplayItem,
     ToolOutputRef, FULL_OUTPUT_HINT, NO_ANSWER,
 };
 pub use subscription_pacing::{

@@ -10,55 +10,14 @@ impl Session {
     /// transcript. Returns the file-restore result plus the prompt that started the rewound-to turn
     /// (so the UI can put it back in the input box). Powers `/undo` and `/checkpoints`.
     /// `db_seq` is a DB **seq** (the stable identity checkpoints are keyed by), NOT a transcript
-    /// index — both `/undo` and the `/checkpoints` picker pass a seq. After a COMPACTED resume the
-    /// in-memory transcript is just the active tail while the DB seqs start high, so the two diverge;
-    /// `offset` (0 when not compacted) maps the seq back to the transcript index for truncation.
+    /// index. The rewind menu's narrower actions are [`Self::rewind_scoped`].
     pub fn rewind_to(&mut self, db_seq: i64) -> Result<RewindOutcome, CoreError> {
-        let db_seq = db_seq.max(0);
-        // A compacted session's in-memory transcript is `[summary, recent tail]`. A target that
-        // lies inside the folded-away history has to reactivate it first: truncating the tail
-        // alone would leave the model with nothing while the store kept the originals soft-deleted
-        // as "compacted", so the rewound-to conversation would never come back.
-        if self.was_compacted() {
-            let first_active = self.store.min_active_seq(&self.id)?.unwrap_or(0);
-            if db_seq <= first_active {
-                self.store.uncompact_session_store(&self.id)?;
-            }
-        }
-        // The message AT the boundary is the user prompt of the rewound-to turn; read it before
-        // deactivation so the UI can re-offer it for editing/resubmitting.
-        let rewound_prompt = self.store.user_prompt_at(&self.id, db_seq)?;
-        let mut restore = snapshot::RestoreReport::default();
-        // Turns are keyed by their user-message seq. Restore every snapshotted turn at/after the
-        // boundary, newest first so an earlier turn's blob (pre-turn bytes) wins the final state.
-        for seq in snapshot::turn_seqs_from(&self.checkpoint_root, &self.id, db_seq) {
-            match snapshot::restore_turn(&self.checkpoint_root, &self.id, seq) {
-                Ok(r) => {
-                    restore.restored.extend(r.restored);
-                    restore.warnings.extend(r.warnings);
-                    restore.failed.extend(r.failed);
-                }
-                // Surface the failure instead of silently discarding it — a caller that only
-                // checks `restore.restored`/`is_empty()` must still learn this turn's files may
-                // not have been reverted.
-                Err(e) => restore.failed.push(format!("turn {seq}: {e}")),
-            }
-        }
-        self.store.deactivate_messages_from(&self.id, db_seq)?;
-        // The model-facing transcript carries no DB seqs, and the DB seq space runs ahead of it
-        // (usage anchor rows, UI notes, compaction), so truncating by index could not be right.
-        // Rebuild it from the store instead: exactly what a fresh resume of this session sees.
-        self.reload_transcript_from_store()?;
-        self.after_history_rewrite();
-        Ok(RewindOutcome {
-            restore,
-            rewound_prompt,
-        })
+        self.rewind_scoped(db_seq, crate::RewindScope::All)
     }
 
     /// Replace the in-memory transcript with the session's active rows and move `seq` past every
     /// row ever written (rewound rows stay in the table, so their seqs must not be reused).
-    fn reload_transcript_from_store(&mut self) -> Result<(), CoreError> {
+    pub(crate) fn reload_transcript_from_store(&mut self) -> Result<(), CoreError> {
         let stored = self.store.load_messages(&self.id)?;
         self.seq = self.store.next_seq_for_session(&self.id)?;
         self.transcript = stored
@@ -84,7 +43,7 @@ impl Session {
     /// server-side copy of them, the "already injected" latches kept AGENTS.md / white-hot guidance
     /// out even though the messages carrying them were gone, queued hints and images from the
     /// removed turn were delivered into the next one, and `/undo` chained from a stale turn seq.
-    fn after_history_rewrite(&mut self) {
+    pub(crate) fn after_history_rewrite(&mut self) {
         self.history_epoch += 1;
         self.cache.note_history_rewrite();
         self.pending_hints.clear();

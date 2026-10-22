@@ -333,7 +333,7 @@ struct DriverState {
     turn_handle: Option<tokio::task::JoinHandle<()>>,
     loop_state: Option<LoopState>,
     goal_state: Option<GoalState>,
-    pending: Option<(String, std::sync::mpsc::Sender<ConfirmOutcome>)>,
+    pending: Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmReply>)>,
     pending_question: Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>>,
     pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
     duel_state: PendingDuel,

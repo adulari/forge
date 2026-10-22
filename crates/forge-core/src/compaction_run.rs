@@ -179,44 +179,12 @@ impl Session {
         // had its older results cut to a head by the prune pass.
         let source = self.store.compaction_source(&self.id).unwrap_or_default();
         let folded = fold_inputs(&self.transcript[..split], &source.tool_results);
-        let directive = match (directive, budget.summary_is_scaled()) {
-            (Some(focus), true) => Some(format!(
-                "{focus}\n\n{}",
-                size_directive(budget.summary_tokens)
-            )),
-            (None, true) => Some(size_directive(budget.summary_tokens)),
-            (directive, false) => directive,
-        };
-        let written = self
-            .write_summary(&folded, directive.as_deref(), &budget)
-            .await;
-        let (model, body) = match written {
+        let (model, summary) = match self.fold_summary(&folded, directive, &budget).await {
             Ok(written) => written,
             Err(error) => {
                 self.abandon_compaction(before);
                 return Err(error);
             }
-        };
-        let body = if tokens::count_message(&body) > budget.summary_hard_cap() {
-            tracing::debug!(
-                tokens = tokens::count_message(&body),
-                cap = budget.summary_hard_cap(),
-                "summary over its budget, cutting its middle"
-            );
-            head_tail(&body, budget.summary_tokens * 4)
-        } else {
-            body
-        };
-        let block = render_verbatim_block_within(
-            &folded.previous_verbatim,
-            &folded.user_messages,
-            budget.verbatim_tokens,
-            budget.verbatim_older_chars(),
-        );
-        let summary = if block.is_empty() {
-            body.trim().to_string()
-        } else {
-            format!("{}\n\n{block}", body.trim())
         };
 
         let mut compacted = Vec::with_capacity(COMPACT_KEEP_RECENT + 1);
@@ -261,6 +229,50 @@ impl Session {
         self.rehydrate_after_compaction(&budget).await;
         self.settle_after_compaction(&budget);
         Ok((before, after))
+    }
+
+    /// The summary text for `folded`: the model's part, held to `budget`, then the user's own
+    /// words verbatim. Returns the model that wrote it and the text. `directive` is the user's
+    /// focus, if any; the size directive is added when the budget scales the summary down.
+    pub(crate) async fn fold_summary(
+        &mut self,
+        folded: &FoldedInput,
+        directive: Option<String>,
+        budget: &CompactionBudget,
+    ) -> Result<(String, String), CoreError> {
+        let directive = match (directive, budget.summary_is_scaled()) {
+            (Some(focus), true) => Some(format!(
+                "{focus}\n\n{}",
+                size_directive(budget.summary_tokens)
+            )),
+            (None, true) => Some(size_directive(budget.summary_tokens)),
+            (directive, false) => directive,
+        };
+        let (model, body) = self
+            .write_summary(folded, directive.as_deref(), budget)
+            .await?;
+        let body = if tokens::count_message(&body) > budget.summary_hard_cap() {
+            tracing::debug!(
+                tokens = tokens::count_message(&body),
+                cap = budget.summary_hard_cap(),
+                "summary over its budget, cutting its middle"
+            );
+            head_tail(&body, budget.summary_tokens * 4)
+        } else {
+            body
+        };
+        let block = render_verbatim_block_within(
+            &folded.previous_verbatim,
+            &folded.user_messages,
+            budget.verbatim_tokens,
+            budget.verbatim_older_chars(),
+        );
+        let summary = if block.is_empty() {
+            body.trim().to_string()
+        } else {
+            format!("{}\n\n{block}", body.trim())
+        };
+        Ok((model, summary))
     }
 
     /// Put back what the summary cannot carry: the task list as it stands now, the memories most

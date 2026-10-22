@@ -496,7 +496,8 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   temper and allow rules stay inert until you run `forge trust` (restrictive settings still apply)
 - Answering `a` (always) at a prompt allows that tool immediately and writes a project allow rule
   to `.forge/config.toml` (or, in an untrusted project, to your own config directory), so future
-  turns and sessions reuse the choice
+  turns and sessions reuse the choice; `s` allows it for this session only (nothing is saved), and
+  `Tab` adds a note that reaches the model with the tool result (the reason on a deny)
 - Diff preview before every write; shadow file snapshots; `/undo` with file restore
 - Per-turn checkpoints; full audit trail of tool calls, routing, and permission outcomes
 - Workspace isolation binds every session, provider bridge, tool, checkpoint, and post-check to the
@@ -729,7 +730,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 | `/execute` | Approve the proposed plan and carry it out (aliases `/approve`, `/go`) |
 | `/init` | Scan the repo and write `.forge/AGENTS.md` project memory |
 | `/new` · `/resume [id]` · `/sessions` | Start fresh · resume · browse past sessions |
-| `/rewind` (alias `/undo`, or Esc Esc) · `/checkpoint [label]` · `/checkpoints` | Rewind chat + context + files to a message · save · rewind to a checkpoint ([docs](docs/features/rewind.md)) |
+| `/rewind` (alias `/undo`, or Esc Esc) · `/checkpoint [label]` · `/checkpoints` | Rewind to a message, then restore code and chat, chat only, code only, or summarize from there · save · rewind to a checkpoint ([docs](docs/features/rewind.md)) |
 | `/compact` · `/uncompact` | Summarize older context to free the window (also auto-triggers at 80% gauge) · undo it — restore the full transcript |
 | `/commit [hint]` | Commit this session's verified work in focused conventional commits, no push ([docs](docs/features/commit-discipline.md)) |
 | `/refine [instructions]` · `/refine status` · `/refine rollback <id>` | Capture durable session/project lessons, inspect the refinement journal, or reverse a prior batch |
@@ -763,7 +764,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 prompt on the mesh's next-ranked model (excludes ones already skipped this turn) · `Ctrl+↑`/`Ctrl+↓`
 bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` activity viewer ·
 `Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / `Esc Esc` rewind (idle) · `Ctrl+C` quit · `↑/↓` navigate · `Ctrl+Home` previous user message (again: the one before) · `Ctrl+End` bottom ·
-`y/n/a` allow/deny/always-allow a permission prompt · in an `ask_user` form `↑/↓` `1-9` `Space` `Enter` answer, `←/→` switch question, `o`/`n` other/note, `Esc` dismiss ([docs](docs/features/ask-user-question.md)) · `Alt+M` model picker · `Alt+E` cycle effort ·
+`y/n/a/s` allow/deny/always-allow/allow-for-this-session a permission prompt (`Tab` adds a note for the model) · in an `ask_user` form `↑/↓` `1-9` `Space` `Enter` answer, `←/→` switch question, `o`/`n` other/note, `Esc` dismiss ([docs](docs/features/ask-user-question.md)) · `Alt+M` model picker · `Alt+E` cycle effort ·
 `Ctrl+N` new session · `Ctrl+S` checkpoint · `Ctrl+Z` undo last write · `Ctrl+L` compact ·
 `Ctrl+R` toggle reasoning display · `Ctrl+,` edit keybinds · `F1` full keybind reference.
 

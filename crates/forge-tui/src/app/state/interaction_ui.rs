@@ -3,16 +3,18 @@
 use std::cell::Cell;
 
 use crate::app::{App, KeyKind};
-use crate::ConfirmOutcome;
+use crate::{ConfirmOutcome, ConfirmReply};
 
 /// How many recently used commands the palette lists first on an empty query.
 const RECENT_COMMANDS: usize = 5;
 
-/// The three outcomes of a tool permission, in the order the block lists them.
-pub(crate) const PERMISSION_CHOICES: [ConfirmOutcome; 3] = [
+/// The outcomes of a tool permission, in the order the block lists them. "This session" comes
+/// last so the first three keep their digits: `3` still denies.
+pub(crate) const PERMISSION_CHOICES: [ConfirmOutcome; 4] = [
     ConfirmOutcome::Allow,
     ConfirmOutcome::AlwaysAllow,
     ConfirmOutcome::Deny,
+    ConfirmOutcome::AllowSession,
 ];
 
 /// A tool permission waiting for the user.
@@ -24,6 +26,9 @@ pub(crate) struct PendingPermission {
     /// Index into [`PERMISSION_CHOICES`] that Enter confirms. Starts on "Allow once", so Enter
     /// keeps the meaning it always had.
     pub focus: usize,
+    /// The note being typed (Tab opens it). It goes to the model with whichever choice Enter
+    /// confirms.
+    pub note: Option<String>,
 }
 
 /// State only the interaction surfaces read or write.
@@ -68,11 +73,12 @@ impl InteractionUi {
 }
 
 impl App {
-    /// Map a key pressed while a tool permission prompt is open to its outcome. `None` means the
-    /// key moved the focus or is not a choice, and the prompt stays open. `y`, `a`, `n`, Enter and
-    /// Esc keep their old meanings; digits pick directly; arrows move the focus and Enter confirms
-    /// the focused choice (the first, "Allow once", until it is moved).
-    pub fn permission_key(&mut self, key: KeyKind) -> Option<ConfirmOutcome> {
+    /// Map a key pressed while a tool permission prompt is open to its answer. `None` means the
+    /// key moved the focus, edited the note or is not a choice, and the prompt stays open. `y`,
+    /// `a`, `n`, Enter and Esc keep their old meanings and `s` allows for this session; digits
+    /// pick directly; arrows move the focus and Enter confirms the focused choice (the first,
+    /// "Allow once", until it is moved). Tab opens a note that goes to the model with the answer.
+    pub fn permission_key(&mut self, key: KeyKind) -> Option<ConfirmReply> {
         let focus = self
             .interaction_ui
             .permission
@@ -83,36 +89,113 @@ impl App {
                 p.focus = to.min(PERMISSION_CHOICES.len() - 1);
             }
         };
-        match key {
+        if let Some(note) = self.permission_note().map(str::to_string) {
+            return self.permission_note_key(key, focus, note);
+        }
+        let outcome = match key {
             KeyKind::Char('a') | KeyKind::Char('A') | KeyKind::Char('2') => {
-                Some(ConfirmOutcome::AlwaysAllow)
+                ConfirmOutcome::AlwaysAllow
             }
-            KeyKind::Char('y') | KeyKind::Char('Y') | KeyKind::Char('1') => {
-                Some(ConfirmOutcome::Allow)
+            KeyKind::Char('y') | KeyKind::Char('Y') | KeyKind::Char('1') => ConfirmOutcome::Allow,
+            KeyKind::Char('s') | KeyKind::Char('S') | KeyKind::Char('4') => {
+                ConfirmOutcome::AllowSession
             }
             KeyKind::Char('n')
             | KeyKind::Char('N')
             | KeyKind::Char('3')
             | KeyKind::Esc
-            | KeyKind::Interrupt => Some(ConfirmOutcome::Deny),
-            KeyKind::Enter => Some(PERMISSION_CHOICES[focus.min(PERMISSION_CHOICES.len() - 1)]),
+            | KeyKind::Interrupt => ConfirmOutcome::Deny,
+            KeyKind::Enter => PERMISSION_CHOICES[focus.min(PERMISSION_CHOICES.len() - 1)],
+            KeyKind::Tab => {
+                if let Some(p) = self.interaction_ui.permission.as_mut() {
+                    p.note = Some(String::new());
+                }
+                return None;
+            }
             KeyKind::Up | KeyKind::Char('k') | KeyKind::CycleTemper => {
                 move_focus(self, focus.saturating_sub(1));
-                None
+                return None;
             }
-            KeyKind::Down | KeyKind::Char('j') | KeyKind::Tab => {
+            KeyKind::Down | KeyKind::Char('j') => {
                 move_focus(self, focus + 1);
-                None
+                return None;
             }
             KeyKind::Home => {
                 move_focus(self, 0);
-                None
+                return None;
             }
             KeyKind::End => {
                 move_focus(self, PERMISSION_CHOICES.len() - 1);
-                None
+                return None;
             }
-            _ => None,
+            _ => return None,
+        };
+        Some(outcome.into())
+    }
+
+    /// The note being typed at the open permission prompt, `None` when no note field is open.
+    pub fn permission_note(&self) -> Option<&str> {
+        self.interaction_ui
+            .permission
+            .as_ref()
+            .and_then(|p| p.note.as_deref())
+    }
+
+    /// A key while the note field is open: printable keys type, arrows still move the focus,
+    /// Enter answers with the focused choice and the note, Esc or Tab closes the field (the
+    /// prompt stays open), Ctrl-C denies.
+    fn permission_note_key(
+        &mut self,
+        key: KeyKind,
+        focus: usize,
+        mut note: String,
+    ) -> Option<ConfirmReply> {
+        let last = PERMISSION_CHOICES.len() - 1;
+        let (focus, note) = match key {
+            KeyKind::Enter => {
+                let choice = PERMISSION_CHOICES[focus.min(last)];
+                return Some(ConfirmReply::with_note(choice, &note));
+            }
+            KeyKind::Interrupt => return Some(ConfirmOutcome::Deny.into()),
+            KeyKind::Esc | KeyKind::Tab => (focus, None),
+            KeyKind::Char(c) => {
+                note.push(c);
+                (focus, Some(note))
+            }
+            KeyKind::Backspace => {
+                note.pop();
+                (focus, Some(note))
+            }
+            KeyKind::Up => (focus.saturating_sub(1), Some(note)),
+            KeyKind::Down => ((focus + 1).min(last), Some(note)),
+            _ => (focus, Some(note)),
+        };
+        if let Some(p) = self.interaction_ui.permission.as_mut() {
+            p.focus = focus;
+            p.note = note;
+        }
+        None
+    }
+
+    /// Say what an answer did beyond this one call: a standing allow and where it lives, and that
+    /// a note goes to the model. `mcp`: the tool's standing allows are in-memory only.
+    pub fn note_permission_answer(&mut self, tool: &str, answer: &ConfirmReply, mcp: bool) {
+        match answer.outcome {
+            ConfirmOutcome::AlwaysAllow => {
+                let scope = if mcp {
+                    "for this session"
+                } else {
+                    "saved to .forge/config.toml"
+                };
+                self.note(&format!("✓ {tool} always allowed — {scope}"));
+            }
+            ConfirmOutcome::AllowSession => {
+                self.note(&format!("✓ {tool} allowed for this session — not saved"));
+            }
+            ConfirmOutcome::Allow | ConfirmOutcome::Deny => {}
+        }
+        if answer.note.is_some() {
+            self.note("✎ your note goes to the model with the tool result");
         }
     }
 
@@ -123,6 +206,7 @@ impl App {
             tool: tool.to_string(),
             side_effect: side_effect.to_string(),
             focus: 0,
+            note: None,
         });
     }
 
@@ -190,6 +274,10 @@ mod tests {
         app
     }
 
+    fn outcome(app: &mut App, key: KeyKind) -> Option<ConfirmOutcome> {
+        app.permission_key(key).map(|reply| reply.outcome)
+    }
+
     #[test]
     fn legacy_keys_keep_their_outcomes() {
         let mut app = app_with_prompt();
@@ -205,8 +293,10 @@ mod tests {
             (KeyKind::Char('1'), ConfirmOutcome::Allow),
             (KeyKind::Char('2'), ConfirmOutcome::AlwaysAllow),
             (KeyKind::Char('3'), ConfirmOutcome::Deny),
+            (KeyKind::Char('s'), ConfirmOutcome::AllowSession),
+            (KeyKind::Char('4'), ConfirmOutcome::AllowSession),
         ] {
-            assert_eq!(app.permission_key(key), Some(want), "{key:?}");
+            assert_eq!(outcome(&mut app, key), Some(want), "{key:?}");
         }
     }
 
@@ -219,7 +309,7 @@ mod tests {
             KeyKind::Right,
             KeyKind::PageUp,
             KeyKind::Backspace,
-            KeyKind::Char('4'),
+            KeyKind::Char('5'),
         ] {
             assert_eq!(app.permission_key(key), None, "{key:?}");
         }
@@ -230,8 +320,13 @@ mod tests {
         let mut app = app_with_prompt();
         assert_eq!(app.permission_key(KeyKind::Down), None);
         assert_eq!(
-            app.permission_key(KeyKind::Enter),
+            outcome(&mut app, KeyKind::Enter),
             Some(ConfirmOutcome::AlwaysAllow)
+        );
+        assert_eq!(app.permission_key(KeyKind::Down), None);
+        assert_eq!(
+            outcome(&mut app, KeyKind::Enter),
+            Some(ConfirmOutcome::Deny)
         );
         assert_eq!(app.permission_key(KeyKind::Down), None);
         assert_eq!(
@@ -240,13 +335,13 @@ mod tests {
             "clamps at the last choice"
         );
         assert_eq!(
-            app.permission_key(KeyKind::Enter),
-            Some(ConfirmOutcome::Deny)
+            outcome(&mut app, KeyKind::Enter),
+            Some(ConfirmOutcome::AllowSession)
         );
         assert_eq!(app.permission_key(KeyKind::Up), None);
         assert_eq!(app.permission_key(KeyKind::Home), None);
         assert_eq!(
-            app.permission_key(KeyKind::Enter),
+            outcome(&mut app, KeyKind::Enter),
             Some(ConfirmOutcome::Allow)
         );
     }
@@ -257,8 +352,53 @@ mod tests {
         app.permission_key(KeyKind::End);
         app.open_permission("shell", "Shell");
         assert_eq!(
-            app.permission_key(KeyKind::Enter),
+            outcome(&mut app, KeyKind::Enter),
             Some(ConfirmOutcome::Allow)
+        );
+    }
+
+    #[test]
+    fn tab_opens_a_note_that_rides_with_the_focused_choice() {
+        let mut app = app_with_prompt();
+        assert_eq!(app.permission_key(KeyKind::Tab), None);
+        assert_eq!(app.permission_note(), Some(""));
+        // In the note, choice letters and digits are text and arrows still move the focus.
+        for c in "use rg 3".chars() {
+            assert_eq!(app.permission_key(KeyKind::Char(c)), None);
+        }
+        app.permission_key(KeyKind::Backspace);
+        app.permission_key(KeyKind::Backspace);
+        app.permission_key(KeyKind::Down);
+        app.permission_key(KeyKind::Down);
+        assert_eq!(
+            app.permission_key(KeyKind::Enter),
+            Some(ConfirmReply::with_note(ConfirmOutcome::Deny, "use rg"))
+        );
+    }
+
+    #[test]
+    fn esc_closes_the_note_without_answering_and_ctrl_c_still_denies() {
+        let mut app = app_with_prompt();
+        app.permission_key(KeyKind::Tab);
+        app.permission_key(KeyKind::Char('x'));
+        assert_eq!(app.permission_key(KeyKind::Esc), None);
+        assert_eq!(app.permission_note(), None, "the note field closed");
+        assert!(app.prompt.is_some(), "the prompt stays open");
+        app.permission_key(KeyKind::Tab);
+        assert_eq!(
+            app.permission_key(KeyKind::Interrupt),
+            Some(ConfirmOutcome::Deny.into())
+        );
+    }
+
+    #[test]
+    fn a_blank_note_is_no_note() {
+        let mut app = app_with_prompt();
+        app.permission_key(KeyKind::Tab);
+        app.permission_key(KeyKind::Char(' '));
+        assert_eq!(
+            app.permission_key(KeyKind::Enter),
+            Some(ConfirmOutcome::Allow.into())
         );
     }
 
