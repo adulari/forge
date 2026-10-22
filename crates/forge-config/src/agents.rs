@@ -16,7 +16,9 @@
 //! bare comma list of Claude tool names, which [`map_tool_name`] translates to Forge's.
 //! [`load_agents_layered`] merges `~/.claude/agents`, `~/.forge/agents`, the project's
 //! `.claude/agents` and the project's configured `agents_dir`, later layers overriding earlier
-//! ones by name.
+//! ones by name. The project layers repeat for each parent up to the repository top
+//! ([`crate::project_resource_dirs`]), farthest first, so a session in `repo/pkg/` sees
+//! `repo/.forge/agents` and `pkg`'s own definitions override the repository's.
 //!
 //! Parsing is dependency-free (a tiny front-matter reader, not full YAML) so a malformed file
 //! degrades to being skipped rather than failing the whole load.
@@ -42,14 +44,15 @@ pub struct AgentDef {
 }
 
 /// Merge every agent-definition directory a user might keep, lowest precedence first:
-/// `~/.claude/agents`, `~/.forge/agents`, `<config>/forge/agents`, `<project>/.claude/agents`, then `agents_dir`
-/// (relative to `project_root` unless absolute). A later definition replaces an earlier one with
-/// the same name, so a project file overrides a personal one.
+/// `~/.claude/agents`, `~/.forge/agents`, `<config>/forge/agents`, then for each project directory
+/// (the repository top down to `project_root`) its `.claude/agents` and `agents_dir` (relative to
+/// that directory unless absolute). A later definition replaces an earlier one with the same name,
+/// so a project file overrides a personal one and a nearer directory overrides the repository's.
 pub fn load_agents_layered(project_root: &Path, agents_dir: &str) -> HashMap<String, AgentDef> {
     let dirs = layer_dirs(
         crate::home_dir().as_deref(),
         crate::config_dir().as_deref(),
-        project_root,
+        &crate::project_resource_dirs(project_root),
         agents_dir,
     );
     let mut out = HashMap::new();
@@ -59,10 +62,11 @@ pub fn load_agents_layered(project_root: &Path, agents_dir: &str) -> HashMap<Str
     out
 }
 
+/// `project_dirs` is nearest first, as [`crate::project_resource_dirs`] returns it.
 fn layer_dirs(
     home: Option<&Path>,
     config_dir: Option<&Path>,
-    project_root: &Path,
+    project_dirs: &[std::path::PathBuf],
     agents_dir: &str,
 ) -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
@@ -74,8 +78,15 @@ fn layer_dirs(
     if let Some(config_dir) = config_dir {
         dirs.push(config_dir.join("agents"));
     }
-    dirs.push(project_root.join(".claude/agents"));
-    dirs.push(project_root.join(agents_dir));
+    for project in project_dirs.iter().rev() {
+        dirs.push(project.join(".claude/agents"));
+        if !Path::new(agents_dir).is_absolute() {
+            dirs.push(project.join(agents_dir));
+        }
+    }
+    if Path::new(agents_dir).is_absolute() {
+        dirs.push(agents_dir.into());
+    }
     dirs
 }
 
@@ -342,7 +353,12 @@ mod tests {
             "from claude dir",
         );
         let mut out = HashMap::new();
-        for dir in layer_dirs(Some(&home), Some(&cfg), &proj, ".forge/agents") {
+        for dir in layer_dirs(
+            Some(&home),
+            Some(&cfg),
+            std::slice::from_ref(&proj),
+            ".forge/agents",
+        ) {
             out.extend(load_agents(&dir));
         }
         assert_eq!(out["shared"].description, "project-forge");
@@ -350,6 +366,38 @@ mod tests {
         assert_eq!(out["imported"].description, "from config dir");
         assert_eq!(out["claude-only"].description, "from claude dir");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn a_subdirectory_sees_the_repositorys_agents_and_overrides_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let pkg = repo.join("pkg");
+        let write = |dir: &Path, name: &str, desc: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{name}.md")),
+                format!("---\nname: {name}\ndescription: {desc}\n---\nbody"),
+            )
+            .unwrap();
+        };
+        write(&repo.join(".forge/agents"), "reviewer", "repo");
+        write(&repo.join(".forge/agents"), "planner", "repo-only");
+        write(&pkg.join(".claude/agents"), "reviewer", "pkg");
+        let mut out = HashMap::new();
+        for dir in layer_dirs(None, None, &[pkg.clone(), repo.clone()], ".forge/agents") {
+            out.extend(load_agents(&dir));
+        }
+        assert_eq!(out["reviewer"].description, "pkg");
+        assert_eq!(out["planner"].description, "repo-only");
+        let absolute = layer_dirs(None, None, &[pkg, repo], "/opt/agents");
+        assert_eq!(
+            absolute
+                .iter()
+                .filter(|d| d.ends_with("opt/agents"))
+                .count(),
+            1
+        );
     }
 
     #[test]

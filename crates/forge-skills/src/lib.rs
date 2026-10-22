@@ -17,7 +17,7 @@ use forge_types::TaskTier;
 
 mod builtin;
 pub mod from_session;
-mod frontmatter;
+pub mod frontmatter;
 pub mod normalize;
 mod summary;
 mod template;

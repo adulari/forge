@@ -100,6 +100,7 @@ pub mod hooks_llm;
 pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
 mod file_restore;
+mod instructions;
 pub mod job_wake;
 mod lean_context;
 pub mod llm_router;
@@ -1760,14 +1761,15 @@ pub struct Session {
     cached_git_branch: Option<String>,
     /// Commit-hook install state and the model last written for it (`git_attribution`).
     attribution: git_attribution::AttributionState,
-    /// The project `AGENTS.md` body the pinned block carries on every request. Read at
-    /// construction (sync, off the async executor) and kept current by `agents_md_fingerprint`
-    /// below; `None` when no file exists.
-    cached_agents_md: Option<String>,
-    /// Fingerprint (path, modified time, length) of the `AGENTS.md` the pinned block carries, so
-    /// `refresh_project_instructions` can tell "unchanged" from "written or edited since" with one
-    /// `stat` per turn. `None` until the first check.
-    agents_md_fingerprint: Option<(std::path::PathBuf, std::time::SystemTime, u64)>,
+    /// The instruction files the pinned block carries on every request (instructions.rs). Read
+    /// at construction (sync, off the async executor) and kept current by `agents_md_fingerprint`.
+    instructions: instructions::Loaded,
+    /// The (modified time, length) of every path `instructions` looked at, so
+    /// `refresh_project_instructions` can tell "unchanged" from "created, edited or deleted since"
+    /// with one batch of `stat`s per turn. `None` makes the next turn reload.
+    agents_md_fingerprint: Option<instructions::Fingerprint>,
+    /// Directory and path-scoped instruction files delivered with a tool result so far.
+    instruction_scope: instructions::ScopeState,
     /// What project/codebase this session is operating in (project_context.rs) — read ONCE at
     /// construction, same rationale as `cached_git_branch`, and passed to the mesh router on every
     /// `route`/`route_hinted` call so it can weight self-hosting infrastructure work correctly.
@@ -1821,62 +1823,6 @@ fn current_git_branch(root: &std::path::Path) -> Option<String> {
         .ok()
         .as_deref()
         .and_then(parse_git_head)
-}
-
-/// Instruction files in precedence order: the project's Forge files, the Claude Code
-/// `CLAUDE.md` convention, then the user-global files. The first non-empty one is injected.
-fn agents_md_candidates(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    #[allow(unused_mut)]
-    let mut paths = vec![
-        root.join(".forge/AGENTS.md"),
-        root.join("AGENTS.md"),
-        root.join("CLAUDE.md"),
-        root.join(".claude/CLAUDE.md"),
-    ];
-    // Unit tests must not read the developer's real user-global instruction files.
-    #[cfg(not(test))]
-    {
-        if let Some(config) = forge_config::config_dir() {
-            paths.push(config.join("AGENTS.md"));
-        }
-        if let Some(home) = forge_config::home_dir() {
-            paths.push(home.join(".forge/AGENTS.md"));
-            paths.push(home.join(".claude/CLAUDE.md"));
-        }
-    }
-    paths
-}
-
-/// Read the project `AGENTS.md` synchronously (`.forge/AGENTS.md`, then `AGENTS.md`), returning the
-/// first non-empty body. Used only at session construction (one-time setup, not on the async turn
-/// path) so the first-turn injection site stays await-free + syscall-free.
-fn read_project_agents_md(root: &std::path::Path) -> Option<String> {
-    for path in agents_md_candidates(root) {
-        if let Ok(body) = std::fs::read_to_string(path) {
-            if !body.trim().is_empty() {
-                return Some(body);
-            }
-        }
-    }
-    None
-}
-
-/// The winning `AGENTS.md` path for a workspace — `.forge/AGENTS.md`, else `AGENTS.md` — paired
-/// with a cheap change fingerprint (modified time + length). Mirrors [`read_project_agents_md`]'s
-/// precedence exactly, including its "non-empty wins" rule, so the file that is stat-ed is the
-/// file that would be read.
-async fn project_agents_md_stat(
-    root: &std::path::Path,
-) -> Option<(std::path::PathBuf, std::time::SystemTime, u64)> {
-    for path in agents_md_candidates(root) {
-        if let Ok(meta) = tokio::fs::metadata(&path).await {
-            if meta.len() > 0 {
-                let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-                return Some((path, modified, meta.len()));
-            }
-        }
-    }
-    None
 }
 
 /// Merge semantics for [`resolved_subscription_plans`], pulled out as a pure function so it's

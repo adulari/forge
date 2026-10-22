@@ -63,6 +63,8 @@ impl Session {
         // Dropping the fingerprint makes the per-turn refresh read the file again on the next turn.
         self.project_prompt_injected = !self.transcript.is_empty();
         self.agents_md_fingerprint = None;
+        // The rewound results may have carried directory instructions; the next touch re-sends them.
+        self.instruction_scope = Default::default();
     }
 
     /// Undo the last user turn: rewind to (and including) the most recent user message, dropping
@@ -271,8 +273,9 @@ impl Session {
             self.checkpoint_root = self.workspace.root().join(".forge/checkpoints");
         }
         self.cached_git_branch = current_git_branch(self.workspace.root());
-        let body = read_project_agents_md(self.workspace.root());
-        self.set_agents_md(body);
+        self.set_instructions(crate::instructions::load(self.workspace.root()));
+        self.agents_md_fingerprint = None;
+        self.instruction_scope = Default::default();
         let (project, project_diagnostic) =
             crate::project_context::compute_with_diagnostic(self.workspace.root());
         self.project = project;
@@ -318,8 +321,7 @@ impl Session {
         self.pinned = Default::default();
         self.pinned.recall_due = true;
         self.recent_files = Default::default();
-        let body = read_project_agents_md(self.workspace.root());
-        self.set_agents_md(body);
+        self.set_instructions(crate::instructions::load(self.workspace.root()));
         self.presenter.emit(PresenterEvent::SessionStarted { id });
         self.emit_session_totals(true);
         Ok(())
@@ -394,9 +396,8 @@ impl Session {
         self.pinned.recall_due = true;
         self.recent_files = Default::default();
         self.refresh_pinned_tasks();
-        let body = self.cached_agents_md.take();
-        self.set_agents_md(body);
         self.agents_md_fingerprint = None;
+        self.instruction_scope = Default::default();
         self.presenter.emit(PresenterEvent::SessionStarted {
             id: session_id.to_string(),
         });

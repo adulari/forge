@@ -52,8 +52,8 @@ pub(crate) fn merge_recalled(
 /// Tasks listed in the block; the rest are counted.
 const LISTED_TASKS: usize = 60;
 
-/// What the block carries besides the project instructions (those live in
-/// `Session::cached_agents_md`, which the per-turn fingerprint check keeps current).
+/// What the block carries besides the instruction files (those live in `Session::instructions`,
+/// which the per-turn fingerprint check keeps current).
 #[derive(Default)]
 pub(crate) struct PinnedState {
     /// The memory block, rendered, from the last recall.
@@ -71,9 +71,6 @@ pub(crate) struct PinnedState {
     pub(crate) recall_prefetch: Option<(String, tokio::task::JoinHandle<Option<Vec<f32>>>)>,
     /// Hashes of the project-instruction and memory text last reported to the context pack.
     reported: (u64, u64),
-    /// The project instructions are already in the project's `CLAUDE.md`, which a bridged claude
-    /// loads itself.
-    pub(crate) claude_md_covers_agents: bool,
 }
 
 fn status_word(status: TodoStatus) -> &'static str {
@@ -142,15 +139,6 @@ fn hash(text: Option<&str>) -> u64 {
 }
 
 impl Session {
-    /// Replace the project instructions the block carries. Whether a bridged claude already loads
-    /// them from its own `CLAUDE.md` is settled here, once, not on every request.
-    pub(crate) fn set_agents_md(&mut self, body: Option<String>) {
-        self.pinned.claude_md_covers_agents = body
-            .as_deref()
-            .is_some_and(|body| lean_context::claude_md_covers(self.workspace.root(), body));
-        self.cached_agents_md = body;
-    }
-
     /// Tell the block which goal the session is working on (`None` clears it).
     pub fn set_active_goal(&mut self, goal: Option<&str>) {
         self.pinned.goal = goal
@@ -177,15 +165,17 @@ impl Session {
     pub(crate) fn pinned_context_message(&self, model: Option<&str>) -> Option<Message> {
         let mut sections: Vec<String> = Vec::new();
 
+        // A bridged claude reads its `CLAUDE.md` files itself; a legacy session's transcript may
+        // still carry a file as a stored system message.
         let bridged_claude = model.is_some_and(|m| m.starts_with("claude-cli::"));
-        if let Some(body) = self
-            .cached_agents_md
-            .as_deref()
-            .filter(|body| !body.trim().is_empty())
-            .filter(|_| !(bridged_claude && self.pinned.claude_md_covers_agents))
-            .filter(|body| !self.transcript_carries(|text| text == *body))
-        {
-            sections.push(format!("## Project instructions\n{}", body.trim_end()));
+        let files = self
+            .instructions
+            .files
+            .iter()
+            .filter(|file| !(bridged_claude && file.claude_loads))
+            .filter(|file| !self.transcript_carries(|text| text.trim() == file.body.trim()));
+        if let Some(body) = instructions::render(files, self.workspace.root()) {
+            sections.push(format!("## Project instructions\n{body}"));
         }
         if let Some(memories) = self
             .pinned
@@ -225,10 +215,7 @@ impl Session {
     /// Record in the turn's context pack the project instructions and memories that entered the
     /// block since it last said so.
     pub(crate) fn audit_pinned_context(&mut self, pack: &mut context_pack::ContextPack) {
-        let agents = self
-            .cached_agents_md
-            .clone()
-            .filter(|body| !body.trim().is_empty());
+        let agents = instructions::render(&self.instructions.files, self.workspace.root());
         let agents_hash = hash(agents.as_deref());
         if agents_hash != self.pinned.reported.0 {
             self.pinned.reported.0 = agents_hash;

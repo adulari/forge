@@ -32,6 +32,7 @@ mod paths;
 pub mod pr;
 pub mod preview;
 pub mod privacy;
+mod project_dirs;
 pub mod project_trust;
 pub mod provider_oauth;
 pub mod quota_status;
@@ -60,6 +61,7 @@ pub use paths::{
     mark_project_auto_setup_attempted, project_auto_setup_attempted, project_initialization,
     ProjectInitialization,
 };
+pub use project_dirs::{project_resource_dirs, repo_top};
 pub use vision_fallback::VisionFallback;
 
 #[derive(Debug, thiserror::Error)]
@@ -3212,8 +3214,10 @@ impl Config {
 }
 
 /// The command/skill discovery sources, scope-tagged: user scope (`<config>/forge/{commands,
-/// skills}`, present only when a config dir resolves) then project scope (`./.forge/{commands,
-/// skills}`). Project wins on a name collision (see `forge_skills::Catalog`).
+/// skills}`, present only when a config dir resolves) then project scope (`.forge/{commands,
+/// skills}` in the working directory and each parent up to the repository top, nearest first, see
+/// [`project_resource_dirs`]). Project wins on a name collision, and among project directories the
+/// nearest one does (see `forge_skills::Catalog`).
 pub fn command_sources() -> forge_skills::Sources {
     command_sources_in(std::path::Path::new("."))
 }
@@ -3233,14 +3237,16 @@ pub fn command_sources_in(root: &std::path::Path) -> forge_skills::Sources {
             path: dir.join("skills"),
         });
     }
-    commands.push(ScopedDir {
-        scope: Scope::Project,
-        path: root.join(".forge/commands"),
-    });
-    skills.push(ScopedDir {
-        scope: Scope::Project,
-        path: root.join(".forge/skills"),
-    });
+    for dir in project_resource_dirs(root) {
+        commands.push(ScopedDir {
+            scope: Scope::Project,
+            path: dir.join(".forge/commands"),
+        });
+        skills.push(ScopedDir {
+            scope: Scope::Project,
+            path: dir.join(".forge/skills"),
+        });
+    }
     forge_skills::Sources { commands, skills }
 }
 
