@@ -71,6 +71,15 @@ const PROBE_SCRUBBED_ENV: [&str; 5] = [
 fn probe_command() -> std::process::Command {
     let mut cmd = std::process::Command::new("claude");
     cmd.args([
+        // The probe reads response headers, not an answer. Without these two it loaded the user's
+        // hooks, CLAUDE.md and every built-in tool definition (~100 KB of request) to ask for one
+        // period, which cost a `claude` start-up's worth of CPU beside the first prompt. They come
+        // first because `--tools` takes a list: placed before the positional prompt it would
+        // swallow it.
+        "--tools",
+        "",
+        "--setting-sources",
+        "",
         "--debug",
         "--print",
         "--model",
@@ -801,6 +810,27 @@ mod tests {
                 "{key} must be removed from the probe child's environment, got {removed:?}"
             );
         }
+    }
+
+    /// The probe asks for one period to read response headers. It must not load the user's hooks,
+    /// CLAUDE.md or tool definitions (~100 KB of request), and the prompt must stay the last
+    /// argument: `--tools` takes a list and would swallow a positional that followed it.
+    #[test]
+    fn probe_child_loads_no_user_settings_or_tools_and_keeps_its_prompt() {
+        let cmd = super::probe_command();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let value_of = |flag: &str| {
+            let at = args.iter().position(|a| a == flag).unwrap_or_else(|| {
+                panic!("{flag} missing from {args:?}");
+            });
+            args[at + 1].clone()
+        };
+        assert_eq!(value_of("--tools"), "");
+        assert_eq!(value_of("--setting-sources"), "");
+        assert_eq!(args.last().map(String::as_str), Some("."));
     }
 
     /// A probe running in the project directory is what made `claude` load the project's .mcp.json

@@ -746,7 +746,9 @@ resets_at, fraction_used }`. Hints are produced by:
   `forge mesh` path (`seed_store_quota`, `crates/forge-cli/src/cli/commands/models.rs:581`)
   record externally-observed percentages: codex from its rollout files, claude from a gated
   one-shot `claude --debug` rate-limit probe (skipped when the store row is younger than
-  5 minutes, `models.rs:534-537`; freshness via `subscription_age_secs`,
+  5 minutes, `models.rs:534-537`, and for a session pinned with `--model`/`/model`, which bypasses
+  selection so the reading cannot change anything; the probe runs without hooks, CLAUDE.md or tool
+  definitions, `bridge_stats::probe_command`; freshness via `subscription_age_secs`,
    `crates/forge-store/src/lib.rs:1888`). Seeded rows, like every other source above, classify
    through `forge_config::quota_status::status_from_fraction` (§5.3.1) and carry no reset time so
    a real in-turn hint replaces them.

@@ -27,6 +27,10 @@ use forge_types::{
 use forge_types::{Presenter, PresenterEvent};
 
 mod adaptive_effort;
+mod bridge_prewarm;
+mod turn_trace;
+mod window_lookup;
+pub use window_lookup::WindowLookup;
 mod build_command;
 mod test_guard;
 pub use test_guard::is_test_path;
@@ -1561,6 +1565,8 @@ pub struct Session {
     /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
     pinned_effort: Option<EffortLevel>,
     adaptive_effort: adaptive_effort::AdaptiveEffort,
+    /// The pinned model's context-window lookup started at session build (see [`window_lookup`]).
+    window_lookup: Option<WindowLookup>,
     /// In-session EXACT rung (`/effort exact <level>`). Where `pinned_effort` is a ceiling the mesh
     /// then optimises under — using measured benchmark data, which only covers the rungs someone
     /// rated — this is an instruction: the routed model runs at this rung, resolved against that
@@ -2677,6 +2683,7 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        turn_trace::mark("run_turn_with start");
         let resume_absorbed = std::mem::take(&mut self.resume_absorbed);
         self.run_budget = self.run_budget_next.take();
         self.refresh_btw_asker();
@@ -2934,6 +2941,7 @@ impl Session {
             });
             return Ok(LoopOutcome::no_output(msg));
         }
+        turn_trace::mark("routed");
         let routed_model = decision.model.clone();
         self.note_harness_model(&routed_model);
         let reuse_response_chain = should_reuse_response_chain(
@@ -4995,6 +5003,9 @@ mod tests {
 
     #[path = "bridge_context.rs"]
     mod bridge_context_tests;
+
+    #[path = "startup_overlap.rs"]
+    mod startup_overlap_tests;
 
     #[path = "stream_idle_hint.rs"]
     mod stream_idle_hint_tests;

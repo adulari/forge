@@ -239,6 +239,7 @@ impl Session {
             exact_effort: None,
             turn_grant: Default::default(),
             adaptive_effort: Default::default(),
+            window_lookup: None,
             subagent_pin_free: None,
             overflow_window_cap: None,
             require_tool_call: false,

@@ -526,6 +526,7 @@ pub(crate) fn spawn_turn_with(
     busy: &mut bool,
     busy_since: &mut std::time::Instant,
 ) -> tokio::task::JoinHandle<()> {
+    tracing::debug!(target: "forge::turn", "enter: turn spawned");
     app.on_turn_start();
     app.submit_user(&prompt);
     app.done = false;
@@ -538,6 +539,7 @@ pub(crate) fn spawn_turn_with(
     tokio::spawn(async move {
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
+        tracing::debug!(target: "forge::turn", "session lock acquired");
         if !images.is_empty() {
             sess.attach_images(images);
         }

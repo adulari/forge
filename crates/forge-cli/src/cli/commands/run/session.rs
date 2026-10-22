@@ -397,21 +397,10 @@ pub(crate) async fn build_session_with_self_mcp(
 
     let catalog = catalog
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
-    let unknown_windows =
-        pin_window::learn_pinned_windows(&store, &config, pin.as_deref(), mock).await;
-    if !unknown_windows.is_empty() {
-        let notice = format!(
-            "context window of {} is unknown — requests and auto-compaction are sized for {} \
-             tokens; set `[mesh.context_windows]` to the real window",
-            unknown_windows.join(", "),
-            forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW
-        );
-        if presenter.is_attended() {
-            presenter.emit(forge_tui::PresenterEvent::Warning(notice));
-        } else {
-            tracing::warn!("{notice}");
-        }
-    }
+    // A pinned model nothing on this machine knows the window of is looked up beside startup; the
+    // session's first request waits for it (see `forge_core::WindowLookup`), startup does not.
+    let window_lookup =
+        pin_window::start_pinned_window_lookup(&store, &config, pin.as_deref(), mock);
     let ctx_windows = store.all_model_contexts().unwrap_or_default();
     clock.mark("calibration + context windows");
     let repo_key = workspace_cwd.clone();
@@ -526,6 +515,7 @@ pub(crate) async fn build_session_with_self_mcp(
         )
         .context("starting session")?,
     };
+    session.set_window_lookup(window_lookup);
     clock.mark("tools + lattice + session start");
     if mock {
         // The router still names a real seed model; the mock provider answers regardless, so file

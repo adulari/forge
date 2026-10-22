@@ -27,7 +27,15 @@ pub(super) fn handle_stream_event(
     tools_unavailable: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     bridge_trace: &std::sync::Arc<std::sync::Mutex<crate::bridge_trace::BridgeTrace>>,
 ) {
-    act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if act.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+        crate::turn_trace::first_event(match &ev {
+            StreamEvent::Text(_) => "text",
+            StreamEvent::Reasoning(_) => "reasoning",
+            StreamEvent::ProviderThinking { .. } => "thinking",
+            StreamEvent::ProviderActivity => "activity",
+            _ => "other",
+        });
+    }
     match ev {
         StreamEvent::ProviderActivity => presenter.emit(PresenterEvent::ProviderProgress),
         StreamEvent::ProviderToolInput { name, chars } => {
@@ -37,6 +45,7 @@ pub(super) fn handle_stream_event(
             presenter.emit(PresenterEvent::ProviderThinking { tokens })
         }
         StreamEvent::Text(t) => {
+            crate::turn_trace::text_delta();
             if !suppress_assistant_text {
                 presenter.emit(PresenterEvent::AssistantDelta(t));
             }
