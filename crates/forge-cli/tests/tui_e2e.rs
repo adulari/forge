@@ -465,3 +465,44 @@ fn tui_ctrl_c_clears_draft_then_needs_two_presses_to_quit() {
     );
     assert!(plain.contains("Ctrl+C again"), "arm hint shown: {plain}");
 }
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_bang_line_runs_in_the_shell_and_the_model_responds() {
+    // `!cmd` is shell mode: the line runs through the shell tool (a `Run` card with the exit code)
+    // instead of reaching the model as text, and the model then answers the output.
+    let (clean, plain) = drive_pty(&[("!echo bang-e2e-marker\r", 3500), ("/quit\r", 600)]);
+    assert!(clean, "clean exit, no panic: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    assert!(
+        plain.contains("exit 0"),
+        "the command ran and its card reports the exit code: {plain}"
+    );
+    assert!(
+        plain.contains("Let me inspect the project manifest"),
+        "the model responded to the shell output: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_unbound_ctrl_chords_never_type_and_ctrl_d_twice_quits() {
+    // Ctrl+X / Ctrl+B / Ctrl+Q have no meaning in the composer and used to insert `x`, `b`, `q`.
+    // Ctrl+D on an empty prompt arms a quit and a second press leaves, with no /quit needed.
+    let (clean, plain) = drive_pty(&[
+        ("abc\x18\x02\x11", 400),
+        ("\x15", 200),
+        ("\x04", 400),
+        ("\x04", 0),
+    ]);
+    assert!(clean, "Ctrl+D twice exits cleanly, no panic: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    assert!(
+        !plain.contains("abcx") && !plain.contains("abcxb"),
+        "an unbound Ctrl chord was typed into the draft: {plain}"
+    );
+    assert!(
+        plain.contains("Ctrl+D again to quit"),
+        "the first Ctrl+D on an empty prompt arms the quit and names its chord: {plain}"
+    );
+}

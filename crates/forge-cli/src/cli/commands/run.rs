@@ -18,6 +18,8 @@ use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 use crate::*;
 
 mod autonomous;
+mod bang;
+use bang::{route_bang, spawn_bang, BangRoute, BANG_BUSY_NOTE, BANG_EMPTY_NOTE};
 pub(crate) mod claude_flags;
 mod commit_prompt;
 mod dispatch_checks;
@@ -476,8 +478,8 @@ pub(crate) async fn run_chat_tui(
     first_prompt: Option<String>,
 ) -> Result<()> {
     use forge_tui::{
-        handle_key, print_banner_direct, App, ChannelPresenter, ConfirmOutcome, InputOutcome,
-        KeyKind, Tui, UiMsg,
+        print_banner_direct, App, ChannelPresenter, ConfirmOutcome, InputOutcome, KeyKind, Tui,
+        UiMsg,
     };
     use std::time::{Duration, Instant};
 
@@ -1443,6 +1445,16 @@ pub(crate) async fn run_chat_tui(
             // inside any overlay it closes that overlay like Esc. Idle with nothing open it clears
             // a draft (saved to history), or on an empty input needs a second press to quit.
             // A bare Esc no longer quits — see the idle-Esc branch below.
+            let key = if matches!(key, KeyKind::ExitOrDelete) {
+                let idle = !busy && pending.is_none() && !app.awaiting_question();
+                let overlay = app.viewer.is_some() || any_remote_modal_open(&app);
+                let Some(key) = app.ctrl_d(idle, overlay) else {
+                    continue;
+                };
+                key
+            } else {
+                key
+            };
             let key = if matches!(key, KeyKind::Interrupt) {
                 if !busy
                     && pending.is_none()
@@ -1678,7 +1690,8 @@ pub(crate) async fn run_chat_tui(
                         .run_fullscreen(|| forge_tui::run_keybind_configurator(&mut app.keybinds));
                     if let Ok(true) = result {
                         // Save changed binds
-                        let defaults = forge_config::KeybindsConfig::default();
+                        let defaults =
+                            forge_config::KeybindsConfig::defaults_for(app.keybinds.preset);
                         for (action, combo) in &app.keybinds.binds {
                             if defaults.binds.get(action.as_str()) != Some(combo) {
                                 let _ = forge_config::write_keybind(action, combo);
@@ -2350,7 +2363,7 @@ pub(crate) async fn run_chat_tui(
                     // That keeps the text cursor moving while the palette is open, and closes the
                     // palette once the cursor leaves the command name (e.g. a space into the args).
                     _ => {
-                        let _ = forge_tui::handle_key(&mut app.input, &mut app.input_cursor, key);
+                        let _ = app.edit_key(key);
                         sync_palette_to_slash_token(&mut app);
                     }
                 }
@@ -2524,7 +2537,7 @@ pub(crate) async fn run_chat_tui(
                     | KeyKind::End => {
                         // Readline editing keeps working under the picker; it re-syncs to
                         // whatever `@token` the cursor is now in (and closes if none).
-                        let _ = handle_key(&mut app.input, &mut app.input_cursor, key);
+                        let _ = app.edit_key(key);
                         sync_at_picker_to_at_token(&mut app);
                     }
                     KeyKind::CycleTemper
@@ -2903,6 +2916,21 @@ pub(crate) async fn run_chat_tui(
             // Ctrl+T expands/collapses the most recent tool card in the transcript — the keyboard
             // path to what clicking the card does, so a terminal without mouse reporting (or a
             // user whose hands are on the keys) still gets at a call's arguments and output.
+            if matches!(key, KeyKind::ExternalEditor) {
+                if pending.is_none() && !app.awaiting_question() {
+                    let editor = forge_tui::external_editor_command();
+                    let draft = app.input.clone();
+                    match tui
+                        .run_external(|| forge_tui::edit_in_external_editor(&editor, &draft))?
+                    {
+                        Ok(text) => app.replace_input(text),
+                        Err(e) => app.note(&format!("⚠ {e}")),
+                    }
+                }
+                dirty = true;
+                continue;
+            }
+
             if matches!(key, KeyKind::ToggleToolCard) {
                 if !app.toggle_last_tool_card() {
                     app.note("no tool call to expand yet");
@@ -3122,7 +3150,7 @@ pub(crate) async fn run_chat_tui(
                     {
                         InputOutcome::Editing
                     } else {
-                        handle_key(&mut app.input, &mut app.input_cursor, key)
+                        app.edit_key(key)
                     };
                 if let InputOutcome::Submit(raw_line) = outcome {
                     if crate::attach_paths::apply_paths(&mut app, &raw_line) {
@@ -3131,7 +3159,10 @@ pub(crate) async fn run_chat_tui(
                     }
                     let (line, imgs) = app.resolve_paste_blocks(raw_line);
                     let trimmed = line.trim();
-                    if trimmed.is_empty() {
+                    if route_bang(&line, true) == BangRoute::Busy {
+                        app.note(BANG_BUSY_NOTE);
+                        app.replace_input(line);
+                    } else if trimmed.is_empty() {
                         // An image with no words: keep it in the input so it is not lost.
                         for img in imgs {
                             app.attach_image(img, "image");
@@ -3313,7 +3344,7 @@ pub(crate) async fn run_chat_tui(
                 let outcome = if app.try_delete_paste_block(key) {
                     InputOutcome::Editing
                 } else {
-                    handle_key(&mut app.input, &mut app.input_cursor, key)
+                    app.edit_key(key)
                 };
                 match outcome {
                     InputOutcome::Submit(raw_line) => {
@@ -3323,9 +3354,27 @@ pub(crate) async fn run_chat_tui(
                         }
                         let (line, mut submit_images) = app.resolve_paste_blocks(raw_line);
                         prompt_history.record(&line);
-                        // `//foo` escapes to a literal prompt `/foo`; a bare `/cmd` typed without
-                        // the palette still dispatches as a command; everything else is a prompt.
-                        if let Some(rest) = line.strip_prefix("//") {
+                        // `!cmd` runs in the shell; `//foo` escapes to a literal prompt `/foo`; a
+                        // bare `/cmd` typed without the palette still dispatches as a command;
+                        // everything else is a prompt.
+                        if let BangRoute::Run(cmd) = route_bang(&line, false) {
+                            for img in std::mem::take(&mut submit_images) {
+                                app.attach_image(img, "image");
+                            }
+                            turn_gen += 1;
+                            turn_handle = Some(spawn_bang(
+                                cmd,
+                                tui_config.tui.respond_to_bash,
+                                &session,
+                                &done_tx,
+                                turn_gen,
+                                &mut app,
+                                &mut busy,
+                                &mut busy_since,
+                            ));
+                        } else if route_bang(&line, false) == BangRoute::Empty {
+                            app.note(BANG_EMPTY_NOTE);
+                        } else if let Some(rest) = line.strip_prefix("//") {
                             let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;
                                 s.name_from_prompt(&line);

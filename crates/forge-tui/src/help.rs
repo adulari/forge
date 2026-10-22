@@ -68,8 +68,12 @@ fn command_group(name: &str) -> &'static str {
 }
 
 /// Keys that are not rebindable, in canonical spelling.
-const FIXED_KEYS: [(&str, &str); 12] = [
+const FIXED_KEYS: [(&str, &str); 19] = [
     ("Enter", "Send the message (queues it while a turn runs)"),
+    (
+        "!",
+        "At the start of the prompt: run a shell command, then Forge responds",
+    ),
     ("Tab", "Accept the suggestion or the selected completion"),
     ("Esc", "Stop the turn, or close what is open"),
     ("Esc Esc", "Rewind to an earlier message (idle)"),
@@ -83,6 +87,21 @@ const FIXED_KEYS: [(&str, &str); 12] = [
     (
         "Ctrl+W",
         "Delete the word before the cursor (Ctrl+U the line)",
+    ),
+    (
+        "Ctrl+K",
+        "Cut to the end of the line (when no action is bound to it)",
+    ),
+    (
+        "Ctrl+Y",
+        "Paste the last cut (Alt+Y then cycles older cuts)",
+    ),
+    ("Ctrl+_", "Undo the last edit to the prompt"),
+    ("Ctrl+P", "Previous prompt in history (Ctrl+N next)"),
+    ("Ctrl+G", "Edit the prompt in $VISUAL or $EDITOR"),
+    (
+        "Ctrl+D",
+        "Delete forward; on an empty prompt press twice to quit",
     ),
     ("Alt+B", "Move by word (Alt+F forward, also Alt+←, Alt+→)"),
     ("Shift+Tab", "Cycle the mode"),

@@ -126,6 +126,16 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
     }
 }
 
+/// How hints and the welcome name `action`'s key: its configured chord, else the Forge default.
+pub fn action_label(keybinds: &KeybindsConfig, action: &str) -> String {
+    keybinds
+        .binds
+        .get(action)
+        .or(KeybindsConfig::default().binds.get(action))
+        .map(combo_display)
+        .unwrap_or_default()
+}
+
 /// Given a raw crossterm key event and the configured keybinds, return the matching `KeyKind`
 /// if any configured action matches.
 pub fn resolve_action(keybinds: &KeybindsConfig, ev: &KeyEvent) -> Option<KeyKind> {

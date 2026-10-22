@@ -17,6 +17,48 @@ The box grows up to the input row cap and then scrolls, saying `↑ N more` in i
 - `/command` tokens are drawn in the brand colour, `@path` mentions in the info hue (`user`).
 - `input_box_height` is the single source of its height, for layout and mouse geometry.
 
+### Shell mode: `!command`
+
+A line that starts with `!` runs in the shell instead of going to the model, as in Claude Code
+(`!git status`, `! npm test`). The composer shows the `!` in the warning hue and the hints change to
+`Enter run in shell`; the empty composer's placeholder says `! runs a shell command`. A line that
+begins with a space (` !important…`) is an ordinary prompt, so a message can still start with `!`.
+
+- The command goes through the session's own `shell` tool (`Session::run_user_shell`, in
+  `crates/forge-core/src/user_shell.rs`): same workspace, sandbox, timeout and output budget as a
+  model call, drawn as an ordinary `Run` card. It skips the approval prompt, since you typed it, but
+  not the safety floor: privilege escalation (`sudo`, `su`, `pkexec`) and catastrophic deletes are
+  refused with a card that says so and nothing runs.
+- The run joins the conversation as a user message (`<bash-input>` / `<bash-stdout>`, the shape
+  Claude Code uses) and the model responds to it. `[tui] respond_to_bash = false` only adds the run
+  to the context; the next prompt's turn sees it.
+- `/paths` and `@refs` in a shell line are shell text: they open neither the palette nor the file
+  picker.
+- A turn is running: the line goes back into the composer with a note, and Enter runs it once the
+  turn ends (Esc stops the turn). A bare `!` explains the syntax.
+
+### Editing keys
+
+Readline keys work in the composer, and a Ctrl or Alt chord with no meaning is dropped instead of
+typing its letter (Ctrl+X, Ctrl+B and Ctrl+Q used to insert `x`, `b`, `q`).
+
+| Key | Action |
+|---|---|
+| `Ctrl+A` · `Ctrl+E` | Start / end of the line |
+| `Ctrl+W` · `Ctrl+U` · `Ctrl+K` | Cut the word before the cursor / to the start / to the end of the line (`Alt+K` for the end of the line in the default keymap, where `Ctrl+K` is the command center) |
+| `Ctrl+Y` · `Alt+Y` | Paste the last cut; right after it, `Alt+Y` swaps in the next older cut (a ring of 16) |
+| `Ctrl+_` | Undo the last edit (a run of typing is one step; a cut, a `Ctrl+Y` and `Ctrl+G` are one step each) |
+| `Ctrl+P` · `Ctrl+N` | Previous / next prompt in history |
+| `Ctrl+D` | Delete the character under the cursor; on an empty prompt press twice to quit |
+| `Ctrl+G` | Edit the draft in `$VISUAL`, then `$EDITOR`, then `vi`; the saved text replaces the draft |
+
+Consecutive cuts join one ring entry, so `Ctrl+W` twice then `Ctrl+Y` pastes both words back.
+`Ctrl+K` is the command center and `Ctrl+N` starts a new session in the default keymap; the
+`claude-code` preset ([keybinds.md](keybinds.md)) frees them for cutting and history. `Ctrl+_` is
+`Ctrl+7` on terminals that send the raw `0x1F` byte, and `Ctrl+Shift+-` with the kitty protocol.
+Code: `crates/forge-tui/src/driver/keymap.rs` (the key map), `crates/forge-tui/src/app/input_edit.rs`
+(kill ring and undo), `crates/forge-tui/src/driver/external.rs` (`Ctrl+G`).
+
 ## One list component
 
 `list_view.rs` draws every list: the slash palette, the command center, the `@file` picker, the

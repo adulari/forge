@@ -60,6 +60,8 @@ pub mod throughput;
 mod usage_source;
 pub use json_result::{error_result_line, JsonResultPresenter};
 pub use print_presenter::PrintPresenter;
+mod shell_mode;
+pub use shell_mode::bang_command;
 pub use stream_json::{StreamInit, StreamInitSlot, StreamJsonPresenter};
 pub use usage_source::{ModelUsage, UsageSlot, UsageSource};
 mod surface;
@@ -86,7 +88,8 @@ pub use commands::{
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{
-    frame_wait, install_panic_restore, ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg,
+    edit_in_external_editor, external_editor_command, frame_wait, install_panic_restore,
+    ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg,
 };
 pub use headless::HeadlessPresenter;
 pub use help::{run_help, HelpTab};

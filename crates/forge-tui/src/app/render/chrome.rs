@@ -202,7 +202,7 @@ pub(crate) fn live_state(app: &App, room: usize) -> Option<LiveState> {
     if app.quit_hint_active() {
         return Some(LiveState {
             spans: vec![Span::styled(
-                format!("{} Ctrl+C again to quit", glyphs.warn),
+                format!("{} {} again to quit", glyphs.warn, app.quit_chord()),
                 styles::warn(),
             )],
         });
@@ -341,7 +341,7 @@ pub(crate) fn fit_hints(mut hints: Vec<Hint>, budget: usize) -> Vec<Hint> {
 fn default_hints(app: &App) -> Vec<Hint> {
     if app.quit_hint_active() {
         return vec![
-            hint("Ctrl+C", "quit"),
+            hint(app.quit_chord(), "quit"),
             hint("any key", "cancels"),
             hint("?", "keys"),
         ];
@@ -366,6 +366,13 @@ fn default_hints(app: &App) -> Vec<Hint> {
             hint("?", "keys"),
         ];
     }
+    if crate::bang_command(&app.input).is_some() {
+        return vec![
+            hint("Enter", "run in shell"),
+            hint("Ctrl+U", "clear"),
+            hint("?", "keys"),
+        ];
+    }
     if !app.input.is_empty() {
         return vec![
             hint("Enter", "send"),
@@ -387,7 +394,7 @@ fn default_hints(app: &App) -> Vec<Hint> {
     vec![
         hint("/", "commands"),
         hint("@", "files"),
-        hint("Ctrl+K", "actions"),
+        hint(&app.action_chord("command_center"), "actions"),
         hint("Shift+Tab", "mode"),
         hint("?", "keys"),
     ]

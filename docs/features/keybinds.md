@@ -74,11 +74,44 @@ true`), kitty (`macos_option_as_alt yes`), WezTerm (`send_composed_key_when_left
 false`) or Alacritty (`option_as_alt = "Both"`), or rebind the action to a Ctrl chord. A tool group
 can always be opened with a click.
 
+### Presets: `preset = "claude-code"`
+
+Some Forge defaults sit on chords a Claude Code user presses by habit and that mean something else
+there: `Ctrl+K` (delete to end of line), `Ctrl+N` / `Ctrl+P` (history), `Ctrl+R` (history search),
+`Ctrl+Z` (suspend), `Ctrl+S` (stash) and `Alt+P` / `Alt+M` / `Alt+T` (model, mode, thinking).
+`Ctrl+L` already redraws in Forge, as in Claude Code. Several of ours are destructive when pressed by
+habit (`Ctrl+Z` undoes a file write). One line moves them all:
+
+```toml
+[keybinds]
+preset = "claude-code"
+```
+
+| Action | Forge default | `claude-code` |
+|---|---|---|
+| `command_center` | Ctrl-K | F2 |
+| `new_session` | Ctrl-N | Alt-N |
+| `undo` | Ctrl-Z | Alt-Z |
+| `checkpoint` | Ctrl-S | Alt-S |
+| `toggle_reasoning` | Ctrl-R | Alt-T |
+| `model_picker` | Alt-M | Alt-P |
+| `temper_cycle` | Alt-T | Alt-M |
+
+Every other action keeps its Forge default. The freed chords fall through to the composer's
+readline keys (`Ctrl+K` cuts to the end of the line, `Ctrl+N` / `Ctrl+P` walk the prompt history,
+see [tui-interaction.md](tui-interaction.md)); `Ctrl+Z`, `Ctrl+S` and `Ctrl+R` do nothing
+instead of typing a letter. A bind you set yourself under `[keybinds.binds]` always wins over the
+preset, and the configurator's reset (`r` / `R`) returns to the preset's chords. Hints, the welcome
+screen and Help name the active chord (`F2  actions`).
+
+`forge setup` asks once whether to turn the preset on (default yes when `~/.claude` exists) and
+writes `[keybinds] preset`. `preset = "forge"` is the default.
+
 ## 3. Implementation
 
-- **`forge-config`** — `KeyCombo`, `KeybindsConfig` (`BTreeMap<String, KeyCombo>`), a `Default`
-  with the binds above (the shipped default map has 27), and `write_keybind()` (rewrites one bind under `[keybinds.binds]`,
-  preserving all other config keys). `Config` gains a `keybinds` field.
+- **`forge-config`** (`keybinds.rs`) — `KeyCombo`, `KeybindsConfig` (`preset` plus a `BTreeMap<String, KeyCombo>`), a `Default`
+  with the binds above (the shipped default map has 27), `KeybindsConfig::defaults_for(preset)`, and `write_keybind()` / `write_keybind_preset()` (rewrite one key under
+  `[keybinds]`, preserving all other config keys). `Config` gains a `keybinds` field.
 - **`forge-tui/keybinds.rs`** — `matches(combo, key_event)` compares a combo against a crossterm
   `KeyEvent`; `resolve_action()` returns the `KeyKind` for the first matching configured action.
   Shift is checked explicitly once Ctrl/Alt is held, so Ctrl-C (interrupt) and Ctrl-Shift-C
@@ -101,7 +134,7 @@ can always be opened with a click.
   active prompt is aborted and retried at the selected tier. The pin persists until another tier
   action or `/reload`, and an explicit per-turn model/tier hint still wins over it.
 - Because `resolve_action` runs first, Ctrl-Shift-K maps to `skip_model` (not the old kill-line-forward); plain Ctrl-K is `command_center`
-  and Ctrl-R to `toggle_reasoning` by default; remap them if you want the editing shortcut back.
+  and Ctrl-R to `toggle_reasoning` by default; remap them, or set `preset = "claude-code"` above, if you want the editing shortcut back.
 
 ## 5. Desktop/web app shortcuts
 

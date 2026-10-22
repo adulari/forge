@@ -196,7 +196,7 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             match &app.suggested_prompt {
                 Some(suggestion) => Some(format!("try: {suggestion}")),
                 None => Some(format!(
-                    "Message Forge{}",
+                    "Message Forge{}  ! runs a shell command",
                     crate::theme::glyphs::g().ellipsis
                 )),
             }
@@ -238,10 +238,15 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// The styled byte ranges of the buffer: a `/command` token on the first line in brand bold, and
-/// every `@path` mention in the `user` hue. A `//literal` escape stays plain.
+/// The styled byte ranges of the buffer: a `/command` token on the first line in brand bold, the
+/// `!` of a shell-mode line in the warning hue, and every `@path` mention in the `user` hue. A
+/// `//literal` escape stays plain.
 fn token_styles(input: &str) -> Vec<(usize, usize, Style)> {
     let mut out = Vec::new();
+    if crate::bang_command(input).is_some() {
+        out.push((0, 1, styles::warn().bold()));
+        return out;
+    }
     let first_line_end = input.find('\n').unwrap_or(input.len());
     let first = &input[..first_line_end];
     if let Some(tok) = crate::commands::slash_token_at(first, first.len()) {

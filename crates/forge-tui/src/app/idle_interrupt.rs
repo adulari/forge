@@ -29,6 +29,7 @@ impl App {
             self.note("input cleared — ↑ to recall");
             return IdleInterrupt::Cleared;
         }
+        let chord = self.next_quit_chord.take().unwrap_or("Ctrl+C");
         let now = std::time::Instant::now();
         if self
             .quit_armed
@@ -38,7 +39,35 @@ impl App {
             return IdleInterrupt::Quit;
         }
         self.quit_armed = Some(now);
+        self.quit_chord = chord;
         IdleInterrupt::Armed
+    }
+
+    /// Ctrl+D, as in Claude Code and a shell: with text in the prompt it deletes the character
+    /// under the cursor; on an empty idle prompt it becomes the Interrupt key, so quitting goes
+    /// through the same double-press guard as Ctrl+C. `None` drops the key: an open overlay or a
+    /// running turn owns the moment, and Ctrl+D neither closes the one nor stops the other.
+    pub fn ctrl_d(&mut self, idle: bool, overlay_open: bool) -> Option<KeyKind> {
+        if overlay_open {
+            return None;
+        }
+        if !self.input.is_empty() {
+            return Some(KeyKind::DeleteForward);
+        }
+        if !idle {
+            return None;
+        }
+        self.next_quit_chord = Some("Ctrl+D");
+        Some(KeyKind::Interrupt)
+    }
+
+    /// The chord the armed quit hint names: the one that armed it.
+    pub fn quit_chord(&self) -> &'static str {
+        if self.quit_chord.is_empty() {
+            "Ctrl+C"
+        } else {
+            self.quit_chord
+        }
     }
 
     pub fn disarm_quit(&mut self) {
@@ -171,6 +200,33 @@ mod tests {
             crate::app::render::chrome::live_text(&app).contains("Ctrl+C again to quit"),
             "{}",
             crate::app::render::chrome::live_text(&app)
+        );
+    }
+
+    #[test]
+    fn ctrl_d_deletes_forward_with_text_and_quits_on_an_empty_prompt() {
+        let mut app = app_with("abc");
+        app.input_cursor = 1;
+        assert_eq!(app.ctrl_d(true, false), Some(KeyKind::DeleteForward));
+        let mut empty = app_with("");
+        assert_eq!(empty.ctrl_d(true, true), None, "an overlay swallows it");
+        assert_eq!(
+            empty.ctrl_d(false, false),
+            None,
+            "a running turn swallows it"
+        );
+        assert_eq!(empty.ctrl_d(true, false), Some(KeyKind::Interrupt));
+        let mut h = PromptHistory::new(vec![]);
+        assert_eq!(empty.idle_interrupt(&mut h), IdleInterrupt::Armed);
+        assert_eq!(empty.quit_chord(), "Ctrl+D");
+        assert!(crate::app::render::chrome::live_text(&empty).contains("Ctrl+D again to quit"));
+        assert_eq!(empty.ctrl_d(true, false), Some(KeyKind::Interrupt));
+        assert_eq!(empty.idle_interrupt(&mut h), IdleInterrupt::Quit);
+        assert_eq!(empty.idle_interrupt(&mut h), IdleInterrupt::Armed);
+        assert_eq!(
+            empty.quit_chord(),
+            "Ctrl+C",
+            "a plain Ctrl+C arm names Ctrl+C"
         );
     }
 }

@@ -182,6 +182,8 @@ mod text_policy;
 pub mod tokens;
 mod tool_dispatch;
 mod tool_output;
+mod user_shell;
+pub use user_shell::UserShellRun;
 pub mod wakeup;
 pub(crate) use tool_output::tool_detail;
 mod spend_guard;
@@ -5084,6 +5086,9 @@ mod tests {
 
     #[path = "security_floor.rs"]
     mod security_floor_tests;
+
+    #[path = "user_shell.rs"]
+    mod user_shell_tests;
 
     #[path = "worktree_scope.rs"]
     mod worktree_scope_tests;

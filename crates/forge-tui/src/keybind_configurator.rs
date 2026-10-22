@@ -105,7 +105,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let defaults = KeybindsConfig::default();
+    let defaults = KeybindsConfig::defaults_for(keybinds.preset);
     let mut working = keybinds.clone();
     let actions = all_actions();
     let mut selected: usize = 0;

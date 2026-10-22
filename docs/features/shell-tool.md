@@ -671,3 +671,12 @@ parallel calls for independent read-only probes, and a script file for long or r
 - Captured output over 1 MiB keeps the first half and the last half, so the final lines of a long run survive; the middle is marked as omitted.
 - RTK output rewriting only applies where a person reads the result. A pipeline into a data consumer (`wc`, `grep -c`, `sort`, ...), a redirect, or machine-readable `git status` flags (`--porcelain`, `-s`, `-z`) run unrewritten; `| tail` and `| head` still use RTK.
 - Contradictory arguments (`command` with `commands`, `background` with `poll_until_exit_zero` or `pty`) are errors, not silently resolved.
+
+## Commands you type (`!command`)
+
+A composer line that starts with `!` runs through this same tool without a model call or an
+approval prompt: the workspace, sandbox, timeout and output budget are the model's, and the
+structural safety floor (`sudo`/`su`/`pkexec`, catastrophic deletes) still refuses. The output joins
+the conversation as a user message and the model responds (`[tui] respond_to_bash`). See
+[tui-interaction.md](tui-interaction.md#shell-mode-command). Code: `Session::run_user_shell` in
+`crates/forge-core/src/user_shell.rs`.

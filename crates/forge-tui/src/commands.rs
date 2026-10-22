@@ -236,8 +236,12 @@ pub struct SlashToken {
 /// whitespace-delimited word; a word qualifies when it begins with exactly one `/` (a `//literal`
 /// escape is skipped). The token *under or just before* the cursor wins, so the palette tracks
 /// the word being edited; otherwise the last slash-token on the line is used. Returns `None` when
-/// no slash-command token is present.
+/// no slash-command token is present, and for a `!command` shell line, whose `/paths` are not
+/// commands.
 pub fn slash_token_at(input: &str, cursor: usize) -> Option<SlashToken> {
+    if crate::bang_command(input).is_some() {
+        return None;
+    }
     let mut best: Option<SlashToken> = None;
     let mut last: Option<SlashToken> = None;
     let mut chars = input.char_indices().peekable();
@@ -294,6 +298,10 @@ pub struct AtToken {
 /// is inside the token (cursor within [start, end]). Unlike the slash palette, there is no
 /// last-token fallback — the picker closes as soon as the cursor moves off the `@` word.
 pub fn at_token_at(input: &str, cursor: usize) -> Option<AtToken> {
+    // A `!command` goes to the shell verbatim; `@path` expansion only applies to prompts.
+    if crate::bang_command(input).is_some() {
+        return None;
+    }
     let mut chars = input.char_indices().peekable();
     while let Some(&(i, ch)) = chars.peek() {
         if ch.is_whitespace() {
