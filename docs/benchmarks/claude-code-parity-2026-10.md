@@ -7,6 +7,10 @@ tasks, one or two repeats), so read every difference together with its confidenc
 
 ## Summary
 
+**Errata (added 2026-10-22, after publication):** the Forge native (FD) arm read the operator's personal
+Forge configuration, and the suite c grader failed five correct answers. The numbers below stay as
+recorded; see [Errata](#errata) for the corrections and what they change.
+
 Nothing here shows Forge ahead of Claude Code with confidence, and nothing shows it far behind on
 the main task suite. On quality, Forge and Claude Code are level within noise on the 26 tasks of
 suites a+b+d for all three models: with DeepSeek V4.1 Flash Forge solved 18/26 and 17/26 against
@@ -739,13 +743,48 @@ In this repository:
 - Hidden tests, graders, reference solutions and the suite archives are not committed. The commitments in
   `tasks.json` and the table above are the way to check them later.
 
+## Errata
+
+Problems with the baseline that came to light after it was published. The tables above are left as
+recorded. The after-fix runs use a corrected kit (kit v2) and re-run every arm, Claude Code included,
+so before/after comparisons are made inside kit v2 only, never against these baseline numbers.
+
+1. **The Forge native arm used the operator's personal Forge configuration.** Runner v1 gave Forge arms
+   their own store (`FORGE_DB`) but not their own config directory. Every FD-deepseek run in suites a to d,
+   suite c, multi-turn and SWE-bench therefore read the operator's live `config.toml`. For the InferHub
+   provider, which FD used, that file sets a custom system-prompt override and a reasoning prefill, and it
+   also carries user MCP servers, a compaction cap and mesh settings. The FD numbers describe Forge with a
+   personal prompt, not Forge's shipped default prompt, so they say less about the harness than intended.
+   Kit v2 gives every Forge seed a private config, store and instruction file. One visible effect: task
+   b09, which only FD solved in the baseline (2 of 2), is solved 0 of 5 times by the same baseline binary
+   under kit v2, and 1 of 5 times with the override put back, so the baseline b09 result is not
+   reproducible and should not be read as a Forge advantage.
+2. **The suite c grader failed five correct answers.** It merged every `A<n>:` line of an answer and let
+   the last `key=value` win, so an explanatory note that repeated a label (the instruction allows notes
+   after the four answer lines) overwrote a correct answer; one exact match also rejected a qualified
+   name (`CliProvider::complete_oneshot` for `complete_oneshot`). Re-grading the recorded answers with a
+   grader that reads only the first block and accepts a qualified name changes 5 of 35 attempts from fail
+   to pass and none from pass to fail: FD c02 and c04, FB-sonnet c02, CC-haiku c04 and FB-haiku c04. All
+   negative examples still fail. Corrected suite c: DeepSeek, Claude Code 11/11 and Forge 9/11; Sonnet,
+   Claude Code 11/11 and Forge bridge 10/11; Haiku, both 11/11. The remaining Forge failures are Forge
+   defects: c06 (a panic after the work was done, fixed in #1607) and c08 (an edit request misread as a
+   read-only turn, fixed in #1603 and widened in #1623). The summary's remark about c02 and c04 and
+   compaction is superseded: both were grading errors.
+3. **The bridge arm's TUI and latency runs saw the operator's Claude Code settings.** Not part of the
+   published numbers, but recorded here because it explains a gap reported elsewhere: in the scripted TUI
+   harness the Claude Code arm ran with `--safe-mode` and an explicit low effort, while the bridged Claude Code
+   process loaded the operator's own settings (global instructions, high reasoning effort). Kit v2 gives every Claude-based
+   arm, Claude Code and the bridge alike, the same empty configuration directory, and the remaining
+   differences are listed in the kit's `CHANGES.md` (section 2.5).
+
 ## After fixes
 
 This section holds the later run sets. To add one: run the arms with the same kit on the new Forge
 build, convert the output with `ingest.py` (`abd` and `c` read the kit's `aggregate.py` summary), copy the
 multi-turn and SWE files in the same shapes, append an entry to `runs.json` with the Forge version and commit,
 and run `render.py`. The tables below compare the newest run set against the baseline for the Forge arms it
-contains, taking Claude Code reference arms from the baseline when the new run set omits them.
+contains, taking Claude Code reference arms from the baseline when the new run set omits them. A kit v2 run set
+must not omit them (see [Errata](#errata)).
 
 ### Suites a+b+d
 
