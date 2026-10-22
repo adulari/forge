@@ -208,6 +208,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/subagents [free|pinned]",
     },
     Command {
+        name: "agents",
+        desc: "list the subagent types spawn_agents can use — built-in explore/plan plus your agent files",
+        usage: "/agents",
+    },
+    Command {
         name: "remember",
         desc: "save a durable memory for this project",
         usage: "/remember <text>",

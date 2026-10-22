@@ -183,6 +183,7 @@ pub async fn run(
             tools: DUEL_TOOLS.iter().map(|s| s.to_string()).collect(),
             tier: Some(decision.tier),
             pinned_model: Some(model.clone()),
+            ..ResolvedAgent::default()
         };
         on_event(Lifecycle::Start {
             id: &child_id,

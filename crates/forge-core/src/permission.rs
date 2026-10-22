@@ -254,10 +254,10 @@ pub fn denying_rule<'a>(
 
 /// The model-facing refusal for a call a deny rule matched.
 pub fn rule_denial(tool_name: &str, rule: &PermissionRule) -> String {
-    let origin = if rule.source == RuleSource::Builtin {
-        "Forge's built-in"
-    } else {
-        "a configured"
+    let origin = match rule.source {
+        RuleSource::Builtin => "Forge's built-in",
+        RuleSource::Configured => "a configured",
+        RuleSource::Turn => "the invoked skill's",
     };
     let pattern = if rule.patterns.is_empty() {
         "(any arguments)".to_string()
@@ -435,7 +435,7 @@ pub(crate) fn is_read_only_shell_call(args: &Value) -> bool {
 }
 mod shell_commands;
 pub use auto::{accept_edits_risk, auto_risk, outside_workspace, AutoVerdict};
-pub(crate) use readonly_shell::{plan_shell_denial, PLAN_SHELL_NOTE};
+pub(crate) use readonly_shell::{is_read_only_shell, plan_shell_denial, PLAN_SHELL_NOTE};
 use shell_commands::effective_commands;
 
 /// Lexically normalized candidate forms of a path for matching secret-deny globs against:

@@ -14,7 +14,7 @@ use std::path::Path;
 use forge_config::AgentDef;
 use forge_provider::ToolSpec;
 use forge_tools::ToolRegistry;
-use forge_types::{SideEffect, TaskTier};
+use forge_types::{EffortLevel, PermissionMode, SideEffect, TaskTier};
 use serde_json::Value;
 
 use super::{SPAWN_AGENTS_TOOL, SUBAGENT_SYSTEM, SUBAGENT_TOOLS};
@@ -248,7 +248,7 @@ pub fn parse_requests(
 /// A request resolved against the loaded agent types — owned so it can move into a spawned
 /// task. A named agent supplies its system prompt / tool subset / pinned tier; an unknown or
 /// inline (`general`) agent falls back to the default read-only investigator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedAgent {
     pub name: String,
     pub task: String,
@@ -259,11 +259,84 @@ pub struct ResolvedAgent {
     /// each candidate MUST run the exact model the arena picked, not whatever the mesh would
     /// independently route the task to). `None` = route normally (the `tier` pin still applies).
     pub pinned_model: Option<String>,
+    /// Tools the agent type removes from its tool set (`disallowedTools`).
+    pub disallowed_tools: Vec<String>,
+    /// The temper the agent type asks for; applied only when stricter than the parent's
+    /// ([`narrowed_mode`]).
+    pub mode: Option<PermissionMode>,
+    /// The agent type's step cap (`maxTurns`), never above `[mesh] max_steps`.
+    pub max_turns: Option<usize>,
+    /// The reasoning rung for the child's model calls.
+    pub effort: Option<EffortLevel>,
+    /// `isolation: worktree`: isolate this child even when worktree isolation is off.
+    pub worktree: bool,
+    /// Skills to load into the child's system prompt ([`system_prompt_with_skills`]).
+    pub skills: Vec<String>,
+}
+
+/// The agent type `name` refers to: an exact match, else a case-insensitive one, so Claude Code's
+/// `Explore` and `Plan` find Forge's built-in `explore` and `plan`.
+pub fn find_agent<'a>(agents: &'a HashMap<String, AgentDef>, name: &str) -> Option<&'a AgentDef> {
+    agents.get(name).or_else(|| {
+        agents
+            .values()
+            .find(|def| def.name.eq_ignore_ascii_case(name))
+    })
+}
+
+/// The temper a child runs under: the agent type's mode when it is stricter than the parent's,
+/// else the parent's. An agent file never widens what a child may do unprompted.
+pub fn narrowed_mode(parent: PermissionMode, requested: Option<PermissionMode>) -> PermissionMode {
+    let rank = |mode: PermissionMode| match mode {
+        PermissionMode::Plan => 0,
+        PermissionMode::Default => 1,
+        PermissionMode::Auto | PermissionMode::AcceptEdits => 2,
+        PermissionMode::Bypass => 3,
+    };
+    match requested {
+        Some(mode) if rank(mode) < rank(parent) => mode,
+        _ => parent,
+    }
+}
+
+/// The tool names the child is offered: the agent's own list (or the read-only default) minus its
+/// `disallowedTools`. `spawn_agents` is never in it; recursion is offered separately.
+pub fn effective_tools(agent: &ResolvedAgent) -> Vec<&str> {
+    let base: Vec<&str> = if agent.tools.is_empty() {
+        SUBAGENT_TOOLS.to_vec()
+    } else {
+        agent.tools.iter().map(String::as_str).collect()
+    };
+    base.into_iter()
+        .filter(|t| *t != SPAWN_AGENTS_TOOL && !agent.disallowed_tools.iter().any(|d| d == t))
+        .collect()
+}
+
+/// The child's system prompt: the agent type's prompt followed by each of its `skills` (Claude
+/// Code's preloaded skills). A skill the model may not load (`disable-model-invocation`, or a
+/// project skill in an untrusted project) is skipped, as it would be for `use_skill`.
+pub fn system_prompt_with_skills(
+    agent: &ResolvedAgent,
+    repo_root: &Path,
+    allow_project: bool,
+) -> String {
+    let mut prompt = agent.system_prompt.clone();
+    if agent.skills.is_empty() {
+        return prompt;
+    }
+    let catalog = forge_skills::Catalog::load(&forge_config::command_sources_in(repo_root));
+    for name in &agent.skills {
+        match catalog.skill_guidance(name, allow_project) {
+            Some(guidance) => prompt.push_str(&format!("\n\n--- skill: {name} ---\n{guidance}")),
+            None => tracing::warn!("agent {}: skill '{name}' is not available", agent.name),
+        }
+    }
+    prompt
 }
 
 /// Resolve a parsed request against the loaded agent-type map (RFC subagent-orchestration Ph2).
 pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> ResolvedAgent {
-    match agents.get(&req.agent) {
+    match find_agent(agents, &req.agent) {
         Some(def) => ResolvedAgent {
             name: def.name.clone(),
             task: req.task.clone(),
@@ -275,27 +348,30 @@ pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> Resolv
             tools: def.tools.clone(),
             tier: def.tier,
             pinned_model: def.pinned_model.clone(),
+            disallowed_tools: def.disallowed_tools.clone(),
+            mode: def.permission_mode,
+            max_turns: def.max_turns,
+            effort: def.effort,
+            worktree: def.worktree,
+            skills: def.skills.clone(),
         },
         None => ResolvedAgent {
             name: req.agent.clone(),
             task: req.task.clone(),
             system_prompt: SUBAGENT_SYSTEM.to_string(),
-            tools: Vec::new(),
-            tier: None,
-            pinned_model: None,
+            ..ResolvedAgent::default()
         },
     }
 }
 
 /// Returns `true` when any of the agent's resolved tools is write- or shell-capable, meaning
 /// concurrent execution could corrupt the shared working tree.
+/// A child in `plan` mode cannot write whatever its tools are, so it needs no worktree.
 pub fn is_write_capable(agent: &ResolvedAgent, registry: &ToolRegistry) -> bool {
-    let tool_names: Vec<&str> = if agent.tools.is_empty() {
-        SUBAGENT_TOOLS.to_vec()
-    } else {
-        agent.tools.iter().map(String::as_str).collect()
-    };
-    tool_names.iter().any(|name| {
+    if agent.mode == Some(PermissionMode::Plan) {
+        return false;
+    }
+    effective_tools(agent).iter().any(|name| {
         registry
             .get(name)
             .map(|t| matches!(t.side_effect(), SideEffect::Write | SideEffect::Shell))
@@ -369,4 +445,109 @@ pub fn rewrite_args_for_root(args: &Value, root: &Path) -> Value {
     }
 
     Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agents() -> HashMap<String, AgentDef> {
+        forge_config::load_agents_layered(Path::new("/nonexistent-forge-root"), ".forge/agents")
+    }
+
+    #[test]
+    fn claude_code_type_names_find_the_builtins() {
+        let agents = agents();
+        let explore = resolve(
+            &AgentRequest {
+                agent: "Explore".into(),
+                task: "where is main".into(),
+            },
+            &agents,
+        );
+        assert_eq!(explore.name, "explore");
+        assert_eq!(explore.mode, Some(PermissionMode::Plan));
+        assert_eq!(explore.tier, Some(TaskTier::Trivial));
+        assert!(find_agent(&agents, "PLAN").is_some());
+        let general = resolve(
+            &AgentRequest {
+                agent: "general-purpose".into(),
+                task: "t".into(),
+            },
+            &agents,
+        );
+        assert_eq!(general.system_prompt, SUBAGENT_SYSTEM);
+        assert!(general.tools.is_empty());
+    }
+
+    #[test]
+    fn agent_modes_only_narrow() {
+        use PermissionMode::*;
+        assert_eq!(narrowed_mode(AcceptEdits, Some(Plan)), Plan);
+        assert_eq!(narrowed_mode(Bypass, Some(Default)), Default);
+        assert_eq!(narrowed_mode(Default, Some(Bypass)), Default);
+        assert_eq!(narrowed_mode(Auto, Some(AcceptEdits)), Auto);
+        assert_eq!(narrowed_mode(Plan, Some(Auto)), Plan);
+        assert_eq!(narrowed_mode(AcceptEdits, None), AcceptEdits);
+    }
+
+    #[test]
+    fn disallowed_tools_leave_the_tool_set() {
+        let mut agent = ResolvedAgent {
+            tools: vec!["read_file".into(), "shell".into(), SPAWN_AGENTS_TOOL.into()],
+            disallowed_tools: vec!["shell".into()],
+            ..ResolvedAgent::default()
+        };
+        assert_eq!(effective_tools(&agent), ["read_file"]);
+        agent.tools.clear();
+        agent.disallowed_tools = vec!["search".into()];
+        assert_eq!(effective_tools(&agent), ["read_file", "list_dir"]);
+    }
+
+    #[test]
+    fn plan_mode_agents_never_need_a_worktree() {
+        let registry = ToolRegistry::with_core_tools();
+        let mut agent = ResolvedAgent {
+            tools: vec!["write_file".into()],
+            ..ResolvedAgent::default()
+        };
+        assert!(is_write_capable(&agent, &registry));
+        agent.mode = Some(PermissionMode::Plan);
+        assert!(!is_write_capable(&agent, &registry));
+        agent.mode = None;
+        agent.disallowed_tools = vec!["write_file".into()];
+        assert!(!is_write_capable(&agent, &registry));
+    }
+
+    #[test]
+    fn resolve_carries_the_claude_code_fields() {
+        let mut agents = HashMap::new();
+        agents.insert(
+            "auditor".to_string(),
+            AgentDef {
+                name: "auditor".into(),
+                max_turns: Some(4),
+                effort: Some(EffortLevel::High),
+                worktree: true,
+                skills: vec!["no-such-skill-for-this-test".into()],
+                ..AgentDef::default()
+            },
+        );
+        let r = resolve(
+            &AgentRequest {
+                agent: "auditor".into(),
+                task: "t".into(),
+            },
+            &agents,
+        );
+        assert_eq!(r.max_turns, Some(4));
+        assert_eq!(r.effort, Some(EffortLevel::High));
+        assert!(r.worktree);
+        assert_eq!(r.skills, ["no-such-skill-for-this-test"]);
+        // An unknown skill is skipped: the prompt is the agent's own, unchanged.
+        assert_eq!(
+            system_prompt_with_skills(&r, Path::new("/nonexistent-forge-root"), false),
+            r.system_prompt
+        );
+    }
 }

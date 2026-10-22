@@ -13,24 +13,28 @@
 //! ```
 //!
 //! Claude Code agent files (`.claude/agents/*.md`) load unchanged: `tools: Read, Grep, Bash` is a
-//! bare comma list of Claude tool names, which [`map_tool_name`] translates to Forge's.
-//! [`load_agents_layered`] merges `~/.claude/agents`, `~/.forge/agents`, the project's
-//! `.claude/agents` and the project's configured `agents_dir`, later layers overriding earlier
-//! ones by name. The project layers repeat for each parent up to the repository top
-//! ([`crate::project_resource_dirs`]), farthest first, so a session in `repo/pkg/` sees
-//! `repo/.forge/agents` and `pkg`'s own definitions override the repository's.
+//! bare comma list of Claude tool names, which [`map_tool_name`] translates to Forge's. The rest of
+//! Claude Code's agent frontmatter is read too: `disallowedTools`, `permissionMode`, `maxTurns`,
+//! `skills`, `mcpServers`, `effort`, `isolation` and `color` (see [`AgentDef`] for what each does
+//! here). [`load_agents_layered`] starts from Forge's built-in `explore` and `plan` agents, then
+//! merges `~/.claude/agents`, `~/.forge/agents`, the project's `.claude/agents` and the project's
+//! configured `agents_dir`, later layers overriding earlier ones by name. The project layers repeat
+//! for each parent up to the repository top ([`crate::project_resource_dirs`]), farthest first, so a
+//! session in `repo/pkg/` sees `repo/.forge/agents` and `pkg`'s own definitions override the
+//! repository's.
 //!
-//! Parsing is dependency-free (a tiny front-matter reader, not full YAML) so a malformed file
-//! degrades to being skipped rather than failing the whole load.
+//! The front matter goes through the lenient reader `forge_skills::frontmatter` (YAML lists, folded
+//! scalars), so a malformed file degrades to being skipped rather than failing the whole load.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use forge_types::TaskTier;
+use forge_skills::frontmatter::{self, Frontmatter};
+use forge_types::{EffortLevel, PermissionMode, TaskTier};
 
 /// A reusable subagent type. The `system_prompt` is the file body; `tools`/`tier` are optional
 /// overrides resolved by the orchestrator (empty `tools` → the default read-only set).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentDef {
     pub name: String,
     pub description: String,
@@ -41,6 +45,28 @@ pub struct AgentDef {
     /// the default.
     pub pinned_model: Option<String>,
     pub system_prompt: String,
+    /// `disallowedTools`: removed from the child's tool set, including from the default one.
+    pub disallowed_tools: Vec<String>,
+    /// `permissionMode`. A child can only be made stricter than its parent session: `plan` or
+    /// `default` narrow it, a wider mode is ignored (a cloned repo's agent file must not widen
+    /// what Forge lets a child do without asking).
+    pub permission_mode: Option<PermissionMode>,
+    /// `maxTurns`: the child's model-step cap, never above `[mesh] max_steps`.
+    pub max_turns: Option<usize>,
+    /// `skills`: skills whose methodology is loaded into the child's system prompt.
+    pub skills: Vec<String>,
+    /// `mcpServers`: the MCP servers the agent asks for, by name. Listed by `/agents`; children
+    /// have no MCP tool surface yet, so they are not connected.
+    pub mcp_servers: Vec<String>,
+    /// `effort`: the reasoning rung sent with the child's model calls.
+    pub effort: Option<EffortLevel>,
+    /// `isolation: worktree`: run the child in its own git worktree even when
+    /// `[mesh.subagents] worktree_isolation` is off.
+    pub worktree: bool,
+    /// `color`: the agent's display colour (shown by `/agents`).
+    pub color: Option<String>,
+    /// The file the definition came from; `None` for a built-in agent.
+    pub path: Option<PathBuf>,
 }
 
 /// Merge every agent-definition directory a user might keep, lowest precedence first:
@@ -55,7 +81,12 @@ pub fn load_agents_layered(project_root: &Path, agents_dir: &str) -> HashMap<Str
         &crate::project_resource_dirs(project_root),
         agents_dir,
     );
-    let mut out = HashMap::new();
+    merge_layers(dirs)
+}
+
+/// The built-in agents overlaid by each directory in order, later ones winning by name.
+fn merge_layers(dirs: Vec<PathBuf>) -> HashMap<String, AgentDef> {
+    let mut out = crate::agent_builtins::builtin_agents();
     for dir in dirs {
         out.extend(load_agents(&dir));
     }
@@ -157,7 +188,8 @@ pub fn load_agents(dir: &Path) -> HashMap<String, AgentDef> {
             .and_then(|s| s.to_str())
             .unwrap_or("agent")
             .to_string();
-        if let Some(def) = parse_agent(&text, &stem) {
+        if let Some(mut def) = parse_agent(&text, &stem) {
+            def.path = Some(path.clone());
             out.insert(def.name.clone(), def);
         }
     }
@@ -170,38 +202,106 @@ pub fn parse_agent(text: &str, default_name: &str) -> Option<AgentDef> {
     let rest = text.strip_prefix("---")?;
     // Split on the closing fence; everything after it is the system prompt body.
     let (front, body) = split_front_matter(rest)?;
-
-    let mut name = default_name.to_string();
-    let mut description = String::new();
-    let mut tools = Vec::new();
-    let mut tier = None;
-    let mut model = None;
-
-    for line in front.lines() {
-        let line = line.trim();
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        match key.trim() {
-            "name" if !value.is_empty() => name = unquote(value),
-            "description" => description = unquote(value),
-            "tools" => tools = parse_list(value),
-            "tier" => tier = parse_tier(value),
-            "model" => model = Some(unquote(value)),
-            _ => {}
-        }
-    }
-
-    let (model_tier, pinned_model) = parse_model(model.as_deref().unwrap_or(""));
+    let fm = lenient_frontmatter(front);
+    let (model_tier, pinned_model) = parse_model(&fm.scalar("model").unwrap_or_default());
+    let tools = |keys: &[&str]| -> Vec<String> {
+        keys.iter()
+            .flat_map(|k| fm.tool_list(k))
+            .filter_map(|t| map_tool_name(&t))
+            .collect()
+    };
     Some(AgentDef {
-        name,
-        description,
-        tools: tools.iter().filter_map(|t| map_tool_name(t)).collect(),
-        tier: tier.or(model_tier),
+        name: fm
+            .scalar("name")
+            .unwrap_or_else(|| default_name.to_string()),
+        description: fm.scalar("description").unwrap_or_default(),
+        tools: tools(&["tools"]),
+        tier: fm
+            .scalar("tier")
+            .and_then(|t| parse_tier(&t))
+            .or(model_tier),
         pinned_model,
         system_prompt: body.trim().to_string(),
+        disallowed_tools: tools(&["disallowedtools", "disallowed-tools", "disallowed_tools"]),
+        permission_mode: first_scalar(&fm, &["permissionmode", "permission-mode"])
+            .and_then(|m| parse_permission_mode(&m)),
+        max_turns: first_scalar(&fm, &["maxturns", "max-turns", "max_turns"])
+            .and_then(|n| n.trim().parse().ok())
+            .filter(|n| *n > 0),
+        skills: names(&fm, "skills"),
+        mcp_servers: first_list(&fm, &["mcpservers", "mcp-servers", "mcp_servers"]),
+        effort: fm.scalar("effort").and_then(|e| parse_effort(&e)),
+        worktree: fm
+            .scalar("isolation")
+            .is_some_and(|i| i.trim().eq_ignore_ascii_case("worktree")),
+        color: fm.scalar("color"),
+        path: None,
     })
+}
+
+/// Parse front matter, dropping unindented lines that are not `key: value` (the reader rejects
+/// them, and an agent file has always tolerated stray lines) and YAML ` # comments`.
+fn lenient_frontmatter(front: &str) -> Frontmatter {
+    let kept: String = front
+        .lines()
+        .map(|line| match line.find(" #") {
+            Some(i) => &line[..i],
+            None => line,
+        })
+        .filter(|line| {
+            let t = line.trim();
+            t.is_empty()
+                || t.starts_with('#')
+                || t.starts_with('-')
+                || line.starts_with([' ', '\t'])
+                || t.contains(':')
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    frontmatter::parse(&kept).unwrap_or_default()
+}
+
+fn first_scalar(fm: &Frontmatter, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| fm.scalar(k))
+}
+
+fn first_list(fm: &Frontmatter, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .map(|k| names(fm, k))
+        .find(|v| !v.is_empty())
+        .unwrap_or_default()
+}
+
+/// A list of plain names (`skills`, `mcpServers`), accepting a YAML list or a comma/space
+/// separated string. Inline server definitions (`name: {...}`) contribute just their name.
+fn names(fm: &Frontmatter, key: &str) -> Vec<String> {
+    fm.tool_list(key)
+        .into_iter()
+        .map(|n| n.split(':').next().unwrap_or("").trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// Claude Code's `permissionMode` values (and Forge's own keys) onto Forge's modes. `dontAsk`
+/// is Forge's default for a child: it has no one to ask, so an `ask` already resolves to deny.
+pub fn parse_permission_mode(value: &str) -> Option<PermissionMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "plan" => Some(PermissionMode::Plan),
+        "default" | "dontask" | "dont-ask" | "ask" => Some(PermissionMode::Default),
+        "acceptedits" | "accept-edits" | "auto-edit" => Some(PermissionMode::AcceptEdits),
+        "auto" => Some(PermissionMode::Auto),
+        "bypasspermissions" | "bypass" | "full" => Some(PermissionMode::Bypass),
+        _ => None,
+    }
+}
+
+/// Claude Code's effort names. `max` is Forge's highest provider rung, `xhigh`: Forge's
+/// `whitehot` adds workflow orchestration guidance an agent file never asked for.
+pub fn parse_effort(value: &str) -> Option<EffortLevel> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "max" => Some(EffortLevel::XHigh),
+        other => EffortLevel::parse(other),
+    }
 }
 
 /// Split `---`-prefixed-stripped text into (front_matter, body) on the next `---` line.
@@ -227,21 +327,9 @@ fn unquote(s: &str) -> String {
         .to_string()
 }
 
-/// Parse `[a, b, c]` or a bare comma list into items.
-fn parse_list(value: &str) -> Vec<String> {
-    value
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(',')
-        .map(unquote)
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// `model:` → (tier, pin). Claude's aliases choose a tier; `provider::model` pins; anything else
 /// (`inherit`, a bare Anthropic id Forge cannot route) leaves the child to the mesh.
-fn parse_model(value: &str) -> (Option<TaskTier>, Option<String>) {
+pub fn parse_model(value: &str) -> (Option<TaskTier>, Option<String>) {
     let v = value.trim();
     if v.contains("::") {
         return (None, Some(v.to_string()));
@@ -286,6 +374,79 @@ mod tests {
         assert!(def.tools.is_empty()); // → default read-only set, decided in core
         assert_eq!(def.tier, None); // → mesh-routed
         assert_eq!(def.system_prompt, "Do the thing.");
+    }
+
+    #[test]
+    fn claude_code_agent_fields_parse() {
+        let text = concat!(
+            "---\n",
+            "name: auditor\n",
+            "description: Audits code\n",
+            "tools:\n  - Read\n  - Bash\n",
+            "disallowedTools: Write, Edit\n",
+            "permissionMode: plan\n",
+            "maxTurns: 7\n",
+            "skills:\n  - honest-review\n  - rust\n",
+            "mcpServers:\n  - github\n",
+            "effort: max\n",
+            "isolation: worktree\n",
+            "color: purple\n",
+            "---\nAudit.",
+        );
+        let def = parse_agent(text, "f").unwrap();
+        assert_eq!(def.tools, ["read_file", "shell"]);
+        assert_eq!(def.disallowed_tools, ["write_file", "edit_file"]);
+        assert_eq!(def.permission_mode, Some(PermissionMode::Plan));
+        assert_eq!(def.max_turns, Some(7));
+        assert_eq!(def.skills, ["honest-review", "rust"]);
+        assert_eq!(def.mcp_servers, ["github"]);
+        assert_eq!(def.effort, Some(EffortLevel::XHigh));
+        assert!(def.worktree);
+        assert_eq!(def.color.as_deref(), Some("purple"));
+    }
+
+    #[test]
+    fn permission_modes_and_stray_lines_and_comments() {
+        for (raw, want) in [
+            ("dontAsk", PermissionMode::Default),
+            ("acceptEdits", PermissionMode::AcceptEdits),
+            ("bypassPermissions", PermissionMode::Bypass),
+            ("auto", PermissionMode::Auto),
+        ] {
+            assert_eq!(parse_permission_mode(raw), Some(want), "{raw}");
+        }
+        assert_eq!(parse_permission_mode("sometimes"), None);
+        let text = "---\nname: x\nthis line has no colon\ntools: [read_file, search]   # comment\nmaxTurns: 0\n---\nbody";
+        let def = parse_agent(text, "x").unwrap();
+        assert_eq!(def.tools, ["read_file", "search"]);
+        assert_eq!(def.max_turns, None, "zero turns is not a cap");
+    }
+
+    #[test]
+    fn layered_load_starts_from_builtins_and_records_paths() {
+        let tmp = std::env::temp_dir().join(format!("forge-agents-b-{}", std::process::id()));
+        let dir = tmp.join(".forge/agents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plan.md"), "---\ndescription: mine\n---\nMy plan.").unwrap();
+        let agents = merge_layers(layer_dirs(
+            None,
+            None,
+            std::slice::from_ref(&tmp),
+            ".forge/agents",
+        ));
+        assert!(
+            agents["explore"].path.is_none(),
+            "builtin explore is present"
+        );
+        assert_eq!(
+            agents["plan"].description, "mine",
+            "a file overrides a builtin"
+        );
+        assert_eq!(
+            agents["plan"].path.as_deref(),
+            Some(dir.join("plan.md").as_path())
+        );
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -413,9 +574,7 @@ mod tests {
                     name: name.into(),
                     description: desc.into(),
                     tools,
-                    tier: None,
-                    pinned_model: None,
-                    system_prompt: String::new(),
+                    ..AgentDef::default()
                 },
             );
         }

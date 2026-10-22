@@ -5,6 +5,15 @@
 use super::*;
 
 impl Session {
+    /// The subagent types this session's `spawn_agents` can use: Forge's built-ins overlaid by the
+    /// user's and the project's agent files (`/agents` lists them).
+    pub fn agent_types(&self) -> std::collections::HashMap<String, forge_config::AgentDef> {
+        forge_config::load_agents_layered(
+            self.workspace.root(),
+            &self.config.mesh.subagents.agents_dir,
+        )
+    }
+
     /// Handle a `spawn_agents` call: resolve each requested child against the loaded agent
     /// types, then run them **concurrently** (bounded by `max_concurrency`), each in its own
     /// mesh-routed, persisted child session. Children run on tokio tasks (they share the

@@ -121,6 +121,7 @@ fn read_only_agent_is_not_write_capable() {
         tools: Vec::new(),
         tier: None,
         pinned_model: None,
+        ..Default::default()
     };
     assert!(
         !forge_core::subagent::is_write_capable(&read_only, &registry),
@@ -135,6 +136,7 @@ fn read_only_agent_is_not_write_capable() {
         tools: vec!["write_file".into()],
         tier: None,
         pinned_model: None,
+        ..Default::default()
     };
     assert!(
         forge_core::subagent::is_write_capable(&writer, &registry),

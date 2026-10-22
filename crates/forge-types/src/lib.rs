@@ -849,6 +849,9 @@ pub enum RuleSource {
     Builtin,
     /// From a user or project `config.toml`.
     Configured,
+    /// Granted by an invoked skill or command (`allowed-tools` / `disallowed-tools`) for the
+    /// current turn only; cleared when the next turn starts.
+    Turn,
 }
 
 /// One fine-grained allow/ask/deny rule (FR-10), matching a tool call by name + argument

@@ -900,3 +900,5 @@ fn a_user_rust_skill_overrides_the_builtin() {
     let g = cat.skill_guidance("rust-best-practices", true).unwrap();
     assert!(g.contains("MY CUSTOM RUST BODY"), "user body loaded: {g}");
 }
+
+mod claude_frontmatter;

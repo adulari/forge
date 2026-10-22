@@ -307,8 +307,9 @@ to empty; unmatched **required** tokens are caught at resolve time → `MissingA
 The readers must parse, without modification, the owner's existing files:
 
 - `~/.claude/commands/*.md` — same `---`-fenced YAML + body shape; CC's `$ARGUMENTS`,
-  `$1..$9` are honoured identically; CC frontmatter keys we don't use (`allowed-tools`,
-  `model`) are read leniently (kept where they map: `model`; ignored otherwise).
+  `$1..$9` are honoured identically; CC's invocation frontmatter is consumed (see
+  [Claude Code invocation frontmatter](#claude-code-invocation-frontmatter)); keys with no Forge
+  meaning (`hooks`, `shell`) are read leniently and ignored.
 - `~/.claude/skills/<name>/SKILL.md` — `name` + `description` frontmatter, markdown body,
   sibling resource files. CC's bundled scripts are **not** executed (non-goal); they're
   ignored or, if referenced, loaded as text.
@@ -317,6 +318,41 @@ The readers must parse, without modification, the owner's existing files:
 
 The **import/migration layer** (separate spec) uses these readers to translate CC assets
 into Forge scopes; nothing here writes to `~/.claude`.
+
+### Claude Code invocation frontmatter
+
+Commands and skills read these keys (`forge_skills::Invocation`), so an imported Claude Code
+definition behaves as it did there:
+
+| key | effect |
+| --- | --- |
+| `allowed-tools` | allow rules for the invoking turn only (`Bash(git log:*)`, `Read`, `Edit(src/**)`, `mcp__x__y`); a configured deny, the safety floor and `plan` mode still win, and a configured `ask` of equal specificity still prompts. Dropped for a project-scope definition in an untrusted project |
+| `disallowed-tools` | deny rules for the turn; a bare tool name also leaves it out of the tools the model sees |
+| `disable-model-invocation: true` | the skill is not in the model's `use_skill` listing and `use_skill` refuses it; `/name` still works |
+| `user-invocable: false` | the skill or command is not in the `/` palette and typing `/name` is refused; the model can still load a skill |
+| `argument-hint` | shown next to the name in the palette (else `<a> [b]` from the declared args) |
+| `arguments` | names for positional arguments, `$name` |
+| `context: fork` + `agent` | the invocation runs as one subagent of that type (default `general-purpose`); its text and the `model:` go to the subagent, the session keeps the typed line and the answer |
+| `paths` | listed next to the skill in `use_skill`, so the model loads it for matching files |
+| `effort` | the reasoning rung for the invoking turn (`low` … `max`) |
+
+A grant lasts for one turn: it is queued when the line is dispatched, installed when the turn
+starts, and removed when the turn ends (or at the start of the next one, if the turn was
+interrupted). A skill the model loads with `use_skill` grants for the rest of that turn.
+
+Template substitutions: `$ARGUMENTS`, `$ARGUMENTS[N]` (0-based), `$0`…`$9`, `$name`,
+`${CLAUDE_SKILL_DIR}`, `${CLAUDE_SESSION_ID}`, `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_EFFORT}`
+(`${FORGE_*}` spellings too). Arguments split shell-style, so `"hello world" two` is two. Forge's
+own `$1` is the first argument; a body that uses `$0` or `$ARGUMENTS[N]` is read as 0-based, so
+there `$0` is the first. `\$1.00` stays literal.
+
+Dynamic context: ``!`cmd` `` (at the start of a line or after whitespace) and fenced ` ```! `
+blocks run before the model sees the text, and their output replaces them. They run only in a
+trusted project (`forge trust`; otherwise a note replaces each), only when the safety floor and deny
+rules allow them, and only when a rule allows them (the skill's own `allowed-tools` count), the
+temper allows them, or they are read-only (`git status`). A command that would need approval aborts
+the invocation with a hint, as does a command that fails (exit 1 from `grep`, `rg`, `diff` is a
+normal "no match"). Output is inserted once and never scanned again.
 
 ### Dispatch flow into `run_turn`
 
