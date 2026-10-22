@@ -89,6 +89,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 usage_json,
                 print: claude.print,
                 verbose: claude.verbose,
+                quiet: claude.quiet,
                 partial_messages: claude.include_partial_messages,
                 stream_input: claude.input_format == Some(InputFormat::StreamJson),
                 never_ask: session.permission_mode
