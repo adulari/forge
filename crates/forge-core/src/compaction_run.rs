@@ -225,6 +225,7 @@ impl Session {
         let kept_tail = self.transcript.len() - split;
         compacted.extend(self.transcript.split_off(split));
         self.transcript = compacted;
+        self.note_transcript_folded(split);
         // The summarised blocks are gone, so the next edit to a file reports from scratch.
         self.lsp_baselines.clear();
 

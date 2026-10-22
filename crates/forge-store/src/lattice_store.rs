@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Files one lattice delete transaction removes. Each takes its symbols, edges and references
+/// with it (a source file of this repository averages ~180 rows), so a chunk is a few thousand
+/// rows: a few milliseconds of write lock.
+const LATTICE_DELETE_CHUNK: usize = 16;
+
+/// Pause between the transactions of a bulk lattice write (deletes, PageRank batches), so writers
+/// waiting on the lock get it.
+const LATTICE_WRITE_YIELD: std::time::Duration = std::time::Duration::from_millis(2);
+
 impl Store {
     /// The stored content hash for a file, or `None` if it hasn't been indexed — the
     /// incremental-update gate (skip files whose hash is unchanged).
@@ -209,18 +218,16 @@ impl Store {
     /// `ON DELETE CASCADE`, all of its symbols/edges/refs. Called after a full `update` walk to
     /// purge files that were removed or are now skipped (deleted files, nested git repos / vendored
     /// trees), so stale symbols don't linger in queries or bloat the store. Returns the count pruned.
+    /// Deleted in [`LATTICE_DELETE_CHUNK`]-file transactions, see [`Store::delete_lattice_files`].
     pub fn prune_lattice_files_except(
         &self,
         repo_root: &str,
         keep: &std::collections::HashSet<String>,
     ) -> Result<usize> {
-        let mut conn = self.lock()?;
-        // IMMEDIATE: SELECTs then DELETEs — a DEFERRED read snapshot could fail to upgrade with
-        // SQLITE_BUSY_SNAPSHOT if the indexer committed concurrently.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let stale: Vec<String> = {
+            let conn = self.lock()?;
             let mut stmt =
-                tx.prepare("SELECT id, rel_path FROM lattice_file WHERE repo_root = ?1")?;
+                conn.prepare("SELECT id, rel_path FROM lattice_file WHERE repo_root = ?1")?;
             let rows = stmt.query_map([repo_root], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
             })?;
@@ -237,11 +244,35 @@ impl Store {
             }
             stale
         };
-        for id in &stale {
-            tx.execute("DELETE FROM lattice_file WHERE id = ?1", (id,))?;
+        self.delete_lattice_files(&stale)
+    }
+
+    /// Delete the lattice files `ids` (cascading to their symbols/edges/refs), a few per
+    /// transaction with a pause between them.
+    ///
+    /// One statement used to delete a whole root: for a 390k-line repository that is ~160k rows
+    /// across four indexed tables, which held the single WAL writer for seconds — and for much
+    /// longer on a loaded machine — while the session opening beside it waited to write its first
+    /// row. Small transactions with a gap let every other writer in between.
+    fn delete_lattice_files(&self, ids: &[String]) -> Result<usize> {
+        let mut removed = 0;
+        for chunk in ids.chunks(LATTICE_DELETE_CHUNK) {
+            removed += with_busy_retry(|| {
+                let mut conn = self.lock()?;
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let mut n = 0;
+                {
+                    let mut stmt = tx.prepare("DELETE FROM lattice_file WHERE id = ?1")?;
+                    for id in chunk {
+                        n += stmt.execute([id])?;
+                    }
+                }
+                tx.commit()?;
+                Ok(n)
+            })?;
+            std::thread::sleep(LATTICE_WRITE_YIELD);
         }
-        tx.commit()?;
-        Ok(stale.len())
+        Ok(removed)
     }
 
     /// Every distinct `repo_root` with indexed files. The store is global (shared across projects
@@ -258,9 +289,19 @@ impl Store {
 
     /// Delete every indexed file under `repo_root` (cascading to its symbols/edges/refs). Used to
     /// drop an orphan root whose directory no longer exists on disk. Returns the count removed.
+    /// Chunked like [`Store::prune_lattice_files_except`].
     pub fn prune_lattice_repo(&self, repo_root: &str) -> Result<usize> {
+        let ids = self.lattice_file_ids(repo_root)?;
+        self.delete_lattice_files(&ids)
+    }
+
+    fn lattice_file_ids(&self, repo_root: &str) -> Result<Vec<String>> {
         let conn = self.lock()?;
-        Ok(conn.execute("DELETE FROM lattice_file WHERE repo_root = ?1", [repo_root])?)
+        let mut stmt = conn.prepare("SELECT id FROM lattice_file WHERE repo_root = ?1")?;
+        let ids = stmt
+            .query_map([repo_root], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
     }
 
     /// Delete a single indexed file's row (cascading to its symbols/edges/refs). Called by the file
@@ -484,6 +525,7 @@ impl Store {
                 tx.commit()?;
                 Ok(())
             })?;
+            std::thread::sleep(LATTICE_WRITE_YIELD);
         }
         Ok(())
     }
@@ -492,6 +534,85 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn index_files(store: &Store, root: &str, files: usize) {
+        for f in 0..files {
+            let file_id = format!("{root}\0src/f{f}.rs");
+            let nodes: Vec<LatticeNodeRow> = (0..3)
+                .map(|n| LatticeNodeRow {
+                    id: format!("{file_id}::n{n}"),
+                    file_id: file_id.clone(),
+                    kind: "function".into(),
+                    name: format!("n{n}"),
+                    qualname: None,
+                    signature: None,
+                    span_start: 0,
+                    span_end: 1,
+                    line_start: 1,
+                    pagerank: 0.0,
+                })
+                .collect();
+            let refs: Vec<LatticeRefRow> = nodes
+                .iter()
+                .map(|n| LatticeRefRow {
+                    id: format!("{}::r", n.id),
+                    src_id: n.id.clone(),
+                    name: "callee".into(),
+                    kind: "calls".into(),
+                    line: 1,
+                })
+                .collect();
+            let file = LatticeFileRow {
+                id: file_id.clone(),
+                repo_root: root.into(),
+                rel_path: format!("src/f{f}.rs"),
+                lang: "rust".into(),
+                content_hash: "h".into(),
+                parse_status: "ok".into(),
+            };
+            store
+                .replace_lattice_file(&file, &nodes, &[], &refs)
+                .unwrap();
+        }
+    }
+
+    fn rows(store: &Store, table: &str) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_root_spanning_many_delete_chunks_is_pruned_completely_and_alone() {
+        let store = Store::open_in_memory().unwrap();
+        index_files(&store, "/gone", LATTICE_DELETE_CHUNK * 3 + 5);
+        index_files(&store, "/kept", 2);
+        assert_eq!(
+            store.prune_lattice_repo("/gone").unwrap(),
+            LATTICE_DELETE_CHUNK * 3 + 5
+        );
+        assert_eq!(rows(&store, "lattice_file"), 2);
+        assert_eq!(rows(&store, "lattice_node"), 6);
+        assert_eq!(
+            rows(&store, "lattice_ref"),
+            6,
+            "children cascade with their files"
+        );
+    }
+
+    #[test]
+    fn pruning_all_but_the_walked_files_spans_chunks_too() {
+        let store = Store::open_in_memory().unwrap();
+        index_files(&store, "/repo", LATTICE_DELETE_CHUNK * 2 + 1);
+        let keep: std::collections::HashSet<String> = ["src/f0.rs".to_string()].into();
+        assert_eq!(
+            store.prune_lattice_files_except("/repo", &keep).unwrap(),
+            LATTICE_DELETE_CHUNK * 2
+        );
+        assert_eq!(rows(&store, "lattice_file"), 1);
+    }
 
     #[test]
     fn prune_lattice_files_reports_malformed_rows() {

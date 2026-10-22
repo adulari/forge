@@ -67,6 +67,20 @@ directory is gone. It never touches a root that still exists — `forge lattice 
 `forge worktree reclaim` remain the tools for those — and the file only shrinks after
 `forge lattice prune --stale --vacuum`.
 
+**Pruning never holds the store for long.** A root used to be deleted in one statement: for a
+390k-line repository that is ~160k rows across four indexed tables, 1.8 s of the single SQLite
+write lock on an idle machine and far longer on a loaded one, while the session opening beside it
+waited to write its first row. Several bench tasks or sessions sharing one store then failed with
+`starting session: database is locked`. Root and stale-file prunes now delete 16 files per
+transaction with a 2 ms pause between transactions, PageRank batches pause the same way, and an
+`update` whose root disappears mid-walk (a finished task's tempdir) stops instead of issuing one
+missing-file delete per remaining file (`index_candidates`, `crates/forge-index/src/lib.rs`;
+`delete_lattice_files`, `crates/forge-store/src/lattice_store.rs`). The store's connections wait
+for the write lock with millisecond polls for up to 30 s (`crates/forge-store/src/busy.rs`):
+SQLite's stock handler polls every 100 ms, which a writer committing in a loop starved for its
+whole 5 s timeout in 4 of 5 trials, against 5 of 5 lock acquisitions in under 5 s with the
+short polls.
+
 ## Parser budget and large generated files
 
 The indexer applies a hard **8 MiB per-source-file parser budget** before reading a file. A
