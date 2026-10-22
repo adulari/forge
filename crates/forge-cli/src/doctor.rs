@@ -24,7 +24,7 @@ pub(crate) enum Status {
 }
 
 impl Status {
-    fn glyph(self) -> &'static str {
+    pub(crate) fn glyph(self) -> &'static str {
         match self {
             Status::Ok => "✓",
             Status::Warn => "⚠",
@@ -209,7 +209,7 @@ fn resolve_store_path(
     data_dir.map(|dir| dir.join("forge.db"))
 }
 
-fn store_checks() -> Vec<Check> {
+pub(crate) fn store_checks() -> Vec<Check> {
     let Some(path) = doctor_store_path() else {
         return vec![check(
             Status::Warn,
@@ -310,7 +310,7 @@ fn store_check_at(path: &std::path::Path) -> Check {
     }
 }
 
-fn config_checks() -> Vec<Check> {
+pub(crate) fn config_checks() -> Vec<Check> {
     let mut out = Vec::new();
     match forge_config::load() {
         Ok(_) => out.push(check(Status::Ok, "config", "loads cleanly", None)),
@@ -383,7 +383,7 @@ pub(crate) fn provider_credentials_present() -> bool {
 }
 
 /// Provider checks + whether at least one routable provider exists.
-fn provider_checks() -> (Vec<Check>, bool) {
+pub(crate) fn provider_checks() -> (Vec<Check>, bool) {
     let mut out = Vec::new();
     let mut usable = false;
 
@@ -435,7 +435,7 @@ fn provider_checks() -> (Vec<Check>, bool) {
     (out, usable)
 }
 
-fn ollama_checks() -> Vec<Check> {
+pub(crate) fn ollama_checks() -> Vec<Check> {
     let mut out = Vec::new();
     match local::ollama_version() {
         Some(v) => out.push(check(Status::Ok, "ollama", v, None)),
@@ -502,7 +502,7 @@ pub(crate) fn short(s: &str) -> String {
 /// Not installed is `Info`, not a failure: the daemon is opt-in and plenty of people never run it.
 /// What matters is an installed daemon that is NOT serving, and the state word distinguishes the
 /// cases that need different fixes (`failed` vs a restart loop vs simply stopped).
-async fn daemon_checks() -> Vec<Check> {
+pub(crate) async fn daemon_checks() -> Vec<Check> {
     let status = match crate::cli::commands::service::query_service_status() {
         Ok(s) => s,
         // A missing/unavailable service manager is not a Forge fault — report and move on.

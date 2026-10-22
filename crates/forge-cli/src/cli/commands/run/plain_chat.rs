@@ -9,6 +9,7 @@ pub(crate) async fn chat(
     plain: bool,
     fullscreen: bool,
     pin: Option<String>,
+    mut first_prompt: Option<String>,
 ) -> Result<()> {
     maybe_first_run_setup(mock)?;
     maybe_autostart_local();
@@ -18,7 +19,7 @@ pub(crate) async fn chat(
         // Update check happens in background inside run_chat_tui (via the UiMsg channel) so it
         // never delays TUI startup. The check has a 3s network timeout — blocking here would
         // freeze the terminal for up to 3s once per day.
-        let ran = run_chat_tui(mock, mode, resume_mode, fullscreen, pin).await;
+        let ran = run_chat_tui(mock, mode, resume_mode, fullscreen, pin, first_prompt).await;
         return match super::super::switch::take_requested() {
             Some(id) if ran.is_ok() => {
                 super::super::switch::switch_forge_session_to_claude(&id).await
@@ -53,7 +54,8 @@ pub(crate) async fn chat(
         );
     }
     session.fire_session_start(None).await;
-    while let Some(line) = session.read_line() {
+    // `forge chat "prompt"`: the first message comes from the command line, then stdin takes over.
+    while let Some(line) = first_prompt.take().or_else(|| session.read_line()) {
         match chat_action(&line) {
             ChatAction::Quit => break,
             ChatAction::Skip => continue,

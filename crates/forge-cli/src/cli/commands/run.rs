@@ -181,6 +181,7 @@ mod heartbeat_cmd;
 mod mesh_overlay;
 mod model_switch;
 mod refine_cmd;
+mod slash_commands;
 pub(crate) use dispatch::*;
 pub(crate) mod driver;
 pub(crate) use driver::*;
@@ -472,6 +473,7 @@ pub(crate) async fn run_chat_tui(
     resume_mode: ResumeMode,
     fullscreen: bool,
     pin: Option<String>,
+    first_prompt: Option<String>,
 ) -> Result<()> {
     use forge_tui::{
         handle_key, print_banner_direct, App, ChannelPresenter, ConfirmOutcome, InputOutcome,
@@ -942,7 +944,10 @@ pub(crate) async fn run_chat_tui(
     // Command lines the loop must run through the remote-prompt dispatch path next iteration:
     // `(line, from_queue)`. A busy-typed `/btw` runs now (`false`); a queued command popped at a
     // turn boundary runs idle (`true`). Never fed to the model as text.
-    let mut local_lines: Vec<(String, bool)> = Vec::new();
+    // `forge chat "prompt"` enters as a queued line: it dispatches like typed input once the loop
+    // runs, and waits behind the automatic project-setup turn when that started first.
+    let mut local_lines: Vec<(String, bool)> =
+        first_prompt.into_iter().map(|p| (p, true)).collect();
     // A queued command just ran (or an interrupt left one at the head): keep draining the queue
     // once the loop is idle, so one command cannot strand the prompts queued behind it.
     let mut pump_queue = false;
@@ -1180,6 +1185,10 @@ pub(crate) async fn run_chat_tui(
             // the blink only resumes once typing pauses.
             last_input_at = std::time::Instant::now();
             app.cursor_hidden = false;
+            if matches!(ev, forge_tui::InputEvent::Key(KeyKind::Redraw)) {
+                tui.redraw();
+                continue;
+            }
 
             if observer.is_some() {
                 match ev {
@@ -3252,7 +3261,7 @@ pub(crate) async fn run_chat_tui(
                     break;
                 }
             } else if matches!(key, KeyKind::CompactSession) {
-                // Ctrl-L: compact the conversation (equivalent to /compact).
+                // Alt-L (configurable `compact`): compact the conversation, like /compact.
                 match dispatch_command(
                     "/compact",
                     &session,
@@ -3711,6 +3720,8 @@ pub(crate) async fn run_chat_tui(
         if let Some(started) = apply_started.filter(|_| applied) {
             forge_tui::perf::record(forge_tui::perf::Metric::Apply, started.elapsed());
         }
+        // Results of background slash commands (`/doctor`, `/diff`, `/mcp reconnect`).
+        dirty |= app.drain_deferred();
 
         // Drain remote-control inputs (a browser sent a prompt / answer / interrupt) and inject
         // them exactly like local keystrokes. We process the whole queue each iteration so a

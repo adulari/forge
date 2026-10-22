@@ -500,8 +500,8 @@ used by the local keyboard, the remote prompt path, the palette and the daemon d
 
 | Class | Commands |
 | --- | --- |
-| Immediate | `/btw` (`/side`), `/help`, `/keys`, `/sessions` (`/resume` with no id), `/board`, `/config`, `/clear`, `/remote`, `/anywhere`, `/thinking`, `/output`, `/image`, `/statusline`, `/voice` |
-| Queue | `/compact`, `/uncompact`, `/reground`, `/commit`, `/pr`, `/new`, `/mode`, `/model`, `/models`, `/effort`, `/subagents`, `/plan`, `/execute`, `/goal`, `/loop`, `/duel`, `/assay`, `/refine`, `/workflow`, `/heartbeat`, `/init`, `/dispatch`, `/mcp`, `/lattice`, `/replay`, `/export`, `/usage`, `/mesh`, `/copy`, `/remember`, `/memories`, `/self-mcp`, `/checkpoint`, file commands and skills |
+| Immediate | `/btw` (`/side`), `/help`, `/keys`, `/sessions` (`/resume` with no id), `/board`, `/config`, `/cls`, `/diff`, `/doctor`, `/remote`, `/anywhere`, `/thinking`, `/output`, `/image`, `/statusline`, `/voice` |
+| Queue | `/compact`, `/uncompact`, `/reground`, `/commit`, `/pr`, `/new` (`/clear`, `/reset`), `/context`, `/permissions`, `/add-dir`, `/rename`, `/mcp reconnect`, `/mode`, `/model`, `/models`, `/effort`, `/subagents`, `/plan`, `/execute`, `/goal`, `/loop`, `/duel`, `/assay`, `/refine`, `/workflow`, `/heartbeat`, `/init`, `/dispatch`, `/mcp`, `/lattice`, `/replay`, `/export`, `/usage`, `/mesh`, `/copy`, `/remember`, `/memories`, `/self-mcp`, `/checkpoint`, file commands and skills |
 | Refuse | `/resume <id>`, `/undo`, `/checkpoints`, `/claude`, `/quit` |
 
 `/usage`, `/replay`, `/export`, `/model` and `/effort` look read-only but await the session lock, so

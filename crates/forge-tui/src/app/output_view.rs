@@ -52,6 +52,8 @@ pub struct OutputView {
     path: Option<String>,
     /// False when only a card's bounded preview could be shown.
     complete: bool,
+    /// Colour unified-diff lines (`/diff`).
+    diff: bool,
     wrap: bool,
     hscroll: usize,
     /// The search being typed after `/`, until Enter or Esc.
@@ -90,6 +92,7 @@ impl OutputView {
             lines,
             path,
             complete,
+            diff: false,
             wrap: true,
             hscroll: 0,
             typing: None,
@@ -103,6 +106,13 @@ impl OutputView {
             body_h: Cell::new(1),
             rows: RefCell::new(None),
         }
+    }
+
+    /// Command output that is not a tool card's (`/diff`, `/doctor`).
+    pub(crate) fn text(title: &str, outcome: &str, text: &str, diff: bool) -> Self {
+        let mut view = Self::new(title.into(), outcome.into(), true, text, None, true);
+        view.diff = diff;
+        view
     }
 
     /// A card's output: the kept file when there is one, else the preview the card already holds.
@@ -496,7 +506,11 @@ fn body_line(
         Span::styled(number, number_style),
         Span::styled(" │ ", styles::faint()),
     ];
-    let base = styles::fg();
+    let base = if view.diff {
+        diff_line_style(&view.lines[row.line])
+    } else {
+        styles::fg()
+    };
     match view
         .query
         .as_deref()
@@ -506,6 +520,20 @@ fn body_line(
         None => spans.push(Span::styled(row.text.clone(), base)),
     }
     TextLine::from(spans)
+}
+
+fn diff_line_style(line: &str) -> Style {
+    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ") {
+        styles::muted().add_modifier(Modifier::BOLD)
+    } else if line.starts_with('+') {
+        styles::ok()
+    } else if line.starts_with('-') {
+        styles::err()
+    } else if line.starts_with("@@") {
+        styles::brand()
+    } else {
+        styles::fg()
+    }
 }
 
 fn footer_line(

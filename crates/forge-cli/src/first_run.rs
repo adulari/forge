@@ -1,14 +1,50 @@
-//! What bare `forge` (no subcommand) prints.
+//! What bare `forge` (no subcommand) does.
 //!
-//! Clap's default for a missing subcommand is the full ~40-command help wall on stderr with exit
-//! code 2 — the least useful screen for the most likely first keystroke, and it never says the
-//! install has no provider yet. Instead: a short first-run panel when nothing is configured, a
-//! common-commands summary when something is. `forge --help` / `forge help` keep the full listing.
+//! On an interactive terminal with a usable provider it starts `forge chat`, the way bare
+//! `claude` starts a session. Everywhere else it prints a screen instead of clap's default (the
+//! full ~40-command help wall on stderr with exit code 2, which never says the install has no
+//! provider yet): a short first-run panel when nothing is configured, a common-commands summary
+//! when something is (a pipe, CI, `TERM=dumb`). `forge --help` / `forge help` keep the full listing.
+
+use std::io::IsTerminal;
+
+use crate::Command;
 
 /// Is there any provider this binary could route a turn to? Reuses doctor's credential-side
 /// check (keys, CLI bridges, a local Ollama model) — local evidence only, no network probe.
 pub(crate) fn provider_configured() -> bool {
     crate::doctor::provider_credentials_present()
+}
+
+/// Bare `forge` opens a chat only when someone is at the keyboard (both ends a terminal that can
+/// draw the TUI) and a turn could actually run; otherwise the screen explains what to do.
+pub(crate) fn bare_starts_chat(terminal: bool, dumb_term: bool, configured: bool) -> bool {
+    terminal && !dumb_term && configured
+}
+
+/// The command bare `forge` runs, or `None` after printing the welcome screen.
+pub(crate) fn bare_command() -> Option<Command> {
+    let stdout_tty = std::io::stdout().is_terminal();
+    let terminal = stdout_tty && std::io::stdin().is_terminal();
+    let dumb_term = std::env::var("TERM").is_ok_and(|t| t == "dumb");
+    let configured = provider_configured();
+    if bare_starts_chat(terminal, dumb_term, configured) {
+        return Some(Command::Chat {
+            prompt: Vec::new(),
+            mock: false,
+            mode: None,
+            r#continue: false,
+            all_dirs: false,
+            resume: None,
+            plain: false,
+            tui: false,
+            inline: false,
+            fullscreen: false,
+            model: None,
+        });
+    }
+    print!("{}", welcome_text(configured, stdout_tty));
+    None
 }
 
 const BOLD: &str = "\x1b[1m";
@@ -38,7 +74,7 @@ pub(crate) fn welcome_text(configured: bool, color: bool) -> String {
         out.push_str(&format!("{bold}Common commands{reset}\n"));
     }
     out.push_str("  forge run \"<prompt>\"      one agent turn, headless\n");
-    out.push_str("  forge chat                interactive multi-turn session\n");
+    out.push_str("  forge chat [\"<prompt>\"]   interactive multi-turn session\n");
     out.push_str("  forge doctor              check config, providers, store\n\n");
     out.push_str(&format!("{dim}run `forge --help` for everything{reset}\n"));
     out
@@ -73,6 +109,17 @@ mod tests {
         assert!(!text.contains("No model provider"));
         assert!(!text.contains("forge setup"));
         assert!(text.contains("run `forge --help` for everything"));
+    }
+
+    #[test]
+    fn bare_forge_starts_chat_only_on_a_configured_interactive_terminal() {
+        assert!(bare_starts_chat(true, false, true));
+        assert!(!bare_starts_chat(false, false, true), "pipe / CI");
+        assert!(!bare_starts_chat(true, true, true), "TERM=dumb");
+        assert!(
+            !bare_starts_chat(true, false, false),
+            "no provider: the setup panel"
+        );
     }
 
     #[test]

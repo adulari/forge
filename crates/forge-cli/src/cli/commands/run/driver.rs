@@ -606,8 +606,11 @@ async fn drive_session(
             dirty = true;
             st.on_turn_done(g).await;
         }
-        // 5. Background overlay loads (/mesh, /usage).
+        // 5. Background overlay loads (/mesh, /usage) and slash-command results (/doctor, /diff).
         if st.poll_overlay_loads() {
+            dirty = true;
+        }
+        if st.app.drain_deferred() {
             dirty = true;
         }
         // 5b. Session heartbeats: `on_turn_done` already checks immediately when a turn ends; this

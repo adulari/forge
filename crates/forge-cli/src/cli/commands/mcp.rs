@@ -28,21 +28,24 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
             bearer_token_env_var,
             command,
         }) => {
-            return mcp_add(
+            return add::mcp_add(add::AddRequest {
                 name,
                 transport,
                 scope,
                 env,
-                header,
+                headers: header,
                 url,
                 bearer_token_env_var,
                 command,
-            )
+            })
+        }
+        Some(McpCmd::AddJson { name, json, scope }) => {
+            return add::mcp_add_json(&name, &json, scope)
         }
         Some(McpCmd::Remove { name, scope }) => return mcp_remove(name, scope),
         Some(McpCmd::Get { name }) => return mcp_get(name),
         Some(McpCmd::Tools { server }) => Some(server),
-        None => None,
+        Some(McpCmd::List) | None => None,
     };
 
     forge_config::inject_provider_keys();
@@ -305,6 +308,8 @@ pub(crate) fn mcp_logout(server: &str, account: Option<&str>) -> Result<()> {
 mod login;
 pub(crate) use login::mcp_login;
 
+mod add;
+
 pub(crate) async fn read_callback_params(
     stream: &mut tokio::net::TcpStream,
 ) -> Result<(String, String)> {
@@ -386,124 +391,6 @@ fn validate_server_name(name: &str) -> Result<()> {
             "server name '{name}' must not contain whitespace or '__' (it prefixes tool names as <name>__<tool>)"
         );
     }
-    Ok(())
-}
-
-/// `forge mcp add <name> [--transport stdio|sse|http] [--scope local|user|project] ...`
-///
-/// Adds a server entry to the chosen scope's `mcp.toml`. Secrets (bearer token env vars) are
-/// referenced by env-var name and never embedded in the TOML (ADR-0007).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn mcp_add(
-    name: String,
-    transport: McpTransportArg,
-    scope: Scope,
-    env_vars: Vec<String>,
-    headers: Vec<String>,
-    url: Option<String>,
-    bearer_token_env_var: Option<String>,
-    command: Vec<String>,
-) -> Result<()> {
-    let path = mcp_scope_path(&scope)?;
-
-    validate_server_name(&name)?;
-
-    // Parse KEY=VALUE env vars.
-    let mut env_map = std::collections::HashMap::new();
-    for kv in &env_vars {
-        let (k, v) = kv
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--env must be KEY=VALUE, got: {kv}"))?;
-        env_map.insert(k.to_string(), v.to_string());
-    }
-
-    // Parse KEY=VALUE or KEY:VALUE headers.
-    let mut header_map = std::collections::HashMap::new();
-    for h in &headers {
-        let (k, v) = h
-            .split_once('=')
-            .or_else(|| h.split_once(':'))
-            .ok_or_else(|| anyhow::anyhow!("--header must be KEY=VALUE or KEY:VALUE, got: {h}"))?;
-        header_map.insert(k.to_string(), v.to_string());
-    }
-
-    for (k, v) in env_map.iter().chain(header_map.iter()) {
-        if !v.is_empty()
-            && (forge_config::looks_secret(k)
-                || k.eq_ignore_ascii_case("authorization")
-                || forge_config::embeds_credentials(v))
-        {
-            eprintln!(
-                "warning: '{k}' looks like a secret and is written in plaintext to {}; prefer --bearer-token-env-var or `forge mcp import`, which stores it in the keyring",
-                path.display()
-            );
-        }
-    }
-
-    let mcp_transport = match transport {
-        McpTransportArg::Stdio => {
-            let cmd = command
-                .first()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("stdio transport requires a COMMAND (pass it after --)")
-                })?
-                .clone();
-            let args = command[1..].to_vec();
-            forge_config::McpTransport::Stdio {
-                command: cmd,
-                args,
-                env: env_map,
-            }
-        }
-        McpTransportArg::Http => {
-            let u =
-                url.ok_or_else(|| anyhow::anyhow!("--url is required for HTTP/SSE transport"))?;
-            forge_config::McpTransport::Http {
-                url: u,
-                headers: header_map,
-            }
-        }
-        McpTransportArg::Sse => {
-            // Legacy HTTP+SSE: drives forge-mcp's hand-rolled SSE client (rmcp has no standalone
-            // SSE client transport). Distinct from `Http` (streamable-HTTP) so old SSE-only servers
-            // actually connect instead of silently falling back.
-            let u =
-                url.ok_or_else(|| anyhow::anyhow!("--url is required for HTTP/SSE transport"))?;
-            forge_config::McpTransport::Sse {
-                url: u,
-                headers: header_map,
-            }
-        }
-    };
-
-    let auth = bearer_token_env_var.map(|env_var| forge_config::McpAuth {
-        token_env: Some(env_var),
-        token_keyring: None,
-        header: None,
-        oauth: None,
-    });
-
-    let server = forge_config::McpServerConfig {
-        name: name.clone(),
-        transport: mcp_transport,
-        auth,
-        secret_env: vec![],
-        enabled: true,
-        shared: None,
-    };
-
-    let mut config = forge_config::load_mcp_toml(&path);
-    if config.servers.iter().any(|s| s.name == name) {
-        anyhow::bail!(
-            "server '{name}' already exists in {}. Use `forge mcp remove {name} --scope {}` first.",
-            path.display(),
-            scope.as_str()
-        );
-    }
-    config.servers.push(server);
-    forge_config::write_mcp_toml(&path, &config)
-        .with_context(|| format!("writing {}", path.display()))?;
-    println!("✓ added server '{name}' to {}", path.display());
     Ok(())
 }
 

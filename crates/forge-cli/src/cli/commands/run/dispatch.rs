@@ -1189,6 +1189,13 @@ script with `return <final result>` so the run yields a relayable answer.\n\nGoa
         CommandAction::Heartbeat(action) => {
             heartbeat_cmd::dispatch_heartbeat(session, app, action).await?;
         }
+        CommandAction::Context
+        | CommandAction::Diff(_)
+        | CommandAction::Permissions(_)
+        | CommandAction::McpReconnect(_)
+        | CommandAction::AddDir(_)
+        | CommandAction::Doctor
+        | CommandAction::Rename(_) => super::slash_commands::dispatch(action, session, app).await,
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {
             return dispatch_catalog(line, catalog, session, app, armed, trust_project, busy).await

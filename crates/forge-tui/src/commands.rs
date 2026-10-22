@@ -187,6 +187,21 @@ pub enum CommandAction {
     /// insert the transcript into the prompt (`/voice`, also bound to Ctrl+V — voice.md). Never
     /// auto-sends.
     Voice,
+    /// What fills the context window, by category (`/context`).
+    Context,
+    /// The working tree's uncommitted changes, optionally under one path (`/diff [path]`).
+    Diff(String),
+    /// The permission rules in force, or `allow|ask|deny <Tool(pattern)>` to add a session rule
+    /// (`/permissions`, alias `/allowed-tools`). Raw arg; the binary parses it.
+    Permissions(String),
+    /// Reconnect every MCP server, or the named one (`/mcp reconnect [server]`).
+    McpReconnect(Option<String>),
+    /// Let the file tools work in another directory for this session (`/add-dir <path>`).
+    AddDir(String),
+    /// In-session diagnostics: config, providers, store, daemon (`/doctor`).
+    Doctor,
+    /// Name this session (`/rename <title>`); empty shows the current name.
+    Rename(String),
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
 }
@@ -320,7 +335,7 @@ pub use palette::{
     PaletteEntry, COMMAND_GROUPS,
 };
 
-use crate::arg_parse::{assay_action, goal_action, has_flag, loop_action};
+use crate::arg_parse::{assay_action, goal_action, has_flag, loop_action, mcp_action};
 
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
@@ -346,10 +361,16 @@ pub fn parse_command(line: &str) -> CommandAction {
         "model" => CommandAction::PinModel((!arg.is_empty()).then_some(arg)),
         "models" | "mc" => CommandAction::ListModels,
         "config" | "cfg" | "settings" => CommandAction::Config,
-        "mcp" => CommandAction::Mcp((!arg.is_empty()).then_some(arg)),
-        "new" | "n" => CommandAction::New,
+        "mcp" => mcp_action(arg),
+        "new" | "n" | "clear" | "reset" => CommandAction::New,
         "mode" | "m" | "temper" => CommandAction::Mode,
         "assay" | "analyze" | "analyse" => assay_action(&arg),
+        "context" | "ctx" => CommandAction::Context,
+        "diff" => CommandAction::Diff(arg),
+        "permissions" | "allowed-tools" | "perms" => CommandAction::Permissions(arg),
+        "add-dir" => CommandAction::AddDir(arg),
+        "doctor" => CommandAction::Doctor,
+        "rename" => CommandAction::Rename(arg),
         "rewind" | "undo" | "u" => CommandAction::Undo,
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,
@@ -401,7 +422,7 @@ pub fn parse_command(line: &str) -> CommandAction {
                 .unwrap_or(1);
             CommandAction::Copy { nth }
         }
-        "clear" | "cls" => CommandAction::ClearScreen,
+        "cls" => CommandAction::ClearScreen,
         "usage" => CommandAction::Usage,
         "status" => CommandAction::Status,
         "mesh" => CommandAction::Mesh((!arg.is_empty()).then_some(arg)),
@@ -990,7 +1011,9 @@ mod tests {
         );
         assert_eq!(parse_command("/resume"), CommandAction::ListSessions);
         assert_eq!(parse_command("/new"), CommandAction::New);
-        assert_eq!(parse_command("/clear"), CommandAction::ClearScreen);
+        assert_eq!(parse_command("/clear"), CommandAction::New);
+        assert_eq!(parse_command("/reset"), CommandAction::New);
+        assert_eq!(parse_command("/cls"), CommandAction::ClearScreen);
         assert_eq!(parse_command("/quit"), CommandAction::Quit);
         assert_eq!(
             parse_command("/lattice Session"),
@@ -1004,6 +1027,61 @@ mod tests {
             parse_command("/bogus"),
             CommandAction::Unknown("bogus".into())
         );
+    }
+
+    #[test]
+    fn parses_claude_code_everyday_commands() {
+        assert_eq!(parse_command("/context"), CommandAction::Context);
+        assert_eq!(parse_command("/diff"), CommandAction::Diff(String::new()));
+        assert_eq!(
+            parse_command("/diff src/lib.rs"),
+            CommandAction::Diff("src/lib.rs".into())
+        );
+        assert_eq!(
+            parse_command("/permissions"),
+            CommandAction::Permissions(String::new())
+        );
+        assert_eq!(
+            parse_command("/allowed-tools allow Bash(git log:*)"),
+            CommandAction::Permissions("allow Bash(git log:*)".into())
+        );
+        assert_eq!(parse_command("/mcp"), CommandAction::Mcp(None));
+        assert_eq!(
+            parse_command("/mcp github"),
+            CommandAction::Mcp(Some("github".into()))
+        );
+        assert_eq!(
+            parse_command("/mcp reconnect"),
+            CommandAction::McpReconnect(None)
+        );
+        assert_eq!(
+            parse_command("/mcp reconnect github"),
+            CommandAction::McpReconnect(Some("github".into()))
+        );
+        assert_eq!(
+            parse_command("/add-dir ../lib"),
+            CommandAction::AddDir("../lib".into())
+        );
+        assert_eq!(parse_command("/doctor"), CommandAction::Doctor);
+        assert_eq!(
+            parse_command("/rename auth refactor"),
+            CommandAction::Rename("auth refactor".into())
+        );
+        for name in [
+            "context",
+            "diff",
+            "permissions",
+            "add-dir",
+            "doctor",
+            "rename",
+            "clear",
+            "cls",
+        ] {
+            assert!(
+                COMMANDS.iter().any(|c| c.name == name),
+                "/{name} is in the registry"
+            );
+        }
     }
 
     #[test]

@@ -148,6 +148,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             mock,
         } => crate::api_serve::api_serve_cmd(host, port, api_key, mock).await,
         Command::Chat {
+            prompt,
             mock,
             mode,
             r#continue,
@@ -173,7 +174,8 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                     .map(|c| c.tui.fullscreen)
                     .unwrap_or(true)
             };
-            chat(mock, mode, resume_mode, plain, fullscreen, model).await
+            let first = Some(prompt.join(" ")).filter(|p| !p.trim().is_empty());
+            chat(mock, mode, resume_mode, plain, fullscreen, model, first).await
         }
         Command::Sessions {
             archived,

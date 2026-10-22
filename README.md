@@ -38,7 +38,8 @@ https://github.com/Adulari/forge/raw/main/docs/assets/forge-promo.mp4
 
 ```bash
 forge setup                                   # first run: keys, bridges, optional local model
-forge chat                                    # full-screen TUI, multi-turn
+forge                                         # full-screen TUI, multi-turn (same as `forge chat`)
+forge chat "explain this repo"                # open the TUI with a first message
 forge run "add pagination to the user list"   # one-shot task
 forge run --model claude-cli::sonnet "…"       # run your Claude subscription THROUGH Forge
 forge models --probe                           # discovered models, ranked, health-checked
@@ -756,7 +757,11 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 | `/voice` | Record and locally transcribe speech into the draft; never auto-sends (microphone capture is opt-in when building on Linux) |
 | `/config` | Dynamic settings editor — fuzzy-search + edit any setting (and API keys) |
 | `/statusline [layout\|toggle <widget>\|reset\|edit]` | Manage the statusline — toggle/reorder widgets, or reset to default |
-| `/copy [N]` · `/clear` | Copy a recent assistant reply · clear the screen without clearing the session |
+| `/copy [N]` · `/clear` · `/cls` | Copy a recent assistant reply · start a new conversation (as in Claude Code; same as `/new`) · clear the screen and keep the session |
+| `/context` · `/diff [path]` | What fills the context window, by category · the working tree's uncommitted changes |
+| `/permissions [allow\|ask\|deny <Tool(pattern)>]` · `/add-dir <path>` | The rules in force, or add a session rule in Claude Code syntax · let file tools work in another directory this session |
+| `/mcp reconnect [server]` · `/doctor` · `/rename <title>` | Reconnect MCP servers · local health checks in the session · name the session |
+| `/review [pr\|branch\|path]` · `/security-review` | Built-in correctness review of a diff or PR · security review of this branch (a project command of the same name replaces them) |
 | `/help` · `/keys` · `/quit` | Command reference · keyboard reference · exit Forge |
 | `/` | Open command palette (fuzzy-find skills + commands) |
 
@@ -765,7 +770,7 @@ prompt on the mesh's next-ranked model (excludes ones already skipped this turn)
 bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` activity viewer ·
 `Ctrl+T` expand/collapse the most recent tool call · `Ctrl+J` newline · `Esc` interrupt (mid-turn) / `Esc Esc` rewind (idle) · `Ctrl+C` quit · `↑/↓` navigate · `Ctrl+Home` previous user message (again: the one before) · `Ctrl+End` bottom ·
 `y/n/a/s` allow/deny/always-allow/allow-for-this-session a permission prompt (`Tab` adds a note for the model) · in an `ask_user` form `↑/↓` `1-9` `Space` `Enter` answer, `←/→` switch question, `o`/`n` other/note, `Esc` dismiss ([docs](docs/features/ask-user-question.md)) · `Alt+M` model picker · `Alt+E` cycle effort ·
-`Ctrl+N` new session · `Ctrl+S` checkpoint · `Ctrl+Z` undo last write · `Ctrl+L` compact ·
+`Ctrl+N` new session · `Ctrl+S` checkpoint · `Ctrl+Z` undo last write · `Alt+L` compact · `Ctrl+L` redraw ·
 `Ctrl+R` toggle reasoning display · `Ctrl+,` edit keybinds · `F1` full keybind reference.
 
 ### ▶️ `forge run` — single non-interactive turn
@@ -1017,9 +1022,10 @@ forge plugin install owner/repo        # install a Forge plugin / skill-pack fro
 forge plugin add <name> <path>         # register a local plugin directory
 forge plugin list            # list installed plugins
 forge plugin remove <name>   # uninstall a plugin
-forge mcp                    # MCP server status
+forge mcp                    # MCP server status (also `forge mcp list`)
 forge mcp import             # wizard: scan installed AI CLIs for MCP configs
-forge mcp add <name> [--transport stdio|http|sse] [-s local|user|project] [-e KEY=VAL] [--header K=V] [--url URL] [-- cmd args]
+forge mcp add <name> <commandOrUrl> [args...] [-t stdio|http|sse] [-s local|user|project] [-e KEY=VAL] [-H "Name: value"]   # `claude mcp add` syntax
+forge mcp add-json <name> '<json>'   # one server from JSON; a token in it goes to the keyring
 forge mcp remove <name>      # remove an MCP server by name
 forge mcp get <name>         # show config for one MCP server
 forge migrate export ./bundle.tar.gz [--include-sessions] [--include-keys]   # move install to another machine (.tar.gz)

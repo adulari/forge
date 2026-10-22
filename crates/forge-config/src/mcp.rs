@@ -485,6 +485,21 @@ pub fn import_mcp_json(path: &Path) -> Result<ParsedServers, ConfigError> {
     Ok(servers_from_json(&root))
 }
 
+/// Translate ONE server's JSON object (`claude mcp add-json <name> '<json>'`) exactly as an entry
+/// of `.mcp.json` would be, secrets captured for the keyring and never put in the config.
+pub fn import_mcp_server_json(name: &str, json: &str) -> Result<ParsedServers, ConfigError> {
+    let spec: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| ConfigError::Write(format!("parsing the server JSON: {e}")))?;
+    if !spec.is_object() {
+        return Err(ConfigError::Write(
+            "the server JSON must be an object".into(),
+        ));
+    }
+    let mut out = ParsedServers::default();
+    server_from_json(name, &spec, &mut out);
+    Ok(out)
+}
+
 /// One place Forge found MCP servers declared (a specific tool's config file). Surfaced by
 /// [`discover_import_sources`] so the user can pick which servers to import.
 #[derive(Debug, Clone)]
@@ -1136,6 +1151,39 @@ Authorization = "Bearer SECRET-TOKEN"
         assert_eq!(reparsed.servers.len(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_server_json_imports_like_an_mcp_json_entry() {
+        let parsed = import_mcp_server_json(
+            "corridor",
+            r#"{"type":"http","url":"https://app.corridor.dev/api/mcp","headers":{"Authorization":"Bearer tok-SECRET"}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.servers.len(), 1);
+        assert_eq!(parsed.servers[0].name, "corridor");
+        assert!(matches!(
+            &parsed.servers[0].transport,
+            McpTransport::Http { url, .. } if url == "https://app.corridor.dev/api/mcp"
+        ));
+        assert!(parsed.secrets.values().any(|v| v.contains("tok-SECRET")));
+        let toml = toml::to_string(&McpConfig {
+            servers: parsed.servers.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            !toml.contains("tok-SECRET"),
+            "secret kept out of the config"
+        );
+
+        let stdio =
+            import_mcp_server_json("fs", r#"{"command":"npx","args":["-y","srv"]}"#).unwrap();
+        assert!(
+            matches!(&stdio.servers[0].transport, McpTransport::Stdio { command, .. } if command == "npx")
+        );
+        assert!(import_mcp_server_json("x", "[1]").is_err());
+        assert!(import_mcp_server_json("x", "not json").is_err());
     }
 
     #[test]

@@ -50,6 +50,16 @@ pub(crate) fn assay_action(arg: &str) -> CommandAction {
     CommandAction::Assay { only, skip, scope }
 }
 
+/// `/mcp [server]` lists; `/mcp reconnect [server]` reconnects (every server when none is named).
+pub(crate) fn mcp_action(arg: String) -> CommandAction {
+    let mut words = arg.split_whitespace();
+    match words.next() {
+        Some("reconnect") => CommandAction::McpReconnect(words.next().map(str::to_string)),
+        Some(_) => CommandAction::Mcp(Some(arg)),
+        None => CommandAction::Mcp(None),
+    }
+}
+
 /// `/goal <objective> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`
 pub(crate) fn goal_action(arg: &str) -> CommandAction {
     let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(arg) else {

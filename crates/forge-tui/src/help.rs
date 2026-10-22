@@ -56,13 +56,13 @@ const GROUP_ORDER: [&str; 5] = [
 fn command_group(name: &str) -> &'static str {
     match name {
         "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline" | "status"
-        | "heartbeat" => "Session",
+        | "heartbeat" | "context" | "permissions" | "doctor" => "Session",
         "sessions" | "replay" | "resume" | "new" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" | "reground" | "refine" | "rewind" | "clear" | "export"
-        | "btw" => "History",
+        | "btw" | "rename" | "cls" => "History",
         "model" | "models" | "usage" | "mesh" | "duel" | "subagents" => "Models & routing",
         "plan" | "execute" | "goal" | "pr" | "loop" | "workflow" | "assay" | "lattice"
-        | "commit" | "dispatch" => "Work",
+        | "commit" | "dispatch" | "diff" => "Work",
         _ => "Project & tools",
     }
 }

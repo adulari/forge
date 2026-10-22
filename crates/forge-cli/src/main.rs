@@ -246,12 +246,7 @@ async fn run_cli(login_path_added: Vec<String>) {
     }
 
     let cli = Cli::parse();
-    let Some(command) = cli.command else {
-        let interactive = std::io::stdout().is_terminal();
-        print!(
-            "{}",
-            first_run::welcome_text(first_run::provider_configured(), interactive)
-        );
+    let Some(command) = cli.command.or_else(first_run::bare_command) else {
         return;
     };
     {

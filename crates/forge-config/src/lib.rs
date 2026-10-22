@@ -28,6 +28,7 @@ pub mod goal;
 mod harness_profile;
 mod hooks;
 mod key_adoption;
+mod keybind_migration;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
 mod lsp_diagnostics;
 pub mod mcp;
@@ -2735,7 +2736,8 @@ impl Default for KeybindsConfig {
         binds.insert("prev_tool_group".into(), bind("up", false, true, false));
         binds.insert("next_tool_group".into(), bind("down", false, true, false));
         binds.insert("undo".into(), bind("z", true, false, false));
-        binds.insert("compact".into(), bind("l", true, false, false));
+        binds.insert("compact".into(), bind("l", false, true, false));
+        binds.insert("redraw".into(), bind("l", true, false, false));
         binds.insert("model_picker".into(), bind("m", false, true, false));
         binds.insert("effort_cycle".into(), bind("e", false, true, false));
         binds.insert("temper_cycle".into(), bind("t", false, true, false));
@@ -2777,6 +2779,7 @@ fn migrate_legacy_keybinds(keybinds: &mut KeybindsConfig) {
             },
         );
     }
+    keybind_migration::move_compact_off_ctrl_l(keybinds);
 }
 
 impl Default for Config {
@@ -4636,7 +4639,7 @@ auto = "local"
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 26);
+        assert_eq!(kb.binds.len(), 27);
         assert_eq!(
             kb.binds["interrupt"],
             KeyCombo {
@@ -4702,7 +4705,7 @@ auto = "local"
         // The override took effect…
         assert_eq!(cfg.keybinds.binds["toggle_reasoning"].key, "x");
         // …and every other default bind survived the merge.
-        assert_eq!(cfg.keybinds.binds.len(), 26);
+        assert_eq!(cfg.keybinds.binds.len(), 27);
         assert_eq!(cfg.keybinds.binds["interrupt"].key, "c");
         assert_eq!(cfg.keybinds.binds["help"].key, "f1");
     }

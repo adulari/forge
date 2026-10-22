@@ -112,6 +112,11 @@ impl App {
         self.refresh_git_location(Instant::now());
     }
 
+    /// The session workspace the statusline follows (`/diff` runs git here without the session).
+    pub fn workspace_path(&self) -> Option<&Path> {
+        self.git_workspace.as_deref()
+    }
+
     /// Point the statusline at `workspace` unless it already is. True when it moved.
     ///
     /// The session's workspace can change after startup: `forge chat --resume` with no id opens the

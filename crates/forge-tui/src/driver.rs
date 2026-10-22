@@ -415,7 +415,13 @@ impl Tui {
         }
     }
 
-    /// Clear the visible screen (used by `/clear`). Native scrollback above is wiped from view;
+    /// Repaint every cell on the next draw (Ctrl+L): repairs a screen another program scribbled
+    /// on, without touching the transcript or the terminal's scrollback.
+    pub fn redraw(&mut self) {
+        let _ = self.terminal.clear();
+    }
+
+    /// Clear the visible screen (used by `/cls`). Native scrollback above is wiped from view;
     /// the session/transcript are untouched. `terminal.clear()` forces a full viewport redraw.
     pub fn clear_screen(&mut self) {
         use crossterm::terminal::{Clear, ClearType};
