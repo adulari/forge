@@ -1,31 +1,77 @@
-//! Applies the `claude -p` compatibility flags (`--max-turns`, `--allowedTools`,
-//! `--disallowedTools`) to the config a `forge run` session is built from.
+//! Applies the Claude Code flags that change the config a `forge run` session is built from:
+//! `--max-turns`, `--allowedTools`/`--disallowedTools`, `--system-prompt[-file]`, `--add-dir`,
+//! `--mcp-config`/`--strict-mcp-config` and `--setting-sources`.
 
 use std::sync::OnceLock;
 
+use anyhow::{Context, Result};
 use forge_config::{Config, OneOrMany, RuleConfig};
 
+use super::mcp_overlay::McpOverlay;
 use crate::cli::args::claude_compat::ClaudeCompat;
+use crate::cli::args::SessionFlags;
 
 #[derive(Debug, Default)]
 pub(crate) struct RunOverrides {
     max_turns: Option<usize>,
     allow: Vec<String>,
     deny: Vec<String>,
+    /// Replaces the base coding-agent prompt for every provider (`--system-prompt`).
+    system_prompt: Option<String>,
+    /// Absolute directories added to `[tools] extra_roots` (`--add-dir`).
+    extra_roots: Vec<String>,
+    mcp: Option<McpOverlay>,
 }
 
 static OVERRIDES: OnceLock<RunOverrides> = OnceLock::new();
 
 /// Record this invocation's overrides. `forge run` builds exactly one session per process, so a
 /// process-wide value reaches `build_session_with_self_mcp` without threading it through every
-/// caller.
-pub(crate) fn install(flags: &ClaudeCompat) {
+/// caller. Fails on a flag whose input cannot be used (a missing prompt file or directory, an
+/// unreadable MCP config, an unknown setting source), before any session work starts.
+pub(crate) fn install(print: &ClaudeCompat, session: &SessionFlags) -> Result<()> {
+    if let Some(list) = &session.setting_sources {
+        let sources = forge_config::setting_sources::SettingSources::parse(list)
+            .map_err(anyhow::Error::msg)?;
+        forge_config::setting_sources::set_setting_sources(sources);
+    }
+    let system_prompt = match (&session.system_prompt, &session.system_prompt_file) {
+        (Some(text), _) => Some(text.clone()),
+        (None, Some(path)) => Some(
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading --system-prompt-file {}", path.display()))?,
+        ),
+        (None, None) => None,
+    };
     let overrides = RunOverrides {
-        max_turns: flags.max_turns.map(|n| n as usize),
-        allow: split_tool_list(&flags.allowed_tools),
-        deny: split_tool_list(&flags.disallowed_tools),
+        max_turns: print.max_turns.map(|n| n as usize),
+        allow: split_tool_list(&session.allowed_tools),
+        deny: split_tool_list(&session.disallowed_tools),
+        system_prompt,
+        extra_roots: added_dirs(&session.add_dir)?,
+        mcp: (!session.mcp_config.is_empty())
+            .then(|| McpOverlay::load(&session.mcp_config, session.strict_mcp_config))
+            .transpose()?,
     };
     let _ = OVERRIDES.set(overrides);
+    Ok(())
+}
+
+/// `--add-dir` paths as the absolute directories `[tools] extra_roots` requires.
+pub(crate) fn added_dirs(dirs: &[std::path::PathBuf]) -> Result<Vec<String>> {
+    dirs.iter()
+        .map(|dir| {
+            let path = dir
+                .canonicalize()
+                .with_context(|| format!("--add-dir {}", dir.display()))?;
+            anyhow::ensure!(
+                path.is_dir(),
+                "--add-dir {}: not a directory",
+                dir.display()
+            );
+            Ok(path.display().to_string())
+        })
+        .collect()
 }
 
 pub(crate) fn apply(config: &mut Config) {
@@ -47,6 +93,22 @@ fn apply_overrides(config: &mut Config, overrides: &RunOverrides) {
         rules.extend(rules_for(spec, Decision::Allow));
     }
     config.permissions.rules.extend(rules);
+    if let Some(prompt) = &overrides.system_prompt {
+        // The command line wins over every configured per-provider prompt.
+        config.system_prompt_overrides = [("*".to_string(), prompt.clone())].into();
+    }
+    for root in &overrides.extra_roots {
+        if !config.tools.extra_roots.contains(root) {
+            config.tools.extra_roots.push(root.clone());
+        }
+    }
+    if let Some(mcp) = &overrides.mcp {
+        mcp.apply(&mut config.mcp);
+        if mcp.strict() {
+            // "Only the servers from --mcp-config" includes Forge's own self-MCP server.
+            config.self_mcp = false;
+        }
+    }
 }
 
 /// Split `"Bash(git log:*) Read"` / `"Read,Edit"` into entries, keeping spaces and commas that sit
@@ -179,6 +241,9 @@ mod tests {
             max_turns: Some(3),
             allow: vec!["Read".into()],
             deny: vec!["Bash(rm:*)".into()],
+            system_prompt: Some("You are a Python expert".into()),
+            extra_roots: vec!["/srv/shared".into()],
+            ..RunOverrides::default()
         };
         apply_overrides(&mut config, &overrides);
         assert_eq!(config.mesh.max_steps, 3);
@@ -189,5 +254,19 @@ mod tests {
             "denies come first"
         );
         assert_eq!(config.permissions.rules[1].tool, "read_file");
+        assert_eq!(config.system_prompt_overrides.len(), 1);
+        assert_eq!(
+            config.system_prompt_overrides["*"],
+            "You are a Python expert"
+        );
+        assert_eq!(config.tools.extra_roots, ["/srv/shared"]);
+    }
+
+    #[test]
+    fn added_dirs_must_exist_and_become_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = added_dirs(&[dir.path().to_path_buf()]).unwrap();
+        assert!(std::path::Path::new(&roots[0]).is_absolute());
+        assert!(added_dirs(&[dir.path().join("missing")]).is_err());
     }
 }

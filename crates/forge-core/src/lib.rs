@@ -129,6 +129,7 @@ mod replay;
 mod review_gate;
 mod routing_policy;
 pub mod run_budget;
+mod run_overrides;
 pub use run_budget::RunBudget;
 pub use session_restore::RestoredTurnState;
 mod session_controls;
@@ -1847,6 +1848,8 @@ pub struct Session {
     /// (`run_budget.rs`), and whether it ended the active turn.
     run_budget: Option<RunBudget>,
     run_budget_next: Option<RunBudget>,
+    /// `--fallback-model`: tried in order after the routed model, before the mesh's own chain.
+    fallback_models: Vec<String>,
     turn_run_budget_hit: bool,
     /// The harness profile of the model currently driving the turn (harness_profile.rs).
     harness_profile: forge_config::HarnessProfile,
@@ -3048,6 +3051,7 @@ impl Session {
             }
             decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
         }
+        self.apply_fallback_models(&mut decision);
         // Same reasoning as the pin backstop above, for the same reason: `decision.effort` is read
         // at six call sites, so honouring an exact rung at each one is a bug waiting to happen.
         // Clamp it once, here, after every routing path has produced a decision.
@@ -5994,6 +5998,44 @@ mod tests {
         assert!(
             msgs[0].content.contains("You are Forge"),
             "unmatched provider keeps the base prompt"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_system_prompt_replaces_the_base_prompt_for_every_provider() {
+        let provider = Arc::new(FlakyProvider {
+            bad: std::collections::HashSet::new(),
+            err: rate_limited,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "kimi::k3".into(),
+            fallbacks: vec![],
+        });
+        let mut config = Config::default();
+        config
+            .system_prompt_overrides
+            .insert("*".to_string(), "YOU ARE A PYTHON EXPERT".to_string());
+        config
+            .system_prompt_overrides
+            .insert("kimi".to_string(), "CUSTOM KIMI PROMPT".to_string());
+        let session = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            provider,
+            router,
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let msgs = session.transcript_with_preamble_and_tools("m", &[]);
+        assert_eq!(msgs[0].content, "YOU ARE A PYTHON EXPERT");
+        assert!(msgs[1].content.contains("<env>"), "env block still present");
+        let msgs = session.transcript_with_preamble_and_tools("kimi::k3", &[]);
+        assert_eq!(
+            msgs[0].content, "CUSTOM KIMI PROMPT",
+            "a provider entry wins"
         );
     }
 

@@ -278,6 +278,7 @@ impl Session {
             turn_hard_guard_abort: false,
             run_budget: None,
             run_budget_next: None,
+            fallback_models: Vec::new(),
             turn_run_budget_hit: false,
             harness_profile: forge_config::HarnessProfile::default(),
             empty_reply_nudged: false,

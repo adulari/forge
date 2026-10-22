@@ -28,11 +28,7 @@ impl Session {
             && forge_provider::prompt_cache::shares_prompt_cache_key_across_sessions(model)
         {
             let mut preamble = self.system_preamble();
-            if let Some(prompt) = self
-                .config
-                .system_prompt_overrides
-                .get(forge_config::provider_of(model))
-            {
+            if let Some(prompt) = self.system_prompt_override(model) {
                 preamble[0].content.clone_from(prompt);
             }
             cross_session_key(model, specs, &preamble, &self.workspace.display())

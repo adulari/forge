@@ -72,6 +72,7 @@ impl AutonomyBudget {
                 .max_tokens
                 .map(|max| max.saturating_sub(self.tokens_used)),
             deadline: self.max_elapsed.map(|max| self.started_at + max),
+            usd_remaining: None,
         })
     }
 }

@@ -1,23 +1,63 @@
 //! One-shot CLI execution and command/skill prompt expansion.
 
+use super::print_run::RunSetup;
+use super::stream_input::{parse_input_line, InputLine};
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run(
-    prompt: String,
-    mock: bool,
-    mode: Option<Mode>,
-    tui: bool,
-    resume: Option<String>,
-    pin: Option<String>,
-    system: Vec<String>,
-    output_format: OutputFormat,
-    publish_to_fleet: bool,
-    no_publish_to_fleet: bool,
-    usage_json: Option<std::path::PathBuf>,
-) -> Result<()> {
-    let prompt = with_piped_stdin(prompt)?;
-    if prompt.trim().is_empty() {
+/// Everything one `forge run` invocation asked for.
+pub(crate) struct RunRequest {
+    pub(crate) prompt: String,
+    pub(crate) mock: bool,
+    pub(crate) mode: Option<Mode>,
+    pub(crate) tui: bool,
+    pub(crate) resume: Option<String>,
+    pub(crate) pin: Option<String>,
+    /// Standing system messages: `--system`/`--append-system-prompt[-file]` and the `--add-dir`
+    /// note.
+    pub(crate) system: Vec<String>,
+    pub(crate) output_format: OutputFormat,
+    pub(crate) publish_to_fleet: bool,
+    /// Keep the run in this process: `--no-publish-to-fleet`, or a flag a daemon cannot honour.
+    pub(crate) local_only: bool,
+    pub(crate) usage_json: Option<std::path::PathBuf>,
+    /// `-p`: stdout carries only the final answer.
+    pub(crate) print: bool,
+    pub(crate) verbose: bool,
+    pub(crate) partial_messages: bool,
+    /// `--input-format stream-json`: further prompts arrive as JSON lines on stdin.
+    pub(crate) stream_input: bool,
+    /// `--permission-mode dontAsk`: deny whatever is not pre-approved, even at a terminal.
+    pub(crate) never_ask: bool,
+    pub(crate) setup: RunSetup,
+}
+
+pub(crate) async fn run(req: RunRequest) -> Result<()> {
+    let RunRequest {
+        prompt,
+        mock,
+        mode,
+        tui,
+        resume,
+        pin,
+        system,
+        output_format,
+        publish_to_fleet,
+        local_only,
+        usage_json,
+        print,
+        verbose,
+        partial_messages,
+        stream_input,
+        never_ask,
+        mut setup,
+    } = req;
+    // With stream-json input, stdin is the message stream, not text to append to the prompt.
+    let prompt = if stream_input {
+        prompt
+    } else {
+        with_piped_stdin(prompt)?
+    };
+    if prompt.trim().is_empty() && !stream_input {
         anyhow::bail!("empty prompt — usage: forge run \"<your task>\"");
     }
     // A first-time user's `forge run "hi"` would otherwise dead-end with no provider; offer the
@@ -40,7 +80,7 @@ pub(crate) async fn run(
         ),
         _ => {}
     }
-    let (prompt, command_guidance, tier) = if goal_spec.is_some() {
+    let (prompt, command_guidance, tier) = if goal_spec.is_some() || prompt.trim().is_empty() {
         (prompt.trim().to_string(), Vec::new(), None)
     } else {
         expand_one_shot_slash(&prompt)?
@@ -52,9 +92,9 @@ pub(crate) async fn run(
     } else {
         Vec::new()
     };
-    if goal_spec.is_none() {
+    if goal_spec.is_none() && !prompt.is_empty() {
         let (file_blocks, included, skipped) = expand_at_files(&prompt);
-        if !included.is_empty() && !output_format.is_machine() {
+        if !included.is_empty() && !output_format.is_machine() && !print {
             eprintln!("included {}", included.join(", "));
         }
         for s in &skipped {
@@ -69,12 +109,13 @@ pub(crate) async fn run(
     // have a daemon reachable. An explicit machine-readable format therefore opts out of the
     // fleet; `forge attach` is still how a human follows a run they started that way.
     // `--usage-json` reports THIS process's session, so a run handed to the daemon would leave
-    // the caller with nothing to read.
+    // the caller with nothing to read. The same holds for `-p` and every flag the daemon cannot
+    // honour (`local_only`), and for `--resume`/`--continue`, whose session lives here.
     if let Some(session_id) = maybe_publish_run_to_fleet(
         &prompt,
         pin.as_deref(),
         publish_to_fleet,
-        no_publish_to_fleet || usage_json.is_some(),
+        local_only || usage_json.is_some() || resume.is_some(),
         output_format,
     )
     .await
@@ -93,15 +134,25 @@ pub(crate) async fn run(
             None => Ok(()),
         }
     };
+    let first = (!prompt.is_empty()).then(|| OneTurn {
+        prompt: prompt.clone(),
+        guidance: guidance.clone(),
+        tier,
+        goal: goal_spec,
+    });
 
-    // stream-json: emit NDJSON events on stdout via the StreamJsonPresenter (no TUI, no heartbeat —
-    // stdout stays a clean machine-readable event stream). Ctrl-C still returns partial output.
+    // Machine formats: a JSON result (`json`) or NDJSON events (`stream-json`) on stdout — no
+    // TUI, no heartbeat, stdout stays machine-readable. Ctrl-C still returns partial output.
     if output_format.is_machine() {
-        let presenter: Box<dyn Presenter> = if output_format == OutputFormat::Json {
-            Box::new(forge_tui::JsonResultPresenter::new())
-        } else {
-            Box::new(forge_tui::StreamJsonPresenter::new())
-        };
+        let (presenter, init): (Box<dyn Presenter>, Option<forge_tui::StreamInitSlot>) =
+            if output_format == OutputFormat::Json {
+                (Box::new(forge_tui::JsonResultPresenter::new()), None)
+            } else {
+                let (presenter, slot) = forge_tui::StreamJsonPresenter::new()
+                    .with_partial_messages(partial_messages)
+                    .with_deferred_init();
+                (Box::new(presenter), Some(slot))
+            };
         let mut session = match build_session_with(presenter, mock, mode, resume, pin, true).await {
             Ok(session) => session,
             Err(e) => {
@@ -109,60 +160,51 @@ pub(crate) async fn run(
                 return Err(e);
             }
         };
-        session.attach_images(at_images.clone());
+        if let Some(slot) = init {
+            slot.fill(super::print_run::stream_init(&session));
+        }
+        if let Err(e) = setup.apply(&mut session) {
+            println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+            setup.finish(&session);
+            return Err(e);
+        }
+        session.attach_images(at_images);
         let before = session.session_usage_detail();
-        if output_format == OutputFormat::Json {
-            // A resumed session's restored totals arrive before routing; the presenter keeps
-            // them as a baseline so `usage` reports this invocation, as `claude -p` does.
-            session.emit_restored_totals();
-        }
-        let mut interrupted = false;
-        let result = if let Some(spec) = goal_spec {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let end =
-                run_goal_headless(&mut session, spec, &guidance, &cwd, interrupt_signal()).await;
-            end.and_then(GoalRunEnd::into_result)
-        } else {
-            let turn = session.run_turn_with(&prompt, &guidance, tier);
-            tokio::pin!(turn);
-            tokio::select! {
-                r = &mut turn => match r.context("running agent turn") {
-                    Ok(outcome) => fail_if_incomplete(outcome),
-                    Err(e) => {
-                        println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
-                        Err(e)
-                    }
-                },
-                _ = interrupt_signal() => {
-                    println!("{}", forge_tui::error_result_line("interrupted"));
-                    interrupted = true;
-                    Ok(())
-                },
-            }
-        };
-        let written = write_usage(&session, &before);
-        result?;
-        written?;
-        if interrupted {
-            std::process::exit(130);
-        }
-        return Ok(());
+        // A resumed session's restored totals arrive before routing; the presenter keeps them as
+        // a baseline so `usage` reports this invocation, as `claude -p` does.
+        session.emit_restored_totals();
+        let result = drive(&mut session, &setup, first, stream_input, &guidance, true).await;
+        return finish_run(&session, &setup, result, write_usage(&session, &before));
     }
 
-    if tui && goal_spec.is_some() {
+    if tui && first.as_ref().is_some_and(|t| t.goal.is_some()) {
         anyhow::bail!("`forge run --tui` does not run /goal as a loop — use `forge chat`");
     }
-    let mut session = build_session(mock, mode, tui, resume, pin).await?;
+    let mut session = if print {
+        let presenter = Box::new(forge_tui::PrintPresenter::new(verbose, !never_ask));
+        build_session_with(presenter, mock, mode, resume, pin, true).await?
+    } else if never_ask && !tui {
+        let presenter = Box::new(forge_tui::HeadlessPresenter::new(false));
+        build_session_with(presenter, mock, mode, resume, pin, false).await?
+    } else {
+        build_session(mock, mode, tui, resume, pin).await?
+    };
+    if let Err(e) = setup.apply(&mut session) {
+        setup.finish(&session);
+        return Err(e);
+    }
     session.attach_images(at_images);
     let before = session.session_usage_detail();
 
     // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.
     if tui {
+        setup.arm_budget(&mut session);
         let result = session
             .run_turn_with(&prompt, &guidance, tier)
             .await
             .context("running agent turn");
         let written = write_usage(&session, &before);
+        setup.finish(&session);
         result?;
         written?;
         // Hold the final frame until the user quits (Esc / Ctrl-C).
@@ -184,39 +226,136 @@ pub(crate) async fn run(
             }
         })
     });
-
-    // Race the turn against Ctrl-C so a hard kill doesn't discard partial output: on interrupt we
-    // drop the turn future (it stops at its next await) and return what already streamed.
-    let mut interrupted = false;
-    let result = if let Some(spec) = goal_spec {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let end = run_goal_headless(&mut session, spec, &guidance, &cwd, async {
-            interrupt_signal().await;
-        })
-        .await;
-        end.and_then(GoalRunEnd::into_result)
-    } else {
-        let turn = session.run_turn_with(&prompt, &guidance, tier);
-        tokio::pin!(turn);
-        tokio::select! {
-            r = &mut turn => r.context("running agent turn").and_then(fail_if_incomplete),
-            _ = interrupt_signal() => {
-                interrupted = true;
-                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — turn stopped (what streamed above is not saved to the session)\x1b[0m");
-                Ok(())
-            }
-        }
-    };
+    let result = drive(&mut session, &setup, first, stream_input, &guidance, false).await;
     if let Some(h) = heartbeat {
         h.abort();
         eprint!("\r\x1b[K"); // clear the heartbeat line
         let _ = std::io::Write::flush(&mut std::io::stderr());
     }
-    let written = write_usage(&session, &before);
-    result?;
+    finish_run(&session, &setup, result, write_usage(&session, &before))
+}
+
+/// One prompt to run as a turn (or, with `goal`, as a `/goal` loop).
+struct OneTurn {
+    prompt: String,
+    guidance: Vec<String>,
+    tier: Option<forge_types::TaskTier>,
+    goal: Option<GoalRunSpec>,
+}
+
+/// Run the first prompt, then (stream-json input) every user message on stdin. `Ok(true)` means
+/// the run was interrupted. A failed turn in a message stream does not end the stream; the run
+/// still fails at the end.
+async fn drive(
+    session: &mut Session,
+    setup: &RunSetup,
+    first: Option<OneTurn>,
+    stream_input: bool,
+    guidance: &[String],
+    machine: bool,
+) -> Result<bool> {
+    let mut failure = None;
+    if let Some(turn) = first {
+        match drive_turn(session, setup, turn, machine).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) if stream_input => failure = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    if !stream_input {
+        return Ok(false);
+    }
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line.context("reading stream-json input")?,
+            _ = interrupt_signal() => return Ok(true),
+        };
+        let Some(line) = line else { break };
+        let text = match parse_input_line(&line) {
+            Ok(InputLine::Prompt(text)) => text,
+            Ok(InputLine::Control(reply)) => {
+                println!("{reply}");
+                continue;
+            }
+            Ok(InputLine::Ignore) => continue,
+            Err(msg) => {
+                eprintln!("warning: --input-format stream-json: {msg}");
+                continue;
+            }
+        };
+        let turn = match expand_one_shot_slash(&text) {
+            Ok((prompt, extra, tier)) => OneTurn {
+                prompt,
+                guidance: guidance.iter().cloned().chain(extra).collect(),
+                tier,
+                goal: None,
+            },
+            Err(e) => {
+                failure = Some(e);
+                continue;
+            }
+        };
+        match drive_turn(session, setup, turn, machine).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => failure = Some(e),
+        }
+    }
+    failure.map_or(Ok(false), Err)
+}
+
+/// One turn raced against Ctrl-C, so a hard kill doesn't discard partial output: on interrupt the
+/// turn future is dropped (it stops at its next await) and what already streamed is kept.
+async fn drive_turn(
+    session: &mut Session,
+    setup: &RunSetup,
+    turn: OneTurn,
+    machine: bool,
+) -> Result<bool> {
+    setup.arm_budget(session);
+    if let Some(spec) = turn.goal {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let end = run_goal_headless(session, spec, &turn.guidance, &cwd, interrupt_signal()).await;
+        return end.and_then(GoalRunEnd::into_result).map(|()| false);
+    }
+    let run = session.run_turn_with(&turn.prompt, &turn.guidance, turn.tier);
+    tokio::pin!(run);
+    tokio::select! {
+        r = &mut run => match r.context("running agent turn") {
+            Ok(outcome) => fail_if_incomplete(outcome).map(|()| false),
+            Err(e) => {
+                if machine {
+                    println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+                }
+                Err(e)
+            }
+        },
+        _ = interrupt_signal() => {
+            if machine {
+                println!("{}", forge_tui::error_result_line("interrupted"));
+            } else {
+                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — turn stopped (what streamed above is not saved to the session)\x1b[0m");
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// The run is over: forget an unsaved session, then report the turn's outcome. An interrupted run
+/// exits 128 + SIGINT; a script must not read an aborted turn as success.
+fn finish_run(
+    session: &Session,
+    setup: &RunSetup,
+    result: Result<bool>,
+    written: Result<()>,
+) -> Result<()> {
+    setup.finish(session);
+    let interrupted = result?;
     written?;
     if interrupted {
-        // Conventional 128 + SIGINT; a script must not read an aborted turn as success.
         std::process::exit(130);
     }
     Ok(())

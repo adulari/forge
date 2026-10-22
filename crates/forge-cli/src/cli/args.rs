@@ -240,6 +240,9 @@ pub(crate) use anywhere::AnywhereCmd;
 #[path = "args/claude_compat.rs"]
 pub(crate) mod claude_compat;
 pub(crate) use claude_compat::ClaudeCompat;
+#[path = "args/session_flags.rs"]
+pub(crate) mod session_flags;
+pub(crate) use session_flags::SessionFlags;
 #[path = "args/stats.rs"]
 pub(crate) mod stats;
 pub(crate) use stats::StatsCmd;
@@ -280,14 +283,6 @@ pub(crate) enum Command {
         /// restricts the routing pool to those models, ranked within the set by the mesh.
         #[arg(long)]
         model: Option<String>,
-        /// Append standing system instructions for the provider without including them in mesh
-        /// task classification. Repeat the flag to add multiple system messages.
-        #[arg(
-            long = "system",
-            visible_alias = "append-system-prompt",
-            value_name = "TEXT"
-        )]
-        system: Vec<String>,
         /// Output format: `text` (default, human line output), `json` (one final Claude-Code-shaped
         /// result object) or `stream-json` (NDJSON — one JSON
         /// event per line on stdout, mirroring Claude Code's stream-json so editors/tools can embed
@@ -309,6 +304,8 @@ pub(crate) enum Command {
         usage_json: Option<std::path::PathBuf>,
         #[command(flatten)]
         claude: ClaudeCompat,
+        #[command(flatten)]
+        session: Box<SessionFlags>,
     },
     /// Start an interactive multi-turn chat session.
     ///

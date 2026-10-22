@@ -249,7 +249,7 @@ async fn a_run_token_budget_ends_the_turn_mid_loop() {
     // 1,000 input tokens per call: the third call crosses 2,500.
     session.set_run_budget(Some(crate::RunBudget {
         tokens_remaining: Some(2_500),
-        deadline: None,
+        ..Default::default()
     }));
 
     let outcome = session.run_turn("keep reading").await.unwrap();
@@ -264,6 +264,31 @@ async fn a_run_token_budget_ends_the_turn_mid_loop() {
 }
 
 #[tokio::test]
+async fn a_run_spend_budget_ends_the_turn_with_budget_exhausted() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = priced_config();
+    config.mesh.budget.turn_cap_usd = 0.0;
+    config.mesh.budget.session_cap_usd = 0.0;
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, events) = session_with(&store, provider, config);
+    // $1 per call: the third call crosses $2.50.
+    session.set_run_budget(Some(crate::RunBudget {
+        usd_remaining: Some(2.5),
+        ..Default::default()
+    }));
+
+    let outcome = session.run_turn("keep reading").await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(loop_steps(&events), 3, "stopped inside the turn, not at 12");
+    assert_eq!(outcome.stop_reason, StopReason::BudgetExhausted);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        PresenterEvent::Warning(w) if w.contains("spend budget (--max-budget-usd) exhausted")
+    )));
+}
+
+#[tokio::test]
 async fn a_run_deadline_stops_the_loop_before_the_next_call() {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let mut config = priced_config();
@@ -274,8 +299,8 @@ async fn a_run_deadline_stops_the_loop_before_the_next_call() {
     let (provider, _calls) = EndlessToolProvider::new(1000);
     let (mut session, events) = session_with(&store, provider, config);
     session.set_run_budget(Some(crate::RunBudget {
-        tokens_remaining: None,
         deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+        ..Default::default()
     }));
 
     let outcome = session.run_turn("keep reading").await.unwrap();
@@ -296,7 +321,7 @@ async fn a_run_budget_binds_only_the_turn_it_was_armed_for() {
     let (mut session, events) = session_with(&store, provider, config);
     session.set_run_budget(Some(crate::RunBudget {
         tokens_remaining: Some(1),
-        deadline: None,
+        ..Default::default()
     }));
     session.run_turn("first").await.unwrap();
     let outcome = session.run_turn("second").await.unwrap();

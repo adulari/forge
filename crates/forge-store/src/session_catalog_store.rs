@@ -531,6 +531,19 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// The newest top-level session named exactly `title` (`forge run --name`), if any.
+    pub fn newest_session_titled(&self, title: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT id FROM session WHERE title = ?1 AND parent_session_id IS NULL \
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [title],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Whether a session with this id exists.
     pub fn session_exists(&self, session_id: &str) -> Result<bool> {
         let n: i64 = self.lock()?.query_row(

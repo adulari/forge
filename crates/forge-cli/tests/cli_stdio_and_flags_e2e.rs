@@ -89,7 +89,7 @@ fn run_accepts_the_claude_print_flags() {
 #[test]
 fn unsupported_claude_flags_are_rejected_not_ignored() {
     let workspace = tempfile::tempdir().unwrap();
-    for flag in ["--system-prompt", "--fork-session", "--add-dir"] {
+    for flag in ["--fork-session", "--json-schema", "--settings"] {
         let output = forge(workspace.path())
             .args(["run", "hi", "--mock", flag, "x"])
             .output()

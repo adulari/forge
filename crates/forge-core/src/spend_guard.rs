@@ -39,6 +39,11 @@ pub(crate) struct SpendState {
 }
 
 impl SpendState {
+    /// Priced spend of this turn's model calls so far.
+    pub(crate) fn turn_usd(&self) -> f64 {
+        self.turn_usd
+    }
+
     pub(crate) fn begin_turn(&mut self) {
         self.turn_usd = 0.0;
         self.turn_warned = false;

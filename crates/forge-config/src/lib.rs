@@ -19,6 +19,9 @@ pub mod codemode;
 mod commit_policy;
 mod compact_model;
 mod config_diagnostics;
+pub mod setting_sources;
+mod system_prompt_overrides;
+use system_prompt_overrides::resolve_system_prompt_overrides;
 pub mod goal;
 mod harness_profile;
 mod lsp_diagnostics;
@@ -3446,7 +3449,8 @@ fn has_permission_rules(table: &toml::Table) -> bool {
 
 /// Load configuration with full layered precedence (lowest -> highest):
 /// built-in defaults -> user config -> project `./.forge/config.toml` -> `FORGE_*` env.
-/// An untrusted project contributes only its safe subset (docs/features/project-trust.md).
+/// An untrusted project contributes only its safe subset (docs/features/project-trust.md), and
+/// `--setting-sources` can leave out the user or project layer ([`setting_sources`]).
 pub fn load() -> Result<Config, ConfigError> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     load_in(&cwd)
@@ -3461,7 +3465,9 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
 
     // `file_exact`, not `file`: figment's `file` searches every parent directory, so a stray
     // `~/.forge/config.toml` silently became the project config of every directory under `$HOME`.
-    let user_config = config_dir().map(|dir| dir.join("config.toml"));
+    let layers = setting_sources::setting_sources();
+    let user_dir = config_dir().filter(|_| layers.user);
+    let user_config = user_dir.as_ref().map(|dir| dir.join("config.toml"));
     // `file_exact` errors on a missing file where `file` skipped it, so guard on existence.
     if let Some(path) = user_config.as_ref().filter(|p| p.is_file()) {
         fig = fig.merge(Toml::file_exact(path));
@@ -3472,11 +3478,15 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
     let trusted = project_trust::is_trusted(&cwd);
     let mut ignored = Vec::new();
     let mut project_has_rules = false;
-    if trusted && project_config.is_file() {
+    if layers.project && trusted && project_config.is_file() {
         fig = fig.merge(Toml::file_exact(project_config));
         project_has_rules =
             project_layer(project_config, true).is_some_and(|(t, _)| has_permission_rules(&t));
-    } else if let Some((table, dropped)) = project_layer(project_config, false) {
+    } else if let Some((table, dropped)) = layers
+        .project
+        .then(|| project_layer(project_config, false))
+        .flatten()
+    {
         project_has_rules = has_permission_rules(&table);
         ignored.extend(dropped);
         let text = toml::to_string(&table).map_err(|e| ConfigError::Write(e.to_string()))?;
@@ -3509,26 +3519,26 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
     // present it sets the whole `[mcp]` section (overriding any `[mcp]` in config.toml). Keeping
     // it a separate file matches Claude-Code's `.mcp.json` convention and keeps server lists out
     // of the main config.
-    if let Some(dir) = config_dir() {
+    if let Some(dir) = user_dir.as_ref() {
         merge_mcp_toml(&mut config.mcp, &dir.join("mcp.toml"));
     }
     let project_mcp_buf = root.join(".forge/mcp.toml");
     let project_mcp = project_mcp_buf.as_path();
-    if trusted {
+    if layers.project && trusted {
         merge_mcp_toml(&mut config.mcp, project_mcp);
-    } else if project_mcp.is_file() && !load_mcp_toml(project_mcp).servers.is_empty() {
+    } else if layers.project
+        && project_mcp.is_file()
+        && !load_mcp_toml(project_mcp).servers.is_empty()
+    {
         ignored.push("MCP servers (.forge/mcp.toml)".to_string());
     }
 
     // Claude-Code-compatible hooks: a `settings.json` (user config dir + project `.forge/`) can
     // declare hooks in CC's event-nested shape. They're appended (CC-compat mode) so existing CC
     // hook scripts run unmodified alongside any native `[[hooks]]`. User scope first, project last.
-    let mut cc_paths = Vec::new();
-    if let Some(dir) = config_dir() {
-        cc_paths.push(dir.join("settings.json"));
-    }
+    let mut cc_paths: Vec<PathBuf> = user_dir.iter().map(|d| d.join("settings.json")).collect();
     let project_settings = root.join(".forge/settings.json");
-    cc_paths.push(project_settings.clone());
+    cc_paths.extend(layers.project.then(|| project_settings.clone()));
     for path in cc_paths {
         if let Ok(text) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<serde_json::Value>(&text) {
@@ -3552,11 +3562,8 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
     // cannot tell those apart from the shipped cold-start seed, and only a file-set tier is an
     // explicit user instruction strong enough to override auto-discovery (forge-mesh
     // `candidates_for_tier`; docs/features/mesh-routing.md §3.1).
-    let mut model_config_paths = Vec::new();
-    if let Some(dir) = config_dir() {
-        model_config_paths.push(dir.join("config.toml"));
-    }
-    model_config_paths.push(root.join(".forge/config.toml"));
+    let mut model_config_paths: Vec<PathBuf> = user_config.iter().cloned().collect();
+    model_config_paths.extend(layers.project.then(|| project_config_buf.clone()));
     for path in model_config_paths {
         if let Ok(text) = std::fs::read_to_string(&path) {
             for tier in configured_model_tiers(&text) {
@@ -3570,7 +3577,7 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
     if let Some(path) = user_config.as_deref().filter(|p| p.is_file()) {
         config_diagnostics::warn_unknown_keys(path);
     }
-    if trusted && project_config.is_file() {
+    if layers.project && trusted && project_config.is_file() {
         config_diagnostics::warn_unknown_keys(project_config);
     }
 
@@ -3583,42 +3590,6 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
     }
 
     Ok(config)
-}
-
-/// Resolve `@path` system-prompt overrides. A value beginning with `@` names a file whose contents
-/// become the prompt (so large or shared prompts can live in a file instead of being inlined).
-/// `~/…` expands to the home directory, a bare relative path resolves against the Forge config
-/// directory, and an absolute path is used as-is. Inline values (no leading `@`) are left untouched.
-fn resolve_system_prompt_overrides(config: &mut Config) -> Result<(), ConfigError> {
-    let base = config_dir();
-    let overrides = std::mem::take(&mut config.system_prompt_overrides);
-    let mut resolved = HashMap::new();
-    for (provider, value) in overrides {
-        let Some(path_str) = value.strip_prefix('@') else {
-            resolved.insert(provider, value);
-            continue;
-        };
-        let path = resolve_prompt_path(path_str, base.as_deref());
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| ConfigError::PromptFile(path.display().to_string(), e.to_string()))?;
-        resolved.insert(provider, contents);
-    }
-    config.system_prompt_overrides = resolved;
-    Ok(())
-}
-
-fn resolve_prompt_path(raw: &str, base: Option<&Path>) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    let path = PathBuf::from(raw);
-    if path.is_absolute() {
-        path
-    } else {
-        base.map(|b| b.join(&path)).unwrap_or(path)
-    }
 }
 
 /// The `[mesh.models]` tier keys one config file's text sets, in file order. Empty for a file

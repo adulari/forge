@@ -169,11 +169,17 @@ pub(crate) fn resolve_resume_mode(
     }
 }
 
-/// Resolve a (possibly abbreviated) session id to a single full id, git-style.
+/// Resolve a (possibly abbreviated) session id to a single full id, git-style. A value that
+/// matches no id is tried as a session name (`forge run --name`); the newest such session wins.
 pub(crate) fn resolve_session(store: &Store, prefix: &str) -> Result<String> {
     let mut matches = store
         .matching_session_ids(prefix)
         .context("looking up session")?;
+    if matches.is_empty() {
+        if let Some(id) = store.newest_session_titled(prefix.trim())? {
+            return Ok(id);
+        }
+    }
     match matches.len() {
         0 => anyhow::bail!("no session matching '{prefix}' — see `forge sessions`"),
         1 => Ok(matches.remove(0)),
@@ -225,7 +231,12 @@ pub(crate) fn sessions(archived_only: bool, all: bool, unarchive: Option<&str>) 
             fmt_age(s.last_activity),
             s.message_count,
             s.total_cost_usd,
-            session_title(s.preview.as_deref()),
+            session_title(
+                s.title
+                    .as_deref()
+                    .filter(|t| !t.trim().is_empty())
+                    .or(s.preview.as_deref())
+            ),
         )
         .is_err()
         {
