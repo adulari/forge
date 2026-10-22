@@ -999,10 +999,12 @@ fn run_accepts_role_separated_system_prompts() {
     .unwrap();
 
     match cli.command.unwrap() {
-        Command::Run { prompt, system, .. } => {
+        Command::Run {
+            prompt, session, ..
+        } => {
             assert_eq!(prompt, ["How many tasks are due today?"]);
             assert_eq!(
-                system,
+                session.system,
                 ["You are a task assistant.", "Use the on-screen task data."]
             );
         }

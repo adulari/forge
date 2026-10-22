@@ -45,16 +45,20 @@ mod overlays;
 mod peer_message;
 pub mod perf;
 mod picker;
+mod print_presenter;
 mod prompt_history;
 pub mod theme;
 pub use prompt_history::PromptHistory;
 mod refine_args;
 mod render;
+mod result_totals;
 pub mod select;
 mod stream_json;
+mod stream_json_message;
 pub mod throughput;
 pub use json_result::{error_result_line, JsonResultPresenter};
-pub use stream_json::StreamJsonPresenter;
+pub use print_presenter::PrintPresenter;
+pub use stream_json::{StreamInit, StreamInitSlot, StreamJsonPresenter};
 mod surface;
 mod transcript;
 mod tui;
@@ -146,7 +150,8 @@ mod stream_json_tests {
 
         let raw = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert_eq!(lines.len(), 6, "one NDJSON object per emit; got:\n{raw}");
+        // The final answer never streamed here, so it is sent as its own assistant message.
+        assert_eq!(lines.len(), 7, "one NDJSON object per message; got:\n{raw}");
 
         // Every line is valid JSON.
         let parsed: Vec<serde_json::Value> = lines
@@ -176,10 +181,13 @@ mod stream_json_tests {
             parsed[3]["message"]["content"][0]["id"],
             parsed[4]["message"]["content"][0]["tool_use_id"]
         );
+        assert_eq!(parsed[5]["type"], "assistant");
+        assert_eq!(parsed[5]["message"]["content"][0]["text"], "done");
         // terminal result event.
-        assert_eq!(parsed[5]["type"], "result");
-        assert_eq!(parsed[5]["result"], "done");
-        assert_eq!(parsed[5]["stop_reason"], "final_answer");
+        assert_eq!(parsed[6]["type"], "result");
+        assert_eq!(parsed[6]["result"], "done");
+        assert_eq!(parsed[6]["stop_reason"], "final_answer");
+        assert!(parsed[6]["usage"].is_object() && parsed[6]["num_turns"].is_u64());
         assert_eq!(
             parsed[3]["message"]["content"][0]["id"],
             parsed[4]["message"]["content"][0]["tool_use_id"]

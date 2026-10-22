@@ -17,6 +17,7 @@ mod codemode_store;
 mod detached_child_store;
 mod dispatch_store;
 mod duel_store;
+mod ephemeral_session_store;
 mod fleet_message_store;
 mod fork_store;
 mod handoff;

@@ -234,6 +234,15 @@ impl Session {
         out
     }
 
+    /// The configured replacement for the base prompt on `model`: its provider's entry, else the
+    /// `"*"` entry that applies to every provider (`forge run --system-prompt` sets only that one).
+    pub(crate) fn system_prompt_override(&self, model: &str) -> Option<&String> {
+        let overrides = &self.config.system_prompt_overrides;
+        overrides
+            .get(forge_config::provider_of(model))
+            .or_else(|| overrides.get("*"))
+    }
+
     /// The base harness preamble prepended (fresh, never persisted) to every main-loop request:
     /// the Forge coding-agent system prompt + a small live environment block (cwd / OS). Placed
     /// first so the provider's cache breakpoint anchors on this stable prefix — which is why the git
@@ -273,11 +282,7 @@ impl Session {
         // Per-provider system-prompt override: when the user configured a custom prompt for this
         // model's namespace, swap it in for the base coding-agent prompt (always the first preamble
         // message). The live env block and any minimal-diff bias are kept.
-        if let Some(override_prompt) = self
-            .config
-            .system_prompt_overrides
-            .get(forge_config::provider_of(model))
-        {
+        if let Some(override_prompt) = self.system_prompt_override(model) {
             preamble[0].content.clone_from(override_prompt);
         }
         // Codemode guidance rides with the tool itself: present exactly when `run_code` is

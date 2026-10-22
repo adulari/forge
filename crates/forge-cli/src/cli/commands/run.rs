@@ -38,8 +38,11 @@ mod pin_check;
 mod session;
 pub(crate) use session::*;
 
+mod mcp_overlay;
 mod one_shot;
 pub(crate) use one_shot::*;
+pub(crate) mod print_run;
+mod stream_input;
 mod usage_json;
 
 mod plain_chat;

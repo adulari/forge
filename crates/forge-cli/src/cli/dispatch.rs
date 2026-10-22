@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 
+use crate::cli::args::claude_compat::InputFormat;
+use crate::cli::commands::run::RunRequest;
+
 use crate::*;
 
 pub(crate) async fn dispatch(command: Command) -> Result<()> {
@@ -15,15 +18,24 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             r#continue,
             resume,
             model,
-            system,
             output_format,
             publish_to_fleet,
             no_publish_to_fleet,
             usage_json,
             claude,
+            session,
         } => {
-            let mode = claude.effective_mode(mode);
-            crate::cli::commands::run::claude_flags::install(&claude);
+            let mode = session.effective_mode(mode);
+            if claude.include_partial_messages && output_format != OutputFormat::StreamJson {
+                anyhow::bail!("--include-partial-messages needs --output-format stream-json");
+            }
+            if tui && claude.input_format == Some(InputFormat::StreamJson) {
+                anyhow::bail!("--input-format stream-json reads stdin, so it cannot run in --tui");
+            }
+            if let Some(models) = &session.fallback_model {
+                crate::cli::commands::run::ensure_pin_providers_known(models)?;
+            }
+            crate::cli::commands::run::claude_flags::install(&claude, &session)?;
             // Unified continuity with `chat`: --continue / --resume <id> / bare --resume (picker).
             // The picker needs the interactive TUI, so treat the headless run as "plain".
             let store = open_store()?;
@@ -35,19 +47,55 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                      `--resume <id>` / `--continue`, or use `forge chat --resume`"
                 ),
             };
-            run(
-                prompt.join(" "),
+            // `--session-id` creates the row now and the run resumes it, so the id holds from
+            // the first event on.
+            let resume_id = match &session.session_id {
+                Some(id) => Some(
+                    crate::cli::commands::run::print_run::create_session_with_id(
+                        &store,
+                        id,
+                        mode.map(Into::into),
+                    )?,
+                ),
+                None => resume_id,
+            };
+            let mut system = session.system.clone();
+            for path in &session.append_system_prompt_file {
+                system.push(std::fs::read_to_string(path).with_context(|| {
+                    format!("reading --append-system-prompt-file {}", path.display())
+                })?);
+            }
+            let dirs = crate::cli::commands::run::claude_flags::added_dirs(&session.add_dir)?;
+            if !dirs.is_empty() {
+                system.push(format!(
+                    "Additional working directories you may read and edit: {}",
+                    dirs.join(", ")
+                ));
+            }
+            run(RunRequest {
+                prompt: prompt.join(" "),
                 mock,
                 mode,
                 tui,
-                resume_id,
-                model,
+                resume: resume_id,
+                pin: model,
                 system,
                 output_format,
                 publish_to_fleet,
-                no_publish_to_fleet,
+                local_only: no_publish_to_fleet
+                    || claude.needs_local_session()
+                    || session.needs_local_session(),
                 usage_json,
-            )
+                print: claude.print,
+                verbose: claude.verbose,
+                partial_messages: claude.include_partial_messages,
+                stream_input: claude.input_format == Some(InputFormat::StreamJson),
+                never_ask: session.permission_mode
+                    == Some(crate::cli::args::session_flags::ClaudePermissionMode::DontAsk),
+                setup: crate::cli::commands::run::print_run::RunSetup::from_flags(
+                    &claude, &session,
+                ),
+            })
             .await
         }
         Command::Serve {

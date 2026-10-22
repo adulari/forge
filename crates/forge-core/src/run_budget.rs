@@ -1,4 +1,5 @@
-//! Wall-clock and token ceiling for one autonomous `/goal` or `/loop` run, enforced INSIDE a turn.
+//! Wall-clock, token and spend ceiling for one autonomous `/goal` or `/loop` run (or a
+//! `forge run --max-budget-usd` invocation), enforced INSIDE a turn.
 //!
 //! The run drivers used to check `--max-tokens` / `--max-minutes` only between turns, so a single
 //! long turn (hundreds of steps) could overshoot either ceiling arbitrarily. The driver now hands
@@ -10,12 +11,14 @@
 use super::*;
 
 /// What remains of a run's budget at the start of a turn. `None` fields are unbounded.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct RunBudget {
     /// Tokens (input + output, the same sum the driver accumulates) this turn may still use.
     pub tokens_remaining: Option<u64>,
     /// Wall-clock instant after which no further model call may start.
     pub deadline: Option<std::time::Instant>,
+    /// Dollars this turn may still spend (`--max-budget-usd`), priced like every other guard.
+    pub usd_remaining: Option<f64>,
 }
 
 /// Which ceiling tripped.
@@ -23,12 +26,14 @@ pub struct RunBudget {
 pub(crate) enum RunBudgetHit {
     Tokens,
     Time,
+    Spend,
 }
 
 /// Pure check, shared by the live guard and the tests.
 pub(crate) fn run_budget_hit(
     budget: &RunBudget,
     turn_tokens: u64,
+    turn_usd: f64,
     now: std::time::Instant,
 ) -> Option<RunBudgetHit> {
     if budget
@@ -36,6 +41,8 @@ pub(crate) fn run_budget_hit(
         .is_some_and(|left| turn_tokens >= left)
     {
         Some(RunBudgetHit::Tokens)
+    } else if budget.usd_remaining.is_some_and(|left| turn_usd >= left) {
+        Some(RunBudgetHit::Spend)
     } else if budget.deadline.is_some_and(|d| now >= d) {
         Some(RunBudgetHit::Time)
     } else {
@@ -62,6 +69,7 @@ impl Session {
             budget,
             self.turn_input_tokens
                 .saturating_add(self.turn_output_tokens),
+            self.spend.turn_usd(),
             std::time::Instant::now(),
         )
     }
@@ -72,6 +80,7 @@ impl Session {
         let which = match hit {
             RunBudgetHit::Tokens => "token budget",
             RunBudgetHit::Time => "time budget",
+            RunBudgetHit::Spend => "spend budget (--max-budget-usd)",
         };
         let work = self.preserve_uncommitted_work();
         self.presenter.emit(PresenterEvent::Warning(format!(
@@ -91,7 +100,7 @@ mod tests {
     #[test]
     fn unbounded_budget_never_trips() {
         assert_eq!(
-            run_budget_hit(&RunBudget::default(), u64::MAX, Instant::now()),
+            run_budget_hit(&RunBudget::default(), u64::MAX, f64::MAX, Instant::now()),
             None
         );
     }
@@ -100,11 +109,11 @@ mod tests {
     fn tokens_trip_at_the_remaining_amount() {
         let b = RunBudget {
             tokens_remaining: Some(100),
-            deadline: None,
+            ..RunBudget::default()
         };
-        assert_eq!(run_budget_hit(&b, 99, Instant::now()), None);
+        assert_eq!(run_budget_hit(&b, 99, 0.0, Instant::now()), None);
         assert_eq!(
-            run_budget_hit(&b, 100, Instant::now()),
+            run_budget_hit(&b, 100, 0.0, Instant::now()),
             Some(RunBudgetHit::Tokens)
         );
     }
@@ -113,13 +122,26 @@ mod tests {
     fn deadline_trips_once_passed() {
         let now = Instant::now();
         let b = RunBudget {
-            tokens_remaining: None,
             deadline: Some(now + Duration::from_secs(5)),
+            ..RunBudget::default()
         };
-        assert_eq!(run_budget_hit(&b, 0, now), None);
+        assert_eq!(run_budget_hit(&b, 0, 0.0, now), None);
         assert_eq!(
-            run_budget_hit(&b, 0, now + Duration::from_secs(5)),
+            run_budget_hit(&b, 0, 0.0, now + Duration::from_secs(5)),
             Some(RunBudgetHit::Time)
+        );
+    }
+
+    #[test]
+    fn spend_trips_once_the_remaining_dollars_are_used() {
+        let b = RunBudget {
+            usd_remaining: Some(0.50),
+            ..RunBudget::default()
+        };
+        assert_eq!(run_budget_hit(&b, 0, 0.49, Instant::now()), None);
+        assert_eq!(
+            run_budget_hit(&b, 0, 0.50, Instant::now()),
+            Some(RunBudgetHit::Spend)
         );
     }
 }
