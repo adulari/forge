@@ -1637,7 +1637,7 @@
      "tool_calls": null,
      "tool_errors": null,
      "ttft_ms": null,
-     "note": "no usage row: the Forge session failed to start with 'database is locked'; the concurrent Forge arms shared one store; counted as unsolved"
+     "note": "no usage row: the Forge session failed to start with 'database is locked'; the concurrent Forge arms shared one store; counted as unsolved; its 47 s agent wall (a failed start) is still part of the speed comparison"
     },
     "a06-answer-retry-policy": {
      "solved": true,

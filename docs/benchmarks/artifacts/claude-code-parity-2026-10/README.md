@@ -11,10 +11,12 @@ Data behind [claude-code-parity-2026-10.md](../../claude-code-parity-2026-10.md)
 | `baseline/multiturn-*.json` | Multi-turn summaries, copied unchanged from the bench kit. |
 | `baseline/swe/<arm>/` | Official `swebench==4.1.0` report, `predictions.jsonl`, `predictions.metrics.jsonl`, `predictions.integrity.jsonl`, `summary.tsv`, `run-meta.json`, `eval.log`. |
 | `baseline/tasks.json` | Every task: id, suite, language, type, one-line summary and the SHA-256 commitment of its withheld directory. |
-| `baseline/environment.json` | Versions, model ids, host, dates, concurrency, private archive hash. |
+| `baseline/environment.json` | Versions, model ids, host, dates, concurrency, commit provenance, private archive hash. |
+| `baseline/isolation-check.json` | Which of the operator's instruction files reached the model in the isolated Claude Code and bridge arms (counts and sizes only). |
 | `baseline/PARITY.md` | Static feature audit (280 features, 25 ranked gaps). |
 | `render.py` | Rewrites the tables of the report between `<!-- BEGIN:name -->` and `<!-- END:name -->` markers. Deterministic. |
 | `ingest.py` | Converts bench-kit output (`aggregate.py` summaries, task directories) into the JSON above. |
+| `audit_raw.py` | Independent check of the report against the kit's raw files: recomputes every table cell, the headline rows, the figures quoted in the text and the task commitments, sharing no code with `render.py`. Needs the kit. |
 
 ## Render
 
@@ -22,6 +24,23 @@ Data behind [claude-code-parity-2026-10.md](../../claude-code-parity-2026-10.md)
 python3 render.py            # rewrite the report's tables
 python3 render.py --check    # exit 1 if the report is out of date
 python3 render.py --verify   # recompute arm totals from per-task rows and compare with the stored totals
+python3 audit_raw.py --kit ~/.cache/forge-ops/ccbench --commitments   # recompute from the kit's raw files (needs the kit)
+```
+
+`render.py --verify` only proves that the stored totals match the stored rows. `audit_raw.py` is the check against the raw output; run it
+after every `render.py` and after adding a run set (extend it for the new run set first: it covers the baseline).
+
+## Regenerate the baseline files
+
+`ingest.py` regenerates the derived baseline files from the kit byte for byte (checked with `cmp` during review; the multi-turn files and the
+SWE-bench files are plain copies of the kit's own):
+
+```
+K=~/.cache/forge-ops/ccbench
+python3 ingest.py abd $K/results/all-now/summary.json baseline/suites-abd.json --default-run sonnet-s1   # the Sonnet arms carry no @run suffix
+python3 ingest.py c $K/results/c-agg/summary.json baseline/suite-c.json --runs-dir $K/results/runs/c \
+    --failed "FD-deepseek:c06-rename-config-provider-of:panic after completion"
+python3 ingest.py tasks $K/suite $K/multiturn/sessions $K/swe/instances.jsonl $K/results/swe/FD-deepseek/run-meta.json baseline/tasks.json
 ```
 
 ## Add an after-fixes run set

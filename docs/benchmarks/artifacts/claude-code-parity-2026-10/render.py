@@ -183,6 +183,15 @@ def forge_arm_ids(suite):
     return [a for a in suite["arms"] if split_arm(a)[0] in ("FB", "FD")]
 
 
+def field(row, key):
+    """A per-task value; 'uncached_input_tokens' is input minus cache reads, derived from the row."""
+    if key == "uncached_input_tokens":
+        if row.get("input_tokens") is None:
+            return None
+        return row["input_tokens"] - (row.get("cached_input_tokens") or 0)
+    return row.get(key)
+
+
 def pair_compare(cc, fg):
     """Paired comparison of a Forge arm against a Claude Code arm over the tasks both ran."""
     tasks = [t for t in cc["tasks"] if t in fg["tasks"]]
@@ -194,11 +203,12 @@ def pair_compare(cc, fg):
         ts = []
         for t in tasks:
             a, b = cc["tasks"][t], fg["tasks"][t]
-            if a.get(key) is None or b.get(key) is None:
+            va, vb = field(a, key), field(b, key)
+            if va is None or vb is None:
                 continue
             if complete_only and (a.get("metrics_complete") is False or b.get("metrics_complete") is False):
                 continue
-            ts.append((a[key], b[key]))
+            ts.append((va, vb))
         if not ts:
             return None
         sc, sf = sum(x for x, _ in ts), sum(y for _, y in ts)
@@ -213,6 +223,7 @@ def pair_compare(cc, fg):
 
     out["agent_wall"] = cmp_field("agent_wall_s", False)
     out["input_tokens"] = cmp_field("input_tokens", True)
+    out["uncached_input"] = cmp_field("uncached_input_tokens", True)
     out["output_tokens"] = cmp_field("output_tokens", True)
     out["tool_calls"] = cmp_field("tool_calls", True)
     out["model_calls"] = cmp_field("model_calls", True)
@@ -708,8 +719,12 @@ def headline(rs):
         fb = sum(1 for t in ids if b["metrics"][t]["wall_secs"] < a["metrics"][t]["wall_secs"])
         add("Speed, SWE-bench Verified, total wall", "DeepSeek V4.1 Flash, FD vs CC, 10 instances", f"{wa:,.0f} s", f"{wb:,.0f} s",
             [verdict(wa, wb, sign_p(fa, fb), False)])
-    # efficiency: input and output tokens
-    for key, nice in (("input_tokens", "input tokens"), ("output_tokens", "output tokens")):
+    # efficiency: input (cache reads counted in full), input not read from cache, output
+    for key, nice, mt_fld, swe_val in (
+            ("input_tokens", "input tokens (cache reads included)", "input_tokens_total", lambda m: m["input_tokens"]),
+            ("uncached_input", "input tokens not read from cache", "uncached_input_tokens",
+             lambda m: m["input_tokens"] - (m.get("cached_input_tokens") or 0)),
+            ("output_tokens", "output tokens", "output_tokens", lambda m: m["output_tokens"])):
         for (kind, model), pr in gabd.items():
             pcs = [pair_compare(a, b)[key] for a, b in pr]
             add(f"Efficiency, suites a+b+d, {nice}", sample(kind, model, pr, 26),
@@ -721,7 +736,7 @@ def headline(rs):
                 [verdict(x["cc_total"], x["fg_total"], x["p"], False)])
         if mtd:
             ra, rb = mtd["CC-deepseek"]["runs"], mtd["FD-deepseek"]["runs"]
-            fld = "input_tokens_total" if key == "input_tokens" else "output_tokens"
+            fld = mt_fld
             fa = sum(1 for x, y in zip(ra, rb) if y[fld] < x[fld])
             fb = sum(1 for x, y in zip(ra, rb) if x[fld] < y[fld])
             ta, tb = sum(x[fld] for x in ra), sum(y[fld] for y in rb)
@@ -729,10 +744,11 @@ def headline(rs):
         if d:
             a, b = d["CC-deepseek"], d["FD-deepseek"]
             ids = a["ids"]
-            ta = sum(a["metrics"][t][key] for t in ids)
-            tb = sum(b["metrics"][t][key] for t in ids)
-            fa = sum(1 for t in ids if a["metrics"][t][key] < b["metrics"][t][key])
-            fb = sum(1 for t in ids if b["metrics"][t][key] < a["metrics"][t][key])
+            va = {t: swe_val(a["metrics"][t]) for t in ids}
+            vb = {t: swe_val(b["metrics"][t]) for t in ids}
+            ta, tb = sum(va.values()), sum(vb.values())
+            fa = sum(1 for t in ids if va[t] < vb[t])
+            fb = sum(1 for t in ids if vb[t] < va[t])
             add(f"Efficiency, SWE-bench Verified, {nice}", "DeepSeek V4.1 Flash, FD vs CC, 10 instances", mi(ta), mi(tb), [verdict(ta, tb, sign_p(fa, fb), False)])
     return md(["Dimension", "Arms and sample", "Claude Code", "Forge", "Leads", "Confidence (lowest level over repeats; sign test)"], rows,
               ["l", "l", "r", "r", "l", "l"])

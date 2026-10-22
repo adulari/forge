@@ -64,7 +64,7 @@ def task_row(a, note=None):
 
 NOTES = {
     ("CC-deepseek/seed1", "a07-speed-up-log-report"): "timed out at the 1200 s limit; Claude Code reports tokens only when a run ends, so token fields are 0 (tool and model-call counts come from the stream)",
-    ("FD-deepseek/seed2", "a05-mailer-options-object"): "no usage row: the Forge session failed to start with 'database is locked'; the concurrent Forge arms shared one store; counted as unsolved",
+    ("FD-deepseek/seed2", "a05-mailer-options-object"): "no usage row: the Forge session failed to start with 'database is locked'; the concurrent Forge arms shared one store; counted as unsolved; its 47 s agent wall (a failed start) is still part of the speed comparison",
 }
 
 
@@ -348,7 +348,7 @@ def cmd_env(args):
         "forge": {
             "version": sh([args.forge, "--version"]).replace("forge ", ""),
             "commit": args.forge_commit,
-            "commit_provenance": "supplied by the study coordinator; the binary embeds no commit hash. Its build time (2026-10-21 11:00Z) is about four minutes after that commit merged (10:56Z)",
+            "commit_provenance": ("built by the kit's forge-dev-update from this commit: its log reads `building 8b18cad8 fix(push): keep generic iOS alerts until replaced; warn on failed APNs sends (#1601)` and was written at 2026-10-21 13:00:43 +0200, within a second of the binary's modification time, and the pinned copy has the same SHA-256 as the binary that build produced. The binary itself embeds no commit hash"),
             "binary": "ccbench/bin/forge (pinned copy of the release build used for every Forge arm)",
             "binary_sha256": file_sha(args.forge),
         },
@@ -369,10 +369,7 @@ def cmd_env(args):
             "multiturn": f"finished {mt_end['CC']} (CC), {mt_end['FD']} (FD)",
             "swe": f"finished {swe_end['CC']} (CC), {swe_end['FD']} (FD)",
         },
-        "concurrency": ("The eight Haiku and DeepSeek arms of suites a+b+d were started within one millisecond of each other and ran side by side "
-                        "on this machine; the Sonnet pair ran afterwards, as a pair. In suite c the Claude Code and Forge chains ran side by side until "
-                        "the Claude Code chain ended; the SWE-bench and multi-turn arms of both harnesses were started together as well. The machine "
-                        "also hosted other agents' work, and load was not recorded, so absolute wall times carry noise."),
+        "concurrency": ("The eight Haiku and DeepSeek arms of suites a+b+d were started within a millisecond of each other (12:21Z) and ran side by side; the Haiku arms ended by 12:56Z and the DeepSeek arms between 13:05Z and 13:15Z. The Sonnet pair started at 13:11Z, while the DeepSeek arms were still finishing, and ended at 13:28Z and 13:29Z. Suite c (one chain per harness), the multi-turn sessions (both harnesses) and SWE-bench (both harnesses, two instances at a time each) all started together at 13:25Z, so they overlapped the last minutes of the Sonnet pair. The Claude Code chain of suite c ended at 13:43Z and the Forge chain at 13:56Z; multi-turn ended at 13:39Z (CC) and 13:40Z (FD), SWE-bench at 13:51Z (CC) and 14:27Z (FD). The machine also hosted other agents' work, and load was not recorded, so absolute wall times carry noise."),
         "private_archive": {"file": args.archive, "sha256": args.archive_sha256},
     }
     dump(args.out, out)

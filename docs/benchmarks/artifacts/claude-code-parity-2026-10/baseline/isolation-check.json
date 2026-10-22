@@ -1,0 +1,88 @@
+{
+ "schema": 1,
+ "what": "Which of the operator's instruction files reached the model in the baseline's isolated Claude Code and bridge arms. Counts and sizes only; no file content is stored here.",
+ "date": "2026-10-22",
+ "claude_code": "2.1.308",
+ "stub_check": {
+  "method": "Zero-quota check made after the baseline run, during review. The kit's fake Anthropic API (runner/lib/stub_anthropic.py) records each request a claude process makes; no model was called. Claude Code was started with the flag set the clean Claude Code arms used (below), once with the working directory under $HOME like the baseline workspaces (~/.cache/forge-ops/ccbench/tmp/...) and once outside $HOME. The request's first user message was searched for text of the operator's global instruction file and of the project instruction file at /home/floris/CLAUDE.md, plus three other markers that only occur in the global files.",
+  "flags": "--setting-sources project --strict-mcp-config --no-session-persistence --output-format stream-json --verbose -p --dangerously-skip-permissions --model haiku",
+  "environment": "ANTHROPIC_BASE_URL pointing at the stub, a dummy ANTHROPIC_API_KEY, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1; default CLAUDE_CONFIG_DIR",
+  "results": [
+   {
+    "working_directory": "under $HOME",
+    "system_prompt_chars": 8847,
+    "first_user_message_chars": 10328,
+    "request_body_bytes": 58231,
+    "markers": {
+     "global_claude_md_text": 1,
+     "project_claude_md_at_home": 2,
+     "other_markers_from_the_global_files_present": 3
+    }
+   },
+   {
+    "working_directory": "outside $HOME (/tmp)",
+    "system_prompt_chars": 8812,
+    "first_user_message_chars": 1275,
+    "request_body_bytes": 49088,
+    "markers": {
+     "global_claude_md_text": 0,
+     "project_claude_md_at_home": 0,
+     "other_markers_from_the_global_files_present": 0
+    }
+   }
+  ],
+  "reading": "With these flags Claude Code loads the CLAUDE.md and .claude/CLAUDE.md of every ancestor directory as project instructions. --setting-sources project does not stop that, so a workspace under $HOME receives the operator's global instructions. The Claude Code arms of suites a, b, c and d ran with workspaces under $HOME and therefore did too (the request itself was not captured during the baseline run)."
+ },
+ "bridge_transcripts": {
+  "what": "The `instructions` attachment of claude's own session transcripts for the bridged arms (results/runs/<run>/FB-*/seed1/transcripts/*/*.jsonl): which files were loaded as project instructions, and in how many of the 26 task transcripts of each arm.",
+  "arms": {
+   "FB-haiku/seed1": {
+    "transcripts": 26,
+    "files": [
+     {
+      "path": "/home/floris/CLAUDE.md",
+      "chars": 1434,
+      "transcripts": 26
+     },
+     {
+      "path": "/home/floris/.claude/CLAUDE.md",
+      "chars": 7049,
+      "transcripts": 26
+     }
+    ]
+   },
+   "FB-haiku/seed2": {
+    "transcripts": 26,
+    "files": [
+     {
+      "path": "/home/floris/CLAUDE.md",
+      "chars": 1434,
+      "transcripts": 26
+     },
+     {
+      "path": "/home/floris/.claude/CLAUDE.md",
+      "chars": 7049,
+      "transcripts": 26
+     }
+    ]
+   },
+   "FB-sonnet/seed1": {
+    "transcripts": 26,
+    "files": [
+     {
+      "path": "/home/floris/CLAUDE.md",
+      "chars": 1434,
+      "transcripts": 26
+     },
+     {
+      "path": "/home/floris/.claude/CLAUDE.md",
+      "chars": 7049,
+      "transcripts": 26
+     }
+    ]
+   }
+  }
+ },
+ "forge_arms": "Not captured. The Forge arms had a neutral .forge/AGENTS.md in every workspace. The static audit (PARITY.md, G3) records that Forge loads only the first non-empty instruction file and does not walk parent directories, which implies the FD arms did not receive either file; this was not verified with a request capture.",
+ "other_dimensions": "The SWE-bench workspaces live under /var/tmp and the multi-turn workspaces under /tmp (the `workspace` field of the session records), both outside $HOME, so no ancestor instruction file applies to them. The SWE-bench Claude Code arm also ran with --safe-mode (swe/run.sh and the bin/claude shim of the kit)."
+}

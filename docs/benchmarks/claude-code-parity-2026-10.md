@@ -14,24 +14,32 @@ suites a+b+d for all three models: with DeepSeek V4.1 Flash Forge solved 18/26 a
 with Sonnet 5.5 through the bridge 18/26 against 21/26 (three tasks only Claude Code solved, sign
 test p=0.25, one repeat). On SWE-bench Verified Forge resolved 10 of 10 instances and Claude Code 9
 of 10 (one instance, within noise), and both completed all three multi-turn sessions. Forge is
-clearly behind on one suite, the large-codebase suite c: 7/11 against 11/11. That is four tasks,
-so p=0.125, but the four are not random: c08 ran as a read-only turn, c06 ended in a Forge panic
-after the work was done, and c02 and c04 returned wrong answers after repeated automatic
-compaction (F1, F2, F6).
+behind on one suite, the large-codebase suite c: 7/11 against 11/11. Four tasks are within noise on
+their own (sign test p=0.125), but the four failures have visible causes: c08 ran as a read-only turn
+(the suite keeps that prompt wording on purpose, as a canary for a Forge defect known beforehand),
+c06 ended in a Forge panic after the work was done, and c02 and c04 returned wrong answers in runs
+with four automatic compactions each, though c10 also had four and passed, so a link to compaction
+is not established (F1, F2, F6). Seven of the eleven suite c tasks use a snapshot of Forge's own source, and the
+suites were written by the Forge team.
 
 Claude Code is faster and lighter in most measured comparisons. Forge's median agent time is
 x1.06 to x1.49 Claude Code's on suites a+b+d, x1.96 on suite c, and x2.31 in total on SWE-bench.
 With the same DeepSeek model, Forge's own loop writes x1.2 to x5.5 the output tokens, makes x1.6 to
 x2.2 the tool calls, and reads less of its prompt from cache (84-85% against 91% on a+b+d, 67%
 against 94% on c, 65% against 97% on SWE-bench), so the input it pays full price for is x1.3 to
-x14 larger, even where its total input tokens are equal or lower (a+b+d and c). The Claude Code bridge adds
-4% to 36% input tokens and 18% to 51% model calls over plain Claude Code on the same model. Forge's own
-wins are small: b09 was solved only by the Forge DeepSeek arm (both repeats), and the SWE-bench result
-and the DeepSeek input-token comparison in repeat 1 lean towards Forge, the latter at p=0.04, the former within noise.
+x14 larger, even where its total input tokens are equal or lower (a+b+d, c and multi-turn). Counting only input not
+read from cache, Claude Code is lower in every DeepSeek comparison, significantly so in suite c and SWE-bench. The Claude Code
+bridge adds 4% to 36% input tokens and 18% to 51% model calls over plain Claude Code on the same model. Forge's own wins
+are small and none is solid: b09 was solved only by the Forge DeepSeek arm (both repeats; each of the other eight arms failed one documentation check, F8), the SWE-bench result leans towards Forge (within noise),
+and Forge's total input tokens are lower on the DeepSeek pair (significant in one of the two a+b+d repeats, p=0.04,
+uncorrected for multiplicity), which is mostly cheaper cached input.
 
-Nine fix PRs were opened from these findings and the static feature audit (five merged, four
-open at the time of writing). None has been re-measured, so every number in this report is the
-pre-fix baseline, and no claim that a fix works rests on it. TUI and UX, trivial-prompt latency,
+Nine fix PRs were opened from these findings and the static feature audit (six merged and three
+open when this was written; the [ledger](#fix-ledger) has each state). None has been re-measured, so every
+number in this report is the pre-fix baseline, and no claim that a fix works rests on it. One isolation
+gap matters for reading the numbers: the Claude Code and bridge arms of suites a to d received the operator's
+global instruction files through their working directory, and the Forge native arm probably did not (F9); if
+anything that handicaps Claude Code in the DeepSeek comparison. TUI and UX, trivial-prompt latency,
 the Opus subset and the Haiku and Sonnet runs on suite c, multi-turn and SWE-bench are not
 measured yet ([Not yet measured](#not-yet-measured)).
 
@@ -50,12 +58,18 @@ measured yet ([Not yet measured](#not-yet-measured)).
 | Speed, suite c, median agent wall | DeepSeek V4.1 Flash, FD vs CC, 1 repeat, 11 tasks | 81.9 s | 160.5 s | Claude Code | Moderate, p=0.0215 |
 | Speed, multi-turn, total wall | DeepSeek V4.1 Flash, FD vs CC, 3 sessions | 783 s | 816 s | Within noise, Claude Code ahead | Low, p=0.25 |
 | Speed, SWE-bench Verified, total wall | DeepSeek V4.1 Flash, FD vs CC, 10 instances | 3,012 s | 6,957 s | Claude Code | High, p=0.00195 |
-| Efficiency, suites a+b+d, input tokens | DeepSeek V4.1 Flash, FD vs CC, repeats 1, 2, 26 tasks | 6.73M, 8.42M | 6.52M, 6.81M | Forge in repeat 1, within noise in repeat 2 | Low (p=0.0433, p=1) |
-| Efficiency, suites a+b+d, input tokens | Haiku 5.5, FB vs CC, repeats 1, 2, 26 tasks | 7.83M, 6.51M | 8.15M, 7.54M | Within noise, Claude Code ahead in both repeats | Low (p=0.0755, p=0.169) |
-| Efficiency, suites a+b+d, input tokens | Sonnet 5.5, FB vs CC, 1 repeat, 26 tasks | 2.83M | 3.85M | Claude Code | High, p<0.001 |
-| Efficiency, suite c, input tokens | DeepSeek V4.1 Flash, FD vs CC, 1 repeat, 10 tasks | 5.45M | 4.48M | Within noise, Forge ahead | Low, p=1 |
-| Efficiency, multi-turn, input tokens | DeepSeek V4.1 Flash, FD vs CC, 3 sessions | 5.01M | 3.94M | Within noise, Forge ahead | Low, p=0.25 |
-| Efficiency, SWE-bench Verified, input tokens | DeepSeek V4.1 Flash, FD vs CC, 10 instances | 12.09M | 14.00M | Within noise, Claude Code ahead | Low, p=0.109 |
+| Efficiency, suites a+b+d, input tokens (cache reads included) | DeepSeek V4.1 Flash, FD vs CC, repeats 1, 2, 26 tasks | 6.73M, 8.42M | 6.52M, 6.81M | Forge in repeat 1, within noise in repeat 2 | Low (p=0.0433, p=1) |
+| Efficiency, suites a+b+d, input tokens (cache reads included) | Haiku 5.5, FB vs CC, repeats 1, 2, 26 tasks | 7.83M, 6.51M | 8.15M, 7.54M | Within noise, Claude Code ahead in both repeats | Low (p=0.0755, p=0.169) |
+| Efficiency, suites a+b+d, input tokens (cache reads included) | Sonnet 5.5, FB vs CC, 1 repeat, 26 tasks | 2.83M | 3.85M | Claude Code | High, p<0.001 |
+| Efficiency, suite c, input tokens (cache reads included) | DeepSeek V4.1 Flash, FD vs CC, 1 repeat, 10 tasks | 5.45M | 4.48M | Within noise, Forge ahead | Low, p=1 |
+| Efficiency, multi-turn, input tokens (cache reads included) | DeepSeek V4.1 Flash, FD vs CC, 3 sessions | 5.01M | 3.94M | Within noise, Forge ahead | Low, p=0.25 |
+| Efficiency, SWE-bench Verified, input tokens (cache reads included) | DeepSeek V4.1 Flash, FD vs CC, 10 instances | 12.09M | 14.00M | Within noise, Claude Code ahead | Low, p=0.109 |
+| Efficiency, suites a+b+d, input tokens not read from cache | DeepSeek V4.1 Flash, FD vs CC, repeats 1, 2, 26 tasks | 608k, 782k | 1.05M, 1.05M | Within noise, Claude Code ahead in both repeats | Low (p=0.23, p=0.69) |
+| Efficiency, suites a+b+d, input tokens not read from cache | Haiku 5.5, FB vs CC, repeats 1, 2, 26 tasks | 674k, 678k | 698k, 664k | Within noise, direction differs by repeat | Low (p=0.0755, p=0.845) |
+| Efficiency, suites a+b+d, input tokens not read from cache | Sonnet 5.5, FB vs CC, 1 repeat, 26 tasks | 398k | 434k | Claude Code | High, p=0.00936 |
+| Efficiency, suite c, input tokens not read from cache | DeepSeek V4.1 Flash, FD vs CC, 1 repeat, 10 tasks | 307k | 1.48M | Claude Code | High, p=0.00195 |
+| Efficiency, multi-turn, input tokens not read from cache | DeepSeek V4.1 Flash, FD vs CC, 3 sessions | 190k | 603k | Within noise, Claude Code ahead | Low, p=0.25 |
+| Efficiency, SWE-bench Verified, input tokens not read from cache | DeepSeek V4.1 Flash, FD vs CC, 10 instances | 346k | 4.84M | Claude Code | High, p=0.00195 |
 | Efficiency, suites a+b+d, output tokens | DeepSeek V4.1 Flash, FD vs CC, repeats 1, 2, 26 tasks | 224k, 292k | 309k, 342k | Claude Code (both repeats) | High (p<0.001, p<0.001) |
 | Efficiency, suites a+b+d, output tokens | Haiku 5.5, FB vs CC, repeats 1, 2, 26 tasks | 250k, 261k | 266k, 247k | Claude Code in repeat 1, within noise in repeat 2 | Low (p=0.00936, p=0.327) |
 | Efficiency, suites a+b+d, output tokens | Sonnet 5.5, FB vs CC, 1 repeat, 26 tasks | 74k | 77k | Within noise, Claude Code ahead | Low, p=0.327 |
@@ -69,7 +83,8 @@ reads "Within noise" and names the side the point estimate favours. With more th
 columns list the repeats in order; a label that differs between repeats is spelled out by repeat. Confidence is the
 lowest level over the repeats: High p<0.01, Moderate p<0.05, Low otherwise. About two dozen
 comparisons are tested here with no correction for multiplicity, so a single Moderate result is weak
-evidence. Token rows use only task pairs where both sides reported complete metrics.
+evidence. Token rows use only task pairs where both sides reported complete metrics. The first input-token rows
+count cache reads in full; the "not read from cache" rows are the closer proxy for what a request costs.
 
 ## Method
 
@@ -103,10 +118,16 @@ Four arm types, each run with the same model:
   runs with `--safe-mode`.
 - Forge arms get a neutral `.forge/AGENTS.md` in every workspace so that Forge does not inject the
   operator's global `~/.claude/CLAUDE.md` as project instructions.
-- Known gap (F9): the bridged Claude Code process received the operator's global `CLAUDE.md` as user
-  memory in every FB transcript, and the Claude Code arms probably did as well.
+- Known gap (F9): the workspaces of suites a, b, c and d lie under `$HOME`, and Claude Code loads the `CLAUDE.md`
+  files of ancestor directories as project instructions whatever `--setting-sources` says. The bridged Claude Code
+  process did (78 of 78 transcripts), a local stub-API check shows that the clean Claude Code flag set does too, so
+  the Claude Code and bridge arms received the operator's global `~/.claude/CLAUDE.md` and `/home/floris/CLAUDE.md`
+  (about 8.5k characters per request). The Forge native arm probably did not (not captured). Multi-turn and SWE-bench
+  workspaces are outside `$HOME`.
 - No effort override was passed in suites a to d, so each harness used its default reasoning
-  effort. Every arm used the same 1,200 s timeout per phase (setup, agent turn, grading) in suites
+  effort. In SWE-bench neither DeepSeek arm was given an effort setting either (`run.sh` sets `SWE_CLAUDE_EFFORT` empty for
+  CC-deepseek and the kit's `claude` shim then omits `--effort`; the `claude_flags` string in `run-meta.json` is a constant that
+  says "high" for every Claude Code arm). Every arm used the same 1,200 s timeout per phase (setup, agent turn, grading) in suites
   a to d and 1,500 s per instance in SWE-bench.
 
 ### Environment
@@ -114,7 +135,7 @@ Four arm types, each run with the same model:
 <!-- BEGIN:env -->
 | Item | Value |
 |---|---|
-| Forge | 2.21.0, commit `8b18cad8` (supplied by the study coordinator; the binary embeds no commit hash. Its build time (2026-10-21 11:00Z) is about four minutes after that commit merged (10:56Z)) |
+| Forge | 2.21.0, commit `8b18cad8` (built by the kit's forge-dev-update from this commit: its log reads `building 8b18cad8 fix(push): keep generic iOS alerts until replaced; warn on failed APNs sends (#1601)` and was written at 2026-10-21 13:00:43 +0200, within a second of the binary's modification time, and the pinned copy has the same SHA-256 as the binary that build produced. The binary itself embeds no commit hash) |
 | Forge binary | `ccbench/bin/forge (pinned copy of the release build used for every Forge arm)`, SHA-256 `9fd1225f2995fdadde8af7e05dc9361e6dbb6e15fa179747bd12451918f07b3b` |
 | Claude Code | 2.1.308 (Claude Code) |
 | Models actually used | `cb/deepseek-v4.1-flash`; `claude-haiku-5-5`; `claude-sonnet-5-5`; `inferhub::cb/deepseek-v4.1-flash (Forge FD arm, provider id)` |
@@ -125,7 +146,7 @@ Four arm types, each run with the same model:
 | RAM | 31 GiB |
 | OS | Arch Linux, kernel Linux 7.2.6-arch2-1 |
 | Run window (UTC) | 2026-10-22, 12:21Z to 14:27Z |
-| Concurrency | The eight Haiku and DeepSeek arms of suites a+b+d were started within one millisecond of each other and ran side by side on this machine; the Sonnet pair ran afterwards, as a pair. In suite c the Claude Code and Forge chains ran side by side until the Claude Code chain ended; the SWE-bench and multi-turn arms of both harnesses were started together as well. The machine also hosted other agents' work, and load was not recorded, so absolute wall times carry noise. |
+| Concurrency | The eight Haiku and DeepSeek arms of suites a+b+d were started within a millisecond of each other (12:21Z) and ran side by side; the Haiku arms ended by 12:56Z and the DeepSeek arms between 13:05Z and 13:15Z. The Sonnet pair started at 13:11Z, while the DeepSeek arms were still finishing, and ended at 13:28Z and 13:29Z. Suite c (one chain per harness), the multi-turn sessions (both harnesses) and SWE-bench (both harnesses, two instances at a time each) all started together at 13:25Z, so they overlapped the last minutes of the Sonnet pair. The Claude Code chain of suite c ended at 13:43Z and the Forge chain at 13:56Z; multi-turn ended at 13:39Z (CC) and 13:40Z (FD), SWE-bench at 13:51Z (CC) and 14:27Z (FD). The machine also hosted other agents' work, and load was not recorded, so absolute wall times carry noise. |
 <!-- END:env -->
 
 ### Suites
@@ -145,7 +166,8 @@ holds the full hashes, the task directory names, and hashes for the shared input
 
 - **a (9 tasks)**: small feature, bugfix, refactor and reading tasks in Python, JavaScript and TypeScript.
 - **b (9 tasks)**: longer or trickier work in Rust, Go and shell: multi-step requests, concurrency, merge repair, history search.
-- **c (11 tasks)**: large offline codebases (a ~390k-line Rust snapshot of Forge, Twisted, dulwich, npm); answers need search, call-chain following or context management.
+- **c (11 tasks)**: large offline codebases (a ~390k-line Rust snapshot of Forge, Twisted, dulwich, npm); answers need search, call-chain following or context management. Seven of the tasks use a
+  snapshot of Forge's own source, and c08 keeps a phrase that triggers a known Forge defect on purpose (F1).
 - **d (8 tasks)**: harness robustness: interactive prompts, huge output, flaky tests, long builds, background processes, read-only files, binary neighbours, portability.
 
 <!-- BEGIN:tasks -->
@@ -304,7 +326,7 @@ token comparisons):
 
 <!-- BEGIN:abd-notes -->
 - `CC-deepseek/seed1` `a07-speed-up-log-report`: timed out at the 1200 s limit; Claude Code reports tokens only when a run ends, so token fields are 0 (tool and model-call counts come from the stream)
-- `FD-deepseek/seed2` `a05-mailer-options-object`: no usage row: the Forge session failed to start with 'database is locked'; the concurrent Forge arms shared one store; counted as unsolved
+- `FD-deepseek/seed2` `a05-mailer-options-object`: no usage row: the Forge session failed to start with 'database is locked'; the concurrent Forge arms shared one store; counted as unsolved; its 47 s agent wall (a failed start) is still part of the speed comparison
 <!-- END:abd-notes -->
 
 Forge against Claude Code on the same model and repeat, quality:
@@ -354,8 +376,8 @@ Reading:
 - Claude Code has the lower median agent time in all five pairs. The gap is significant in 3 of the 5
   pairs (DeepSeek both repeats, Haiku repeat 1) and not in the others. Totals are dominated by a few long tasks
   and by one 1,200 s timeout in CC-deepseek repeat 1, which is why the medians lead.
-- Forge's DeepSeek loop uses a similar number of input tokens but x1.2 to x1.4 the output tokens and x1.6
-  to x1.8 the tool calls, with a lower cache hit (F5, F6). The bridge costs more input and model calls than plain Claude Code (F4).
+- Forge's DeepSeek loop uses no more input tokens in total (x0.97 and x0.81 of Claude Code's) but x1.2 to x1.4 the output tokens
+  and x1.6 to x1.8 the tool calls, with a lower cache hit and so x1.3 to x1.8 the input not read from cache (F5, F6). The bridge costs more input and model calls than plain Claude Code (F4).
 
 ### Suite c: large codebases
 
@@ -415,8 +437,8 @@ reading tasks):
 <!-- END:c-tasks -->
 
 Reading: Claude Code solved all 11; Forge solved 7. Forge's four failures: c02 (2 of 4 answer items) and
-c04 (3 of 4) are wrong answers on reading tasks, c08 is the read-only misclassification (F1), and c06
-is the panic (F2). Forge was slower on 9 of 10 comparable tasks (ratio of medians x1.96), wrote x3.68 the output
+c04 (3 of 4) are wrong answers on reading tasks, c08 is the read-only misclassification (F1; the suite keeps that prompt wording
+on purpose as a canary), and c06 is the panic (F2). Forge was slower on 9 of 10 comparable tasks (ratio of medians x1.96), wrote x3.68 the output
 tokens and made x2.21 the tool calls. Forge ran with a fresh store per task, and its logs show 30
 automatic compactions across the 11 tasks; Claude Code's streams show none (F6).
 
@@ -442,9 +464,11 @@ grader and a probe of whether a standing rule or an earlier finding is still hon
 <!-- END:mt -->
 
 Reading: both arms completed all 21 prompts, passed every hidden test and scored 1.00 on the probe, so
-this dimension is at its ceiling and says nothing about quality. Total wall time differs by about 4%.
+this dimension is at its ceiling and says nothing about quality. Total prompt time differs by about 4%.
 Forge reads less of its prompt from cache (603,025 of 3,941,905 input tokens not from cache against 189,733 of
-5,006,885) and made x1.32 the tool calls. One repeat only.
+5,006,885) and made x1.32 the tool calls. "Wall" is the sum of the seven prompt times of a session; the whole session, with
+workspace setup, the hidden grader and the probe, took 884 s for Forge and 821 s for Claude Code (8% apart). Claude Code was faster in all three
+sessions. One repeat only.
 
 ### SWE-bench Verified
 
@@ -475,7 +499,7 @@ Paired over 10 instances: resolved only by FD-deepseek 1, only by CC-deepseek 0 
 <!-- END:swe-instances -->
 
 Reading: Forge resolved all ten and Claude Code nine (`astropy__astropy-13033` unresolved), a one-instance
-difference that is inside the noise. Forge took x2.31 the total time and was slower on every instance (10 of 10), and it wrote
+difference that is inside the noise. Forge took x2.31 the total time (summed over instances; each arm ran two instances at a time, so elapsed time was about half) and was slower on every instance (10 of 10), and it wrote
 x5.51 the output tokens, 50% of them reported as reasoning. Its cache hit was 65% against 97%. Forge left
 `refs/stash` in 8 of the 10 repositories (F3).
 
@@ -539,20 +563,21 @@ Suite c:
 Each finding says what was observed, where, and how sure we are of the cause.
 
 **F1. A scoped "don't edit X" turned fix requests into read-only turns.**
-Observed: in both FD repeats the run log shows `permission denied by task scope ...: shell is
-unavailable for ReadOnlyReview` on a01, a04 and a07 and on no other task. The agent then printed a diagnosis
-and a patch and said it could not apply it. The three prompts each contain a clause of the form "don't
+Observed: in both FD repeats the run log shows `permission denied by task scope <id>: shell is
+unavailable for Rea…` (the log line is cut off; the agent's own text names `ReadOnlyReview`) on a01, a04 and a07 and on no other
+task. The agent then printed a diagnosis and a patch and said it could not apply it. The three prompts each contain a clause of the form "don't
 edit the existing tests" / "don't edit the incoming CSV". In all three FB arms the bridged model also
 says the turn is read-only on the same three tasks. Suite c shows the same denial on c08, whose prompt keeps
 "do not edit existing files under `dulwich/tests`" on purpose as a canary. Effect on score: a04 and a07
 were solved by no arm, so within suites a+b+d it shows on a01 only (Claude Code 5 of 5 arms, Forge 0 of 5); it cost c08.
-PR #1603 narrows the rule so a protected object no longer makes the whole turn read-only. That PR has
-unit tests only; the tasks have not been re-run, so that a01 and c08 now pass is a hypothesis.
+PR #1603 narrows the rule so a protected object no longer makes the whole turn read-only (its description says
+Claude Code fixed all three tasks; in this baseline it fixed a01 only). That PR has unit tests only; the tasks have not
+been re-run, so that a01 and c08 now pass is a hypothesis.
 
 **F2. Forge panicked after finishing c06.**
 Observed: the FD run for c06 exited with code 101 after 165 s with `thread 'main' panicked at
 crates/forge-core/src/lib.rs:3862:50: range start index 17 out of range for slice of length 10`. The log shows the
-agent had finished its edits (a 28-file diff) but the process died before grading, so there is no
+agent had finished its edits (its final summary lists 28 files changed) but the process died before grading, so there is no
 result row. It is counted as failed; whether the work would have passed is unknown. The suite c
 README records the same panic on c06 and c10 during calibration. PR #1607 attributes it to the completeness audit slicing a
 transcript that automatic compaction had already shortened (2 of 8 compaction-heavy runs in its measurements).
@@ -562,9 +587,10 @@ Observed: 8 of 10 FD SWE-bench repositories ended with a `refs/stash`; none of t
 did (`summary.tsv`, column `history`). All ten FD logs contain Forge's warning that the turn modified existing test
 files and that it stashed the test edits and pushed back once. That is the existing-tests-are-spec guard in
 `crates/forge-core/src/lib.rs` (it runs `git stash push -- <test files>`). The two repositories without a stash
-(django-13343, django-13821) are the two whose final patch still touches test files, which fits the model
-having popped the stash back, but that was not checked. The patch is captured from the working tree, so this does not change how the
-official evaluator scored the instances. The side effect is visible to a user: an unexpected stash entry holding the agent's
+(django-13343, django-13821) are the two whose final patch still touches test files: both logs show the model
+running `git stash pop`. The patch is captured from the working tree, so stashed test edits are not in it; the official
+evaluator resets the test files to the base commit before applying its own test patch (`git checkout <base> <test files>` in
+`swebench/harness/test_spec/python.py`), so test-file edits in a patch do not change the verdict either way. The side effect is visible to a user: an unexpected stash entry holding the agent's
 rejected test edits. The guard fired in 10 of 10 FD instances, so DeepSeek edited existing tests every time;
 9 of 10 Claude Code patches also touch test files.
 
@@ -575,15 +601,17 @@ model calls x1.18, x1.28 and x1.51, median agent time x1.14, x1.06 and x1.10. Th
 (an 11,970-character system prompt cut to 9,616, a 2,354-character auto-memory section) and notes that Forge's tool
 schemas (18.8k characters) are smaller than Claude Code's own (29.5k); those figures come from the PR's own
 measurements on a debug build, not from this baseline, and this baseline did not isolate the contributors.
-F9 may add to the FB side.
+F9 does not explain it: the bridge and Claude Code arms both received the global instruction files.
 
 **F5. Forge's loop writes more and acts more than Claude Code's on the same model.**
 Observed with DeepSeek: output tokens x1.38 and x1.17 (a+b+d), x3.68 (c), x5.51 (SWE-bench); tool calls
 x1.58 and x1.83 (a+b+d), x2.21 (c). Forge reports 52% of its a+b+d output (164,936 of 316,385 and 179,458 of 342,294)
-and 50% of its SWE-bench output (418,482 of 841,616) as reasoning tokens. Caveats: it was not verified
-that Claude Code's output counter includes reasoning tokens (its streams in repeat 1 hold 261 thinking blocks across 498 tool calls,
-so it reasons too), nor that the two paths through InferHub count them the same way. Wall time and tool calls point the same way
-and are not subject to that caveat.
+and 50% of its SWE-bench output (418,482 of 841,616) as reasoning tokens. Caveat on the counters: in every FD row of suites a+b+d reasoning is
+30% to 72% of the reported output, so Forge's output figure includes it. Claude Code's streams in repeat 1 hold 261 thinking blocks
+across 498 tool calls, and its 223,861 reported output tokens are well above the roughly 56k that the visible text and tool inputs
+would come to at four characters per token, and above the roughly 189k with the thinking text included, which indicates its counter
+includes thinking as well. That is an estimate, not a tokenizer count, and how InferHub counts reasoning on the two API surfaces
+was not checked. Wall time and tool calls point the same way and are not subject to this caveat.
 
 **F6. Low cache hit and heavy compaction on large tasks.**
 Observed: Forge's cache hit is 84-85% (a+b+d), 67% (c) and 65% (SWE) against 91%, 94% and 97% for Claude Code.
@@ -597,36 +625,46 @@ task, suites a+b+d one shared store. Our logs confirm the compactions, not the c
 Observed: FD repeat 2 lost a05 with `building session: starting session: database is locked` after 47 s, with no usage row.
 That log has 8 such lines (the other FD repeat none). The two FD and two FB-Haiku arms ran at the same time on one shared
 SQLite store (`forge-bench.db`), so part of the contention is the benchmark's own doing; a session start should
-still not fail on it. One attempt of 52 was lost. It is counted as unsolved. PR #1607 changes the busy handling.
+still not fail on it. The two FB-Haiku arms logged one and two lattice warnings with the same error but lost no session. One attempt of 52 was lost. It is counted
+as unsolved. PR #1607 changes the busy handling.
 
 **F8. Forge solved one task nobody else did.**
-Observed: `b09-fsweep-docs-drift` was solved by both FD repeats and by none of the eight other arms. We did not look at
-why. It is a single task, so it shows that the two harnesses fail differently, not that one is better.
+Observed: `b09-fsweep-docs-drift` was solved by both FD repeats and by none of the eight other arms. The grader stops at the
+first failing check: five of the eight other arms failed on "--help output does not describe the dry-run output (would remove)" and three
+(CC-Haiku in both repeats, FB-Haiku in repeat 2) on "docs/usage.md does not mention --verbose". So each missed one documentation item. Why
+Forge's loop caught them was not examined. It is a single task, so it shows that the two harnesses fail differently, not that one is better.
 
 **F9. Isolation was not perfect.**
-Observed: the text of the operator's global `~/.claude/CLAUDE.md` appears in all 78 FB
-transcripts (26 tasks in each of three arms); the recorded argv runs the bridged process with `CLAUDE_CONFIG_DIR` pointing at the bridge's own home. The stream-json
-output of the Claude Code arms does not record memory, so it cannot show whether they got it; they use the same flag set and the same
-home directory, and the init event lists 19 skills and 3 plugins for the Anthropic-model arms (16 and 2 for DeepSeek), so they probably did. The SWE-bench
-shim says default flags leak the user's `CLAUDE.md` and that `--safe-mode` does not, and the SWE-bench Claude Code arm
-uses `--safe-mode`. Effect: unknown; it adds input tokens and could change behaviour on both sides. Before the next run, capture the first request of each
-arm (the kit has a stub API mode that records requests) and move suites a to d to `--safe-mode`.
+Observed: the suite a, b, c and d workspaces are created under `$HOME` (`~/.cache/forge-ops/ccbench/tmp/`), and Claude Code loads the
+`CLAUDE.md` and `.claude/CLAUDE.md` of every ancestor directory as project instructions. The `instructions` attachment of all 78 bridged
+transcripts (26 tasks in each of three FB arms) lists `/home/floris/CLAUDE.md` (1,434 characters) and the operator's global
+`/home/floris/.claude/CLAUDE.md` (7,049), both typed as project instructions. The Claude Code arms' stream-json does not record memory, so
+we checked the same flag set (`--setting-sources project --strict-mcp-config --no-session-persistence`) against a local fake API after the
+run, with no model call ([isolation-check.json](artifacts/claude-code-parity-2026-10/baseline/isolation-check.json)): from a directory under
+`$HOME` the first user message is 10,328 characters and contains text of both files; from `/tmp` it is
+1,275 characters and contains neither. So the Claude Code and bridge arms received about 8.5k characters of the operator's private instructions
+on every request (the files hold behavioural rules, not only facts), and the request body of that check was 9.1k bytes larger. That is a bias of unknown size on quality, and it is symmetric between CC and FB. The Forge native arm had a neutral `.forge/AGENTS.md`, and
+the static audit records that Forge loads only the first instruction file and does not walk parent directories (PARITY.md, G3), so FD probably
+received neither; no FD request was captured. If so, the DeepSeek A/B handicaps Claude Code slightly, which does not explain Forge's losses on time and
+output tokens. Multi-turn and SWE-bench workspaces are outside `$HOME` (`/tmp`, `/var/tmp`), and the SWE-bench Claude Code arm also used `--safe-mode`.
+Before the next run, move the suite a to d workspaces outside `$HOME` (or use `--safe-mode`) and capture the first request of every arm, FD included.
 
 ## Fix ledger
 
 Fix PRs opened from these findings and the [feature audit](artifacts/claude-code-parity-2026-10/baseline/PARITY.md)
-(280 compared features: Forge better on 40, equal on 110, worse on 71, no equivalent on 59; 25 ranked gaps).
+(280 compared features: Forge better on 40, equal on 110, worse on 71, no equivalent on 59; 25 ranked gaps; the Claude Code
+side of that audit is read from its documentation and `--help` output, not executed).
 Findings F1 to F9 are listed above; the audit's gaps are G1 to G25.
 
 <!-- BEGIN:ledger -->
-| PR | Title | State (2026-10-22 evening, from gh pr view) | Finding or gap it addresses | Evidence it works |
+| PR | Title | State (2026-10-22 15:43Z, from gh pr view) | Finding or gap it addresses | Evidence it works |
 |---|---|---|---|---|
 | #1602 | feat(cli): forge run -p is a drop-in for claude -p | merged | Parity gaps G1 (print mode), G2 (stream-json shapes), headless half of G7 (flags); PARITY.md | Before/after on the mock provider in the PR. No benchmark dimension measures it yet. |
 | #1603 | fix(core): a scoped "don't edit X" no longer makes a change request read-only | merged | F1: a01, a04, a07 (Forge arms) and c08 were run as read-only turns because the prompt says not to edit tests or a directory | Unit tests of the phrase rule in the PR. The affected tasks have not been re-run, so the effect on pass rate is a hypothesis. |
-| #1604 | feat(tui): fold tool runs into one summary row; nav pills only when scrolled up | open | UI/UX parity with Claude Code's folded tool groups; a navigation pill that covered the newest rows | Not measured: the scripted TUI comparison is pending. |
+| #1604 | feat(tui): fold tool runs into one summary row; nav pills only when scrolled up | merged | UI/UX parity with Claude Code's folded tool groups; a navigation pill that covered the newest rows | Not measured: the scripted TUI comparison is pending. |
 | #1605 | fix(cli,tui): bounded stdin wait, per-directory --continue, auth --list on stderr, notices never split an answer | merged | Headless and TUI robustness defects found while driving both tools (a run that hung on an unclosed stdin pipe, --continue taking another project's session) | Unit tests and before/after runs in the PR. Robustness is not a benchmarked dimension yet. |
-| #1606 | perf(bridge): cut claude-cli bridge startup, prompt and post-turn overhead | open | F4 (bridge token and latency overhead). Does not change F9, the benchmark isolation gap, because the baseline Forge arms already had a neutral project instruction file | Local fake-API measurements in the PR (for example mcp-serve handshake 935 ms to 101 ms, system prompt 11,970 to 9,616 characters). The FB arms have not been re-run. |
-| #1607 | fix(core): bench robustness: compaction-safe audit, store lock starvation, pinned windows and side calls | merged | F2 (c06 panic), F6 (compaction churn and low cache hit on large codebases), F7 ('database is locked' at session start), side calls that ignored the pin | Two live single runs in the PR (c01, c02): compactions 3 and 4 before, 0 after; c02 unsolved before, solved after. One sample each, not a re-run of the suite. |
+| #1606 | perf(bridge): cut claude-cli bridge startup, prompt and post-turn overhead | open | F4 (bridge token and latency overhead). Its first item (the global CLAUDE.md sent twice when a project has no instruction file) does not apply to the baseline FB arms, which had a neutral project instruction file, and nothing in it changes F9 | Local fake-API measurements in the PR (for example mcp-serve handshake 935 ms to 101 ms, system prompt 11,970 to 9,616 characters). The FB arms have not been re-run. |
+| #1607 | fix(core): bench robustness — compaction-safe audit, store lock starvation, pinned windows and side calls | merged | F2 (c06 panic), F6 (compaction churn and low cache hit on large codebases), F7 ('database is locked' at session start), side calls that ignored the pin | Two live single runs in the PR (c01, c02): compactions 3 and 4 before, 0 after; c02 unsolved before, solved after. One sample each, not a re-run of the suite. |
 | #1608 | perf(core): nothing optional runs before a turn's answer or its first token | merged | Latency before the first token and after the answer (trivial-prompt latency, not yet benchmarked) | Release-build timings in the PR. The latency benchmark is pending. |
 | #1609 | feat(bench): task selection, failure reasons, Claude Code metrics, bridged-CLI tool counts | open | Measurement gaps behind the tool-call comparability caveat and the missing failure reasons in this baseline | Tooling change; it makes the next run set more comparable. |
 | #1610 | feat(cli): bare forge starts chat, claude-style mcp add, /clear = new, Ctrl+L redraw, 9 Claude Code slash commands | open | Parity gaps G6 (entry points), G10 (slash commands), G11 (/clear and Ctrl+L) | Not measured: feature parity, no benchmark dimension. |
@@ -648,13 +686,13 @@ Findings F1 to F9 are listed above; the audit's gaps are G1 to G25.
   Between repeats of one arm 2 to 5 tasks change outcome, comparable to most harness differences.
 - **Only ten of the 26 a+b+d tasks discriminate** (4 solved by nobody, 12 by everybody). The multi-turn set is at its ceiling.
 - **One repeat for Sonnet and for everything in suite c, multi-turn and SWE-bench.**
-- **Shared machine.** Paired arms ran side by side on one machine that also hosted other agents' work (see Environment). Load was not recorded, so wall times carry noise, though pairs share it.
+- **Shared machine.** Paired arms ran side by side on one machine that also hosted other agents' work (see Environment). Load was not recorded, so wall times carry noise, though pairs share it. The Sonnet pair and the suite c, multi-turn and SWE-bench runs overlapped in time with other arms, so wall times of different run sets are not comparable with each other.
 - **Different paths to the model.** The DeepSeek A/B uses an Anthropic-compatible endpoint for Claude Code and Forge's provider for FD. Caching, reasoning accounting and latency may differ by path, apart from the harness.
 - **Token and tool accounting differ** between harnesses (cache writes, reasoning tokens, tool vocabulary). Ratios are indicative.
-- **Isolation and effort.** See F9. Suites a to d used each harness's default effort. The SWE-bench `run-meta.json` for the Claude Code arm records `--effort high`, but `run.sh` passes an empty effort for that arm, which omits the flag; which one ran could not be verified from the stored output.
-- **Authored by the Forge team.** The suites were written for this study; c01-c06 and c11 use a snapshot of Forge's own source. Hidden graders are withheld, so outsiders cannot re-run the scoring until they are disclosed against the commitments.
+- **Isolation and effort.** See F9: the Claude Code and bridge arms of suites a to d saw the operator's global instruction files and the Forge native arm probably did not. Suites a to d used each harness's default effort. The SWE-bench `run-meta.json` for the Claude Code arm says `--effort high`, but that string is a constant written by `run.sh` for every Claude Code arm; the arm's environment sets `SWE_CLAUDE_EFFORT` empty, which the shim turns into no `--effort` flag, so both SWE-bench arms ran at their default effort (read from the scripts; the Claude Code argv was not recorded for that run).
+- **Authored by the Forge team.** The suites were written for this study; c01-c06 and c11 use a snapshot of Forge's own source, and c08 keeps a prompt phrase that triggers a Forge defect known beforehand. Suite c was calibrated against Forge's own loop before this run: its README records c01, c02, c03, c04, c05, c07, c09 and c11 solved in that run, so c02 and c04 passed once and failed in the baseline, and a single attempt per task is noisy. Hidden graders are withheld, so outsiders cannot re-run the scoring until they are disclosed against the commitments.
 - **FD c06 is scored as failed** because the grader never ran. That favours Claude Code by at most one task in suite c (7/11 would become 8/11 if the work passed).
-- **Forge commit provenance.** The binary embeds no commit hash; commit `8b18cad8` was supplied by the study coordinator and fits the binary's build time.
+- **Forge commit provenance.** The binary embeds no commit hash. Commit `8b18cad8` is traced through the kit's build log (see Environment) rather than through the binary itself.
 - **One Claude Code timeout.** One Claude Code attempt (a07, repeat 1) timed out; its tokens are recorded as 0 and the arm's token totals are slightly low. Paired token comparisons exclude it.
 
 ## Reproduction
@@ -690,10 +728,14 @@ In this repository:
 - `docs/benchmarks/artifacts/claude-code-parity-2026-10/runs.json` lists the run sets and their files.
 - `baseline/` holds `suites-abd.json`, `suite-c.json`, `multiturn-*.json`, `swe/` (official reports,
   predictions, metrics, integrity, `summary.tsv`, `run-meta.json`, `eval.log` per arm), `tasks.json`,
-  `environment.json` and `PARITY.md`.
+  `environment.json`, `isolation-check.json` and `PARITY.md`.
 - `python3 docs/benchmarks/artifacts/claude-code-parity-2026-10/render.py` rewrites every table in this report from
   those files (`--check` verifies, `--verify` recomputes arm totals from the per-task rows).
   `ingest.py` converts a new kit output into the same file shapes.
+- `python3 docs/benchmarks/artifacts/claude-code-parity-2026-10/audit_raw.py --kit ~/.cache/forge-ops/ccbench --commitments` is an
+  independent check. It shares no code with `render.py`, reads none of the derived JSON, and recomputes every table cell, every
+  headline row, the figures quoted in the text and the task commitments from the kit's own files. It needs the kit, so until the kit
+  or its archive is shared only the Forge team can run it.
 - Hidden tests, graders, reference solutions and the suite archives are not committed. The commitments in
   `tasks.json` and the table above are the way to check them later.
 
