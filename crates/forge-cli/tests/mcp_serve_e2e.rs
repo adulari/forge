@@ -193,6 +193,50 @@ fn assert_withheld(opt_in: bool, trusted: bool) {
     );
 }
 
+#[test]
+fn bridge_batched_read_withholds_only_the_denied_entry() {
+    let (dir, _child, mut stdin, reader) = spawn_bridge(false, true);
+    std::fs::write(dir.path().join("a.txt"), "alpha-contents").unwrap();
+    std::fs::write(dir.path().join(".env"), "SECRET=hunter2").unwrap();
+    std::fs::write(dir.path().join(".env.example"), "SECRET=changeme").unwrap();
+    let mut call = |id: i64, paths: &[&str]| {
+        let paths: Vec<String> = paths
+            .iter()
+            .map(|p| dir.path().join(p).to_string_lossy().into_owned())
+            .collect();
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": "read_file", "arguments": { "paths": paths } },
+        });
+        let reply = rpc(&mut stdin, &reader, &request.to_string(), Some(id)).unwrap();
+        serde_json::to_string(&reply["result"]).unwrap()
+    };
+
+    let mixed = call(2, &["a.txt", ".env", ".env.example"]);
+    assert!(mixed.contains("alpha-contents"), "{mixed}");
+    assert!(
+        mixed.contains("SECRET=changeme"),
+        "the template is readable: {mixed}"
+    );
+    assert!(
+        !mixed.contains("hunter2"),
+        "the real .env stays unread: {mixed}"
+    );
+    assert!(
+        mixed.contains("withheld by policy, 1 of 3 paths"),
+        "{mixed}"
+    );
+
+    let only_secret = call(3, &[".env"]);
+    assert!(!only_secret.contains("hunter2"), "{only_secret}");
+    assert!(
+        only_secret.contains("denied by Forge permission policy"),
+        "{only_secret}"
+    );
+}
+
 /// Send a raw HTTP/1.1 request over a fresh connection and return the response's status line.
 /// `auth` adds an `Authorization: Bearer` header when `Some`. Keeps the test dependency-free and
 /// cross-platform (no async runtime, no reqwest blocking feature).

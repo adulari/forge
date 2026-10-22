@@ -31,6 +31,15 @@ pub(super) fn result(
     (message(tool, mode, declined, attended), None, false)
 }
 
+/// A call a `PermissionRequest` hook refused, as a failed tool outcome.
+pub(super) fn hook(reason: &str) -> (String, Option<String>, bool) {
+    (
+        format!("denied by PermissionRequest hook: {reason}"),
+        None,
+        false,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

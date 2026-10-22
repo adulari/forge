@@ -6,6 +6,16 @@ use forge_types::{Message, Role};
 
 use crate::is_test_path;
 
+/// What an identifier migration must leave alone. One text shared by every migration prompt, so
+/// the exemption cannot drift between the first-pass guidance, the audit and its retries.
+macro_rules! frozen_contract {
+    () => {
+        "A name the repository declares frozen or public (a compatibility or wire-format document, \
+an API contract, migrations, changelog history) is NOT an omission: leave that name as it is and \
+never edit the file that declares it. "
+    };
+}
+
 /// Injected for the self-review pass (mesh.self_review): the same model critically re-checks the
 /// edits it just made before the turn ends. Framed to FIND real defects (the common failure is a
 /// fix that's plausible but wrong/incomplete), but to stop cleanly when the work is sound — so it
@@ -24,7 +34,7 @@ say so in one line and stop — do NOT make changes for their own sake or second
 /// Direct-provider counterpart of the bridge completeness re-drive. Unlike the broad same-model
 /// self-review (which regressed when always-on), this requires a small, concrete repository-search
 /// sweep and permits another edit only when that evidence exposes an omitted production path.
-pub(crate) const DIRECT_COMPLETENESS_PROMPT: &str = "\
+pub(crate) const DIRECT_COMPLETENESS_PROMPT: &str = concat!("\
 Before finishing this identifier-migration code-change task, perform ONE bounded completeness \
 audit grounded in evidence:
 1. Run `git diff` once to inspect the COMPLETE current change, then re-read the original task.
@@ -39,17 +49,18 @@ level once. Otherwise search for the directly affected callers/implementations.
 3. Search-result snippets are NOT inspection. You MUST open the relevant surrounding code in every \
 unedited production file returned with an old/deprecated name, especially sibling clients, \
 adapters, serializers, commands, and alternate entry points. Explicitly classify whether each path \
-implements the same behavior. For a deprecation or rename, any public config/parser/CLI path in the \
+implements the same behavior. For a deprecation, any public config/parser/CLI path in the \
 affected subsystem that still consumes the old name is a CONCRETE OMISSION until it prefers the \
-replacement while retaining the old alias for compatibility (unless the task requires removal). A \
-different call shape or downstream consumer does not exempt that path. Do not finish with such an \
-unhandled occurrence. Passing existing tests alone is not proof: hidden tests often exercise an \
-omitted sibling path.
+replacement while retaining the old alias for compatibility (unless the task requires removal); a \
+different call shape or downstream consumer does not exempt that path. A plain rename needs no \
+alias unless the task asks for compatibility. ", frozen_contract!(), "Do not finish with an \
+unhandled occurrence that is not exempt. Passing existing tests alone is not proof: hidden tests \
+often exercise an omitted sibling path.
 4. If one is missing, fix that specific omission and run focused verification. If the sweep reveals \
 no concrete omission, make NO further edits and finish.
 
 Do not broadly re-explore or refactor, and do not modify existing tests to hide a failure. This is \
-one evidence check, not an invitation to second-guess a complete fix.";
+one evidence check, not an invitation to second-guess a complete fix.");
 
 /// A direct audit that reports no matches after identifiers disappeared from the diff has not
 /// produced trustworthy evidence: path + glob duplication and over-narrow scopes are common model
@@ -72,23 +83,32 @@ such as `git grep -n -F -e '<old-name>' -- <nearest-production-directory>`. If i
 old/deprecated term in an unedited production sibling, OPEN that code and handle the concrete \
 omission under the prior compatibility rule. Do not modify tests.";
 
-pub(crate) const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = "\
+pub(crate) const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = concat!(
+    "\
 Your completeness evidence identified the related production path(s) listed below, but the final \
 diff still leaves them unchanged. That is unresolved evidence, not a completed audit. Open each \
-listed path and address the task there NOW. For a deprecation/rename, make the replacement name \
-preferred while preserving the old name only as a compatibility fallback. Do not run more broad \
-searches. Leaving a listed path unchanged is allowed ONLY when its current text contains none of \
-the old/deprecated identifiers; a different consumer or call shape is not an exemption. If it \
-reads an old identifier from configuration/options, edit it to prefer the replacement. Do not edit \
-tests, and do not finish with prose that merely repeats the changes already made.";
+listed path and address the task there NOW. For a deprecation, make the replacement name \
+preferred while preserving the old name only as a compatibility fallback; for a plain rename, \
+change the path to the new name. Do not run more broad searches. Leaving a listed path unchanged \
+is allowed ONLY when its current text contains none of the old/deprecated identifiers; a \
+different consumer or call shape is not an exemption. ",
+    frozen_contract!(),
+    "If it reads an old \
+identifier from configuration/options and is not exempt, edit it to prefer the replacement. Do \
+not edit tests, and do not finish with prose that merely repeats the changes already made."
+);
 
-pub(crate) const DIRECT_COMPLETENESS_UNRESOLVED_RETRY_PROMPT: &str = "\
+pub(crate) const DIRECT_COMPLETENESS_UNRESOLVED_RETRY_PROMPT: &str = concat!(
+    "\
 The mandatory reconciliation ended without changing the evidence-backed production path(s) listed \
 below. Final prose cannot override repository state. Re-open each path and make the concrete edit \
-NOW. For a deprecation/rename, any path that reads an old identifier from configuration/options \
-must prefer the replacement and keep the old name only as fallback compatibility; a different \
-consumer or call shape is not an exemption. Inspect the final diff and run focused verification. \
-Do not edit tests or repeat the prior summary without acting.";
+NOW. For a deprecation, any path that reads an old identifier from configuration/options must \
+prefer the replacement and keep the old name only as fallback compatibility; for a plain rename, \
+change it to the new name; a different consumer or call shape is not an exemption. ",
+    frozen_contract!(),
+    "Inspect the final diff and run focused verification. Do not edit tests or \
+repeat the prior summary without acting."
+);
 
 pub(crate) const DIRECT_NAMED_API_SCOPE_GUIDANCE: &str = "\
 The task explicitly names the production API(s) below. Treat those API boundaries as the default \
@@ -102,7 +122,8 @@ deleted guard.";
 
 /// First-pass scope guard for direct-provider identifier migrations. This is injected into the
 /// initial context pack, so it improves discovery without paying for a second provider round.
-pub(crate) const DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE: &str = "\
+pub(crate) const DIRECT_IDENTIFIER_MIGRATION_SCOPE_GUIDANCE: &str = concat!(
+    "\
 This task migrates a deprecated/renamed identifier, option, or API. Before editing, do ONE bounded \
 production-scope sweep:
 - Search for EACH old/deprecated identifier as a plain literal in the nearest production subsystem \
@@ -111,12 +132,16 @@ surrounding-syntax predicates that can hide a sibling implementation.
 - Open every unedited production sibling match that may implement the same behavior, especially \
 clients, adapters, serializers, commands, parsers, and alternate entry points. Search snippets are \
 not inspection.
-- Update every concrete same-behavior path. For a deprecation/rename, any config/parser/CLI path in \
+- Update every concrete same-behavior path. For a deprecation, any config/parser/CLI path in \
 the affected subsystem that still consumes the old name is a CONCRETE OMISSION until it prefers \
-the replacement while retaining the old alias as a fallback unless removal is explicit. A \
-different call shape or downstream consumer does not exempt that path.
+the replacement while retaining the old alias as a fallback unless removal is explicit; a \
+different call shape or downstream consumer does not exempt that path. A plain rename needs no \
+alias unless the task asks for compatibility. ",
+    frozen_contract!(),
+    "
 
-Keep the sweep bounded; do not broadly review or refactor unrelated code.";
+Keep the sweep bounded; do not broadly review or refactor unrelated code."
+);
 
 pub(crate) fn completeness_search_reported_no_matches(messages: &[Message]) -> bool {
     messages.iter().any(|message| {

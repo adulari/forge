@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-fn git_output(root: Option<&Path>, args: &[&str]) -> Option<Vec<u8>> {
+pub(crate) fn git_output(root: Option<&Path>, args: &[&str]) -> Option<Vec<u8>> {
     let mut cmd = std::process::Command::new("git");
     cmd.args(args);
     if let Some(root) = root {

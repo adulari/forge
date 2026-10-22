@@ -474,6 +474,9 @@ impl ForgeMcp {
             }
         }
 
+        // A denied entry in a batched read withholds only itself; the rest of the batch is read.
+        let withheld = permission::narrow_read(&name, &mut args, &self.rules);
+
         // Forge's permission gate — the unoverridable denylist always applies here.
         let mode = self.effective_mode();
         let (decision, auto_verdict) =
@@ -546,6 +549,7 @@ impl ForgeMcp {
             }
             Err(e) => (format!("error: {e}"), false),
         };
+        let out = permission::with_withheld_note(out, withheld.as_ref(), ok);
         if ok {
             forge_core::evidence_capture::record_bridge_verification_proof(&name, &args, &out);
         }

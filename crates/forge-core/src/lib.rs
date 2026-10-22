@@ -28,6 +28,8 @@ use forge_types::{Presenter, PresenterEvent};
 
 mod adaptive_effort;
 mod build_command;
+mod test_guard;
+pub use test_guard::is_test_path;
 pub mod git_attribution;
 mod memory_scope;
 mod transcript_mark;
@@ -673,24 +675,6 @@ pub fn reconcile_deadline_budget_secs(timeout_secs: u64, reserve_secs: u64) -> O
     (budget > 0).then_some(budget)
 }
 
-/// The existing-tests-are-spec guard turn (quality guards wave 4, fix 1): sent as a synthetic
-/// user message after the working diff was found to MODIFY existing test files and those edits
-/// were stashed. Hidden evaluation restores pristine tests, so a fix that only passes rewritten
-/// expectations is a guaranteed fail (the xarray-3364 forensic: a correct 6-line fix, then a
-/// refactor that broke 2 tests, then the tests' expectations rewritten to match).
-const TEST_EDIT_GUARD: &str = "Your change edits existing test expectations. Hidden evaluation \
-uses the ORIGINAL tests. Re-verify your core change against the pristine tests (they have been \
-restored); if they fail, shrink your fix rather than editing tests. Your test edits are stashed \
-(`git stash pop` re-applies them); re-apply only if genuinely justified by the issue text.";
-
-/// Proactive counterpart to [`TEST_EDIT_GUARD`]. When the user explicitly requires pristine
-/// existing tests, make the recoverable post-hoc guard exceptional rather than the normal path:
-/// models may still add useful coverage, but must put it in a new file so the original contract
-/// remains byte-identical and no paid restore/reverification loop is needed.
-const PRISTINE_TEST_GUIDANCE: &str = "Existing tracked test files are immutable for this session. \
-Read and run them, but do not edit, delete, or rename them—even to add coverage. Put useful new \
-coverage in a new test file, and fix production code so the original pristine tests still pass.";
-
 /// Prevent a common false-positive completion on rollback work: a model proves a hand-written test
 /// double but never checks whether the repository's actual fault-injection seam covers the sibling
 /// production path named by the task. The guidance is semantic and repository-agnostic; it is
@@ -702,85 +686,6 @@ every analogous write/save path and make that same seam behave consistently befo
 special-case test doubles. A bespoke subclass may add coverage, but it cannot replace a test of \
 the base hook. Before declaring complete, search the affected subsystem for sibling persistence \
 paths and verify that each injected failure leaves state unchanged.";
-
-/// Whether `path` looks like a test file — the small, extensible pattern list the
-/// existing-tests-are-spec guard keys on. Matches by basename (`test_*.py`, `*_test.py`,
-/// `*_tests.rs`, `*_test.rs`, `*.test.js/ts`, `*.spec.js/ts`, `test_*.rs`) or by living under a
-/// `tests/` / `test/` / `testing/` directory component. Paths use `/` (git porcelain output).
-pub fn is_test_path(path: &str) -> bool {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    let by_name = (base.starts_with("test_") && (base.ends_with(".py") || base.ends_with(".rs")))
-        || base.ends_with("_test.py")
-        || base.ends_with("_test.rs")
-        || base.ends_with("_tests.rs")
-        || base.ends_with("_test.go")
-        || [
-            ".test.js",
-            ".test.ts",
-            ".test.jsx",
-            ".test.tsx",
-            ".spec.js",
-            ".spec.ts",
-        ]
-        .iter()
-        .any(|s| base.ends_with(s));
-    let by_dir = path
-        .split('/')
-        .rev()
-        .skip(1) // the basename is not a directory component
-        .any(|c| c == "tests" || c == "test" || c == "testing");
-    by_name || by_dir
-}
-
-/// "Don't change or weaken the existing tests", "never touch the tests", ... — a negation, then a
-/// modifying verb, then "test", all inside one sentence.
-fn forbids_touching_tests(prompt: &str) -> bool {
-    const NEGATIONS: [&str; 8] = [
-        "do not",
-        "don't",
-        "dont",
-        "never",
-        "must not",
-        "mustn't",
-        "should not",
-        "shouldn't",
-    ];
-    const VERBS: [&str; 7] = [
-        "modify", "change", "weaken", "edit", "touch", "alter", "rewrite",
-    ];
-    prompt
-        .replace('\u{2019}', "'")
-        .split(['.', '!', '?', '\n', ';'])
-        .any(|sentence| {
-            NEGATIONS.iter().any(|neg| {
-                let Some(at) = sentence.find(neg) else {
-                    return false;
-                };
-                let after = &sentence[at + neg.len()..];
-                VERBS.iter().any(|verb| {
-                    after
-                        .find(verb)
-                        .is_some_and(|v| after[v + verb.len()..].contains("test"))
-                })
-            })
-        })
-}
-
-fn prompt_requires_pristine_existing_tests(prompt: &str) -> bool {
-    let prompt = prompt.to_lowercase();
-    prompt.contains("test")
-        && (forbids_touching_tests(&prompt)
-            || prompt.contains("do not weaken")
-            || prompt.contains("no tests weakened")
-            || prompt.contains("do not modify existing tests")
-            || prompt.contains("keep existing tests unchanged"))
-}
-
-fn session_requires_pristine_existing_tests(messages: &[Message]) -> bool {
-    messages.iter().any(|message| {
-        message.role == Role::User && prompt_requires_pristine_existing_tests(&message.content)
-    })
-}
 
 fn prompt_requires_fault_seam_audit(prompt: &str) -> bool {
     let prompt = prompt.to_ascii_lowercase();
@@ -796,57 +701,6 @@ fn prompt_requires_fault_seam_audit(prompt: &str) -> bool {
             || prompt.contains("persist")
             || prompt.contains("write")
             || prompt.contains("save"))
-}
-
-/// Parse `git status --porcelain` output into the list of MODIFIED (or deleted) existing test
-/// files. The status columns distinguish the red flag from allowed practice: `M`/`D` in either
-/// column means an existing tracked test was rewritten/removed (the guard's target), while `A`
-/// (added) and `??` (untracked) are NEW tests — writing a fresh reproduction test is normal and
-/// never trips the guard. Rename lines (`R  old -> new`) are skipped: rare here, and stashing by
-/// pathspec doesn't round-trip them cleanly. Pure so it is unit-testable.
-fn modified_test_paths(porcelain: &str) -> Vec<String> {
-    porcelain
-        .lines()
-        .filter_map(|line| {
-            if line.len() < 4 || line.contains(" -> ") {
-                return None;
-            }
-            let (status, path) = line.split_at(2);
-            let modified = status.contains('M') || status.contains('D');
-            let path = path.trim_start();
-            (modified && is_test_path(path)).then(|| path.trim_matches('"').to_string())
-        })
-        .collect()
-}
-
-/// The working diff's modified-existing-test files at `root` (`None` = process cwd). Any git
-/// failure yields an empty list so the guard can never fire outside a real repository.
-fn modified_test_files_in_tree(root: Option<&std::path::Path>) -> Vec<String> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["status", "--porcelain"]);
-    if let Some(r) = root {
-        cmd.current_dir(r);
-    }
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
-            modified_test_paths(&String::from_utf8_lossy(&out.stdout))
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Stash the given pathspecs at `root` (`git stash push -- <paths>`), restoring those files to
-/// their committed (pristine) state while keeping the edits recoverable via `git stash pop`.
-/// Returns whether the stash actually succeeded — the guard only fires on success (a failed
-/// stash leaves the tree untouched, and claiming "tests restored" would then be a lie).
-fn stash_paths(root: Option<&std::path::Path>, paths: &[String]) -> bool {
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["stash", "push", "--quiet", "--"]);
-    cmd.args(paths);
-    if let Some(r) = root {
-        cmd.current_dir(r);
-    }
-    matches!(cmd.output(), Ok(out) if out.status.success())
 }
 
 /// Whether the working tree at `root` (`None` = process cwd) shows NO changes at all:
@@ -3259,18 +3113,19 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 guidance,
             )?;
         }
-        let pristine_tests_required = prompt_requires_pristine_existing_tests(prompt)
-            || session_requires_pristine_existing_tests(&self.transcript);
-        let pristine_guidance_present = self.transcript.iter().any(|message| {
-            message.role == Role::System && message.content == PRISTINE_TEST_GUIDANCE
-        });
-        if pristine_tests_required && !pristine_guidance_present {
-            self.inject_context(
-                &mut context_pack,
-                context_pack::ContextSource::TurnContract,
-                "pristine existing-test contract",
-                PRISTINE_TEST_GUIDANCE,
-            )?;
+        if let Some((label, text)) = test_guard::guidance(prompt, &self.transcript) {
+            let present = self
+                .transcript
+                .iter()
+                .any(|message| message.role == Role::System && message.content == text);
+            if !present {
+                self.inject_context(
+                    &mut context_pack,
+                    context_pack::ContextSource::TurnContract,
+                    label,
+                    text,
+                )?;
+            }
         }
         let fault_seam_required = prompt_requires_fault_seam_audit(prompt);
         let fault_seam_guidance_present = self
@@ -3323,13 +3178,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             seq = landed;
         }
         self.current_turn_seq = seq;
+        let turn_start_head = git_head(Some(self.workspace.root()));
         self.task_scope = Some(TaskScope::for_turn(
             prompt,
             contract,
             self.mode,
             seq,
             Some(self.workspace.root().to_path_buf()),
-            git_head(Some(self.workspace.root())),
+            turn_start_head.clone(),
             self.id.clone(),
             seq as u64,
         ));
@@ -3730,35 +3586,51 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         }
 
         // ── Existing-tests-are-spec guard (quality guards wave 4, fix 1) ──────────────────────
-        // A headless code-change turn whose working diff MODIFIES existing test files is the
-        // xarray-3364 failure shape: the model rewrites test expectations to match its own
-        // behavior, the evaluator restores the pristine tests, and the run fails. Before the turn
-        // completes: stash exactly the test-file modifications (restoring the pristine tests) and
-        // push back ONCE — re-verify against the originals, shrink the fix rather than editing
-        // tests, `git stash pop` only if the issue text genuinely demands a test change. NEW test
-        // files (git status `A`/`??`) never trip it — writing a reproduction test is normal.
+        // A turn whose diff REWRITES existing test files is the xarray-3364 failure shape: the
+        // model changes test expectations to match its own behavior, the evaluator restores the
+        // pristine tests, and the run fails. Before the turn completes: put the originals back
+        // (stash, or a patch when the model already committed the edits) and push back ONCE —
+        // re-verify against the originals, shrink the fix rather than editing tests. The diff is
+        // taken against the commit the turn started on, because the harness has the model commit
+        // each verified unit and `git status` is then clean. Armed by `expect_code_change`, an
+        // explicit "don't edit the tests" (any edit counts) or "keep the existing tests green"
+        // (only rewritten content counts; appended and new tests are fine, see `test_guard`).
         // One-shot by construction (straight-line code, like the empty-diff nudge above); runs
         // BEFORE self-review/autofix so whatever state the model settles on is still checked.
         // Skipped past the soft deadline: no budget for a guard turn (same rationale as the
         // empty-diff nudge gate above).
-        let preserve_existing_tests =
-            self.expect_code_change || session_requires_pristine_existing_tests(&self.transcript);
+        let test_guard_level = test_guard::level(
+            self.expect_code_change,
+            &self.transcript,
+            self.presenter.is_attended(),
+        );
         if self.config.mesh.guard_test_edits
-            && preserve_existing_tests
+            && test_guard_level != test_guard::Level::Off
             && !self.past_turn_deadline()
             && !halted_by_loop_guard
         {
-            let test_edits = modified_test_files_in_tree(Some(self.workspace.root()));
-            if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
+            let root = self.workspace.root();
+            let test_edits = test_guard::modified_existing_tests(
+                Some(root),
+                turn_start_head.as_deref(),
+                test_guard_level,
+            );
+            let restored = (!test_edits.is_empty())
+                .then(|| {
+                    test_guard::restore_originals(
+                        Some(root),
+                        turn_start_head.as_deref(),
+                        &test_edits,
+                    )
+                })
+                .flatten();
+            if let Some(restored) = restored {
                 self.presenter.emit(PresenterEvent::Warning(format!(
-                    "code-change turn modified {} existing test file(s) — stashed the test edits \
-                     and pushing back once: existing tests must keep their original assertions",
+                    "turn modified {} existing test file(s) — restored the originals and pushing \
+                     back once: existing tests must keep their original assertions",
                     test_edits.len()
                 )));
-                let guard = format!(
-                    "{TEST_EDIT_GUARD}\n\nStashed test-file edits:\n- {}",
-                    test_edits.join("\n- ")
-                );
+                let guard = test_guard::push_back(self.expect_code_change, &test_edits, &restored);
                 self.push_nudge(guard)?;
                 let guard_specs = self.tool_specs();
                 let guard_outcome = self
@@ -4051,13 +3923,25 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             // the audit prompt's "do not modify tests" rule and introduce fresh expectation edits.
             // There is no later model pass that needs those changes, so restore the original tests
             // deterministically before patch capture. New tests remain allowed by
-            // `modified_test_files_in_tree`, matching the main guard's contract.
-            if self.config.mesh.guard_test_edits && preserve_existing_tests {
-                let test_edits = modified_test_files_in_tree(Some(self.workspace.root()));
-                if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
+            // `test_guard::modified_existing_tests`, matching the main guard's contract.
+            if self.config.mesh.guard_test_edits && test_guard_level != test_guard::Level::Off {
+                let root = self.workspace.root();
+                let test_edits = test_guard::modified_existing_tests(
+                    Some(root),
+                    turn_start_head.as_deref(),
+                    test_guard_level,
+                );
+                if !test_edits.is_empty()
+                    && test_guard::restore_originals(
+                        Some(root),
+                        turn_start_head.as_deref(),
+                        &test_edits,
+                    )
+                    .is_some()
+                {
                     self.presenter.emit(PresenterEvent::Warning(format!(
-                        "completeness audit modified {} existing test file(s) — stashed those \
-                         edits so evaluation keeps the original specification",
+                        "completeness audit modified {} existing test file(s) — restored the \
+                         originals so evaluation keeps the original specification",
                         test_edits.len()
                     )));
                 }
@@ -5060,6 +4944,10 @@ pub fn test_cwd_guard(target: &std::path::Path) -> TestCwdGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_guard::{
+        prompt_requires_pristine_existing_tests, session_requires_pristine_existing_tests,
+        PRISTINE_TEST_GUIDANCE,
+    };
     use forge_mesh::HeuristicRouter;
     use forge_provider::MockProvider;
     use forge_tui::HeadlessPresenter;
@@ -5095,6 +4983,15 @@ mod tests {
 
     #[path = "completeness_gate.rs"]
     mod completeness_gate_tests;
+
+    #[path = "test_guard.rs"]
+    mod test_guard_tests;
+
+    #[path = "migration_guidance.rs"]
+    mod migration_guidance_tests;
+
+    #[path = "batched_read_denial.rs"]
+    mod batched_read_denial_tests;
 
     #[path = "phantom_edit.rs"]
     mod phantom_edit_tests;
@@ -14785,27 +14682,6 @@ mod tests {
         ] {
             assert!(!is_test_path(p), "{p} must NOT classify as a test path");
         }
-    }
-
-    #[test]
-    fn modified_test_paths_flags_m_and_d_but_never_new_files() {
-        // The red flag is a MODIFIED (or deleted) existing test; a NEW test file (`A` staged or
-        // `??` untracked) is normal practice and must never trip the guard.
-        let porcelain = " M xarray/tests/test_concat.py\n\
-                         M  tests/test_merge.py\n\
-                         D  tests/test_old.py\n\
-                         A  tests/test_new.py\n\
-                         ?? tests/test_scratch.py\n\
-                         M  xarray/core/concat.py\n\
-                         R  tests/test_a.py -> tests/test_b.py\n";
-        assert_eq!(
-            modified_test_paths(porcelain),
-            vec![
-                "xarray/tests/test_concat.py".to_string(),
-                "tests/test_merge.py".to_string(),
-                "tests/test_old.py".to_string(),
-            ]
-        );
     }
 
     #[test]

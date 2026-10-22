@@ -509,6 +509,7 @@ impl Session {
             }
         }
 
+        let withheld = permission::narrow_read(&call.name, &mut effective_args, &self.rules);
         let workspace = self.workspace_binding.read().ok().map(|g| g.clone());
         let (decision, auto_verdict) = permission::decide_in_auto(
             self.mode,
@@ -680,7 +681,11 @@ impl Session {
                         // hint so the model self-corrects this turn.
                         self.queue_lsp_hint(path, lsp_pre_edit).await;
                     }
-                    (out.model, out.full, true)
+                    (
+                        permission::append_withheld(out.model, withheld.as_ref()),
+                        out.full,
+                        true,
+                    )
                 }
                 Err(e) => (format!("error: {e}"), None, false),
             }
@@ -689,11 +694,7 @@ impl Session {
         {
             (permission::plan_shell_denial(), None, false)
         } else if let Some(reason) = hook_denial {
-            (
-                format!("denied by PermissionRequest hook: {reason}"),
-                None,
-                false,
-            )
+            denial::hook(&reason)
         } else if let Some(note) = self.floor_denial(&call.name, &effective_args) {
             (note, None, false)
         } else if let Some(rule) =

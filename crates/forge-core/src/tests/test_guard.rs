@@ -1,0 +1,508 @@
+//! The existing-tests-are-spec guard: which requests arm it, what it counts as a rewritten test,
+//! and that a test edit the model already committed is still caught and restored.
+
+use super::*;
+use crate::test_guard::{
+    guidance, level, modified_existing_tests, parse_name_status,
+    prompt_expects_green_existing_tests, prompt_requires_pristine_existing_tests, push_back,
+    restore_originals, sentences, Level, Restored, KEEP_TESTS_GUIDANCE, PRISTINE_TEST_GUIDANCE,
+};
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A repo whose HEAD holds `tests/test_foo.py` (two tests) and `src/lib.py`.
+fn repo_with_committed_test() -> std::path::PathBuf {
+    let dir = clean_git_repo();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("tests/test_foo.py"),
+        "def test_a():\n    assert fix() == 1\n\ndef test_b():\n    assert other() == 2\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/lib.py"), "def fix():\n    return 0\n").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "add tests"]);
+    dir
+}
+
+#[test]
+fn the_bench_prompts_that_name_green_tests_arm_the_rewrite_guard() {
+    for prompt in [
+        // a02
+        "Add tests for it under `tests/`. The existing tests must keep passing.",
+        // b02
+        "Can you fix it so `Get` never returns an expired entry? Keep the existing tests green.",
+        // b04: the `./...` must not split the sentence between the command and "green"
+        "Can you make `batch.Run` do what README.md says, and keep `go test -race ./...` green? \
+         Please don't change its signature, other packages call it.",
+        // b05
+        "Can you get main building again and `cargo test` green? CI builds offline.",
+        // b01
+        "Update the README, add tests for the new behaviour, and make sure `cargo test` and \
+         `cargo fmt --check` both pass.",
+        "The test suite has to stay green.",
+        "keep the tests passing",
+    ] {
+        assert!(prompt_expects_green_existing_tests(prompt), "{prompt}");
+    }
+}
+
+#[test]
+fn requests_that_expect_tests_to_change_do_not_arm_it() {
+    for prompt in [
+        // b03: the tests are renamed along with the code
+        "Please rename the `User` concept to `Account`. Everything should still build and `go \
+         test ./...` should pass.",
+        "Refactor the pricing module and keep the tests green.",
+        "Update the tests to match the new output and make sure they pass.",
+        "Fix the failing test so that it passes.",
+        "The db keyword is deprecated; use database instead. Tests should pass.",
+        "Implement pagination.",
+        "Add a --verbose flag to the CLI.",
+        "Review the latest changes and attest to them.",
+    ] {
+        assert!(!prompt_expects_green_existing_tests(prompt), "{prompt}");
+    }
+}
+
+#[test]
+fn leave_the_existing_tests_alone_is_an_explicit_prohibition() {
+    for prompt in [
+        "Fix the parser. Leave the existing tests alone.",
+        "Fix the parser and leave existing tests untouched.",
+        "Fix the parser without changing the tests.",
+        "Fix the parser, existing tests as is.",
+        "Don't edit the existing tests.",
+    ] {
+        assert!(prompt_requires_pristine_existing_tests(prompt), "{prompt}");
+    }
+    for prompt in [
+        "The existing tests must keep passing.",
+        "Fix the parser without changing its public API.",
+        "Leave the logging alone and update the tests.",
+    ] {
+        assert!(!prompt_requires_pristine_existing_tests(prompt), "{prompt}");
+    }
+}
+
+#[test]
+fn a_dot_inside_a_token_does_not_end_a_sentence() {
+    assert_eq!(
+        sentences("Keep `go test ./...` green. Done"),
+        vec!["keep `go test ./...` green", " done"]
+    );
+    assert_eq!(
+        sentences("edit main.rs\nthen stop"),
+        vec!["edit main.rs", "then stop"]
+    );
+}
+
+#[test]
+fn the_level_follows_the_strongest_signal() {
+    let user = |text: &str| vec![Message::user(text)];
+    assert_eq!(level(true, &user("hi"), false), Level::AnyEdit);
+    assert_eq!(
+        level(false, &user("Don't edit the existing tests."), true),
+        Level::AnyEdit
+    );
+    assert_eq!(
+        level(false, &user("Keep the existing tests green."), false),
+        Level::Rewrites
+    );
+    assert_eq!(
+        level(false, &user("Keep the existing tests green."), true),
+        Level::Off,
+        "a person in a chat is not given an extra restore round for saying the tests must pass"
+    );
+    assert_eq!(
+        level(false, &user("Implement pagination."), false),
+        Level::Off
+    );
+    // A later turn that says nothing about tests keeps the session's protection.
+    let sticky = vec![
+        Message::user("Keep the existing tests green."),
+        Message::assistant("ok"),
+        Message::user("Now handle the empty case."),
+    ];
+    assert_eq!(level(false, &sticky, false), Level::Rewrites);
+}
+
+#[test]
+fn guidance_matches_the_strength_of_the_request() {
+    assert_eq!(
+        guidance("Don't edit the existing tests.", &[]).map(|g| g.1),
+        Some(PRISTINE_TEST_GUIDANCE)
+    );
+    assert_eq!(
+        guidance("Keep the existing tests green.", &[]).map(|g| g.1),
+        Some(KEEP_TESTS_GUIDANCE)
+    );
+    assert_eq!(guidance("Implement pagination.", &[]), None);
+}
+
+#[test]
+fn name_status_lists_every_changed_path_and_splits_renames() {
+    let raw = b"M\0tests/test_a.py\0D\0tests/test_old.py\0A\0tests/test_new.py\0M\0src/lib.py\0";
+    assert_eq!(
+        parse_name_status(raw),
+        vec![
+            ('M', "tests/test_a.py".to_string()),
+            ('D', "tests/test_old.py".to_string()),
+            ('A', "tests/test_new.py".to_string()),
+            ('M', "src/lib.py".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn an_appended_test_is_fine_under_rewrites_but_not_under_any_edit() {
+    let dir = repo_with_committed_test();
+    let mut text = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    text.push_str("\ndef test_c():\n    assert fix() == 3\n");
+    std::fs::write(dir.join("tests/test_foo.py"), text).unwrap();
+    assert!(modified_existing_tests(Some(&dir), None, Level::Rewrites).is_empty());
+    assert_eq!(
+        modified_existing_tests(Some(&dir), None, Level::AnyEdit),
+        vec!["tests/test_foo.py".to_string()]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_test_inserted_before_existing_ones_or_a_changed_line_is_a_rewrite() {
+    let dir = repo_with_committed_test();
+    let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    // b02's shape: a new test slipped in ahead of an existing one.
+    let inserted = original.replace(
+        "def test_b():",
+        "def test_new():\n    assert fix() == 9\n\ndef test_b():",
+    );
+    std::fs::write(dir.join("tests/test_foo.py"), inserted).unwrap();
+    assert_eq!(
+        modified_existing_tests(Some(&dir), None, Level::Rewrites),
+        vec!["tests/test_foo.py".to_string()]
+    );
+    // a02's shape: an existing import line widened.
+    std::fs::write(
+        dir.join("tests/test_foo.py"),
+        original.replace("== 1", "== 2"),
+    )
+    .unwrap();
+    assert_eq!(
+        modified_existing_tests(Some(&dir), None, Level::Rewrites),
+        vec!["tests/test_foo.py".to_string()]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn deleted_and_moved_tests_count_while_new_files_and_sources_do_not() {
+    let dir = repo_with_committed_test();
+    std::fs::rename(
+        dir.join("tests/test_foo.py"),
+        dir.join("tests/test_moved.py"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("tests/test_new.py"), "def test_n():\n    pass\n").unwrap();
+    std::fs::write(dir.join("src/lib.py"), "def fix():\n    return 1\n").unwrap();
+    git(&dir, &["add", "-A"]);
+    assert_eq!(
+        modified_existing_tests(Some(&dir), None, Level::Rewrites),
+        vec!["tests/test_foo.py".to_string()],
+        "the original path was removed; the added file and the source edit are not tests that \
+         were rewritten"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_committed_test_edit_is_only_visible_against_the_turn_start_commit() {
+    let dir = repo_with_committed_test();
+    let start = git(&dir, &["rev-parse", "HEAD"]);
+    let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    std::fs::write(
+        dir.join("tests/test_foo.py"),
+        original.replace("== 1", "== 2"),
+    )
+    .unwrap();
+    git(&dir, &["commit", "-qam", "make the tests agree"]);
+    assert!(
+        git(&dir, &["status", "--porcelain"]).is_empty(),
+        "the tree is clean after the model's own commit, which is what hid the edit from `git status`"
+    );
+    assert!(modified_existing_tests(Some(&dir), None, Level::Rewrites).is_empty());
+    assert_eq!(
+        modified_existing_tests(Some(&dir), Some(&start), Level::Rewrites),
+        vec!["tests/test_foo.py".to_string()]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn uncommitted_test_edits_are_stashed_and_restored() {
+    let dir = repo_with_committed_test();
+    let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    std::fs::write(
+        dir.join("tests/test_foo.py"),
+        original.replace("== 1", "== 2"),
+    )
+    .unwrap();
+    let paths = vec!["tests/test_foo.py".to_string()];
+    let start = git(&dir, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        restore_originals(Some(&dir), Some(&start), &paths),
+        Some(Restored::Stashed)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+        original
+    );
+    assert!(!git(&dir, &["stash", "list"]).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn committed_test_edits_are_restored_and_kept_as_a_patch() {
+    let dir = repo_with_committed_test();
+    let start = git(&dir, &["rev-parse", "HEAD"]);
+    let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    let rewritten = original.replace("== 1", "== 2");
+    std::fs::write(dir.join("tests/test_foo.py"), &rewritten).unwrap();
+    git(&dir, &["commit", "-qam", "make the tests agree"]);
+    let paths = vec!["tests/test_foo.py".to_string()];
+
+    let Some(Restored::Patch(patch)) = restore_originals(Some(&dir), Some(&start), &paths) else {
+        panic!("a committed edit must be restored through a patch");
+    };
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+        original
+    );
+    assert!(patch.exists(), "the patch must be on disk: {patch:?}");
+    git(&dir, &["apply", patch.to_str().unwrap()]);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+        rewritten,
+        "applying the patch gives the model its edit back"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_push_back_says_how_to_get_the_edits_back_and_matches_the_run() {
+    let edits = vec!["tests/test_foo.py".to_string()];
+    let stashed = push_back(true, &edits, &Restored::Stashed);
+    assert!(stashed.contains("Hidden evaluation uses the ORIGINAL tests"));
+    assert!(stashed.contains("`git stash pop`") && stashed.contains("tests/test_foo.py"));
+    let patched = push_back(
+        false,
+        &edits,
+        &Restored::Patch(std::path::PathBuf::from("/repo/.git/x.patch")),
+    );
+    assert!(!patched.contains("Hidden evaluation"), "{patched}");
+    assert!(
+        patched.contains("`git apply /repo/.git/x.patch`"),
+        "{patched}"
+    );
+}
+
+/// Rewrites a test and COMMITS it with one shell call, then answers; every later completion is a
+/// short reply. The harness asks models to commit each verified unit, so this is the common shape.
+struct RewriteCommitThenAnswer {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Provider for RewriteCommitThenAnswer {
+    async fn complete(
+        &self,
+        _model: &str,
+        _messages: &[Message],
+        _tools: &[ToolSpec],
+        _on_event: &mut forge_provider::EventSink<'_>,
+    ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tool_calls = if n == 0 {
+            vec![forge_types::ToolCall {
+                id: forge_types::new_id(),
+                name: "shell".into(),
+                args: serde_json::json!({
+                    "command": "printf 'def test_a():\\n    assert fix() == 2\\n\\ndef test_b():\\n    \
+                                assert other() == 2\\n' > tests/test_foo.py && git add -A && \
+                                git -c user.name=t -c user.email=t@t commit -qm agree"
+                }),
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
+            reasoning_items: Vec::new(),
+            content: if n == 0 { String::new() } else { "done".into() },
+            tool_calls,
+            usage: forge_types::Usage::default(),
+            quotas: Vec::new(),
+        })
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_committed_test_rewrite_in_a_keep_green_turn_is_restored_and_pushed_back_once() {
+    let dir = repo_with_committed_test();
+    let provider = Arc::new(RewriteCommitThenAnswer {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let calls = Arc::clone(&provider);
+    let capture = CapturePresenter::default();
+    let events = capture.events.clone();
+    let mut config = Config {
+        permission_mode: forge_types::PermissionMode::Bypass,
+        ..Config::default()
+    };
+    config.recap.enabled = false;
+    config.suggest.enabled = false;
+    config.mesh.auto_memory = false;
+    let mut session = Session::start(
+        Arc::new(Store::open_in_memory().unwrap()),
+        provider,
+        Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        }),
+        ToolRegistry::with_core_tools_in(&dir),
+        Box::new(capture),
+        config,
+        dir.to_str().unwrap(),
+    )
+    .unwrap();
+
+    session
+        .run_turn("Fix `fix()` so it returns 1. Keep the existing tests green.")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "tool call, the answer, then exactly ONE guard re-drive"
+    );
+    assert!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py"))
+            .unwrap()
+            .contains("== 1"),
+        "the committed rewrite must be undone in the tree"
+    );
+    let warned =
+        events.lock().unwrap().iter().any(
+            |e| matches!(e, PresenterEvent::Warning(w) if w.contains("restored the originals")),
+        );
+    assert!(warned, "the restore must be announced");
+    let nudge = session
+        .transcript
+        .iter()
+        .find(|m| m.content.contains("git apply"))
+        .expect("the model is told how to re-apply its edits");
+    assert!(
+        !nudge.content.contains("Hidden evaluation"),
+        "a person's request is not a hidden evaluation: {}",
+        nudge.content
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_turn_that_never_asked_for_green_tests_leaves_edited_tests_alone() {
+    let dir = repo_with_committed_test();
+    let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    let rewritten = original.replace("== 1", "== 2");
+    std::fs::write(dir.join("tests/test_foo.py"), &rewritten).unwrap();
+    let provider = Arc::new(DescribeOnlyProvider {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (_store, mut session) = fixed_session(
+        provider,
+        Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        }),
+    );
+    session.config.recap.enabled = false;
+    session.config.suggest.enabled = false;
+    session.config.mesh.auto_memory = false;
+    session.workspace = WorkspaceContext::new(&dir).unwrap();
+
+    session
+        .run_turn("Update the tests for the new default.")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+        rewritten,
+        "nothing asked for the existing tests to be kept, so the edit stays"
+    );
+    assert!(git(&dir, &["stash", "list"]).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_attended_chat_that_says_tests_must_pass_gets_no_restore_round() {
+    let dir = repo_with_committed_test();
+    let provider = Arc::new(RewriteCommitThenAnswer {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let calls = Arc::clone(&provider);
+    let mut config = Config {
+        permission_mode: forge_types::PermissionMode::Bypass,
+        ..Config::default()
+    };
+    config.recap.enabled = false;
+    config.suggest.enabled = false;
+    config.mesh.auto_memory = false;
+    let mut session = Session::start(
+        Arc::new(Store::open_in_memory().unwrap()),
+        provider,
+        Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        }),
+        ToolRegistry::with_core_tools_in(&dir),
+        Box::new(CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        }),
+        config,
+        dir.to_str().unwrap(),
+    )
+    .unwrap();
+
+    session
+        .run_turn("Fix `fix()` so it returns 1. Keep the existing tests green.")
+        .await
+        .unwrap();
+
+    assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(std::fs::read_to_string(dir.join("tests/test_foo.py"))
+        .unwrap()
+        .contains("== 2"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
