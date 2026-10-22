@@ -23,6 +23,7 @@ that cannot run anything, send data anywhere or widen permissions
 | `[[permissions.rules]]` with `ask` or `deny` | restriction is always safe |
 | `permission_mode` = `plan`/`read-only` or `default`/`ask` | a stricter temper |
 | `permissions.auto_classifier = false` | makes `auto` ask more |
+| `permissions.auto_allow_read_only_shell = false` | makes Ask prompt for read-only shell commands again |
 | `[tui]`, `[keybinds]`, `[recap]`, `[suggest]`, `[project]`, `[model_effort]`, `[compact_cap]`, `stop_hook_max_blocks`, `commands.max_palette` | display and pacing |
 | `[mesh]` except `headroom`, `headroom_url`, budgets/caps, `pricing`, `subscriptions`, `disabled`, `bridge_mcp_external` | routing preferences among providers the user already configured |
 

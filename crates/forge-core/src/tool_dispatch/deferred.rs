@@ -168,14 +168,18 @@ impl Session {
         if name == "shell" {
             // Only when the broker would allow it outright: the batch path never prompts, so a
             // shell line that would ask must go through the serial path's confirmation instead.
+            // The workspace matters to Ask's read-only auto-allow, which resolves the call's paths
+            // against it exactly as the serial path does.
+            let workspace = self.workspace_binding.read().ok().map(|g| g.clone());
             return self.tools.get(name).is_some()
                 && permission::is_read_only_shell_call(&call.args)
-                && permission::decide(
+                && permission::decide_in(
                     self.mode,
                     forge_types::SideEffect::Shell,
                     name,
                     &call.args,
                     &self.rules,
+                    workspace.as_deref(),
                 ) == PermissionDecision::Allow;
         }
         if name == subagent::SPAWN_AGENTS_TOOL

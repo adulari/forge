@@ -31,7 +31,7 @@ names stay stable). Temper is a **display + UX layer** plus runtime switching. C
 | Canonical key | Temper label | Behaviour | In SHIFT+TAB cycle? |
 |---------------|--------------|-----------|---------------------|
 | `plan` | **Read-only** | Investigate & propose, **no** side effects (hard contract). | yes |
-| `default` | **Ask** | Ask before each side effect. | yes |
+| `default` | **Ask** | Ask before each side effect, except shell commands that are provably read-only (see "Ask and read-only shell"). | yes |
 | `accept-edits` | **Auto-edit** | Auto-apply workspace edits and ordinary shell; ask for writes beyond the workspace and for shell that deletes, moves or writes outside it (see "Auto-edit and shell"). | yes |
 | `auto` | **Auto** | Proceed on safe calls, ask on risky or unrecognised ones (see "Auto mode classification"). | yes |
 | `bypass` | **Full** | All permission guards off (the unoverridable safety denylist still applies). | **no — explicit opt-in only** |
@@ -62,6 +62,42 @@ still redirected into the worktree.
 `extra_roots` only, refused in every mode). It was the default until the refusals proved to buy no
 safety, since `shell` was never confined, while pushing models to write files through `cat >` and
 heredocs instead of the reviewable file tools.
+
+### Ask and read-only shell
+
+Ask used to prompt for every shell call, `git status` and `cat calc.py` included. It now runs a
+shell command without a prompt when the broker can prove it only reads (`permission/ask_shell.rs`,
+ADR-0008): every statement is one of `ls cat head tail wc pwd echo stat du nl tac cut tr sort uniq
+basename dirname realpath readlink which md5sum sha1sum sha256sum b3sum diff cmp grep egrep fgrep
+rg find sed git`, written plainly, with arguments that cannot write, run code or reach the
+network. Pipelines and `&&`/`;` chains qualify when every stage does. The call still shows in the
+transcript as an ordinary tool row, just with no prompt.
+
+It does not qualify, so it asks as before, when it has a redirect (other than `2>&1` and
+`>/dev/null`), a `$`/backtick/`<(` substitution, a subshell or brace, a `&`, a `VAR=value`
+prefix, a wrapper (`env`, `command`, `nohup`, `time`), a binary named by path or in quotes, a newline,
+or a flag such as `find -exec/-delete`, `sort -o`, `rg --pre`, `tail -f`; for `sed` only
+`sed -n 'N,Mp'` qualifies, for `git` only the read subcommands (`status diff log show branch`
+listing, `rev-parse ls-files blame grep ls-tree rev-list shortlog describe merge-base show-ref`) with no `-c`, `-C`, `--output`, `--ext-diff`, `--textconv` or `-O`.
+
+Secrets are not a way around the secret rules. The built-in deny verbs (`cat .env`, ...) refuse as
+before, and the paths a read-only command names are also checked against the same secret globs
+(`.env*` but not `.env.example`, `*.pem`, `id_rsa`, `~/.ssh/**`, `/proc/*/environ`, ...), through
+symlinks, `~` and wildcards: `wc -c .env`, `git show HEAD:.env` and `cat .e*` ask. A recursive
+`grep -r` asks when its tree holds such a file.
+
+What outranks it still does: the safety floor, deny rules, ask rules, hooks (`PreToolUse` runs
+first and may block), and the Read-only temper (which has its own classifier). Auto-edit, Auto and
+Full are unchanged. The native loop, the CLI bridge (`forge mcp-serve`) and subagents all use the
+same decision.
+
+```toml
+[permissions]
+auto_allow_read_only_shell = true   # default; false makes Ask prompt for every shell command again
+```
+
+An untrusted project may set it to `false` (more prompts) but not to `true`
+([project-trust.md](project-trust.md)).
 
 ### Auto-edit and shell
 

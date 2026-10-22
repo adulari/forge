@@ -1211,6 +1211,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ask_decides_read_only_shell_on_the_bridge_exactly_as_the_native_loop_does() {
+        use PermissionDecision::{Allow, Ask, Deny};
+        let mut server = test_server_with_mode(PermissionMode::Default);
+        server.rules = Config::default().permission_rules();
+        let effect = server
+            .registry
+            .get("shell")
+            .expect("shell is a core tool")
+            .side_effect();
+        let cwd = std::env::current_dir().unwrap();
+        for (command, expected) in [
+            ("git status", Allow),
+            ("git diff --stat", Allow),
+            ("ls -la", Allow),
+            ("grep -rn fn src | head", Allow),
+            ("touch bridge_probe.txt", Ask),
+            ("ls; touch bridge_probe.txt", Ask),
+            ("git commit -m x", Ask),
+            ("cat .env", Deny),
+            ("wc -c .env", Ask),
+        ] {
+            let args = serde_json::json!({ "command": command });
+            // The bridge calls the broker with no workspace; a native session passes its own.
+            let bridged = permission::decide_in_auto(
+                PermissionMode::Default,
+                effect,
+                "shell",
+                &args,
+                &server.rules,
+                None,
+            );
+            let native = permission::decide_in_auto(
+                PermissionMode::Default,
+                effect,
+                "shell",
+                &args,
+                &server.rules,
+                Some(&cwd),
+            );
+            assert_eq!(bridged.0, native.0, "{command}");
+            assert_eq!(bridged.0, expected, "{command}");
+            // An allowed call is dispatched; an Ask with no prompt to relay to is refused.
+            let gated = gate_decision(bridged.0, "shell", PermissionMode::Default);
+            assert_eq!(gated.is_ok(), expected == Allow, "{command}");
+        }
+        server.rules = Config {
+            permissions: forge_config::PermissionsConfig {
+                auto_allow_read_only_shell: false,
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+        .permission_rules();
+        let off = permission::decide_in_auto(
+            PermissionMode::Default,
+            effect,
+            "shell",
+            &serde_json::json!({ "command": "git status" }),
+            &server.rules,
+            None,
+        );
+        assert_eq!(off.0, Ask);
+    }
+
     /// Like [`test_server`] but lets a test inject an [`McpManager`] to exercise the external-MCP
     /// surface (meta-tools) the same way `run()`'s gate would when opted in.
     fn test_server_with_mcp(lean: bool, mcp: Option<Arc<forge_mcp::McpManager>>) -> ForgeMcp {

@@ -5081,6 +5081,9 @@ mod tests {
     #[path = "plan_shell.rs"]
     mod plan_shell_tests;
 
+    #[path = "ask_read_only_shell.rs"]
+    mod ask_read_only_shell_tests;
+
     #[path = "turn_grant.rs"]
     mod turn_grant_tests;
 

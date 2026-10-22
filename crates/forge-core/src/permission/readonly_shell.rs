@@ -76,6 +76,8 @@ const GIT_READ_ONLY: &[&str] = &[
     "name-rev",
     "diff-tree",
     "show-ref",
+    "branch",
+    "remote",
 ];
 
 const CARGO_READ_ONLY: &[&str] = &["metadata", "tree", "locate-project", "pkgid", "version"];
@@ -107,7 +109,7 @@ pub(crate) fn is_read_only_shell(cmd: &str) -> bool {
 /// Remove `2>&1`-style fd duplication and `>/dev/null` discards (no file is written), and refuse
 /// any other unquoted redirect or input/process substitution. A redirect inside `$(…)`/backticks
 /// is invisible to the quote tracker, so a line using either must contain no `<`/`>` at all.
-fn strip_harmless_redirects(cmd: &str) -> Option<String> {
+pub(super) fn strip_harmless_redirects(cmd: &str) -> Option<String> {
     if (cmd.contains("$(") || cmd.contains('`')) && cmd.contains(['<', '>']) {
         return None;
     }
@@ -197,18 +199,38 @@ fn segment_is_read_only(segment: &str) -> bool {
     }
     let cmd = cmd_word.as_str();
     let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
-    let flag = |name: &str| {
-        rest.iter()
-            .any(|w| *w == name || w.starts_with(&format!("{name}=")))
-    };
+    if let Some(verdict) = shared_args_read_only(cmd, &rest) {
+        return verdict;
+    }
     match cmd {
-        // `uniq IN OUT` writes OUT; `sort -o` / `tree -o` write a file; `date -s` sets the clock.
-        "uniq" => rest.iter().filter(|w| !w.starts_with('-')).count() <= 1,
-        "sort" => !rest
-            .iter()
-            .any(|w| *w == "-o" || w.starts_with("--output") || is_short_flag(w, 'o')),
-        "tree" => !rest.iter().any(|w| is_short_flag(w, 'o')) && !flag("--output"),
         "date" => !rest.iter().any(|w| *w == "-s" || w.starts_with("--set")),
+        "git" => git_read_only(&rest, GIT_READ_ONLY),
+        "cargo" => rest
+            .first()
+            .is_some_and(|sub| CARGO_READ_ONLY.contains(sub) || *sub == "--version"),
+        c => ALWAYS_READ_ONLY.contains(&c),
+    }
+}
+
+/// The argument rules for binaries whose read-only status depends on a flag, shared by the Plan
+/// classifier and the Ask auto-allow so the two cannot drift: `Some(verdict)` for a binary with
+/// such a rule, `None` for one without. A binary reaching here is already known to be one the
+/// caller allows; this only vets its arguments.
+pub(super) fn shared_args_read_only(cmd: &str, rest: &[&str]) -> Option<bool> {
+    let long = |full: &str| rest.iter().any(|w| is_long_option(w, full));
+    Some(match cmd {
+        // `uniq IN OUT` writes OUT; `sort -o` / `tree -o` write a file. `sort` also execs the
+        // `--compress-program` it is given and writes spill files under `-T`.
+        "uniq" => rest.iter().filter(|w| !w.starts_with('-')).count() <= 1,
+        "sort" => {
+            !(rest
+                .iter()
+                .any(|w| is_short_flag(w, 'o') || is_short_flag(w, 'T'))
+                || long("--output")
+                || long("--compress-program")
+                || long("--temporary-directory"))
+        }
+        "tree" => !rest.iter().any(|w| is_short_flag(w, 'o')) && !long("--output"),
         "find" => !rest.iter().any(|w| {
             matches!(
                 *w,
@@ -223,44 +245,71 @@ fn segment_is_read_only(segment: &str) -> bool {
                     | "-fls"
             )
         }),
-        // `--pre` runs a preprocessor command over every file searched.
-        "rg" => !flag("--pre") && !flag("--hostname-bin"),
-        "git" => git_read_only(&rest),
-        "cargo" => rest
-            .first()
-            .is_some_and(|sub| CARGO_READ_ONLY.contains(sub) || *sub == "--version"),
-        c => ALWAYS_READ_ONLY.contains(&c),
-    }
+        // `--pre` runs a preprocessor command over every file searched, `--hostname-bin` runs a
+        // program, and `-z` shells out to a decompressor for each file.
+        "rg" => {
+            !(long("--pre")
+                || long("--hostname-bin")
+                || long("--search-zip")
+                || rest.iter().any(|w| is_short_flag(w, 'z')))
+        }
+        _ => return None,
+    })
 }
 
-fn git_read_only(rest: &[&str]) -> bool {
+/// Whether `word` is the long option `full` or something a getopt_long-style parser accepts as an
+/// abbreviation of it (`sort --out=x` is `sort --output=x`; `git grep --open=sh` is
+/// `--open-files-in-pager=sh`). Too short to be an abbreviation (`--`) is not a match.
+pub(super) fn is_long_option(word: &str, full: &str) -> bool {
+    let name = word.split_once('=').map_or(word, |(name, _)| name);
+    name.len() >= 3 && name.starts_with("--") && full.starts_with(name)
+}
+
+/// Whether `git <rest>` is one of the read subcommands in `subcommands` with no flag that writes a
+/// file or runs a helper. Anything before the subcommand (`-c`, `-C`, `--git-dir`, `--exec-path`)
+/// makes the first word a non-subcommand, so it fails closed.
+pub(super) fn git_read_only(rest: &[&str], subcommands: &[&str]) -> bool {
     let Some((sub, args)) = rest.split_first() else {
         return false;
     };
-    // `--output`, `--ext-diff` and `--textconv` run helpers or write files; `-c` injects config.
+    // `--output`, `--ext-diff` and `--textconv` run helpers or write files; `-c` injects config;
+    // `git grep -O<cmd>` runs a pager command; `--exec*` and `--config-env` redirect what runs.
     let hostile = args.iter().any(|a| {
-        a.starts_with("--output") || matches!(*a, "--ext-diff" | "--textconv") || *a == "-c"
+        a.starts_with("--output")
+            || *a == "-c"
+            || a.starts_with("-O")
+            || a.starts_with("--exec")
+            || [
+                "--ext-diff",
+                "--textconv",
+                "--open-files-in-pager",
+                "--config-env",
+            ]
+            .iter()
+            .any(|full| is_long_option(a, full))
+            || is_long_option(a, "--output")
+            || is_long_option(a, "--exec-path")
     });
     if hostile {
         return false;
     }
     match *sub {
-        "branch" => args
+        "branch" if subcommands.contains(&"branch") => args
             .iter()
             .all(|a| matches!(*a, "-a" | "-r" | "-v" | "-vv" | "--list" | "--show-current")),
-        "remote" => args.iter().all(|a| *a == "-v"),
-        s => GIT_READ_ONLY.contains(&s),
+        "remote" if subcommands.contains(&"remote") => args.iter().all(|a| *a == "-v"),
+        s => subcommands.contains(&s),
     }
 }
 
-fn is_short_flag(word: &str, c: char) -> bool {
+pub(super) fn is_short_flag(word: &str, c: char) -> bool {
     word.starts_with('-') && !word.starts_with("--") && word[1..].contains(c)
 }
 
 /// A bare `VAR=value` prefix is stripped by `effective_commands`, which would hide
 /// `LD_PRELOAD=… ls` or `GIT_EXTERNAL_DIFF=… git diff`, so the raw line is checked for any
 /// assignment-shaped word (over-strict for a quoted `a=b` argument, which is fine).
-fn has_assignment_word(cmd: &str) -> bool {
+pub(super) fn has_assignment_word(cmd: &str) -> bool {
     let spaced: String = cmd
         .chars()
         .map(|c| if ";&|()\n\r".contains(c) { ' ' } else { c })
@@ -331,6 +380,14 @@ mod tests {
             "git -c core.pager=x log",
             "git diff --output=f",
             "git branch -D x",
+            "sort --out=x in",
+            "sort --compress-program=sh in",
+            "sort -T /tmp in",
+            "git grep -O'sh -c x' foo",
+            "git grep --open=sh foo",
+            "git show --textc HEAD:f",
+            "rg -z x",
+            "rg --pr ./evil x",
             "git branch newbranch",
             "git config user.name x",
             "cargo build",

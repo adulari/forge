@@ -114,8 +114,9 @@ async fn a_shell_command_that_exits_nonzero_is_not_drawn_as_a_success() {
 
 #[tokio::test]
 async fn a_call_the_person_declined_does_not_blame_policy() {
-    // `CapturePresenter` answers every confirmation with Deny, standing in for the person.
-    let (result, events) = run("echo hi", PermissionMode::Default).await;
+    // `CapturePresenter` answers every confirmation with Deny, standing in for the person. The
+    // command writes: Ask runs a read-only one (`echo hi`) without ever asking.
+    let (result, events) = run("touch declined_probe.txt", PermissionMode::Default).await;
     assert!(result.starts_with("permission denied"), "{result}");
     assert!(result.contains("by the user"), "{result}");
     assert!(!result.contains("policy"), "{result}");
