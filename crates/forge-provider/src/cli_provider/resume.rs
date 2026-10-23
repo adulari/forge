@@ -46,12 +46,17 @@ pub(super) struct ResumeState {
     /// resumed `codex exec` reports the thread's running total, so this is what the next turn's
     /// report is measured from (see [`super::codex_usage`]).
     pub(super) codex_total: Option<forge_types::Usage>,
+    /// Set when a new Forge process read this state back from disk (see `resume_store`): the
+    /// [`prefix_digest`] of everything the CLI session was given. `epoch` counts rewrites inside
+    /// one process and says nothing about another, so a restored state is checked against the
+    /// transcript itself instead.
+    pub(super) restored: Option<u64>,
 }
 
 /// Fingerprints of the last two messages a CLI session was sent, which is how a later call finds
 /// where the new ones start even after the view was trimmed at the front. Two messages rather than
 /// one, because a single message is often a repeat of an earlier one (the same nudge twice).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) struct SentMark {
     last: u64,
     prev: Option<u64>,
@@ -69,13 +74,32 @@ fn fingerprint(m: &Message) -> u64 {
     h.finish()
 }
 
+/// One fingerprint of a whole request after its leading system run (the system prompt and the
+/// pinned context, which a resumed session handles on its own): it matches only when every message
+/// the CLI session was given is still there, unchanged and in order.
+pub(super) fn prefix_digest(messages: &[Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for m in messages.iter().skip_while(|m| m.role == Role::System) {
+        fingerprint(m).hash(&mut h);
+    }
+    h.finish()
+}
+
 impl SentMark {
     /// The mark for a call that handed the CLI all of `messages`; `None` for an empty slice.
     pub(super) fn of(messages: &[Message]) -> Option<Self> {
         let last = fingerprint(messages.last()?);
+        // The leading system run (system prompt, pinned context) is rendered again for every
+        // request and may differ next time, so the first request's mark is its message alone.
+        let lead = messages
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
         let prev = messages
             .len()
             .checked_sub(2)
+            .filter(|&i| i >= lead)
             .map(|i| fingerprint(&messages[i]));
         Some(Self { last, prev })
     }
@@ -168,7 +192,11 @@ pub(super) fn allowed(
         // A call with no checkpoint context has no conversation identity (subagents, legacy
         // callers): two of them would match each other's `None` owner and cross-wire transcripts.
         && checkpoint.is_some_and(|c| st.owner.as_deref() == Some(c.session.as_str()))
-        && st.epoch == checkpoint.map_or(0, |c| c.epoch)
+        && match st.restored {
+            Some(prefix) => locate_sent(st.sent, st.mark, messages)
+                .is_some_and(|at| prefix_digest(&messages[..at]) == prefix),
+            None => st.epoch == checkpoint.map_or(0, |c| c.epoch),
+        }
 }
 
 /// What a live process is told when it is driven again with nothing new in the transcript. Its own
