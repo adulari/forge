@@ -209,6 +209,7 @@ impl Session {
     /// emits its own one-line note). No-op when it already fits or the transcript is too short to
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     pub(crate) async fn auto_compact_if_needed(&mut self, model: &str) {
+        self.settle_window_lookup(model, None).await;
         let trigger = self.compaction_trigger(model);
         if needs_compaction(
             self.context_pressure_tokens(),

@@ -1453,11 +1453,14 @@ impl App {
                 diagnosis,
                 fix,
             } => {
-                self.set_turn_activity(
-                    TurnPhase::ProcessingToolResult,
-                    "shell diagnosis ready; sending the result back to the model",
-                );
+                // It is computed off the turn and may land after the turn is over.
                 let in_turn = self.transcript_ui.turn_open;
+                if in_turn {
+                    self.set_turn_activity(
+                        TurnPhase::ProcessingToolResult,
+                        "shell diagnosis ready",
+                    );
+                }
                 self.flush.extend(shell_diagnosis_lines(
                     &command,
                     &diagnosis,

@@ -93,7 +93,8 @@ process down after 20 minutes idle (`FORGE_BRIDGE_IDLE_TTL_SECS` overrides).
 **Prewarm.** A first turn would otherwise start `claude`, which starts `forge mcp-serve`, and wait
 for the tool server to report connected before the prompt can be written (1.0-1.5 s of "nothing
 happens"). A new conversation pinned to exactly one `claude-cli::` model starts that process when
-the TUI starts (`Session::prewarm_pinned_bridge` -> `Provider::prewarm` -> `CliProvider::prewarm_live`)
+the TUI starts, or as soon as a one-shot `forge run` has built its session, so the turn's hooks and
+routing run beside it (`Session::prewarm_pinned_bridge` -> `Provider::prewarm` -> `CliProvider::prewarm_live`)
 and parks it in the conversation's slot marked `unused`: handshaken, holding no history. The first
 turn takes it over like a fresh spawn (full transcript), provided the model, effort, epoch and
 workspace match; otherwise it is torn down and the turn spawns as before. The warm-up holds the slot

@@ -258,6 +258,7 @@ impl Session {
             extra_tool_roots,
             btw_asker: None,
             pending_hints: vec![],
+            shell_diagnoses: Default::default(),
             steer: crate::steer::SteerInbox::default(),
             resume_absorbed: false,
             job_wake: crate::job_wake::JobWake::default(),

@@ -233,9 +233,7 @@ impl Session {
                     self.push_note(forge_types::MessageKind::Deadline, DEADLINE_RECONCILE_NUDGE);
             }
             self.sync_commit_attribution(&active_model);
-            // Every step, not only at nudge points: a 120K-ceiling Kimi turn once grew to 246K.
-            self.advance_floor_if_due(&active_model, false);
-            self.auto_compact_if_needed(&active_model).await;
+            self.prepare_step_context(&active_model).await;
             let bridge_cwd =
                 forge_provider::is_cli_bridge(&active_model).then(|| self.stored_cwd());
             let step_specs = self.specs_for_step(specs);

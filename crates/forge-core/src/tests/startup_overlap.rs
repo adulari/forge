@@ -82,35 +82,62 @@ async fn warmed_within(provider: &WarmRecorder, wait: Duration) -> Warmed {
     provider.warmed.lock().unwrap().clone()
 }
 
+const UNKNOWN: &str = "gateway::model";
+
+/// Words enough that the 32k floor would compact them: the window decides what is sent.
+fn fill_past_a_quarter_of_the_floor_trigger(session: &mut Session) {
+    let words = vec!["context"; 12_000].join(" ");
+    session.transcript.push(Message::user(words));
+}
+
 #[tokio::test]
-async fn the_first_request_waits_for_the_window_lookup_and_names_a_window_it_never_learned() {
+async fn a_small_first_request_goes_out_without_waiting_for_the_window_lookup() {
     let dir = tempfile::tempdir().unwrap();
     let (mut session, capture) = session(dir.path(), Arc::default());
     let (tx, lookup) = crate::WindowLookup::channel();
     session.set_window_lookup(Some(lookup));
+
+    let started = std::time::Instant::now();
+    session.settle_window_lookup(UNKNOWN, Some(&[])).await;
+    session.settle_window_lookup(UNKNOWN, None).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "the floor sizes a first request exactly as the real window would"
+    );
+    assert!(warnings(&capture).is_empty());
+
+    // The answer is still taken by a later request.
+    tx.send(Some(vec![UNKNOWN.to_string()])).unwrap();
+    session.settle_window_lookup(UNKNOWN, None).await;
+    assert_eq!(warnings(&capture).len(), 1);
+}
+
+#[tokio::test]
+async fn a_context_the_floor_would_cut_waits_for_the_lookup_and_names_a_window_it_never_learned() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, capture) = session(dir.path(), Arc::default());
+    let (tx, lookup) = crate::WindowLookup::channel();
+    session.set_window_lookup(Some(lookup));
+    fill_past_a_quarter_of_the_floor_trigger(&mut session);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(60)).await;
-        let _ = tx.send(Some(vec!["gateway::model".to_string()]));
+        let _ = tx.send(Some(vec![UNKNOWN.to_string()]));
     });
 
     let started = std::time::Instant::now();
-    session.settle_window_lookup().await;
+    session.settle_window_lookup(UNKNOWN, None).await;
 
     assert!(
         started.elapsed() >= Duration::from_millis(50),
-        "the first request must not be sized before the lookup settled"
+        "a context the floor would compact must not be sized before the lookup settled"
     );
     let notice = warnings(&capture).join("\n");
     assert!(
         notice.contains("context window of gateway::model is unknown"),
         "{notice}"
     );
-    session.settle_window_lookup().await;
-    assert_eq!(
-        warnings(&capture).len(),
-        1,
-        "the lookup is consumed by the first request"
-    );
+    session.settle_window_lookup(UNKNOWN, None).await;
+    assert_eq!(warnings(&capture).len(), 1, "the lookup is consumed once");
 }
 
 #[tokio::test]
@@ -122,7 +149,9 @@ async fn a_window_notice_is_not_stacked_on_a_pin_startup_already_called_unknown(
     tx.send(Some(vec!["nonexistent-model-xyz".to_string()]))
         .unwrap();
     session.set_window_lookup(Some(lookup));
-    session.settle_window_lookup().await;
+    session
+        .settle_window_lookup("nonexistent-model-xyz", None)
+        .await;
     assert!(
         warnings(&capture).is_empty(),
         "one warning about a model the person is about to replace is enough: {:?}",
@@ -133,7 +162,7 @@ async fn a_window_notice_is_not_stacked_on_a_pin_startup_already_called_unknown(
     let (tx, lookup) = crate::WindowLookup::channel();
     tx.send(Some(vec!["gateway::model".to_string()])).unwrap();
     session.set_window_lookup(Some(lookup));
-    session.settle_window_lookup().await;
+    session.settle_window_lookup(UNKNOWN, None).await;
     assert_eq!(warnings(&capture).len(), 1);
 }
 
@@ -141,18 +170,22 @@ async fn a_window_notice_is_not_stacked_on_a_pin_startup_already_called_unknown(
 async fn a_lookup_that_found_every_window_or_died_says_nothing_and_never_hangs() {
     let dir = tempfile::tempdir().unwrap();
     let (mut session, capture) = session(dir.path(), Arc::default());
+    fill_past_a_quarter_of_the_floor_trigger(&mut session);
 
     let (tx, lookup) = crate::WindowLookup::channel();
     tx.send(Some(Vec::new())).unwrap();
     session.set_window_lookup(Some(lookup));
-    session.settle_window_lookup().await;
+    session.settle_window_lookup(UNKNOWN, None).await;
 
     let (tx, lookup) = crate::WindowLookup::channel();
     drop(tx);
     session.set_window_lookup(Some(lookup));
-    tokio::time::timeout(Duration::from_secs(2), session.settle_window_lookup())
-        .await
-        .expect("a lookup whose task died must not hold the first request");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        session.settle_window_lookup(UNKNOWN, None),
+    )
+    .await
+    .expect("a lookup whose task died must not hold the first request");
 
     assert!(warnings(&capture).is_empty());
 }

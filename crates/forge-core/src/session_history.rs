@@ -47,6 +47,7 @@ impl Session {
         self.history_epoch += 1;
         self.cache.note_history_rewrite();
         self.pending_hints.clear();
+        self.shell_diagnoses.forget();
         self.lsp_baselines.clear();
         self.pending_images.clear();
         self.steer.clear();
