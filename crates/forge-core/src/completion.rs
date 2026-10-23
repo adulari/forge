@@ -31,6 +31,13 @@ pub(crate) enum VerificationObservation {
     Mutation,
     Generic,
     Check(VerificationFamily),
+    /// A `shell` call with a `commands` batch whose entry number `at` (1-based) is the check. The
+    /// batch reports one status for all entries, so whether the check passed or failed has to be
+    /// read from the result ([`VerificationLedger::observe_result`]).
+    BatchCheck {
+        family: VerificationFamily,
+        at: usize,
+    },
 }
 
 /// Outcome-aware evidence for the completion gate. Failed verification families remain unresolved
@@ -80,6 +87,39 @@ impl VerificationLedger {
                     self.unresolved.insert(family);
                 }
             }
+            // Without the result there is no telling which entry failed: a pass is a pass, a
+            // failure proves nothing about the check.
+            VerificationObservation::BatchCheck { family, .. } => {
+                if ok {
+                    self.observe(VerificationObservation::Check(family), true);
+                }
+            }
+        }
+    }
+
+    /// [`Self::observe`] with the tool's result text, which a batched check needs: the batch's
+    /// exit status is its first failure's, so a failing `git diff --check` after a passing test
+    /// run must not read as a failed test.
+    pub(crate) fn observe_result(
+        &mut self,
+        observation: VerificationObservation,
+        ok: bool,
+        result: &str,
+    ) {
+        let VerificationObservation::BatchCheck { family, at } = observation else {
+            return self.observe(observation, ok);
+        };
+        let check = VerificationObservation::Check(family);
+        if ok {
+            return self.observe(check, true);
+        }
+        match batch_failure(result) {
+            // The batch stopped at the check: it failed. Stopped after it: it passed.
+            BatchFailure::StoppedAt(entry) if entry == at => self.observe(check, false),
+            BatchFailure::StoppedAt(entry) if entry > at => self.observe(check, true),
+            BatchFailure::Everything => self.observe(check, false),
+            // Stopped before the check ran, or kept going and one of several failed.
+            _ => {}
         }
     }
 
@@ -111,6 +151,39 @@ impl VerificationLedger {
                 .collect::<Vec<_>>()
                 .join(", ")
         })
+    }
+}
+
+/// Which entries of a failed `commands` batch failed, from the header its result opens with:
+/// `shell: exit 1 in 353ms (2/3 ok, stopped at #3)`.
+#[derive(Debug, PartialEq, Eq)]
+enum BatchFailure {
+    StoppedAt(usize),
+    /// No entry succeeded, so the check failed too.
+    Everything,
+    Unknown,
+}
+
+fn batch_failure(result: &str) -> BatchFailure {
+    let header = result.lines().next().unwrap_or("");
+    let Some((_, counts)) = header.split_once("ms (") else {
+        return BatchFailure::Unknown;
+    };
+    let number = |text: &str| {
+        text.trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse::<usize>().ok())
+    };
+    if let Some((_, rest)) = counts.split_once("stopped at #") {
+        return number(rest).map_or(BatchFailure::Unknown, BatchFailure::StoppedAt);
+    }
+    let ok = number(counts);
+    let total = counts.split_once('/').and_then(|(_, rest)| number(rest));
+    match (ok, total) {
+        (Some(0), Some(_)) => BatchFailure::Everything,
+        (Some(_), Some(1)) => BatchFailure::StoppedAt(1),
+        _ => BatchFailure::Unknown,
     }
 }
 
@@ -185,15 +258,15 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
     if let Some(entries) = value.as_ref().and_then(shell_batch_entries) {
         let mut check = None;
         let mut masked = false;
-        for entry in entries {
+        for (index, entry) in entries.into_iter().enumerate() {
             match classify_command(entry) {
-                VerificationObservation::Check(family) => check = Some(family),
+                VerificationObservation::Check(family) => check = Some((family, index + 1)),
                 VerificationObservation::Ignore => masked = true,
                 _ => {}
             }
         }
         return match (check, masked) {
-            (Some(family), _) => VerificationObservation::Check(family),
+            (Some((family, at)), _) => VerificationObservation::BatchCheck { family, at },
             (None, true) => VerificationObservation::Ignore,
             (None, false) => VerificationObservation::Generic,
         };
@@ -715,14 +788,20 @@ mod tests {
                 "shell",
                 r#"{"commands":["cargo build","cargo test -p forge-core"]}"#
             ),
-            VerificationObservation::Check(VerificationFamily::Test)
+            VerificationObservation::BatchCheck {
+                family: VerificationFamily::Test,
+                at: 2
+            }
         );
         assert_eq!(
             classify_tool(
                 "shell",
                 r#"{"commands":["python3 -m pytest tests/test_scheduler.py","git diff --check && git diff"]}"#
             ),
-            VerificationObservation::Check(VerificationFamily::Test)
+            VerificationObservation::BatchCheck {
+                family: VerificationFamily::Test,
+                at: 1
+            }
         );
         assert_eq!(
             classify_tool(
@@ -744,6 +823,64 @@ mod tests {
             VerificationObservation::Ignore,
             "lines of one script still share a status"
         );
+    }
+
+    #[test]
+    fn a_failed_batch_blames_the_check_only_when_the_check_is_what_failed() {
+        let batch =
+            |commands: &str| classify_tool("shell", &format!(r#"{{"commands":{commands}}}"#));
+        let ran = |observation: VerificationObservation, ok: bool, result: &str| {
+            let mut ledger = VerificationLedger::default();
+            ledger.observe_result(observation, ok, result);
+            ledger
+        };
+        let tests_then_diff = batch(r#"["python3 -m unittest","git diff --check"]"#);
+        assert!(ran(tests_then_diff, true, "shell: exit 0 in 90ms (2/2 ok)").checked_since_edit());
+        // The test run passed and the second entry failed: not a failed test.
+        let diff_failed = ran(
+            tests_then_diff,
+            false,
+            "shell: exit 1 in 353ms (1/2 ok, stopped at #2)\n\n── [1] python3 -m unittest",
+        );
+        assert!(!diff_failed.has_failing_check());
+        assert!(diff_failed.checked_since_edit(), "the check ran and passed");
+        // The check itself stopped the batch.
+        let test_failed = ran(
+            tests_then_diff,
+            false,
+            "shell: exit 1 in 90ms (0/2 ok, stopped at #1)\n\n── [1] python3 -m unittest",
+        );
+        assert!(test_failed.has_failing_check());
+        // Stopped before the check ran, or one of several failed with no way to tell which.
+        let build_then_test = batch(r#"["cargo build","cargo test"]"#);
+        assert!(!ran(
+            build_then_test,
+            false,
+            "shell: exit 101 in 62ms (0/2 ok, stopped at #1)"
+        )
+        .checked_since_edit());
+        let build_failed_before_the_tests = ran(
+            build_then_test,
+            false,
+            "shell: exit 101 in 62ms (0/2 ok, stopped at #1)",
+        );
+        assert!(!build_failed_before_the_tests.has_failing_check());
+        let unknown = ran(
+            tests_then_diff,
+            false,
+            "shell: exit 1 in 353ms (2/3 ok)\n\n── [1] python3 -m unittest",
+        );
+        assert!(!unknown.has_failing_check() && !unknown.checked_since_edit());
+        // A batch of one is its own entry; all entries failing includes the check.
+        let single = batch(r#"["cargo test"]"#);
+        assert!(ran(single, false, "shell: exit 101 in 62ms (0/1 ok)").has_failing_check());
+        assert!(ran(tests_then_diff, false, "shell: exit 2 in 40ms (0/2 ok)").has_failing_check());
+        // Callers without the result text: a pass counts, a failure is not blamed.
+        let mut plain = VerificationLedger::default();
+        plain.observe(tests_then_diff, false);
+        assert!(!plain.has_failing_check());
+        plain.observe(tests_then_diff, true);
+        assert!(plain.checked_since_edit());
     }
 
     #[test]

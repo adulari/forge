@@ -195,9 +195,10 @@ impl Session {
                         false,
                         &result,
                     ));
-                ledgers.verification_ledger.lock().unwrap().observe(
+                ledgers.verification_ledger.lock().unwrap().observe_result(
                     completion::classify_tool(&call.name, &call.args.to_string()),
                     kind.is_none(),
+                    &result,
                 );
                 match kind {
                     Some(k) => *ledgers.failure_counts.entry((name, k)).or_insert(0) += 1,

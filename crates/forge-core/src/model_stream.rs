@@ -90,7 +90,10 @@ pub(super) fn handle_stream_event(
                 .get_mut(&name)
                 .and_then(std::collections::VecDeque::pop_front)
                 .unwrap_or(VerificationObservation::Generic);
-            verification.lock().unwrap().observe(observation, ok);
+            verification
+                .lock()
+                .unwrap()
+                .observe_result(observation, ok, &summary);
             if ok && completion::tool_name_mutates(&name) {
                 mutations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
