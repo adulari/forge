@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use forge_core::is_test_path;
+use forge_core::{is_assertion_line, is_skip_marker_line, is_test_path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -215,13 +215,6 @@ fn test_paths_touched(files: &[FileDiff], findings: &mut Vec<Finding>) {
     }
 }
 
-static SKIP_MARKER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"@pytest\.mark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail|importorskip)\s*\(|@unittest\.(?:skip|skipIf|skipUnless|expectedFailure)\b|\bself\.skipTest\s*\(|\braise\s+(?:unittest\.)?SkipTest\b|#\[ignore\b|\b(?:it|test|describe)\.(?:skip|todo)\s*\(|\bx(?:it|describe|test)\s*\(|\bt\.Skip(?:Now|f)?\s*\(",
-    )
-    .expect("skip marker regex")
-});
-
 /// Markers added to EXISTING test files. A brand-new test file the agent wrote may legitimately
 /// skip on an unsupported platform; silencing a graded test cannot happen there.
 fn skip_markers_added(files: &[FileDiff], findings: &mut Vec<Finding>) {
@@ -229,8 +222,8 @@ fn skip_markers_added(files: &[FileDiff], findings: &mut Vec<Finding>) {
         .iter()
         .filter(|f| !f.new_file && is_test_file(&f.path))
     {
-        let added = f.added.iter().filter(|l| SKIP_MARKER.is_match(l)).count();
-        let removed = f.removed.iter().filter(|l| SKIP_MARKER.is_match(l)).count();
+        let added = f.added.iter().filter(|l| is_skip_marker_line(l)).count();
+        let removed = f.removed.iter().filter(|l| is_skip_marker_line(l)).count();
         if added > removed {
             findings.push(Finding::new(
                 Rule::SkipMarkerAdded,
@@ -271,13 +264,6 @@ fn collection_config_edited(files: &[FileDiff], findings: &mut Vec<Finding>) {
     }
 }
 
-static ASSERTION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"^\s*assert\b|\bself\.assert[A-Z]\w*\s*\(|\bassert(?:_eq|_ne|_matches)?!\s*\(|\bexpect\s*\(|\bpytest\.raises\s*\(|\bassertThat\s*\(|\bt\.(?:Error|Fatal)f?\s*\(",
-    )
-    .expect("assertion regex")
-});
-
 /// Net deletion per existing test file: rewriting an assert (one removed, one added) is not a
 /// deletion; dropping it, or the whole file, is.
 fn assertions_deleted(files: &[FileDiff], findings: &mut Vec<Finding>) {
@@ -285,8 +271,8 @@ fn assertions_deleted(files: &[FileDiff], findings: &mut Vec<Finding>) {
         .iter()
         .filter(|f| !f.new_file && is_test_path(&f.path))
     {
-        let removed = f.removed.iter().filter(|l| ASSERTION.is_match(l)).count();
-        let added = f.added.iter().filter(|l| ASSERTION.is_match(l)).count();
+        let removed = f.removed.iter().filter(|l| is_assertion_line(l)).count();
+        let added = f.added.iter().filter(|l| is_assertion_line(l)).count();
         if removed > added {
             findings.push(Finding::new(
                 Rule::AssertionsDeleted,
