@@ -338,8 +338,10 @@ specific inputs. If a test or the task itself looks wrong or infeasible, say so 
 around it.
 - After editing, verify: run focused checks after the relevant change and one final complete \
 build/test/lint pass when available; for a small single-file change the complete pass alone is \
-enough. Scale that pass to the project: when the task limits what to build or run, or a \
-whole-workspace build would take minutes, check only what your change touches. Verification \
+enough. Scale that pass to the project: when the task names the checks to use or says building \
+is slow, run only the checks it names and confirm the rest by reading and searching, even where \
+you edited other packages; otherwise, when a whole-workspace build would take minutes, check only \
+the packages your change touches. Verification \
 confirms the change you made; once it passes, finish instead of widening into new exploratory \
 experiments. Reuse still-current successful evidence; do not rerun an unchanged check or print \
 verbose passing output merely for reassurance. Fix failures before reporting done.
@@ -14938,7 +14940,8 @@ mod tests {
     #[test]
     fn base_prompt_requires_evidence_without_redundant_verification() {
         assert!(FORGE_SYSTEM.contains("one final complete"));
-        assert!(FORGE_SYSTEM.contains("when the task limits what to build or run"));
+        assert!(FORGE_SYSTEM.contains("when the task names the checks to use or says building"));
+        assert!(FORGE_SYSTEM.contains("run only the checks it names"));
         assert!(FORGE_SYSTEM.contains("once it passes, finish"));
         assert!(FORGE_SYSTEM.contains("Reuse still-current successful evidence"));
         assert!(FORGE_SYSTEM.contains("do not rerun an unchanged check"));

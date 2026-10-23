@@ -37,9 +37,10 @@ needs one of these signals, checked in this order:
 |---|---|
 | failing check | a test, lint, typecheck or build failed and has not passed since |
 | hedged answer | the answer says something is untested, unverified, not yet done, a TODO, and so on (phrases, not bare words: "no tests were skipped" is not a hedge) |
-| enumerated requirements | the request has three or more bulleted or numbered items |
-| unverified multi-requirement | two listed items, or five prose sentences, and no check passed after the last edit |
-| large change | three or more files or 60 changed lines this turn changed, measured against the turn's starting commit; untracked files count only when a file tool wrote something, and test-run byproducts (`__pycache__/`, `node_modules/`) never do (section 3) |
+| unverified multi-requirement | two or more listed items, or five prose sentences, and no check passed after the last edit |
+| unverified large change | no check passed after the last edit, and three or more files or 60 changed lines this turn changed, measured against the turn's starting commit; untracked files count only when a file tool wrote something, and test-run byproducts (`__pycache__/`, `node_modules/`) never do (section 3) |
+
+A check that passed after the last edit ends the decision after the first two rows (section 8).
 
 Prose is counted outside fenced code, with inline code reduced to a word, and a terminator only
 ends a sentence before whitespace, so file names and decimals do not split one. The size of the
@@ -72,7 +73,8 @@ what it *decides*:
 | Work an earlier turn left uncommitted counted again. The size is measured against the commit the turn started from, so in a session whose earlier turns did not commit, every later turn started large | multi-turn S1-S3 | `TurnBaseline` records, at turn start, which files differed and by how many lines; only the difference since then counts |
 | The evidence was wrong in both directions. Forge's `shell` answers `shell: exit 101 ...` as an ordinary result, so codex marks the MCP call `completed` and claude `is_error: false`: a failing `cargo test` was recorded as a passing check (25 of 189 shell calls in the baseline exited non-zero), and `FailingCheck` could never fire. And a `commands` batch (`["cargo build", "cargo test"]`, the form Forge's own tool description recommends) was read as one multi-line script with an unchecked exit status, so a batched test run never counted as a check, for the direct path as well | b06 (reviewed as "unchecked", its tests ran in a batch) | `tool_call_succeeded` reads the first line of a bridged `shell` result. `classify_tool` classifies each batch entry on its own (they are separate processes) and `VerificationLedger::observe_result` reads the batch header (`(1/2 ok, stopped at #2)`) to say which entry failed: a failing `git diff --check` after a passing test run is not a failed test, and a failure that cannot be attributed (`(2/3 ok)`) blames nothing |
 
-The signals, their order and their thresholds are unchanged. The measured change is in section 5.
+The signals, their order and their thresholds were unchanged by those fixes (section 5). Section 8
+narrows them.
 
 ## 4. The answer a review leaves
 

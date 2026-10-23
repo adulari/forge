@@ -177,22 +177,28 @@ pub(crate) fn completeness_repository_search_ran(messages: &[Message]) -> bool {
     messages
         .iter()
         .flat_map(|message| &message.tool_calls)
-        .any(|call| {
-            if call.name == "search" {
-                return true;
-            }
-            if call.name != "shell" {
-                return false;
-            }
-            forge_types::shell_command_text(&call.args)
-                .map(|command| {
-                    let command = command.to_ascii_lowercase();
-                    command.contains("git grep")
-                        || command.contains("rg ")
-                        || command.contains("grep ")
-                })
-                .unwrap_or(false)
+        .any(|call| match call.name.as_str() {
+            "search" => true,
+            "shell" => forge_types::shell_command_text(&call.args)
+                .is_some_and(|command| is_search_command(&command)),
+            // A script runs the same tools: `tools.search(...)`, or a grep through `tools.shell`.
+            // The audit's search was counted as skipped when the model batched it this way, and
+            // the retry then repeated it.
+            "run_code" => call
+                .args
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|code| {
+                    code.contains("tools.search(")
+                        || (code.contains("tools.shell(") && is_search_command(code))
+                }),
+            _ => false,
         })
+}
+
+fn is_search_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    command.contains("git grep") || command.contains("rg ") || command.contains("grep ")
 }
 
 /// Production files returned by the primary solve's required plain-literal identifier search.
@@ -567,6 +573,10 @@ pub(crate) fn adopt_redrive_text(final_text: &mut String, redrive_text: String) 
 /// `evidence` is that status and diff, run by Forge ([`crate::review_evidence::gather`]); with it
 /// the model compares the change with the request at once instead of first spending a round trip
 /// on two git commands. Without it (nothing to show, or too big) the model is told to run them.
+/// The whole reply a review that found nothing missing is asked for. It is never shown: the
+/// turn's earlier answer stands when the review leaves the tree as it was.
+pub(crate) const REVIEW_CLEAN: &str = "No change needed.";
+
 pub(crate) fn completeness_nudge(turn_start: Option<&str>, evidence: Option<&str>) -> String {
     let diff = match turn_start {
         Some(sha) => format!(
@@ -586,11 +596,13 @@ pub(crate) fn completeness_nudge(turn_start: Option<&str>, evidence: Option<&str
     };
     let mut nudge = format!(
         "Before finishing, do ONE final review (a single bounded pass — do NOT re-explore the \
-         codebase): {see} Re-read the original request and write the distinct requirements/cases \
-         it lists (issues routinely specify several, e.g. \"reject a dotted blueprint name AND a \
-         dotted endpoint\"), and for each confirm your change already handles it. Only if the \
-         change is MISSING a requirement, add that specific fix — otherwise finish. A change that \
-         handles only the first of several cases is INCOMPLETE."
+         codebase): {see} Re-read the original request, go through the distinct \
+         requirements/cases it lists (issues routinely specify several, e.g. \"reject a dotted \
+         blueprint name AND a dotted endpoint\"), and for each confirm your change already \
+         handles it. Only if the change is MISSING a requirement, add that specific fix. A change \
+         that handles only the first of several cases is INCOMPLETE. If nothing is missing, reply \
+         with exactly `{REVIEW_CLEAN}` and nothing else: your earlier answer is what the user \
+         reads, so do not list the requirements or repeat the summary."
     );
     if let Some(evidence) = evidence {
         // File content is data the review reads, never instructions it follows.
@@ -659,8 +671,70 @@ impl crate::Session {
 }
 
 #[cfg(test)]
+mod audit_search_tests {
+    use super::completeness_repository_search_ran;
+    use forge_types::{Message, ToolCall};
+
+    fn called(name: &str, args: serde_json::Value) -> Vec<Message> {
+        vec![Message::assistant_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                args,
+            }],
+        )]
+    }
+
+    #[test]
+    fn a_search_made_from_a_script_counts() {
+        let code = "const a = await tools.search({query: 'provider_of', path: '.'}); return a;";
+        assert!(completeness_repository_search_ran(&called(
+            "run_code",
+            serde_json::json!({ "code": code })
+        )));
+        let grep = "return await tools.shell({command: \"git grep -n -F -e 'provider_of'\"});";
+        assert!(completeness_repository_search_ran(&called(
+            "run_code",
+            serde_json::json!({ "code": grep })
+        )));
+    }
+
+    #[test]
+    fn a_script_or_command_that_does_not_search_does_not_count() {
+        let code = "return await tools.shell({command: 'git diff --name-only'});";
+        assert!(!completeness_repository_search_ran(&called(
+            "run_code",
+            serde_json::json!({ "code": code })
+        )));
+        assert!(!completeness_repository_search_ran(&called(
+            "shell",
+            serde_json::json!({ "command": "cargo test" })
+        )));
+        assert!(completeness_repository_search_ran(&called(
+            "shell",
+            serde_json::json!({ "command": "rg -n provider_of crates" })
+        )));
+    }
+}
+
+#[cfg(test)]
 mod review_answer_tests {
     use super::{answer_after_review, completeness_nudge};
+
+    #[test]
+    fn a_clean_review_is_asked_for_one_line_not_a_second_summary() {
+        let nudge = completeness_nudge(None, None);
+        assert!(
+            nudge.contains(&format!("`{}`", super::REVIEW_CLEAN)),
+            "{nudge}"
+        );
+        assert!(nudge.contains("do not list the requirements"), "{nudge}");
+        assert!(
+            !nudge.contains("write the distinct requirements"),
+            "{nudge}"
+        );
+    }
 
     #[test]
     fn review_nudge_points_at_untracked_files_not_just_the_tracked_diff() {
