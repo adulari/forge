@@ -112,6 +112,24 @@ claude has not seen, instead of the flattened transcript (which on big sessions 
 text blob with a cold cache). If the resumed process dies or stalls before any output and before
 any tool ran, the resume state is cleared and Forge respawns fresh with the full transcript.
 
+**A later Forge process resumes too.** The resume state used to live only in the provider, so
+`forge run --resume <id>` (and a restarted daemon) started a fresh claude session and rendered the
+transcript as text. Forge's transcript of a bridged turn holds the replies, not the tool calls that
+ran inside claude, so the model lost every file it had read and every command it had run and read
+them again: in the multi-turn benchmark 57 of 76 `read_file` calls of `claude-cli::sonnet`
+re-read a file an earlier prompt had already read or written. After each successful claude call the
+provider now writes `<data dir>/bridge-sessions/<conversation id>.json` (claude's session id, the
+sent mark, the pinned fingerprint, the model, the workspace and a digest of every message after the
+leading system run), and removes it when the next call starts, so a failed call or a process that
+dies mid-turn leaves nothing behind. A new process resumes that session only when the conversation,
+workspace and model match and the transcript still holds every message claude was given, unchanged
+and in order (`resume::prefix_digest`; the in-process `epoch` is not comparable across processes).
+Anything else starts fresh, as before. A warmed (`unused`) process gives way to the resumed session.
+The sent mark of a first request no longer includes the last message of the leading system run,
+which is rendered again for every request and could differ. Code:
+`crates/forge-provider/src/cli_provider/resume_store.rs`. Claude only: a resumed `codex exec`
+needs its thread's running usage total carried across processes as well.
+
 **Context size comes from claude, not from Forge's transcript.** The bridge runs the whole tool loop
 inside claude, so every file read and build log lives in claude's own window while Forge's transcript
 only records the replies. In a measured 40-turn session claude's window held ~650k tokens per request

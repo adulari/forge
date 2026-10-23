@@ -1034,6 +1034,7 @@ const STDERR_CAP: usize = 16 * 1024;
 mod codex_usage;
 mod preamble;
 mod resume;
+mod resume_store;
 pub use preamble::codex_harness_preamble;
 use preamble::{apply_harness_preamble, apply_resume_reminder, CLAUDE_HARNESS_PREAMBLE};
 use resume::ResumeState;
@@ -1061,6 +1062,9 @@ pub struct CliProvider {
     /// Live `--resume` state (see [`ResumeState`]). Interior-mutable because [`Provider::complete`]
     /// takes `&self`; the lock is only ever held briefly to read/update, never across an `.await`.
     resume: std::sync::Mutex<ResumeState>,
+    /// Where the claude session of each conversation is recorded for the next Forge process (see
+    /// `resume_store`); `None` keeps resume within this process.
+    resume_dir: Option<std::path::PathBuf>,
     /// P1 persistent transport (claude only): keep ONE long-lived `--input-format stream-json`
     /// process alive across turns and write each turn's delta to its stdin, instead of re-spawning
     /// (and re-`--resume`-ing) the CLI every turn/re-drive. Removes the per-turn process-spawn +
@@ -1095,6 +1099,10 @@ impl CliProvider {
             // never consult it). Default on so the efficiency win applies without opt-in.
             resume_enabled: true,
             resume: std::sync::Mutex::new(ResumeState::default()),
+            resume_dir: (!cfg!(test))
+                .then(forge_config::data_dir)
+                .flatten()
+                .map(|d| d.join(resume_store::DIR)),
             // Persistent transport is claude-only (the one CLI with `--input-format stream-json`).
             // On by default for claude; the env var is the operator escape hatch.
             persistent: kind == CliKind::ClaudeCode
@@ -1132,6 +1140,12 @@ impl CliProvider {
         self
     }
 
+    /// Record directory for resuming a claude session in a later process; `None` turns that off.
+    pub fn with_resume_dir(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.resume_dir = dir;
+        self
+    }
+
     /// Whether this bridge reuses the CLI session across calls. claude (`--resume <id>`) and codex
     /// (`exec resume <id>`) both support it; agy does not. Gated by the `with_session_resume` flag.
     fn resumes(&self) -> bool {
@@ -1163,6 +1177,7 @@ impl CliProvider {
             st.model = model.to_string();
             st.owner = owner.map(str::to_string);
             st.epoch = epoch;
+            st.restored = None;
         }
     }
 
@@ -1902,10 +1917,13 @@ impl CliProvider {
             // would panic on EVERY later turn — a sticky brick with no recovery. Recover the guard
             // and carry on; the worst case is treating the session as stale (a fresh, full-transcript
             // turn), which is exactly the safe fallback.
-            let st = self
+            let mut st = self
                 .resume
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !isolated {
+                self.restore_resume(&mut st, messages, model, checkpoint);
+            }
             // The delta starts where the CLI's own record of the conversation ends; `st.sent` is an
             // index into an earlier, possibly differently trimmed view (see `SentMark`).
             let resume_at = resume::locate_sent(st.sent, st.mark, messages);
@@ -2428,10 +2446,11 @@ impl CliProvider {
                 checkpoint.map(|c| c.session.as_str()),
                 checkpoint.map_or(0, |c| c.epoch),
             );
-            if self.kind == CliKind::Codex {
-                if let Ok(mut st) = self.resume.lock() {
+            if let Ok(mut st) = self.resume.lock() {
+                if self.kind == CliKind::Codex {
                     st.codex_total = Some(codex_total);
                 }
+                self.persist_resume(&st, messages, checkpoint);
             }
         }
 
@@ -2847,6 +2866,14 @@ impl CliProvider {
             }
             Err(_) => return Err(PersistentTurn::Busy),
         };
+        // A warmed process holds no history; the claude session an earlier process left holds all.
+        if self.restore_resume(&mut guard.last, messages, model, checkpoint)
+            && matches!(&guard.session, Some(s) if s.unused)
+        {
+            if let Some(old) = guard.session.take() {
+                old.teardown().await;
+            }
+        }
 
         // Reuse only a session that matches the model and effort, has strictly grown (a shrink →
         // its in-process context is stale after a compaction/reset), is on the same history epoch,
@@ -3039,7 +3066,9 @@ impl CliProvider {
                                 owner: owner.map(str::to_string),
                                 epoch,
                                 codex_total: None,
+                                restored: None,
                             };
+                            self.persist_resume(last, messages, checkpoint);
                             if self.resumes() {
                                 self.record_session(
                                     claude_session,
@@ -7084,6 +7113,47 @@ done
         );
         let stdin = read_log(dir.path(), "stdin.log");
         assert!(stdin[1].contains("second-question") && !stdin[1].contains("first-question"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_forge_process_resumes_the_claude_session_the_last_one_drove() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let records = tempfile::tempdir().unwrap();
+        let ctx = test_ctx("conv-a", 1, "default", ws.path());
+        let first = resumable_provider(dir.path()).with_resume_dir(Some(records.path().into()));
+        let r1 = run_turn(&first, &ctx, &[Message::user("first-question")]).await;
+        drop(first);
+
+        // `forge run --resume`: a new provider, with nothing in memory.
+        let second = resumable_provider(dir.path()).with_resume_dir(Some(records.path().into()));
+        let msgs2 = vec![
+            Message::user("first-question"),
+            Message::assistant(&r1.content),
+            Message::user("second-question"),
+        ];
+        run_turn(&second, &ctx, &msgs2).await;
+        let spawns = read_log(dir.path(), "spawns.log");
+        assert!(
+            spawns[1].contains("--resume sess-1"),
+            "the second process resumes claude's session: {}",
+            spawns[1]
+        );
+        let stdin = read_log(dir.path(), "stdin.log");
+        assert!(stdin[1].contains("second-question") && !stdin[1].contains("first-question"));
+
+        // A rewritten history is not resumed into.
+        let third = resumable_provider(dir.path()).with_resume_dir(Some(records.path().into()));
+        let rewritten = vec![
+            Message::user("another first question"),
+            Message::assistant(&r1.content),
+            Message::user("second-question"),
+            Message::assistant("ok"),
+            Message::user("third-question"),
+        ];
+        run_turn(&third, &ctx, &rewritten).await;
+        assert!(!read_log(dir.path(), "spawns.log")[2].contains("--resume"));
     }
 
     #[cfg(unix)]
