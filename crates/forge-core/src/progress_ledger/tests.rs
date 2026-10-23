@@ -828,6 +828,13 @@ fn replay(name: &str) -> (Vec<Verdict>, usize) {
     replay_in(include_str!("../tests/fixtures/loop_replays.json"), name)
 }
 
+/// Whole bench sessions reduced the same way (`tests/fixtures/bench_replays.json`): hash-only,
+/// narration words and result lines replaced by opaque ids, with the harness gates, poll waits and
+/// task closures the live loop would have told the ledger about.
+fn bench_replay(name: &str) -> (Vec<Verdict>, usize) {
+    replay_in(include_str!("../tests/fixtures/bench_replays.json"), name)
+}
+
 fn replay_in(fixture: &str, name: &str) -> (Vec<Verdict>, usize) {
     let all: serde_json::Value = serde_json::from_str(fixture).unwrap();
     let seg = all
@@ -861,15 +868,24 @@ fn replay_in(fixture: &str, name: &str) -> (Vec<Verdict>, usize) {
                 .unwrap()
                 .iter()
                 .map(|c| {
-                    obs(
+                    let call = obs(
                         c["sig"].as_u64().unwrap(),
                         c["ok"].as_bool().unwrap(),
                         c["mut"].as_bool().unwrap(),
                         &blobs[c["res"].as_u64().unwrap() as usize],
-                    )
+                    );
+                    if c["wait"].as_bool().unwrap_or(false) {
+                        call.waiting_for_job()
+                    } else {
+                        call
+                    }
                 })
                 .collect();
-            ledger.observe_step(step["text"].as_str().unwrap(), &calls, false)
+            if step["gate"].as_bool().unwrap_or(false) {
+                ledger.note_gate();
+            }
+            let closed = step["closed"].as_bool().unwrap_or(false);
+            ledger.observe_step(step["text"].as_str().unwrap(), &calls, closed)
         })
         .collect();
     (verdicts, steps.len())
@@ -895,6 +911,89 @@ fn working_stretches_the_old_guard_nudged_are_left_alone() {
         assert!(v.iter().all(|v| *v == Verdict::Fine), "{name}: {v:?}");
     }
 }
+
+fn events(verdicts: &[Verdict]) -> Vec<(usize, &'static str, &'static str)> {
+    verdicts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| match v {
+            Verdict::Fine => None,
+            Verdict::Nudge(r) => Some((i + 1, "nudge", r.lane.as_str())),
+            Verdict::Stop(r) => Some((i + 1, "stop", r.lane.as_str())),
+        })
+        .collect()
+}
+
+/// The acceptance gate for replacing the old guards: across whole bench sessions that were solved,
+/// no stop, and no nudge the old failure and doom guards did not also send.
+#[test]
+fn no_solved_bench_turn_is_ever_stopped() {
+    for name in BENCH_NAMES {
+        let (verdicts, steps) = bench_replay(name);
+        assert!(steps >= 10, "{name}");
+        assert!(
+            !verdicts.iter().any(|v| matches!(v, Verdict::Stop(_))),
+            "{name}: {:?}",
+            events(&verdicts)
+        );
+    }
+}
+
+/// Four sessions the old failure guard nudged although the model was working: its count ran
+/// across the turn (3 failures of one tool and kind, with successes in between), where the ledger
+/// needs three failed steps in a row. The empty `commands` array behind most of them is fixed at
+/// the source.
+#[test]
+fn the_failure_nudges_that_were_false_alarms_do_not_fire() {
+    for name in &BENCH_NAMES[1..5] {
+        let (verdicts, _) = bench_replay(name);
+        assert_eq!(events(&verdicts), vec![], "{name}");
+    }
+}
+
+/// A session that did loop: `shell` failed three times running with the same error. The ledger
+/// nudges on the third failed step, as the old guard did, and the model recovered.
+#[test]
+fn a_true_failure_streak_is_nudged_on_the_third_failed_step() {
+    let (verdicts, _) = bench_replay(BENCH_NAMES[5]);
+    assert_eq!(events(&verdicts), vec![(5, "nudge", "failure")]);
+}
+
+/// 46 steps of real work with 12 failed ones scattered through it: one nudge, for the one place
+/// three failed steps really did come in a row, and no stop.
+#[test]
+fn a_long_session_with_scattered_failures_is_nudged_only_where_three_came_in_a_row() {
+    let (verdicts, steps) = bench_replay(BENCH_NAMES[9]);
+    assert_eq!(steps, 46);
+    assert_eq!(events(&verdicts), vec![(23, "nudge", "failure")]);
+}
+
+/// Long productive sessions say nothing at all.
+#[test]
+fn long_productive_bench_sessions_are_left_alone() {
+    for name in [
+        BENCH_NAMES[0],
+        BENCH_NAMES[6],
+        BENCH_NAMES[7],
+        BENCH_NAMES[8],
+    ] {
+        let (verdicts, _) = bench_replay(name);
+        assert_eq!(events(&verdicts), vec![], "{name}");
+    }
+}
+
+const BENCH_NAMES: [&str; 10] = [
+    "b1_gate_redrive_stale_steps",
+    "b2_failure_nudge_false_positive_a",
+    "b3_failure_nudge_false_positive_b",
+    "b4_failure_nudge_false_positive_c",
+    "b5_failure_nudge_false_positive_d",
+    "b6_true_early_failure_catch",
+    "b7_long_productive_deepseek_a",
+    "b8_long_productive_deepseek_b",
+    "b9_long_productive_codex_a",
+    "b10_long_productive_codex_b",
+];
 
 /// Deterministic pseudo-random streams: the properties hold for whatever order of step kinds the
 /// seed produces.
