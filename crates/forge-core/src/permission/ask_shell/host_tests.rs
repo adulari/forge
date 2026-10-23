@@ -112,6 +112,103 @@ fn the_probe_never_starts_git_in_an_untrusted_project() {
     );
 }
 
+// ---- the trust hint ----
+
+fn hint(f: &Fixture, command: &str, host: Host<'_>) -> Option<&'static str> {
+    trust_hint_on(
+        &json!({ "command": command }),
+        &rules(),
+        Some(&f.root),
+        host,
+    )
+}
+
+#[test]
+fn the_hint_names_git_when_trust_is_all_a_read_only_call_lacks() {
+    let f = fixture();
+    for command in [
+        "git status",
+        "git diff -- calc.py",
+        "git log --oneline -3",
+        "ls && git status",
+        "git status | wc -l",
+    ] {
+        assert_eq!(
+            hint(&f, command, host(&f, sane_path(), &untrusted)),
+            Some("git"),
+            "untrusted: {command}"
+        );
+        assert_eq!(
+            hint(&f, command, host(&f, sane_path(), &trusted)),
+            None,
+            "a trusted project has nothing to be told: {command}"
+        );
+    }
+}
+
+#[test]
+fn the_hint_stays_quiet_when_trust_would_not_make_the_call_run() {
+    let f = fixture();
+    for command in [
+        // not read-only at all
+        "git push",
+        "git commit -m x",
+        "git status > out.txt",
+        "git -c core.pager=less log",
+        "touch ccbench-marker.txt",
+        "python -c 'print(1)'",
+        // read-only and already runs without trust
+        "ls",
+        "cat calc.py",
+        "grep -n add calc.py",
+        // a secret the path guard refuses
+        "cat .env",
+    ] {
+        assert_eq!(
+            hint(&f, command, host(&f, sane_path(), &untrusted)),
+            None,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn the_hint_calls_a_non_git_trust_gated_binary_commands() {
+    let f = fixture();
+    assert_eq!(
+        hint(&f, "file calc.py", host(&f, sane_path(), &untrusted)),
+        Some("commands")
+    );
+}
+
+#[test]
+fn the_hint_respects_the_opt_out_and_never_starts_git() {
+    let f = fixture();
+    let (_dir, bin) = outside();
+    let (_git, log) = logging_git(&bin);
+    let path = path_with(&bin);
+    assert_eq!(
+        hint(&f, "git status", host(&f, path.clone(), &untrusted)),
+        Some("git")
+    );
+    assert_eq!(
+        calls(&log),
+        0,
+        "the hint must not run git in an untrusted project"
+    );
+    let opted_out = [forge_types::read_only_shell_opt_out_rule()];
+    assert_eq!(
+        trust_hint_on(
+            &json!({ "command": "git status" }),
+            &opted_out,
+            Some(&f.root),
+            host(&f, path, &untrusted)
+        ),
+        None,
+        "auto_allow_read_only_shell = false: trust would not skip the prompt"
+    );
+}
+
 /// What a repository can change about a binary decides whether it needs the trust. Adding a
 /// binary to the list fails the completeness check below until its author says which it is.
 const INDEPENDENT_OF_THE_REPOSITORY: &[(&str, &str)] = &[

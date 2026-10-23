@@ -300,6 +300,10 @@ pub struct App {
     /// Prompts the user typed while busy, queued to run after the current turn (shown in the
     /// statusline as "⏳ N queued"). Maintained by the I/O shell.
     pub queued: Vec<String>,
+    /// Whether this app draws [`Self::queued`] itself, in the live region above the composer. A
+    /// surface that never draws it (the headless daemon, mirrored to a phone or `forge attach`)
+    /// keeps announcing a queued prompt with a transcript note instead.
+    pub queue_visible: bool,
     /// Animation tick, advanced by the render loop while busy.
     pub tick: usize,
     /// Finalized scrollback lines, in arrival order; drained by the I/O shell.
@@ -2614,6 +2618,22 @@ impl App {
         }
     }
 
+    /// Take a queued prompt back into the composer to edit it: `text` becomes the draft and the
+    /// images it was queued with return as attachments. The caller has already removed the
+    /// prompt from the queue it keeps.
+    pub fn restore_queued_to_input(&mut self, text: &str) {
+        let images = self
+            .queued_images
+            .iter()
+            .position(|(t, _)| t == text)
+            .map(|i| self.queued_images.remove(i).1)
+            .unwrap_or_default();
+        self.replace_input(text.to_string());
+        for image in images {
+            self.attach_image(image, "image");
+        }
+    }
+
     /// Images the turn being spawned must carry (empty unless a queued prompt had some).
     pub fn take_ready_images(&mut self) -> Vec<forge_types::ImageAttachment> {
         std::mem::take(&mut self.ready_images)
@@ -2692,7 +2712,7 @@ impl App {
             self.transcript_ui.cooling = None;
         }
         self.tag_flush(LineOrigin::user(), |s| {
-            s.flush.push(lines::turn::user_label(Some("steer")));
+            s.flush.push(lines::turn::user_label(Some("follow-up")));
             s.echo_user_text(text);
             s.flush.push(TextLine::default());
         });

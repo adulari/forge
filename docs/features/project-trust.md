@@ -48,6 +48,14 @@ Forge never starts git to find out whether the repository is safe. Everything el
 stays unprompted in an untrusted project. Trust is read from the store on every call, so
 `forge trust --revoke` applies to the very next command.
 
+Because the prompt itself gave no hint of this, the permission panel now says so: when a shell
+call asks only because the project is not trusted (in the Ask temper, every statement read-only,
+no rule deciding it), one line is added above the choices, `Trust this project to skip prompts for
+read-only git: forge trust` (shorter on a narrow terminal). It is advisory. It is worked out from
+the text of the command and the trust store alone, never by running git in the repository, and it
+does not change what any call may do; trusting still leaves a repository whose config names a
+helper asking (`forge_core::permission::shell_trust_hint`).
+
 ## Trusting
 
 ```sh

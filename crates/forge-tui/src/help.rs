@@ -67,15 +67,30 @@ fn command_group(name: &str) -> &'static str {
     }
 }
 
+/// A note the transcript no longer repeats: the terms a CLI bridge runs under are shown once per
+/// installation, and stay here for anyone who wants them again.
+const BRIDGE_NOTE: (&str, &str) = (
+    "CLI bridges",
+    "claude-cli and codex-cli run your own local login; provider terms may limit use through \
+     third-party tools (docs/features/provider-integrations.md)",
+);
+
 /// Keys that are not rebindable, in canonical spelling.
-const FIXED_KEYS: [(&str, &str); 19] = [
+const FIXED_KEYS: [(&str, &str); 20] = [
     ("Enter", "Send the message (queues it while a turn runs)"),
+    (
+        "↑",
+        "While a turn runs, with an empty prompt: pull the last queued message back to edit it",
+    ),
     (
         "!",
         "At the start of the prompt: run a shell command, then Forge responds",
     ),
     ("Tab", "Accept the suggestion or the selected completion"),
-    ("Esc", "Stop the turn, or close what is open"),
+    (
+        "Esc",
+        "Stop the turn (and send the first queued message now), or close what is open",
+    ),
     ("Esc Esc", "Rewind to an earlier message (idle)"),
     (
         "Ctrl+T",
@@ -214,6 +229,19 @@ impl HelpState {
             let args = c.usage.contains('<') || c.usage.contains('[');
             inserts.push(format!("/{}{}", c.name, if args { " " } else { "" }));
         }
+        if matches_query(&self.query, &[BRIDGE_NOTE.0, BRIDGE_NOTE.1]) {
+            if self.query.is_empty() {
+                items.push(Item::Header("Notes".to_string()));
+            }
+            items.push(Item::Row(Row {
+                label: BRIDGE_NOTE.0.to_string(),
+                label_style: Some(styles::muted()),
+                desc: BRIDGE_NOTE.1.to_string(),
+                ..Row::default()
+            }));
+            // Nothing to insert: Enter on a note does not close the screen.
+            inserts.push(String::new());
+        }
         (items, inserts)
     }
 
@@ -299,7 +327,12 @@ impl HelpState {
                 self.selected = 0;
             }
             KeyCode::Enter if self.tab == HelpTab::Commands => {
-                if let Some(text) = self.command_items().1.get(self.selected) {
+                if let Some(text) = self
+                    .command_items()
+                    .1
+                    .get(self.selected)
+                    .filter(|t| !t.is_empty())
+                {
                     return HelpOutcome::Insert(text.clone());
                 }
             }
@@ -587,5 +620,50 @@ mod tests {
         assert!(out.contains("search"), "{out}");
         assert!(out.contains("usage  /"), "{out}");
         assert!(out.contains("Esc close"), "{out}");
+    }
+
+    #[test]
+    fn the_bridge_terms_are_kept_under_notes_after_the_commands() {
+        let s = state(HelpTab::Commands);
+        let view = &s.views(80)[0];
+        let rows = rows_of(view);
+        assert_eq!(rows.last().map(String::as_str), Some("CLI bridges"));
+        let notes = view
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Header(h) if h == "Notes"))
+            .expect("a Notes header");
+        let last_command = view
+            .items
+            .iter()
+            .rposition(|i| matches!(i, Item::Row(r) if r.label.starts_with('/')))
+            .unwrap();
+        assert!(last_command < notes, "notes come after every command");
+        let note = view.rows().find(|r| r.label == "CLI bridges").unwrap();
+        assert!(note.desc.contains("provider terms"), "{}", note.desc);
+    }
+
+    #[test]
+    fn searching_finds_the_note_and_enter_on_it_does_not_close_help() {
+        let mut s = state(HelpTab::Commands);
+        for c in "terms".chars() {
+            s.key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(rows_of(&s.views(80)[0]), vec!["CLI bridges".to_string()]);
+        assert_eq!(
+            s.key(KeyCode::Enter, KeyModifiers::NONE),
+            HelpOutcome::Open,
+            "a note has nothing to insert into the composer"
+        );
+    }
+
+    #[test]
+    fn the_queue_keys_are_listed_under_fixed_keys() {
+        let s = state(HelpTab::Keybinds);
+        let view = &s.views(80)[0];
+        let up = view.rows().find(|r| r.label == "↑").expect("an Up row");
+        assert!(up.desc.contains("queued"), "{}", up.desc);
+        let esc = view.rows().find(|r| r.label == "Esc").expect("an Esc row");
+        assert!(esc.desc.contains("queued"), "{}", esc.desc);
     }
 }

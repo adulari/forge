@@ -1,3 +1,5 @@
+use unicode_width::UnicodeWidthStr;
+
 use super::*;
 use crate::theme::styles;
 
@@ -186,30 +188,40 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 
     // Ghost text on an empty prompt: the predicted next prompt (Tab accepts it), otherwise what
     // the prompt does right now. It never affects sizing or cursor math.
+    let inner = block.inner(area);
     if app.input.is_empty() && app.prompt.is_none() {
+        let ellipsis = crate::theme::glyphs::g().ellipsis;
         let ghost = if app.busy {
-            Some(format!(
-                "queue a follow-up{}",
-                crate::theme::glyphs::g().ellipsis
-            ))
+            format!("queue a follow-up{ellipsis}")
         } else {
             match &app.suggested_prompt {
-                Some(suggestion) => Some(format!("try: {suggestion}")),
-                None => Some(format!(
-                    "Message Forge{}  ! runs a shell command",
-                    crate::theme::glyphs::g().ellipsis
-                )),
+                Some(suggestion) => format!("try: {suggestion}"),
+                None => {
+                    // The shell hint is the first thing to go on a narrow box: a clipped
+                    // "! runs a shell co" reads as a rendering bug, "Message Forge…" never does.
+                    let room = text_lines.first().map_or(0, |first| {
+                        (inner.width as usize)
+                            .saturating_sub(first.spans.iter().map(|s| s.content.width()).sum())
+                    });
+                    let full = format!("Message Forge{ellipsis}  ! runs a shell command");
+                    if full.width() <= room {
+                        full
+                    } else {
+                        format!("Message Forge{ellipsis}")
+                    }
+                }
             }
         };
-        if let (Some(ghost), Some(first)) = (ghost, text_lines.first_mut()) {
+        if let Some(first) = text_lines.first_mut() {
+            let used: usize = first.spans.iter().map(|s| s.content.width()).sum();
+            let room = (inner.width as usize).saturating_sub(used);
             first.spans.push(Span::styled(
-                ghost,
+                super::list_view::fit(&ghost, room),
                 styles::faint().add_modifier(Modifier::ITALIC),
             ));
         }
     }
 
-    let inner = block.inner(area);
     let visible_rows = inner.height.max(1);
     let total_rows = text_lines.len() as u16;
     let cursor_row = input_cursor_row(&app.input, cursor, area.width);

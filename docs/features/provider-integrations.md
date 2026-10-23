@@ -308,7 +308,9 @@ This is a **medium-low-confidence** compliance position and the spec says so pla
   tool invoking it breaches "don't power third-party services" is likewise ambiguous.
 
 **Decision:** ship it as **opt-in, off by default, clearly labelled**. Forge shows a
-one-time notice on first CLI-bridge use:
+one-time notice on first CLI-bridge use (once per installation: a marker file beside the store,
+`<data dir>/notices/cli-bridge-terms`, or `<FORGE_DB>.notices/` for a scratch store; every later
+session starts without it, and `/help` keeps the text under Notes):
 > "CLI-bridge runs your locally-installed `{claude|codex}`. Forge never sees your login.
 > Using subscription CLIs from third-party tools may be restricted by Anthropic/OpenAI
 > terms — you run this at your own discretion. See docs/features/provider-integrations.md."

@@ -28,6 +28,7 @@ pub mod goal;
 mod hard_stop;
 mod harness_profile;
 mod hooks;
+mod install_notices;
 mod key_adoption;
 mod keybind_migration;
 mod keybinds;
@@ -56,6 +57,7 @@ pub use compact_model::CompactModel;
 pub use hard_stop::HardStop;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
+pub use install_notices::{install_notice_seen, mark_install_notice_seen, CLI_BRIDGE_TERMS};
 pub use keybinds::{write_keybind, write_keybind_preset, KeyCombo, KeybindPreset, KeybindsConfig};
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{

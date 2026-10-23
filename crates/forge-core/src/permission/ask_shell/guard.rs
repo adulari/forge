@@ -143,6 +143,18 @@ impl<'a> Guard<'a> {
         self.programs_are_the_systems() && (!self.uses_git.get() || self.git_is_safe())
     }
 
+    /// Whether the statements judged so far would run unasked in a trusted project but the project
+    /// is not trusted: the one check [`Guard::finish`] makes before it runs anything. Reads the
+    /// trust store and nothing else, so it is safe to ask about a repository nobody vouched for.
+    pub(super) fn awaits_only_trust(&self) -> bool {
+        self.needs_trust.get() && !self.project_is_trusted()
+    }
+
+    /// Whether a judged statement was a `git` command.
+    pub(super) fn runs_git(&self) -> bool {
+        self.uses_git.get()
+    }
+
     /// The workspace and the directory the command runs in, both: either can be somewhere the user
     /// never vouched for, and a trusted workspace can be given a `cwd` that leads out of it.
     fn project_is_trusted(&self) -> bool {

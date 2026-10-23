@@ -87,7 +87,9 @@ fn tokens_text(up: u64, down: u64) -> String {
 
 /// The tier chip text for the active routing, if any.
 fn tier_text(app: &App) -> Option<String> {
-    app.routing.as_ref().map(|r| r.tier.clone())
+    app.routing
+        .as_ref()
+        .map(|r| crate::app::lines::turn::plain_tier(&r.tier).to_string())
 }
 
 /// Items for one configured widget. A widget may yield several (the model carries its tier and

@@ -60,7 +60,10 @@ fn a_steered_prompt_is_echoed_as_a_user_line() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("steer"), "header names the steer: {text}");
+    assert!(
+        text.contains("you · follow-up") && !text.contains("steer"),
+        "the header says what the user did, in plain words: {text}"
+    );
     assert!(text.contains("also rename the helper"), "{text}");
 }
 

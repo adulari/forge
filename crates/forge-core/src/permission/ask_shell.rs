@@ -202,34 +202,76 @@ fn auto_allows_on(
     workspace: Option<&Path>,
     host: Host<'_>,
 ) -> bool {
+    // Every statement first, which costs nothing but string work and a few directory reads; then
+    // the checks that need the machine (trust, `PATH`, and above all running git), which a line
+    // that asks anyway must not pay for.
+    judged(args, rules, workspace, host, |guard| guard.finish()).unwrap_or(false)
+}
+
+/// Judge every statement of the call and, when each is read-only, hand the [`Guard`] to `then` for
+/// the checks that need the machine. `None` when the call does not qualify at all.
+fn judged<R>(
+    args: &Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
+    host: Host<'_>,
+    then: impl FnOnce(&Guard<'_>) -> R,
+) -> Option<R> {
     if !forge_types::auto_allow_read_only_shell_enabled(rules) {
-        return false;
+        return None;
     }
-    let Some(base) = workspace
+    let base = workspace
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
-    else {
-        return false;
-    };
-    let Some(cwd) = command_cwd(args, &base) else {
-        return false;
-    };
+        .or_else(|| std::env::current_dir().ok())?;
+    let cwd = command_cwd(args, &base)?;
     // Background, poll and pty runs outlive or re-run the call; they keep their prompt.
     let set = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
     if ["background", "poll_until_exit_zero", "pty"]
         .into_iter()
         .any(set)
     {
-        return false;
+        return None;
     }
-    let Some(lines) = command_lines(args) else {
-        return false;
-    };
+    let lines = command_lines(args)?;
     let guard = Guard::new(rules, cwd, base, host);
-    // Every statement first, which costs nothing but string work and a few directory reads; then
-    // the checks that need the machine (trust, `PATH`, and above all running git), which a line
-    // that asks anyway must not pay for.
-    lines.iter().all(|line| line_is_read_only(line, &guard)) && guard.finish()
+    lines
+        .iter()
+        .all(|line| line_is_read_only(line, &guard))
+        .then(|| then(&guard))
+}
+
+/// What a prompt for this `shell` call can tell the user about trust, without deciding anything:
+/// `Some("git")` (or `Some("commands")`) when every statement is read-only and the only thing
+/// between the call and running unasked is that the project is not trusted (`forge trust`).
+/// Nothing here runs git: asking git about an untrusted repository is the exposure the gate keeps
+/// out, so the repository checks that come after trust are not made, and trusting may still leave
+/// a repository with a helper in its config asking.
+pub(super) fn trust_hint(
+    args: &Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
+) -> Option<&'static str> {
+    let host = Host {
+        home: std::env::var_os("HOME").map(PathBuf::from),
+        path: std::env::var_os("PATH"),
+        trusted: &project_is_trusted,
+    };
+    trust_hint_on(args, rules, workspace, host)
+}
+
+/// [`trust_hint`] against a `host` the caller describes.
+fn trust_hint_on(
+    args: &Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
+    host: Host<'_>,
+) -> Option<&'static str> {
+    judged(args, rules, workspace, host, |guard| {
+        guard
+            .awaits_only_trust()
+            .then_some(if guard.runs_git() { "git" } else { "commands" })
+    })
+    .flatten()
 }
 
 /// The command lines of a call. A `commands` batch runs each entry as a command of its own, so

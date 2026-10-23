@@ -130,8 +130,10 @@ twice (`app/render/chrome.rs`):
   line after 15 s of silence and turns warn after 60 s, so a provider stall looks different from
   hidden reasoning. On narrow borders a stop reason shrinks to a short phrase and then to the bare
   recovery.
-- **Top-right, chips.** `N lines` while multi-line, `N queued`, the loop and goal chips, and the mode
+- **Top-right, chips.** `N lines` while multi-line, the loop and goal chips, and the mode
   chip last in its temper colour (Read-only `user`, Ask `fg_muted`, Auto-edit `brand`, Full `err`).
+  Queued messages are not a chip: they are listed in a band directly above the composer, so the
+  count and the text are in one place ([steering.md](steering.md)).
   The border itself takes the temper colour, and `warn` while the app waits for you.
 - **Bottom-right, hints.** At most five `key label` pairs for the current state: idle, typing,
   suggestion pending, busy, stopped, palette, picker, permission, question, armed. When the border
@@ -145,7 +147,9 @@ events, tool-call count, the model at the provider boundary) are listed under `A
 ### Status line
 
 One row (plus one per configured `extra_rows` entry and one for a `[statusline] command`). Left:
-the model with its tier (`llama3.2 · trivial`), the `⟨med⟩` rung marker, cost (`$0`, `<$0.01`,
+the model with its tier (`llama3.2 · simple`; the router's `trivial` is shown as `simple`, and a
+model you pinned as `your pick`, where `/status` and `/mesh` keep the router's own names), the
+`⟨med⟩` rung marker, cost (`$0`, `<$0.01`,
 `$0.42`, `free`, `subscription`), the last turn's `↑72 ↓30` tokens, and live throughput. Right: the
 context gauge (`ctx ▱▱▱▱▱▱▱▱ 0% of 32k`, muted below 70 %, warn from 70, err from 90) and the mesh
 effort chip (`mesh auto`).

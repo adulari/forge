@@ -36,7 +36,8 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | Action | Default | Notes |
 |---|---|---|
 | `interrupt` | Ctrl-C | Stop current turn (in an overlay: close it). Idle with text: clear the input and save it to prompt history (↑ recalls it). Idle with empty input: press twice within 2 s to quit |
-| — | Esc | Stop current turn (idle: press twice to open the rewind picker; never quits) |
+| — | Esc | Stop current turn (idle: press twice to open the rewind picker; never quits). With messages queued it then sends the first one now ([steering.md](steering.md)) |
+| — | ↑ | While a turn runs, with an empty prompt and messages queued: pull the newest queued message back into the prompt to edit it |
 | — | Ctrl-Home | Full-screen: jump to the most recent user message above the view; again = the one before (the "↑ Previous message" pill at the top does the same on click; it and the "Jump to bottom" pill only show while scrolled up) |
 | — | ↑/↓ · 1–9 · Space · Enter · ←/→ · o · n · Esc | Inside an `ask_user` form: move · pick · toggle · confirm · switch question · other / note · dismiss ([docs](ask-user-question.md)) |
 | `command_palette` | / | Open slash-command palette |
