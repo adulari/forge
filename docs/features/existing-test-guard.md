@@ -23,6 +23,24 @@ A prompt that expects tests to change ("update the tests ...", "fix the failing 
 a rename, a deprecation) does not arm `Rewrites`: there the tests are renamed along with the
 code.
 
+**"Pass" has to be the verb.** "Final pass: rerun everything and confirm each change is covered
+by a test" is a request for a review round, and the noun "pass" used to count as "the tests must
+pass". In an unattended run that armed `Rewrites` for the rest of the session and added the
+"existing tests are the specification" text to the turn. When the model had widened an existing
+import line of a test file in an earlier turn (3 of 5 runs of the multi-turn suite's session S3 on
+`cb/deepseek-v4.1-flash`), the end-of-turn check then restored that line from the turn-start
+commit, even though the model had just put the original back, and sent it round a second time: 11
+to 14 model calls and 330 to 475 k prompt tokens for that last prompt, against 3 to 6 calls and 62
+to 176 k for the same five seeds with the fix (Claude Code: 4 calls, 73 to 112 k).
+A "pass" after an article, an ordinal or a quantity word ("final", "a quick", "one more", "second",
+"review", "extra") is a round of work and arms nothing; "the tests pass", "must pass", "it passes",
+"keep passing" still do. The same sentence with "passing" or "green" in it still arms the guard.
+
+A turn that is armed measures its edits against the commit it started on, so a test file the model
+rewrote in an earlier, unarmed turn is the baseline, not a violation. That also means an armed
+turn that puts such a line back to its original text is flagged: the file differs from the turn
+start in a changed line. The guard does not look further back than the turn.
+
 **An explicit instruction to change tests wins over a prohibition the guard inferred.** The two
 cannot both hold (a signature refactor has to change the call sites in the tests), and the guard
 used to side with its own guess: the bench task a05 says "Update every caller, the tests, the
@@ -44,7 +62,10 @@ and the model obeyed, left `npm test` red and said so (both seeds of the codex b
 - Across a session the latest request that speaks to the tests decides: "don't edit the existing
   tests" protects them through the unrelated messages that follow, and a later "now update the
   tests" lifts that, and a later "leave the tests alone" restores it. (`expect_code_change` is a
-  property of the run, not of a message, and still arms `AnyEdit`.)
+  property of the run, not of a message, and still arms `AnyEdit`.) Only what the person typed
+  counts: the harness stores its own nudges as user messages too, and the push-back after a restore
+  ("fix the production code rather than the tests") used to read as a request to change tests and
+  lift the protection it had just enforced.
 
 `mesh.guard_test_edits = false` turns the guard off. It is skipped past the soft turn deadline.
 
