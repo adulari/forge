@@ -622,8 +622,11 @@ impl crate::Session {
             "completeness check — reviewing the change against every requirement before finishing"
                 .to_string(),
         ));
-        let evidence =
-            crate::review_evidence::gather(self.workspace_root(), self.turn_start_head());
+        let evidence = crate::review_evidence::gather(
+            self.workspace_root(),
+            self.turn_start_head(),
+            &self.turn_start_baseline,
+        );
         let nudge = completeness_nudge(self.turn_start_head(), evidence.as_deref());
         let nseq = self.next_seq();
         let _ = self
