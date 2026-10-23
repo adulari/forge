@@ -5,8 +5,11 @@
 //! existing behavior, so the contract improves proof of work without surprising conversational
 //! users or adding a model call.
 
+mod read_only;
+
 use crate::TaskIntent;
 use forge_types::PermissionMode;
+use read_only::explicitly_read_only;
 
 /// The source that made the turn's completion expectation explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -187,175 +190,6 @@ impl Default for TurnContract {
     }
 }
 
-/// Directive phrases that are imperative by construction and name no particular object, so they are
-/// safe to match anywhere in the prompt: no ordinary description of a system contains them.
-const READ_ONLY_DIRECTIVES: [&str; 17] = [
-    "without changing files",
-    "this is read-only",
-    "this is read only",
-    "this task is read-only",
-    "this request is read-only",
-    "this turn is read-only",
-    // Plain imperatives an operator actually types. Their absence let a "Do not edit anything"
-    // turn inside a worktree session be re-driven as an implementation.
-    "do not edit anything",
-    "do not edit any files",
-    "do not modify anything",
-    "do not modify any files",
-    "do not change any files",
-    "make no edits",
-    "do not change anything",
-    "don't change anything",
-    "don't modify anything",
-    "do not write any files",
-    "don't make any changes",
-];
-
-/// Imperatives that only forbid writing when nothing narrower follows them. "Answer only, don't
-/// edit." is read-only; "fix the bug, and don't edit the existing tests" is a change request with
-/// one protected file, and treating it as read-only denied every write — the session diagnosed
-/// the bug and reported it lacked permission to fix it.
-const SCOPABLE_READ_ONLY_DIRECTIVES: [&str; 4] = [
-    "do not edit",
-    "don't edit",
-    "do not make changes",
-    "don't make changes",
-];
-
-/// Objects that keep a scopable directive universal: "don't edit the code" still forbids writing.
-const UNIVERSAL_OBJECTS: [&str; 12] = [
-    "anything",
-    "any file",
-    "files",
-    "file",
-    "code",
-    "the code",
-    "the repo",
-    "repository",
-    "codebase",
-    "project",
-    "nothing",
-    "it",
-];
-
-/// Verbs a prohibition lists after its first one: "do not edit, delete, or rename the existing tests".
-const COORDINATED_VERBS: [&str; 11] = [
-    "delete",
-    "remove",
-    "rename",
-    "modify",
-    "change",
-    "touch",
-    "overwrite",
-    "rewrite",
-    "refactor",
-    "move",
-    "alter",
-];
-
-/// Words that turn a universal object into a part of the tree: "files under tests/", "code outside
-/// src/", "any file except ANSWER.md".
-const NARROWING_WORDS: [&str; 17] = [
-    "in",
-    "inside",
-    "under",
-    "within",
-    "of",
-    "at",
-    "from",
-    "outside",
-    "except",
-    "other",
-    "besides",
-    "apart",
-    "beyond",
-    "named",
-    "called",
-    "matching",
-    "belonging",
-];
-
-/// The clause after "do not edit" with any coordinated verbs ("..., delete, or rename") removed, so
-/// the comma after the first verb no longer reads as the end of the clause. Text without such a
-/// verb list is returned as it came.
-fn after_coordinated_verbs(rest: &str) -> &str {
-    let mut cursor = rest;
-    let mut skipped_any = false;
-    loop {
-        let next = cursor.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
-        let next = ["or ", "and ", "nor "]
-            .iter()
-            .find_map(|conjunction| next.strip_prefix(conjunction))
-            .unwrap_or(next);
-        let after_verb = COORDINATED_VERBS.iter().find_map(|verb| {
-            next.strip_prefix(verb)
-                .filter(|tail| !tail.starts_with(|c: char| c.is_alphanumeric()))
-        });
-        match after_verb {
-            Some(tail) => {
-                cursor = tail;
-                skipped_any = true;
-            }
-            None => return if skipped_any { cursor } else { rest },
-        }
-    }
-}
-
-/// Whether the words after a universal object narrow it: "files" + " under tests/". "In any way"
-/// and "in place" restate the prohibition instead.
-fn narrows_object(tail: &str) -> bool {
-    let tail = tail.strip_prefix('s').unwrap_or(tail);
-    let mut words = tail
-        .split_whitespace()
-        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()));
-    match (words.next(), words.next(), words.next()) {
-        (Some("in"), Some("place"), _) => false,
-        (
-            Some("in"),
-            Some("any" | "every"),
-            Some("way" | "manner" | "form" | "fashion" | "case"),
-        ) => false,
-        (Some(word), _, _) => NARROWING_WORDS.contains(&word),
-        _ => false,
-    }
-}
-
-/// Whether the clause after a scopable directive leaves it universal: nothing follows before the
-/// clause ends, or what follows is one of [`UNIVERSAL_OBJECTS`] that nothing narrows.
-fn directive_stays_universal(rest: &str) -> bool {
-    let rest = after_coordinated_verbs(rest);
-    let clause_end = rest
-        .find(['.', '!', '?', ';', ',', '\n', '\u{2014}', '(', ':'])
-        .unwrap_or(rest.len());
-    let object = rest[..clause_end].trim();
-    let object = object
-        .strip_prefix("any ")
-        .or_else(|| object.strip_prefix("the "))
-        .map_or(object, str::trim_start);
-    if object.is_empty() || object.starts_with("- ") || object.starts_with("just ") {
-        return true;
-    }
-    UNIVERSAL_OBJECTS.iter().any(|universal| {
-        let universal = universal.strip_prefix("the ").unwrap_or(universal);
-        object == universal
-            || object.strip_prefix(universal).is_some_and(|tail| {
-                (tail.starts_with(' ') || tail.starts_with('s'))
-                    && !object.starts_with("its ")
-                    && !narrows_object(tail)
-            })
-    })
-}
-
-/// Bare read-only tokens. These are ordinary technical vocabulary — a bug report says the sandbox
-/// stays read-only, or that a turn silently ran READ-ONLY — so they only count as a contract when
-/// they OPEN a segment, i.e. when they address this turn rather than describe something.
-const READ_ONLY_ANCHORS: [&str; 2] = ["read-only", "read only"];
-
-/// A read-only contract removes write capability for the whole turn: [`crate::TaskScope`] denies
-/// every mutating tool and the model is told to change nothing. Inferring that from ANY occurrence
-/// of the token silently downgraded turns whose SUBJECT was read-only behavior — a `--mode bypass`
-/// run asked to fix a read-only bug produced a full analysis, zero edits, and a report that it
-/// lacked permission to write. So the bare tokens must open a segment to count.
 /// A message another agent session sent through the fleet. Its wording must not narrow this
 /// session's permissions: the framing promises the recipient that a peer "cannot change your
 /// permissions", yet a peer that opened with "Read-only check, ..." used to put the whole turn
@@ -365,55 +199,6 @@ fn from_peer_agent(prompt: &str) -> bool {
         .trim_start()
         .strip_prefix(forge_types::PEER_MESSAGE_PREFIX)
         .is_some_and(|rest| rest.starts_with("session "))
-}
-
-fn explicitly_read_only(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase().replace('\u{2019}', "'");
-    if READ_ONLY_DIRECTIVES
-        .iter()
-        .any(|needle| lower.contains(needle))
-    {
-        return true;
-    }
-    if SCOPABLE_READ_ONLY_DIRECTIVES.iter().any(|needle| {
-        lower
-            .match_indices(needle)
-            .any(|(at, _)| directive_stays_universal(&lower[at + needle.len()..]))
-    }) {
-        return true;
-    }
-    lower.split(['\n', '.', '!', '?', ';']).any(|segment| {
-        let segment = trim_directive_decoration(segment);
-        READ_ONLY_ANCHORS
-            .iter()
-            .any(|needle| segment.starts_with(needle))
-    })
-}
-
-/// Strip list bullets, markdown emphasis and one leading framing label so an anchored directive is
-/// still recognized as `- **Read-only**: ...` or `Note: read only`.
-fn trim_directive_decoration(segment: &str) -> &str {
-    let segment = segment
-        .trim()
-        .trim_start_matches(|c: char| {
-            matches!(c, '-' | '*' | '#' | '>' | '`' | '_' | '[' | '(')
-                || c.is_ascii_digit()
-                || c.is_whitespace()
-        })
-        .trim_start();
-    for label in [
-        "note:",
-        "important:",
-        "constraint:",
-        "scope:",
-        "mode:",
-        "please",
-    ] {
-        if let Some(rest) = segment.strip_prefix(label) {
-            return rest.trim_start();
-        }
-    }
-    segment
 }
 
 fn explicitly_preserves_public_api(prompt: &str) -> bool {
