@@ -402,6 +402,15 @@ impl Session {
         }));
     }
 
+    /// Before each model step: hand over finished shell diagnoses, then keep the context in bounds,
+    /// every step and not only at nudge points (a 120K-ceiling Kimi turn once grew to 246K).
+    pub(crate) async fn prepare_step_context(&mut self, model: &str) {
+        self.deliver_shell_diagnoses();
+        self.settle_window_lookup(model, None).await;
+        self.advance_floor_if_due(model, false);
+        self.auto_compact_if_needed(model).await;
+    }
+
     /// Whether the request just built had to drop user or assistant messages and a compaction may
     /// still run in its place: the trim is the last resort, a summary keeps what it would drop.
     pub(crate) fn trim_calls_for_compaction(&self) -> bool {
@@ -432,9 +441,9 @@ impl Session {
         model: &str,
         specs: &[forge_provider::ToolSpec],
     ) -> Vec<Message> {
-        // The first request of a session waits for the startup window lookup right here, before
-        // anything is sized from a window the store may not know yet.
-        self.settle_window_lookup().await;
+        // Nothing is sized from a window the store may not know yet where knowing it would change
+        // the request (window_lookup.rs).
+        self.settle_window_lookup(model, Some(specs)).await;
         let mut sent = self.transcript_with_preamble_and_tools(model, specs);
         if self.trim_calls_for_compaction() && self.compact_instead_of_trim(model).await {
             sent = self.transcript_with_preamble_and_tools(model, specs);

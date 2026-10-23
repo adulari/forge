@@ -204,6 +204,8 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         }
         session.attach_images(at_images);
         mark_one_shot(&mut session, true);
+        // A bridge pin's `claude` process starts now, beside the hooks and routing of the turn.
+        session.prewarm_pinned_bridge();
         session.fire_session_start(None).await;
         let before = session.session_usage_detail();
         // A resumed session's restored totals arrive before routing; the presenter keeps them as
@@ -238,6 +240,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     }
     session.attach_images(at_images);
     mark_one_shot(&mut session, !tui);
+    session.prewarm_pinned_bridge();
     session.fire_session_start(None).await;
     let before = session.session_usage_detail();
 

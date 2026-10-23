@@ -353,8 +353,21 @@ fn touches_only_run_artifacts(args: &str) -> bool {
 /// One shell command line: which family of check it is, and whether its exit status can be
 /// trusted as that check's result.
 fn classify_command(command: &str) -> VerificationObservation {
+    match verification_family(command) {
+        // POSIX pipelines report the final stage's status, and `;` / `||` chains can overwrite a
+        // failed check with a later successful command. Never accept masked status as proof.
+        Some(_) if has_untrustworthy_control_flow(&command.to_ascii_lowercase()) => {
+            VerificationObservation::Ignore
+        }
+        Some(family) => VerificationObservation::Check(family),
+        None => VerificationObservation::Generic,
+    }
+}
+
+/// The kind of check a shell command runs (tests, build, lint, type check), if it runs one.
+pub(crate) fn verification_family(command: &str) -> Option<VerificationFamily> {
     let command = command.to_ascii_lowercase();
-    let family = if command.contains("tsc")
+    if command.contains("tsc")
         || command.contains("typecheck")
         || command.contains("type-check")
         || command.contains("cargo check")
@@ -385,13 +398,6 @@ fn classify_command(command: &str) -> VerificationObservation {
         Some(VerificationFamily::Build)
     } else {
         None
-    };
-    match family {
-        // POSIX pipelines report the final stage's status, and `;` / `||` chains can overwrite a
-        // failed check with a later successful command. Never accept masked status as proof.
-        Some(_) if has_untrustworthy_control_flow(&command) => VerificationObservation::Ignore,
-        Some(family) => VerificationObservation::Check(family),
-        None => VerificationObservation::Generic,
     }
 }
 

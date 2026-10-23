@@ -409,8 +409,8 @@ pub(crate) async fn build_session_with_self_mcp(
 
     let catalog = catalog
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
-    // A pinned model nothing on this machine knows the window of is looked up beside startup; the
-    // session's first request waits for it (see `forge_core::WindowLookup`), startup does not.
+    // A pinned model nothing on this machine knows the window of is looked up beside startup;
+    // neither startup nor a first request waits for it (see `forge_core::WindowLookup`).
     let window_lookup =
         pin_window::start_pinned_window_lookup(&store, &config, pin.as_deref(), mock);
     let ctx_windows = store.all_model_contexts().unwrap_or_default();

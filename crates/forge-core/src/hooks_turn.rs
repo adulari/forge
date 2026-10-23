@@ -42,6 +42,7 @@ impl Session {
                 Box::pin(self.run_turn_body(prompt, guidance, tier_override)),
             )
             .await;
+        self.close_shell_diagnoses();
         if let Err(error) = &result {
             self.fire_stop_failure(error).await;
         }

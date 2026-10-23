@@ -1,6 +1,6 @@
-//! Learn a pinned model's context window before the session sizes its first request, without
-//! holding startup for it: the lookup runs in the background and the first request waits for it
-//! (`forge_core::WindowLookup`), by which time a person has typed a prompt.
+//! Learn a pinned model's context window without holding startup or the first answer for it: the
+//! lookup runs in the background, and the session waits for it only where the window would change
+//! what it sends (`forge_core::WindowLookup`); a first request never needs it.
 //!
 //! Context windows live in the store, written by the catalog sweep (`context_windows.rs`). A store
 //! that has never been swept — a scratch `FORGE_DB`, which is how `forge bench tasks` isolates each
@@ -48,8 +48,9 @@ fn pins_without_window(
 }
 
 /// Start fetching the windows of pinned models nothing knows yet and return at once. `None` when
-/// nothing needs fetching; otherwise the handle the session's first request waits on, which carries
-/// the members still unknown afterwards (they run on the conservative floor).
+/// nothing needs fetching; otherwise the handle the session settles before sizing anything the
+/// window could change, which carries the members still unknown afterwards (they run on the
+/// conservative floor).
 pub(super) fn start_pinned_window_lookup(
     store: &Arc<Store>,
     config: &forge_config::Config,

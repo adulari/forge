@@ -159,6 +159,7 @@ mod review_gate;
 mod routing_policy;
 pub mod run_budget;
 mod run_overrides;
+mod shell_diagnosis;
 pub use run_budget::RunBudget;
 pub use session_restore::RestoredTurnState;
 mod session_controls;
@@ -1655,6 +1656,8 @@ pub struct Session {
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
+    /// Shell diagnoses running off the turn (shell_diagnosis.rs).
+    shell_diagnoses: shell_diagnosis::ShellDiagnoses,
     /// Prompts queued by the surface while a turn runs; drained by the model loop (`steer.rs`).
     steer: steer::SteerInbox,
     /// Set by [`Session::run_turn_resuming`]: the next turn's prompt is already in the transcript
@@ -4943,6 +4946,9 @@ mod tests {
     mod bridge_trace_tests;
     #[path = "session_slash_controls.rs"]
     mod session_slash_controls_tests;
+    #[cfg(unix)]
+    #[path = "shell_diagnosis.rs"]
+    mod shell_diagnosis_tests;
 
     #[path = "compaction_summary.rs"]
     mod compaction_summary_tests;
@@ -9368,207 +9374,6 @@ mod tests {
     fn pattern_diagnose_is_case_insensitive() {
         assert!(pattern_diagnose("COMMAND NOT FOUND").is_some());
         assert!(pattern_diagnose("PERMISSION DENIED").is_some());
-    }
-
-    /// First call emits a failing `shell` command; the diagnosis call (identified by its system
-    /// prompt) returns a fix; after the tool result it answers `done`. Unix-only: the `shell`
-    /// tool shells out to `sh`, so the e2e tests using it are gated to Unix.
-    #[cfg(unix)]
-    struct ShellFailProvider;
-    #[cfg(unix)]
-    #[async_trait::async_trait]
-    impl Provider for ShellFailProvider {
-        async fn complete(
-            &self,
-            _model: &str,
-            messages: &[Message],
-            _tools: &[ToolSpec],
-            _on_event: &mut forge_provider::EventSink<'_>,
-        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
-            use forge_provider::ModelResponse;
-            use forge_types::{new_id, ToolCall, Usage};
-            let usage = Usage::default();
-            if messages
-                .iter()
-                .any(|m| m.role == Role::System && m.content.starts_with("A shell command run by"))
-            {
-                return Ok(ModelResponse {
-                    reasoning: String::new(),
-                    reasoning_items: Vec::new(),
-                    content: "The command is not installed. Fix: install it first.".into(),
-                    tool_calls: vec![],
-                    usage,
-                    quotas: Vec::new(),
-                });
-            }
-            if messages.iter().any(|m| m.role == Role::Tool) {
-                return Ok(ModelResponse {
-                    reasoning: String::new(),
-                    reasoning_items: Vec::new(),
-                    content: "done".into(),
-                    tool_calls: vec![],
-                    usage,
-                    quotas: Vec::new(),
-                });
-            }
-            Ok(ModelResponse {
-                reasoning: String::new(),
-                reasoning_items: Vec::new(),
-                content: String::new(),
-                tool_calls: vec![ToolCall {
-                    id: new_id(),
-                    name: "shell".into(),
-                    args: serde_json::json!({
-                        "command": "printf opaque_failure_xyz >&2; exit 9"
-                    }),
-                }],
-                usage,
-                quotas: Vec::new(),
-            })
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn failed_shell_command_is_auto_diagnosed() {
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        // Bypass auto-allows the shell call so the interceptor path is reached.
-        let config = Config {
-            permission_mode: forge_types::PermissionMode::Bypass,
-            ..Config::default()
-        };
-        let presenter = CapturePresenter::default();
-        let events = presenter.events.clone();
-        let mut session = Session::start(
-            Arc::clone(&store),
-            Arc::new(ShellFailProvider),
-            Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools_in(test_workspace()),
-            Box::new(presenter),
-            config,
-            test_workspace().to_str().expect("workspace path is UTF-8"),
-        )
-        .unwrap();
-
-        session.run_turn("build the project").await.unwrap();
-
-        let events = events.lock().unwrap();
-        let started = events.iter().position(|event| {
-            matches!(event, PresenterEvent::AuxiliaryRequest { purpose, .. }
-                if purpose.contains("diagnosing"))
-        });
-        let diagnosed = events.iter().position(|e| {
-            matches!(e, PresenterEvent::ShellDiagnosis { command, diagnosis, .. }
-                if command.contains("opaque_failure_xyz") && diagnosis.contains("install"))
-        });
-        assert!(
-            started.is_some(),
-            "the UI is told why an internal model call started"
-        );
-        assert!(
-            diagnosed.is_some(),
-            "a ShellDiagnosis event was emitted for the failed command"
-        );
-        assert!(
-            started < diagnosed,
-            "the start event precedes the completed diagnosis"
-        );
-    }
-
-    /// The main loop responds normally, but the optional shell-diagnosis request never emits an
-    /// event and never returns. This reproduces a real TUI run that remained stuck in
-    /// "auxiliary model work" for more than six minutes after a failing test command.
-    #[cfg(unix)]
-    struct StallingShellDiagnosisProvider;
-    #[cfg(unix)]
-    #[async_trait::async_trait]
-    impl Provider for StallingShellDiagnosisProvider {
-        async fn complete(
-            &self,
-            _model: &str,
-            messages: &[Message],
-            _tools: &[ToolSpec],
-            _on_event: &mut forge_provider::EventSink<'_>,
-        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
-            use forge_provider::ModelResponse;
-            use forge_types::{new_id, ToolCall, Usage};
-            if messages
-                .iter()
-                .any(|m| m.role == Role::System && m.content.starts_with("A shell command run by"))
-            {
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                unreachable!("the auxiliary watchdog must abort this request")
-            }
-            if messages.iter().any(|m| m.role == Role::Tool) {
-                return Ok(ModelResponse {
-                    reasoning: String::new(),
-                    reasoning_items: Vec::new(),
-                    content: "done".into(),
-                    tool_calls: vec![],
-                    usage: Usage::default(),
-                    quotas: Vec::new(),
-                });
-            }
-            Ok(ModelResponse {
-                reasoning: String::new(),
-                reasoning_items: Vec::new(),
-                content: String::new(),
-                tool_calls: vec![ToolCall {
-                    id: new_id(),
-                    name: "shell".into(),
-                    args: serde_json::json!({
-                        "command": "printf opaque_auxiliary_stall >&2; exit 23"
-                    }),
-                }],
-                usage: Usage::default(),
-                quotas: Vec::new(),
-            })
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stalled_shell_diagnosis_times_out_and_main_turn_continues() {
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let mut config = Config {
-            permission_mode: forge_types::PermissionMode::Bypass,
-            ..Config::default()
-        };
-        config.mesh.stream_idle_timeout_secs = 1;
-        let presenter = CapturePresenter::default();
-        let events = presenter.events.clone();
-        let mut session = Session::start(
-            Arc::clone(&store),
-            Arc::new(StallingShellDiagnosisProvider),
-            Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools_in(test_workspace()),
-            Box::new(presenter),
-            config,
-            test_workspace().to_str().expect("workspace path is UTF-8"),
-        )
-        .unwrap();
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            session.run_turn("run the failing test and repair it"),
-        )
-        .await;
-        assert!(
-            result.is_ok(),
-            "the optional diagnosis held the turn hostage"
-        );
-        assert_eq!(result.unwrap().unwrap(), "done");
-
-        let events = events.lock().unwrap();
-        assert!(events.iter().any(|event| {
-            matches!(event, PresenterEvent::AuxiliaryRequest { purpose, .. }
-                if purpose.contains("diagnosing"))
-        }));
-        assert!(events.iter().any(|event| {
-            matches!(event, PresenterEvent::Warning(message)
-                if message.contains("optional shell diagnosis")
-                    && message.contains("continuing without it"))
-        }));
     }
 
     #[cfg(unix)]

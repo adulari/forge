@@ -199,7 +199,8 @@ async fn a_pinned_runs_shell_diagnosis_stays_on_the_pin() {
             fallbacks: vec![],
         }),
         ToolRegistry::with_core_tools_in(dir.path()),
-        Box::new(HeadlessPresenter::new(false)),
+        // Attended: an unattended pinned run makes no diagnosis call at all.
+        Box::new(HeadlessPresenter::new(true)),
         config,
         dir.path().to_str().unwrap(),
     )
@@ -208,8 +209,15 @@ async fn a_pinned_runs_shell_diagnosis_stays_on_the_pin() {
     session.pin_model(Some("inferhub::cb/deepseek-v4.1-flash".into()));
 
     session
-        .diagnose_shell_error("./build.sh", "shell: exit 3 in 12ms\nstage two aborted")
+        .diagnose_shell_error("./deploy.sh", "shell: exit 3 in 12ms\nstage two aborted")
         .await;
+    // The call runs off the turn.
+    for _ in 0..200 {
+        if !models.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert_eq!(
         *models.lock().unwrap(),
         vec!["inferhub::cb/deepseek-v4.1-flash".to_string()]

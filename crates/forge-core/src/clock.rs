@@ -33,7 +33,11 @@ pub(crate) fn is_full_line(content: &str) -> bool {
 }
 
 const FULL_LINE_PREFIX: &str = "[time] Current date and time: ";
-const TIMESTAMP_FORMAT: &str = "%A %Y-%m-%d %H:%M:%S %:z";
+/// To the minute. On a CLI bridge the line sits in the first user message, ahead of the prompt;
+/// with seconds in it no two first requests were ever byte-identical, so the provider wrote that
+/// whole message (2.1k tokens on a trivial `claude-cli::haiku` turn) to its cache every time
+/// instead of reading it back as Claude Code's own date-only prompt is.
+const TIMESTAMP_FORMAT: &str = "%A %Y-%m-%d %H:%M %:z";
 
 fn short_line_for(now: chrono::DateTime<chrono::Local>) -> String {
     format!("[time] {}", now.format(TIMESTAMP_FORMAT))
@@ -63,7 +67,11 @@ mod tests {
             .expect("unambiguous local time");
         let line = line_for(at);
         assert!(line.contains("2026-09-14"), "{line}");
-        assert!(line.contains("01:20:33"), "{line}");
+        assert!(line.contains("01:20 "), "{line}");
+        assert!(
+            !line.contains("01:20:33"),
+            "seconds would break prompt caching: {line}"
+        );
         // The weekday matters: "is the 14th a Monday" is exactly the kind of thing a model
         // otherwise derives from a wrong year.
         assert!(line.contains("Monday"), "{line}");
@@ -88,7 +96,7 @@ mod tests {
             .expect("unambiguous local time");
         let short = short_line_for(at);
         assert!(
-            short.starts_with("[time] Monday 2026-09-14 01:20:33"),
+            short.starts_with("[time] Monday 2026-09-14 01:20 "),
             "{short}"
         );
         assert!(!is_full_line(&short));
