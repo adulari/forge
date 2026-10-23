@@ -31,7 +31,7 @@ names stay stable). Temper is a **display + UX layer** plus runtime switching. C
 | Canonical key | Temper label | Behaviour | In SHIFT+TAB cycle? |
 |---------------|--------------|-----------|---------------------|
 | `plan` | **Read-only** | Investigate & propose, **no** side effects (hard contract). | yes |
-| `default` | **Ask** | Ask before each side effect. | yes |
+| `default` | **Ask** | Ask before each side effect, except shell commands that are provably read-only (see "Ask and read-only shell"). | yes |
 | `accept-edits` | **Auto-edit** | Auto-apply workspace edits and ordinary shell; ask for writes beyond the workspace and for shell that deletes, moves or writes outside it (see "Auto-edit and shell"). | yes |
 | `auto` | **Auto** | Proceed on safe calls, ask on risky or unrecognised ones (see "Auto mode classification"). | yes |
 | `bypass` | **Full** | All permission guards off (the unoverridable safety denylist still applies). | **no — explicit opt-in only** |
@@ -62,6 +62,76 @@ still redirected into the worktree.
 `extra_roots` only, refused in every mode). It was the default until the refusals proved to buy no
 safety, since `shell` was never confined, while pushing models to write files through `cat >` and
 heredocs instead of the reviewable file tools.
+
+### Ask and read-only shell
+
+Ask used to prompt for every shell call, `git status` and `cat calc.py` included. It now runs a
+shell command without a prompt when the broker can prove it only reads (`permission/ask_shell.rs`,
+ADR-0008): every statement is one of `ls cat head tail wc pwd echo stat du nl tac cut tr sort uniq
+basename dirname realpath readlink which md5sum sha1sum sha256sum b3sum diff cmp grep egrep fgrep
+rg find sed git printf column rev fold expand comm paste nproc whoami uname id df file hostname`,
+written plainly, with arguments that cannot write, run code or reach the network. Pipelines and
+`&&`/`;` chains qualify when every stage does. The call still shows in the transcript as an
+ordinary tool row, just with no prompt.
+
+It does not qualify, so it asks as before, when it has a redirect (other than `2>&1` and
+`>/dev/null`), a `$`/backtick/`<(` substitution, a subshell or brace, a `&`, a `VAR=value`
+prefix, a wrapper (`env`, `command`, `nohup`, `time`), a binary named by path or in quotes, a newline,
+or a flag such as `find -exec/-delete`, `sort -o`, `rg --pre`, `tail -f`, `printf -v`; for `sed` only
+`sed -n 'N,Mp'` qualifies, for `git` only the read subcommands (`status diff log show branch`
+listing, `rev-parse ls-files blame grep ls-tree rev-list shortlog describe merge-base show-ref
+for-each-ref name-rev`, `tag` and `reflog` for listing, `stash list`, `worktree list`) with no
+`-c`, `-C`, `--output`, `--ext-diff`, `--textconv`, `-O`, `--no-index` or `--show-signature`.
+
+`git` and `file` run without a prompt only in a project you trusted (`forge trust`,
+[project-trust.md](project-trust.md)), because a repository can influence them: git runs the
+programs a repository's config, attributes and hooks name, and `file` parses whatever binary
+format it is handed. In a project you did not trust they ask every time and Forge never starts git
+there to find out more; every other command on the list stays unprompted there, since nothing a
+repository holds changes what it does. A project that ships nothing in `.forge/` is not asked at
+startup, so the first `git status` prompt is the cue to run `forge trust` once. Trust is read on
+every call (`forge trust --revoke` applies to the next one), covers the directory the session
+started in and the one the command runs in, and a linked worktree has the trust of its main
+checkout.
+
+Even in a trusted project `git` also asks outside a repository, in one whose own config (or a
+nested repository's, behind a submodule entry) names a program or anything else the broker does
+not know to be inert (`core.fsmonitor` other than `false`, a `textconv` driver, a promisor remote,
+an `include`), where a `post-index-change` or `reference-transaction` hook is, with a nested
+repository whose work tree is not the directory it sits in, with a git directory outside the
+trusted tree, with more than 32 nested repositories, or when the check takes over 1.5 s; and
+`git diff` asks when an operand lies outside the repository's work tree. Git runs those programs
+on `git status` and `git diff`, and a checkout can bring its own. The check asks git itself
+(`rev-parse`, `config --list`, `ls-files`) rather than reading `.git`, with `core.fsmonitor`
+forced off, lazy fetching and every transport forbidden and none of Forge's provider keys in its
+environment, so it needs git 2.31 or later; an older git asks. It runs last, once per call, and
+only for a line that passed every other check.
+
+The programs themselves must be the system's: when `PATH` holds a relative or empty entry (`bin`,
+`.`, a trailing colon) or one that lies inside the workspace, and that entry holds a program the
+call starts (`ls`, `git`, the `sh` that runs it), the call asks, because a repository could ship
+that file. A virtualenv's `python` and `pip` in `PATH` cost nothing.
+
+Secrets are not a way around the secret rules. The built-in deny verbs (`cat .env`, ...) refuse as
+before, and the paths a read-only command names are also checked against the same secret globs
+(`.env*` but not `.env.example`, `*.pem`, `id_rsa`, `~/.ssh/**`, `/proc/*/environ`, ...), through
+symlinks, `~` and wildcards: `wc -c .env`, `git show HEAD:.env` and `cat .e*` ask. A command that
+reads every file below a directory (`grep -r`, `diff` of two directories, `rg`, `git grep
+--untracked`) asks unless the directory is inside the workspace and holds no such file; a plain
+`rg` ignores hidden files, so a hidden `.env` does not stop it, but a visible `server.pem` does.
+
+What outranks it still does: the safety floor, deny rules, ask rules, hooks (`PreToolUse` runs
+first and may block), and the Read-only temper (which has its own classifier). Auto-edit, Auto and
+Full are unchanged. The native loop, the CLI bridge (`forge mcp-serve`) and subagents all use the
+same decision.
+
+```toml
+[permissions]
+auto_allow_read_only_shell = true   # default; false makes Ask prompt for every shell command again
+```
+
+An untrusted project may set it to `false` (more prompts) but not to `true`
+([project-trust.md](project-trust.md)).
 
 ### Auto-edit and shell
 

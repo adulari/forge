@@ -23,6 +23,7 @@ that cannot run anything, send data anywhere or widen permissions
 | `[[permissions.rules]]` with `ask` or `deny` | restriction is always safe |
 | `permission_mode` = `plan`/`read-only` or `default`/`ask` | a stricter temper |
 | `permissions.auto_classifier = false` | makes `auto` ask more |
+| `permissions.auto_allow_read_only_shell = false` | makes Ask prompt for read-only shell commands again |
 | `[tui]`, `[keybinds]`, `[recap]`, `[suggest]`, `[project]`, `[model_effort]`, `[compact_cap]`, `stop_hook_max_blocks`, `commands.max_palette` | display and pacing |
 | `[mesh]` except `headroom`, `headroom_url`, budgets/caps, `pricing`, `subscriptions`, `disabled`, `bridge_mcp_external` | routing preferences among providers the user already configured |
 
@@ -36,6 +37,16 @@ What was dropped is named once at startup of `forge run` / `forge chat` / `forge
 (`note: this project is not trusted, so Forge ignored its hooks, 1 allow rule, … — review .forge/
 and run `forge trust` to enable them`), and by `forge doctor` (`project trust` warning). An
 interactive `forge chat` (or `forge run --tui`) asks once: `Trust this folder and load them? [y/N]`.
+
+## What trust also gates
+
+In the Ask temper, shell commands that only read run without a prompt (`git status`, `ls`,
+[temper-modes.md](temper-modes.md)). `git` and `file` are the two such commands a repository can
+influence (git runs the programs the repository's config, attributes and hooks name; `file` parses
+arbitrary binary formats), so they run unprompted only in a trusted project, and in an untrusted one
+Forge never starts git to find out whether the repository is safe. Everything else on that list
+stays unprompted in an untrusted project. Trust is read from the store on every call, so
+`forge trust --revoke` applies to the very next command.
 
 ## Trusting
 

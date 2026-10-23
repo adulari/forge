@@ -2158,6 +2158,7 @@ dependencies = [
  "forge-agent-types",
  "forge-agent-workflow",
  "futures",
+ "glob",
  "globset",
  "hex",
  "libc",

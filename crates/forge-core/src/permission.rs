@@ -16,7 +16,8 @@
 //!    only when *every* effective segment matches an allow rule ([`decide_shell_segments`])
 //! 5. other tools: the most-specific allow/ask match → that decision
 //! 6. otherwise fall back to the mode ([`decide_mode`]; `auto` inspects the call instead, see
-//!    [`auto_risk`]).
+//!    [`auto_risk`]; `default` (Ask) first lets a shell line through that [`ask_shell`] can prove
+//!    read-only, so every denial and every ask rule above has already had its say).
 
 use std::path::Path;
 
@@ -68,9 +69,20 @@ fn mode_fallback(
     side_effect: SideEffect,
     tool_name: &str,
     args: &Value,
+    rules: &[PermissionRule],
     workspace: Option<&Path>,
     auto_out: &mut Option<AutoVerdict>,
 ) -> PermissionDecision {
+    // Ask runs a shell line it can prove read-only without a prompt (ADR-0008). Only here, after
+    // the floor, every deny, the plan contract and every ask rule had their say.
+    if mode == PermissionMode::Default
+        && side_effect == SideEffect::Shell
+        && is_shell_tool(tool_name)
+        && ask_shell::auto_allows(args, rules, workspace)
+    {
+        tracing::debug!("ask: auto-allowed a provably read-only shell command");
+        return PermissionDecision::Allow;
+    }
     if mode == PermissionMode::AcceptEdits
         && side_effect == SideEffect::Shell
         && is_shell_tool(tool_name)
@@ -202,7 +214,15 @@ fn decide_in_with(
         if let Some(decision) = decide_shell_segments(tool_name, args, rules) {
             return decision;
         }
-        return mode_fallback(mode, side_effect, tool_name, args, workspace, auto_out);
+        return mode_fallback(
+            mode,
+            side_effect,
+            tool_name,
+            args,
+            rules,
+            workspace,
+            auto_out,
+        );
     }
     // 5. Most-specific allow/ask wins.
     if let Some(rule) = matched
@@ -213,7 +233,15 @@ fn decide_in_with(
         return rule.decision;
     }
     // 6. No rule applies: fall back to the global mode.
-    mode_fallback(mode, side_effect, tool_name, args, workspace, auto_out)
+    mode_fallback(
+        mode,
+        side_effect,
+        tool_name,
+        args,
+        rules,
+        workspace,
+        auto_out,
+    )
 }
 
 /// The model-facing explanation for a call the structural floor refuses in every temper: a
@@ -407,6 +435,9 @@ fn specificity(rule: &PermissionRule) -> usize {
     tool_score + arg_score
 }
 
+mod ask_shell;
+#[cfg(test)]
+pub(crate) use ask_shell::stand_in_for_trust;
 mod auto;
 mod auto_safe;
 mod catastrophic;
