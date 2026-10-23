@@ -79,6 +79,12 @@ impl Session {
     /// is skipped when the budget is exhausted and stays silent on any model error, so it can
     /// never derail the turn (shell-error-interceptor.md).
     pub(crate) async fn diagnose_shell_error(&mut self, command: &str, result: &str) {
+        crate::turn_trace::mark("shell diagnose: start");
+        self.diagnose_shell_error_inner(command, result).await;
+        crate::turn_trace::mark("shell diagnose: done");
+    }
+
+    async fn diagnose_shell_error_inner(&mut self, command: &str, result: &str) {
         // Fast path: common patterns don't need a model call.
         if let Some(cached) = pattern_diagnose(result) {
             self.pending_hints

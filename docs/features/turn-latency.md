@@ -53,6 +53,32 @@ first line from claude`, first stream event, first text delta); the log's own ti
 deltas. In the full-screen TUI the log is `.forge/forge.log` in the project. For a headless turn,
 time the stream-json events: `system/routing`, the first `assistant` text, and `result`.
 
+Every model-loop step also prints its own boundaries, so a slow turn splits into the model's time
+and Forge's: `step N: request` (the request is being built), `dispatch <model>`, `first stream
+event`, `step N: response complete`, then `tools start` and `tools done` around the step's tool
+calls. `shell diagnose: start` / `done`
+wrap the failed-command explanation that runs inside a tool call, and `post-turn side calls:
+start` / `done` wrap the recap, suggestion and memory capture after the answer. The final answer's
+step has no `response complete` line: it ends the loop, so its model time is the gap before
+`post-turn side calls: start`.
+
+Five `inferhub::cb/deepseek-v4.1-flash` tasks on the native loop (`forge bench tasks`, one seed,
+`RUST_LOG=forge::turn=debug`; a sixth, whose test run hung for 776 s on a busy machine, is left
+out), as a share of the time from `run_turn_with start` to the end of the turn (314 s, 44
+steps):
+
+| phase | share |
+|---|---|
+| model, dispatch to response | 74.0% |
+| tools | 11.1% |
+| recap, suggestion and memory capture after the answer | 9.0% (4.8 to 8.2 s a task) |
+| shell diagnosis (a model call inside a failed command's tool call) | 0.5% (1.7 s, one call) |
+| building the request, the guards, the gaps between steps | 0.4% |
+| the last step's model time (it has no `response complete` line) | 5.0% |
+
+Forge's own work between a tool result and the next request is under 10 ms in every step of the
+trace; the only Forge-side time that is not the model or a tool is the work after the answer.
+
 What is left after these steps is the model's own time: a bridged `claude` runs with the person's
 own `~/.claude` (CLAUDE.md, hooks, a global `effortLevel`), so a prompt it decides to think about
 costs seconds of hidden reasoning before the first character. Claude Code started with the same

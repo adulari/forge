@@ -17,6 +17,7 @@ impl Session {
         verification_ledger: &std::sync::Arc<std::sync::Mutex<VerificationLedger>>,
         observations: &mut Vec<crate::loop_progress::CallObservation>,
     ) -> Result<bool, CoreError> {
+        crate::turn_trace::mark("tools start");
         // A `tool_call{name, arguments}` IS its inner call for every counter below: the phantom-edit
         // gate (`mutations_ran`), the verification ledger, the progress observations, the
         // env-fight cap and batch eligibility. Ids are kept, so the tool results still pair with
@@ -142,6 +143,7 @@ impl Session {
             }
         }
 
+        crate::turn_trace::mark("tools done");
         if self.fire_post_tool_batch(&batch).await {
             return Ok(true);
         }

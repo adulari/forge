@@ -140,6 +140,7 @@ pub(super) async fn request_provider_response(
     pinned_outage_last_error: &mut Option<String>,
     step: usize,
 ) -> Result<(u64, forge_provider::ModelResponse), CoreError> {
+    crate::turn_trace::step_phase(step, "request");
     let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
     let mut attempted = std::collections::HashSet::new();
     let mut failures = Vec::new();
@@ -793,6 +794,7 @@ pub(super) async fn request_provider_response(
             }
         }
     };
+    crate::turn_trace::step_phase(step, "response complete");
     Ok((tools_before, resp))
 }
 
