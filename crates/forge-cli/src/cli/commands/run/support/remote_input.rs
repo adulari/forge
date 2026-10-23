@@ -210,6 +210,23 @@ fn remote_attach_confined(path: &str, cwd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Run `f` on the session without ever stalling the render loop. A running turn holds the session
+/// lock for its whole length, so awaiting it here would freeze the loop until the turn ends, and
+/// for good if that turn asks the UI something first. When the lock is free `f` runs now; else it
+/// runs on a task as soon as the turn lets go. The lock queues waiters in order, so `f` still runs
+/// before anything the loop starts after it (the next turn's prompt).
+fn with_session(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    f: impl FnOnce(&mut Session) + Send + 'static,
+) {
+    if let Ok(mut s) = session.try_lock() {
+        f(&mut s);
+        return;
+    }
+    let session = Arc::clone(session);
+    tokio::spawn(async move { f(&mut *session.lock().await) });
+}
+
 pub(crate) async fn handle_remote_attach(
     session: &Arc<tokio::sync::Mutex<Session>>,
     app: &mut forge_tui::App,
@@ -225,7 +242,7 @@ pub(crate) async fn handle_remote_attach(
     if image {
         match crate::image_input::load_image_file(&path) {
             Ok((att, label)) => {
-                session.lock().await.attach_images(vec![att]);
+                with_session(session, move |s| s.attach_images(vec![att]));
                 // Also record a `@path` mention, exactly like the non-image branch below: the
                 // vision attachment only rides THIS turn's provider call (`attach_images` is
                 // transient), so without a durable mention the image reference never reaches
@@ -277,7 +294,7 @@ pub(crate) async fn resolve_prompt_attachments(
     }
     // Drop, don't use: whatever's ambiently pending belongs to no turn now that an explicit,
     // authoritative list has arrived for THIS one.
-    let _ = session.lock().await.take_pending_images();
+    with_session(session, |s| drop(s.take_pending_images()));
 
     let mut mentions = Vec::new();
     for att in attachments {
@@ -297,7 +314,7 @@ pub(crate) async fn resolve_prompt_attachments(
             match crate::image_input::load_image_file(&att.path) {
                 Ok((img, label)) => {
                     tracing::info!(path = %att.path, %label, "prompt image attachment resolved");
-                    session.lock().await.attach_images(vec![img]);
+                    with_session(session, move |s| s.attach_images(vec![img]));
                     app.note(&format!("🖼 image attached ({label}) — rides this prompt"));
                 }
                 Err(e) => {

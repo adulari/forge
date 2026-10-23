@@ -22,6 +22,14 @@ pub(crate) async fn dispatch_catalog(
     trust_project: bool,
     busy: bool,
 ) -> Result<DispatchOutcome> {
+    // The running turn holds the session lock for its whole length, so awaiting it here would stop
+    // the render loop (no redraw, no keys, not even Esc), and deadlock for good once that turn
+    // asks the UI a question or for a permission: the turn waits for the UI, the UI for the lock.
+    // A command or skill is refused while busy anyway, so say so without the session.
+    if busy {
+        note_busy_line(line, catalog, app);
+        return Ok(DispatchOutcome::Handled);
+    }
     let (vars, workspace) = {
         let s = session.lock().await;
         (s.skill_template_vars(), s.workspace_root().to_path_buf())
@@ -32,10 +40,6 @@ pub(crate) async fn dispatch_catalog(
             prompt,
             guidance,
         } => {
-            if busy {
-                app.note("⚠ finish or Esc the current turn first");
-                return Ok(DispatchOutcome::Handled);
-            }
             if !project_trust_ok(&cmd.name, cmd.scope, trust_project, armed, app) {
                 return Ok(DispatchOutcome::Handled);
             }
@@ -69,10 +73,6 @@ pub(crate) async fn dispatch_catalog(
             })
         }
         Resolved::Skill { meta, prompt } => {
-            if busy {
-                app.note("⚠ finish or Esc the current turn first");
-                return Ok(DispatchOutcome::Handled);
-            }
             if !project_trust_ok(&meta.name, meta.scope, trust_project, armed, app) {
                 return Ok(DispatchOutcome::Handled);
             }
@@ -127,6 +127,17 @@ pub(crate) async fn dispatch_catalog(
                 })
             }
         }
+        other => {
+            note_unresolved(&other, line, app);
+            Ok(DispatchOutcome::Handled)
+        }
+    }
+}
+
+/// What a `/line` that expands to nothing says: missing args, a model-only definition, an
+/// unknown name.
+fn note_unresolved(resolved: &Resolved, line: &str, app: &mut forge_tui::App) {
+    match resolved {
         Resolved::MissingArgs { name, missing } => {
             let need = missing
                 .iter()
@@ -134,23 +145,25 @@ pub(crate) async fn dispatch_catalog(
                 .collect::<Vec<_>>()
                 .join(" ");
             app.note(&format!("/{name} requires {need}"));
-            Ok(DispatchOutcome::Handled)
         }
-        Resolved::NotUserInvocable(name) => {
-            app.note(&format!(
-                "/{name} is for the model only (user-invocable: false) — it loads it when relevant"
-            ));
-            Ok(DispatchOutcome::Handled)
-        }
-        Resolved::Unknown(x) => {
-            app.note(&super::dispatch_checks::unknown_command_note(&x, line));
-            Ok(DispatchOutcome::Handled)
-        }
+        Resolved::NotUserInvocable(name) => app.note(&format!(
+            "/{name} is for the model only (user-invocable: false) — it loads it when relevant"
+        )),
+        Resolved::Unknown(x) => app.note(&super::dispatch_checks::unknown_command_note(x, line)),
         // A `/`-line never resolves to Plain, but stay safe rather than silently submit it.
-        Resolved::Plain(_) => {
-            app.note("unknown command — try /help");
-            Ok(DispatchOutcome::Handled)
+        Resolved::Plain(_) => app.note("unknown command — try /help"),
+        Resolved::Command { .. } | Resolved::Skill { .. } => {}
+    }
+}
+
+/// A `/line` typed while a turn runs: a command or skill waits for the idle session, anything
+/// else gets its usual note. Reads only the catalog, never the session.
+fn note_busy_line(line: &str, catalog: &forge_skills::Catalog, app: &mut forge_tui::App) {
+    match catalog.resolve(line) {
+        Resolved::Command { .. } | Resolved::Skill { .. } => {
+            app.note("⚠ finish or Esc the current turn first");
         }
+        other => note_unresolved(&other, line, app),
     }
 }
 

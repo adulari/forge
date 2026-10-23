@@ -1795,4 +1795,128 @@ mod tests {
         assert!(state.turn_handle.is_none());
         assert!(!state.busy);
     }
+
+    /// A running turn holds the session lock for its whole length. The tests below hold it
+    /// themselves, as the turn does, and type what a user or a phone sends meanwhile. They fail
+    /// (instead of hanging the suite) when the driver waits on the lock: that is what froze the
+    /// render loop on an unknown `/name`, and deadlocked it for good once the turn asked a question.
+    async fn within<T>(work: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(10), work)
+            .await
+            .expect("the driver waited for the session lock that a running turn holds")
+    }
+
+    fn shown(app: &mut App) -> String {
+        app.drain_flush()
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    async fn busy_state() -> DriverState {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state
+    }
+
+    #[tokio::test]
+    async fn an_unknown_command_typed_during_a_turn_does_not_wait_for_the_session_lock() {
+        let mut state = busy_state().await;
+        let _turn = state.session.clone().lock_owned().await;
+
+        for text in ["/definitely-not-a-command", "/nor-is-this one with args"] {
+            within(state.handle_input(remote::RemoteInput::FollowUp { text: text.into() }))
+                .await
+                .unwrap();
+        }
+
+        let text = shown(&mut state.app);
+        for name in ["definitely-not-a-command", "nor-is-this"] {
+            assert!(
+                text.contains(&format!("unknown command: /{name}")),
+                "{text}"
+            );
+        }
+        assert!(state.busy, "the command never touches the running turn");
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn rename_during_a_turn_stores_the_title_without_waiting_for_the_turn() {
+        let mut state = busy_state().await;
+        let (id, store) = {
+            let s = state.session.lock().await;
+            (s.session_id().to_string(), s.store.clone())
+        };
+        // Every turn start publishes the detached handle `/rename` uses while the lock is held.
+        state.session.lock().await.ask_btw("side question").await;
+        state.app.session_id = id.clone();
+        let _turn = state.session.clone().lock_owned().await;
+
+        within(state.handle_input(remote::RemoteInput::FollowUp {
+            text: "/rename  mid   turn title".into(),
+        }))
+        .await
+        .unwrap();
+
+        within(async {
+            while !state.app.drain_deferred() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(
+            store.session_title(&id).unwrap().as_deref(),
+            Some("mid turn title"),
+            "the title is stored while the turn still holds the session"
+        );
+        assert!(
+            shown(&mut state.app).contains("session renamed to “mid turn title”"),
+            "the result reaches the chat"
+        );
+        assert!(
+            state.queued_prompts.is_empty(),
+            "a rename is not queued behind the turn"
+        );
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn an_image_sent_during_a_turn_attaches_once_it_ends_without_stalling_the_driver() {
+        let mut state = busy_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = dir.path().join(".forge").join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let file = uploads.join("shot.png");
+        std::fs::write(&file, png.into_inner()).unwrap();
+        state.cwd = dir.path().display().to_string();
+        let turn = state.session.clone().lock_owned().await;
+
+        within(state.handle_input(remote::RemoteInput::Attach {
+            path: file.display().to_string(),
+            image: true,
+        }))
+        .await
+        .unwrap();
+        assert_eq!(state.pending_mentions.len(), 1);
+
+        drop(turn);
+        let session = state.session.clone();
+        within(async {
+            loop {
+                if session.lock().await.take_pending_images().len() == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        state.turn_handle.take().unwrap().abort();
+    }
 }

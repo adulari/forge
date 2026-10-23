@@ -60,6 +60,17 @@ pub struct BtwAsker {
 }
 
 impl BtwAsker {
+    /// The session this asker was published for.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// The session's store, for a command that only reads or writes it (`/rename`) and so has no
+    /// need to wait for the turn that holds the session lock.
+    pub fn store(&self) -> &Arc<Store> {
+        &self.store
+    }
+
     /// Answer `question` and show the card (or a warning) through this asker's presenter sink.
     pub async fn ask_and_emit(&self, question: &str) {
         let event = self.answer(question).await;
