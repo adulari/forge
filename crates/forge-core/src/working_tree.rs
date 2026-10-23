@@ -118,23 +118,31 @@ fn scan_fingerprint(root: &std::path::Path) -> Option<u64> {
     let mut files: Vec<(String, u64, u64)> = Vec::new();
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let mut read = 0u64;
+    let mut visited = 0usize;
     while let Some((dir, depth)) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        // An unreadable directory or a file that vanished mid-scan is left out, not fatal.
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
             let path = entry.path();
             let rel = path.strip_prefix(root).ok()?.to_string_lossy().into_owned();
             if rel == ".git" || rel.ends_with("/.git") || is_run_artifact(&rel) {
                 continue;
             }
-            let meta = std::fs::symlink_metadata(&path).ok()?;
+            visited += 1;
+            if visited > SCAN_MAX_ENTRIES {
+                return None;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
             if meta.is_dir() {
                 if depth + 1 > SCAN_MAX_DEPTH {
                     return None;
                 }
                 pending.push((path, depth + 1));
                 continue;
-            }
-            if files.len() >= SCAN_MAX_ENTRIES {
-                return None;
             }
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             if meta.is_file()
@@ -324,6 +332,15 @@ mod tests {
         std::fs::write(dir.path().join("f.txt"), "a").unwrap();
         assert_ne!(a, b);
         assert_eq!(a, progress_fingerprint(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn a_scan_counts_directories_too_so_a_tree_of_empty_ones_gives_up() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..SCAN_MAX_ENTRIES + 1 {
+            std::fs::create_dir(dir.path().join(format!("d{i}"))).unwrap();
+        }
+        assert_eq!(progress_fingerprint(dir.path()), None);
     }
 
     #[test]

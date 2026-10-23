@@ -39,6 +39,14 @@ impl Lane {
         }
     }
 
+    /// What the lane counts.
+    fn unit(self) -> &'static str {
+        match self {
+            Lane::Check => "runs",
+            _ => "steps",
+        }
+    }
+
     /// The stop reason in a sentence.
     fn reason(self) -> &'static str {
         match self {
@@ -163,10 +171,11 @@ impl StallReport {
             _ => "nudging the model once before stopping",
         };
         format!(
-            "progress check ({}): {} for {} steps — {then}",
+            "progress check ({}): {} for {} {} — {then}",
             self.lane.as_str(),
             self.lane.reason(),
-            self.steps
+            self.steps,
+            self.lane.unit()
         )
     }
 
@@ -190,10 +199,11 @@ impl StallReport {
     /// The same, for `progress_guard = "warn"`: where the turn would have stopped.
     pub(crate) fn would_stop_text(&self) -> String {
         format!(
-            "progress_guard = warn: would have stopped here ({}: {} for {} steps); the turn goes on",
+            "progress_guard = warn: would have stopped here ({}: {} for {} {}); the turn goes on",
             self.lane.as_str(),
             self.lane.reason(),
-            self.steps
+            self.steps,
+            self.lane.unit()
         )
     }
 

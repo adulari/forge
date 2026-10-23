@@ -70,3 +70,52 @@ impl TreeWatch {
         self.seen.insert(state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn without_a_baseline_the_first_sample_only_sets_one() {
+        let mut watch = TreeWatch::default();
+        assert!(!watch.is_new_state(&mut || Some(7)));
+        assert!(watch.is_new_state(&mut || Some(8)));
+        assert!(!watch.is_new_state(&mut || Some(7)), "a state already seen");
+    }
+
+    #[test]
+    fn a_write_the_model_made_explains_the_next_sample_and_only_that_one() {
+        let mut watch = TreeWatch::default();
+        watch.rebase(Some(1));
+        watch.wrote();
+        assert!(!watch.is_new_state(&mut || Some(2)));
+        assert!(watch.is_new_state(&mut || Some(3)));
+    }
+
+    #[test]
+    fn a_slow_sample_makes_the_next_few_skip_and_a_missing_tree_is_no_evidence() {
+        let mut watch = TreeWatch::default();
+        watch.rebase(Some(1));
+        let slow = &mut || {
+            std::thread::sleep(SLOW_SAMPLE + Duration::from_millis(50));
+            Some(2)
+        };
+        assert!(watch.is_new_state(slow));
+        for _ in 0..SKIP_AFTER_SLOW {
+            assert!(!watch
+                .is_new_state(&mut || -> Option<u64> { panic!("skipped samples never probe") }));
+        }
+        assert!(watch.is_new_state(&mut || Some(3)));
+        assert!(!watch.is_new_state(&mut || None));
+    }
+
+    #[test]
+    fn a_very_long_turn_forgets_old_states_rather_than_growing_without_bound() {
+        let mut watch = TreeWatch::default();
+        watch.rebase(Some(0));
+        for state in 1..=(MAX_STATES as u64 * 2) {
+            watch.is_new_state(&mut || Some(state));
+        }
+        assert!(watch.seen.len() <= MAX_STATES);
+    }
+}

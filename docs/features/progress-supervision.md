@@ -101,7 +101,7 @@ Seven lanes watch the evidence under one latch.
 |---|---|---|---|
 | Narration | restated openings on stale steps (`NarrationTracker`, window of 10) | 3 in the window | 2 relapsing steps in the 4 after the nudge: stale, or the same opening over output that only looked new (a step that read a path for the first time is not one) |
 | Futile | consecutive stale or all-failed steps | 5 | 10 |
-| Failure | consecutive steps in which every call failed with the same error (digits ignored) and printed nothing new; a failure with no message (a search that found nothing) is not one | 3 | 6 |
+| Failure | consecutive steps in which every call failed with the same error (digits ignored), unless a failure prints three or more lines a quarter of which are new (failing tests, compiler output: the model is learning something); a failure with no message (a search that found nothing) is not one and falls to the futile lane | 3 | 6 |
 | Cycle | the same batch of calls with the same result 3 times in a row, or at most two distinct batches in the last 6, one recurring 3 times, each with one result throughout | when it holds | after 2 further repeats |
 | Check | runs of one check failing with the same output, however much was edited between them | 6 | 12 |
 | Waiting | wait steps since the last Strong step | 24, on every surface | 96, on headless turns only |
@@ -289,13 +289,16 @@ Six tasks from suite2 chosen for long turns and guard history (`b01-stockctl-lon
 | Binary | Runs | Solved per run | Model calls per run | Tool calls per run | Agent wall per run | Tokens per run |
 |---|---|---|---|---|---|---|
 | before (`forge-after1-734e482d`) | 3 | 4, 5, 4 | 117, 134, 125 | 249, 286, 269 | 913, 1074, 1576 s | 2.65M, 3.43M, 3.41M |
-| progress ledger (`edd56f4c`, then `ad3bc5b3`) | 3 | 4, 4, 4 | 132, 103, 118 | 265, 218, 254 | 1287, 1218, 1151 s | 3.12M, 1.96M, 2.68M |
+| first ledger (`edd56f4c`, then `ad3bc5b3`) | 3 | 4, 4, 4 | 132, 103, 118 | 265, 218, 254 | 1287, 1218, 1151 s | 3.12M, 1.96M, 2.68M |
+| this version (`1bb97cf8`) | 2 | 5, 5 | 106, 123 | 245, 266 | 1029, 1019 s | 2.26M, 2.58M |
 
-Run-to-run spread from the model is larger than the difference between the binaries (`a05` and
-`b07` swing by a factor of two in tokens either way), so this shows no regression, not an
-improvement. No turn came near a step cap, so the headline result is about events:
+Run-to-run spread from the model is larger than the difference between the binaries: `a04` fails
+in all 8 runs of every binary, and `a05` is solved in 1 of the 3 earliest runs, 0 of 3 with the
+first ledger and 2 of 2 now, which is the model's variance and not something the ledger did. So
+this shows no regression, not an improvement. No turn came near a step cap, so the headline
+result is about events:
 
-- **Ledger events in the 18 task runs of the new binaries: none.** No nudge, no stop. The runs did
+- **Ledger events in the 30 task runs of the new binaries: none.** No nudge, no stop. The runs did
   include harness gates (the existing-tests push-back in `a05` and `b01`, and the "latest test
   check failed" continue gate twice in one `b01`, a 41-call turn); those steps are neutral.
 - **The old guards in 18 task runs: one false alarm.** In `a04` the failure tracker refused the
@@ -303,13 +306,20 @@ improvement. No turn came near a step cap, so the headline result is about event
   (`tools.read_file(...) failed: doom-loop`), although the file had been edited in between.
   `ToolFailureTracker` is gone and a repeat now has to return an identical result three times.
 
-Against the real binary with a zero-quota stub model that never stops calling tools:
+The bench never loops, so the cases the ledger is for are measured against the real binary with a
+scripted zero-quota stub model behind an OpenAI-compatible endpoint (headless, defaults;
+`runner2/live_stub.sh` in the bench kit):
 
-| Scenario | Before | Now |
+| Scenario | Before (`forge-after1-734e482d`) | Now |
 |---|---|---|
-| the same `read_file` forever | the third call refused outright, nudge, halt after the fourth; exit 0 | nudge at step 3, stop at 5, `ERROR: Stopped: the same calls returning the same results for 5 steps ... Resume: forge run --continue`, exit 1 |
-| endless new reads (headless, defaults) | `reached soft step cap 100 at step 100 ...`, then `hard step ceiling 400`, 40,000 billable input tokens | idle nudge at 60, stop at 200, 20,000 tokens |
-| 12 distinct reads, then an answer | finishes | finishes, nothing printed |
+| the same `read_file` forever | halted after 4 calls, exit 0 | nudge at step 3, stop at 5, `ERROR: Stopped: the same calls returning the same results for 5 steps ... Resume: forge run --continue`, exit 1 |
+| 40 polls of a running background job (`shell_job status`) | halted after 5 calls | finishes, nothing printed |
+| 120 such polls | | headless: stop at 96, `still waiting for something that is not ready`, exit 1; attended: one nudge at 24, no stop |
+| 40 distinct silent shell commands, each writing a new file | halted after 12 calls | finishes |
+| 8 failing scripts, each printing different output | halted after 6 calls | finishes |
+| a tracked file rewritten through 3 states, 60 steps | halted after 26 calls | stopped after 13 calls |
+| 30 different edits, each followed by the same failing test | ran all 61 calls | nudge at 12, stop at 24 (`the same check failing the same way after every edit (12 runs)`) |
+| 250 novel reads | ran all 251 calls | headless: stop at 200; attended: finishes |
 
 `forge mcp-serve` driven over stdio the way a bridged model would: the third identical call returns
 the nudge in front of its result, the fifth returns the refusal, every later call is refused, the

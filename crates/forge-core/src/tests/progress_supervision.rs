@@ -497,6 +497,103 @@ async fn a_shell_migration_outside_git_is_progress_too() {
     assert_eq!(h.errors("Stopped:"), 0);
 }
 
+/// A shell loop that grows an untracked log and reports its length: new output every step and a
+/// new tree state every step, so nothing is ever stale.
+#[tokio::test]
+async fn growing_an_untracked_file_from_the_shell_is_progress() {
+    let mut h = git_harness("echo more >> log.txt; wc -l log.txt", 90);
+    let out = h.session.run_turn("keep the log going").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.warnings("progress check"), 0);
+    assert_eq!(h.errors("Stopped:"), 0);
+}
+
+/// Silent commands that only write gitignored outputs leave git nothing to see; each one is a
+/// command not run before, which is what the ledger can tell.
+#[tokio::test]
+async fn silent_commands_that_write_only_gitignored_outputs_are_not_idleness() {
+    let mut h = git_harness_with(
+        |n| format!("mkdir -p out && printf 'part {n}\\n' > out/part_{n}.txt"),
+        30,
+        true,
+    );
+    std::fs::write(h.dir.path().join(".gitignore"), "out/\n").unwrap();
+    git(h.dir.path(), &["add", ".gitignore"]);
+    git(h.dir.path(), &["commit", "-q", "-m", "ignore out"]);
+    let out = h.session.run_turn("generate the parts").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.warnings("progress check"), 0);
+    assert_eq!(h.errors("Stopped:"), 0);
+}
+
+/// A command that is cut by its time limit and called again is how a run longer than the cap is
+/// watched: it is a wait, however identical the answers.
+#[tokio::test]
+async fn a_watch_cut_by_the_shell_time_limit_and_repeated_is_a_wait() {
+    let provider = Scripted::new(Box::new(|n| {
+        (n < 9).then(|| {
+            (
+                "Watching the run again.".to_string(),
+                tool(
+                    "shell",
+                    serde_json::json!({"command": "sleep 30", "timeout_secs": 1}),
+                ),
+            )
+        })
+    }));
+    let mut h = Harness::new(provider, PermissionMode::Bypass, true, |_| {});
+    let out = h.session.run_turn("watch the CI run").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.warnings("progress check"), 0);
+    assert_eq!(h.warnings("Stopped:"), 0);
+}
+
+/// `sleep`, then the job's log, alternately: the sleep always answers the same and the log keeps
+/// growing, which is two calls that look alike only to a ledger that ignores what they are for.
+#[tokio::test(flavor = "multi_thread")]
+async fn following_a_job_log_with_a_sleep_between_reads_is_a_wait() {
+    let _only_one = JOB_TESTS.lock().await;
+    let state = tempfile::tempdir().unwrap();
+    std::env::set_var("FORGE_STATE_DIR", state.path());
+    let id = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let plan_id = Arc::clone(&id);
+    let mut h = Harness::new(
+        Scripted::new(Box::new(move |n| {
+            (n < 16).then(|| {
+                if n % 2 == 0 {
+                    (
+                        "Giving the build a moment.".to_string(),
+                        tool("shell", serde_json::json!({"command": "sleep 0.3"})),
+                    )
+                } else {
+                    (
+                        "Reading the log again.".to_string(),
+                        tool(
+                            "shell_job",
+                            serde_json::json!({"action": "log", "id": plan_id.load(std::sync::atomic::Ordering::SeqCst)}),
+                        ),
+                    )
+                }
+            })
+        })),
+        PermissionMode::AcceptEdits,
+        true,
+        |_| {},
+    );
+    let job = start_job(
+        &h,
+        "i=0; while true; do i=$((i+1)); echo \"building crate $i\"; sleep 0.1; done",
+    )
+    .await;
+    id.store(job, std::sync::atomic::Ordering::SeqCst);
+    let out = h.session.run_turn("wait for the build").await;
+    stop_job(&h, job).await;
+    let out = out.unwrap();
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.warnings("progress check"), 0);
+    assert_eq!(h.warnings("Stopped:"), 0);
+}
+
 /// Different edits, then the same failing test, again and again: the edits do not touch what
 /// fails. No edit repeats, so only the check's own verdict gives it away.
 #[tokio::test]
@@ -631,6 +728,10 @@ async fn bypass_mode_with_a_person_attending_is_not_stopped_for_idleness() {
     assert_eq!(h.errors("Stopped:"), 0);
 }
 
+/// The jobs registry lives under a process-wide state directory, so tests that start jobs take
+/// turns.
+static JOB_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn start_job(h: &Harness, command: &str) -> u32 {
     let shell = h.session.tools.get("shell").expect("shell tool");
     let out = shell
@@ -658,9 +759,7 @@ async fn stop_job(h: &Harness, id: u32) {
 /// Waits on a job that is still running, polling it with `shell_job status` once per step the
 /// way the harness tells the model to.
 async fn poll_a_running_job(polls: usize, attended: bool) -> (Harness, LoopOutcome) {
-    // The jobs registry lives under a process-wide state directory.
-    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _only_one = ONE_AT_A_TIME.lock().await;
+    let _only_one = JOB_TESTS.lock().await;
     let state = tempfile::tempdir().unwrap();
     std::env::set_var("FORGE_STATE_DIR", state.path());
     let id = Arc::new(std::sync::atomic::AtomicU32::new(0));
