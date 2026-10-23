@@ -320,13 +320,13 @@ fn git_runs_nothing_of_its_own(rest: &[&str], guard: &Guard) -> bool {
     if git_subcommand(rest) != Some("diff") {
         return true;
     }
-    let operands: Vec<&str> = rest
+    let after_subcommand = rest
         .iter()
         .copied()
         .skip_while(|word| GIT_LEADING_FLAGS.contains(word))
         .skip(1)
-        .filter(|word| !word.starts_with('-') || *word == "-")
-        .collect();
+        .collect::<Vec<_>>();
+    let operands = operand_words(&after_subcommand);
     repo.work_tree
         .as_deref()
         .is_some_and(|tree| guard.all_inside(tree, &operands))
@@ -427,15 +427,30 @@ fn is_line_range_print(script: &str) -> bool {
     }
 }
 
+/// The words a command takes as files, not as options: everything that does not start with `-`
+/// (a lone `-` included), and every word after `--` whatever it starts with. A file named `-esc`
+/// is an operand after `--`, and a symlink so named can lead a recursive search out of the
+/// workspace.
+fn operand_words<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    let mut after_dashes = false;
+    let mut operands = Vec::new();
+    for &word in words {
+        if after_dashes {
+            operands.push(word);
+        } else if word == "--" {
+            after_dashes = true;
+        } else if word == "-" || !word.starts_with('-') {
+            operands.push(word);
+        }
+    }
+    operands
+}
+
 fn operands_are_safe(cmd: &str, rest: &[&str], guard: &Guard) -> bool {
     if !rest.iter().all(|word| guard.word_is_safe(word)) {
         return false;
     }
-    let operands: Vec<&str> = rest
-        .iter()
-        .copied()
-        .filter(|w| !w.starts_with('-'))
-        .collect();
+    let operands = operand_words(rest);
     match recursive_search(cmd, rest, &operands, guard) {
         None => true,
         Some(search) => guard.search_is_safe(&operands, search == Search::SkipsHidden),

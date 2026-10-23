@@ -226,6 +226,10 @@ pub(super) fn shared_args_read_only(cmd: &str, rest: &[&str]) -> Option<bool> {
         // `sort -o` / `tree -o` write a file. `sort` also execs the `--compress-program` it is
         // given and writes spill files under `-T`.
         "uniq" => uniq_operands(rest) <= 1 && !rest.iter().any(|w| w.contains(['*', '?', '['])),
+        // bash's builtin `printf -v NAME` assigns a shell variable, `-v 'a[$(cmd)]'` evaluates the
+        // subscript, and `-v PATH` or `-v HOME` changes what every later statement of the line
+        // runs or reads. Only a format string, not an option, may come first.
+        "printf" => rest.first().is_none_or(|first| !first.starts_with('-')),
         "sort" => {
             !(rest
                 .iter()
@@ -325,7 +329,8 @@ fn tag_only_lists(args: &[&str]) -> bool {
 /// A git argument that writes a file or runs a helper. `--output`, `--ext-diff` and `--textconv`
 /// run helpers or write files; `-c` injects config; `-O<cmd>` is `git grep`'s pager command and may
 /// sit inside a cluster of short flags (`-nOsh`); `--exec*` and `--config-env` redirect what runs;
-/// `--show-signature` and the `%G` placeholders run `gpg` over a signature the repository supplied;
+/// `--show-signature`, the `%G` placeholders and `for-each-ref`'s `signature` atoms run `gpg` over a
+/// signature the repository supplied;
 /// `--submodule` and `--recurse-submodules` read through a submodule's own repository.
 fn git_arg_is_hostile(sub: &str, arg: &str) -> bool {
     let name = arg.split_once('=').map_or(arg, |(name, _)| name);
@@ -344,6 +349,8 @@ fn git_arg_is_hostile(sub: &str, arg: &str) -> bool {
     }
     arg.starts_with("--output")
         || arg == "-c"
+        // `%(signature)` atoms and `--sort=signature` verify a signature with `gpg`, as `%G` does.
+        || (sub == "for-each-ref" && arg.contains("signature"))
         || is_short_flag(arg, 'O')
         || arg.starts_with("--exec")
         || arg.contains("%G")
@@ -415,6 +422,8 @@ mod tests {
             "ls 2>&-",
             "git diff --text",
             "git diff --output-indicator-new=+",
+            "printf %s hi",
+            "printf '%s\\n' a b",
             "uniq",
             "uniq -c",
             "uniq calc.py",
@@ -465,6 +474,11 @@ mod tests {
             "git log --show-signature",
             "git log --format=%G? -1",
             "git diff --submodule=diff",
+            "printf -v PATH %s .",
+            "printf -vx %s 1",
+            "printf -v 'a[$(touch pwned)]' %s 1",
+            "printf -v PATH %s . && ls",
+            "git for-each-ref --format=%(signature)",
             "uniq - out",
             "uniq -c - out",
             "uniq -- -x out",

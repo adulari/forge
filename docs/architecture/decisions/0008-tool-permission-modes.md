@@ -89,14 +89,18 @@ file hostname`) written plainly, with no argument that writes, runs code or reac
   count as operands (`uniq - out` writes `out`); `wc`, `du` and `sort` without `--files0-from`;
   the checksum tools without `--check`; `rg` without `--pre`, `--hostname-bin`, `-z`; `tail`
   without `-f`; `diff` without `-l`, `--from-file`, `--to-file`; `sed` only as
-  `sed -n 'N,Mp' [files]`; `file` without `-C -m -f`; `hostname` only as a lookup;
+  `sed -n 'N,Mp' [files]`; `file` without `-C -m -f`; `hostname` only as a lookup; `printf` only
+  with a format first, never an option (bash's builtin `printf -v NAME` assigns a variable,
+  evaluates a subscript like `a[$(cmd)]`, and so can replace `PATH` or `HOME` for the rest of the
+  line);
 - `git` only `status diff log show branch rev-parse ls-files blame grep ls-tree rev-list shortlog
   describe merge-base show-ref for-each-ref name-rev`, plus `tag` in its listing forms, `reflog`
   and `reflog show`, `stash list` and `worktree list`, with `branch` limited to its listing
   forms. Rejected: `-c`, `--output`, `--ext-diff`, `--textconv`, `--open-files-in-pager` and `-O`
   anywhere in a cluster of short flags (`git grep -nOsh x` runs `sh`), `--exec*`, `--config-env`,
-  `--no-index`, `--submodule`, `--recurse-submodules`, `--show-signature` and any `%G` placeholder
-  (they run `gpg` over a signature the repository supplied), and any global option before the
+  `--no-index`, `--submodule`, `--recurse-submodules`, `--show-signature`, any `%G` placeholder
+  and, for `for-each-ref`, any argument naming `signature` (`%(signature)`, `--sort=signature`;
+  they run `gpg` over a signature the repository supplied), and any global option before the
   subcommand (`git -C dir diff` asks). `git remote -v` asks too, since a remote URL often carries
   a token. Long options are matched as getopt-style abbreviations as well, since `sort --out=x` is
   `sort --output=x`, except for the exact options that merely start like one (`git diff --text`).
@@ -125,21 +129,34 @@ file hostname`) written plainly, with no argument that writes, runs code or reac
   not above or at the home directory, and holds no secret file, symlinks followed and a symlink
   that leaves the workspace unprovable. A plain `rg` skips hidden files and directories, so a
   hidden `.env` does not stop it, but a visible `server.pem`, `*.key` or `id_rsa` does.
-  The walk is bounded (50,000 entries, 250 ms); past the bound the call asks.
+  The roots are the operands, which include every word after `--` whatever it starts with (a
+  committed symlink named `-esc` is a root there). The walk is bounded (50,000 entries, 250 ms);
+  past the bound the call asks.
 - `git` runs only in a repository whose own files run nothing (`ask_shell/git_repo.rs`). Git
   runs helpers a repository names: `core.fsmonitor` on `git status`, a `textconv` or external diff
   driver on `git diff`/`show`/`blame`, a pager, the `post-index-change` hook, a promisor remote
   that fetches over the network. Those files can arrive with a checkout (an unpacked archive's
-  `.git`, or a committed directory shaped like a bare repository, which git adopts as soon as the
-  call's `cwd` is inside it). So the repository git would find from the working directory is
-  located the way git locates it (`.git` directory or `gitdir:` file, else a bare-shaped
-  directory), and its config, worktree config, and the config of every submodule repository must
-  contain only keys on a short list of inert ones (`core.bare`, `remote.*.url`, `branch.*.merge`,
-  ...; `core.fsmonitor` only as `true`/`false`). Any other key or section, an `include`, an
-  oversized or unreadable file, or a `post-index-change` or `reference-transaction` hook is a
-  refusal. Outside a repository `git` asks too, because it stops being a repository tool there
-  (`git grep` is `--no-index`, `git diff A B` is `git diff --no-index A B`); and inside one,
-  `git diff` asks when an operand lies outside the work tree, for the same reason.
+  `.git`, a committed directory shaped like a bare repository, which git adopts as soon as the
+  call's `cwd` is inside it, or a nested repository behind a gitlink, whose own config `git
+  status` runs). Finding the repository and reading its config is git's own job, with rules a
+  second implementation here got wrong six ways (which `HEAD` is valid, where whitespace is
+  trimmed, where discovery stops at a mount point, which index entries are submodules), so the
+  check asks git, with commands that only read and run no hook, helper or pager: `rev-parse` for
+  the repository, its work tree and where it looks for hooks, `config --list --show-scope` for the
+  keys of the repository's own config (local and worktree scope) as git parsed them, and
+  `ls-files --stage` for gitlinks, each checked-out one of which is judged the same way, judged by
+  its git directory (a `core.worktree` of its own moves the work tree, not where `git status`
+  runs). Those keys must all be on a short list of inert ones (`core.bare`, `remote.*.url`,
+  `branch.*.merge`, ...; `core.fsmonitor` only as `false`, since `true` starts git's own daemon,
+  which outlives the call). Any other key or section, an `include`, a `post-index-change` or
+  `reference-transaction` hook at the path git resolves for it (so a `core.hooksPath` is judged
+  by where it leads), output past a bound, a `git` that fails or takes over five seconds in all, a
+  relative `PATH` entry that holds a `git`, or more than 64 nested repositories is a refusal.
+  Outside a repository `git` asks too, because it stops being a repository tool there (`git diff
+  A B` is `git diff --no-index A B`), as it does where git will not open the repository (a
+  dubious owner, a mount point inside the checkout); inside one, `git diff` asks when an operand
+  lies outside the work tree, for the same reason. It needs git 2.31 or later (`rev-parse
+  --path-format`); an older git asks.
 
 **Rationale.** Claude Code does not prompt for these commands, and the prompt buys little: the
 calls cannot change anything, and the ones that can still prompt. In the scripted TUI benchmark
@@ -154,9 +171,9 @@ rest of the broker.
 - The user's own global and system git config and the process environment are trusted: a
   `diff.<driver>.textconv` or `core.fsmonitor` there still runs under `git diff`/`git status`,
   and a driver those files define runs on whatever attributes a repository selects. What a
-  checkout brings with it is what `git_repo.rs` reads. `git status` may refresh `.git/index`.
-  Some repositories ask for want of a key the list does not know (`core.hooksPath` from husky,
-  an LFS filter, `http.*.extraheader` from CI): that is a prompt, not a hole.
+  checkout brings with it is what `git_repo.rs` asks git about. `git status` may refresh
+  `.git/index`. Some repositories ask for want of a key the list does not know (an LFS filter,
+  `http.*.extraheader` from CI): that is a prompt, not a hole.
 - Secrets are judged by the paths a command names or walks, not by what `git` can print from the
   repository's history. `git log -p`, `git show`, `git diff` and `git grep` over tracked files can
   show a file that was once committed, or a tracked `.env` that was modified: `.env` named on the
@@ -184,6 +201,23 @@ passed the home check; `.git/config` could carry `core.fsmonitor`. A further hol
 fixing them: `>&1file` passed the redirect stripper as `>&1` and wrote `1file`. Each has a
 regression test in `ask_shell/tests.rs`, `ask_shell/git_repo/tests.rs` and `readonly_shell.rs`.
 Not closed, by design: the history content above.
+
+**Review findings, round 2** (two more reviewers attacked what round 1 added; all closed).
+`printf -v` ran a command (`a[$(cmd)]`) and replaced `PATH`/`HOME` for the rest of the line, in
+Read-only mode too; `for-each-ref --format=%(signature)` ran `gpg`; a dash-named operand after `--`
+(`diff -r -- -esc src`, a committed symlink out of the workspace) hid the search root from the
+confinement check. In the repository check, six disagreements with git, all from reimplementing
+it: a decoy `HEAD` hid the bare-shaped repository git adopts, and a plain `git clone` could carry
+one; `.trim()` on a `gitdir:` file, on `commondir` and on `core.hooksPath` named a different
+directory than git does (any Unicode blank); a nested repository behind a gitlink, or behind a
+symlinked `modules/` entry, was never inspected; a mount point inside the checkout made git
+stop where the inspection went on (`git diff . ../empty` then dumped untracked files); and
+`core.fsmonitor = true` started a persistent daemon. All but the gitlinks went away by asking git
+instead of reading its files. One bug of the rewrite itself, found while testing it: judging a
+nested repository only when its work tree is the directory it sits in missed one whose own
+`core.worktree` points elsewhere, whose config `git status` still runs; they are judged by git
+directory now. The tests build the layouts with real git, and a variant of each was run end to end
+against the decision, including the mount case in a user namespace.
 
 **Alternatives rejected.** Reusing the Read-only classifier unchanged (it admits command
 substitution and `jq`, which can print the environment); asking the `auto` temper's classifier model

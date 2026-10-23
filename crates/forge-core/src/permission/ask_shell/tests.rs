@@ -164,6 +164,10 @@ const ALLOWED: &[&str] = &[
     "git worktree list --porcelain",
     "rg --files src | wc -l",
     "printf '%s\\n' b a | sort",
+    "printf %s hello",
+    "printf '%s %s\\n' a b",
+    "git for-each-ref --format='%(refname:short) %(objectname:short)' refs/heads",
+    "git for-each-ref --sort=-committerdate refs/heads",
     "whoami",
     "uname -a",
     "id",
@@ -649,6 +653,48 @@ const REFUSED: &[(&str, &str)] = &[
     ("file compiles a magic file", "file --compile"),
     ("a symlink out of the searched tree", "grep -rn add escape"),
     ("a symlink out of the searched tree", "grep -R add escape"),
+    // Round 2: bash's printf is a variable assignment with -v.
+    ("printf assigns a shell variable", "printf -v x %s 1"),
+    ("printf assigns a shell variable", "printf -vx %s 1"),
+    (
+        "printf assigns a shell variable",
+        "printf -v 'a[$(touch pwned)]' %s 1",
+    ),
+    (
+        "printf assigns a shell variable",
+        "printf -v PATH %s . && ls",
+    ),
+    (
+        "printf assigns a shell variable",
+        "printf -v HOME %s ./h && git status",
+    ),
+    ("printf assigns a shell variable", "printf -- '%s' x"),
+    ("printf assigns a shell variable", "printf --help"),
+    // Round 2: ref-filter atoms that verify a signature run gpg like %G does.
+    (
+        "for-each-ref verifies signatures",
+        "git for-each-ref --format='%(signature)' refs/heads",
+    ),
+    (
+        "for-each-ref verifies signatures",
+        "git for-each-ref --format='%(signature:grade)'",
+    ),
+    (
+        "for-each-ref verifies signatures",
+        "git for-each-ref --format %(signature:signer)",
+    ),
+    (
+        "for-each-ref verifies signatures",
+        "git for-each-ref --sort=signature:grade",
+    ),
+    (
+        "for-each-ref verifies signatures",
+        "git for-each-ref --sort signature",
+    ),
+    (
+        "for-each-ref verifies signatures",
+        "git for-each-ref --format=%(contents:signature)",
+    ),
 ];
 
 #[test]
@@ -1036,9 +1082,18 @@ fn git_runs_only_in_a_repository_whose_config_runs_nothing() {
         // Nothing but git is judged by the repository's config.
         assert!(allows(&f, "ls"), "{hostile:?}");
     }
+    // `true` starts git's own fsmonitor daemon, which outlives the call; only `false` is inert.
+    for starts_a_daemon in ["fsmonitor = true", "fsmonitor", "fsmonitor = \"true\""] {
+        std::fs::write(
+            &config,
+            format!("{INERT_CONFIG}[core]\n\t{starts_a_daemon}\n"),
+        )
+        .unwrap();
+        assert!(ask("git status"), "{starts_a_daemon}");
+    }
     std::fs::write(
         &config,
-        format!("{INERT_CONFIG}[core]\n\tfsmonitor = true\n"),
+        format!("{INERT_CONFIG}[core]\n\tfsmonitor = false\n"),
     )
     .unwrap();
     assert!(allows(&f, "git status"));
@@ -1348,4 +1403,105 @@ fn the_setting_turns_the_auto_allow_off() {
         ),
         Allow
     );
+}
+
+// ---- round 2 ----
+
+#[test]
+fn a_dash_named_operand_after_double_dash_is_still_a_search_root() {
+    let f = fixture();
+    // A committed symlink named `-esc` that leaves the workspace. Before `--` the word is an
+    // option; after it, it is the directory the search walks.
+    symlink(f.home.join("docs"), f.root.join("-esc")).unwrap();
+    for command in [
+        "diff -r -- -esc src",
+        "diff -raN -- -esc src",
+        "diff -- -esc src",
+        "diff -- src -esc",
+        "grep -rn plain src -- -esc",
+        "grep -rn plain -- -esc",
+        "grep -R plain -- src -esc",
+        "rg plain src -- -esc",
+        "rg -uu -g environ plain src -- -esc",
+        "git diff -- -esc",
+    ] {
+        assert!(!allows(&f, command), "{command}");
+        assert_eq!(
+            decide_ask(&f, command, &rules()),
+            PermissionDecision::Ask,
+            "{command}"
+        );
+    }
+    // The words after `--` are checked, not every dash-led word: roots inside the workspace and
+    // a `--` with nothing odd after it still qualify.
+    for command in [
+        "grep -rn add -- src",
+        "grep -rn add src -- src",
+        "rg add -- src",
+        "diff -r -- src src",
+        "cat -- calc.py",
+    ] {
+        assert!(allows(&f, command), "{command}");
+    }
+}
+
+#[test]
+fn a_dash_named_symlink_to_a_secret_is_judged_after_double_dash_too() {
+    let f = fixture();
+    symlink(f.root.join(".env"), f.root.join("-token")).unwrap();
+    assert!(!allows(&f, "cat -- -token"));
+    assert!(!allows(&f, "grep -n KEY -- -token"));
+}
+
+#[test]
+fn printf_keeps_its_format_but_loses_its_options() {
+    let f = fixture();
+    for command in ["printf %s hello", "printf '%s\\n' a b | sort", "printf hi"] {
+        assert!(allows(&f, command), "{command}");
+    }
+    for command in [
+        "printf -v 'a[$(touch pwned)]' %s 1",
+        "printf -v PATH %s . && ls",
+        "printf -v HOME %s ./h && git status",
+        "printf -vPATH %s .",
+        "printf -- %s x",
+    ] {
+        assert!(!allows(&f, command), "{command}");
+        assert_eq!(
+            decide_ask(&f, command, &rules()),
+            PermissionDecision::Ask,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn a_decoy_head_does_not_hide_the_bare_repository_git_adopts() {
+    let f = fixture();
+    // A clone brings this along: a directory shaped like a bare repository whose config runs a
+    // command, and below it a directory with a garbage `HEAD`, which git skips.
+    let hostile = f.root.join("tests/fixture");
+    std::fs::create_dir_all(hostile.join("objects")).unwrap();
+    std::fs::create_dir_all(hostile.join("refs")).unwrap();
+    std::fs::write(hostile.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        hostile.join("config"),
+        "[core]\n\tbare = false\n\tworktree = ..\n\tfsmonitor = touch ran; echo\n",
+    )
+    .unwrap();
+    let decoy = hostile.join("inner");
+    std::fs::create_dir_all(decoy.join("objects")).unwrap();
+    std::fs::create_dir_all(decoy.join("refs")).unwrap();
+    std::fs::write(decoy.join("HEAD"), "garbage\n").unwrap();
+    for command in ["git status", "git log -p", "git diff"] {
+        assert!(allows(&f, command), "{command} from the workspace");
+        assert!(
+            !allows_in(&f, command, "tests/fixture"),
+            "{command} in the hostile directory"
+        );
+        assert!(
+            !allows_in(&f, command, "tests/fixture/inner"),
+            "{command} below the decoy"
+        );
+    }
 }
