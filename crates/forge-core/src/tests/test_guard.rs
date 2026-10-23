@@ -322,19 +322,33 @@ fn guidance_matches_the_strength_of_the_request() {
 #[test]
 fn a_harness_nudge_does_not_speak_for_the_person() {
     let nudge = |text: String| Message::user(text).with_kind(forge_types::MessageKind::Nudge);
-    // The push-back after a restore says "fix the production code rather than the tests".
-    let pushed_back = push_back(
-        false,
-        &["tests/test_a.py".to_string()],
-        std::path::Path::new("/tmp/edits.patch"),
-    );
-    let transcript = vec![
-        Message::user("Fix the parser. Leave the existing tests alone."),
-        Message::assistant("ok"),
-        nudge(pushed_back),
-    ];
-    assert!(session_requires_pristine_existing_tests(&transcript));
-    assert_eq!(level(false, &transcript, true), Level::AnyEdit);
+    // The push-back after a restore says "fix the production code rather than the tests", and
+    // the one for a hiding edit says to re-apply a changed expectation.
+    for (level_pushed, why) in [
+        (Level::Frozen, Why::Requested),
+        (Level::Guarded, Why::AlwaysTrue),
+    ] {
+        let edits = TestEdits {
+            restore: vec![crate::test_guard::Restore {
+                path: "tests/test_a.py".to_string(),
+                why: vec![why],
+            }],
+            ..TestEdits::default()
+        };
+        let pushed_back = push_back(
+            level_pushed,
+            &edits,
+            Some(std::path::Path::new("/tmp/edits.patch")),
+            None,
+        );
+        let transcript = vec![
+            Message::user("Fix the parser. Leave the existing tests alone."),
+            Message::assistant("ok"),
+            nudge(pushed_back),
+        ];
+        assert!(session_requires_pristine_existing_tests(&transcript));
+        assert_eq!(level(false, &transcript, true), Level::Frozen);
+    }
 
     // A nudge that talks about passing tests does not arm the keep-it-green guard.
     let transcript = vec![
@@ -349,7 +363,7 @@ fn a_harness_nudge_does_not_speak_for_the_person() {
     let transcript = vec![Message::user(
         "Run the tests again and make sure they pass.",
     )];
-    assert_eq!(level(false, &transcript, false), Level::Rewrites);
+    assert_eq!(level(false, &transcript, false), Level::Guarded);
 }
 
 #[test]
@@ -1215,10 +1229,10 @@ async fn a_final_pass_request_does_not_restore_or_push_back() {
         widened
     );
     assert!(
-        !session.transcript.iter().any(|m| m
-            .content
-            .contains("existing tests are the specification")
-            || m.content.contains("git apply")),
+        !session
+            .transcript
+            .iter()
+            .any(|m| m.content.contains(KEEP_TESTS_GUIDANCE) || m.content.contains("git apply")),
         "a review round is given neither the keep-the-tests text nor a restore push-back"
     );
     let _ = std::fs::remove_dir_all(&dir);
