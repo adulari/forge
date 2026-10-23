@@ -234,8 +234,20 @@ pub(super) fn write_catalog(catalog: &ModelCatalog) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_vec(catalog) {
-        let _ = std::fs::write(&path, json);
+        let _ = write_beside_then_rename(&path, &json);
     }
+}
+
+/// Write `bytes` to a sibling file and rename it over `path`: a refresh that dies mid-write (a
+/// one-shot exits while its background discovery is still running) must not leave a truncated
+/// catalog that every later startup reads as "no catalog" and waits for a full discovery again.
+fn write_beside_then_rename(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
 }
 
 /// Delete the on-disk catalog cache so the next lookup re-discovers from scratch. A new
@@ -906,5 +918,48 @@ mod startup_refresh_tests {
             CATALOG_STARTUP_REFRESH_AFTER_SECS
         )));
         assert!(startup_refresh_due(Some(CATALOG_CACHE_MAX_AGE_SECS + 1)));
+    }
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::write_beside_then_rename;
+
+    #[test]
+    fn a_rewrite_replaces_the_file_and_leaves_no_sibling_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        write_beside_then_rename(&path, b"{\"models\":[\"a\"]}").unwrap();
+        write_beside_then_rename(&path, b"{\"models\":[\"b\"]}").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"models\":[\"b\"]}"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["catalog.json"], "no temporary file may remain");
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_previous_catalog_and_leaves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        std::fs::write(&path, "previous").unwrap();
+        // The rename target is a directory, so the final step fails after the temp file was written.
+        let blocked = dir.path().join("blocked.json");
+        std::fs::create_dir(&blocked).unwrap();
+
+        assert!(write_beside_then_rename(&blocked, b"new").is_err());
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous");
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["blocked.json", "catalog.json"]);
     }
 }

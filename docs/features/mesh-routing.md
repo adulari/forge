@@ -218,6 +218,35 @@ or key is swept at once instead of after the one-hour gate. Not hot-reloaded: ot
 sections (session config is read at startup) and multi-key rotation pools for a provider added
 mid-session (single-key providers work).
 
+#### What discovery starts, and when
+
+Discovery is the only part of a start that runs other programs, and it is never what the first
+token needs, so it is kept off that path and kept small:
+
+| Start | Discovery |
+|---|---|
+| `forge run -p --model <provider>::<model>` (one fully-qualified model, no `pin_failover`) | none: no inline wait, no background refresh. A pinned one-shot dispatches the pin as written and exits before a refresh would finish |
+| the same pin in the TUI | none before the first frame; the refresh starts behind it when the cache is missing, over an hour old, or lacks a routable bridge |
+| a pin set, `pin_failover`, or a bare alias | as unpinned: the catalog ranks the members, the fallback chain or the alias |
+| unpinned, catalog cached | the cache routes at once; a refresh starts behind the turn when it is over an hour old |
+| unpinned, first run on a machine | one bounded (12 s) wait, then the real catalog routes the turn |
+
+What a pass asks each installed bridge, and what that costs (a busy 32-core machine):
+
+| Program | Why | Cost |
+|---|---|---|
+| `claude -p --input-format stream-json ... --strict-mcp-config` plus `claude --help`, together | the models the account can run (initialize reply) and the aliases `--help` names | 2.2 s, 300 MB; the probe runs in an empty directory, so claude indexes none of your project |
+| `codex debug models` | the catalog the ChatGPT backend lists | 0.25 s, 110 MB |
+| `agy models` | Antigravity's model list, fetched over the network | 1.8 s |
+
+`agy` has no flag that skips its MCP servers, hooks or status line, and a plain `agy models` starts
+every server in `~/.gemini/antigravity/mcp_config.json` (six `npx` servers: 1.07 GB for the list).
+Forge therefore runs it with a scratch `HOME` that holds a link to the one file it needs, its OAuth
+token (490 MB, no MCP server, no hook). If agy answers "please sign in" from that home, Forge asks
+again with your real environment, so the isolation can never be what drops a signed-in bridge. Every
+probe runs at nice 10, in its own process group (a probe that times out takes the helpers it started
+down with it) and under a timeout (5 s for the local CLIs, 30 s for agy).
+
 A tier a **config file** pins under `[mesh.models]` overrides auto-discovery for that tier: its
 models lead the candidate list, in the order written, and the routing rationale reads
 `configured [mesh.models].<tier>: <model>`. Only tiers present in a loaded `config.toml` count —

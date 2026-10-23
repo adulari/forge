@@ -301,10 +301,15 @@ impl CliKind {
     /// nothing must never be indistinguishable from a CLI that happened to advertise exactly the
     /// aliases Forge hardcodes — see [`Self::bridge_models_detailed`].
     pub async fn detect_models_result(self) -> Result<Vec<String>, String> {
+        let mut claude_help = None;
         if self == CliKind::ClaudeCode {
-            if let Some(initialization) =
-                probe_claude_initialization_response(self.default_binary()).await
-            {
+            // Both answers come from the same CLI and both are needed on the success path, so they
+            // start together: the slower one sets the wall time instead of their sum.
+            let (initialization, help) = tokio::join!(
+                probe_claude_initialization_response(self.default_binary()),
+                run_model_probe(self.default_binary(), &["--help"], self.probe_timeout()),
+            );
+            if let Some(initialization) = initialization {
                 let advertised = claude_advertised_models(initialization.models);
                 if !advertised.is_empty() {
                     // The initialize response is the picker's list, not the CLI's full
@@ -312,21 +317,27 @@ impl CliKind {
                     // NOTHING for Fable, while `claude --model fable` answers on the same
                     // install. `--help` is the CLI's own documentation of `--model` and does
                     // name it, so the two are unioned; both are non-billing.
-                    let documented =
-                        run_model_probe(self.default_binary(), &["--help"], self.probe_timeout())
-                            .await
-                            .map(|out| parse_claude_model_aliases(&out))
-                            .unwrap_or_default();
+                    let documented = help
+                        .as_ref()
+                        .map(|out| parse_claude_model_aliases(out))
+                        .unwrap_or_default();
                     return Ok(merge_claude_aliases(advertised, &documented));
                 }
             }
+            claude_help = Some(help);
         }
         let args: &[&str] = match self {
             CliKind::ClaudeCode => &["--help"],
             CliKind::Antigravity => &["models"],
             CliKind::Codex => &["debug", "models"],
         };
-        let out = run_model_probe(self.default_binary(), args, self.probe_timeout()).await?;
+        let out = match (claude_help, self) {
+            (Some(help), _) => help?,
+            (None, CliKind::Antigravity) => {
+                model_probe::agy_models_output(self.default_binary(), self.probe_timeout()).await?
+            }
+            (None, _) => run_model_probe(self.default_binary(), args, self.probe_timeout()).await?,
+        };
         let models = match self {
             CliKind::ClaudeCode => parse_claude_model_aliases(&out),
             CliKind::Antigravity => parse_agy_models(&out),
@@ -487,6 +498,8 @@ fn claude_control_probe_args() -> Vec<String> {
         String::new(),
         "--setting-sources".into(),
         String::new(),
+        // No MCP server of the user's (global, project or plugin) is started for a capability read.
+        "--strict-mcp-config".into(),
     ]
 }
 
@@ -554,7 +567,9 @@ async fn probe_claude_initialization_response(binary: &str) -> Option<ClaudeInit
         .stderr(Stdio::null())
         .kill_on_drop(true);
     apply_claude_bridge_home(CliKind::ClaudeCode, &mut cmd);
+    model_probe::quiet_probe(&mut cmd);
     let mut child = cmd.spawn().ok()?;
+    let pid = child.id();
     let mut stdin = child.stdin.take()?;
     let stdout = child.stdout.take()?;
     let request_id = "forge-capabilities";
@@ -563,6 +578,7 @@ async fn probe_claude_initialization_response(binary: &str) -> Option<ClaudeInit
         || stdin.write_all(b"\n").await.is_err()
         || stdin.shutdown().await.is_err()
     {
+        model_probe::kill_group(pid);
         let _ = child.start_kill();
         let _ = child.wait().await;
         return None;
@@ -588,6 +604,7 @@ async fn probe_claude_initialization_response(binary: &str) -> Option<ClaudeInit
     .await
     .ok()
     .flatten();
+    model_probe::kill_group(pid);
     let _ = child.start_kill();
     let _ = child.wait().await;
     result
@@ -810,28 +827,7 @@ fn parse_claude_model_aliases(help: &str) -> Vec<String> {
 /// in to view available models") because that, not a generic "discovery failed", is what tells a
 /// user what to do about it.
 async fn run_model_probe(binary: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
-    let owned: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
-    let label = format!("`{binary} {}`", args.join(" "));
-    let mut cmd = bridge_command(binary, &owned);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    match tokio::time::timeout(timeout, cmd.output()).await {
-        Ok(Ok(out)) if out.status.success() => {
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        }
-        Ok(Ok(out)) => Err(format!(
-            "{label} {}: {}",
-            match out.status.code() {
-                Some(code) => format!("exited {code}"),
-                None => "was killed by a signal".to_string(),
-            },
-            probe_failure_message(&out.stderr, &out.stdout)
-        )),
-        Ok(Err(e)) => Err(format!("{label} could not be launched: {e}")),
-        Err(_) => Err(format!("{label} timed out after {}s", timeout.as_secs())),
-    }
+    model_probe::run_in(binary, args, timeout, None).await
 }
 
 /// The most useful single line a failed probe printed (stderr first, then stdout), clamped so a
