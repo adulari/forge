@@ -4247,8 +4247,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // recap/suggestion/memory provider round-trip never delays the user, a JSONL consumer
         // reading up to `result`, or a one-shot process exit.
         self.emit_terminal_events(&final_text, stop_reason, context_tokens, &active_model)?;
+        turn_trace::mark("post-turn side calls: start");
         self.run_post_turn_side_calls(prompt, &final_text, &recap_tasks_before)
             .await;
+        turn_trace::mark("post-turn side calls: done");
         // The returned outcome carries the SAME `stop_reason` the presenter was told, so a headless
         // caller (`forge run`, the MCP `forge_chat` tool, a subagent) cannot read a no-output turn
         // as a final answer while the TUI shows it as failed.
