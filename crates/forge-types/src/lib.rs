@@ -13,6 +13,7 @@ pub use message_kind::MessageKind;
 mod provider_items;
 pub use provider_items::ProviderItems;
 pub mod child_env;
+pub mod deferred_call;
 pub mod effort;
 pub mod interaction;
 mod permission_mode;

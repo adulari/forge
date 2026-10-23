@@ -10,8 +10,7 @@
 use forge_provider::ToolSpec;
 use serde_json::{json, Map, Value};
 
-pub const TOOL_SEARCH: &str = "tool_search";
-pub const TOOL_CALL: &str = "tool_call";
+pub use forge_types::deferred_call::{TOOL_CALL, TOOL_SEARCH};
 
 /// Advertised up front on both paths. Everything else is deferred behind [`TOOL_SEARCH`] /
 /// [`TOOL_CALL`].
@@ -276,31 +275,15 @@ pub fn unwrap_tool_call(
     if call.name != TOOL_CALL {
         return None;
     }
-    let inner = call
-        .args
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    if inner.is_empty() || inner == TOOL_CALL || inner == TOOL_SEARCH {
-        return Some(Err(
-            "error: tool_call needs the exact name of a tool found with tool_search".to_string(),
-        ));
-    }
-    let args = match ["arguments", "args", "input"]
-        .iter()
-        .find_map(|k| call.args.get(*k))
-    {
-        // Weak models often send the arguments as an escaped JSON string.
-        Some(Value::String(raw)) => serde_json::from_str(raw).unwrap_or(Value::String(raw.clone())),
-        Some(Value::Null) | None => Value::Object(Map::new()),
-        Some(other) => other.clone(),
-    };
-    Some(Ok(forge_types::ToolCall {
-        id: call.id.clone(),
-        name: inner.to_string(),
-        args,
-    }))
+    Some(
+        forge_types::deferred_call::inner_call(&call.args).map(|(name, args)| {
+            forge_types::ToolCall {
+                id: call.id.clone(),
+                name,
+                args,
+            }
+        }),
+    )
 }
 
 #[cfg(test)]
