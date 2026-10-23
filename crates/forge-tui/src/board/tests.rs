@@ -416,6 +416,7 @@ fn signals_are_sorted_danger_first() {
 fn stop_reason_words_maps_known_reasons() {
     assert_eq!(stop_reason_words(Some("no_output")), "no output");
     assert_eq!(stop_reason_words(Some("max_steps")), "hit the step cap");
+    assert_eq!(stop_reason_words(Some("stalled")), "stalled, no progress");
     assert_eq!(
         stop_reason_words(Some("budget_exhausted")),
         "budget exhausted"

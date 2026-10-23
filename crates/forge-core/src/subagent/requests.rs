@@ -264,7 +264,7 @@ pub struct ResolvedAgent {
     /// The temper the agent type asks for; applied only when stricter than the parent's
     /// ([`narrowed_mode`]).
     pub mode: Option<PermissionMode>,
-    /// The agent type's step cap (`maxTurns`), never above `[mesh] max_steps`.
+    /// The agent type's step cap (`maxTurns`), never above `[mesh] max_steps` when that is set.
     pub max_turns: Option<usize>,
     /// The reasoning rung for the child's model calls.
     pub effort: Option<EffortLevel>,

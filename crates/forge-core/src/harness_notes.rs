@@ -16,6 +16,14 @@ impl Session {
         content: impl Into<String>,
     ) -> Result<(), CoreError> {
         let content = content.into();
+        // A harness note that repeats verbatim is the harness talking to itself: drop the copies
+        // past the limit instead of feeding the model the same hint every step.
+        if !self.ledger.admit_note(kind, &content) {
+            return Ok(());
+        }
+        if matches!(kind, MessageKind::Continue | MessageKind::Nudge) {
+            self.ledger.note_gate();
+        }
         let seq = self.next_seq();
         let stored = self
             .store
@@ -29,6 +37,7 @@ impl Session {
     /// must end on a legal user turn, but it is not the task: it never anchors a turn.
     pub(crate) fn push_nudge(&mut self, content: impl Into<String>) -> Result<(), CoreError> {
         let content = content.into();
+        self.ledger.note_gate();
         let seq = self.next_seq();
         let stored = self.store.add_nudge_message(&self.id, seq, &content);
         self.transcript

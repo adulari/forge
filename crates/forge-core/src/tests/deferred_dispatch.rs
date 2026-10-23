@@ -69,12 +69,6 @@ async fn run_wrapped_notebook_edit(
             &Arc::new(AtomicU64::new(0)),
             &mutations,
             &ledger,
-            &mut None,
-            &mut 0,
-            &mut std::collections::VecDeque::new(),
-            &mut false,
-            &mut std::collections::HashMap::new(),
-            &mut false,
             &mut Vec::new(),
         )
         .await

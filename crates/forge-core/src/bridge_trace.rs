@@ -16,14 +16,35 @@ struct BridgedCall {
     outcome: Option<(bool, String)>,
 }
 
+/// How long a bridged model may keep calling tools after `mcp-serve` told it to stop before the
+/// process is killed: a model that obeys answers within seconds, so this is only the bound for
+/// one that does not.
+const STALL_KILL_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, Default)]
 pub(crate) struct BridgeTrace {
     calls: Vec<BridgedCall>,
     model_calls: Option<u64>,
+    /// `mcp-serve` stopped the turn: what the person is told, and when.
+    stall: Option<(String, std::time::Instant)>,
+    /// The model kept starting tools well after the stop.
+    kill: bool,
 }
 
 impl BridgeTrace {
+    pub(crate) fn stalled(&mut self, headline: String) {
+        self.stall
+            .get_or_insert((headline, std::time::Instant::now()));
+    }
+
     pub(crate) fn started(&mut self, name: &str, args: &str) {
+        if self
+            .stall
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > STALL_KILL_AFTER)
+        {
+            self.kill = true;
+        }
         self.calls.push(BridgedCall {
             name: name.to_string(),
             args: args.to_string(),
@@ -45,6 +66,44 @@ impl BridgeTrace {
 
     pub(crate) fn add_model_calls(&mut self, calls: u64) {
         self.model_calls = Some(self.model_calls.unwrap_or(0) + calls);
+    }
+}
+
+/// Run a completion, but give up on it if the bridged model ignores a stop (see
+/// [`kill_requested`]): dropping it kills the bridge process group, exactly as the idle watchdog
+/// does, and the turn ends as stalled on what the model already did. The response is empty and
+/// that call's usage is lost.
+pub(crate) async fn until_killed<F>(
+    completion: F,
+    trace: &std::sync::Arc<std::sync::Mutex<BridgeTrace>>,
+    bridge: bool,
+) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError>
+where
+    F: std::future::Future<
+        Output = Result<forge_provider::ModelResponse, forge_provider::ProviderError>,
+    >,
+{
+    tokio::select! {
+        result = completion => result,
+        () = kill_requested(trace, bridge) => Ok(forge_provider::ModelResponse {
+            reasoning: String::new(),
+            reasoning_items: Vec::new(),
+            content: String::new(),
+            tool_calls: Vec::new(),
+            usage: forge_types::Usage::default(),
+            quotas: Vec::new(),
+        }),
+    }
+}
+
+/// Resolves once the bridged model has ignored a stop for [`STALL_KILL_AFTER`] and started another
+/// tool; never for a model that is not a bridge.
+async fn kill_requested(trace: &std::sync::Arc<std::sync::Mutex<BridgeTrace>>, bridge: bool) {
+    if !bridge {
+        return std::future::pending().await;
+    }
+    while !trace.lock().unwrap().kill {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
 
@@ -71,6 +130,9 @@ impl Session {
         }
         if let Some(calls) = trace.model_calls {
             let _ = self.store.set_usage_api_calls(message_id, calls);
+        }
+        if let Some((headline, _)) = trace.stall {
+            self.bridge_stall = Some(headline);
         }
     }
 }
@@ -106,5 +168,59 @@ mod tests {
         trace.add_model_calls(3);
         trace.add_model_calls(2);
         assert_eq!(trace.model_calls, Some(5));
+    }
+
+    #[test]
+    fn only_a_tool_started_long_after_the_stop_asks_for_the_kill() {
+        let mut trace = BridgeTrace::default();
+        trace.stalled("Stopped: no progress.".into());
+        trace.started("shell", "{}");
+        assert!(
+            !trace.kill,
+            "a call right after the stop is the model finishing up"
+        );
+        trace.stall = Some((
+            "Stopped: no progress.".into(),
+            std::time::Instant::now() - STALL_KILL_AFTER - std::time::Duration::from_secs(1),
+        ));
+        trace.started("shell", "{}");
+        assert!(
+            trace.kill,
+            "a model that keeps working 30 s after the stop is killed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_killed_completion_resolves_empty_and_a_quiet_one_is_left_alone() {
+        let trace = std::sync::Arc::new(std::sync::Mutex::new(BridgeTrace::default()));
+        {
+            let mut t = trace.lock().unwrap();
+            t.stall = Some((
+                "Stopped: no progress.".into(),
+                std::time::Instant::now() - STALL_KILL_AFTER - std::time::Duration::from_secs(1),
+            ));
+            t.started("shell", "{}");
+        }
+        let never = std::future::pending::<
+            Result<forge_provider::ModelResponse, forge_provider::ProviderError>,
+        >();
+        let response = until_killed(never, &trace, true).await.unwrap();
+        assert!(response.content.is_empty() && response.tool_calls.is_empty());
+
+        let quiet = std::sync::Arc::new(std::sync::Mutex::new(BridgeTrace::default()));
+        let done = async {
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                reasoning_items: Vec::new(),
+                content: "finished".into(),
+                tool_calls: Vec::new(),
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        };
+        assert_eq!(
+            until_killed(done, &quiet, true).await.unwrap().content,
+            "finished"
+        );
     }
 }

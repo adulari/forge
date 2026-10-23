@@ -119,7 +119,7 @@ deduplicated; a card's strongest signal is what drives its `Stalled` classificat
 | Danger | `model returned empty responses` | A recent system row mentions "empty response". | Usually the same dead-pin situation as above. |
 | Danger | `stall guard fired` | A recent system row mentions "same sentence" or "stopping to avoid a loop". | The harness already ended the turn; read the Live tab and re-prompt with what it needs. |
 | Warn | `a task has stalled` | A recent system row mentions "not moved for" or "stalled task". | See `docs/features/stalled-tasks.md`; open Tasks to see which one. |
-| Warn | `stopped: <reason>` | Idle, not waiting, last turn's outcome was `"failed"`. `stop_reason_words` renders `StopReason` (`no output`, `hit the step cap`, `budget exhausted`, `interrupted`, …). | Open Overview to see the reason, then re-prompt. |
+| Warn | `stopped: <reason>` | Idle, not waiting, last turn's outcome was `"failed"`. `stop_reason_words` renders `StopReason` (`no output`, `hit the step cap`, `stalled, no progress`, `budget exhausted`, `interrupted`, …). | Open Overview to see the reason, then re-prompt. |
 | Warn | `n recent tool failures` | ≥ 3 of the last 12 tool rows failed. | Open the Tools tab. |
 | Info | `n queued` | Prompts are queued behind the current turn. | Informational — they deliver at the next turn boundary. |
 | Info | `workflow running` | A `/workflow` script is active. | Open Overview or Live for its phases/log. |

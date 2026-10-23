@@ -45,6 +45,7 @@ mod execution;
 pub use execution::sum_usage;
 use execution::{execute_tool, tool_result_failed};
 
+mod progress;
 mod requests;
 pub use requests::{
     cancel_subagent_spec, effective_tools, find_agent, is_write_capable, list_subagents_spec,
@@ -319,20 +320,24 @@ async fn run_agent_loop(
     let mut chain = decision.fallbacks.clone().into_iter();
     let mut active_model = decision.model.clone();
 
-    let max_steps = agent
-        .max_turns
-        .map_or(ctx.config.mesh.max_steps, |n| {
-            n.min(ctx.config.mesh.max_steps)
-        })
-        .max(1);
-    for step in 0..max_steps {
+    let step_limit = progress::step_limit(agent.max_turns, ctx.config.mesh.max_steps);
+    let mut supervisor = progress::ChildSupervisor::new(
+        &ctx.config,
+        ctx.worktree_root
+            .clone()
+            .unwrap_or_else(|| ctx.repo_root.clone()),
+    );
+    let mut stalled: Option<String> = None;
+    for step in 0usize.. {
+        if step_limit.is_some_and(|limit| step >= limit) {
+            break;
+        }
         // Forward the child's streamed deltas so the orchestrator can show live per-child
         // activity (RFC subagent-orchestration Phase 3b), with transparent failover.
         let mut resp = loop {
             on_delta(StreamEvent::Reasoning(format!(
-                "model step {}/{}: waiting for `{active_model}`",
-                step + 1,
-                max_steps
+                "model step {}: waiting for `{active_model}`",
+                progress::step_label(step, step_limit)
             )));
             let activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let sink_activity = Arc::clone(&activity);
@@ -422,11 +427,11 @@ async fn run_agent_loop(
             break;
         }
 
+        let mut observations = Vec::new();
         for call in &resp.tool_calls {
             on_delta(StreamEvent::Reasoning(format!(
-                "model step {}/{}: running tool `{}`",
-                step + 1,
-                max_steps,
+                "model step {}: running tool `{}`",
+                progress::step_label(step, step_limit),
                 call.name
             )));
             let result = if call.name == SPAWN_AGENTS_TOOL && can_recurse {
@@ -443,10 +448,15 @@ async fn run_agent_loop(
             // siblings that failed without ever touching a tool showed ✓.)
             let failed = tool_result_failed(&result);
             ok = !failed;
+            let writes = full
+                .get(&call.name)
+                .is_some_and(|tool| tool.side_effect() == forge_types::SideEffect::Write);
+            observations.push(crate::loop_progress::CallObservation::for_call(
+                call, !failed, writes, &result,
+            ));
             on_delta(StreamEvent::Reasoning(format!(
-                "model step {}/{}: tool `{}` {}",
-                step + 1,
-                max_steps,
+                "model step {}: tool `{}` {}",
+                progress::step_label(step, step_limit),
                 call.name,
                 if failed {
                     "failed; continuing"
@@ -465,6 +475,20 @@ async fn run_agent_loop(
             )?;
             transcript.push(Message::tool_result(&call.id, result));
         }
+        if let Some(headline) = supervisor.observe(
+            &resp.content,
+            &observations,
+            &mut transcript,
+            &mut *on_delta,
+        ) {
+            stalled = Some(headline);
+            final_text = resp.content.clone();
+            break;
+        }
+    }
+
+    if let Some(headline) = stalled {
+        return Ok(progress::stalled_outcome(final_text, &headline));
     }
 
     // The model produced no usable final answer — either it kept calling tools until the step
@@ -473,10 +497,7 @@ async fn run_agent_loop(
     // `[agent N]` block and proceed as if the child finished its task.
     if final_text.trim().is_empty() {
         ok = false;
-        final_text = format!(
-            "error: subagent produced no usable final answer (blank output, or it hit the \
-             {max_steps}-step limit without answering)"
-        );
+        final_text = progress::no_answer_error(step_limit);
     }
 
     Ok(SubagentOutcome { final_text, ok })
@@ -1860,6 +1881,129 @@ mod tests {
                 .any(|line| line.contains("tool `read_file` finished")),
             "successful child tool recovery should be visible"
         );
+    }
+
+    #[test]
+    fn a_childs_step_limit_is_explicit_and_never_below_one() {
+        assert_eq!(progress::step_limit(None, 0), None);
+        assert_eq!(progress::step_limit(None, 100), Some(100));
+        assert_eq!(progress::step_limit(Some(7), 0), Some(7));
+        assert_eq!(progress::step_limit(Some(7), 3), Some(3));
+        assert_eq!(progress::step_limit(Some(7), 100), Some(7));
+        assert_eq!(progress::step_limit(Some(0), 0), Some(1));
+    }
+
+    /// Reads the same file with the same arguments `loop_steps` times, then answers.
+    struct LoopingChild {
+        calls: std::sync::atomic::AtomicUsize,
+        loop_steps: usize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for LoopingChild {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let looping = n < self.loop_steps;
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                reasoning_items: Vec::new(),
+                content: if looping {
+                    "Still reading the manifest.".into()
+                } else {
+                    "the manifest names the crate".into()
+                },
+                tool_calls: if looping {
+                    vec![forge_types::ToolCall {
+                        id: format!("c{n}"),
+                        name: "read_file".into(),
+                        args: serde_json::json!({"path": "Cargo.toml"}),
+                    }]
+                } else {
+                    vec![]
+                },
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    async fn run_looping_child(
+        loop_steps: usize,
+        guard: forge_config::ProgressGuardMode,
+    ) -> (SubagentOutcome, usize) {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let child = store
+            .create_child_session(".", "default", "parent")
+            .unwrap();
+        let provider = Arc::new(LoopingChild {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            loop_steps,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "good::model".into(),
+            fallbacks: vec![],
+        });
+        let mut ctx = ctx_with(provider.clone(), router, Arc::clone(&store));
+        ctx.config.mesh.progress_guard = guard;
+        let agent = ResolvedAgent {
+            name: "general".into(),
+            task: "read the manifest".into(),
+            system_prompt: "you are a subagent".into(),
+            tools: Vec::new(),
+            tier: None,
+            pinned_model: None,
+            ..Default::default()
+        };
+        let mut sink = |_: StreamEvent| {};
+        let decision = route_child(&ctx, &agent, BudgetState::default()).await;
+        let out = run_subagent(
+            &ctx,
+            &child,
+            &agent,
+            decision,
+            BudgetState::default(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        (
+            out,
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_child_that_stops_getting_anywhere_is_stopped_and_keeps_what_it_said() {
+        let (out, calls) = run_looping_child(50, forge_config::ProgressGuardMode::Enforce).await;
+        assert!(!out.ok, "a stalled child is not a clean answer");
+        assert!(
+            out.final_text.contains("Still reading the manifest."),
+            "{}",
+            out.final_text
+        );
+        assert!(out.final_text.contains("Stopped:"), "{}", out.final_text);
+        assert!(calls <= 6, "{calls} model calls");
+    }
+
+    #[tokio::test]
+    async fn a_child_is_never_stopped_with_the_progress_guard_off() {
+        let (out, calls) = run_looping_child(8, forge_config::ProgressGuardMode::Off).await;
+        assert!(out.ok);
+        assert_eq!(out.final_text, "the manifest names the crate");
+        assert_eq!(calls, 9);
+    }
+
+    #[tokio::test]
+    async fn a_child_with_no_step_limit_at_all_runs_to_its_answer() {
+        // `mesh.max_steps` defaults to none; a child must not be capped at one step by it.
+        let (out, _) = run_looping_child(2, forge_config::ProgressGuardMode::Enforce).await;
+        assert!(out.ok);
+        assert_eq!(out.final_text, "the manifest names the crate");
     }
 
     #[test]

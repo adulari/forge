@@ -697,6 +697,11 @@ pub enum StreamEvent {
         /// The change a write would make, so the prompt shows the same diff a native write does.
         diff: Option<Box<forge_types::FileDiff>>,
     },
+    /// `forge mcp-serve`'s progress ledger stopped this bridged turn: the model's calls were going
+    /// nowhere, and every call since is refused with an instruction to answer. `headline` is what
+    /// the person is told. The parent ends the turn as stalled instead of re-driving a plan that
+    /// is not moving (CLI bridge only).
+    Stall { headline: String },
 }
 
 /// A sink for [`StreamEvent`]s as they arrive (text, reasoning, tool activity).

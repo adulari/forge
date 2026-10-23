@@ -3,6 +3,9 @@
 use super::*;
 
 impl Session {
+    /// Run one model response's tool calls through the permission broker and record what each
+    /// returned. Returns whether a `PostToolBatch` hook ended the turn. Judging whether the turn
+    /// is getting anywhere is the progress ledger's job, after the step (`progress_supervisor`).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_model_tool_step(
         &mut self,
@@ -12,16 +15,10 @@ impl Session {
         inspect_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
         mutations_ran: &std::sync::Arc<std::sync::atomic::AtomicU64>,
         verification_ledger: &std::sync::Arc<std::sync::Mutex<VerificationLedger>>,
-        last_tool_sig: &mut Option<u64>,
-        repeat_count: &mut usize,
-        recent_sigs: &mut std::collections::VecDeque<u64>,
-        doom_nudged: &mut bool,
-        failure_counts: &mut std::collections::HashMap<(String, ErrorCategory), usize>,
-        failure_nudged: &mut bool,
         observations: &mut Vec<crate::loop_progress::CallObservation>,
     ) -> Result<bool, CoreError> {
         // A `tool_call{name, arguments}` IS its inner call for every counter below: the phantom-edit
-        // gate (`mutations_ran`), the verification ledger, the failure and doom-loop guards, the
+        // gate (`mutations_ran`), the verification ledger, the progress observations, the
         // env-fight cap and batch eligibility. Ids are kept, so the tool results still pair with
         // the assistant message the model sent.
         let resolved: Vec<forge_types::ToolCall> = calls
@@ -29,101 +26,6 @@ impl Session {
             .map(|call| self.resolve_model_call(call))
             .collect();
         let calls = resolved.as_slice();
-        // Doom-loop guard: if the model emits the exact same tool call(s) several steps running,
-        // it's stuck (re-reading the same file, retrying an identical failing edit). Identical
-        // args yield identical results, so halt with a clear message instead of burning the
-        // remaining step budget + tokens.
-        const DOOM_LOOP_THRESHOLD: usize = 3;
-        // Sliding-window size for the oscillation guard. 6 holds three full A,B cycles, so an
-        // A,B,A,B,A,B alternation surfaces the same signature THRESHOLD× and trips the guard,
-        // while leaving room for legitimate progress (distinct calls don't accumulate).
-        const DOOM_OSC_WINDOW: usize = 6;
-        let sig = tool_batch_signature(calls);
-        if *last_tool_sig == Some(sig) {
-            *repeat_count += 1;
-        } else {
-            *repeat_count = 0;
-            *last_tool_sig = Some(sig);
-        }
-        // Oscillation count: how many of the last DOOM_OSC_WINDOW steps had THIS signature.
-        // Catches the non-consecutive loop the `repeat_count` reset blinds us to.
-        recent_sigs.push_back(sig);
-        if recent_sigs.len() > DOOM_OSC_WINDOW {
-            recent_sigs.pop_front();
-        }
-        let osc_count = recent_sigs.iter().filter(|&&s| s == sig).count();
-        // Break-out reset: clear the one-shot `doom_nudged` latch when the model changes course,
-        // so a *later* genuine loop in the same turn earns its own nudge-before-halt cycle
-        // instead of being hard-halted off a stale latch. `osc_count == 1` (this signature is
-        // alone in the recent window) is the signal. Do NOT also wipe the window here: on a
-        // strict A,B,A,B alternation every step's signature is "new" to a freshly-cleared window,
-        // so clearing pinned `osc_count` at 1 forever and the guard NEVER fired — the model ran
-        // to the step cap instead of halting (regression the doom_loop test now covers). The
-        // window is bounded and slides on its own (`pop_front` above), so a broken-out model's
-        // stale loop signatures age out naturally, while a true A,B,A,B spiral accumulates to
-        // `DOOM_LOOP_THRESHOLD`.
-        if osc_count == 1 {
-            *doom_nudged = false;
-        }
-        // How many DIFFERENT things the model did in the window. A real cycle is dominated by
-        // repetition — A,A,A or A,B,A,B — so it holds at most two distinct signatures.
-        //
-        // Requiring that is what keeps act-then-observe workflows out of this guard. Driving a UI
-        // goes tap, ui, tap, ui…: the observation is byte-identical every time (same tool, same
-        // args, so the same signature) while every action differs, which pushed a *productive*
-        // loop to `osc_count == 3` on the observation alone and nudged a model that was making
-        // progress. Browser and device work cannot be done any other way — you have to look at
-        // the screen between taps — so the repeated look is the shape of progress here, not
-        // evidence against it. A model genuinely stuck tapping the same element still trips this:
-        // its taps repeat too, leaving two distinct signatures.
-        let distinct_sigs = recent_sigs
-            .iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len();
-        let cycling = distinct_sigs <= 2 && osc_count >= DOOM_LOOP_THRESHOLD;
-        // Distinguish the two loop shapes so the warning isn't misleading: a true A,A,A repeat
-        // vs an A,B,A,B oscillation (where the model did NOT repeat the *same* call back-to-back).
-        let is_oscillation = cycling && *repeat_count + 1 < DOOM_LOOP_THRESHOLD;
-        if *repeat_count + 1 >= DOOM_LOOP_THRESHOLD || cycling {
-            if !*doom_nudged {
-                // First time: don't kill the turn. Tell it the loop won't make progress and to
-                // switch approach — a weaker model usually breaks out of the rut. Queue the nudge
-                // so it lands AFTER this step's tool results (valid message ordering); fall
-                // through to execute, then re-check next step.
-                *doom_nudged = true;
-                self.presenter.emit(PresenterEvent::Warning(
-                    if is_oscillation {
-                        "model is alternating between the same tool calls in a loop (A→B→A \
-                     pattern) — nudging it to break out before stopping"
-                    } else {
-                        "model repeated the same tool call — nudging it to change approach \
-                     before stopping"
-                    }
-                    .to_string(),
-                ));
-                self.pending_hints.push(
-                    "You've now cycled through the same tool calls several times — the results \
-                 will not change. Stop repeating this pattern and take a DIFFERENT approach \
-                 (another tool, different arguments, or a different file). If the task is \
-                 genuinely complete, say so plainly or mark it Done with update_tasks. Do \
-                 not issue that same cycle of calls again."
-                        .to_string(),
-                );
-            } else {
-                // Still looping after the nudge → truly stuck; halt with a clear message.
-                self.presenter.emit(PresenterEvent::Error(
-                    if is_oscillation {
-                        "the model kept alternating between the same tool calls after a nudge — \
-                     stopping to avoid a loop"
-                    } else {
-                        "the model kept repeating the same tool call after a nudge — stopping \
-                     to avoid a loop"
-                    }
-                    .to_string(),
-                ));
-                return Ok(true);
-            }
-        }
 
         // Count the tools the DIRECT path is about to run, so the completion-verification gate's
         // progress + inspection signals work for direct models. The stream sink only increments
@@ -139,8 +41,6 @@ impl Session {
             inspect_ran,
             mutations_ran,
             verification_ledger,
-            failure_counts,
-            failure_nudged,
             observations,
         };
         for call in calls {
@@ -166,9 +66,6 @@ impl Session {
         let concurrent_batch =
             calls.len() >= 2 && !tool_hooks && calls.iter().all(|c| self.is_concurrent_readonly(c));
         if concurrent_batch {
-            // Feed the failure-loop guard the same way the serial path does, so a concurrent
-            // batch that keeps failing the same way (different args each step) is caught instead
-            // of burning the budget to the step cap.
             let classified = self.run_readonly_batch(msg_id, calls).await?;
             // A read-only shell call that failed gets the same diagnosis as on the serial path;
             // its hint is delivered with the batch's other hints below.
@@ -183,37 +80,28 @@ impl Session {
                     }
                 }
             }
-            for (call, (name, kind, result)) in calls.iter().zip(classified) {
+            for (call, (_, kind, result)) in calls.iter().zip(classified) {
                 if batch_hooks {
                     batch.push((call, result.clone()));
                 }
-                ledgers
-                    .observations
-                    .push(crate::loop_progress::CallObservation::new(
-                        crate::loop_progress::call_signature(call),
-                        kind.is_none(),
-                        false,
-                        &result,
-                    ));
-                ledgers.verification_ledger.lock().unwrap().observe_result(
-                    completion::classify_tool(&call.name, &call.args.to_string()),
+                let verification = completion::classify_tool(&call.name, &call.args.to_string());
+                let flipped = ledgers.verification_ledger.lock().unwrap().observe_result(
+                    verification,
                     kind.is_none(),
                     &result,
                 );
-                match kind {
-                    Some(k) => *ledgers.failure_counts.entry((name, k)).or_insert(0) += 1,
-                    None => {
-                        ledgers.failure_counts.retain(|(nm, _), _| nm != &name);
-                        // A genuine tool success = the model recovered; clear the one-shot
-                        // failure-loop latch so a *later* distinct failure loop earns its own
-                        // nudge-before-halt instead of an immediate halt off a stale latch.
-                        *ledgers.failure_nudged = false;
-                    }
-                }
+                ledgers.observations.push(
+                    crate::loop_progress::CallObservation::for_call(
+                        call,
+                        kind.is_none(),
+                        false,
+                        &result,
+                    )
+                    .with_check(verification.check_family(), flipped),
+                );
             }
-            // Deliver any queued system hints (e.g. the doom-loop "change approach" nudge) — the
-            // serial path does this per call; without it here the nudge sits undelivered and the
-            // model is halted next step "after a nudge" it never actually saw.
+            // Deliver any queued system hints (the serial path does this per call): a hint left
+            // undelivered here would reach the model a step late, if at all.
             let hints: Vec<String> = std::mem::take(&mut self.pending_hints);
             for hint in hints {
                 let _ = self.push_note(forge_types::MessageKind::Hint, hint);
@@ -256,46 +144,6 @@ impl Session {
 
         if self.fire_post_tool_batch(&batch).await {
             return Ok(true);
-        }
-
-        // Failure-loop guard: a tool that keeps failing the SAME way (across differing args) is
-        // making no progress and burning the step/token budget — invisible to the identical-call
-        // doom-loop above. Two-stage like that guard: nudge a change of approach once, then halt
-        // if it persists. (BOTH the serial path and the concurrent read-only batch populate
-        // `failure_counts`, so a batch failing the same way every step is caught here too.)
-        const FAILURE_LOOP_THRESHOLD: usize = 3;
-        if let Some((tool, kind, n)) = ledgers
-            .failure_counts
-            .iter()
-            .filter(|(_, &c)| c >= FAILURE_LOOP_THRESHOLD)
-            .max_by_key(|(_, &c)| c)
-            .map(|((nm, k), &c)| (nm.clone(), *k, c))
-        {
-            if !*ledgers.failure_nudged {
-                *ledgers.failure_nudged = true;
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "`{tool}` failed {n}× the same way ({}) — nudging a change of approach",
-                    kind.label()
-                )));
-                let nudge = format!(
-                    "Your `{tool}` calls keep failing with the same kind of error ({}). \
-                 Repeating the same approach won't change that. Diagnose the root cause \
-                 first (re-read the file / inspect the actual state), then take a DIFFERENT \
-                 approach — or if you're genuinely blocked, say so plainly. Do not keep \
-                 retrying the same way.",
-                    kind.label()
-                );
-                let _ = self.push_note(forge_types::MessageKind::LoopGuard, nudge);
-                // Fresh slate after the nudge: only halt if it loops AGAIN, and don't let a
-                // stale pre-nudge streak trip the halt when the model is now trying something new.
-                ledgers.failure_counts.clear();
-            } else {
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "`{tool}` kept failing ({}) after a nudge — stopping to avoid a wasted loop",
-                    kind.label()
-                )));
-                return Ok(true);
-            }
         }
 
         Ok(false)

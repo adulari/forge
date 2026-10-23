@@ -1,7 +1,8 @@
 //! Per-call turn bookkeeping shared by every serially executed direct-path tool call: a plain
 //! model call and each inner call a `run_code` script makes. Keeping it in one place is what
-//! makes the phantom-edit gate, the verification ledger, the failure-loop guard and the env-fight
-//! cap see a script's writes and tests exactly as they see the same calls made one per step.
+//! makes the phantom-edit gate, the verification ledger, the progress ledger's observations and the
+//! env-fight cap see a script's writes and tests exactly as they see the same calls made one per
+//! step.
 
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,8 +13,6 @@ pub(crate) struct TurnLedgers<'a> {
     pub(crate) inspect_ran: &'a std::sync::Arc<AtomicU64>,
     pub(crate) mutations_ran: &'a std::sync::Arc<AtomicU64>,
     pub(crate) verification_ledger: &'a std::sync::Arc<std::sync::Mutex<VerificationLedger>>,
-    pub(crate) failure_counts: &'a mut std::collections::HashMap<(String, ErrorCategory), usize>,
-    pub(crate) failure_nudged: &'a mut bool,
     pub(crate) observations: &'a mut Vec<crate::loop_progress::CallObservation>,
 }
 
@@ -39,9 +38,7 @@ impl Session {
     ) {
         // The `run_code` wrapper is not a tool outcome of its own: its inner calls were observed
         // one by one. It fails only when the script did (its result then starts `error:`), not
-        // when it returns a failing test's output, and its success is not the "model recovered"
-        // signal that clears the failure-loop latch; otherwise a script re-running the same
-        // failing test each step would earn a fresh nudge forever instead of the halt.
+        // when it returns a failing test's output.
         let wrapper = call.name == crate::codemode::RUN_CODE_TOOL;
         let failure = if wrapper {
             result
@@ -53,27 +50,29 @@ impl Session {
             classify_tool_failure(result)
         };
         // The footer's elapsed time differs on every run, so it would make every script look
-        // like new information to the stagnation judge.
+        // like new information to the progress ledger.
         let observed = if wrapper {
             crate::codemode::without_footer(result)
         } else {
             result
         };
-        ledgers.verification_ledger.lock().unwrap().observe_result(
-            completion::classify_tool(&call.name, &call.args.to_string()),
+        let verification = completion::classify_tool(&call.name, &call.args.to_string());
+        let flipped = ledgers.verification_ledger.lock().unwrap().observe_result(
+            verification,
             failure.is_none(),
             result,
         );
         let side_effect = self.tools.get(&call.name).map(|tool| tool.side_effect());
         let writes = side_effect == Some(forge_types::SideEffect::Write);
-        ledgers
-            .observations
-            .push(crate::loop_progress::CallObservation::new(
-                crate::loop_progress::call_signature(call),
+        ledgers.observations.push(
+            crate::loop_progress::CallObservation::for_call(
+                call,
                 failure.is_none(),
                 writes,
                 observed,
-            ));
+            )
+            .with_check(verification.check_family(), flipped),
+        );
         // Count the mutation only once it SUCCEEDED. A denied or failing write changed nothing,
         // so treating the attempt as evidence would let both the phantom-edit gate and the
         // no-output turn classification accept a turn that mutated nothing.
@@ -84,32 +83,6 @@ impl Session {
             )
         {
             ledgers.mutations_ran.fetch_add(1, Ordering::Relaxed);
-        }
-        match failure {
-            Some(kind) => {
-                *ledgers
-                    .failure_counts
-                    .entry((call.name.clone(), kind))
-                    .or_insert(0) += 1;
-            }
-            // A success on this tool means progress — clear its failure streaks so an earlier
-            // rough patch doesn't later trip the guard after the model recovered.
-            None => {
-                // A successful write IS the change of approach the nudge asks for: an edit →
-                // compile-error → edit cycle must not read as "failing the same way" just
-                // because the failing `cargo test` text matched one category.
-                if writes {
-                    ledgers.failure_counts.clear();
-                }
-                ledgers
-                    .failure_counts
-                    .retain(|(name, _), _| name != &call.name);
-                // A genuine success means the model recovered, so a *later* distinct failure
-                // loop in the same turn gets its own nudge-before-halt, not an immediate halt.
-                if !wrapper {
-                    *ledgers.failure_nudged = false;
-                }
-            }
         }
         // Env-fight spend cap: shell commands that look like environment provisioning after a
         // failure are venv archaeology. Allow one alternate recovery attempt, then tell the model

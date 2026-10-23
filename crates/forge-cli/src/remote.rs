@@ -556,7 +556,7 @@ pub struct Snapshot {
     #[serde(default)]
     pub last_turn_outcome: Option<String>,
     /// The precise stop reason behind `last_turn_outcome` (`final_answer`, `max_steps`,
-    /// `budget_exhausted`, `interrupted`, `no_output`), for callers that want the detail.
+    /// `budget_exhausted`, `interrupted`, `no_output`, `stalled`), for callers that want the detail.
     #[serde(default)]
     pub last_stop_reason: Option<String>,
     /// Turns this driver has finished (additive). Restarts at 0 when the driver restarts, so a

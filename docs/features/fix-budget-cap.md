@@ -302,14 +302,14 @@ one in-flight call — acceptable for v0.1 and called out as W2.
 daily_cap_usd     = 5.00     # optional; absent = unlimited
 monthly_cap_usd   = 80.00    # optional; absent = unlimited
 warn_threshold    = 0.8      # fraction of a cap that triggers a warning
-hard_stop         = true     # refuse calls once a cap is exceeded
+hard_stop         = "auto"   # true | false | "auto": whether a cap refuses calls (see 5.5.1)
 cap_overrides_pin = true     # a cap downshifts/stops even a pinned model
 ```
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetBehavior {
-    pub hard_stop: bool,         // default true
+    pub hard_stop: HardStop,     // default Auto (true / false / "auto" in TOML)
     pub cap_overrides_pin: bool, // default true
 }
 ```
@@ -332,7 +332,16 @@ session_warn_usd = 25.0    # one warning per process
 session_cap_usd  = 100.0   # refuses new turns until raised or FORGE_BUDGET_OVERRIDE=1
 ```
 
-`hard_stop = false` downgrades both caps to warnings; `FORGE_BUDGET_OVERRIDE=1` bypasses them.
+`hard_stop` decides whether a cap stops a turn or only warns. `true` stops everywhere, `false`
+downgrades the USD caps to warnings, and `"auto"` (the default) stops an **unattended** turn
+(headless `forge run`, JSON output, bench, `--mode bypass`) and only warns an **attended** one:
+the person at the terminal sees the spend and can press escape, where an unattended turn has
+nobody to. `auto` covers the per-turn USD cap, `mesh.max_turn_input_tokens` and
+`mesh.bridge_turn_token_cap`; an attended turn gets one warning when it passes one of the token
+ceilings (naming `hard_stop = true` as the way to stop there). The session, day, week and month
+caps act between turns and are enforced under `auto` and `true` alike. This replaces the default
+of `true` that #1489 introduced after a $186 session; set `hard_stop = true` to get it back.
+`FORGE_BUDGET_OVERRIDE=1` bypasses the caps.
 Side calls (compaction, memory, recap, suggestion, shell diagnosis, refine) are priced from their
 token counts like any other call; they used to be recorded at $0.
 

@@ -44,7 +44,7 @@ characters to 16 tools / 16,688 characters.
 
 The model loop turns each `tool_call{name, arguments}` into the real call (same id) **before**
 anything looks at it. The phantom-edit gate's `mutations_ran`, the verification ledger, the
-failure-loop and doom-loop guards, the env-fight cap, batch eligibility, task scope, the
+progress ledger, the env-fight cap, batch eligibility, task scope, the
 permission broker, hooks, the audit row and the presenter all see `notebook_edit`, never
 `tool_call`. A deferred write through `tool_call` is still denied in Plan mode, and a successful
 one still counts as a mutation. The tool result keeps the original id, so it pairs with the

@@ -32,6 +32,9 @@ pub(super) fn parse_sink_line(line: &str) -> Option<StreamEvent> {
             let plan = serde_json::from_value(v.get("plan")?.clone()).ok()?;
             Some(StreamEvent::Plan(plan))
         }
+        "stall" => Some(StreamEvent::Stall {
+            headline: s("report"),
+        }),
         "permission" => {
             let answer = s("answer");
             if answer.is_empty() {

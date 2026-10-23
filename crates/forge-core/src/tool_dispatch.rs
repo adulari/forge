@@ -181,19 +181,6 @@ impl Session {
             self.emit_tool_card(&call.name, false, &result);
             return Ok(result);
         }
-        if let Some(warning) = self
-            .failure_tracker
-            .record_call(&call.name, &call_args_json)
-        {
-            self.presenter
-                .emit(PresenterEvent::Warning(warning.clone()));
-            self.pending_hints.push(format!(
-                "The `{}` call just repeated with identical arguments. Do not retry it unchanged; inspect the actual state or try a different tool/argument path.",
-                call.name
-            ));
-            return Ok(warning);
-        }
-
         // The subagent virtual tool is owned by core (it needs provider/router/store), not the
         // registry — intercept before the registry lookup (RFC subagent-orchestration).
         if call.name == subagent::SPAWN_AGENTS_TOOL {
@@ -302,11 +289,6 @@ impl Session {
             });
             self.store
                 .record_tool_call(msg_id, &call.name, &args_json, &result, "denied", "error")?;
-            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
-                self.presenter
-                    .emit(PresenterEvent::Warning(warning.clone()));
-                self.pending_hints.push(warning);
-            }
             return Ok(result);
         }
 
@@ -330,11 +312,6 @@ impl Session {
             });
             self.store
                 .record_tool_call(msg_id, &call.name, &args_json, &result, "blocked", "error")?;
-            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
-                self.presenter
-                    .emit(PresenterEvent::Warning(warning.clone()));
-                self.pending_hints.push(warning);
-            }
             return Ok(result);
         }
 
@@ -362,11 +339,6 @@ impl Session {
             });
             self.store
                 .record_tool_call(msg_id, &call.name, &args_json, &result, "n/a", "error")?;
-            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
-                self.presenter
-                    .emit(PresenterEvent::Warning(warning.clone()));
-                self.pending_hints.push(warning);
-            }
             return Ok(result);
         };
 
@@ -437,12 +409,6 @@ impl Session {
                     self.store.record_tool_call(
                         msg_id, &call.name, &args_json, &result, "denied", "error",
                     )?;
-                    if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result)
-                    {
-                        self.presenter
-                            .emit(PresenterEvent::Warning(warning.clone()));
-                        self.pending_hints.push(warning);
-                    }
                     return Ok(result);
                 }
             }
@@ -484,11 +450,6 @@ impl Session {
             });
             self.store
                 .record_tool_call(msg_id, &call.name, &args_json, &result, "n/a", "error")?;
-            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
-                self.presenter
-                    .emit(PresenterEvent::Warning(warning.clone()));
-                self.pending_hints.push(warning);
-            }
             return Ok(result);
         }
 
@@ -696,8 +657,6 @@ impl Session {
         };
         if ok {
             self.note_read_files(&call.name, &effective_args);
-            self.failure_tracker
-                .record_success_with(&call.name, &call_args_json, &result);
             // A shell command that may move HEAD is when the commit tracker forgets clean files.
             if self.config.git.commit_nudge
                 && call.name == "shell"
@@ -709,10 +668,6 @@ impl Session {
                 let head = crate::git_head(Some(root));
                 self.git_hygiene.observe_head(root, head);
             }
-        } else if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
-            self.presenter
-                .emit(PresenterEvent::Warning(warning.clone()));
-            self.pending_hints.push(warning);
         }
 
         // PostToolUse / PostToolUseFailure hooks (hooks.md): observe the completed call (e.g.

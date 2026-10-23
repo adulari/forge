@@ -121,6 +121,22 @@ fn opening_words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// A fingerprint of the opening, or `None` when it is too short to be a preamble (the same bar as
+/// [`similar`]). Lets the ledger recognise a model that resumes a stopped turn with the sentence
+/// it was stopped on.
+pub(crate) fn opening_fingerprint(text: &str) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let words = opening_words(text);
+    if words.len() < MIN_WORDS {
+        return None;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    words.hash(&mut h);
+    Some(h.finish())
+}
+
+const MIN_WORDS: usize = 5;
+
 /// Near-identical openings. A one-liner like "Reading." never counts (too short to be a
 /// preamble). Otherwise: the same first four words, or a word-set overlap of at least 60% — the
 /// live loop rephrased its second half every step ("finishing the revert I left half-done",
@@ -128,7 +144,6 @@ fn opening_words(text: &str) -> Vec<String> {
 /// fifth word changed every time ("You're right — I looped. Answering / Recovering / I'll …"), so
 /// a five-word prefix let thirty near-identical apologies through.
 fn similar(a: &[String], b: &[String]) -> bool {
-    const MIN_WORDS: usize = 5;
     const PREFIX_WORDS: usize = 4;
     if a.len() < MIN_WORDS || b.len() < MIN_WORDS {
         return false;

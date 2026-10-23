@@ -60,7 +60,7 @@ impl Session {
 
     /// Whether the run budget ended the most recent turn mid-flight.
     pub fn run_budget_hit_last_turn(&self) -> bool {
-        self.turn_run_budget_hit
+        self.turn_forced_stop == Some(StopReason::BudgetExhausted)
     }
 
     pub(crate) fn run_budget_tripped(&self) -> Option<RunBudgetHit> {
@@ -87,7 +87,7 @@ impl Session {
             "run {which} exhausted mid-turn — stopping the turn here; work is uncommitted: {work}"
         )));
         self.turn_hard_guard_abort = true;
-        self.turn_run_budget_hit = true;
+        self.turn_forced_stop = Some(StopReason::BudgetExhausted);
         format!("Stopped: the run's {which} was exhausted mid-turn; work is uncommitted: {work}")
     }
 }

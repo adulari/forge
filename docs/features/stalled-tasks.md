@@ -22,8 +22,8 @@ then on:
 - the session narrated a near-identical sentence each step and made no change to the repository
   until a human interrupted it, decided what the task meant, and marked it done by hand.
 
-None of the existing guards could see this. The doom-loop guard needs identical tool arguments; the
-failure-loop guard needs failures; the narration-stall guard (`stall_guard.rs`) bounds the *steps
+None of the existing guards could see this. The cycle check needs identical tool arguments; the
+failure check needs failures; the narration-stall guard (`stall_guard.rs`) bounds the *steps
 inside one turn*, not the task that keeps starting new ones. What was missing is the obvious
 structural fact: **that task had not moved in days**.
 

@@ -25,11 +25,13 @@ pub mod setting_sources;
 mod system_prompt_overrides;
 use system_prompt_overrides::resolve_system_prompt_overrides;
 pub mod goal;
+mod hard_stop;
 mod harness_profile;
 mod hooks;
 mod key_adoption;
 mod keybind_migration;
 mod keybinds;
+mod progress_guard;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
 mod lsp_diagnostics;
 pub mod mcp;
@@ -51,6 +53,7 @@ pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
+pub use hard_stop::HardStop;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
 pub use keybinds::{write_keybind, write_keybind_preset, KeyCombo, KeybindPreset, KeybindsConfig};
@@ -71,6 +74,7 @@ pub use paths::{
     mark_project_auto_setup_attempted, project_auto_setup_attempted, project_initialization,
     ProjectInitialization,
 };
+pub use progress_guard::ProgressGuardMode;
 pub use project_dirs::{project_resource_dirs, repo_top};
 pub use vision_fallback::VisionFallback;
 pub use workspace_state::{
@@ -1957,19 +1961,38 @@ pub struct MeshConfig {
     /// than this falls through to failover. `0` disables in-turn waiting entirely.
     #[serde(default = "default_rate_limit_wait_secs")]
     pub rate_limit_wait_secs: u64,
-    /// Max model↔tool rounds in a single turn. This is a *runaway guard*, not a functional limit:
-    /// like Claude Code / Codex, the agent loop runs until the model stops calling tools — a turn
-    /// should normally finish well under this. Hitting it pauses the turn with a visible warning
-    /// (type `continue` to resume), never a silent stop. Raise for very long agentic turns.
+    /// Explicit cap on model↔tool rounds in one turn. `0` (the default) means none: like Claude
+    /// Code and Codex, the loop runs until the model stops calling tools, the person interrupts, or
+    /// the progress supervisor (`progress_guard`) sees a turn that is not getting anywhere. Set a
+    /// number only when you want a hard count: reaching it pauses an attended turn with a warning
+    /// (type `continue` to resume) and fails an unattended one. `--max-turns N` sets it per run.
+    /// The count is per turn, across every re-drive the turn makes.
     #[serde(default = "default_max_steps")]
     pub max_steps: usize,
-    /// Hard step ceiling for an UNATTENDED turn (headless `forge run`, a detached session, or
-    /// `--mode bypass`). Nobody can type `continue` there, so `max_steps` is a checkpoint — the
-    /// turn logs a warning with its token spend and keeps going until this ceiling, then ends with
-    /// an error naming the uncommitted work. Interactive sessions ignore this and pause at
-    /// `max_steps` as before.
+    /// Explicit cap on rounds for an UNATTENDED turn (headless `forge run`, a detached session, or
+    /// `--mode bypass`), where nobody can type `continue`. `0` (the default) means none; the
+    /// unattended safety net is progress-based (`idle_stop_steps`) and the spend ceilings. When
+    /// set it wins over `max_steps` on unattended turns; the turn ends with an error naming the
+    /// uncommitted work. Interactive sessions never read it.
     #[serde(default = "default_max_steps_unattended")]
     pub max_steps_unattended: usize,
+    /// What the progress supervisor does to a turn that stopped making progress: `enforce` (the
+    /// default) nudges once and then ends the turn cleanly, `warn` only reports where it would
+    /// have stopped, `off` disables stops (loop nudges stay).
+    #[serde(default)]
+    pub progress_guard: ProgressGuardMode,
+    /// Steps without a file change, a closed task, a passing check or a steer after which the
+    /// supervisor asks the model to report what it found or make the change. Never stops a turn.
+    /// `0` disables the nudge. Default 60: the longest healthy stretch measured was 37.
+    #[serde(default = "default_idle_nudge_steps")]
+    pub idle_nudge_steps: usize,
+    /// Steps without any of those after which a HEADLESS turn (nobody watching: `forge run`, a
+    /// detached session, JSON output) is stopped. A person at a terminal is never stopped by this,
+    /// even in `--mode bypass`: they can see the turn and press escape. A headless turn that does
+    /// nothing but wait on a job that never finishes is stopped on the same switch, after 96 wait
+    /// steps. `0` disables both. Default 200.
+    #[serde(default = "default_idle_stop_steps")]
+    pub idle_stop_steps: usize,
     /// Cumulative input tokens a single turn may consume before it is ended with an error, on any
     /// surface. The step cap alone does not bound cost (one runaway turn burned 7.0M input tokens
     /// inside 100 steps). `0` disables the ceiling.
@@ -2234,17 +2257,25 @@ fn default_max_output_tokens() -> u32 {
     0
 }
 
-/// Default per-turn step cap (runaway guard). 100 model↔tool rounds is far above what a normal
-/// agentic turn needs — the loop ends naturally when the model stops calling tools — while still
-/// bounding a model stuck in a tool-call loop. Configurable via `mesh.max_steps`.
+/// No step cap by default (`0`). Before the progress supervisor this was 100 (a pause on attended turns, a warning on
+/// unattended ones), which interrupted productive turns and bounded nothing about spend: the loop
+/// ends when the model stops, the person interrupts, or the progress supervisor sees a stall.
 fn default_max_steps() -> usize {
-    100
+    0
 }
 
-/// Default hard step ceiling for unattended turns (4× the soft cap). Configurable via
-/// `mesh.max_steps_unattended`.
+/// No unattended step ceiling by default (`0`; it was 400). The unattended safety net is the
+/// progress supervisor's idle stop plus the spend ceilings.
 fn default_max_steps_unattended() -> usize {
-    400
+    0
+}
+
+fn default_idle_nudge_steps() -> usize {
+    60
+}
+
+fn default_idle_stop_steps() -> usize {
+    200
 }
 
 /// Default per-turn cumulative input-token ceiling. Configurable via `mesh.max_turn_input_tokens`.
@@ -2528,8 +2559,11 @@ pub enum ClassifierKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BudgetBehavior {
     /// Refuse model calls once a cap is exceeded (overridable per-turn via
-    /// `FORGE_BUDGET_OVERRIDE=1`). Default true.
-    pub hard_stop: bool,
+    /// `FORGE_BUDGET_OVERRIDE=1`). `true` stops everywhere, `false` only warns on the USD caps, and
+    /// `"auto"` (the default) stops an unattended turn and only warns an attended one: the person
+    /// at an attended turn sees the spend and can interrupt. Session, daily, weekly and monthly
+    /// caps are enforced either way.
+    pub hard_stop: HardStop,
     /// A cap downshifts/stops even an explicitly pinned model. Default true. (Model pinning
     /// is not yet a feature; this is forward-compatible config.)
     pub cap_overrides_pin: bool,
@@ -2572,7 +2606,7 @@ fn default_session_cap_usd() -> f64 {
 impl Default for BudgetBehavior {
     fn default() -> Self {
         Self {
-            hard_stop: true,
+            hard_stop: HardStop::Auto,
             cap_overrides_pin: true,
             turn_warn_usd: default_turn_warn_usd(),
             turn_cap_usd: default_turn_cap_usd(),
@@ -2781,6 +2815,9 @@ impl Default for Config {
                 free_model_cap_tokens: default_free_model_cap_tokens(),
                 max_steps: default_max_steps(),
                 max_steps_unattended: default_max_steps_unattended(),
+                progress_guard: ProgressGuardMode::default(),
+                idle_nudge_steps: default_idle_nudge_steps(),
+                idle_stop_steps: default_idle_stop_steps(),
                 max_turn_input_tokens: default_max_turn_input_tokens(),
                 subscription_conserve: default_subscription_conserve(),
                 benchmark_ranking: default_benchmark_ranking(),
@@ -3299,9 +3336,11 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
 
     if let Some(path) = user_config.as_deref().filter(|p| p.is_file()) {
         config_diagnostics::warn_unknown_keys(path);
+        config_diagnostics::warn_legacy_step_limits(path);
     }
     if layers.project && trusted && project_config.is_file() {
         config_diagnostics::warn_unknown_keys(project_config);
+        config_diagnostics::warn_legacy_step_limits(project_config);
     }
 
     // A typo in `[anywhere]` (e.g. `nabled` for `enabled`) is otherwise silent: Figment/serde drop

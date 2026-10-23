@@ -1,12 +1,13 @@
-//! Step and token guards that bound one turn.
+//! Hard guards that end a turn: the spend and token ceilings, an explicit step limit, and the
+//! unfinished-task halts.
 //!
-//! An ATTENDED turn treats `mesh.max_steps` as a checkpoint it can pause on — a human types
-//! `continue`. An UNATTENDED turn (headless `forge run`, a detached daemon session, or
-//! `--mode bypass`) has nobody to type it, so pausing there is a silent death with the work left
-//! uncommitted. These guards make the unattended path warn at the soft cap and run on to
-//! `mesh.max_steps_unattended`, then end the turn with an ERROR naming the uncommitted work.
-//! `mesh.max_turn_input_tokens` ends a turn on every surface, because the step cap alone does not
-//! bound spend.
+//! There is no default step cap. A turn that is making progress is never stopped by a count, and
+//! one that is not is caught by the progress supervisor (`progress_ledger.rs`), which stops it
+//! cleanly. `mesh.max_steps` and `mesh.max_steps_unattended` are explicit limits the user opts
+//! into (`--max-turns` sets both): an ATTENDED turn pauses at the limit for a human to type
+//! `continue`, an UNATTENDED one ends with an ERROR naming the uncommitted work.
+//! `mesh.max_turn_input_tokens` ends a turn on every surface, because a step count says nothing
+//! about spend.
 
 use super::*;
 
@@ -29,7 +30,9 @@ impl Session {
                 self.abort_for_run_budget(hit);
             }
         }
-        if !self.turn_hard_guard_abort {
+        // A stalled turn is not a hard abort (an attended one still gets a status written), but a
+        // re-drive must not restart the loop whose evidence stopped it.
+        if !self.turn_hard_guard_abort && self.turn_forced_stop.is_none() {
             return None;
         }
         Some(ModelLoopOutcome {
@@ -45,20 +48,45 @@ impl Session {
         })
     }
 
-    /// One warning as an unattended turn passes the soft cap. Names the spend so a runaway is
-    /// visible in the log stream rather than only in the final bill.
-    pub(crate) fn warn_soft_step_checkpoint(&mut self, soft_cap: usize, step: usize, hard: usize) {
-        self.presenter.emit(PresenterEvent::Warning(format!(
-            "reached soft step cap {soft_cap} at step {step}; unattended turn continuing toward \
-             hard cap {hard} (turn tokens: billable input={}, total input={} incl. cache reads, \
-             output={})",
-            self.turn_billable_input_tokens, self.turn_input_tokens, self.turn_output_tokens
-        )));
-    }
-
     pub(crate) fn turn_input_ceiling_hit(&self) -> bool {
         let cap = self.config.mesh.max_turn_input_tokens;
         cap != 0 && self.turn_billable_input_tokens >= cap
+    }
+
+    /// The per-turn token ceiling's verdict: `Some(final text)` when the turn must end. With
+    /// `hard_stop = "auto"` an attended turn only gets a warning, once: its person sees the spend
+    /// and can interrupt, where an unattended turn has nobody to.
+    pub(crate) fn token_ceiling_stop(&mut self) -> Option<String> {
+        if !self.turn_input_ceiling_hit() {
+            return None;
+        }
+        if self.cap_stops_turn_tokens("turn input-token ceiling") {
+            return Some(self.abort_for_token_ceiling());
+        }
+        None
+    }
+
+    /// Whether a per-turn token cap ends the turn. When it does not, say so once per turn.
+    pub(crate) fn cap_stops_turn_tokens(&mut self, what: &str) -> bool {
+        let unattended = self.turn_is_unattended();
+        if self
+            .config
+            .mesh
+            .budget
+            .hard_stop
+            .stops_turn_tokens(unattended)
+        {
+            return true;
+        }
+        if !self.spend.ceiling_warning_already_given() {
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "the {what} was passed (billable input {}, total {} incl. cache reads); this turn \
+                 goes on because you are attached — set `mesh.budget.hard_stop = true` to stop \
+                 turns at their ceilings",
+                self.turn_billable_input_tokens, self.turn_input_tokens
+            )));
+        }
+        false
     }
 
     /// Preserve whatever the turn had reached before a hard guard ends it, and describe both the
@@ -90,27 +118,25 @@ impl Session {
             self.turn_billable_input_tokens, self.turn_input_tokens, self.turn_output_tokens
         )));
         self.turn_hard_guard_abort = true;
+        self.turn_forced_stop = Some(StopReason::BudgetExhausted);
         format!("ERROR: turn input-token ceiling exceeded; work is uncommitted: {work}")
     }
 
-    /// End an unattended turn that ran all the way to the hard step ceiling.
-    pub(crate) fn abort_for_step_ceiling(&mut self, hard: usize, soft_cap: usize) -> String {
+    /// End an unattended turn that reached the explicit step limit the user set.
+    pub(crate) fn abort_for_step_ceiling(&mut self, limit: usize) -> String {
         let work = self.preserve_uncommitted_work();
-        // Print BOTH input figures. The one that looked alarming in the field — 48.5M — is the
+        // Print BOTH input figures. The one that looks alarming — a 48.5M turn — is the
         // cache-inclusive total, while `mesh.max_turn_input_tokens` watches the billable subtotal;
         // showing only the former makes a working token ceiling look broken.
         self.presenter.emit(PresenterEvent::Error(format!(
-            "ERROR: unattended turn reached hard step ceiling {hard} (soft cap {soft_cap}; turn \
-             tokens: billable input={}, total input={} incl. cache reads, output={}; token \
-             ceiling `mesh.max_turn_input_tokens`={}) — ending turn; work is uncommitted: {work}",
-            self.turn_billable_input_tokens,
-            self.turn_input_tokens,
-            self.turn_output_tokens,
-            self.config.mesh.max_turn_input_tokens
+            "ERROR: unattended turn reached the {limit}-step limit (`mesh.max_steps_unattended` / \
+             `--max-turns`; turn tokens: billable input={}, total input={} incl. cache reads, \
+             output={}) — ending turn; work is uncommitted: {work}",
+            self.turn_billable_input_tokens, self.turn_input_tokens, self.turn_output_tokens,
         )));
         self.turn_hard_guard_abort = true;
         format!(
-            "ERROR: unattended turn reached hard step ceiling {hard}; work is uncommitted: {work}"
+            "ERROR: unattended turn reached the {limit}-step limit; work is uncommitted: {work}"
         )
     }
 

@@ -176,6 +176,13 @@ fn stop_line(
             "Tasks unfinished",
             "Tasks left",
         )),
+        R::Stalled => Some((
+            false,
+            "Paused: no progress",
+            "send `continue` or say what to try",
+            "No progress · send continue",
+            "send continue",
+        )),
         R::NoOutput => Some((
             true,
             "No output, the turn failed",

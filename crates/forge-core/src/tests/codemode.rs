@@ -102,9 +102,6 @@ async fn step(
         .store
         .add_message_full(session.id(), 0, Role::Assistant, "", None, &[], None)
         .unwrap();
-    let (mut last_sig, mut repeat, mut recent) = (None, 0, std::collections::VecDeque::new());
-    let (mut doom_nudged, mut failure_nudged) = (false, false);
-    let mut failure_counts = std::collections::HashMap::new();
     let mut observations = Vec::new();
     let halted = session
         .execute_model_tool_step(
@@ -114,12 +111,6 @@ async fn step(
             &ledgers.inspect_ran,
             &ledgers.mutations_ran,
             &ledgers.verification,
-            &mut last_sig,
-            &mut repeat,
-            &mut recent,
-            &mut doom_nudged,
-            &mut failure_counts,
-            &mut failure_nudged,
             &mut observations,
         )
         .await
@@ -534,42 +525,38 @@ async fn the_kill_switch_hides_the_tool_and_refuses_the_call() {
 }
 
 #[tokio::test]
-async fn the_wrapper_never_clears_the_failure_latch_or_counts_a_returned_test_failure() {
+async fn the_wrapper_is_not_a_failure_for_a_returned_test_failure_but_is_for_a_thrown_script() {
     let dir = workspace("latch");
     let mut session = session_in(&dir, PermissionMode::AcceptEdits, Approver::default());
     let l = Ledgers::new();
-    let mut failure_counts = std::collections::HashMap::new();
-    let mut failure_nudged = true;
     let mut observations = Vec::new();
     let mut ledgers = crate::tool_outcome::TurnLedgers {
         tools_ran: &l.tools_ran,
         inspect_ran: &l.inspect_ran,
         mutations_ran: &l.mutations_ran,
         verification_ledger: &l.verification,
-        failure_counts: &mut failure_counts,
-        failure_nudged: &mut failure_nudged,
         observations: &mut observations,
     };
-    // The script returned a failing test's output: the inner shell call already counted that.
+    // The script returned a failing test's output: the inner shell call already counted that, so
+    // the wrapper itself did not fail.
     let call = run_code_call("return 1;", None);
     session.observe_tool_outcome(
         &call,
         "shell: exit 101\ntest foo ... FAILED\n\n[run_code: 1 tool call, 0 ok, 1 failed, 3.1s]",
         &mut ledgers,
     );
-    assert!(
-        *ledgers.failure_nudged,
-        "a script returning is not recovery"
-    );
-    assert!(ledgers.failure_counts.is_empty());
     session.observe_tool_outcome(
         &call,
         "error: ReferenceError: x is not defined\n\n[run_code: 0 tool calls, 0 ok, 0 failed, 0.0s]",
         &mut ledgers,
     );
-    assert_eq!(
-        ledgers.failure_counts.len(),
-        1,
+    assert_eq!(ledgers.observations.len(), 2);
+    assert!(
+        ledgers.observations[0].ok(),
+        "a returned test failure is not a wrapper failure"
+    );
+    assert!(
+        !ledgers.observations[1].ok(),
         "a thrown script is a run_code failure"
     );
     assert_eq!(l.mutations_ran.load(Ordering::SeqCst), 0);

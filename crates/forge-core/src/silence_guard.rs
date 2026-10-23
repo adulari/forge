@@ -17,8 +17,6 @@ pub(crate) const SILENCE_NUDGE_STEPS: usize = 12;
 /// Wall-clock silence that triggers a progress ask once at least [`SILENCE_MIN_TIMED_STEPS`] ran.
 pub(crate) const SILENCE_NUDGE_SECS: u64 = 180;
 const SILENCE_MIN_TIMED_STEPS: usize = 4;
-/// Steps without a successful file write after which the ask also requests a findings summary.
-pub(crate) const EXPLORATION_STEPS: usize = 40;
 const RECENT_COMMANDS: usize = 3;
 const COMMAND_HEAD_CHARS: usize = 60;
 
@@ -35,8 +33,6 @@ pub(crate) struct SilenceTracker {
     since: std::time::Instant,
     tool_counts: std::collections::BTreeMap<String, usize>,
     recent_commands: std::collections::VecDeque<String>,
-    steps_without_write: usize,
-    exploration_flagged: bool,
 }
 
 impl SilenceTracker {
@@ -46,8 +42,6 @@ impl SilenceTracker {
             since: now,
             tool_counts: Default::default(),
             recent_commands: Default::default(),
-            steps_without_write: 0,
-            exploration_flagged: false,
         }
     }
 
@@ -59,20 +53,13 @@ impl SilenceTracker {
     }
 
     /// Record one tool step. `visible_text` is whether the step's response showed the user any
-    /// text; `wrote` whether a file write in it succeeded.
+    /// text.
     pub(crate) fn observe(
         &mut self,
         visible_text: bool,
         calls: &[forge_types::ToolCall],
-        wrote: bool,
         now: std::time::Instant,
     ) -> Option<SilenceNudge> {
-        if wrote {
-            self.steps_without_write = 0;
-            self.exploration_flagged = false;
-        } else if !calls.is_empty() {
-            self.steps_without_write += 1;
-        }
         if visible_text {
             self.reset_stretch(now);
             return None;
@@ -102,19 +89,11 @@ impl SilenceTracker {
 
     fn build_nudge(&mut self) -> SilenceNudge {
         let calls: usize = self.tool_counts.values().sum();
-        let mut model_hint = format!(
+        let model_hint = format!(
             "You have made {calls} tool calls without a word to the user. In your next response, \
              write one or two sentences on what you have found and what you are doing next, and \
              continue with tool calls in that same response."
         );
-        if self.steps_without_write >= EXPLORATION_STEPS && !self.exploration_flagged {
-            self.exploration_flagged = true;
-            model_hint.push_str(&format!(
-                " You have also gone {} steps without changing a file: summarize your findings so \
-                 far and state the decision you are working toward.",
-                self.steps_without_write
-            ));
-        }
         let mut by_tool: Vec<(&String, &usize)> = self.tool_counts.iter().collect();
         by_tool.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         let tools = by_tool
@@ -168,18 +147,14 @@ impl Session {
         tracker: &mut SilenceTracker,
         text_shown: bool,
         resp: &forge_provider::ModelResponse,
-        observations: &[crate::loop_progress::CallObservation],
     ) -> Result<(), CoreError> {
         let visible_text = text_shown && !resp.content.trim().is_empty();
-        let wrote = observations
-            .iter()
-            .any(crate::loop_progress::CallObservation::wrote);
         let calls: Vec<forge_types::ToolCall> = resp
             .tool_calls
             .iter()
             .map(|call| self.resolve_model_call(call))
             .collect();
-        match tracker.observe(visible_text, &calls, wrote, std::time::Instant::now()) {
+        match tracker.observe(visible_text, &calls, std::time::Instant::now()) {
             Some(nudge) => self.deliver_silence_nudge(nudge),
             None => Ok(()),
         }
@@ -215,11 +190,11 @@ mod tests {
         let mut tracker = SilenceTracker::new(t0);
         for i in 0..SILENCE_NUDGE_STEPS - 1 {
             assert!(tracker
-                .observe(false, &[shell(&format!("ls {i}"))], false, t0)
+                .observe(false, &[shell(&format!("ls {i}"))], t0)
                 .is_none());
         }
         let nudge = tracker
-            .observe(false, &[shell("cargo test -p forge-agent-core")], false, t0)
+            .observe(false, &[shell("cargo test -p forge-agent-core")], t0)
             .expect("the twelfth silent step asks for an update");
         assert!(nudge.model_hint.contains("12 tool calls"));
         assert!(nudge
@@ -230,10 +205,10 @@ mod tests {
             .contains("cargo test -p forge-agent-core"));
         for i in 0..SILENCE_NUDGE_STEPS - 1 {
             assert!(tracker
-                .observe(false, &[shell(&format!("ls {i}"))], false, t0)
+                .observe(false, &[shell(&format!("ls {i}"))], t0)
                 .is_none());
         }
-        assert!(tracker.observe(false, &[shell("ls")], false, t0).is_some());
+        assert!(tracker.observe(false, &[shell("ls")], t0).is_some());
     }
 
     #[test]
@@ -241,11 +216,11 @@ mod tests {
         let t0 = std::time::Instant::now();
         let mut tracker = SilenceTracker::new(t0);
         for _ in 0..SILENCE_NUDGE_STEPS - 1 {
-            tracker.observe(false, &[shell("ls")], false, t0);
+            tracker.observe(false, &[shell("ls")], t0);
         }
-        assert!(tracker.observe(true, &[shell("ls")], false, t0).is_none());
+        assert!(tracker.observe(true, &[shell("ls")], t0).is_none());
         for _ in 0..SILENCE_NUDGE_STEPS - 1 {
-            assert!(tracker.observe(false, &[shell("ls")], false, t0).is_none());
+            assert!(tracker.observe(false, &[shell("ls")], t0).is_none());
         }
     }
 
@@ -256,28 +231,11 @@ mod tests {
         let mut tracker = SilenceTracker::new(t0);
         for _ in 0..SILENCE_MIN_TIMED_STEPS - 1 {
             assert!(tracker
-                .observe(false, &[shell("sleep 60")], false, later)
+                .observe(false, &[shell("sleep 60")], later)
                 .is_none());
         }
         assert!(tracker
-            .observe(false, &[shell("sleep 60")], false, later)
+            .observe(false, &[shell("sleep 60")], later)
             .is_some());
-    }
-
-    #[test]
-    fn a_long_stretch_without_writes_also_asks_for_findings_once() {
-        let t0 = std::time::Instant::now();
-        let mut tracker = SilenceTracker::new(t0);
-        let mut asks = Vec::new();
-        for _ in 0..EXPLORATION_STEPS + SILENCE_NUDGE_STEPS {
-            if let Some(n) = tracker.observe(false, &[shell("grep x")], false, t0) {
-                asks.push(n.model_hint);
-            }
-        }
-        let with_findings = asks
-            .iter()
-            .filter(|h| h.contains("summarize your findings"))
-            .count();
-        assert_eq!(with_findings, 1, "{asks:?}");
     }
 }

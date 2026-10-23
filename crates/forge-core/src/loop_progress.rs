@@ -1,65 +1,64 @@
-//! Structural progress judgement for the direct tool loop.
+//! What one executed tool call looked like, reduced to what the progress ledger needs.
 //!
 //! Text similarity alone cannot tell a stuck model from a busy one: seven consecutive successful
 //! edit/test steps that all open `Now let me update the …` repeat themselves exactly as much as
 //! thirty steps of `You're right — I looped` that re-read the same file. What separates them is
-//! whether the tool calls got the model anywhere. A step makes STRONG progress when it
-//! successfully ran a mutating tool (`write_file`/`edit`/…) with arguments not tried before this
-//! turn: the workspace changed, so everything resets. It is merely INFORMATIVE when a successful
-//! result carries at least a quarter of lines the model has not already seen this turn (so
-//! re-reading a file with a slightly different `limit`, or re-running a check that prints the
-//! same thing, is stale, while reading a different file or watching a screen change is not).
-//! Failed calls are never progress (the failure-loop guard owns them).
+//! whether the tool calls got the model anywhere, and that is what [`CallObservation`] carries:
+//! the call's signature, whether it succeeded, whether it wrote a file, and fingerprints of the
+//! lines its result printed. The judgement itself lives in [`crate::progress_ledger`].
 //!
-//! A repeated opening only counts against the model on stale steps, over a sliding window of
-//! recent steps. Once [`NARRATION_NUDGE_AT`] such steps accumulate the model is told to answer;
-//! if [`RELAPSE_STEPS`] more stale steps follow, it is halted — the apology-relapse pattern
-//! (`You're right, no more loops` followed by more of the same) gets no third chance.
-//! Stagnation without any repeated wording (the model rephrases every step while reading the same
-//! things, or alternates A,B,A,B with identical results) is caught by the same window at a
-//! higher bar, [`STAGNANT_NUDGE_AT`].
-//!
-//! Pure data in, verdict out; [`Session::judge_loop_progress`] is the only part that touches the
-//! transcript.
+//! Built where the result is in hand so the (possibly huge) text is hashed once and never copied.
 
-use crate::stall_guard::NarrationTracker;
-use std::collections::HashSet;
+mod text;
+mod waiting;
+
 use std::hash::{Hash, Hasher};
+use text::{
+    error_text, excerpt, has_body, hash_lines, line_fingerprints, mask_digits, stable_fingerprint,
+};
 
-/// Steps remembered for the judgement.
-const WINDOW_STEPS: usize = 10;
-/// Stale narration repeats (restatements on steps with nothing new) within the window before the
-/// model is nudged to answer. The third repeat is the fourth time the sentence is said.
-pub(crate) const NARRATION_NUDGE_AT: usize = 3;
-/// Steps with nothing new within the window, regardless of wording, before the same nudge. Higher
-/// than the narration bar because a model that varies its words may simply be exploring:
-/// legitimately waiting on a job produces unchanged output for a while, and the identical-call
-/// doom-loop guard separately handles byte-identical polling.
-pub(crate) const STAGNANT_NUDGE_AT: usize = 8;
-/// Relapsing steps (nothing new, or the same opening again) tolerated after a nudge before the
-/// turn ends.
-pub(crate) const RELAPSE_STEPS: usize = 2;
-/// Steps after a nudge in which [`RELAPSE_STEPS`] stale ones halt the turn; surviving the window
-/// without them counts as the model having taken the hint.
-const RELAPSE_WINDOW: usize = 4;
+pub(crate) use text::hash_str;
 
-/// Seen-line set size past which it is dropped and rebuilt; bounds memory on a very long turn
-/// without ever leaving the tracker unable to judge (it just re-learns).
-const MAX_SEEN_LINES: usize = 200_000;
-/// A result with at least this share (1 in `NEW_LINE_DIVISOR`) of lines unseen is informative.
-const NEW_LINE_DIVISOR: usize = 4;
-/// One-line results at most this long are treated as status messages (`no matches for 'x'`,
-/// `ok`): their quoted parts are masked so varying only the query does not read as new.
-const SHORT_RESULT_CHARS: usize = 160;
+/// Tools that cannot change the working tree: a step made only of these is never a reason to
+/// look at it. Everything else (a shell command, a script, an external server's tool) might.
+const TREE_SAFE_TOOLS: [&str; 14] = [
+    "read_file",
+    "list_dir",
+    "glob",
+    "search",
+    "web_fetch",
+    "web_search",
+    "lattice",
+    "shell_job",
+    "update_tasks",
+    "ask_user",
+    "present_plan",
+    "spawn_agents",
+    "browser_network",
+    "proxy_network",
+];
 
-/// What one executed tool call looked like, reduced to what the judgement needs. Built where the
-/// result is in hand so the (possibly huge) text is hashed once and never copied.
+/// Tools whose first read of a path is information by itself, whatever the lines in it repeat.
+const FIRST_READ_TOOLS: [&str; 2] = ["read_file", "list_dir"];
+
 #[derive(Debug, Clone)]
 pub(crate) struct CallObservation {
     signature: u64,
+    tool: String,
+    label: String,
     ok: bool,
     mutating: bool,
+    waiting: bool,
+    opaque: bool,
+    silent: bool,
+    check_flip: bool,
+    check: Option<&'static str>,
+    result_fp: u64,
+    failure_fp: u64,
+    error_head: Option<String>,
+    cause: Option<u64>,
     lines: Vec<u64>,
+    read_targets: Vec<u64>,
 }
 
 impl CallObservation {
@@ -72,14 +71,190 @@ impl CallObservation {
         self.ok && self.mutating
     }
 
+    pub(crate) fn signature(&self) -> u64 {
+        self.signature
+    }
+
+    pub(crate) fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub(crate) fn mutating(&self) -> bool {
+        self.mutating
+    }
+
+    /// A call that waits for something outside the turn (see [`waiting`]): neither progress nor
+    /// a loop.
+    pub(crate) fn waiting(&self) -> bool {
+        self.waiting
+    }
+
+    /// The call could have changed the working tree without being a recognised write: a shell
+    /// command, a script, an external tool.
+    pub(crate) fn opaque(&self) -> bool {
+        self.opaque
+    }
+
+    /// A shell command that succeeded and printed nothing: all it says is that it ran, so its
+    /// effect, if any, is somewhere else.
+    pub(crate) fn silent(&self) -> bool {
+        self.silent
+    }
+
+    /// A verification family that was failing passed on this call.
+    pub(crate) fn check_flip(&self) -> bool {
+        self.check_flip
+    }
+
+    /// The verification family (`test`, `build`, ...) this call ran, when it was one command of
+    /// one family.
+    pub(crate) fn check(&self) -> Option<&'static str> {
+        self.check
+    }
+
+    /// Hash of the result's line fingerprints: identical across runs of the same call that differ
+    /// only in the shell's `exit N in Xms` header (output that changes, a poll's progress,
+    /// hashes differently). A failure's lines have their digits masked first.
+    pub(crate) fn result_fp(&self) -> u64 {
+        self.result_fp
+    }
+
+    /// What a failing result says without its durations, times and ids: equal for two runs of a
+    /// check that fail the same way.
+    pub(crate) fn failure_fp(&self) -> u64 {
+        self.failure_fp
+    }
+
+    /// The line of a failure that says what went wrong; `None` when there was none to read.
+    pub(crate) fn error_head(&self) -> Option<&str> {
+        self.error_head.as_deref()
+    }
+
+    /// The failure's cause, ignoring digits: `attempt 3 refused` and `no such file: a-4.rs` and
+    /// `no such file: a-5.rs` are each one.
+    pub(crate) fn cause(&self) -> Option<u64> {
+        self.cause
+    }
+
+    pub(crate) fn lines(&self) -> &[u64] {
+        &self.lines
+    }
+
+    /// The paths this call read for the first time, when it was a read.
+    pub(crate) fn read_targets(&self) -> &[u64] {
+        &self.read_targets
+    }
+
+    /// Anonymous observation, for fixtures that carry only a signature and a result.
     pub(crate) fn new(signature: u64, ok: bool, mutating: bool, result: &str) -> Self {
+        let lines = line_fingerprints(result, !ok);
+        let error = if ok { None } else { error_text(result) };
         Self {
             signature,
+            tool: "tool".to_string(),
+            label: format!("call {:08x}", signature & 0xffff_ffff),
             ok,
             mutating,
-            lines: line_fingerprints(result),
+            waiting: false,
+            opaque: false,
+            silent: false,
+            check_flip: false,
+            check: None,
+            result_fp: hash_lines(&lines),
+            failure_fp: stable_fingerprint(result),
+            cause: error.as_deref().map(|e| hash_str(&mask_digits(e))),
+            error_head: error,
+            lines,
+            read_targets: Vec::new(),
         }
     }
+
+    pub(crate) fn for_call(
+        call: &forge_types::ToolCall,
+        ok: bool,
+        mutating: bool,
+        result: &str,
+    ) -> Self {
+        let mut observation = Self::new(call_signature(call), ok, mutating, result);
+        observation.tool = call.name.clone();
+        observation.label = call_label(call);
+        observation.waiting = waiting::is_waiting(call, ok, result);
+        observation.opaque = !mutating && !TREE_SAFE_TOOLS.contains(&call.name.as_str());
+        observation.silent = call.name == "shell" && ok && !has_body(result);
+        if FIRST_READ_TOOLS.contains(&call.name.as_str()) {
+            observation.read_targets = read_targets(call);
+        }
+        observation
+    }
+
+    pub(crate) fn with_check(mut self, family: Option<&'static str>, flipped: bool) -> Self {
+        self.check = family;
+        self.check_flip = flipped;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn named(mut self, tool: &str) -> Self {
+        self.tool = tool.to_string();
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiting_for_job(mut self) -> Self {
+        self.waiting = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flipping_a_check(self) -> Self {
+        self.with_check(None, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn running_check(self, family: &'static str) -> Self {
+        self.with_check(Some(family), false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn opaquely(mut self) -> Self {
+        self.opaque = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn silently(mut self) -> Self {
+        self.silent = true;
+        self.opaque = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reading(mut self, path: &str) -> Self {
+        self.read_targets = vec![hash_str(path)];
+        self
+    }
+}
+
+/// The paths a read names, hashed.
+fn read_targets(call: &forge_types::ToolCall) -> Vec<u64> {
+    let paths = if call.name == "read_file" {
+        crate::recent_files::read_paths(&call.args)
+    } else {
+        ["path", "dir"]
+            .iter()
+            .find_map(|key| call.args.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    };
+    paths
+        .iter()
+        .map(|path| hash_str(&format!("{}:{path}", call.name)))
+        .collect()
 }
 
 /// Stable hash of one call's tool name and JSON arguments (object keys are ordered, so equal
@@ -91,727 +266,249 @@ pub(crate) fn call_signature(call: &forge_types::ToolCall) -> u64 {
     h.finish()
 }
 
-fn line_fingerprints(result: &str) -> Vec<u64> {
-    let mut lines = result.lines().map(str::trim).filter(|l| !l.is_empty());
-    let first = lines.next();
-    let rest: Vec<&str> = lines.collect();
-    let mut out = Vec::with_capacity(rest.len() + 1);
-    let single_short = rest.is_empty() && first.is_some_and(|l| l.len() <= SHORT_RESULT_CHARS);
-    if let Some(first) = first {
-        out.push(hash_str(&if single_short {
-            mask_quoted(first)
-        } else if first.starts_with("shell:") {
-            // `shell: exit 0 in 42ms` — the timing differs on every run of an identical command.
-            first.replace(|c: char| c.is_ascii_digit(), "#")
-        } else {
-            first.to_string()
-        }));
-    }
-    out.extend(rest.into_iter().map(hash_str));
-    out
-}
-
-fn hash_str(s: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
-}
-
-/// Replace everything between matching quote characters with nothing.
-fn mask_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut open: Option<char> = None;
-    for c in s.chars() {
-        match open {
-            Some(q) if c == q => {
-                open = None;
-                out.push(c);
-            }
-            Some(_) => {}
-            None => {
-                if matches!(c, '\'' | '"' | '`') {
-                    open = Some(c);
-                }
-                out.push(c);
-            }
-        }
-    }
-    out
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verdict {
-    Fine,
-    /// The model keeps restating itself while getting nothing new: tell it to answer.
-    NudgeRepeating {
-        stale_steps: usize,
-    },
-    /// Most recent steps found nothing new, though the wording varied: tell it to answer.
-    NudgeStagnant {
-        stale_steps: usize,
-    },
-    /// Still nothing new after the nudge: end the turn cleanly.
-    Halt {
-        stale_steps: usize,
-    },
-}
-
-/// How a finished step is remembered in the sliding window.
-#[derive(Debug, Clone, Copy)]
-struct StepRecord {
-    /// Nothing in it was new: no successful new mutation and under a quarter of the result lines
-    /// unseen.
-    stale: bool,
-    /// Its opening restated one of the model's recent openings.
-    restated: bool,
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct ProgressTracker {
-    narration: NarrationTracker,
-    seen_signatures: HashSet<u64>,
-    seen_lines: HashSet<u64>,
-    window: std::collections::VecDeque<StepRecord>,
-    nudged: bool,
-    /// Steps since the nudge, and how many of them were stale.
-    steps_since_nudge: usize,
-    stale_since_nudge: usize,
-}
-
-impl ProgressTracker {
-    /// Judge one finished tool step: the narration the model emitted with it and what its calls
-    /// returned.
-    ///
-    /// Two tiers of progress. A successful mutation with new arguments is STRONG: it wipes the
-    /// slate, because the workspace actually changed. New information alone (a read of something
-    /// not seen before, a screen that changed) is WEAK: it stops that one step counting against
-    /// the model but does not erase the steps around it. The distinction matters because a stuck
-    /// model rarely returns nothing new on every single step — live, it alternated a re-read of a
-    /// big file (nothing new) with a small `git diff | grep` (a few new lines) for 25 steps — so
-    /// a rule that any new line clears the count never fires on the loops that matter, while a
-    /// window over recent steps does.
-    pub(crate) fn observe_step(&mut self, narration: &str, calls: &[CallObservation]) -> Verdict {
-        let (strong, informative) = self.assess(calls);
-        let restated = self.narration.observe(narration, strong);
-        if strong {
-            self.window.clear();
-            self.nudged = false;
-            self.steps_since_nudge = 0;
-            self.stale_since_nudge = 0;
-            return Verdict::Fine;
-        }
-        let stale = !informative;
-        self.window.push_back(StepRecord { stale, restated });
-        if self.window.len() > WINDOW_STEPS {
-            self.window.pop_front();
-        }
-        if self.nudged {
-            self.steps_since_nudge += 1;
-            // Told to stop repeating itself, a step that still repeats itself relapses even if it
-            // happened to read something new: the live apology loop did exactly that.
-            if stale || restated {
-                self.stale_since_nudge += 1;
-            }
-            if self.stale_since_nudge >= RELAPSE_STEPS {
-                return Verdict::Halt {
-                    stale_steps: self.stale_steps(),
-                };
-            }
-            if self.steps_since_nudge >= RELAPSE_WINDOW {
-                // It took the hint: new information kept arriving. Judge afresh from here.
-                self.nudged = false;
-                self.window.clear();
-            }
-            return Verdict::Fine;
-        }
-        if self.stale_repeats() >= NARRATION_NUDGE_AT {
-            self.nudged = true;
-            self.steps_since_nudge = 0;
-            self.stale_since_nudge = 0;
-            return Verdict::NudgeRepeating {
-                stale_steps: self.stale_steps(),
-            };
-        }
-        if self.stale_steps() >= STAGNANT_NUDGE_AT {
-            self.nudged = true;
-            self.steps_since_nudge = 0;
-            self.stale_since_nudge = 0;
-            return Verdict::NudgeStagnant {
-                stale_steps: self.stale_steps(),
-            };
-        }
-        Verdict::Fine
-    }
-
-    fn stale_steps(&self) -> usize {
-        self.window.iter().filter(|r| r.stale).count()
-    }
-
-    fn stale_repeats(&self) -> usize {
-        self.window.iter().filter(|r| r.stale && r.restated).count()
-    }
-
-    /// `(strong, informative)` for this step; records everything seen either way.
-    fn assess(&mut self, calls: &[CallObservation]) -> (bool, bool) {
-        let (mut strong, mut informative) = (false, false);
-        for call in calls {
-            let new_signature = self.seen_signatures.insert(call.signature);
-            if !call.ok {
-                continue;
-            }
-            if call.mutating && new_signature {
-                strong = true;
-            }
-            if self.seen_lines.len() > MAX_SEEN_LINES {
-                self.seen_lines.clear();
-            }
-            let total = call.lines.len();
-            let new = call
-                .lines
-                .iter()
-                .filter(|l| self.seen_lines.insert(**l))
-                .count();
-            if new > 0 && new * NEW_LINE_DIVISOR >= total {
-                informative = true;
-            }
-        }
-        (strong, informative || strong)
-    }
-
-    /// A new user turn. What the model has read stays read, but the turn gets a fresh
-    /// nudge-then-halt budget: carrying a pending nudge (or a window full of stale steps) across
-    /// turns halted every later turn after its first step in long sessions, where nearly every
-    /// read repeats something seen hours earlier. A loop that really survives the user's message
-    /// is still caught within this turn: the window refills, the nudge lands, the relapse halts.
-    /// Argument signatures are forgotten too, so a deliberate redo of an earlier edit still
-    /// counts as a fresh mutation.
-    pub(crate) fn begin_turn(&mut self) {
-        self.narration.begin_turn();
-        self.seen_signatures.clear();
-        self.window.clear();
-        self.nudged = false;
-        self.steps_since_nudge = 0;
-        self.stale_since_nudge = 0;
-    }
-
-    /// The transcript was just compacted: the model no longer remembers what it read, so reading
-    /// it again is legitimate. Forget what was seen, but keep the window and any pending nudge —
-    /// a loop that survives a compaction is exactly the case this exists to catch.
-    pub(crate) fn note_compaction(&mut self) {
-        self.seen_signatures.clear();
-        self.seen_lines.clear();
-    }
-
-    /// How hard this turn is currently repeating itself, as a rung on the sampling ladder
-    /// (0 = nothing, 1 = restated once, 2 = persistently). Reports the evidence EARLY, while the
-    /// turn is still salvageable, so the next request can be shaped differently (a higher
-    /// temperature, a repetition penalty) instead of being sent again identically. Only stale
-    /// steps count: a productive turn never runs hotter.
-    pub(crate) fn pressure(&self) -> u8 {
-        let verbatim = self.narration.max_verbatim();
-        let repeats = self.stale_repeats();
-        if verbatim >= 3 || self.nudged || repeats >= 2 {
-            return 2;
-        }
-        if verbatim >= 2 || repeats >= 1 {
-            return 1;
-        }
-        0
+/// `read_file src/lib.rs`, `shell cargo test`: the tool and the one argument that says what it
+/// was aimed at, short enough for a one-line report.
+pub(crate) fn call_label(call: &forge_types::ToolCall) -> String {
+    let target = if call.name == "shell" {
+        forge_types::shell_command_text(&call.args).and_then(|text| {
+            text.lines()
+                .find(|l| !l.trim().is_empty())
+                .map(str::to_string)
+        })
+    } else {
+        ["path", "file_path", "pattern", "query", "url", "name"]
+            .iter()
+            .find_map(|key| call.args.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+    };
+    match target {
+        Some(target) => excerpt(&format!("{} {}", call.name, target.trim())),
+        None => call.name.clone(),
     }
 }
-
-impl crate::Session {
-    /// Called after the step's tools ran: novelty decides whether repeated wording is a loop,
-    /// and a nudge must land after the tool results.
-    /// Judge the step that just finished. Delivers a nudge into the transcript (after the tool
-    /// results, so message ordering stays valid) or reports that the turn must end.
-    pub(crate) fn judge_loop_progress(
-        &mut self,
-        narration: &str,
-        observations: &[CallObservation],
-    ) -> bool {
-        let verdict = self.progress.observe_step(narration, observations);
-        // Carried into the NEXT request's sampling (see `model_request`).
-        self.repetition_pressure = self.progress.pressure();
-        let (warning, nudge) = match verdict {
-            Verdict::Fine => return false,
-            Verdict::NudgeRepeating { stale_steps } => (
-                format!(
-                    "model has opened {} replies with the same sentence while {stale_steps} of \
-                     its last {WINDOW_STEPS} steps found nothing new — nudging it to answer \
-                     before stopping",
-                    NARRATION_NUDGE_AT + 1
-                ),
-                crate::stall_guard::STALL_NUDGE,
-            ),
-            Verdict::NudgeStagnant { stale_steps } => (
-                format!(
-                    "{stale_steps} of the last {WINDOW_STEPS} steps found nothing new — nudging \
-                     the model to answer before stopping"
-                ),
-                STAGNATION_NUDGE,
-            ),
-            Verdict::Halt { stale_steps } => {
-                let after = if self.advisory_nudges_on() {
-                    " after a nudge"
-                } else {
-                    ""
-                };
-                self.presenter
-                    .emit(forge_types::PresenterEvent::Warning(format!(
-                        "{stale_steps} of the model's last {WINDOW_STEPS} steps found nothing new \
-                         and it kept going{after} — stopping to avoid a loop. Nothing is lost: \
-                         edits so far are kept. Reply with what you want next, or `continue` to \
-                         let it try again."
-                    )));
-                return true;
-            }
-        };
-        // A `minimal` profile sends no nudge, but the tracker still counts the relapse window, so
-        // a model that keeps finding nothing new is halted on the same schedule.
-        if !self.advisory_nudges_on() {
-            return false;
-        }
-        self.presenter
-            .emit(forge_types::PresenterEvent::Warning(warning));
-        let _ = self.push_note(forge_types::MessageKind::LoopGuard, nudge);
-        false
-    }
-}
-
-pub(crate) const STAGNATION_NUDGE: &str = "Your last several steps returned nothing you had not \
-already seen, whatever order or wording you used. More of the same will not change that. Stop \
-investigating: answer now from what you have, say what is still uncertain, or make a concrete \
-edit or run a command that tests a NEW idea. If you are waiting on something, say so and stop \
-polling.";
 
 #[cfg(test)]
 mod tests {
+    use super::text::{line_fingerprints, EXCERPT_CHARS};
     use super::*;
 
-    const REPEATED: &str =
-        "You're right — I looped. Answering the question from evidence, then finishing the revert.";
-
-    fn obs(sig: u64, ok: bool, mutating: bool, result: &str) -> CallObservation {
-        CallObservation::new(sig, ok, mutating, result)
-    }
-
-    /// A read that shows `n` lines of a file, the first `n - 1` of which an earlier read of the
-    /// same file already showed (`limit` creeping up by one).
-    fn creeping_read(n: usize) -> CallObservation {
-        let text: String = (0..n).map(|i| format!("line {i} of the file\n")).collect();
-        obs(1000 + n as u64, true, false, &text)
-    }
-
-    /// Twenty openings with nothing in common, so wording never counts as a repeat.
-    const DISTINCT: [&str; 20] = [
-        "Checking whether the cache invalidates correctly under load",
-        "Perhaps the scheduler drops the wakeup before the lock releases",
-        "Switching to the config loader since parsing might be lenient",
-        "Reconsidering how retries interact with idempotency keys here",
-        "Tracing allocation sizes through the buffer pool next",
-        "Comparing serialization output between both encoder versions",
-        "Wondering if the migration ordering explains the missing column",
-        "Looking into whether timeouts shadow the underlying socket error",
-        "Revisiting the assumption about monotonic clock readings",
-        "Auditing feature flags that gate the experimental path",
-        "Examining log rotation settings for truncated entries",
-        "Measuring queue latency percentiles around the incident window",
-        "Questioning whether the proxy rewrites headers unexpectedly",
-        "Mapping which crates depend on the shared error enum",
-        "Validating the fixture data against the published schema",
-        "Probing the watcher for missed filesystem events",
-        "Studying how backpressure propagates through the pipeline",
-        "Inspecting build script outputs for stale artifacts",
-        "Reviewing locale handling inside the date formatter",
-        "Estimating memory growth across repeated reconnects",
-    ];
-
-    fn run(steps: &[(&str, Vec<CallObservation>)]) -> Vec<Verdict> {
-        let mut t = ProgressTracker::default();
-        steps
-            .iter()
-            .map(|(text, calls)| t.observe_step(text, calls))
-            .collect()
-    }
-
-    fn first(verdicts: &[Verdict], pred: impl Fn(&Verdict) -> bool) -> Option<usize> {
-        verdicts.iter().position(pred).map(|i| i + 1)
+    fn shell(command: &str) -> forge_types::ToolCall {
+        forge_types::ToolCall {
+            id: "c".into(),
+            name: "shell".into(),
+            args: serde_json::json!({ "command": command }),
+        }
     }
 
     #[test]
-    fn a_productive_edit_streak_with_one_opening_never_nudges_or_halts() {
-        let steps: Vec<_> = (0..30)
-            .map(|i| {
-                let calls = if i % 2 == 0 {
-                    vec![obs(i, true, true, "edited src/lib.rs")]
-                } else {
-                    vec![obs(
-                        500 + i,
-                        true,
-                        false,
-                        &format!("running 3 tests\ntest case_{i} ... ok\ntest result: ok"),
-                    )]
-                };
-                ("Now let me update the parser to cover the next case", calls)
-            })
-            .collect();
-        let verdicts = run(&steps);
-        assert!(verdicts.iter().all(|v| *v == Verdict::Fine), "{verdicts:?}");
+    fn shell_timing_in_the_header_does_not_change_the_fingerprints() {
+        let a = line_fingerprints("shell: exit 0 in 42ms\n\nsame output\nmore output", false);
+        let b = line_fingerprints("shell: exit 0 in 19ms\n\nsame output\nmore output", false);
+        assert_eq!(a, b);
+        let a = CallObservation::new(1, true, false, "shell: exit 0 in 42ms\nsame");
+        let b = CallObservation::new(1, true, false, "shell: exit 0 in 19ms\nsame");
+        assert_eq!(a.result_fp(), b.result_fp());
+        let c = CallObservation::new(1, true, false, "shell: exit 0 in 19ms\nother");
+        assert_ne!(a.result_fp(), c.result_fp());
+        let poll_a = CallObservation::new(1, true, false, "shell: exit 0 in 4ms\n\nbuilt 3 of 40");
+        let poll_b = CallObservation::new(1, true, false, "shell: exit 0 in 4ms\n\nbuilt 4 of 40");
+        assert_ne!(
+            poll_a.result_fp(),
+            poll_b.result_fp(),
+            "a poll whose counter moves is not an identical result"
+        );
     }
 
     #[test]
-    fn rereading_with_a_creeping_limit_and_one_opening_halts_by_step_six() {
-        let steps: Vec<_> = (20..40)
-            .map(|n| (REPEATED, vec![creeping_read(n)]))
-            .collect();
-        let verdicts = run(&steps);
+    fn a_silent_shell_command_is_the_same_result_whatever_its_timing() {
         assert_eq!(
-            first(&verdicts, |v| matches!(v, Verdict::NudgeRepeating { .. })),
-            Some(4),
-            "{verdicts:?}"
+            line_fingerprints("shell: exit 0 in 3ms", false),
+            line_fingerprints("shell: exit 0 in 41ms", false)
         );
+    }
+
+    #[test]
+    fn varying_only_the_quoted_query_of_a_short_result_is_not_new() {
         assert_eq!(
-            first(&verdicts, |v| matches!(v, Verdict::Halt { .. })),
-            Some(6),
-            "{verdicts:?}"
+            line_fingerprints("no matches for 'a'", false),
+            line_fingerprints("no matches for 'b'", false)
         );
     }
 
     #[test]
-    fn a_changing_wording_still_halts_through_the_stagnation_counter() {
-        let steps: Vec<_> = DISTINCT
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (*t, vec![creeping_read(20 + i)]))
-            .collect();
-        let verdicts = run(&steps);
-        assert_eq!(
-            first(&verdicts, |v| matches!(v, Verdict::NudgeStagnant { .. })),
-            Some(STAGNANT_NUDGE_AT + 1),
-            "{verdicts:?}"
-        );
-        assert_eq!(
-            first(&verdicts, |v| matches!(v, Verdict::Halt { .. })),
-            Some(STAGNANT_NUDGE_AT + RELAPSE_STEPS + 1),
-            "{verdicts:?}"
-        );
+    fn a_poll_mode_wait_is_recognised_only_for_shell() {
+        let result = "shell: not ready after 100s (last exit 1) — call shell again with the same poll args to keep waiting.";
+        assert!(CallObservation::for_call(&shell("gh run watch"), true, false, result).waiting());
+        let other = forge_types::ToolCall {
+            id: "c".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({ "path": "a" }),
+        };
+        assert!(!CallObservation::for_call(&other, true, false, result).waiting());
+        assert!(!CallObservation::for_call(&shell("ls"), true, false, "shell: exit 0").waiting());
     }
 
     #[test]
-    fn oscillation_with_identical_results_is_caught_even_with_new_prose_each_time() {
-        let a = "contents of a.rs\nfn a() {}\nfn b() {}\nfn c() {}";
-        let b = "contents of b.rs\nfn x() {}\nfn y() {}\nfn z() {}";
-        let steps: Vec<_> = DISTINCT
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let call = if i % 2 == 0 {
-                    obs(1, true, false, a)
-                } else {
-                    obs(2, true, false, b)
-                };
-                (*t, vec![call])
-            })
-            .collect();
-        let verdicts = run(&steps);
-        // Steps 1 and 2 are novel (first sight of each file); the stale streak starts at 3.
-        assert!(
-            first(&verdicts, |v| matches!(v, Verdict::Halt { .. })).is_some_and(|s| s <= 12),
-            "{verdicts:?}"
-        );
+    fn labels_name_the_tool_and_its_target() {
+        let read = forge_types::ToolCall {
+            id: "c".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({ "path": "src/lib.rs" }),
+        };
+        assert_eq!(call_label(&read), "read_file src/lib.rs");
+        assert_eq!(call_label(&shell("cargo test\nsecond")), "shell cargo test");
+        let long = shell(&"x".repeat(200));
+        assert!(call_label(&long).chars().count() <= EXCERPT_CHARS + 1);
     }
 
     #[test]
-    fn device_polling_with_changing_results_is_never_stopped() {
-        let steps: Vec<_> = (0..40)
-            .map(|i| {
-                let calls = vec![
-                    obs(10_000 + i, true, false, "tapped"),
-                    obs(
-                        1,
-                        true,
-                        false,
-                        &format!("screen {i}\nbutton Next\nlabel Step {i} of 40\nprogress {i}%"),
-                    ),
-                ];
-                ("Tapping the next control and checking the screen", calls)
-            })
-            .collect();
-        let verdicts = run(&steps);
-        assert!(verdicts.iter().all(|v| *v == Verdict::Fine), "{verdicts:?}");
-    }
-
-    #[test]
-    fn device_polling_whose_screen_never_changes_is_still_a_loop() {
-        let steps: Vec<_> = (0..20)
-            .map(|i| {
-                let calls = vec![
-                    obs(10_000 + i, true, false, "tapped"),
-                    obs(1, true, false, "screen home\nbutton Next\nlabel Welcome"),
-                ];
-                ("Tapping the next control and checking the screen", calls)
-            })
-            .collect();
-        let verdicts = run(&steps);
-        assert!(
-            first(&verdicts, |v| matches!(v, Verdict::Halt { .. })).is_some(),
-            "{verdicts:?}"
-        );
-    }
-
-    #[test]
-    fn varying_only_the_quoted_query_of_an_empty_search_is_not_new() {
-        let steps: Vec<_> = (0..12)
-            .map(|i| {
-                (
-                    REPEATED,
-                    vec![obs(
-                        i,
-                        true,
-                        false,
-                        &format!("no matches for 'pattern_{i}'"),
-                    )],
-                )
-            })
-            .collect();
-        let verdicts = run(&steps);
-        assert!(
-            first(&verdicts, |v| matches!(v, Verdict::Halt { .. })).is_some(),
-            "{verdicts:?}"
-        );
-    }
-
-    #[test]
-    fn failed_calls_and_repeated_mutations_are_not_progress() {
-        let mut t = ProgressTracker::default();
-        let edit = || vec![obs(7, true, true, "edited src/lib.rs")];
-        assert_eq!(t.observe_step(REPEATED, &edit()), Verdict::Fine);
-        // The same edit again (a revert/re-apply cycle) and a failing edit add nothing.
-        for _ in 0..2 {
-            t.observe_step(REPEATED, &edit());
-            t.observe_step(REPEATED, &[obs(8, false, true, "error: no match")]);
-        }
-        assert!(t.stale_steps() >= 4, "{}", t.stale_steps());
-    }
-
-    #[test]
-    fn a_novel_step_after_the_nudge_clears_it_so_a_later_loop_gets_its_own() {
-        let mut t = ProgressTracker::default();
-        let mut verdicts = Vec::new();
-        for n in 20..25 {
-            verdicts.push(t.observe_step(REPEATED, &[creeping_read(n)]));
-        }
-        assert!(
-            matches!(verdicts[3], Verdict::NudgeRepeating { .. }),
-            "{verdicts:?}"
-        );
-        assert_eq!(
-            t.observe_step("Found it", &[obs(99, true, true, "edited src/other.rs")]),
-            Verdict::Fine
-        );
-        let mut again = Vec::new();
-        for n in 30..36 {
-            again.push(t.observe_step(REPEATED, &[creeping_read(n)]));
-        }
-        assert!(
-            again
-                .iter()
-                .any(|v| matches!(v, Verdict::NudgeRepeating { .. })),
-            "second loop was not nudged again: {again:?}"
-        );
-    }
-
-    #[test]
-    fn a_compaction_forgets_what_was_read_but_not_the_streak() {
-        let mut t = ProgressTracker::default();
-        for n in 20..24 {
-            t.observe_step(REPEATED, &[creeping_read(n)]);
-        }
-        assert!(t.nudged);
-        t.note_compaction();
-        // The same file read again after compaction is new information for a model that lost it
-        // (not stale, so not a halt)...
-        assert_eq!(
-            t.observe_step(REPEATED, &[creeping_read(23)]),
-            Verdict::Fine
-        );
-        assert!(t.nudged, "the pending nudge survives the compaction");
-        // ...but a loop that continues past it is caught again within a handful of steps.
-        let verdicts: Vec<Verdict> = (24..34)
-            .map(|n| t.observe_step(REPEATED, &[creeping_read(n)]))
-            .collect();
-        assert!(
-            verdicts.iter().any(|v| matches!(v, Verdict::Halt { .. })),
-            "{verdicts:?}"
-        );
-    }
-
-    #[test]
-    fn a_new_user_turn_gets_a_fresh_budget_but_a_loop_is_still_caught() {
-        let mut t = ProgressTracker::default();
-        for n in 20..24 {
-            t.observe_step(REPEATED, &[creeping_read(n)]);
-        }
-        assert!(t.nudged);
-        t.begin_turn();
-        assert_eq!(
-            t.observe_step(REPEATED, &[creeping_read(20)]),
-            Verdict::Fine,
-            "the first step of a new turn must never halt on the previous turn's evidence"
-        );
-        let verdicts: Vec<Verdict> = (24..40)
-            .map(|n| t.observe_step(REPEATED, &[creeping_read(n)]))
-            .collect();
-        assert!(
-            verdicts.iter().any(|v| matches!(v, Verdict::Halt { .. })),
-            "a loop that continues through the new turn is still halted within it: {verdicts:?}"
-        );
-    }
-
-    #[test]
-    fn rereading_old_output_in_a_new_turn_does_not_halt_it() {
-        let mut t = ProgressTracker::default();
-        for n in 0..WINDOW_STEPS + RELAPSE_STEPS + 2 {
-            t.observe_step(
-                "",
-                &[obs(n as u64, true, false, "the same old file contents")],
-            );
-        }
-        t.begin_turn();
-        for n in 0..STAGNANT_NUDGE_AT - 1 {
-            assert_eq!(
-                t.observe_step(
-                    "",
-                    &[obs(
-                        1000 + n as u64,
-                        true,
-                        false,
-                        "the same old file contents"
-                    )]
-                ),
-                Verdict::Fine
-            );
-        }
-    }
-
-    #[test]
-    fn pressure_tracks_stale_repetition_only() {
-        let mut t = ProgressTracker::default();
-        for i in 0..6 {
-            t.observe_step(
-                "Now let me update the parser to cover the next case",
-                &[obs(i, true, true, "edited src/lib.rs")],
-            );
-        }
-        assert_eq!(t.pressure(), 0, "productive repetition never runs hotter");
-        t.observe_step(REPEATED, &[creeping_read(20)]);
-        t.observe_step(REPEATED, &[creeping_read(21)]);
-        assert_eq!(t.pressure(), 1);
-        t.observe_step(REPEATED, &[creeping_read(22)]);
-        t.observe_step(REPEATED, &[creeping_read(23)]);
-        assert_eq!(t.pressure(), 2);
-    }
-
-    #[test]
-    fn shell_timing_in_the_header_is_not_new_information() {
-        let a = obs(
-            1,
-            true,
+    fn a_failed_shell_result_reports_its_cause_not_the_exit_header() {
+        let obs = CallObservation::for_call(
+            &shell("nope"),
             false,
-            "shell: exit 0 in 42ms\n\nsame output\nmore output",
-        );
-        let b = obs(
-            1,
-            true,
             false,
-            "shell: exit 0 in 19ms\n\nsame output\nmore output",
+            "shell: exit 127 in 3ms\n\nsh: 1: nope: not found",
         );
-        let mut t = ProgressTracker::default();
-        assert!(t.assess(&[a]).1);
-        assert!(!t.assess(&[b]).1);
-    }
-    /// Real looping stretches from the live store (2026-09-08 and 2026-09-17), reduced to the
-    /// shape the tracker sees: narration openings, call signatures, success flags, and result
-    /// lines interned to ids (one blob per distinct result). Anonymised: no file contents, paths
-    /// or credentials survive.
-    fn replay(name: &str) -> (Vec<Verdict>, usize) {
-        let all: serde_json::Value =
-            serde_json::from_str(include_str!("tests/fixtures/loop_replays.json")).unwrap();
-        let seg = all
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["name"] == name)
-            .unwrap();
-        let blobs: Vec<String> = seg["blobs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|runs| {
-                let mut text = String::new();
-                for run in runs.as_array().unwrap() {
-                    let (start, count) = (run[0].as_u64().unwrap(), run[1].as_u64().unwrap());
-                    for id in start..start + count {
-                        text.push_str(&format!("L{id}\n"));
-                    }
-                }
-                text
-            })
-            .collect();
-        let steps = seg["steps"].as_array().unwrap();
-        let mut t = ProgressTracker::default();
-        let verdicts = steps
-            .iter()
-            .map(|step| {
-                let calls: Vec<CallObservation> = step["calls"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|c| {
-                        CallObservation::new(
-                            c["sig"].as_u64().unwrap(),
-                            c["ok"].as_bool().unwrap(),
-                            c["mut"].as_bool().unwrap(),
-                            &blobs[c["res"].as_u64().unwrap() as usize],
-                        )
-                    })
-                    .collect();
-                t.observe_step(step["text"].as_str().unwrap(), &calls)
-            })
-            .collect();
-        (verdicts, steps.len())
-    }
-
-    /// The Sep 8 apology loop: 35 steps, no edit, the same `You're right — I looped` opening
-    /// from step 6 on, alternating a re-read of a 1,349-line file with small `git`/`grep`
-    /// queries. The old narration-only guard (5-word prefix, no notion of progress) nudged at
-    /// step 14 and halted at step 18 when started fresh on this stretch; live it needed ~37 steps
-    /// and three user messages because each message reset it.
-    #[test]
-    fn the_apology_loop_is_nudged_by_step_12_and_halted_by_step_14() {
-        let (v, n) = replay("s1_looped_apology");
-        assert_eq!(n, 35);
+        assert_eq!(obs.error_head(), Some("sh: 1: nope: not found"));
+        assert!(CallObservation::new(1, true, false, "fine")
+            .error_head()
+            .is_none());
+        let silent =
+            CallObservation::for_call(&shell("grep nope f"), false, false, "shell: exit 1 in 3ms");
         assert_eq!(
-            first(&v, |v| matches!(v, Verdict::NudgeRepeating { .. })),
-            Some(12),
-            "{v:?}"
-        );
-        assert_eq!(
-            first(&v, |v| matches!(v, Verdict::Halt { .. })),
-            Some(14),
-            "{v:?}"
+            silent.error_head(),
+            None,
+            "a failure with no words has no cause to compare"
         );
     }
 
-    /// Two stretches the old guard nudged although the model was working (it nudged at the last
-    /// step of both): a sweep-and-push where every shell command printed something new, and a
-    /// clippy cleanup reading fresh compiler output each time. Neither is a loop.
+    fn result_of(name: &str, command: &str, ok: bool, result: &str) -> CallObservation {
+        let call = forge_types::ToolCall {
+            id: "c".into(),
+            name: name.into(),
+            args: if name == "shell_job" {
+                serde_json::json!({ "action": command, "id": 4242 })
+            } else {
+                serde_json::json!({ "command": command })
+            },
+        };
+        CallObservation::for_call(&call, ok, false, result)
+    }
+
     #[test]
-    fn working_stretches_the_old_guard_nudged_are_left_alone() {
-        for name in ["s2_sweep_and_push", "s3_clippy_shell"] {
-            let (v, _) = replay(name);
-            assert!(v.iter().all(|v| *v == Verdict::Fine), "{name}: {v:?}");
+    fn calls_that_wait_for_something_outside_the_turn_are_recognised() {
+        let running = "job 4242 is running\n  command: cargo build\n  log: /tmp/j.log";
+        assert!(result_of("shell_job", "status", true, running).waiting());
+        let log = "job 4242 is running — last 50 lines of /tmp/j.log:\n\ncompiling";
+        assert!(result_of("shell_job", "log", true, log).waiting());
+        assert!(!result_of(
+            "shell_job",
+            "status",
+            true,
+            "job 4242 is exited 0\n  command: x"
+        )
+        .waiting());
+        let cut = "shell: timed out after 120s (killed) in 120013ms\n\nwatching run 9";
+        assert!(result_of("shell", "gh run watch 9", false, cut).waiting());
+        let ok = "shell: exit 0 in 60004ms\n\nin progress";
+        assert!(result_of("shell", "sleep 60; gh run view 9", true, ok).waiting());
+        assert!(result_of("shell", "gh run watch 9", true, ok).waiting());
+        assert!(!result_of(
+            "shell",
+            "sleep 60; false",
+            false,
+            "shell: exit 1 in 60004ms"
+        )
+        .waiting());
+        assert!(!result_of("shell", "cargo test", true, "shell: exit 0 in 4210ms").waiting());
+        assert!(!result_of("shell", "tail -n 1 build.log", true, ok).waiting());
+    }
+
+    #[test]
+    fn a_failure_is_the_same_failure_whatever_its_timing_and_not_when_it_moved() {
+        let run = |extra: &str| {
+            let result = format!(
+                "shell: exit 1 in 953ms\n\nFAILED tests::header\nassertion failed: left == right\n{extra}"
+            );
+            CallObservation::new(1, false, false, &result).failure_fp()
+        };
+        assert_eq!(
+            run("finished in 0.41s\nstarted 2026-10-23 12:00:01"),
+            run("finished in 0.52s\nstarted 2026-10-23 12:07:45")
+        );
+        assert_ne!(run(""), run("FAILED tests::footer"));
+    }
+
+    #[test]
+    fn only_a_call_that_may_change_files_unseen_is_opaque() {
+        let named = |name: &str| {
+            let call = forge_types::ToolCall {
+                id: "c".into(),
+                name: name.into(),
+                args: serde_json::json!({ "path": "a" }),
+            };
+            CallObservation::for_call(&call, true, false, "x")
+        };
+        for pure in [
+            "read_file",
+            "search",
+            "glob",
+            "list_dir",
+            "web_fetch",
+            "shell_job",
+        ] {
+            assert!(!named(pure).opaque(), "{pure}");
         }
+        for open in ["shell", "run_code", "mcp__server__tool"] {
+            assert!(named(open).opaque(), "{open}");
+        }
+        let call = forge_types::ToolCall {
+            id: "c".into(),
+            name: "write_file".into(),
+            args: serde_json::json!({ "path": "a" }),
+        };
+        assert!(
+            !CallObservation::for_call(&call, true, true, "wrote").opaque(),
+            "a recognised write is not an unseen change"
+        );
+    }
+
+    #[test]
+    fn a_silent_shell_command_has_nothing_to_say_and_a_read_names_its_paths() {
+        assert!(result_of("shell", "mkdir out", true, "shell: exit 0 in 3ms").silent());
+        assert!(!result_of("shell", "ls", true, "shell: exit 0 in 3ms\n\na\nb").silent());
+        assert!(!result_of("shell", "false", false, "shell: exit 1 in 3ms").silent());
+        let call = forge_types::ToolCall {
+            id: "c".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({ "paths": ["a.rs:10-20", "b.rs"] }),
+        };
+        let read = CallObservation::for_call(&call, true, false, "x");
+        assert_eq!(read.read_targets().len(), 2);
+    }
+
+    #[test]
+    fn noise_is_masked_but_the_numbers_that_tell_things_apart_are_not() {
+        use super::text::mask_noise;
+        assert_eq!(
+            mask_noise("attempt 3 of 20: connection refused (os error 111)"),
+            mask_noise("attempt 4 of 20: connection refused (os error 111)")
+        );
+        assert_eq!(
+            mask_noise("finished in 0.41s at 12:00:01 on 2026-10-23"),
+            mask_noise("finished in 3.50s at 23:59:59 on 2026-10-24")
+        );
+        assert_eq!(
+            mask_noise("pid 4242 exited, run 77"),
+            mask_noise("pid 9 exited, run 3")
+        );
+        assert_ne!(
+            mask_noise("suite 3 case 5: fixture_2 is missing"),
+            mask_noise("suite 4 case 1: fixture_2 is missing")
+        );
+        assert_ne!(
+            mask_noise("left: 1\nright: 2"),
+            mask_noise("left: 1\nright: 3")
+        );
     }
 }

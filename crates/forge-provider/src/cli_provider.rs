@@ -3843,6 +3843,16 @@ mod tests {
     }
 
     #[test]
+    fn a_stall_record_becomes_a_stall_event() {
+        assert_eq!(
+            parse_sink_line(r#"{"k":"stall","report":"Stopped: no progress for 10 steps."}"#),
+            Some(StreamEvent::Stall {
+                headline: "Stopped: no progress for 10 steps.".into()
+            })
+        );
+    }
+
+    #[test]
     fn sink_lines_parse_into_subagent_events() {
         match parse_sink_line(r#"{"k":"start","id":"x1","agent":"reviewer","task":"review"}"#) {
             Some(StreamEvent::SubagentStarted { id, agent, task }) => {
