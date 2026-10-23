@@ -456,6 +456,7 @@ pub fn stop_reason_words(reason: Option<&str>) -> String {
     match reason {
         Some("no_output") => "no output".into(),
         Some("max_steps") => "hit the step cap".into(),
+        Some("stalled") => "stalled, no progress".into(),
         Some("budget_exhausted") => "budget exhausted".into(),
         Some("interrupted") => "interrupted".into(),
         Some("final_answer") => "answered".into(),

@@ -15,7 +15,7 @@ use forge_types::{EffortLevel, Message, PermissionMode, Presenter, PresenterEven
 
 use crate::{
     context_pack, current_git_branch, normalize_workspace_target, turn_contract, CoreError,
-    EnvFightTracker, Session, ToolFailureTracker, WorkspaceContext,
+    EnvFightTracker, Session, WorkspaceContext,
 };
 
 /// Shown when a resumed session's previous process died without clearing its terminal claim. A
@@ -247,7 +247,7 @@ impl Session {
             overflow_window_cap: None,
             require_tool_call: false,
             repetition_pressure: 0,
-            progress: Default::default(),
+            ledger: Default::default(),
             kept_outputs: std::collections::HashMap::new(),
             whitehot_guidance_injected: false,
             pinned_tier: None,
@@ -290,7 +290,7 @@ impl Session {
             run_budget: None,
             run_budget_next: None,
             fallback_models: Vec::new(),
-            turn_run_budget_hit: false,
+            turn_forced_stop: None,
             harness_profile: forge_config::HarnessProfile::default(),
             empty_reply_nudged: false,
             trim_watch: Default::default(),
@@ -304,7 +304,6 @@ impl Session {
             turn_deadline: None,
             deadline_reconciled: false,
             env_fight: EnvFightTracker::default(),
-            failure_tracker: ToolFailureTracker::new(),
             cached_git_branch,
             attribution: Default::default(),
             // Set below, through `set_instructions`.

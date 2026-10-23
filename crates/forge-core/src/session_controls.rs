@@ -773,6 +773,7 @@ impl Session {
         if texts.is_empty() {
             return false;
         }
+        self.ledger.note_steer();
         if let Err(error) = self.publish_terminal_answer(answered) {
             tracing::warn!(%error, "could not publish the reply a steer interrupted");
         }

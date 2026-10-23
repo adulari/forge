@@ -51,7 +51,7 @@ pub struct AgentDef {
     /// `default` narrow it, a wider mode is ignored (a cloned repo's agent file must not widen
     /// what Forge lets a child do without asking).
     pub permission_mode: Option<PermissionMode>,
-    /// `maxTurns`: the child's model-step cap, never above `[mesh] max_steps`.
+    /// `maxTurns`: the child's model-step cap, never above `[mesh] max_steps` when that is set.
     pub max_turns: Option<usize>,
     /// `skills`: skills whose methodology is loaded into the child's system prompt.
     pub skills: Vec<String>,

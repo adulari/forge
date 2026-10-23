@@ -342,7 +342,7 @@ export interface SessionRow {
    * and one that burned a turn producing nothing look identical. Additive. */
   last_turn_outcome?: "success" | "failed" | null;
   /** The precise reason behind `last_turn_outcome` (`final_answer`, `max_steps`,
-   * `budget_exhausted`, `interrupted`, `no_output`). Additive. */
+   * `budget_exhausted`, `interrupted`, `no_output`, `stalled`). Additive. */
   last_stop_reason?: string | null;
 }
 

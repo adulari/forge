@@ -65,11 +65,6 @@ impl Session {
                 self.store.record_tool_call(
                     msg_id, &call.name, &args_json, &result, "blocked", "error",
                 )?;
-                if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
-                    self.presenter
-                        .emit(PresenterEvent::Warning(warning.clone()));
-                    self.pending_hints.push(warning);
-                }
                 return Ok(result);
             }
             if let Some(new_args) = outcome.rewritten_args {

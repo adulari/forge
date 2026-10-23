@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 pub enum StopReason {
     /// Model produced a final answer without requesting more tools.
     FinalAnswer,
-    /// Loop hit the configured `max_steps` limit while the model still wanted tools.
+    /// Loop hit an explicit step limit (`mesh.max_steps`, `--max-turns`) while the model still
+    /// wanted tools. Never a default: step limits are opt-in.
     MaxSteps,
-    /// Daily/monthly budget cap was reached before the turn ran.
+    /// A spend or run budget ended the turn: the per-turn token or dollar ceiling, a session cap,
+    /// or a goal/loop/`--max-budget-usd` budget.
     BudgetExhausted,
     /// Turn was aborted via `forge_interrupt` (or an equivalent signal).
     Interrupted,
@@ -22,6 +24,10 @@ pub enum StopReason {
     /// without acting) before the plan was complete. Never a success: an orchestrator polling the
     /// fleet must see half-done work as half-done.
     TasksUnfinished,
+    /// The progress supervisor ended the turn: nothing had changed and nothing new had turned up
+    /// for long enough, even after a nudge. Edits are kept and `continue` starts a fresh window.
+    /// Never a success: the work the person asked for is not known to be done.
+    Stalled,
 }
 
 impl StopReason {
@@ -35,6 +41,7 @@ impl StopReason {
             Self::DaemonShutdown => "daemon_shutdown",
             Self::NoOutput => "no_output",
             Self::TasksUnfinished => "tasks_unfinished",
+            Self::Stalled => "stalled",
         }
     }
 
@@ -49,7 +56,8 @@ impl StopReason {
             | Self::BudgetExhausted
             | Self::Interrupted
             | Self::NoOutput
-            | Self::TasksUnfinished => "failed",
+            | Self::TasksUnfinished
+            | Self::Stalled => "failed",
         }
     }
 
@@ -87,6 +95,14 @@ impl LoopOutcome {
         Self {
             text,
             stop_reason: StopReason::BudgetExhausted,
+        }
+    }
+
+    /// The progress supervisor stopped the turn.
+    pub fn stalled(text: String) -> Self {
+        Self {
+            text,
+            stop_reason: StopReason::Stalled,
         }
     }
 
@@ -150,6 +166,7 @@ mod tests {
             StopReason::BudgetExhausted,
             StopReason::Interrupted,
             StopReason::TasksUnfinished,
+            StopReason::Stalled,
         ] {
             assert_eq!(failed.outcome(), "failed", "{failed:?} is not a success");
         }
@@ -162,6 +179,7 @@ mod tests {
             StopReason::DaemonShutdown,
             StopReason::NoOutput,
             StopReason::TasksUnfinished,
+            StopReason::Stalled,
         ] {
             assert_eq!(
                 serde_json::to_string(&reason).unwrap(),
@@ -171,5 +189,6 @@ mod tests {
         }
         assert_eq!(StopReason::DaemonShutdown.outcome(), "interrupted");
         assert_eq!(StopReason::DaemonShutdown.as_str(), "daemon_shutdown");
+        assert_eq!(StopReason::Stalled.as_str(), "stalled");
     }
 }

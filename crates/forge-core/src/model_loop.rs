@@ -10,7 +10,8 @@ impl Session {
     /// * `specs`        – tool specs to advertise (pre-built by the caller).
     /// * `decision`     – `Some(d)` for the primary turn (enables failover, step-0 routing
     ///   record, quota-hint persistence); `None` for autofix re-runs (no failover, no records).
-    /// * `max_steps`    – step cap (runaway guard).
+    /// * `step_limit`   – the explicit cap on model calls this turn, if the user set one. Counted
+    ///   across every re-drive pass of the turn, not per pass.
     /// * `stream_idle`  – idle-stream timeout forwarded to every `complete_with` call.
     pub(crate) async fn run_model_loop(
         &mut self,
@@ -18,7 +19,7 @@ impl Session {
         specs: &[ToolSpec],
         decision: Option<&forge_mesh::RoutingDecision>,
         reuse_response_chain: bool,
-        max_steps: usize,
+        step_limit: Option<usize>,
         stream_idle: std::time::Duration,
     ) -> Result<ModelLoopOutcome, CoreError> {
         let failover_enabled = decision.is_some() && self.config.mesh.failover;
@@ -99,20 +100,9 @@ impl Session {
         // Plan mode — the bridge advertises present_plan unconditionally, so the parent gates here.
         let mut proposed_plan: Option<forge_types::PlanProposal> = None;
         let in_plan_mode = self.mode == PermissionMode::Plan;
-        // `last_tool_sig`/`repeat_count`: doom-loop detection — the same tool batch repeated
-        // DOOM_LOOP_THRESHOLD× halts the turn.
-        let mut last_tool_sig: Option<u64> = None;
-        let mut repeat_count = 0usize;
-        // `recent_sigs`: a short sliding window of recent tool-batch signatures. The consecutive
-        // `repeat_count` above misses an A,B,A,B,… oscillation (every step differs from the one
-        // before, so the counter keeps resetting) — e.g. a model alternating a failing/empty call
-        // with a trivial successful one, which ALSO clears the failure-loop streak (a success on a
-        // tool resets it). Counting how often a signature recurs in this window catches that.
-        let mut recent_sigs: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
         // `continue_nudges`: bounded retries when the model signs off with text but tracked tasks
         // are still unfinished (narrate-then-stall) — drive it to completion instead of ending the
-        // turn mid-task. `doom_nudged`: the doom-loop fires a "change approach" nudge BEFORE it
-        // ever hard-stops, so a repeated call doesn't kill an otherwise-recoverable turn.
+        // turn mid-task.
         let mut continue_nudges = 0usize;
         // Consecutive continue-nudges that ran tools but completed no task — the goalless-loop
         // signal. Reset whenever a task finishes; past `GOALLESS_NUDGE_LIMIT` the turn is handed
@@ -135,15 +125,7 @@ impl Session {
         }
         // Mid-intent nudges sent in the current stretch of idleness; see `followup_intent_nudge`.
         let mut followup_intent_nudges = 0usize;
-        let mut doom_nudged = false;
         let mut silence = crate::silence_guard::SilenceTracker::new(std::time::Instant::now());
-        // Failure-loop guard (complements the identical-call doom-loop): counts tool failures by
-        // (tool name, error kind) ACROSS the turn, so a model retrying the same KIND of error with
-        // different args (edits that never match, reads of paths that don't exist) is caught even
-        // though its call signature keeps changing. A success on a tool clears its streak.
-        let mut failure_counts: std::collections::HashMap<(String, ErrorCategory), usize> =
-            std::collections::HashMap::new();
-        let mut failure_nudged = false;
         let mut codemode_steer = crate::codemode::Steer::default();
         // `toolcall_repair_nudges`: bounded retries when a direct model writes a tool call as TEXT
         // (`<invoke>` / `default_api:` markup) that the provider couldn't decode AND the text
@@ -219,15 +201,15 @@ impl Session {
         let mut checkpoint_ctx = self.checkpoint_context();
 
         let unattended = self.turn_is_unattended();
-        let soft_cap = self.config.mesh.max_steps.max(1);
-        let mut warned_soft_cap = false;
         let mut hard_guard_abort = false;
 
-        for step in 0..max_steps {
-            if step >= soft_cap && unattended && !warned_soft_cap {
-                warned_soft_cap = true;
-                self.warn_soft_step_checkpoint(soft_cap, step, max_steps);
+        for step in 0usize.. {
+            // The explicit limit counts the turn's model calls across every re-drive pass, so a
+            // gate that re-enters this loop cannot hand the turn a fresh allowance.
+            if step_limit.is_some_and(|limit| self.ledger.model_calls() >= limit) {
+                break;
             }
+            self.ledger.begin_model_call();
             // ── Timeout reconciliation window (quality guards wave 4, fix 2) ──────────────────
             // The caller's hard timeout (`bench swe`'s tokio kill) is invisible from inside the
             // turn, so without this the kill lands mid-verification and "submit partial work"
@@ -536,8 +518,14 @@ impl Session {
                     let done_now = self.tasks.len().saturating_sub(unfinished.len());
                     let tools_this_turn =
                         tools_ran.load(std::sync::atomic::Ordering::Relaxed) - tools_before;
-                    let made_progress = tools_this_turn > 0 || done_now > bridge_done_prev;
+                    let closed_a_task = done_now > bridge_done_prev;
+                    let made_progress = tools_this_turn > 0 || closed_a_task;
                     bridge_done_prev = done_now;
+                    // The budget bounds re-drives that close nothing. A plan that keeps finishing
+                    // tasks is making progress however many times the bridge has to be re-run.
+                    if closed_a_task {
+                        bridge_continue_nudges = 0;
+                    }
                     const MAX_BRIDGE_CONTINUE_NUDGES: usize = 8;
                     if !unfinished.is_empty() {
                         // Work is open again — any earlier "all done" verification is stale.
@@ -691,6 +679,7 @@ impl Session {
                                     None,
                                 );
                                 self.transcript.push(Message::system(&nudge));
+                                self.ledger.note_gate();
                                 continue;
                             }
                             ContinueNudge::BlockedStop => {
@@ -780,6 +769,7 @@ impl Session {
             }
 
             let mut step_observations = Vec::new();
+            let done_before = self.done_task_count();
             if self
                 .execute_model_tool_step(
                     &msg_id,
@@ -788,29 +778,30 @@ impl Session {
                     &inspect_ran,
                     &mutations_ran,
                     &verification_ledger,
-                    &mut last_tool_sig,
-                    &mut repeat_count,
-                    &mut recent_sigs,
-                    &mut doom_nudged,
-                    &mut failure_counts,
-                    &mut failure_nudged,
                     &mut step_observations,
                 )
                 .await?
-                || self.judge_loop_progress(&resp.content, &step_observations)
             {
+                halted_by_loop_guard = true;
+                hit_step_cap = false;
+                break;
+            }
+            let unresolved = verification_ledger.lock().unwrap().unresolved_summary();
+            if let Some(stop) = self.supervise_step(
+                &resp.content,
+                &step_observations,
+                self.done_task_count() > done_before,
+                unresolved.as_deref(),
+            ) {
+                final_text = stop.final_text;
+                hard_guard_abort = stop.hard;
                 halted_by_loop_guard = true;
                 hit_step_cap = false;
                 break;
             }
             self.observe_adaptive_round(&resp.tool_calls, &step_observations);
             self.steer_codemode(&mut codemode_steer, &active_model, &resp.tool_calls);
-            self.observe_silence(
-                &mut silence,
-                verify_attempts == 0,
-                &resp,
-                &step_observations,
-            )?;
+            self.observe_silence(&mut silence, verify_attempts == 0, &resp)?;
             // Tool results are in: the earliest point a queued prompt can join the conversation.
             self.inject_steers("");
         }
@@ -821,8 +812,8 @@ impl Session {
         // any single loop's count.
         self.mutations_this_turn += mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
 
-        if hit_step_cap && unattended {
-            final_text = self.abort_for_step_ceiling(max_steps, soft_cap);
+        if let (true, true, Some(limit)) = (hit_step_cap, unattended, step_limit) {
+            final_text = self.abort_for_step_ceiling(limit);
             halted_by_loop_guard = true;
             hard_guard_abort = true;
         }

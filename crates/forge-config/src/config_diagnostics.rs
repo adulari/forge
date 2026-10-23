@@ -93,6 +93,21 @@ pub(crate) fn unknown_keys(text: &str) -> Vec<(String, Option<usize>)> {
         .collect()
 }
 
+/// Whether `text` pins `[mesh] max_steps = 100` together with `max_steps_unattended = 400`: the
+/// old defaults, copied into a config by `forge config` or by hand. Both now mean an explicit
+/// hard limit, so a config that only ever carried the defaults silently keeps the cap it no
+/// longer needs. Any other pair is a deliberate choice and is left alone.
+pub(crate) fn pins_legacy_step_defaults(text: &str) -> bool {
+    let Ok(doc) = Document::parse(text) else {
+        return false;
+    };
+    let Some(mesh) = doc.as_table().get("mesh").and_then(|m| m.as_table_like()) else {
+        return false;
+    };
+    let value = |key: &str| mesh.get(key).and_then(|v| v.as_integer());
+    value("max_steps") == Some(100) && value("max_steps_unattended") == Some(400)
+}
+
 static WARNED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// Warn once per process about each unknown key in `file`; loading continues regardless.
@@ -116,9 +131,45 @@ pub(crate) fn warn_unknown_keys(file: &Path) {
     }
 }
 
+/// Warn once per process when `file` pins the old step-limit defaults; loading continues.
+pub(crate) fn warn_legacy_step_limits(file: &Path) {
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return;
+    };
+    if !pins_legacy_step_defaults(&text) {
+        return;
+    }
+    let message = format!(
+        "{} sets mesh.max_steps = 100 and max_steps_unattended = 400, the old defaults. They are \
+         hard limits now (the default is none; stalls are caught by the progress supervisor). \
+         Remove both lines to stop capping turns by count.",
+        file.display()
+    );
+    let mut guard = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if guard
+        .get_or_insert_with(HashSet::new)
+        .insert(message.clone())
+    {
+        tracing::warn!("{message}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_exact_old_default_pair_is_flagged_as_legacy() {
+        assert!(pins_legacy_step_defaults(
+            "[mesh]\nmax_steps = 100\nmax_steps_unattended = 400\n"
+        ));
+        assert!(!pins_legacy_step_defaults("[mesh]\nmax_steps = 100\n"));
+        assert!(!pins_legacy_step_defaults(
+            "[mesh]\nmax_steps = 150\nmax_steps_unattended = 400\n"
+        ));
+        assert!(!pins_legacy_step_defaults("[mesh]\nmax_steps = 0\n"));
+        assert!(!pins_legacy_step_defaults("not toml ["));
+    }
 
     #[test]
     fn a_default_config_has_no_unknown_keys() {

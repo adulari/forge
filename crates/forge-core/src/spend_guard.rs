@@ -155,6 +155,7 @@ impl Session {
             "ERROR: {reason}; work is uncommitted: {work}"
         )));
         self.turn_hard_guard_abort = true;
+        self.turn_forced_stop = Some(StopReason::BudgetExhausted);
         format!("ERROR: {reason}; work is uncommitted: {work}")
     }
 }

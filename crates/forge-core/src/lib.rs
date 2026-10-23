@@ -141,6 +141,9 @@ pub mod permission;
 mod pinned_context;
 mod post_turn_calls;
 mod prefix_cache_key;
+pub(crate) mod progress_ledger;
+mod progress_report;
+mod progress_supervisor;
 pub mod project_context;
 pub mod push_notify;
 mod quality_gates;
@@ -622,15 +625,20 @@ const fn bridge_turn_over_budget(accumulated_input: u64, cap: u64) -> bool {
     cap != 0 && accumulated_input >= cap
 }
 
-/// Hard step ceiling for one model loop. An unattended turn treats `mesh.max_steps` as a
-/// checkpoint (nobody can type `continue`) and runs on to `mesh.max_steps_unattended`; an attended
-/// turn stops at the soft cap and asks. Never below the soft cap, so lowering the unattended
-/// ceiling can't silently shorten a turn.
-const fn effective_step_ceiling(soft_cap: usize, unattended_cap: usize, unattended: bool) -> usize {
-    if unattended && unattended_cap > soft_cap {
-        unattended_cap
+/// The explicit cap on model calls in one turn, if the user set one (`0` means none, the
+/// default). An unattended turn reads `mesh.max_steps_unattended` first, then `mesh.max_steps`;
+/// an attended turn reads only `mesh.max_steps`. The count is per turn, across every re-drive pass.
+const fn explicit_step_limit(
+    max_steps: usize,
+    max_steps_unattended: usize,
+    unattended: bool,
+) -> Option<usize> {
+    if unattended && max_steps_unattended > 0 {
+        Some(max_steps_unattended)
+    } else if max_steps > 0 {
+        Some(max_steps)
     } else {
-        soft_cap
+        None
     }
 }
 
@@ -875,20 +883,6 @@ fn validate_tool_args(schema: &serde_json::Value, args: &serde_json::Value) -> R
         missing.join(", "),
         required.join(", ")
     ))
-}
-
-/// A stable hash of a tool-call batch (each call's name + JSON arguments), used by the agent loop's
-/// doom-loop guard to detect a model repeating the *exact* same call(s) step after step. Identical
-/// args → identical result, so a repeat is a death-spiral (re-reading a file, retrying a failing
-/// edit) worth halting rather than burning steps on.
-fn tool_batch_signature(calls: &[forge_types::ToolCall]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    for c in calls {
-        c.name.hash(&mut h);
-        c.args.to_string().hash(&mut h);
-    }
-    h.finish()
 }
 
 /// Decision of the completion-verification gate for a turn that reported every tracked task Done.
@@ -1618,10 +1612,10 @@ pub struct Session {
     /// How hard the CURRENT turn is repeating itself (0-2), fed by the narration guard every step
     /// and consumed when the next request's sampling is chosen. Reset at turn start.
     repetition_pressure: u8,
-    /// Structural progress judgement for the direct tool loop; spans every `run_model_loop`
+    /// The per-turn progress ledger (`progress_ledger.rs`): spans every `run_model_loop`
     /// re-entry of one user turn (nudges, self-review, autofix) so a loop cannot reset its own
-    /// evidence by being re-driven.
-    progress: loop_progress::ProgressTracker,
+    /// evidence by being re-driven, and counts the turn's model calls for the explicit limit.
+    ledger: progress_ledger::ProgressLedger,
     /// Where each spooled tool output was written, by call id, so a result cut later can point at it.
     kept_outputs: std::collections::HashMap<String, String>,
     /// Whether white-hot effort's standing orchestration guidance has been injected this session
@@ -1752,7 +1746,10 @@ pub struct Session {
     run_budget_next: Option<RunBudget>,
     /// `--fallback-model`: tried in order after the routed model, before the mesh's own chain.
     fallback_models: Vec<String>,
-    turn_run_budget_hit: bool,
+    /// Why a guard ended the active turn mid-flight, when one did: a spend or run budget
+    /// (`BudgetExhausted`) or the progress supervisor (`Stalled`). Read when the turn's stop reason
+    /// is chosen, and by `hard_guard_short_circuit` so no re-drive restarts the loop.
+    turn_forced_stop: Option<StopReason>,
     /// The harness profile of the model currently driving the turn (harness_profile.rs).
     harness_profile: forge_config::HarnessProfile,
     /// The empty-reply nudge is spent until the model makes tool progress again (empty_reply.rs).
@@ -1790,8 +1787,6 @@ pub struct Session {
     /// Env-fight spend cap (quality guards wave 4): consecutive failed env-provisioning shell
     /// commands this turn + the once-per-turn nudge latch. Reset at each turn start.
     env_fight: EnvFightTracker,
-    /// Per-turn guard against repeated failing tools and identical-call doom loops.
-    failure_tracker: ToolFailureTracker,
     /// The current git branch (`.git/HEAD` → `refs/heads/<branch>`), cached so the hot per-request
     /// `system_preamble` reads a field instead of doing a blocking `std::fs` syscall on the async
     /// executor. Seeded at construction and refreshed once per turn (via `tokio::fs`, AFTER the
@@ -3100,19 +3095,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
         self.repetition_pressure = 0;
-        self.progress.begin_turn();
+        self.ledger.begin_turn();
         self.mutations_this_turn = 0;
         self.turn_input_tokens = 0;
         self.turn_output_tokens = 0;
         self.turn_billable_input_tokens = 0;
         *self.bridge_trace.lock().unwrap() = Default::default();
         self.turn_hard_guard_abort = false;
-        self.turn_run_budget_hit = false;
+        self.turn_forced_stop = None;
         self.empty_reply_nudged = false;
         self.trim_watch.begin_turn();
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
-        self.failure_tracker.reset_turn();
         self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
@@ -3412,12 +3406,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
         // 3. Model <-> tool loop. The cap is a runaway guard, not a functional limit — the loop
         // ends naturally when the model stops calling tools.
-        let max_steps = self.config.mesh.max_steps.max(1);
-        let unattended = !self.presenter.is_attended() || self.mode == PermissionMode::Bypass;
-        let effective_max_steps = effective_step_ceiling(
-            max_steps,
-            self.config.mesh.max_steps_unattended.max(1),
-            unattended,
+        let step_limit = explicit_step_limit(
+            self.config.mesh.max_steps,
+            self.config.mesh.max_steps_unattended,
+            self.turn_is_unattended(),
         );
 
         // Primary turn: pass the routing decision so failover, step-0 routing record, and quota
@@ -3438,7 +3430,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 &specs,
                 primary_decision,
                 reuse_response_chain,
-                effective_max_steps,
+                step_limit,
                 stream_idle,
             )
             .await?;
@@ -3466,8 +3458,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // so the user can resume by sending `continue`.
         if outcome.hit_step_cap && !outcome.hard_guard_abort {
             self.presenter.emit(PresenterEvent::Warning(format!(
-                "reached the {max_steps}-step limit — turn paused mid-task; send `continue` to keep going \
-                 (raise `mesh.max_steps` in config to allow longer turns)"
+                "reached the {}-step limit you set — turn paused mid-task; send `continue` to keep \
+                 going (raise or remove `mesh.max_steps` in config to allow longer turns)",
+                step_limit.unwrap_or_default()
             )));
         }
 
@@ -3585,7 +3578,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 &nudge_specs,
                                 primary_decision,
                                 reuse_response_chain,
-                                effective_max_steps,
+                                step_limit,
                                 stream_idle,
                             )
                             .await?;
@@ -3662,7 +3655,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &guard_specs,
                         primary_decision,
                         reuse_response_chain,
-                        effective_max_steps,
+                        step_limit,
                         stream_idle,
                     )
                     .await?;
@@ -3758,7 +3751,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &review_specs,
                     None,
                     reuse_response_chain,
-                    effective_max_steps,
+                    step_limit,
                     stream_idle,
                 )
                 .await?;
@@ -3800,7 +3793,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &retry_specs,
                         None,
                         reuse_response_chain,
-                        effective_max_steps,
+                        step_limit,
                         stream_idle,
                     )
                     .await?;
@@ -3838,7 +3831,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &retry_specs,
                         None,
                         reuse_response_chain,
-                        effective_max_steps,
+                        step_limit,
                         stream_idle,
                     )
                     .await?;
@@ -3885,7 +3878,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         &path_specs,
                         None,
                         reuse_response_chain,
-                        effective_max_steps,
+                        step_limit,
                         stream_idle,
                     )
                     .await?;
@@ -3930,7 +3923,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                             &retry_specs,
                             None,
                             reuse_response_chain,
-                            effective_max_steps,
+                            step_limit,
                             stream_idle,
                         )
                         .await?;
@@ -4021,7 +4014,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &rv_specs,
                     None,
                     reuse_response_chain,
-                    effective_max_steps,
+                    step_limit,
                     stream_idle,
                 )
                 .await?;
@@ -4112,7 +4105,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                 &fix_specs,
                                 None,
                                 reuse_response_chain,
-                                effective_max_steps,
+                                step_limit,
                                 stream_idle,
                             )
                             .await?;
@@ -4127,7 +4120,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         }
                         if fix_outcome.hit_step_cap {
                             self.presenter.emit(PresenterEvent::Warning(format!(
-                                "autofix: inner model loop hit the {max_steps}-step limit"
+                                "autofix: inner model loop hit the {}-step limit",
+                                step_limit.unwrap_or_default()
                             )));
                         }
                     }
@@ -4228,7 +4222,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     &cont_specs,
                     None,
                     reuse_response_chain,
-                    effective_max_steps,
+                    step_limit,
                     stream_idle,
                 )
                 .await?;
@@ -4265,8 +4259,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && self.mutations_this_turn == 0
             && !presented_plan
             && !hard_guard_abort;
-        let stop_reason = if self.turn_run_budget_hit {
-            StopReason::BudgetExhausted
+        let stop_reason = if let Some(forced) = self.turn_forced_stop {
+            forced
         } else if produced_nothing {
             // A loop-guard halt has already told the user what happened and that nothing is lost;
             // a second, crash-sounding Error on top of it would bury that. The recorded outcome
@@ -5083,6 +5077,9 @@ mod tests {
     #[path = "stall_guard.rs"]
     mod stall_guard_tests;
 
+    #[path = "progress_supervision.rs"]
+    mod progress_supervision_tests;
+
     #[path = "silence_guard.rs"]
     mod silence_guard_tests;
 
@@ -5641,97 +5638,6 @@ mod tests {
             fitted.contains("omitted"),
             "the hole must be declared so the summarizer doesn't invent continuity"
         );
-    }
-
-    #[test]
-    fn polling_with_changing_output_is_not_a_doom_loop() {
-        let mut t = ToolFailureTracker::new();
-        for i in 0..6 {
-            assert!(
-                t.record_call("shell", "{\"cmd\":\"poll\"}").is_none(),
-                "call {i}"
-            );
-            t.note_result("shell", "{\"cmd\":\"poll\"}", &format!("state {i}"));
-        }
-        let mut same = ToolFailureTracker::new();
-        let mut tripped = false;
-        for _ in 0..4 {
-            tripped |= same.record_call("shell", "{}").is_some();
-            same.note_result("shell", "{}", "unchanged");
-        }
-        assert!(tripped, "identical results still trip the guard");
-    }
-
-    #[test]
-    fn tool_failure_tracker_trips_at_threshold() {
-        let mut tracker = ToolFailureTracker::new();
-
-        assert!(tracker
-            .record_failure("read_file", "permission denied")
-            .is_none());
-        assert!(tracker
-            .record_failure("read_file", "permission denied")
-            .is_none());
-        let warning = tracker
-            .record_failure("read_file", "permission denied")
-            .expect("third matching failure should trip");
-
-        assert!(warning.contains("stuck: `read_file` failed 3 times"));
-        assert!(warning.contains("Permission"));
-    }
-
-    #[test]
-    fn tool_failure_tracker_resets_on_success() {
-        let mut tracker = ToolFailureTracker::new();
-
-        assert!(tracker
-            .record_failure("edit_file", "invalid patch")
-            .is_none());
-        assert!(tracker
-            .record_failure("edit_file", "invalid patch")
-            .is_none());
-        tracker.record_success("edit_file");
-        assert!(tracker
-            .record_failure("edit_file", "invalid patch")
-            .is_none());
-        assert!(tracker
-            .record_failure("edit_file", "invalid patch")
-            .is_none());
-    }
-
-    #[test]
-    fn doom_loop_tracker_trips_consecutive() {
-        let mut tracker = ToolFailureTracker::new();
-
-        assert!(tracker
-            .record_call("shell", r#"{"command":"cargo check"}"#)
-            .is_none());
-        assert!(tracker
-            .record_call("shell", r#"{"command":"cargo check"}"#)
-            .is_none());
-        let warning = tracker
-            .record_call("shell", r#"{"command":"cargo check"}"#)
-            .expect("third identical call should trip");
-
-        assert!(warning.contains("doom-loop: `shell` called identically 3 times"));
-    }
-
-    #[test]
-    fn doom_loop_resets_on_different_call() {
-        let mut tracker = ToolFailureTracker::new();
-
-        assert!(tracker
-            .record_call("read_file", r#"{"path":"a"}"#)
-            .is_none());
-        assert!(tracker
-            .record_call("read_file", r#"{"path":"b"}"#)
-            .is_none());
-        assert!(tracker
-            .record_call("read_file", r#"{"path":"a"}"#)
-            .is_none());
-        assert!(tracker
-            .record_call("read_file", r#"{"path":"a"}"#)
-            .is_none());
     }
 
     #[test]
@@ -7190,7 +7096,8 @@ mod tests {
     }
 
     /// Always issues the exact same tool call (a fresh id each time, but identical name + args, so
-    /// `tool_batch_signature` sees a repeat). Models a stuck model re-reading the same file forever.
+    /// the progress ledger sees a repeat with identical results). Models a stuck model re-reading
+    /// the same file forever.
     struct DoomLoopProvider;
     #[async_trait::async_trait]
     impl Provider for DoomLoopProvider {
@@ -7219,11 +7126,14 @@ mod tests {
 
     #[tokio::test]
     async fn doom_loop_halts_a_model_repeating_the_same_call() {
-        // The doom-loop guard must stop a model that emits the EXACT same tool call step after step
-        // (identical args → identical result → no progress) rather than burning the whole step budget
-        // + quota. It nudges once to change approach, then halts loudly if the repeat continues.
+        // The progress ledger must stop a model that emits the EXACT same tool call step after step
+        // (identical args → identical result → no progress) rather than burning quota without
+        // bound. It nudges once to change approach, then stops cleanly if the repeat continues.
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..Default::default()
+        };
         let events = capture.events.clone();
         let mut session = Session::start(
             Arc::clone(&store),
@@ -7248,23 +7158,32 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // The guard fired: first a "change approach" nudge, then a loud halt — assert the halt so we
-        // know it actually STOPPED the loop (not merely nudged and then hit the step cap).
+        // The ledger fired: first a "change approach" nudge, then a clean stop — assert the stop so
+        // we know it actually ENDED the loop (not merely nudged it).
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("kept repeating the same tool call")),
-            "the doom-loop guard should halt a repeating model; warnings: {warnings:?}"
+                .any(|w| w.contains("progress check (cycle)")),
+            "the nudge came first; warnings: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Stopped: the same calls returning the same results")),
+            "the ledger should stop a repeating model; warnings: {warnings:?}"
         );
     }
 
     #[tokio::test]
     async fn doom_loop_halt_is_not_restarted_by_empty_diff_recovery() {
-        // A hard loop halt is terminal for this turn. The outer empty-diff recovery must not treat
-        // it as an ordinary model sign-off and start fresh model loops with reset guard state.
+        // A stall stop is terminal for this turn. The outer empty-diff recovery must not treat
+        // it as an ordinary model sign-off and start fresh model loops.
         let dir = clean_git_repo();
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..Default::default()
+        };
         let events = capture.events.clone();
         let mut session = Session::start(
             Arc::clone(&store),
@@ -7298,16 +7217,16 @@ mod tests {
         assert_eq!(
             warnings
                 .iter()
-                .filter(|message| message.contains("kept repeating the same tool call"))
+                .filter(|message| message.contains("Stopped:"))
                 .count(),
             1,
-            "a hard loop halt must be surfaced once; warnings: {warnings:?}"
+            "a stall stop must be surfaced once; warnings: {warnings:?}"
         );
         assert!(
             !warnings
                 .iter()
                 .any(|message| message.contains("empty diff")),
-            "empty-diff recovery must not restart a loop-guard halt; warnings: {warnings:?}"
+            "empty-diff recovery must not restart a stall stop; warnings: {warnings:?}"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -7315,9 +7234,12 @@ mod tests {
     #[tokio::test]
     async fn doom_loop_halt_is_not_restarted_by_blocking_stop_hook() {
         // Stop hooks still run for lifecycle observation, but a blocking hook cannot override a
-        // hard model-loop halt and re-enter the same guarded turn with fresh counters.
+        // stall stop and re-enter the same guarded turn.
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..Default::default()
+        };
         let events = capture.events.clone();
         let mut config = stop_hook_config("exit 2");
         config.recap.enabled = false;
@@ -7350,24 +7272,24 @@ mod tests {
         assert_eq!(
             warnings
                 .iter()
-                .filter(|message| message.contains("kept repeating the same tool call"))
+                .filter(|message| message.contains("Stopped:"))
                 .count(),
             1,
-            "a blocking Stop hook must not restart a hard loop halt; warnings: {warnings:?}"
+            "a blocking Stop hook must not restart a stall stop; warnings: {warnings:?}"
         );
         assert!(
             !warnings
                 .iter()
                 .any(|message| message.contains("stop hook requested continuation")),
-            "a hard loop halt must override Stop-hook continuation; warnings: {warnings:?}"
+            "a stall stop must override Stop-hook continuation; warnings: {warnings:?}"
         );
     }
 
     /// Alternates two DIFFERENT calls forever: a failing read of a missing path, then a succeeding
-    /// read of a real file. Neither the consecutive doom-loop (each step differs from the one before)
-    /// NOR the failure-loop (the interleaved success clears the read_file failure streak) can see it —
-    /// only the oscillation window catches the A,B,A,B cycle. Models the real bug where a model
-    /// alternated an empty failing `shell({})` with a trivial `ls -la`, looping until timeout.
+    /// read of a real file. No two consecutive steps are alike and the interleaved success breaks
+    /// the failure streak — only the cycle window catches the A,B,A,B pattern. Models the real bug
+    /// where a model alternated an empty failing `shell({})` with a trivial `ls -la`, looping
+    /// until timeout.
     struct OscillatingProvider {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -7407,11 +7329,14 @@ mod tests {
     #[tokio::test]
     async fn doom_loop_halts_a_model_oscillating_between_two_calls() {
         // Regression for the alternation-evasion bug: a model that ping-pongs between a failing call
-        // and a succeeding one evades BOTH the consecutive doom-loop (no two steps alike) and the
-        // failure-loop (the success clears the failure streak), so without the oscillation window it
-        // runs to the step cap / timeout. The guard must still halt it.
+        // and a succeeding one evades a consecutive-repeat check (no two steps alike) and a
+        // failure streak (the success clears it), so without the cycle window it runs until
+        // something external ends it. The ledger must still stop it.
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..Default::default()
+        };
         let events = capture.events.clone();
         let mut session = Session::start(
             Arc::clone(&store),
@@ -7440,9 +7365,9 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("kept alternating between the same tool calls")),
-            "the oscillation guard should halt a model ping-ponging between two calls with an \
-             ALTERNATING-specific message; warnings: {warnings:?}"
+                .any(|w| w.contains("Stopped: the same calls returning the same results")),
+            "the cycle window should stop a model ping-ponging between two calls; warnings: \
+             {warnings:?}"
         );
     }
 
@@ -7493,8 +7418,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_identical_observation_between_differing_actions_is_progress_not_a_loop() {
-        // Regression: the oscillation guard counted only how often ONE signature recurred in the
-        // window, so a productive tap/ui/tap/ui flow tripped it on the repeated `ui` alone — the
+        // Regression: a cycle check that counted only how often ONE call recurred in the window
+        // tripped a productive tap/ui/tap/ui flow on the repeated `ui` alone — the
         // observation is necessarily identical, while every tap differed. Driving a device or a
         // browser cannot be done without looking between actions, so this must not fire.
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -7523,17 +7448,17 @@ mod tests {
                 PresenterEvent::Warning(w) | PresenterEvent::Error(w) => Some(w.clone()),
                 _ => None,
             })
-            .filter(|w| w.contains("alternating") || w.contains("repeated the same tool call"))
+            .filter(|w| w.contains("(cycle)") || w.contains("the same calls returning"))
             .collect();
         assert!(
             complaints.is_empty(),
-            "an act-observe workflow was flagged as a loop: {complaints:?}"
+            "an act-observe workflow was flagged as a cycle: {complaints:?}"
         );
     }
 
-    /// Reads a UNIQUE non-existent path each call. Every call fails the same WAY (`NotFound`) but with
-    /// DIFFERENT args, so the identical-call doom-loop never fires — only the failure-loop guard,
-    /// which tracks failures by (tool, error-kind) across the turn, can catch it.
+    /// Reads a UNIQUE non-existent path each call. Every call fails the same WAY (`NotFound`) but
+    /// with DIFFERENT args, so no call repeats — only the failure lane, which counts consecutive
+    /// steps in which every call failed, can catch it.
     struct FailureLoopProvider {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -7565,11 +7490,14 @@ mod tests {
 
     #[tokio::test]
     async fn failure_loop_halts_a_model_failing_the_same_way() {
-        // The failure-loop guard must stop a model that keeps hitting the same KIND of error with
-        // different arguments (edits that never match, reads of paths that don't exist) — which the
-        // identical-call doom-loop can't see, because the call signature keeps changing.
+        // The failure lane must stop a model that keeps hitting errors with different arguments
+        // (edits that never match, reads of paths that don't exist), which an identical-call
+        // check can't see, because the call signature keeps changing.
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..Default::default()
+        };
         let events = capture.events.clone();
         let mut session = Session::start(
             Arc::clone(&store),
@@ -7591,13 +7519,21 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(|e| match e {
-                PresenterEvent::Warning(w) => Some(w.clone()),
+                PresenterEvent::Warning(w) | PresenterEvent::Error(w) => Some(w.clone()),
                 _ => None,
             })
             .collect();
         assert!(
-            warnings.iter().any(|w| w.contains("kept failing") && w.contains("after a nudge")),
-            "the failure-loop guard should halt a model failing the same way; warnings: {warnings:?}"
+            warnings
+                .iter()
+                .any(|w| w.contains("progress check (failure)")),
+            "the nudge came first; warnings: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Stopped: the same calls failing")),
+            "the failure lane should stop a model failing the same way; warnings: {warnings:?}"
         );
     }
 
@@ -7911,9 +7847,8 @@ mod tests {
     }
 
     /// Yields TWO read_file calls (a concurrent read-only batch) with DIFFERENT missing paths every
-    /// step — so the identical-call doom-loop never fires (signature changes) and, before the fix,
-    /// the concurrent batch path didn't feed the failure-loop guard either, letting it burn to the
-    /// step cap. The failure-loop guard must now catch it.
+    /// step — so no call repeats (the signature changes). The concurrent batch path must feed the
+    /// ledger exactly as the serial path does, or this burns until something external stops it.
     struct ConcurrentFailureProvider {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -7947,10 +7882,13 @@ mod tests {
     #[tokio::test]
     async fn concurrent_batch_failure_loop_is_caught() {
         // Regression for the concurrent-batch failure-tracking gap: two read_file calls run as a
-        // concurrent read-only batch, both NotFound, different paths each step. Must halt via the
-        // failure-loop guard, not run to the step cap.
+        // concurrent read-only batch, both NotFound, different paths each step. Must stop via the
+        // failure lane, not run on.
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..Default::default()
+        };
         let events = capture.events.clone();
         let mut session = Session::start(
             Arc::clone(&store),
@@ -7972,20 +7910,20 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(|e| match e {
-                PresenterEvent::Warning(w) => Some(w.clone()),
+                PresenterEvent::Warning(w) | PresenterEvent::Error(w) => Some(w.clone()),
                 _ => None,
             })
             .collect();
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("kept failing") && w.contains("after a nudge")),
-            "the failure-loop guard must catch a concurrent batch failing the same way; warnings: {warnings:?}"
+                .any(|w| w.contains("Stopped: the same calls failing")),
+            "the failure lane must catch a concurrent batch failing the same way; warnings: {warnings:?}"
         );
     }
 
     /// Yields the SAME two successful read-only calls every step (a concurrent batch with a constant
-    /// signature) — trips the doom-loop, not the failure-loop. Used to prove the nudge is delivered.
+    /// signature) — trips the cycle lane, not the failure lane. Used to prove the nudge is delivered.
     struct ConcurrentRepeatProvider;
     #[async_trait::async_trait]
     impl Provider for ConcurrentRepeatProvider {
@@ -8015,16 +7953,18 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_batch_doom_nudge_is_delivered_to_the_model() {
-        // Regression: the doom-loop nudge is pushed to pending_hints, but the concurrent read-only
-        // batch path didn't drain them — so the model was halted "after a nudge" it never saw. The
-        // nudge must reach the transcript.
+        // Regression: a concurrent read-only batch must feed the ledger like any other step, and the
+        // nudge it earns must reach the transcript so the model sees it before being stopped.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let mut session = Session::start(
             Arc::clone(&store),
             Arc::new(ConcurrentRepeatProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
             ToolRegistry::with_core_tools_in(test_workspace()),
-            Box::new(HeadlessPresenter::new(false)),
+            Box::new(CapturePresenter {
+                attended: true,
+                ..Default::default()
+            }),
             Config::default(),
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
@@ -8034,13 +7974,14 @@ mod tests {
 
         assert!(
             session.transcript.iter().any(|m| m.role == Role::System
-                && m.content.contains("cycled through the same tool calls")),
-            "the doom-loop nudge must be delivered to the transcript on the concurrent batch path"
+                && m.content.contains("Progress check from Forge")
+                && m.content.contains("ran 3 times with identical results")),
+            "the cycle nudge must be delivered to the transcript on the concurrent batch path"
         );
     }
 
-    /// Yields a tool call every single step forever (unique args so no doom/failure guard fires) —
-    /// only the step cap can stop it.
+    /// Yields a tool call every single step forever (unique args, every result new) — only an
+    /// explicit step limit, a spend ceiling or the idle stop can end it.
     struct EndlessToolProvider {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         input_tokens: u64,
@@ -8100,8 +8041,8 @@ mod tests {
                 content: "still working".into(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
-                    // A real successful read each step with a UNIQUE range → no doom/failure guard,
-                    // forcing the step cap to be the thing that stops the turn.
+                    // A real successful read each step with a UNIQUE range whose result is new, so
+                    // nothing structural fires and only a limit can stop the turn.
                     name: "read_file".into(),
                     args: serde_json::json!({"path": "Cargo.toml", "start_line": n + 1, "end_line": n + 1}),
                 }],
@@ -8109,50 +8050,6 @@ mod tests {
                     input_tokens: self.input_tokens,
                     output_tokens: self.output_tokens,
                     cached_input_tokens: self.cached_input_tokens,
-                    ..Usage::default()
-                },
-                quotas: Vec::new(),
-            })
-        }
-    }
-
-    /// Wants a tool call for the first `tool_steps` responses, then answers with plain text —
-    /// so a turn that is allowed to run past the soft cap finishes on its own.
-    struct FiniteToolProvider {
-        calls: Arc<std::sync::atomic::AtomicUsize>,
-        tool_steps: usize,
-    }
-
-    #[async_trait::async_trait]
-    impl Provider for FiniteToolProvider {
-        async fn complete(
-            &self,
-            _model: &str,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _on_event: &mut forge_provider::EventSink<'_>,
-        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
-            use forge_types::{new_id, ToolCall, Usage};
-            let n = self
-                .calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let tool_calls = if n < self.tool_steps {
-                vec![ToolCall {
-                    id: new_id(),
-                    name: "read_file".into(),
-                    args: serde_json::json!({"path": "Cargo.toml", "start_line": 1, "end_line": 1}),
-                }]
-            } else {
-                Vec::new()
-            };
-            Ok(forge_provider::ModelResponse {
-                reasoning: String::new(),
-                reasoning_items: Vec::new(),
-                content: "all done".into(),
-                tool_calls,
-                usage: Usage {
-                    input_tokens: 3,
-                    output_tokens: 1,
                     ..Usage::default()
                 },
                 quotas: Vec::new(),
@@ -8171,50 +8068,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn headless_continues_past_the_soft_cap_and_finishes() {
-        // An unattended turn must NOT die at the soft cap: it warns once and runs to completion
-        // well inside the hard ceiling.
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let capture = CapturePresenter::default();
-        let events = capture.events.clone();
-        let mut config = Config::default();
-        config.mesh.max_steps = 2;
-        config.mesh.max_steps_unattended = 50;
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut session = Session::start(
-            Arc::clone(&store),
-            Arc::new(FiniteToolProvider {
-                calls: Arc::clone(&calls),
-                tool_steps: 4,
-            }),
-            Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools_in(test_workspace()),
-            Box::new(capture),
-            config,
-            test_workspace().to_str().expect("workspace path is UTF-8"),
-        )
-        .unwrap();
-
-        session.run_turn("keep reading").await.unwrap();
-
-        assert!(
-            calls.load(std::sync::atomic::Ordering::Relaxed) > 2,
-            "the unattended turn must run past the soft cap"
-        );
-        let events = events.lock().unwrap();
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("soft step cap 2"))));
-        assert!(
-            !events.iter().any(|e| matches!(
-                e,
-                PresenterEvent::Warning(w) if w.contains("send `continue`")
-            )),
-            "unattended turns must never be told to send `continue`"
-        );
-    }
-
-    #[tokio::test]
     async fn interactive_step_cap_pauses_a_runaway_turn() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter {
@@ -8224,7 +8077,6 @@ mod tests {
         let events = capture.events.clone();
         let mut config = Config::default();
         config.mesh.max_steps = 2;
-        config.mesh.max_steps_unattended = 5;
         let (provider, calls) = EndlessToolProvider::new(7);
         let mut session = Session::start(
             Arc::clone(&store),
@@ -8250,17 +8102,18 @@ mod tests {
             !events
                 .iter()
                 .any(|e| matches!(e, PresenterEvent::Error(w) if w.contains("step ceiling"))),
-            "an attended turn pauses at the soft cap; it must not hit the unattended hard ceiling"
+            "an attended turn pauses at its limit; it must not take the unattended error path"
         );
     }
 
     #[tokio::test]
-    async fn headless_step_cap_warns_and_continues_to_hard_ceiling() {
+    async fn an_explicit_unattended_limit_ends_the_turn_with_an_error() {
+        // `mesh.max_steps_unattended` (or `--max-turns`) is an explicit limit the user chose: the
+        // turn ends there with an error naming the uncommitted work, and says so by its stop reason.
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
         let mut config = Config::default();
-        config.mesh.max_steps = 2;
         config.mesh.max_steps_unattended = 5;
         let (provider, _calls) = EndlessToolProvider::new(7);
         let mut session = Session::start(
@@ -8280,20 +8133,21 @@ mod tests {
         assert_eq!(
             loop_steps(&events),
             5,
-            "the unattended turn runs from the soft cap up to the hard ceiling"
+            "the unattended turn runs to its explicit limit"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Warning(w) if w.contains("soft step cap")
+            )),
+            "there is no soft cap any more"
         );
         assert!(events.iter().any(|e| matches!(
             e,
-            PresenterEvent::Warning(w)
-                if w.contains("soft step cap 2")
-                    && w.contains("hard cap 5")
-                    && w.contains("input=14")
-                    && w.contains("output=2")
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
             PresenterEvent::Error(w)
-                if w.contains("hard step ceiling 5") && w.contains("work is uncommitted")
+                if w.contains("5-step limit")
+                    && w.contains("input=")
+                    && w.contains("work is uncommitted")
         )));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -8362,8 +8216,6 @@ mod tests {
         };
         let events = capture.events.clone();
         let mut config = Config::default();
-        config.mesh.max_steps = 5;
-        config.mesh.max_steps_unattended = 5;
         config.mesh.max_turn_input_tokens = 10;
         let (provider, _calls) = EndlessToolProvider::new(6);
         let mut session = Session::start(
@@ -8383,7 +8235,7 @@ mod tests {
         assert_eq!(
             loop_steps(&events),
             2,
-            "the token ceiling ends the turn well before the step cap"
+            "the token ceiling ends the turn on the second call"
         );
         assert!(events.iter().any(|e| matches!(
             e,
@@ -8394,13 +8246,16 @@ mod tests {
                 && w.contains("output 2")
                 && w.contains("work is uncommitted")
         )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            PresenterEvent::Done {
-                stop_reason: StopReason::FinalAnswer,
-                ..
-            }
-        )));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Done {
+                    stop_reason: StopReason::BudgetExhausted,
+                    ..
+                }
+            )),
+            "a spend ceiling is a failed turn, never a success"
+        );
     }
 
     /// Stalls on the 2nd call (text, no tool call) while a task is still in_progress, then — once
@@ -15911,6 +15766,81 @@ mod tests {
         );
     }
 
+    /// A bridge that closes one more tracked task on every invocation, running a tool each time.
+    struct TaskClosingBridge {
+        calls: std::sync::atomic::AtomicUsize,
+        total: usize,
+        session: std::sync::Mutex<Option<(Arc<Store>, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for TaskClosingBridge {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            on_event(StreamEvent::ToolStarted {
+                name: "shell".into(),
+                args: "git status".into(),
+            });
+            on_event(StreamEvent::ToolFinished {
+                name: "shell".into(),
+                ok: true,
+                summary: "clean".into(),
+            });
+            if let Some((store, id)) = self.session.lock().unwrap().as_ref() {
+                let titles: Vec<String> = (0..self.total).map(|i| format!("step {i}")).collect();
+                let rows: Vec<(&str, bool)> = titles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, title)| (title.as_str(), i <= n))
+                    .collect();
+                seed_tasks(store, id, &rows);
+            }
+            let finished = n + 1 >= self.total;
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                reasoning_items: Vec::new(),
+                content: if finished {
+                    "finished and verified"
+                } else {
+                    ""
+                }
+                .into(),
+                tool_calls: Vec::new(),
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_bridge_re_drive_budget_resets_whenever_a_task_closes() {
+        // The continue budget bounds re-drives that close NOTHING. A plan of twelve tasks that
+        // finishes one per invocation needs twelve re-drives, more than the eight a plan that
+        // makes no headway gets.
+        let provider = Arc::new(TaskClosingBridge {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            total: 12,
+            session: std::sync::Mutex::new(None),
+        });
+        let (store, mut session) = bridge_session(provider.clone());
+        *provider.session.lock().unwrap() = Some((Arc::clone(&store), session.id.clone()));
+        seed_tasks(&store, &session.id, &[("step 0", false)]);
+        session.config.mesh.verify_completeness = false;
+        let answer = session.run_turn("carry out the plan").await.unwrap();
+        assert_eq!(answer, "finished and verified");
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            12,
+            "every re-drive closed a task, so none was refused for the budget"
+        );
+    }
+
     #[tokio::test]
     async fn bridge_completion_accepts_fresh_inspection_without_a_redundant_turn() {
         // "All tasks Done" must have fresh tool-grounded evidence. Here the bridge runs an
@@ -18605,24 +18535,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(allowed);
         let _ = std::fs::remove_dir_all(sibling);
-    }
-
-    #[test]
-    fn tool_batch_signature_distinguishes_calls() {
-        use forge_types::ToolCall;
-        let mk = |name: &str, args: serde_json::Value| ToolCall {
-            id: "x".into(),
-            name: name.into(),
-            args,
-        };
-        let a = vec![mk("read_file", serde_json::json!({"path": "a.rs"}))];
-        let a2 = vec![mk("read_file", serde_json::json!({"path": "a.rs"}))];
-        let b = vec![mk("read_file", serde_json::json!({"path": "b.rs"}))];
-        let c = vec![mk("edit_file", serde_json::json!({"path": "a.rs"}))];
-        // Identical batches hash equal (drives doom-loop detection); different args or tool differ.
-        assert_eq!(tool_batch_signature(&a), tool_batch_signature(&a2));
-        assert_ne!(tool_batch_signature(&a), tool_batch_signature(&b));
-        assert_ne!(tool_batch_signature(&a), tool_batch_signature(&c));
     }
 
     #[test]

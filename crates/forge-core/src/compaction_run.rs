@@ -202,7 +202,7 @@ impl Session {
         let _ = self
             .store
             .compact_session_store(&self.id, &summary, kept_tail);
-        self.progress.note_compaction();
+        self.ledger.note_compaction();
 
         let after = self.transcript.len();
         self.presenter

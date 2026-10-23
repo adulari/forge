@@ -63,7 +63,9 @@ impl VerificationLedger {
         self.successful_observations
     }
 
-    pub(crate) fn observe(&mut self, observation: VerificationObservation, ok: bool) {
+    /// Record one call's outcome. Returns whether a check family that was failing just passed:
+    /// the progress ledger counts that as real progress.
+    pub(crate) fn observe(&mut self, observation: VerificationObservation, ok: bool) -> bool {
         match observation {
             VerificationObservation::Ignore => {}
             VerificationObservation::Mutation => {
@@ -80,21 +82,22 @@ impl VerificationLedger {
             }
             VerificationObservation::Check(family) => {
                 if ok {
-                    self.unresolved.remove(&family);
+                    let flipped = self.unresolved.remove(&family);
                     self.successful_observations = self.successful_observations.saturating_add(1);
                     self.checked_since_edit = true;
-                } else {
-                    self.unresolved.insert(family);
+                    return flipped;
                 }
+                self.unresolved.insert(family);
             }
             // Without the result there is no telling which entry failed: a pass is a pass, a
             // failure proves nothing about the check.
             VerificationObservation::BatchCheck { family, .. } => {
                 if ok {
-                    self.observe(VerificationObservation::Check(family), true);
+                    return self.observe(VerificationObservation::Check(family), true);
                 }
             }
         }
+        false
     }
 
     /// [`Self::observe`] with the tool's result text, which a batched check needs: the batch's
@@ -105,7 +108,7 @@ impl VerificationLedger {
         observation: VerificationObservation,
         ok: bool,
         result: &str,
-    ) {
+    ) -> bool {
         let VerificationObservation::BatchCheck { family, at } = observation else {
             return self.observe(observation, ok);
         };
@@ -119,7 +122,7 @@ impl VerificationLedger {
             BatchFailure::StoppedAt(entry) if entry > at => self.observe(check, true),
             BatchFailure::Everything => self.observe(check, false),
             // Stopped before the check ran, or kept going and one of several failed.
-            _ => {}
+            _ => false,
         }
     }
 

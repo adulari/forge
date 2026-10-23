@@ -465,6 +465,7 @@ fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
             | StopReason::MaxSteps
             | StopReason::BudgetExhausted
             | StopReason::NoOutput
+            | StopReason::Stalled
             | StopReason::DaemonShutdown
     ) {
         anyhow::bail!(outcome.text);

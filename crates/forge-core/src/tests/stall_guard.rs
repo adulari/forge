@@ -191,15 +191,13 @@ async fn a_model_cycling_among_a_few_phrasings_is_nudged_then_stopped() {
     );
     assert!(
         session.transcript.iter().any(|m| m.role == Role::System
-            && (m.content == crate::stall_guard::STALL_NUDGE
-                || m.content == crate::loop_progress::STAGNATION_NUDGE)),
+            && (m.content.starts_with(crate::stall_guard::STALL_NUDGE)
+                || m.content.starts_with("Progress check from Forge"))),
         "the nudge reached the model"
     );
     let (warnings, errors) = loop_notices(&events);
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("stopping to avoid a loop")),
+        warnings.iter().any(|w| w.contains("Stopped:")),
         "{warnings:?}"
     );
     assert!(errors.is_empty(), "a loop halt is not a crash: {errors:?}");
@@ -245,14 +243,13 @@ async fn a_model_repeating_its_opening_while_reading_different_things_is_nudged_
         session
             .transcript
             .iter()
-            .any(|m| m.role == Role::System && m.content == crate::stall_guard::STALL_NUDGE),
+            .any(|m| m.role == Role::System
+                && m.content.starts_with(crate::stall_guard::STALL_NUDGE)),
         "the nudge reached the model"
     );
     let (warnings, errors) = loop_notices(&events);
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("stopping to avoid a loop")),
+        warnings.iter().any(|w| w.contains("Stopped:")),
         "{warnings:?}"
     );
     assert!(errors.is_empty(), "a loop halt is not a crash: {errors:?}");
@@ -410,14 +407,14 @@ async fn a_productive_run_of_edits_with_one_opening_sentence_is_never_stopped() 
     assert!(
         !warnings
             .iter()
-            .any(|w| w.contains("same sentence") || w.contains("avoid a loop")),
+            .any(|w| w.contains("progress check") || w.contains("Stopped:")),
         "{warnings:?}"
     );
     assert!(errors.is_empty(), "{errors:?}");
     assert!(
         !session.transcript.iter().any(|m| m.role == Role::System
-            && (m.content == crate::stall_guard::STALL_NUDGE
-                || m.content == crate::loop_progress::STAGNATION_NUDGE)),
+            && (m.content.starts_with(crate::stall_guard::STALL_NUDGE)
+                || m.content.starts_with("Progress check from Forge"))),
         "no loop nudge in a productive turn"
     );
 }

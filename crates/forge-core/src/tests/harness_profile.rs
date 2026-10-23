@@ -1,6 +1,6 @@
 //! `[mesh] harness_profile` through real turns: `minimal` silences every advisory nudge while each
-//! safety guard (permission broker, doom-loop and failure-loop halts, stagnation halt, phantom-edit
-//! gate, step cap, spend cap) still fires; the profile follows the model driving each step; and the
+//! safety guard (permission broker, the progress ledger's stops, phantom-edit gate, an explicit
+//! step limit, spend cap) still fires; the profile follows the model driving each step; and the
 //! empty-reply nudge is spent at most once per turn.
 
 use super::*;
@@ -203,9 +203,9 @@ async fn minimal_sends_no_stall_nudge_but_still_halts_the_loop() {
     let mut run = Run::new(provider, config(HarnessProfile::Minimal), test_workspace());
     run.session.run_turn("why does it loop?").await.unwrap();
     assert_eq!(run.system_notes(crate::stall_guard::STALL_NUDGE), 0);
-    assert_eq!(run.system_notes(crate::loop_progress::STAGNATION_NUDGE), 0);
+    assert_eq!(run.system_notes("Progress check from Forge"), 0);
     assert_eq!(run.warnings("nudging"), 0);
-    assert_eq!(run.warnings("stopping to avoid a loop"), 1);
+    assert_eq!(run.warnings("Stopped:"), 1);
     assert!(calls.load(std::sync::atomic::Ordering::SeqCst) < 40);
 }
 
@@ -353,7 +353,8 @@ async fn minimal_still_halts_a_doom_loop() {
         test_workspace(),
     );
     run.session.run_turn("read the file").await.unwrap();
-    assert!(run.warnings("kept repeating the same tool call") > 0);
+    assert!(run.warnings("Stopped: the same calls returning the same results") > 0);
+    assert_eq!(run.warnings("progress check"), 0, "minimal sends no nudge");
 }
 
 #[tokio::test]
@@ -375,7 +376,7 @@ async fn minimal_still_halts_a_failure_loop() {
         test_workspace(),
     );
     run.session.run_turn("find the config").await.unwrap();
-    assert!(run.warnings("kept failing") > 0);
+    assert!(run.warnings("Stopped: the same calls failing") > 0);
 }
 
 #[tokio::test]
