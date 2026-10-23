@@ -18,6 +18,11 @@ use crate::{
     EnvFightTracker, Session, ToolFailureTracker, WorkspaceContext,
 };
 
+/// Shown when a resumed session's previous process died without clearing its terminal claim. A
+/// surface that claims the session before resuming it consumes that signal, and shows this itself.
+pub const UNCLEAN_EXIT_NOTICE: &str = "the previous run of this session ended without a clean \
+     exit (killed or crashed); its last turn may be incomplete";
+
 impl Session {
     pub fn start(
         store: Arc<Store>,
@@ -139,11 +144,9 @@ impl Session {
         // an empty gauge until its next model call.
         session.refresh_gauge_after_history_change_from_hint();
         if session.store.take_unclean_exit(session_id).unwrap_or(false) {
-            session.presenter.emit(PresenterEvent::Warning(
-                "the previous run of this session ended without a clean exit (killed or crashed); \
-                 its last turn may be incomplete"
-                    .to_string(),
-            ));
+            session
+                .presenter
+                .emit(PresenterEvent::Warning(UNCLEAN_EXIT_NOTICE.to_string()));
         }
         Ok(session)
     }

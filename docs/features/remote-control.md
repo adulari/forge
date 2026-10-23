@@ -536,7 +536,10 @@ a daemon-hosted one and there is nothing to keep in step as `Snapshot` and `Remo
 
 Archive, delete and resume are gated for such a session: `POST /api/sessions/{id}/archive`,
 `DELETE /api/sessions/{id}` and `POST /api/sessions {"resume": id}` answer 409 (`resume` with code
-`session_open_in_terminal`) while the terminal's presence heartbeat is fresh. Deleting used to
+`session_open_in_terminal`) while a terminal owns the session: a fresh presence heartbeat, or a
+quiet one (up to 30 minutes) whose published control channel still answers on loopback — a chat
+whose loop is stalled stops beating while its process and transcript are all still there, and the
+daemon must not read that as "gone". Deleting used to
 remove the rows out from under the live writer, which then re-created a stub with only what it sent
 afterwards; resuming put a second driver on one session. The opposite direction is guarded too:
 `forge chat --resume <id>`, `--continue` and the `/resume` picker refuse a session a live
@@ -744,6 +747,29 @@ available?") rather than a bare exit code. On Linux the generated unit sets `OOM
 if the kernel OOM-kills an agent-owned compiler or language-server child, systemd keeps the daemon
 and its live-session metadata running. Forge's LSP failure backoff then retries diagnostics after
 the normal cooldown rather than treating that child eviction as a daemon failure.
+
+## 2i. Restarting the daemon and upgrading the binary under running chats
+
+A deploy replaces `~/.local/bin/forge` (or what it links to), then restarts `forge-serve`. Open
+`forge chat` terminals must come through both. Nothing ties a chat to the daemon: it opens the
+shared store itself, serves its own loopback control channel, and talks to the daemon only for
+fleet messaging and the app proxy, so a restart alone never ends one. What did break running
+chats was the binary being replaced and, separately, the restarted daemon taking sessions that
+terminals still had open.
+
+| Hazard | What happened | Now |
+|---|---|---|
+| The chat's binary file was replaced | Linux reports the running executable as `<path> (deleted)`. A bridged `claude`/`codex` chat told its CLI to start `<path> (deleted) mcp-serve`, which does not exist, so every turn failed with `Forge MCP startup failed` and the pinned model gave no failover. | Children are launched through `/proc/<pid>/exe`, which stays executable while the process lives and keeps the child on the build its parent runs (`forge_types::self_exe`). Paths written to files that outlive the process (OS timers) use the installed path instead. The chat says once that the binary was upgraded and it is still running the old build. |
+| The daemon restored a session a terminal had open | `resurrect_fleet` resumed every `daemon_live` session after the heartbeat check, which only proves the chat's loop ran in the last minute. A stalled chat was resumed beside, and the resume cleared its presence for good. | A session with a terminal claim is left with it: fresh heartbeat, or a quiet one whose control channel still answers. The daemon drops its fleet flag for it. A terminal that opens a session clears that flag itself, claims it before the (seconds-long) session build, and re-asserts its claim if another process clears it. |
+| A session nobody had typed in yet | Every Forge process runs the retention sweep three seconds after start; `prune_empty` deleted empty sessions older than ten minutes without looking at who had them open. | It skips `daemon_live` sessions and terminals that beat within the horizon, as `prune` already did. |
+| A failed `/resume`, archive toggle or observe | The chat loop propagated the error with `?`, which ended the chat. After an upgrade that migrated the store, the old build's `open_store()` refuses the newer schema, so `/resume` closed the terminal. | Those failures are shown in the transcript and the chat carries on. |
+
+**Safe deploy for sessions that are running.** Replace the binary atomically (`install` to a
+temporary name, then `mv` over the old one; `forge-dev-update` already does this with a symlink),
+restart the daemon only when `forge attach --list` shows nothing `[busy]`, and leave the chats
+alone: they keep the build they started with and keep working. Restart a chat
+(`forge chat --resume <id>`) when it should pick up the new build. Do not run a build whose store
+schema is newer than the installed binary against the real store (see `AGENTS.md`).
 
 ## 4. Surfaces touched
 

@@ -32,6 +32,18 @@ pub(crate) fn open_resume_choice_picker(app: &mut forge_tui::App) {
     );
 }
 
+/// Archive a session, or bring it back if it is archived. The row's own state decides, not the
+/// view: a row is only un-archived if it is archived.
+pub(crate) fn toggle_session_archive(id: &str) -> Result<()> {
+    let store = open_store()?;
+    if store.session_archived(id)? {
+        store.unarchive_session(id)?;
+    } else {
+        store.archive_session(id)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Result<()> {
     let store = open_store()?;
     // Tab flips between the live list and the archived-only list; resuming from the archived

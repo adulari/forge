@@ -65,110 +65,8 @@ pub(crate) type PendingDuel = Option<(
     Vec<forge_core::worktree::WorktreeGuard>,
 )>;
 
-/// Publishes (and, on drop, retracts) this terminal-local `forge` chat process's presence into
-/// the shared store — the read-only fleet entry a `forge serve`/Anywhere client sees alongside its
-/// own driven sessions (`forge_store::Store::local_live_sessions`, `SessionRow::read_only` in
-/// `serve.rs`).
-///
-/// `store: None` (open failed, or genuinely unavailable) makes every method a silent no-op:
-/// presence is a nice-to-have surfaced through remote clients, never something the interactive
-/// loop should degrade or fail over.
-struct LocalPresenceGuard {
-    store: Option<Arc<forge_store::Store>>,
-    /// The session id currently marked `local_live` in the store, if any. A plain `Mutex` (not
-    /// async) because every access here is a quick compare-and-maybe-write, never held across an
-    /// `.await`.
-    current: std::sync::Mutex<Option<String>>,
-    /// The loopback control endpoint this terminal published, when it opened one (`[remote]
-    /// interactive_local_sessions`). Kept here rather than written once because
-    /// `set_session_local_live` deliberately clears the column, so `/new` and `/resume` have to
-    /// re-publish the SAME still-listening channel against the new session id — otherwise the
-    /// session silently reverts to read-only in the apps the moment the user starts a new chat.
-    control_url: std::sync::Mutex<Option<String>>,
-}
-
-impl LocalPresenceGuard {
-    fn new(store: Option<Arc<forge_store::Store>>) -> Self {
-        Self {
-            store,
-            current: std::sync::Mutex::new(None),
-            control_url: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// Record the loopback control endpoint for this terminal and publish it for the session
-    /// currently marked live, making the session drivable (not merely visible) from the apps.
-    fn publish_control_url(&self, url: String) {
-        let mut held = self
-            .control_url
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *held = Some(url);
-        let Some(store) = &self.store else { return };
-        let current = self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(id) = current.as_deref() {
-            let _ = store.set_session_local_control_url(id, held.as_deref());
-        }
-    }
-
-    /// Mark `session_id` as the locally-live session, clearing the previous one first (`/new` and
-    /// `/resume` swap the id this same terminal is driving without the process restarting).
-    /// Idempotent: retargeting to the id already current is a no-op.
-    fn retarget(&self, session_id: &str) {
-        let Some(store) = &self.store else { return };
-        let mut current = self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current.as_deref() == Some(session_id) {
-            return;
-        }
-        if let Some(old) = current.take() {
-            let _ = store.set_session_local_live(&old, false);
-        }
-        let _ = store.set_session_local_live(session_id, true);
-        *current = Some(session_id.to_string());
-        // `set_session_local_live` cleared the endpoint column (it may have held a dead port from
-        // a previous process). This terminal's channel is still listening and still drives this
-        // very loop, so re-publish it for the new id.
-        if let Some(url) = self
-            .control_url
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_deref()
-        {
-            let _ = store.set_session_local_control_url(session_id, Some(url));
-        }
-    }
-
-    /// Refresh the liveness heartbeat and busy flag for the currently-tracked session.
-    fn touch(&self, busy: bool) {
-        let Some(store) = &self.store else { return };
-        let current = self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(id) = current.as_deref() {
-            let _ = store.touch_session_local_presence(id, busy);
-        }
-    }
-}
-
-impl Drop for LocalPresenceGuard {
-    fn drop(&mut self) {
-        let Some(store) = &self.store else { return };
-        let mut current = self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(id) = current.take() {
-            let _ = store.set_session_local_live(&id, false);
-        }
-    }
-}
+mod local_presence;
+use local_presence::LocalPresenceGuard;
 
 mod atfiles;
 pub(crate) use atfiles::*;
@@ -501,6 +399,30 @@ pub(crate) async fn run_chat_tui(
     let tx_mcp = tx.clone(); // clone before tx is moved into ChannelPresenter
     let tx_custom = tx.clone(); // held for the render loop's shell-backed custom-widget refresh
 
+    // Publish this terminal-local session into the shared store's presence table so a
+    // remote/Anywhere client sees it (read-only) in the fleet list alongside `forge serve`-hosted
+    // sessions — see docs/features/remote-control.md and forge_store::Store::local_live_sessions.
+    // Retargeted (below, in the render loop) on every heartbeat tick to the CURRENT session id
+    // rather than being set once, because `/new` and `/resume` retarget `session` to a different
+    // id without this function returning. Store-open failure degrades to a silent no-op
+    // (`store: None`) rather than blocking chat on a presence feature that is read-only anyway.
+    // `[remote] publish_local_sessions` is the opt-OUT: on by default, since this publishes only
+    // read-only presence for a session the shared store already holds.
+    //
+    // A resumed session is claimed NOW, ahead of the session build, which on a large transcript
+    // takes seconds. A daemon restarting in that window restored the session into its own fleet
+    // and ended up driving it beside this terminal, because no claim existed yet to stop it.
+    let local_presence = LocalPresenceGuard::new(
+        tui_config
+            .remote
+            .publish_local_sessions
+            .then(|| crate::open_store().ok().map(Arc::new))
+            .flatten(),
+    );
+    let prior_unclean_exit = resume_id
+        .as_deref()
+        .is_some_and(|id| local_presence.retarget(id));
+
     // Inline-mode banner: print BEFORE ratatui creates the inline viewport so the terminal's own
     // line-ending handling clears the full row width. ratatui's draw_lines_over_cleared uses
     // old.diff(&new) which skips default-style cells at cols 42+ (empty == empty in the diff),
@@ -708,25 +630,12 @@ pub(crate) async fn run_chat_tui(
     // SessionStart (`startup`, or `resume` for a reopened conversation); never holds the lock
     // while the hooks run.
     forge_core::hooks_session::fire_session_start_shared(&session, None).await;
-    let (sid, session_store) = {
-        let s = session.lock().await;
-        (s.session_id().to_string(), s.store.clone())
-    };
-
-    // Publish this terminal-local session into the shared store's presence table so a
-    // remote/Anywhere client sees it (read-only) in the fleet list alongside `forge serve`-hosted
-    // sessions — see docs/features/remote-control.md and forge_store::Store::local_live_sessions.
-    // Retargeted (below, in the render loop) on every heartbeat tick to the CURRENT session id
-    // rather than being set once here, because `/new` and `/resume` retarget `session` to a
-    // different id without this function returning. Store-open failure degrades to a silent no-op
-    // (`store: None`) rather than blocking chat on a presence feature that is read-only anyway.
-    // `[remote] publish_local_sessions` is the opt-OUT: on by default, since this publishes only
-    // read-only presence for a session the shared store already holds.
-    let publish_local_sessions = forge_config::load()
-        .map(|c| c.remote.publish_local_sessions)
-        .unwrap_or(true);
-    let local_presence = LocalPresenceGuard::new(publish_local_sessions.then_some(session_store));
+    let sid = session.lock().await.session_id().to_string();
+    // A fresh session is claimed here; a resumed one already was, and this is then a no-op.
     local_presence.retarget(&sid);
+    if prior_unclean_exit {
+        app.note(&format!("⚠ {}", forge_core::UNCLEAN_EXIT_NOTICE));
+    }
 
     // On a resumed session (`--continue` / `--resume <id>`): render the FULL prior transcript into
     // scrollback (the user sees the entire original conversation, even the parts compaction folded
@@ -768,7 +677,9 @@ pub(crate) async fn run_chat_tui(
     // can choose which session to reattach to. Otherwise, if we resumed a previously-compacted
     // session, ask whether to continue compacted or reload the full history into the model's view.
     if open_picker_on_start {
-        open_sessions_picker(&mut app, "")?;
+        if let Err(error) = open_sessions_picker(&mut app, "") {
+            app.note(&format!("⚠ could not list sessions: {error:#}"));
+        }
     } else if offer_resume_choice {
         open_resume_choice_picker(&mut app);
     }
@@ -1005,6 +916,9 @@ pub(crate) async fn run_chat_tui(
     // full interval.
     let mut local_presence_last_touch = std::time::Instant::now();
     let mut local_presence_last_busy: Option<bool> = None;
+    // The installed binary was replaced under this process (a deploy). Said once, so the user
+    // knows this session still runs the build it started with.
+    let mut upgrade_noted = false;
     const LOCAL_PRESENCE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(20);
 
     // Session workspace is a live binding: `/new` and `/resume` retarget it in place while this
@@ -1080,6 +994,15 @@ pub(crate) async fn run_chat_tui(
             // working stopped heartbeating and vanished from the phone/desktop apps after a minute.
             // `touch` needs no session lock: `LocalPresenceGuard` tracks the current id itself.
             local_presence.touch(busy);
+            if !upgrade_noted && forge_types::self_exe::running_binary_replaced() {
+                upgrade_noted = true;
+                dirty = true;
+                app.note(
+                    "ℹ forge was upgraded on disk while this session was running. It keeps the \
+                     build it started with, and so do the tools it launches; restart the chat \
+                     (`forge chat --resume`) to pick up the new one.",
+                );
+            }
             // Retarget only needs the lock, and only to catch a `/new`/`/resume` id change — a
             // between-turns action, so a busy turn failing `try_lock` here loses nothing: the id it
             // would read is the one already tracked.
@@ -1752,7 +1675,7 @@ pub(crate) async fn run_chat_tui(
 
                 if matches!(key, KeyKind::CopyLast) {
                     // Copy last assistant response to clipboard — equivalent to /copy.
-                    match dispatch_command(
+                    match dispatch_chat_command(
                         "/copy",
                         &session,
                         Some(&mut tui),
@@ -1838,7 +1761,7 @@ pub(crate) async fn run_chat_tui(
                     // the running turn). `voice_press_at` feeds the push-to-talk tap-vs-hold
                     // decision on the matching `InputEvent::KeyUp` release, if one ever arrives.
                     voice_press_at = Some(Instant::now());
-                    if let DispatchOutcome::PendingVoice(start) = dispatch_command(
+                    if let DispatchOutcome::PendingVoice(start) = dispatch_chat_command(
                         "/voice",
                         &session,
                         Some(&mut tui),
@@ -2141,7 +2064,7 @@ pub(crate) async fn run_chat_tui(
                         };
                         app.palette.close();
                         app.input.clear();
-                        match dispatch_command(
+                        match dispatch_chat_command(
                             &line,
                             &session,
                             Some(&mut tui),
@@ -2615,23 +2538,24 @@ pub(crate) async fn run_chat_tui(
                     KeyKind::Tab if app.picker.kind == Some(forge_tui::PickerKind::Sessions) => {
                         let query = app.picker.query.clone();
                         app.show_archived = !app.show_archived;
-                        open_sessions_picker(&mut app, &query)?;
+                        if let Err(error) = open_sessions_picker(&mut app, &query) {
+                            app.note(&format!("⚠ could not list sessions: {error:#}"));
+                        }
                     }
                     KeyKind::DeleteForward
                         if app.picker.kind == Some(forge_tui::PickerKind::Sessions) =>
                     {
                         if let Some(row) = app.picker.selected_row() {
                             if !row.id.starts_with("observe:") {
-                                let store = crate::open_store()?;
-                                // The row's own state decides, not the view: a row is only
-                                // un-archived if it is archived.
-                                if store.session_archived(&row.id)? {
-                                    store.unarchive_session(&row.id)?;
-                                } else {
-                                    store.archive_session(&row.id)?;
-                                }
+                                let id = row.id.clone();
                                 let query = app.picker.query.clone();
-                                open_sessions_picker(&mut app, &query)?;
+                                // A store that cannot be opened or written is reported, never
+                                // fatal: `?` out of this loop ends the whole chat.
+                                let outcome = toggle_session_archive(&id)
+                                    .and_then(|()| open_sessions_picker(&mut app, &query));
+                                if let Err(error) = outcome {
+                                    app.note(&format!("⚠ could not update the session: {error:#}"));
+                                }
                             }
                         }
                     }
@@ -2774,7 +2698,16 @@ pub(crate) async fn run_chat_tui(
                                 && row.id.starts_with("observe:")
                             {
                                 let session_id = row.id.trim_start_matches("observe:").to_string();
-                                let obs_store = std::sync::Arc::new(crate::open_store()?);
+                                let obs_store = match crate::open_store() {
+                                    Ok(store) => std::sync::Arc::new(store),
+                                    Err(error) => {
+                                        app.note(&format!(
+                                            "⚠ could not observe the session: {error:#}"
+                                        ));
+                                        dirty = true;
+                                        continue;
+                                    }
+                                };
                                 let start_event_id =
                                     find_starting_event_id(&obs_store, &session_id);
                                 // `try_lock`: same reasoning as skip_model above — a turn parked
@@ -2785,9 +2718,11 @@ pub(crate) async fn run_chat_tui(
                                     dirty = true;
                                     continue;
                                 };
-                                s.reset_resumed_hooked(&session_id)
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                                if let Err(error) = s.reset_resumed_hooked(&session_id).await {
+                                    app.note(&format!("⚠ could not observe the session: {error}"));
+                                    dirty = true;
+                                    continue;
+                                }
                                 let (items, view) = (
                                     s.replay_items_tail(REPLAY_TAIL_MESSAGES).0,
                                     s.view_snapshot(),
@@ -2812,8 +2747,16 @@ pub(crate) async fn run_chat_tui(
                                     last_poll: std::time::Instant::now(),
                                 });
                             } else if let Some(request) =
-                                picker_accept(kind, &row, &session, Some(&mut tui), &mut app)
-                                    .await?
+                                match picker_accept(kind, &row, &session, Some(&mut tui), &mut app)
+                                    .await
+                                {
+                                    Ok(request) => request,
+                                    Err(error) => {
+                                        app.note(&format!("⚠ {error:#}"));
+                                        dirty = true;
+                                        None
+                                    }
+                                }
                             {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_summarize_from(
@@ -3218,7 +3161,7 @@ pub(crate) async fn run_chat_tui(
                 open_models_root(&session, &mut app).await?;
             } else if matches!(key, KeyKind::NewSession) {
                 // Ctrl-N: start a fresh session (equivalent to /new).
-                if let DispatchOutcome::Quit = dispatch_command(
+                if let DispatchOutcome::Quit = dispatch_chat_command(
                     "/new",
                     &session,
                     Some(&mut tui),
@@ -3243,7 +3186,7 @@ pub(crate) async fn run_chat_tui(
                 }
             } else if matches!(key, KeyKind::SaveCheckpoint) {
                 // Ctrl-S: save a checkpoint (equivalent to /checkpoint).
-                if let DispatchOutcome::Quit = dispatch_command(
+                if let DispatchOutcome::Quit = dispatch_chat_command(
                     "/checkpoint",
                     &session,
                     Some(&mut tui),
@@ -3268,7 +3211,7 @@ pub(crate) async fn run_chat_tui(
                 }
             } else if matches!(key, KeyKind::UndoWrite) {
                 // Ctrl-Z: undo last write (equivalent to /undo).
-                if let DispatchOutcome::Quit = dispatch_command(
+                if let DispatchOutcome::Quit = dispatch_chat_command(
                     "/undo",
                     &session,
                     Some(&mut tui),
@@ -3293,7 +3236,7 @@ pub(crate) async fn run_chat_tui(
                 }
             } else if matches!(key, KeyKind::CompactSession) {
                 // Alt-L (configurable `compact`): compact the conversation, like /compact.
-                match dispatch_command(
+                match dispatch_chat_command(
                     "/compact",
                     &session,
                     Some(&mut tui),
@@ -3422,7 +3365,7 @@ pub(crate) async fn run_chat_tui(
                             for img in std::mem::take(&mut submit_images) {
                                 app.attach_image(img, "image");
                             }
-                            match dispatch_command(
+                            match dispatch_chat_command(
                                 &line,
                                 &session,
                                 Some(&mut tui),
@@ -3961,7 +3904,7 @@ pub(crate) async fn run_chat_tui(
                                 ));
                             }
                         } else if text.starts_with('/') {
-                            match dispatch_command(
+                            match dispatch_chat_command(
                                 &text,
                                 &session,
                                 Some(&mut tui),

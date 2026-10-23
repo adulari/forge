@@ -121,16 +121,42 @@ impl Store {
 
     /// Refresh the liveness heartbeat and busy flag for a locally-live session. Called at turn
     /// start/end and on a coarse idle tick so a killed terminal's row ages out instead of showing
-    /// live forever. A no-op (0 rows touched) if the session isn't currently marked local-live —
-    /// callers don't need to special-case that.
-    pub fn touch_session_local_presence(&self, session_id: &str, busy: bool) -> Result<()> {
-        self.lock()?.execute(
+    /// live forever. A no-op (0 rows touched) if the session isn't currently marked local-live.
+    ///
+    /// Returns whether the session was still marked live. `false` means another process cleared
+    /// the flag under a terminal that is still running (a second terminal on the same session
+    /// exiting cleanly, a daemon resuming the session after seeing a stale heartbeat), so the
+    /// caller can re-assert the claim instead of staying invisible and unprotected.
+    pub fn touch_session_local_presence(&self, session_id: &str, busy: bool) -> Result<bool> {
+        let touched = self.lock()?.execute(
             "UPDATE session
              SET local_busy = ?2, local_last_seen = strftime('%s','now')
              WHERE id = ?1 AND local_live = 1",
             rusqlite::params![session_id, i64::from(busy)],
         )?;
-        Ok(())
+        Ok(touched > 0)
+    }
+
+    /// The terminal claim on `session_id`, whether or not its heartbeat is still fresh — `None`
+    /// when no terminal has it open. [`Store::is_session_local_read_only`] answers "is the
+    /// heartbeat current", which is the wrong question for deciding to take a session over: a
+    /// terminal whose main loop is blocked (a stalled disk, a suspended laptop) stops beating
+    /// while its process, its control channel and its in-memory transcript are all still there.
+    pub fn local_claim(&self, session_id: &str) -> Result<Option<crate::LocalClaim>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT strftime('%s','now') - COALESCE(local_last_seen, 0), local_control_url
+                 FROM session WHERE id = ?1 AND local_live = 1",
+                [session_id],
+                |row| {
+                    Ok(crate::LocalClaim {
+                        idle_secs: row.get(0)?,
+                        control_url: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     /// Publish (or clear) the loopback control endpoint an interactive terminal session is

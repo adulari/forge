@@ -24,6 +24,14 @@ use crate::cli::commands::schedule::{
 };
 use crate::serve::{err_response, json_response, DaemonState};
 
+/// The path an OS timer should exec. The daemon may have been upgraded on disk while it runs, and
+/// `current_exe()` then names `<path> (deleted)`, which a timer file would carry forever.
+fn persisted_forge_exe() -> String {
+    forge_types::self_exe::installed_path()
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct ScheduleRow {
     id: String,
@@ -132,10 +140,7 @@ pub(crate) async fn create_schedule(
         if !std::path::Path::new(&cwd).is_dir() {
             return Err(format!("no such directory: {cwd}"));
         }
-        let forge_exe = std::env::current_exe()
-            .map_err(|error| format!("resolving the forge binary path: {error}"))?
-            .to_string_lossy()
-            .to_string();
+        let forge_exe = persisted_forge_exe();
 
         let id = forge_types::new_id();
         store
@@ -220,10 +225,7 @@ async fn mutate_schedule(state: Arc<DaemonState>, id: String, action: ScheduleAc
             ScheduleAction::Resume => {
                 let spec = ScheduleSpec::from_stored(&schedule.cron)
                     .ok_or_else(|| format!("unrecognised schedule spec: {}", schedule.cron))?;
-                let forge_exe = std::env::current_exe()
-                    .map_err(|error| format!("resolving the forge binary path: {error}"))?
-                    .to_string_lossy()
-                    .to_string();
+                let forge_exe = persisted_forge_exe();
                 install_timer(
                     &schedule.id,
                     &spec,

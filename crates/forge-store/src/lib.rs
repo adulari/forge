@@ -1715,6 +1715,23 @@ pub struct CheckpointRow {
 /// `local_live` — see [`Store::local_live_sessions`].
 pub const LOCAL_PRESENCE_STALE_SECS: i64 = 60;
 
+/// A terminal's claim on a session, as recorded in the store ([`Store::local_claim`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalClaim {
+    /// Seconds since the owning terminal last beat. At most [`LOCAL_PRESENCE_STALE_SECS`] for a
+    /// healthy one; a larger value means blocked or gone, which the control channel tells apart.
+    pub idle_secs: i64,
+    /// The loopback endpoint the terminal listens on, if it published one.
+    pub control_url: Option<String>,
+}
+
+impl LocalClaim {
+    /// Whether the heartbeat alone proves the terminal is alive.
+    pub fn is_fresh(&self) -> bool {
+        self.idle_secs <= LOCAL_PRESENCE_STALE_SECS
+    }
+}
+
 /// One row of the terminal-local fleet: a session currently open in an interactive `forge` chat
 /// process, read straight from the store (there is no in-memory driver to ask, unlike a
 /// `forge serve`-hosted session).
@@ -5195,6 +5212,96 @@ mod tests {
         assert!(ids_after.contains(&recent_empty), "too young to prune");
         assert!(!ids_after.contains(&old_empty), "old + empty: pruned");
         assert!(ids_after.contains(&old_used), "has a real message: kept");
+    }
+
+    /// A session somebody has open is not "unused" because nobody typed in it yet. The sweep runs
+    /// in every Forge process 3 s after start, so a fresh `forge run` used to delete the empty
+    /// session of the chat (or daemon) that held it.
+    #[test]
+    fn prune_empty_keeps_empty_sessions_that_are_open_somewhere() {
+        let store = Store::open_in_memory().unwrap();
+        let backdate = |id: &str| {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE session SET created_at = ?1 WHERE id = ?2",
+                    rusqlite::params![chrono::Utc::now().timestamp() - 3600, id],
+                )
+                .unwrap();
+        };
+        let in_terminal = store.create_session("/terminal", "default").unwrap();
+        store.set_session_local_live(&in_terminal, true).unwrap();
+        let in_daemon = store.create_session("/daemon", "default").unwrap();
+        store.set_session_daemon_live(&in_daemon, true).unwrap();
+        let abandoned_terminal = store.create_session("/abandoned", "default").unwrap();
+        store
+            .set_session_local_live(&abandoned_terminal, true)
+            .unwrap();
+        // A terminal killed an hour ago never cleared its flag; its empty session is leftover.
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET local_last_seen = ?1 WHERE id = ?2",
+                rusqlite::params![chrono::Utc::now().timestamp() - 3600, abandoned_terminal],
+            )
+            .unwrap();
+        for id in [&in_terminal, &in_daemon, &abandoned_terminal] {
+            backdate(id);
+        }
+
+        assert_eq!(store.prune_empty(600, 50).unwrap(), 1);
+        assert!(store.session_exists(&in_terminal).unwrap());
+        assert!(store.session_exists(&in_daemon).unwrap());
+        assert!(!store.session_exists(&abandoned_terminal).unwrap());
+    }
+
+    #[test]
+    fn local_claim_reports_a_terminal_whose_heartbeat_has_gone_quiet() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        assert_eq!(store.local_claim(&sid).unwrap(), None);
+
+        store.set_session_local_live(&sid, true).unwrap();
+        store
+            .set_session_local_control_url(&sid, Some("http://127.0.0.1:5051/tok"))
+            .unwrap();
+        let fresh = store.local_claim(&sid).unwrap().expect("claimed");
+        assert!(fresh.is_fresh());
+        assert_eq!(
+            fresh.control_url.as_deref(),
+            Some("http://127.0.0.1:5051/tok")
+        );
+
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET local_last_seen = ?1 WHERE id = ?2",
+                rusqlite::params![chrono::Utc::now().timestamp() - 600, sid],
+            )
+            .unwrap();
+        let quiet = store.local_claim(&sid).unwrap().expect("still claimed");
+        assert!(!quiet.is_fresh(), "{quiet:?}");
+        assert!(
+            quiet.idle_secs >= 600,
+            "the claim must survive a stale heartbeat, unlike is_session_local_read_only: {quiet:?}"
+        );
+        assert!(!store.is_session_local_read_only(&sid).unwrap());
+    }
+
+    #[test]
+    fn touching_presence_says_whether_the_terminal_is_still_marked_live() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        assert!(!store.touch_session_local_presence(&sid, false).unwrap());
+        store.set_session_local_live(&sid, true).unwrap();
+        assert!(store.touch_session_local_presence(&sid, true).unwrap());
+        // Another process clearing the flag (the stale-heartbeat takeover) must be visible to the
+        // terminal that is still running, so it can re-assert itself.
+        store.set_session_local_live(&sid, false).unwrap();
+        assert!(!store.touch_session_local_presence(&sid, true).unwrap());
     }
 
     #[test]

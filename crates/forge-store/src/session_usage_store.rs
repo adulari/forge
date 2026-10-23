@@ -75,6 +75,12 @@ impl Store {
     /// and exits (or crashes) before the user ever sends a prompt — e.g. an `mcp agent` connection
     /// that's opened and torn down without being used — otherwise leaves a permanent, empty row that
     /// clutters `forge sessions` / the resume picker forever. Returns the number removed.
+    ///
+    /// A session someone has open is not unused just because nobody typed yet. A daemon-hosted
+    /// session (`daemon_live`) or one a terminal beat for within the horizon is skipped, exactly
+    /// as [`Store::prune`] skips them: this sweep runs once in EVERY Forge process, so without the
+    /// check a freshly started `forge run` deleted a live, still-empty session out from under the
+    /// chat or daemon holding it.
     pub fn prune_empty(&self, horizon_secs: i64, max_sessions: usize) -> Result<usize> {
         if max_sessions == 0 {
             return Ok(0);
@@ -85,6 +91,8 @@ impl Store {
             let ids: Vec<String> = {
                 let mut stmt = conn.prepare(
                     "SELECT id FROM session s WHERE s.created_at < ?1 AND s.agent_active = 0 \
+                     AND s.daemon_live = 0 \
+                     AND (s.local_live = 0 OR COALESCE(s.local_last_seen, 0) < ?1) \
                      AND NOT EXISTS ( \
                        SELECT 1 FROM message m \
                        WHERE m.session_id = s.id AND m.role = 'user' \

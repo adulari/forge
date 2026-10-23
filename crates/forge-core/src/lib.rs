@@ -158,6 +158,7 @@ pub use session_restore::RestoredTurnState;
 mod session_controls;
 mod session_history;
 mod session_lifecycle;
+pub use session_lifecycle::UNCLEAN_EXIT_NOTICE;
 mod session_restore;
 mod session_rewind;
 pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};

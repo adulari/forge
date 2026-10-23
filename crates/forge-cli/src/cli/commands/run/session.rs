@@ -247,13 +247,13 @@ pub(crate) async fn build_session_with_self_mcp(
         // server that resolves to THIS SAME BINARY invoked with `mcp agent`, regardless of
         // what it's named in the config (covers a renamed entry too, not just literally
         // "forge").
-        let self_exe_name = std::env::current_exe().ok().and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        });
+        let installed = forge_types::self_exe::installed_path();
+        let self_exe_name = installed
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
         remove_recursive_self_mcp(&mut mcp_config, self_exe_name.as_deref());
     } else if config.self_mcp && !mcp_config.servers.iter().any(|s| s.name == "forge") {
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("forge"));
+        let exe = forge_types::self_exe::forge_executable();
         mcp_config.servers.insert(
             0,
             forge_config::McpServerConfig {
