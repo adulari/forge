@@ -83,6 +83,39 @@ fn requests_that_expect_tests_to_change_do_not_arm_it() {
     }
 }
 
+/// A review round is not a promise that the tests stay green. A last-look prompt with "pass" as a
+/// noun used to arm the guard, which restored a test file the model had repaired and cost a second
+/// full round.
+#[test]
+fn a_pass_over_the_work_is_not_a_green_tests_request() {
+    for prompt in [
+        "Final pass: rerun everything and confirm each change is covered by a test of its own.",
+        "Do one more pass over the tests and tell me what is missing.",
+        "Take a quick pass through the test directory.",
+        "A second pass on the tests, please, with notes per file.",
+        "Two passes over the unit tests would be enough.",
+        "Review pass: confirm each change is covered by a test.",
+    ] {
+        assert!(!prompt_expects_green_existing_tests(prompt), "{prompt}");
+        assert_eq!(guidance(prompt, &[]), None, "{prompt}");
+        assert_eq!(level(false, &[Message::user(prompt)], false), Level::Off);
+    }
+}
+
+#[test]
+fn the_verb_pass_still_asks_for_green_tests() {
+    for prompt in [
+        "Make the tests pass.",
+        "All the tests must pass when you are done.",
+        "The tests that pass today have to keep passing.",
+        "Every test should still pass after the change.",
+        "Run the suite once more; it passes right now and must stay that way, tests included.",
+        "Final pass: the tests must keep passing.",
+    ] {
+        assert!(prompt_expects_green_existing_tests(prompt), "{prompt}");
+    }
+}
+
 #[test]
 fn leave_the_existing_tests_alone_is_an_explicit_prohibition() {
     for prompt in [
@@ -267,6 +300,39 @@ fn guidance_matches_the_strength_of_the_request() {
         Some(KEEP_TESTS_GUIDANCE)
     );
     assert_eq!(guidance("Implement pagination.", &[]), None);
+}
+
+#[test]
+fn a_harness_nudge_does_not_speak_for_the_person() {
+    let nudge = |text: String| Message::user(text).with_kind(forge_types::MessageKind::Nudge);
+    // The push-back after a restore says "fix the production code rather than the tests".
+    let pushed_back = push_back(
+        false,
+        &["tests/test_a.py".to_string()],
+        std::path::Path::new("/tmp/edits.patch"),
+    );
+    let transcript = vec![
+        Message::user("Fix the parser. Leave the existing tests alone."),
+        Message::assistant("ok"),
+        nudge(pushed_back),
+    ];
+    assert!(session_requires_pristine_existing_tests(&transcript));
+    assert_eq!(level(false, &transcript, true), Level::AnyEdit);
+
+    // A nudge that talks about passing tests does not arm the keep-it-green guard.
+    let transcript = vec![
+        Message::user("Implement pagination."),
+        Message::assistant("done"),
+        nudge("Run the tests again and make sure they pass.".to_string()),
+    ];
+    assert_eq!(level(false, &transcript, false), Level::Off);
+    assert_eq!(guidance("Implement pagination.", &transcript), None);
+
+    // The same words typed by the person still count.
+    let transcript = vec![Message::user(
+        "Run the tests again and make sure they pass.",
+    )];
+    assert_eq!(level(false, &transcript, false), Level::Rewrites);
 }
 
 #[test]
@@ -618,6 +684,51 @@ async fn a_turn_that_never_asked_for_green_tests_leaves_edited_tests_alone() {
         "nothing asked for the existing tests to be kept, so the edit stays"
     );
     assert!(git(&dir, &["stash", "list"]).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An earlier turn widened an existing test; a closing "final pass" turn must not read as "keep
+/// the tests green", restore that test to the version the turn started with and send the model
+/// round again.
+#[tokio::test]
+async fn a_final_pass_request_does_not_restore_or_push_back() {
+    let dir = repo_with_committed_test();
+    let original = std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap();
+    let widened = original.replace("== 1", "== 2");
+    std::fs::write(dir.join("tests/test_foo.py"), &widened).unwrap();
+    let provider = Arc::new(DescribeOnlyProvider {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (_store, mut session) = fixed_session(
+        provider,
+        Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        }),
+    );
+    session.config.recap.enabled = false;
+    session.config.suggest.enabled = false;
+    session.config.mesh.auto_memory = false;
+    session.workspace = WorkspaceContext::new(&dir).unwrap();
+
+    session
+        .run_turn(
+            "Final pass: rerun everything and tell me which of today's changes still lack a test.",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+        widened
+    );
+    assert!(
+        !session.transcript.iter().any(|m| m
+            .content
+            .contains("existing tests are the specification")
+            || m.content.contains("git apply")),
+        "a review round is given neither the keep-the-tests text nor a restore push-back"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
