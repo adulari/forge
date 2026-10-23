@@ -15,6 +15,9 @@ impl Session {
         bridge_input_accum: &mut u64,
     ) -> Result<(String, bool), CoreError> {
         let provisional_completion = !resp.wants_tools() && !resp.content.trim().is_empty();
+        // A model that called tools on a request that carried none (a call recovered from text)
+        // needs them for the rest of the turn: its history now holds tool calls and results.
+        self.tools_advertised_once |= resp.wants_tools();
         // Carry the reply's own thinking on the in-memory transcript. Thinking-mode APIs want it
         // back on the NEXT request of this turn — DeepSeek rejects the request outright without it
         // — so it has to survive from here to the tool-result round trip. It is deliberately not

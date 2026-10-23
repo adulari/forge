@@ -17,6 +17,7 @@ mod cli_provider;
 mod codex_oauth;
 mod codex_websocket;
 mod custom_models;
+mod dsml;
 mod dsml_stream_guard;
 mod embedder;
 mod error;
@@ -65,6 +66,7 @@ pub use genai_provider::{
 pub use mock::MockProvider;
 pub use tool_recovery::{
     looks_like_unexecuted_tool_call, recover_text_tool_calls, repair_malformed_args,
+    strip_tool_call_markup,
 };
 pub use xai_oauth::{
     has_session as has_xai_oauth_session, is_pinned_xai_url, list_models as list_xai_oauth_models,
