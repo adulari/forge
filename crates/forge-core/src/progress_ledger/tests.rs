@@ -376,8 +376,8 @@ fn failed_calls_and_repeated_mutations_are_not_progress() {
             vec![obs(8, false, true, "error: no match")],
         );
     }
-    // The failed call is new information the first time it is seen, and a repeat of it is not.
-    assert_eq!(ledger.futile_run, 2, "{}", ledger.futile_run);
+    // A short error is a cause, not information, so it never breaks the run.
+    assert_eq!(ledger.futile_run, 4, "{}", ledger.futile_run);
     assert_eq!(ledger.idle_steps, 4);
 }
 

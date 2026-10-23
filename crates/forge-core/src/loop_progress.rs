@@ -134,7 +134,8 @@ impl CallObservation {
         self.error_head.as_deref()
     }
 
-    /// The failure's cause, ignoring digits: `attempt 3 refused` and `attempt 4 refused` are one.
+    /// The failure's cause, ignoring digits: `attempt 3 refused` and `no such file: a-4.rs` and
+    /// `no such file: a-5.rs` are each one.
     pub(crate) fn cause(&self) -> Option<u64> {
         self.cause
     }
@@ -484,5 +485,30 @@ mod tests {
         };
         let read = CallObservation::for_call(&call, true, false, "x");
         assert_eq!(read.read_targets().len(), 2);
+    }
+
+    #[test]
+    fn noise_is_masked_but_the_numbers_that_tell_things_apart_are_not() {
+        use super::text::mask_noise;
+        assert_eq!(
+            mask_noise("attempt 3 of 20: connection refused (os error 111)"),
+            mask_noise("attempt 4 of 20: connection refused (os error 111)")
+        );
+        assert_eq!(
+            mask_noise("finished in 0.41s at 12:00:01 on 2026-10-23"),
+            mask_noise("finished in 3.50s at 23:59:59 on 2026-10-24")
+        );
+        assert_eq!(
+            mask_noise("pid 4242 exited, run 77"),
+            mask_noise("pid 9 exited, run 3")
+        );
+        assert_ne!(
+            mask_noise("suite 3 case 5: fixture_2 is missing"),
+            mask_noise("suite 4 case 1: fixture_2 is missing")
+        );
+        assert_ne!(
+            mask_noise("left: 1\nright: 2"),
+            mask_noise("left: 1\nright: 3")
+        );
     }
 }

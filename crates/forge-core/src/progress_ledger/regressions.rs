@@ -284,7 +284,7 @@ fn a_continue_that_opens_the_same_way_over_new_findings_is_not_stopped() {
 // ---- failures ----------------------------------------------------------------------------------
 
 #[test]
-fn eight_different_failing_commands_are_exploring_not_one_failure() {
+fn eight_different_failing_commands_that_explain_themselves_are_exploring_not_one_failure() {
     let steps: Vec<_> = (0..8)
         .map(|i| {
             (
@@ -293,9 +293,12 @@ fn eight_different_failing_commands_are_exploring_not_one_failure() {
                     i as u64,
                     false,
                     &format!(
-                        "error: {} is wrong\nhint: look at {}",
+                        "error: {} is wrong\nhint: look at {}\nnote: {} was last changed by {}\nnote: see {}",
                         WORDS[i],
-                        WORDS[(i + 3) % 8]
+                        WORDS[(i + 3) % 8],
+                        WORDS[(i + 5) % 8],
+                        WORDS[(i + 1) % 8],
+                        WORDS[(i + 2) % 8]
                     ),
                 )],
             )
@@ -306,11 +309,74 @@ fn eight_different_failing_commands_are_exploring_not_one_failure() {
 }
 
 #[test]
+fn a_dozen_different_one_line_errors_in_a_row_are_futile_not_one_failure() {
+    let steps: Vec<_> = (0..12)
+        .map(|i| {
+            (
+                distinct(i),
+                vec![shell_call(
+                    i as u64,
+                    false,
+                    &format!("error: {} is wrong", WORDS[i % 8].repeat(1 + i / 8)),
+                )],
+            )
+        })
+        .collect();
+    let verdicts = run(steps);
+    assert!(
+        !events(&verdicts)
+            .iter()
+            .any(|(_, _, lane)| *lane == "failure"),
+        "{:?}",
+        events(&verdicts)
+    );
+    assert_eq!(
+        first(&verdicts, nudge_of(Lane::Futile)),
+        Some(5),
+        "{:?}",
+        events(&verdicts)
+    );
+    assert!(first(&verdicts, stop_of(Lane::Futile)).is_some_and(|s| s >= 10));
+}
+
+#[test]
+fn reads_of_paths_that_do_not_exist_are_one_failure_whatever_the_path() {
+    let steps: Vec<_> = (0..8)
+        .map(|i| {
+            (
+                distinct(i),
+                vec![obs(
+                    i as u64,
+                    false,
+                    false,
+                    &format!("error: no such file or directory: does-not-exist-{i}.rs"),
+                )
+                .named("read_file")],
+            )
+        })
+        .collect();
+    let verdicts = run(steps);
+    assert_eq!(
+        first(&verdicts, nudge_of(Lane::Failure)),
+        Some(3),
+        "{:?}",
+        events(&verdicts)
+    );
+    assert_eq!(
+        first(&verdicts, stop_of(Lane::Failure)),
+        Some(6),
+        "{:?}",
+        events(&verdicts)
+    );
+}
+
+#[test]
 fn six_failing_scripts_that_open_alike_but_print_different_things_are_not_one_failure() {
     let steps: Vec<_> = (0..6)
         .map(|i| {
+            // Numbered cases, as test suites print them: only the numbers tell them apart.
             let body: String = (0..25)
-                .map(|k| format!("{} line {}\n", WORDS[i], WORDS[k % 8].repeat(1 + k / 8)))
+                .map(|k| format!("suite {i} case {k}: fixture_{k} is missing\n"))
                 .collect();
             (
                 distinct(i),

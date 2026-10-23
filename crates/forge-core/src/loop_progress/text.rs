@@ -34,19 +34,21 @@ pub(super) fn excerpt(text: &str) -> String {
 ///
 /// The shell's `exit N in Xms` header carries the run's timing, so its digits are always masked:
 /// a silent command (`true`, `git add`) whose whole result is that header would otherwise look
-/// like new output every time it ran. `mask_all` masks the digits of every line, for failures:
-/// an attempt counter, a timestamp or a port in an error message is noise, and a retry loop that
-/// differs only in those must not read as new information. A successful result keeps its
-/// numbers, because a poll whose counter moves is moving.
-pub(super) fn line_fingerprints(result: &str, mask_all: bool) -> Vec<u64> {
+/// like new output every time it ran. `noisy` masks the run-to-run noise of every line, for
+/// failures (see [`mask_noise`]): an attempt counter or a timestamp in an error message says
+/// nothing new, and a retry loop that differs only in those must not read as new information.
+/// A successful result keeps its numbers, because a poll whose counter moves is moving.
+pub(super) fn line_fingerprints(result: &str, noisy: bool) -> Vec<u64> {
     let mut lines = result.lines().map(str::trim).filter(|l| !l.is_empty());
     let first = lines.next();
     let rest: Vec<&str> = lines.collect();
     let mut out = Vec::with_capacity(rest.len() + 1);
     let single_short = rest.is_empty() && first.is_some_and(|l| l.len() <= SHORT_RESULT_CHARS);
     if let Some(first) = first {
-        let header = if mask_all || first.starts_with("shell:") {
+        let header = if first.starts_with("shell:") {
             mask_digits(first)
+        } else if noisy {
+            mask_noise(first)
         } else {
             first.to_string()
         };
@@ -57,8 +59,8 @@ pub(super) fn line_fingerprints(result: &str, mask_all: bool) -> Vec<u64> {
         }));
     }
     out.extend(rest.into_iter().map(|line| {
-        if mask_all {
-            hash_str(&mask_digits(line))
+        if noisy {
+            hash_str(&mask_noise(line))
         } else {
             hash_str(line)
         }
@@ -106,30 +108,31 @@ fn mask_quoted(s: &str) -> String {
     out
 }
 
-/// A line whose content changes from run to run for reasons that say nothing about the outcome:
-/// a duration, a clock time, a date, a long hex id.
-fn is_volatile(line: &str) -> bool {
-    static VOLATILE: OnceLock<regex::Regex> = OnceLock::new();
-    VOLATILE
+/// The parts of a line that change from run to run without meaning anything: durations, clock
+/// times, dates, long hex ids, and counters (`attempt 3`, `3 of 20`, `pid 4242`), each replaced by
+/// `#`. Other digits stay: `suite 3 case 5` and `suite 4 case 1` are different tests.
+pub(super) fn mask_noise(line: &str) -> String {
+    static NOISE: OnceLock<regex::Regex> = OnceLock::new();
+    NOISE
         .get_or_init(|| {
             regex::Regex::new(
-                r"(?i)\d+(\.\d+)?\s?(ms|µs|us|ns|s|secs?|seconds|mins?|minutes)\b|\d{1,2}:\d{2}(:\d{2})?|\d{4}-\d{2}-\d{2}|\b0x[0-9a-f]{6,}\b|\b[0-9a-f]{8,}\b",
+                r"(?i)\d+(\.\d+)?\s?(ms|µs|us|ns|s|secs?|seconds|mins?|minutes|h)\b|\d{4}-\d{2}-\d{2}(t\d{2}:\d{2}:\d{2}(\.\d+)?z?)?|\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?|\b0x[0-9a-f]+\b|\b[0-9a-f]{8,}\b|\b(attempts?|retry|retries|tries|try|iteration|iter|poll|pid|port|elapsed|waited|run)\b[\s:#=]*\d+|\b\d+\s*(of|/)\s*\d+\b",
             )
-            .expect("volatile-line pattern")
+            .expect("noise pattern")
         })
-        .is_match(line)
+        .replace_all(line, "#")
+        .into_owned()
 }
 
-/// What a failing result says once its run-to-run noise is taken out: the set of its lines that
-/// are not durations, times or ids. Two runs of a check that fail the same way give the same
-/// value however long each took; a failure that moved (a different assertion, a changed count)
-/// gives another.
+/// What a failing result says once its run-to-run noise is taken out: the set of its lines with
+/// [`mask_noise`] applied. Two runs of a check that fail the same way give the same value however
+/// long each took; a failure that moved (a different assertion, a changed count) gives another.
 pub(super) fn stable_fingerprint(result: &str) -> u64 {
     let mut lines: Vec<u64> = result
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with("shell:") && !is_volatile(l))
-        .map(hash_str)
+        .filter(|l| !l.is_empty() && !l.starts_with("shell:"))
+        .map(|l| hash_str(&mask_noise(l)))
         .collect();
     lines.sort_unstable();
     lines.dedup();

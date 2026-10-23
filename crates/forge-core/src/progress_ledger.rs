@@ -92,6 +92,9 @@ const NOTE_REMIND_AFTER_STEPS: u32 = 25;
 const MAX_SEEN_LINES: usize = 200_000;
 /// A result with at least this share (1 in `NEW_LINE_DIVISOR`) of lines unseen is informative.
 const NEW_LINE_DIVISOR: usize = 4;
+/// A failed call has to print at least this many lines (the shell's header counts) before what it
+/// printed can be new information.
+const MIN_FAILURE_LINES: usize = 3;
 pub(crate) const DEFAULT_IDLE_NUDGE_STEPS: u32 = 60;
 pub(crate) const DEFAULT_IDLE_STOP_STEPS: u32 = 200;
 
@@ -499,6 +502,12 @@ impl ProgressLedger {
                 self.seen_lines.clear();
             }
             let total = call.lines().len();
+            // A short error is a cause, not information: its novelty is a different path or
+            // number in the same sentence. A listing of failures, a stack trace, compiler output
+            // is.
+            if !call.ok() && total < MIN_FAILURE_LINES {
+                continue;
+            }
             let new = call
                 .lines()
                 .iter()
