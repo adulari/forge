@@ -282,6 +282,7 @@ pub(super) async fn apply(patch: &str, cwd: &Path) -> Result<String, ToolError> 
                         old: hunk.old,
                         new: hunk.new,
                         replace_all: false,
+                        ordered: true,
                         after: hunk.after,
                     })
                     .collect();
@@ -563,4 +564,149 @@ mod tests {
         assert!(err.contains("only context"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// The patch `gpt-6-luna` sent for the first edit of the b01 benchmark task (stockctl, a long
+    /// multi-feature change to `src/cli.rs`), replayed on the task's original file. Its fourth chunk
+    /// names a closing `}` that occurs dozens of times; the patch was refused as ambiguous.
+    #[tokio::test]
+    async fn a_recorded_model_patch_with_a_bare_closing_brace_chunk_applies() {
+        let dir = tmp("b01-replay");
+        write(&dir, "cli.rs", CLI_RS);
+        let patch = B01_PATCH.replace("src/cli.rs", "cli.rs");
+        let out = apply(&patch, &dir).await;
+        assert!(out.is_ok(), "{out:?}");
+        let updated = std::fs::read_to_string(dir.join("cli.rs")).unwrap();
+        let export_at = updated.find("fn cmd_export").expect("cmd_export added");
+        let list_at = updated.find("fn cmd_list").unwrap();
+        let summary_at = updated.find("fn cmd_summary").unwrap();
+        assert!(
+            list_at < export_at && export_at < summary_at,
+            "cmd_export lands between cmd_list and cmd_summary, after cmd_list's closing brace"
+        );
+        assert!(
+            updated.contains("}\n\nfn cmd_export"),
+            "after the function's own `}}`, not one nested inside it:\n{updated}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const CLI_RS: &str = r####"//! Argument handling for the `stockctl` binary.
+
+use std::io::Write;
+
+use crate::model::Item;
+use crate::{csv, report};
+
+const USAGE: &str = "usage: stockctl <list|summary> <file>";
+
+/// Runs the CLI and returns the process exit code.
+pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("list") => cmd_list(&args[1..], out, err),
+        Some("summary") => cmd_summary(&args[1..], out, err),
+        Some("--help") | Some("-h") => {
+            let _ = writeln!(out, "{USAGE}");
+            0
+        }
+        Some(other) => {
+            let _ = writeln!(err, "stockctl: unknown command `{other}`\n{USAGE}");
+            2
+        }
+        None => {
+            let _ = writeln!(err, "{USAGE}");
+            2
+        }
+    }
+}
+
+fn load(path: &str) -> Result<Vec<Item>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    csv::parse_items(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+fn cmd_list(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let [path] = args else {
+        let _ = writeln!(err, "stockctl list: expected exactly one file\n{USAGE}");
+        return 2;
+    };
+    match load(path) {
+        Ok(items) => {
+            let _ = write!(out, "{}", report::list(&items));
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(err, "stockctl: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_summary(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let [path] = args else {
+        let _ = writeln!(err, "stockctl summary: expected exactly one file\n{USAGE}");
+        return 2;
+    };
+    match load(path) {
+        Ok(items) => {
+            let _ = write!(out, "{}", report::summary(&items));
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(err, "stockctl: {e}");
+            1
+        }
+    }
+}
+"####;
+
+    const B01_PATCH: &str = r####"*** Begin Patch
+*** Update File: src/cli.rs
+@@
+-const USAGE: &str = "usage: stockctl <list|summary> <file>";
++const USAGE: &str = "usage: stockctl <list|summary> <file> | stockctl export <file> --format <csv|json>";
+@@
+         Some("summary") => cmd_summary(&args[1..], out, err),
++        Some("export") => cmd_export(&args[1..], out, err),
+@@
+ fn cmd_list(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+-    let [path] = args else {
+-        let _ = writeln!(err, "stockctl list: expected exactly one file\n{USAGE}");
++    let (path, min_qty) = match args {
++        [path] => (path.as_str(), None),
++        [path, flag, value] if flag == "--min-qty" => match value.parse::<u32>() {
++            Ok(n) => (path.as_str(), Some(n)),
++            Err(_) => { let _ = writeln!(err, "stockctl list: invalid minimum quantity `{value}`\n{USAGE}"); return 2; }
++        },
++        _ => {
++            let _ = writeln!(err, "stockctl list: expected <file> [--min-qty N]\n{USAGE}");
++            return 2;
++        }
++    };
+-        return 2;
+-    };
+     match load(path) {
+         Ok(items) => {
+-            let _ = write!(out, "{}", report::list(&items));
++            let filtered: Vec<Item> = items.into_iter().filter(|i| min_qty.is_none_or(|n| i.qty >= n)).collect();
++            let _ = write!(out, "{}", report::list(&filtered));
+@@
+ }
++
++fn cmd_export(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let [path, flag, format] = args else {
++        let _ = writeln!(err, "stockctl export: expected <file> --format <csv|json>\n{USAGE}");
++        return 2;
++    };
++    if flag != "--format" { let _ = writeln!(err, "stockctl export: expected --format <csv|json>\n{USAGE}"); return 2; }
++    if !["csv", "json"].contains(&format.as_str()) { let _ = writeln!(err, "stockctl export: unsupported format `{format}`; supported formats: csv, json"); return 2; }
++    match load(path) {
++        Ok(items) => { let _ = write!(out, "{}", if format == "csv" { report::export_csv(&items) } else { report::export_json(&items) }); 0 }
++        Err(e) => { let _ = writeln!(err, "stockctl: {e}"); 1 }
++    }
++}
+@@
+-            let _ = write!(out, "{}", report::summary(&items));
++            let mut text = report::summary(&items);
++            text.push_str(&report::categories(&items));
++            let _ = write!(out, "{text}");
+*** End Patch"####;
 }

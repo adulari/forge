@@ -51,6 +51,7 @@ fn plan(args: &Value) -> Result<Vec<(String, Vec<EditStep>)>, ToolError> {
                 .get("replace_all")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            ordered: false,
             after: None,
         };
         let key: std::path::PathBuf = std::path::Path::new(path).components().collect();

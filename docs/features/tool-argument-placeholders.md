@@ -67,14 +67,27 @@ the tool stopped rejecting the pair.
 
 ## `apply_patch` hunks in the Codex envelope
 
-The same models send Codex-style patches, where a chunk with no `-`/`+` line (context only) or a
-`@@ <line>` header is a position: Codex applies the next chunk after it. Forge treated a
-context-only chunk as an edit whose `old` and `new` were identical and rejected the whole patch.
-That was 15 of the 19 failed `apply_patch` calls in the 52 native-loop runs, and the b01 retry
-loop; 3 more were a `-`/`+` pair restating the same text, which stays an error.
+The same models send Codex-style patches, where the chunks of one file come in file order: each
+is looked for after the previous one, and a chunk with no `-`/`+` line (context only) or a
+`@@ <line>` header names lines the next chunk must come after. Forge looked for every chunk
+anywhere in the file. A context-only chunk became an edit whose `old` and `new` were identical,
+and the whole patch was refused; that was 15 of the 19 failed `apply_patch` calls in the 52
+native-loop runs and the b01 retry loop (3 more were a `-`/`+` pair restating the same text,
+which stays an error). A chunk such as a bare closing `}` was refused as ambiguous, because it
+occurs dozens of times.
 
-Such a chunk is now not a hunk. It, or the `@@` header text, scopes the next hunk to the first
-match after those lines, so a hunk whose `old` text occurs many times (a closing `}`) lands where
-the patch meant. A scope that is not in the file, or an `old` that does not follow it, is ignored:
-the scope only chooses between matches and never makes an edit fail that applied without it. A
-patch that is nothing but context is refused with that reason.
+Chunks are now applied the way Codex reads them (`apply_edits` with `ordered` steps):
+
+- A context-only chunk is not a hunk. It, or the header text, becomes the lines the next hunk
+  must come after.
+- The first hunk of a patch must still match exactly once. Each later one goes to the first
+  match after the end of the previous hunk, or after its anchor lines when it has some.
+- A match is whole lines, so the `}` of a hunk is not the one inside `"{}"` or indented deeper.
+- Ordering only chooses between matches. A hunk with nothing after the previous one to match, or
+  an anchor that is not in the file, is applied by the usual rule (one exact match, else the
+  whitespace-insensitive and block-anchor tiers), so it never makes an edit fail that applied
+  before.
+- A patch of nothing but context is refused with that reason.
+
+The patch `gpt-6-luna` sent for b01, replayed on the task's original `src/cli.rs`, is a unit
+test (`a_recorded_model_patch_with_a_bare_closing_brace_chunk_applies`).

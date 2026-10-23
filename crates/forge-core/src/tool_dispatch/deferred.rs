@@ -60,8 +60,9 @@ impl Session {
     /// [`Self::resolve_deferred_call`], with the placeholder values a model that must fill in every
     /// property sends for the optional ones it is not using (`commands: []`, `path: ""`,
     /// `timeout_secs: 0`) removed from the arguments, so the permission rules, hooks, loop guards
-    /// and the tool all see the call the model meant. The transcript keeps what the model sent:
-    /// provider-side request reuse compares it byte for byte.
+    /// and the tool all see the call the model meant. The transcript keeps what the model sent: it
+    /// is replayed as the provider produced it, and a request that differs from the response's own
+    /// items cannot reuse the previous one.
     pub(crate) fn resolve_model_call(&self, call: &forge_types::ToolCall) -> forge_types::ToolCall {
         let mut resolved = self.resolve_deferred_call(call);
         resolved.args = self.normalized_call_args(&resolved.name, &resolved.args);

@@ -156,7 +156,8 @@ impl Session {
         // Idempotent: the model loop already resolved `tool_call` and removed the placeholder
         // values, so its counters saw the same call.
         let call = &self.resolve_model_call(call);
-        // Snapshot args before hooks so the audit row preserves exactly what the model requested.
+        // Snapshot args before hooks so the audit row preserves the call as the model made it, bar
+        // the placeholder values removed above (the transcript has them exactly as sent).
         let call_args_json = serde_json::to_string(&call.args)?;
         if let Some(scope) = self
             .task_scope

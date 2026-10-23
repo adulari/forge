@@ -592,9 +592,11 @@ pub(super) struct EditStep {
     pub old: String,
     pub new: String,
     pub replace_all: bool,
-    /// Lines that must come first: `old` is looked for after them, and the first match there wins
-    /// even when `old` also occurs earlier or later. A Codex hunk's `@@ <line>` header, or a
-    /// context-only chunk before it, says this. `None` for every other edit.
+    /// A hunk of a Codex patch. The hunks of one patch come in file order, so once one has landed
+    /// the next is the first match after it, even when `old` also occurs elsewhere.
+    pub ordered: bool,
+    /// For an `ordered` edit: lines `old` must come after, from the hunk's `@@ <line>` header or
+    /// a context-only chunk before it.
     pub after: Option<String>,
 }
 
@@ -632,34 +634,62 @@ pub(super) fn edit_snippet(updated: &str, new: &str) -> String {
     format!("\n{body}")
 }
 
-/// Apply `old → new` at the first place `old` occurs after the lines `after`. `after` that is not
-/// in the file, or an `old` that does not follow it, leaves nothing to scope by, so the edit is
-/// applied as if there were no anchor: the anchor only ever picks between matches, it never makes
-/// an edit fail that would have applied without it.
-fn apply_edit_after(
+/// Apply the next hunk of a Codex patch. It goes to the first match of `old` after the lines
+/// `after` (a `@@` header or a context-only chunk), else after the end of the previous hunk
+/// (`cursor`), the way Codex reads a patch. Nothing to go by (the first hunk, or no match
+/// after what it should follow) leaves the usual rule: `old` must match exactly once, or
+/// match loosely. So ordering only ever picks between matches; it never makes an edit fail that
+/// would have applied without it.
+fn apply_edit_ordered(
     content: &str,
-    after: &str,
+    cursor: Option<usize>,
+    after: Option<&str>,
     old: &str,
     new: &str,
 ) -> Result<(String, &'static str), String> {
-    let scoped = line_span(content, after).and_then(|(anchor_start, anchor_end)| {
-        let start = anchor_end + content[anchor_end..].find(old)?;
-        Some((anchor_start, start, start + old.len()))
+    let from = cursor.unwrap_or(0);
+    let anchored = after.and_then(|anchor| {
+        let (_, end) =
+            line_span_from(content, anchor, from).or_else(|| line_span_from(content, anchor, 0))?;
+        find_whole_lines(content, end, old)
     });
-    let Some((anchor_start, start, end)) = scoped else {
+    let placed = anchored.or_else(|| find_whole_lines(content, cursor?, old));
+    let Some(start) = placed else {
         return apply_edit_inner(content, old, new, false);
     };
-    // Widen the edit to start at the anchor: that stretch of text is unique where `old` alone is
-    // not, so the one exact-match path does the replacing (line endings included).
-    let widened_old = &content[anchor_start..end];
-    let widened_new = format!("{}{new}", &content[anchor_start..start]);
-    apply_edit_inner(content, widened_old, &widened_new, false)
+    check_degenerate(old, new)?;
+    if looks_truncated(old, new) {
+        return Err(TRUNCATED_QUOTES.to_string());
+    }
+    let new = if old.contains("\r\n") {
+        to_crlf(new)
+    } else if old.contains('\n') {
+        to_lf(new)
+    } else {
+        match_eol(content, new)
+    };
+    let end = start + old.len();
+    Ok((format!("{}{new}{}", &content[..start], &content[end..]), ""))
 }
 
-/// Byte range of the first run of whole lines in `content` that equals the lines of `anchor`:
-/// exactly (trailing whitespace aside) first, then ignoring indentation too. Includes the final
-/// line's newline.
-fn line_span(content: &str, anchor: &str) -> Option<(usize, usize)> {
+/// Byte offset of the first place at or after `from` where the lines of `old` appear as whole
+/// lines of `content`. A hunk's `old` is whole lines, and the closing `}` it names is not the one
+/// inside `"{}"` or indented deeper.
+fn find_whole_lines(content: &str, from: usize, old: &str) -> Option<usize> {
+    content[from..].match_indices(old).find_map(|(at, _)| {
+        let (start, end) = (from + at, from + at + old.len());
+        let at_line_start = start == 0 || content[..start].ends_with('\n');
+        let at_line_end = content[end..].is_empty()
+            || content[end..].starts_with('\n')
+            || content[end..].starts_with("\r\n");
+        (at_line_start && at_line_end).then_some(start)
+    })
+}
+
+/// Byte range of the first run of whole lines at or after byte `from` in `content` that equals
+/// the lines of `anchor`: exactly (trailing whitespace aside) first, then ignoring indentation too.
+/// Includes the final line's newline.
+fn line_span_from(content: &str, anchor: &str, from: usize) -> Option<(usize, usize)> {
     let wanted: Vec<&str> = anchor.lines().collect();
     if wanted.is_empty() || wanted.iter().all(|line| line.trim().is_empty()) {
         return None;
@@ -667,12 +697,17 @@ fn line_span(content: &str, anchor: &str) -> Option<(usize, usize)> {
     let mut lines: Vec<(usize, usize, &str)> = Vec::new();
     let mut offset = 0;
     for raw in content.split_inclusive('\n') {
-        lines.push((
-            offset,
-            offset + raw.len(),
-            raw.trim_end_matches(['\n', '\r']),
-        ));
+        if offset >= from {
+            lines.push((
+                offset,
+                offset + raw.len(),
+                raw.trim_end_matches(['\n', '\r']),
+            ));
+        }
         offset += raw.len();
+    }
+    if wanted.len() > lines.len() {
+        return None;
     }
     for ignore_indent in [false, true] {
         let same = |have: &str, want: &str| {
@@ -695,19 +730,44 @@ fn line_span(content: &str, anchor: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// Where the change that turned `before` into `after` ends in `after`: past the last byte that
+/// differs. The next hunk of a patch is looked for from there.
+fn changed_end(before: &str, after: &str) -> usize {
+    let (b, a) = (before.as_bytes(), after.as_bytes());
+    let prefix = b.iter().zip(a).take_while(|(x, y)| x == y).count();
+    let room = b.len().min(a.len()) - prefix;
+    let suffix = b
+        .iter()
+        .rev()
+        .zip(a.iter().rev())
+        .take(room)
+        .take_while(|(x, y)| x == y)
+        .count();
+    let mut end = a.len() - suffix;
+    while !after.is_char_boundary(end) {
+        end += 1;
+    }
+    end
+}
+
 /// Fold the edits over `content` in order (each on the running result), all-or-nothing: the first
 /// edit that can't apply aborts with `edit #k: <reason>` and the caller writes nothing.
 pub(super) fn apply_edits(content: &str, edits: &[EditStep]) -> Result<String, String> {
     let mut cur = content.to_string();
+    // Where the last `ordered` hunk ended; `None` until one has landed.
+    let mut cursor: Option<usize> = None;
     for step in edits {
         let result = if step.replace_all {
             apply_edit_all_inner(&cur, &step.old, &step.new, false)
-        } else if let Some(after) = &step.after {
-            apply_edit_after(&cur, after, &step.old, &step.new)
+        } else if step.ordered {
+            apply_edit_ordered(&cur, cursor, step.after.as_deref(), &step.old, &step.new)
         } else {
             apply_edit_inner(&cur, &step.old, &step.new, false)
         };
         let (next, _) = result.map_err(|e| format!("edit #{}: {e}", step.number))?;
+        if step.ordered {
+            cursor = Some(changed_end(&cur, &next));
+        }
         cur = next;
     }
     // Bracket balance is judged on the combined result: one step may open a block that a later
@@ -728,6 +788,7 @@ mod tests {
             old: old.to_string(),
             new: new.to_string(),
             replace_all: false,
+            ordered: false,
             after: None,
         }
     }
@@ -1014,6 +1075,7 @@ mod tests {
             old: old.to_string(),
             new: new.to_string(),
             replace_all: false,
+            ordered: false,
             after: None,
         };
         let content = "fn f() {\n    body();\n}\n";
@@ -1033,14 +1095,31 @@ mod tests {
         let err = apply_edit("some content x here\n", "does not exist", "x").unwrap_err();
         assert!(!err.contains("probably applied already"), "{err}");
     }
+    fn hunk(old: &str, new: &str, after: Option<&str>) -> EditStep {
+        EditStep {
+            number: 0,
+            old: old.to_string(),
+            new: new.to_string(),
+            replace_all: false,
+            ordered: true,
+            after: after.map(str::to_string),
+        }
+    }
+
+    const THREE_FUNCTIONS: &str =
+        "fn a() {\n    x();\n}\nfn b() {\n    x();\n}\nfn c() {\n    x();\n}\n";
+
     #[test]
-    fn apply_edit_after_picks_the_first_match_after_the_anchor() {
-        let content = "fn a() {\n    x();\n}\nfn b() {\n    x();\n}\nfn c() {\n    x();\n}\n";
+    fn an_anchor_picks_the_first_match_after_it() {
         assert!(
-            apply_edit(content, "    x();", "    y();").is_err(),
+            apply_edit(THREE_FUNCTIONS, "    x();", "    y();").is_err(),
             "ambiguous without an anchor"
         );
-        let (out, _) = apply_edit_after(content, "fn b() {", "    x();", "    y();").unwrap();
+        let out = apply_edits(
+            THREE_FUNCTIONS,
+            &[hunk("    x();", "    y();", Some("fn b() {"))],
+        )
+        .unwrap();
         assert_eq!(
             out,
             "fn a() {\n    x();\n}\nfn b() {\n    y();\n}\nfn c() {\n    x();\n}\n"
@@ -1048,22 +1127,85 @@ mod tests {
     }
 
     #[test]
-    fn apply_edit_after_without_a_usable_anchor_is_the_plain_edit() {
-        let content = "a = 1\nb = 2\n";
-        let (out, _) = apply_edit_after(content, "no such line", "b = 2", "b = 3").unwrap();
-        assert_eq!(out, "a = 1\nb = 3\n");
-        // `old` only occurs before the anchor: nothing to scope by, so the plain edit applies.
-        let (out, _) = apply_edit_after(content, "b = 2", "a = 1", "a = 9").unwrap();
-        assert_eq!(out, "a = 9\nb = 2\n");
-        // An ambiguous `old` stays an error when the anchor cannot pick between the matches.
-        assert!(apply_edit_after("x\nx\n", "missing", "x", "y").is_err());
+    fn a_hunk_goes_to_the_first_match_after_the_previous_one() {
+        // `}` occurs three times; the second hunk is the first `}` after where the first landed.
+        let out = apply_edits(
+            THREE_FUNCTIONS,
+            &[
+                hunk("fn b() {\n    x();", "fn b() {\n    y();", None),
+                hunk("}", "}\n// after b", None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "fn a() {\n    x();\n}\nfn b() {\n    y();\n}\n// after b\nfn c() {\n    x();\n}\n"
+        );
     }
 
     #[test]
-    fn apply_edit_after_keeps_crlf_files_crlf() {
+    fn an_ordered_hunk_matches_whole_lines_not_text_inside_a_line() {
+        // The first `}` after the first hunk is inside `"{}"` and the next is indented; the hunk
+        // named the closing brace at column 0.
+        let content = "fn a() {\n    p(\"{}\");\n    if x {\n        y();\n    }\n}\nfn b() {}\n";
+        let out = apply_edits(
+            content,
+            &[
+                hunk("    p(\"{}\");", "    p(\"{:?}\");", None),
+                hunk("}", "}\n// end of a", None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "fn a() {\n    p(\"{:?}\");\n    if x {\n        y();\n    }\n}\n// end of a\nfn b() {}\n"
+        );
+    }
+
+    #[test]
+    fn the_first_hunk_still_has_to_match_exactly_once() {
+        let err = apply_edits(THREE_FUNCTIONS, &[hunk("    x();", "    y();", None)]).unwrap_err();
+        assert!(err.contains("3 occurrences"), "{err}");
+    }
+
+    #[test]
+    fn nothing_after_the_previous_hunk_falls_back_to_the_unique_match() {
+        // The second hunk's `old` only occurs before the first hunk: ordering has nothing to pick,
+        // so the plain rule applies and the edit still lands.
+        let out = apply_edits(
+            "one = 1\ntwo = 2\nthree = 3\n",
+            &[
+                hunk("three = 3", "three = 33", None),
+                hunk("one = 1", "one = 11", None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(out, "one = 11\ntwo = 2\nthree = 33\n");
+    }
+
+    #[test]
+    fn an_anchor_that_is_not_in_the_file_is_ignored() {
+        let out = apply_edits(
+            "a = 1\nb = 2\n",
+            &[hunk("b = 2", "b = 3", Some("no such line"))],
+        )
+        .unwrap();
+        assert_eq!(out, "a = 1\nb = 3\n");
+        // And an `old` that only occurs before the anchor still applies.
+        let out = apply_edits("a = 1\nb = 2\n", &[hunk("a = 1", "a = 9", Some("b = 2"))]).unwrap();
+        assert_eq!(out, "a = 9\nb = 2\n");
+        // An ambiguous `old` with no usable anchor stays an error.
+        assert!(apply_edits("x\nx\n", &[hunk("x", "y", Some("missing"))]).is_err());
+    }
+
+    #[test]
+    fn ordered_hunks_keep_crlf_files_crlf() {
         let content = "fn a() {\r\n    x();\r\n}\r\nfn b() {\r\n    x();\r\n}\r\n";
-        let (out, _) =
-            apply_edit_after(content, "fn b() {", "    x();", "    y();\n    z();").unwrap();
+        let out = apply_edits(
+            content,
+            &[hunk("    x();", "    y();\n    z();", Some("fn b() {"))],
+        )
+        .unwrap();
         assert_eq!(
             out,
             "fn a() {\r\n    x();\r\n}\r\nfn b() {\r\n    y();\r\n    z();\r\n}\r\n"
@@ -1071,16 +1213,36 @@ mod tests {
     }
 
     #[test]
-    fn line_span_matches_whole_lines_exactly_then_ignoring_indentation() {
+    fn line_span_from_matches_whole_lines_exactly_then_ignoring_indentation() {
         let content = "  fn a() {\n    x();\n  }\n";
-        assert_eq!(line_span(content, "  fn a() {"), Some((0, 11)));
+        assert_eq!(line_span_from(content, "  fn a() {", 0), Some((0, 11)));
         assert_eq!(
-            line_span(content, "fn a() {"),
+            line_span_from(content, "fn a() {", 0),
             Some((0, 11)),
             "indentation ignored second"
         );
-        assert_eq!(line_span(content, "fn a"), None, "a line, not a substring");
-        assert_eq!(line_span(content, "    x();\n  }"), Some((11, 24)));
-        assert_eq!(line_span(content, ""), None);
+        assert_eq!(
+            line_span_from(content, "fn a", 0),
+            None,
+            "a line, not a substring"
+        );
+        assert_eq!(line_span_from(content, "    x();\n  }", 0), Some((11, 24)));
+        assert_eq!(line_span_from(content, "", 0), None);
+        assert_eq!(
+            line_span_from(content, "  fn a() {", 1),
+            None,
+            "only lines that start at or after `from`"
+        );
+    }
+
+    #[test]
+    fn changed_end_is_past_the_last_differing_byte() {
+        assert_eq!(changed_end("a = 1\nb = 2\n", "a = 1\nb = 22\n"), 12);
+        assert_eq!(changed_end("same", "same"), 4);
+        // A pure insertion ends where the inserted text ends.
+        assert_eq!(changed_end("ab", "aXYb"), 3);
+        // Never inside a multi-byte character.
+        let end = changed_end("é", "è");
+        assert!("è".is_char_boundary(end));
     }
 }
