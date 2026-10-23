@@ -181,23 +181,26 @@ pub(crate) fn untracked_digest(root: &std::path::Path, path: &str) -> (u64, u64)
     (meta.len(), hasher.finish())
 }
 
-/// Snapshot of "where the work stands": `git status --porcelain` plus the checked-out commit.
+/// Snapshot of "where the work stands": the [`worktree_fingerprint`] (HEAD, status, the diff
+/// against HEAD and each untracked file's content).
 ///
 /// Status alone cannot see a turn whose work was committed. The model edits, runs the tests and
 /// commits (the harness itself asks it to commit each verified unit), so the tree is clean before
 /// and after and the porcelain output is byte-identical — which read as an empty diff and
-/// re-drove every committed turn with "You have not modified any files". A repository with no
-/// commit yet has no HEAD; that contributes nothing and status alone decides.
+/// re-drove every committed turn with "You have not modified any files". Nor can it see a turn
+/// that edits files an earlier turn left modified or untracked: the status lines are the same
+/// before and after. In a multi-turn bridge session (whose edits never reach the direct-path edit
+/// counter) every turn after the first few was re-driven that way. A repository with no commit
+/// yet has no HEAD; that contributes nothing.
 ///
 /// `None` outside a git repository, which callers treat as "changed" so a code-change nudge can
 /// never fire where progress cannot be measured.
 pub(crate) fn working_tree_marker(root: Option<&Path>) -> Option<Vec<u8>> {
-    let mut marker = git_output(root, &["status", "--porcelain"])?;
-    if let Some(head) = git_output(root, &["rev-parse", "--verify", "-q", "HEAD"]) {
-        marker.extend_from_slice(b"\0HEAD ");
-        marker.extend_from_slice(&head);
-    }
-    Some(marker)
+    let root = match root {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
+    worktree_fingerprint(&root).map(|hash| hash.to_le_bytes().to_vec())
 }
 
 /// Whether the repository moved on from `baseline` (a [`working_tree_marker`]): files modified,
@@ -251,6 +254,43 @@ mod tests {
             working_tree_changed_since(Some(dir.path()), Some(&baseline)),
             "the tree is clean again, but HEAD moved: the edit was committed"
         );
+    }
+
+    #[test]
+    fn editing_files_an_earlier_turn_left_dirty_counts_as_progress() {
+        let dir = repo();
+        std::fs::write(dir.path().join("f.txt"), "earlier turn").unwrap();
+        std::fs::write(dir.path().join("new.py"), "x = 1\n").unwrap();
+        let baseline = working_tree_marker(Some(dir.path())).unwrap();
+        assert!(!working_tree_changed_since(
+            Some(dir.path()),
+            Some(&baseline)
+        ));
+
+        std::fs::write(dir.path().join("f.txt"), "this turn").unwrap();
+        assert!(
+            working_tree_changed_since(Some(dir.path()), Some(&baseline)),
+            "same ` M f.txt` status line, different content"
+        );
+
+        let baseline = working_tree_marker(Some(dir.path())).unwrap();
+        std::fs::write(dir.path().join("new.py"), "x = 2\n").unwrap();
+        assert!(
+            working_tree_changed_since(Some(dir.path()), Some(&baseline)),
+            "same `?? new.py` status line, different content"
+        );
+    }
+
+    #[test]
+    fn running_the_tests_alone_is_not_progress() {
+        let dir = repo();
+        let baseline = working_tree_marker(Some(dir.path())).unwrap();
+        std::fs::create_dir(dir.path().join("__pycache__")).unwrap();
+        std::fs::write(dir.path().join("__pycache__/m.pyc"), "junk").unwrap();
+        assert!(!working_tree_changed_since(
+            Some(dir.path()),
+            Some(&baseline)
+        ));
     }
 
     #[test]
