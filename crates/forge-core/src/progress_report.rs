@@ -137,10 +137,13 @@ impl StallReport {
             Some((step, what)) => format!(" (last change: step {step}, {what})"),
             None => String::new(),
         };
+        let span = match self.lane {
+            Lane::Resumed => String::new(),
+            _ => format!(" for {} steps", self.steps),
+        };
         format!(
-            "Stopped: {} for {} steps{what}. Your edits are kept.",
-            self.lane.reason(),
-            self.steps
+            "Stopped: {}{span}{what}. Your edits are kept.",
+            self.lane.reason()
         )
     }
 
@@ -225,6 +228,15 @@ mod tests {
             ..report(Lane::Futile)
         };
         assert!(!bare.stop_headline().contains("last change"));
+    }
+
+    #[test]
+    fn a_resumed_stop_does_not_count_steps() {
+        let text = report(Lane::Resumed).stop_headline();
+        assert!(
+            text.starts_with("Stopped: the same steps again after a stop (last change"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -214,3 +214,39 @@ in `mcp-serve` and stay protected by those alone.
   get nudges and lane stops but no idle stop.
 - The thresholds are priors from a small sample of real runaways. Run with
   `progress_guard = "warn"` for a while before trusting the stops on your own work.
+
+## 9. Measured
+
+Six tasks from suite2 chosen for long turns and guard history (`b01-stockctl-longhorizon`,
+`a02-sliding-window-limiter`, `a04-debug-nightly-export-crash`, `a05-mailer-options-object`,
+`b07-ledger-rollup-awk`, `d04-long-build-await`), the native loop on
+`inferhub::cb/deepseek-v4.1-flash`, headless, one attempt per run:
+
+| Binary | Runs | Solved per run | Model calls per run | Tool calls per run | Agent wall per run | Tokens per run |
+|---|---|---|---|---|---|---|
+| before (`forge-after1-734e482d`) | 3 | 4, 5, 4 | 117, 134, 125 | 249, 286, 269 | 913, 1074, 1576 s | 2.65M, 3.43M, 3.41M |
+| progress ledger (`edd56f4c`, then `ad3bc5b3`) | 3 | 4, 4, 4 | 132, 103, 118 | 265, 218, 254 | 1287, 1218, 1151 s | 3.12M, 1.96M, 2.68M |
+
+Run-to-run spread from the model is larger than the difference between the binaries (`a05` and
+`b07` swing by a factor of two in tokens either way), so this shows no regression, not an
+improvement. No turn came near a step cap, so the headline result is about events:
+
+- **Ledger events in the 18 task runs of the new binaries: none.** No nudge, no stop. The runs did
+  include harness gates (the existing-tests push-back in `a05` and `b01`, and the "latest test
+  check failed" continue gate twice in one `b01`, a 41-call turn); those steps are neutral.
+- **The old guards in 18 task runs: one false alarm.** In `a04` the failure tracker refused the
+  model's third identical `read_file` of the same CSV outright, from inside a `run_code` script
+  (`tools.read_file(...) failed: doom-loop`), although the file had been edited in between.
+  `ToolFailureTracker` is gone and a repeat now has to return an identical result three times.
+
+Against the real binary with a zero-quota stub model that never stops calling tools:
+
+| Scenario | Before | Now |
+|---|---|---|
+| the same `read_file` forever | the third call refused outright, nudge, halt after the fourth; exit 0 | nudge at step 3, stop at 5, `ERROR: Stopped: the same calls returning the same results for 5 steps ... Resume: forge run --continue`, exit 1 |
+| endless new reads (headless, defaults) | `reached soft step cap 100 at step 100 ...`, then `hard step ceiling 400`, 40,000 billable input tokens | idle nudge at 60, stop at 200, 20,000 tokens |
+| 12 distinct reads, then an answer | finishes | finishes, nothing printed |
+
+`forge mcp-serve` driven over stdio the way a bridged model would: the third identical call returns
+the nudge in front of its result, the fifth returns the refusal, every later call is refused, the
+sink gets `{"k":"stall"}`, and the same call in the next turn is refused at once.
