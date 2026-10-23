@@ -563,5 +563,27 @@ async fn the_wrapper_is_not_a_failure_for_a_returned_test_failure_but_is_for_a_t
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_bridge_request_carries_no_run_code_guidance() {
+    let dir = std::env::temp_dir().join(format!("forge-codemode-guidance-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = session_in(&dir, PermissionMode::Bypass, Approver::default());
+    let specs = [codemode::run_code_spec()];
+    let has_guidance = |model: &str| {
+        session
+            .transcript_with_preamble_and_tools(model, &specs)
+            .iter()
+            .any(|m| m.role == Role::System && m.content.contains("run_code (one step"))
+    };
+    assert!(
+        has_guidance("direct::codemode"),
+        "a direct model is taught run_code"
+    );
+    for bridge in ["codex-cli::gpt-6-luna", "claude-cli::sonnet"] {
+        assert!(!has_guidance(bridge), "{bridge} cannot call run_code");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[path = "codemode_deferred.rs"]
 mod deferred;

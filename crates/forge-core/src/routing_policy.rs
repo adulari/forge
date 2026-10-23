@@ -286,8 +286,11 @@ impl Session {
             preamble[0].content.clone_from(override_prompt);
         }
         // Codemode guidance rides with the tool itself: present exactly when `run_code` is
-        // advertised (never on a bridge), static text so the cached prefix stays stable.
-        if crate::codemode::guidance_advertised(specs) {
+        // advertised, static text so the cached prefix stays stable. A bridge is handed the
+        // direct catalog here only to size the request, never the tool: the guidance told a
+        // bridged codex to `return` from a script (a syntax error there) and a bridged claude to
+        // call a tool neither can see.
+        if crate::codemode::guidance_advertised(specs) && !forge_provider::is_cli_bridge(model) {
             preamble.insert(1, Message::system(crate::codemode::GUIDANCE));
         }
         // The pinned session context follows the stable prefix, so the provider can cache that
