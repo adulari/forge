@@ -9,6 +9,7 @@ All notable changes to Forge are documented here. The format follows
 ## [2.22.0] - 2026-10-24
 
 ### Security
+- **Dependency advisory RUSTSEC-2026-0385 is cleared and a yanked crate replaced.** `ctutils` 0.4.5 (non-constant-time mask generation and `u128` comparisons in 0.4.2, reached through `aes-gcm` and `crypto-bigint`) and `clipboard-win` 5.4.3 (5.4.1 was yanked); the desktop app's lockfile also takes `rustls-webpki` 0.103.16 and `webpki-roots` / `webpki-root-certs` 1.0.11.
 - **Dependency advisories RUSTSEC-2026-0381, -0382 and -0383 are cleared.** `rustls-webpki` 0.103.16 and `webpki-roots` / `webpki-root-certs` 1.0.10 stop trusting the distrusted emSign intermediates that `cargo deny` and `cargo audit` now report for 0.103.15 / 1.0.8 / 1.0.9, which was failing the security checks of every pull request.
 
 ### Added
