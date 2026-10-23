@@ -59,7 +59,10 @@ fn save(dir: &Path, record: &Record) -> std::io::Result<()> {
 fn load(dir: &Path, owner: &str, workspace: &str) -> Option<ResumeState> {
     let raw = std::fs::read(record_path(dir, owner)).ok()?;
     let r: Record = serde_json::from_slice(&raw).ok()?;
-    (r.owner == owner && r.workspace == workspace).then(|| ResumeState {
+    if r.owner != owner || r.workspace != workspace {
+        return None;
+    }
+    Some(ResumeState {
         session_id: Some(r.session_id),
         sent: r.sent,
         mark: r.mark,
