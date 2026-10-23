@@ -42,9 +42,10 @@ pub mod wire_params;
 mod xai_oauth;
 
 pub use cli_provider::{
-    claude_bridge_env, codex_cli_detected_plan, codex_rollout_is_account_wide, BridgeModelSource,
-    BridgeModels, ClaudeInitialization, ClaudeModelCapability, CliKind, CliProvider,
-    BRIDGE_CLASSIFIER_MODEL_ENV, BRIDGE_PROVIDER_KEYS_ENV, SUBAGENT_SINK_ENV,
+    claude_bridge_env, codex_cli_detected_plan, codex_harness_preamble,
+    codex_rollout_is_account_wide, BridgeModelSource, BridgeModels, ClaudeInitialization,
+    ClaudeModelCapability, CliKind, CliProvider, BRIDGE_CLASSIFIER_MODEL_ENV,
+    BRIDGE_PROVIDER_KEYS_ENV, SUBAGENT_SINK_ENV,
 };
 
 mod bridge_login;

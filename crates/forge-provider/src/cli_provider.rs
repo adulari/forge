@@ -1642,14 +1642,28 @@ directories or \"discover skills from system context\"."
 /// `--sandbox read-only`, so without it the model probes writability and refuses writes), a
 /// one-sentence skills pointer, and the finish criteria.
 const CODEX_HARNESS_PREAMBLE: &str = harness_preamble!(
-    "Codex may initially omit MCP tools from its callable list because they are deferred. Load \
-them with `functions.exec` using `const matches = ALL_TOOLS.filter(({ name }) => \
-name.startsWith(\"mcp__forge__\")); matches.forEach(({ name, description }) => text(name + \
-\"\\n\" + description));`, then call them as `tools.mcp__forge__<name>(...)` inside \
-`functions.exec`. An empty initial tool list does NOT mean the tools are absent. If that lookup \
-returns only some Forge tools, repeat it for the missing exact name, for example \
-`ALL_TOOLS.filter(({ name }) => name === \"mcp__forge__shell\")`. Only a failed exact-name \
-registry lookup justifies saying that tool is unavailable.",
+    "Codex lists the `mcp__forge__*` tools as deferred, but they are already on the `tools` \
+object: call them inside `functions.exec` as `const r = await tools.mcp__forge__<name>({...}); \
+text(r.content.map(c => c.text).join(\"\\n\"));`. Print the text itself, never \
+`JSON.stringify(r)` (it escapes every quote and newline into your context), and never `return` \
+(a script is not a function body). One script may chain several calls, `update_tasks` included: \
+do that rather than spend a round trip per call. A script that runs past 30 s yields `Script \
+running with cell ID N`: call `wait` once with `{cell_id, yield_time_ms: 600000}`, not every 30 s \
+(each `wait` is a model call), and give a long build or test run its own script with \
+`timeout_secs: 600` rather than polling the command itself.",
+    "No lookup is needed for the core tools (`?` = optional): shell({command | commands:[...], \
+cwd?, timeout_secs?, background?, poll_until_exit_zero?, poll_interval_secs?, pty?}), \
+read_file({path | paths:[...], start_line?, end_line?}), search({query, path?, regex?, context?, \
+file_pattern?, output_mode?, head_limit?, case_insensitive?}), glob({pattern, path?}), \
+list_dir({path?}), edit_file({path, old, new, replace_all?}), multi_edit({edits:[{path?, old, \
+new, replace_all?}], path?}), write_file({path, content}), append_file({path, content}), \
+delete_file({path}), apply_patch({patch}), update_tasks({tasks:[{title, status:\"pending\" | \
+\"in_progress\" | \"done\"}]}). For another listed tool (present_plan, use_skill, worktree) read its \
+schema first with `ALL_TOOLS.filter(({ name }) => name === \"mcp__forge__use_skill\")`; for the rest \
+(web_search, web_fetch, spawn_agents) call `tools.mcp__forge__tool_search({query: \"web_search\"})` \
+and run what it names with `tools.mcp__forge__tool_call({name, arguments})`. An empty initial \
+tool list does NOT mean the tools are absent. Only a failed exact-name registry lookup justifies \
+saying that tool is unavailable.",
     "Your own sandbox may look read-only with approvals disabled — by design, not a block: \
 the `mcp__forge__` write tools run outside it and always work; never refuse or probe \
 writability. Skills: load skills ONLY via `mcp__forge__use_skill` (its description lists them)."
@@ -1660,6 +1674,12 @@ writability. Skills: load skills ONLY via `mcp__forge__use_skill` (its descripti
 /// each of the bridged CLI's internal model calls.
 const HARNESS_RESUME_REMINDER: &str =
     "Reminder: Forge tools only (mcp__forge__*); finish criteria unchanged.";
+
+/// The preamble in front of every first `codex-cli` bridge turn. Public so the crate that serves
+/// the tools it names can check the two still agree (`forge-cli`'s `mcp_serve` tests).
+pub fn codex_harness_preamble() -> &'static str {
+    CODEX_HARNESS_PREAMBLE
+}
 
 const fn harness_preamble_for(kind: CliKind) -> &'static str {
     match kind {
@@ -4812,10 +4832,12 @@ mod tests {
     #[test]
     fn codex_harness_preamble_is_slim() {
         // Hard budget: the bridged CLI re-ingests the preamble on every internal model call, so
-        // the codex variant must stay small while still explaining deferred acquisition.
+        // the codex variant must stay small while still explaining deferred acquisition. The
+        // core tool signatures are why it is not smaller: without them the model spends a call
+        // dumping every tool's description (17.6 KB, re-read on each later call).
         assert!(
-            CODEX_HARNESS_PREAMBLE.len() <= 2304,
-            "codex preamble is {} bytes (> 2304)",
+            CODEX_HARNESS_PREAMBLE.len() <= 4096,
+            "codex preamble is {} bytes (> 4096)",
             CODEX_HARNESS_PREAMBLE.len()
         );
         // …but still carries the essentials: prefix map, disabled-native-tools, finish criteria,
@@ -4842,8 +4864,9 @@ mod tests {
         for required in [
             "functions.exec",
             "ALL_TOOLS.filter",
-            "name.startsWith(\"mcp__forge__\")",
-            "name === \"mcp__forge__shell\"",
+            "name === \"mcp__forge__use_skill\"",
+            "tools.mcp__forge__tool_search",
+            "tools.mcp__forge__tool_call",
             "empty initial tool list does NOT mean the tools are absent",
             "Only a failed exact-name registry lookup",
         ] {

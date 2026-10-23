@@ -95,3 +95,56 @@ claude rejected the model's own tool input, a raw tab (three `multi_edit` calls 
 text) or raw newline (two `shell` `commands` calls) inside a JSON string of a nested array. The
 `edits` and `commands` parameter descriptions now begin with the escape reminder, which survives the
 lean surface's first-sentence cut; whether that lowers the rate is not measured.
+
+## Bridge: the Codex preamble spells the core tools
+
+Codex lists MCP tools as deferred: its code mode (`functions.exec`) reaches them as
+`tools.mcp__forge__<name>` but names them only in `ALL_TOOLS`. The preamble used to tell the model
+to dump every Forge description before it started (`ALL_TOOLS.filter(name.startsWith("mcp__forge__"))`):
+17.7 KB for the 17 tools of the lean surface. In a 52-task baseline on `codex-cli::gpt-6-luna` that
+was one model call in 50 sessions (64 of 739 calls ran the dump) and then about 4.7k tokens in every
+later request, an estimated 15% of the arm's input tokens.
+
+The lookup is not needed to call a tool. Against Codex's own Responses stub (no quota),
+`tools.mcp__forge__list_dir({path: "."})` runs in the first script and answers
+`{"content": [{"type": "text", "text": "..."}], "isError": false}`. The preamble now spells the
+arguments of the 12 core tools in about 1 KB and says three more things the dump never did: print
+`r.content.map(c => c.text).join("\n")` and never `JSON.stringify(r)` (which escaped every quote and
+newline of every result into the context), never `return` from a script, and wait for a yielded cell
+with one `wait` of a large `yield_time_ms` instead of a model call every 30 s. Tools off that list
+(`present_plan`, `use_skill`, `worktree`) are read by exact name from `ALL_TOOLS`; the deferred
+ones (`web_search`, `web_fetch`, `spawn_agents`) go through `tool_search` and `tool_call`.
+`the_codex_preamble_signatures_match_the_served_tools` in `forge-cli` fails when a signature names an
+argument the served schema does not have.
+
+Thirteen tasks on the build with this change against the same thirteen in each baseline seed
+(`results/runs/eff-fx-after1`, `codex-a2`), input counted from Codex's own rollout files:
+
+| | baseline seed 1 | baseline seed 2 | this change |
+|---|---|---|---|
+| input tokens | 4.91M | 5.59M | 2.99M |
+| model calls (per task) | 187 (14.4) | 204 (15.7) | 138 (10.6) |
+| tool output into the context | 0.59 MB | 0.63 MB | 0.31 MB |
+| full tool-list dumps, other `ALL_TOOLS` lookups | 13, 3 | 13, 3 | 2, 5 |
+| failed `exec` scripts | 9 | 5 | 1 |
+| `d04-long-build-await`: calls, wall | 27, 440 s | 27, 645 s | 9, 212 s |
+
+The build includes the neighbouring bridge fixes (no `run_code` guidance, the review carrying its
+evidence, the resumed-turn accounting), so the columns are the combined effect; the dump itself
+accounts for the share above. The model still dumped the whole list in 2 of 13 tasks, the
+preamble notwithstanding.
+
+Wall time needs a concurrent control (the machine's load moved between the runs), so the stack and
+the baseline binary ran six of those tasks at the same time, one run each (`results/runs/eff-fx-ab-*`):
+
+| six tasks, concurrent | baseline binary | with the stack |
+|---|---|---|
+| input tokens (rollout files) | 2.76M | 1.79M |
+| input tokens as Forge stored them | 6.15M | 1.79M |
+| model calls | 95 | 74 |
+| agent wall: sum, median | 532 s, 79.7 s | 413 s, 66.4 s |
+| solved | 5 of 6 | 6 of 6 |
+
+One run per task per arm is a small sample on tasks whose outcome itself varies between seeds: the
+13-task run solved 8 against the baseline seeds' 11 and 10, with failures on tasks (`a08`, `a09`,
+`b02`, `d01`) that also fail or flip at baseline.
