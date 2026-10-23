@@ -1628,6 +1628,78 @@ mod tests {
         );
     }
 
+    /// The codex preamble spells out the core tools' arguments so the model need not dump the tool
+    /// list first. Every name it spells must be an argument the served schema really has, and
+    /// every tool it spells must be on the lean surface.
+    #[test]
+    fn the_codex_preamble_signatures_match_the_served_tools() {
+        fn properties(schema: &Value, out: &mut std::collections::HashSet<String>) {
+            match schema {
+                Value::Object(map) => {
+                    if let Some(Value::Object(props)) = map.get("properties") {
+                        out.extend(props.keys().cloned());
+                    }
+                    map.values().for_each(|v| properties(v, out));
+                }
+                Value::Array(items) => items.iter().for_each(|v| properties(v, out)),
+                _ => {}
+            }
+        }
+        let preamble = forge_provider::codex_harness_preamble();
+        let tools = test_server(true).tool_list();
+        for name in [
+            "shell",
+            "read_file",
+            "search",
+            "glob",
+            "list_dir",
+            "edit_file",
+            "multi_edit",
+            "write_file",
+            "append_file",
+            "delete_file",
+            "apply_patch",
+            "update_tasks",
+        ] {
+            assert!(deferred::is_core(name), "{name} is not on the lean surface");
+            let tool = tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("{name} is not served"));
+            let mut served = std::collections::HashSet::new();
+            properties(&Value::Object((*tool.input_schema).clone()), &mut served);
+            let open = format!("{name}({{");
+            let start = preamble
+                .find(&open)
+                .unwrap_or_else(|| panic!("the preamble does not spell {name}"));
+            let mut depth = 0usize;
+            let mut end = start + open.len() - 1;
+            for (i, c) in preamble[start + open.len() - 1..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + open.len() - 1 + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let signature = &preamble[start + open.len()..end];
+            let words = signature
+                .split(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+                .filter(|w| !w.is_empty() && !matches!(*w, "pending" | "in_progress" | "done"));
+            for word in words {
+                assert!(
+                    served.contains(word),
+                    "the preamble gives {name} an argument `{word}` its schema does not have"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_lean_shell_tool_does_not_send_the_model_to_an_unlisted_shell_job() {
         let shell_description = |lean: bool| {
