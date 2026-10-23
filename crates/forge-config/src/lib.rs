@@ -25,6 +25,7 @@ pub mod setting_sources;
 mod system_prompt_overrides;
 use system_prompt_overrides::resolve_system_prompt_overrides;
 pub mod goal;
+mod hard_stop;
 mod harness_profile;
 mod hooks;
 mod key_adoption;
@@ -52,6 +53,7 @@ pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
+pub use hard_stop::HardStop;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
 pub use keybinds::{write_keybind, write_keybind_preset, KeyCombo, KeybindPreset, KeybindsConfig};
@@ -2545,8 +2547,11 @@ pub enum ClassifierKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BudgetBehavior {
     /// Refuse model calls once a cap is exceeded (overridable per-turn via
-    /// `FORGE_BUDGET_OVERRIDE=1`). Default true.
-    pub hard_stop: bool,
+    /// `FORGE_BUDGET_OVERRIDE=1`). `true` stops everywhere, `false` only warns on the USD caps, and
+    /// `"auto"` (the default) stops an unattended turn and only warns an attended one: the person
+    /// at an attended turn sees the spend and can interrupt. Session, daily, weekly and monthly
+    /// caps are enforced either way.
+    pub hard_stop: HardStop,
     /// A cap downshifts/stops even an explicitly pinned model. Default true. (Model pinning
     /// is not yet a feature; this is forward-compatible config.)
     pub cap_overrides_pin: bool,
@@ -2589,7 +2594,7 @@ fn default_session_cap_usd() -> f64 {
 impl Default for BudgetBehavior {
     fn default() -> Self {
         Self {
-            hard_stop: true,
+            hard_stop: HardStop::Auto,
             cap_overrides_pin: true,
             turn_warn_usd: default_turn_warn_usd(),
             turn_cap_usd: default_turn_cap_usd(),

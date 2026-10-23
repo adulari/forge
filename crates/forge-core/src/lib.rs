@@ -66,6 +66,7 @@ mod goal_evidence;
 mod shell_batch;
 mod silence_guard;
 mod workspace_policy;
+pub use bridge_progress::{BridgeProgress, BridgeVerdict};
 pub use btw_policy::{busy_asker, BtwAsker};
 pub use goal_evaluator::{GoalEvalRequest, GoalVerdict};
 pub use workspace_policy::{accept_edits_write_gate, writes_beyond_workspace};
@@ -116,6 +117,7 @@ mod hooks_turn;
 mod hooks_worktree;
 pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
+pub mod bridge_progress;
 pub mod context_report;
 mod file_restore;
 mod instructions;
@@ -1735,6 +1737,9 @@ pub struct Session {
     turn_billable_input_tokens: u64,
     /// Tool calls and model calls a bridged CLI reported while the current response streamed.
     bridge_trace: Arc<std::sync::Mutex<bridge_trace::BridgeTrace>>,
+    /// The headline of a stop `forge mcp-serve` put on the bridged turn that just streamed. The
+    /// model loop ends the turn as stalled when it sees it.
+    bridge_stall: Option<String>,
     /// Latched when a hard guard (unattended step ceiling or per-turn input-token ceiling) ended
     /// this turn. Every later re-drive pass must return immediately: the guards exist to stop
     /// spending, and a nudge/verification re-drive would restart the model loop with fresh
@@ -2756,7 +2761,7 @@ impl Session {
         // (the cap is never silently exceeded). Overridable per process via
         // FORGE_BUDGET_OVERRIDE=1.
         if status == BudgetStatus::Exhausted
-            && self.config.mesh.budget.hard_stop
+            && self.config.mesh.budget.hard_stop.enforces_between_turns()
             && !budget_override_active()
         {
             let msg = over_budget_message(&budget);
@@ -3103,6 +3108,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         *self.bridge_trace.lock().unwrap() = Default::default();
         self.turn_hard_guard_abort = false;
         self.turn_forced_stop = None;
+        self.bridge_stall = None;
         self.empty_reply_nudged = false;
         self.trim_watch.begin_turn();
         self.spend.begin_turn();
@@ -8208,7 +8214,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_ceiling_errors_on_every_surface() {
+    async fn token_ceiling_errors_on_every_surface_when_hard_stop_is_true() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter {
             attended: true,
@@ -8217,6 +8223,7 @@ mod tests {
         let events = capture.events.clone();
         let mut config = Config::default();
         config.mesh.max_turn_input_tokens = 10;
+        config.mesh.budget.hard_stop = forge_config::HardStop::Always;
         let (provider, _calls) = EndlessToolProvider::new(6);
         let mut session = Session::start(
             Arc::clone(&store),
@@ -15816,6 +15823,102 @@ mod tests {
                 quotas: Vec::new(),
             })
         }
+    }
+
+    /// A bridge whose `mcp-serve` stopped the turn: it reports the stall through the sink while
+    /// tools are still running, and the model's last words are the summary it was told to give.
+    struct StalledBridge {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for StalledBridge {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            on_event(StreamEvent::ToolStarted {
+                name: "shell".into(),
+                args: "cargo test".into(),
+            });
+            on_event(StreamEvent::ToolFinished {
+                name: "shell".into(),
+                ok: true,
+                summary: "same output".into(),
+            });
+            on_event(StreamEvent::Stall {
+                headline: "Stopped: the same calls returning the same results for 5 steps. \
+                           Your edits are kept."
+                    .into(),
+            });
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                reasoning_items: Vec::new(),
+                content: "I ran the same test five times; it fails on the date parser.".into(),
+                tool_calls: Vec::new(),
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bridge_stall_ends_an_attended_turn_as_stalled_without_re_driving_the_plan() {
+        let provider = Arc::new(StalledBridge {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (store, mut session) = bridge_session(provider.clone());
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        // An open task is what would normally have the bridge re-driven.
+        seed_tasks(&store, &session.id, &[("make the tests pass", false)]);
+
+        let answer = session.run_turn("fix it").await.unwrap();
+
+        assert_eq!(answer.stop_reason, StopReason::Stalled);
+        assert_eq!(
+            answer.text,
+            "I ran the same test five times; it fails on the date parser."
+        );
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            PresenterEvent::Warning(w) if w.contains("Stopped: the same calls") && w.contains("`continue`")
+        )));
+        assert!(session
+            .transcript
+            .iter()
+            .any(|m| m.role == Role::System
+                && m.content.contains("Forge stopped your previous turn")));
+    }
+
+    #[tokio::test]
+    async fn a_bridge_stall_fails_an_unattended_turn_with_the_way_to_resume() {
+        let provider = Arc::new(StalledBridge {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (store, mut session) = bridge_session(provider.clone());
+        seed_tasks(&store, &session.id, &[("make the tests pass", false)]);
+
+        let answer = session.run_turn("fix it").await.unwrap();
+
+        assert_eq!(answer.stop_reason, StopReason::Stalled);
+        assert!(
+            answer.text.starts_with("ERROR: Stopped:"),
+            "{}",
+            answer.text
+        );
+        assert!(answer.text.contains("Resume: forge run --continue"));
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

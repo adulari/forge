@@ -318,6 +318,12 @@ impl Session {
                 break;
             }
 
+            if let Some(stop) = self.take_bridge_stall(&resp.content, unattended)? {
+                final_text = stop.final_text;
+                (hard_guard_abort, halted_by_loop_guard, hit_step_cap) = (stop.hard, true, false);
+                break;
+            }
+
             if !resp.wants_tools() {
                 self.adaptive_effort.restore();
                 if !resp.content.trim().is_empty() {
@@ -428,7 +434,7 @@ impl Session {
                     let over_budget = bridge_turn_over_budget(
                         bridge_input_accum,
                         self.config.mesh.bridge_turn_token_cap,
-                    );
+                    ) && self.cap_stops_turn_tokens("bridge turn token ceiling");
                     let build_fighting = bridge_build_fight
                         .load(std::sync::atomic::Ordering::Relaxed)
                         >= BRIDGE_BUILD_FIGHT_THRESHOLD;

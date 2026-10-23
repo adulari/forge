@@ -83,6 +83,7 @@ use bridge_budget::*;
 
 mod auto_classify;
 mod permission_relay;
+mod progress;
 use hook_payload::bridge_hook_payload;
 use permission_relay::gate;
 #[cfg(test)]
@@ -123,6 +124,9 @@ struct ForgeMcp {
     lean: bool,
     /// `auto` temper: the classifier for Unknown shell commands (see `auto_classify.rs`).
     auto_classify: auto_classify::AutoClassify,
+    /// The bridged turn's progress ledger (`progress.rs`): nudges a call that earns one, refuses
+    /// every call once the turn is stopped.
+    progress: std::sync::Mutex<forge_core::BridgeProgress>,
 }
 
 fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'static str> {
@@ -237,6 +241,9 @@ impl ForgeMcp {
         request: CallToolRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(refusal) = self.progress_refusal() {
+            return Ok(refusal);
+        }
         let name = request.name.to_string();
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
 
@@ -305,11 +312,17 @@ impl ForgeMcp {
                 .filter(|t| t.status == forge_types::TodoStatus::Done)
                 .count();
             report_to_sink(serde_json::json!({ "k": "tasks", "tasks": tasks }));
-            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            let summary = format!(
                 "task list updated: {} task(s) — {done} done\n{}",
                 tasks.len(),
                 forge_core::render_task_list(&tasks)
-            ))]));
+            );
+            let (text, ok) = self.judge_call(&name, &args, (summary, true), false, Some(done));
+            return Ok(if ok {
+                CallToolResult::success(vec![ContentBlock::text(text)])
+            } else {
+                CallToolResult::error(vec![ContentBlock::text(text)])
+            });
         }
 
         // On-demand memory write — bridge model can persist a durable fact mid-turn (parity with
@@ -594,6 +607,8 @@ impl ForgeMcp {
         } else {
             format!("{note_prefix}{out}")
         };
+        let mutating = tool.side_effect() == forge_types::SideEffect::Write;
+        let (result_text, ok) = self.judge_call(&name, &args, (result_text, ok), mutating, None);
         Ok(if ok {
             CallToolResult::success(vec![ContentBlock::text(result_text)])
         } else {
@@ -910,6 +925,8 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         registry.register(Box::new(shell_tool));
     }
     let _ = registry.bind_extra_roots(crate::cli::commands::run::resolve_extra_tool_roots(&config));
+    let progress =
+        std::sync::Mutex::new(forge_core::BridgeProgress::new(config.mesh.progress_guard));
     let server = ForgeMcp {
         registry,
         trust_project: config.commands.trust_project,
@@ -922,6 +939,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         skills,
         lean,
         auto_classify: Default::default(),
+        progress,
     };
     clock.mark("mcp-serve: registry");
     if http {
@@ -1063,7 +1081,40 @@ mod tests {
             )),
             lean: false,
             auto_classify: Default::default(),
+            progress: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_bridged_turn_that_repeats_one_call_is_nudged_then_stopped_and_refused() {
+        let server = test_server(false);
+        let args = serde_json::json!({"path": "a.rs"});
+        let result = |server: &ForgeMcp| {
+            server.judge_call(
+                "read_file",
+                &args,
+                ("fn a() {}\nfn b() {}\nfn c() {}".to_string(), true),
+                false,
+                None,
+            )
+        };
+        let results: Vec<(String, bool)> = (0..6).map(|_| result(&server)).collect();
+        assert_eq!(
+            results[1].0, "fn a() {}\nfn b() {}\nfn c() {}",
+            "{results:?}"
+        );
+        assert!(
+            results[2].0.starts_with("Progress check from Forge")
+                && results[2].0.ends_with("fn c() {}"),
+            "the third identical call carries the nudge in front of its result: {:?}",
+            results[2]
+        );
+        assert!(results[2].1);
+        let (stop, ok) = &results[4];
+        assert!(!ok);
+        assert!(stop.contains("Make no more tool calls"), "{stop}");
+        let refusal = server.progress_refusal().expect("later calls are refused");
+        assert_eq!(refusal.is_error, Some(true));
     }
 
     #[test]
@@ -1229,6 +1280,7 @@ mod tests {
             )),
             lean,
             auto_classify: Default::default(),
+            progress: Default::default(),
         }
     }
 

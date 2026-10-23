@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::spend_guard::{level, Level};
-use forge_config::PriceOverride;
+use forge_config::{HardStop, PriceOverride};
 
 const MODEL: &str = "ollama::spend-test";
 
@@ -15,6 +15,9 @@ fn priced_config() -> Config {
     config.mesh.max_steps = 12;
     config.mesh.max_steps_unattended = 12;
     config.mesh.max_turn_input_tokens = 0;
+    // The caps below are the subject of most tests here, and `true` is the mode in which they stop
+    // an attended turn too; `auto` (the default) is covered by its own tests at the end.
+    config.mesh.budget.hard_stop = HardStop::Always;
     config.mesh.pricing.insert(
         MODEL.into(),
         PriceOverride {
@@ -31,8 +34,17 @@ fn session_with(
     provider: impl Provider + 'static,
     config: Config,
 ) -> (Session, Arc<Mutex<Vec<PresenterEvent>>>) {
+    session_with_attendance(store, provider, config, true)
+}
+
+fn session_with_attendance(
+    store: &Arc<Store>,
+    provider: impl Provider + 'static,
+    config: Config,
+    attended: bool,
+) -> (Session, Arc<Mutex<Vec<PresenterEvent>>>) {
     let capture = CapturePresenter {
-        attended: true,
+        attended,
         ..CapturePresenter::default()
     };
     let events = capture.events.clone();
@@ -173,7 +185,7 @@ async fn without_hard_stop_the_caps_only_warn() {
     let mut config = priced_config();
     config.mesh.max_steps = 6;
     config.mesh.max_steps_unattended = 6;
-    config.mesh.budget.hard_stop = false;
+    config.mesh.budget.hard_stop = HardStop::Never;
     config.mesh.budget.turn_warn_usd = 1.0;
     config.mesh.budget.turn_cap_usd = 2.0;
     config.mesh.budget.session_cap_usd = 0.0;
@@ -328,4 +340,116 @@ async fn a_run_budget_binds_only_the_turn_it_was_armed_for() {
 
     assert_ne!(outcome.stop_reason, StopReason::BudgetExhausted);
     assert!(loop_steps(&events.lock().unwrap()) >= 4);
+}
+
+fn auto_config() -> Config {
+    let mut config = priced_config();
+    config.mesh.budget.hard_stop = HardStop::Auto;
+    config.mesh.budget.turn_warn_usd = 1.0;
+    config.mesh.budget.turn_cap_usd = 2.0;
+    config.mesh.budget.session_warn_usd = 0.0;
+    config.mesh.budget.session_cap_usd = 0.0;
+    config
+}
+
+#[tokio::test]
+async fn auto_hard_stop_only_warns_an_attended_turn_at_its_dollar_cap() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = auto_config();
+    config.mesh.max_steps = 6;
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, events) = session_with(&store, provider, config);
+
+    session.run_turn("keep reading").await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(
+        loop_steps(&events),
+        6,
+        "an attended turn runs past a $2.00 cap, to its explicit step limit"
+    );
+    assert_eq!(warnings(&events, "this turn has spent"), 1);
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        PresenterEvent::Error(w) if w.contains("turn spend cap")
+    )));
+}
+
+#[tokio::test]
+async fn auto_hard_stop_ends_an_unattended_turn_at_its_dollar_cap() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, events) = session_with_attendance(&store, provider, auto_config(), false);
+
+    session.run_turn("keep reading").await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(loop_steps(&events), 2, "stopped at the second $1.00 call");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        PresenterEvent::Error(w) if w.contains("turn spend cap")
+    )));
+}
+
+#[tokio::test]
+async fn auto_hard_stop_warns_an_attended_turn_once_at_the_token_ceiling() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = auto_config();
+    config.mesh.budget.turn_warn_usd = 0.0;
+    config.mesh.budget.turn_cap_usd = 0.0;
+    config.mesh.max_turn_input_tokens = 10;
+    config.mesh.max_steps = 5;
+    let (provider, _calls) = EndlessToolProvider::new(6);
+    let (mut session, events) = session_with(&store, provider, config);
+
+    session.run_turn("keep reading").await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(loop_steps(&events), 5);
+    assert_eq!(warnings(&events, "turn input-token ceiling was passed"), 1);
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        PresenterEvent::Error(w) if w.contains("input-token ceiling")
+    )));
+}
+
+#[tokio::test]
+async fn auto_hard_stop_still_ends_an_unattended_turn_at_the_token_ceiling() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = auto_config();
+    config.mesh.max_turn_input_tokens = 10;
+    let (provider, _calls) = EndlessToolProvider::new(6);
+    let (mut session, events) = session_with_attendance(&store, provider, config, false);
+
+    session.run_turn("keep reading").await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(loop_steps(&events), 2);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        PresenterEvent::Done {
+            stop_reason: StopReason::BudgetExhausted,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn auto_hard_stop_does_not_relax_the_session_cap() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = auto_config();
+    config.mesh.budget.turn_warn_usd = 0.0;
+    config.mesh.budget.turn_cap_usd = 0.0;
+    config.mesh.budget.session_warn_usd = 1.0;
+    config.mesh.budget.session_cap_usd = 2.5;
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, events) = session_with(&store, provider, config);
+
+    session.run_turn("keep reading").await.unwrap();
+
+    assert_eq!(
+        loop_steps(&events.lock().unwrap()),
+        3,
+        "the session cap acts on an attended turn as before"
+    );
 }

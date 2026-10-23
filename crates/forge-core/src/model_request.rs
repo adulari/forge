@@ -267,12 +267,17 @@ pub(super) async fn request_provider_response(
             } else {
                 std::time::Duration::from_secs(session.config.mesh.first_event_timeout_secs)
             };
-            crate::stream_with_first_event_timeout(
+            let guarded = crate::stream_with_first_event_timeout(
                 fut,
                 &activity,
                 Some(&active_tools),
                 stream_idle,
                 first_event,
+            );
+            crate::bridge_trace::until_killed(
+                guarded,
+                &session.bridge_trace,
+                forge_provider::is_cli_bridge(active_model),
             )
             .await
         };

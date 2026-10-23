@@ -4,9 +4,9 @@
 > judgement), `progress_report.rs` (what the model and the person are told),
 > `progress_supervisor.rs` (the session side), `loop_progress.rs` (what one call looked like),
 > `stall_guard.rs` (the narration lane), `turn_guards.rs` (explicit limits and spend ceilings),
-> `crates/forge-config/src/progress_guard.rs`. Tests: `progress_ledger/tests.rs`,
-> `tests/progress_supervision.rs`. Bridges (`claude-cli`, `codex-cli`) are covered by their own
-> re-drive budget and token ceiling; see [Not covered yet](#not-covered-yet).
+> `crates/forge-config/src/progress_guard.rs`, `hard_stop.rs`. Bridges: `bridge_progress.rs` and
+> `crates/forge-cli/src/mcp_serve/progress.rs`. Tests: `progress_ledger/tests.rs`,
+> `tests/progress_supervision.rs`, `tests/fixtures/bench_replays.json`.
 
 ## 1. Problem
 
@@ -151,7 +151,8 @@ The turn ends with `StopReason::Stalled` (wire `stalled`, outcome `failed`). The
 | `mesh.max_steps_unattended = N` | the same for unattended turns; wins over `max_steps` there |
 | `--max-turns N` | sets both for one run (JSON subtype `error_max_turns`) |
 | `--max-budget-usd`, `/goal` and `/loop` budgets | unchanged; they end the turn with `budget_exhausted` |
-| `mesh.max_turn_input_tokens`, the USD turn and session caps | unchanged; they now end the turn as `budget_exhausted`, where a token-ceiling or dollar-cap abort used to be reported as a finished answer |
+| `mesh.max_turn_input_tokens`, `mesh.bridge_turn_token_cap`, the USD turn cap | stop an unattended turn as `budget_exhausted` (a token-ceiling or dollar-cap abort used to be reported as a finished answer); an attended turn gets one warning, see `mesh.budget.hard_stop` below |
+| `mesh.budget.hard_stop = true \| false \| "auto"` | `auto` (the default) stops unattended turns at those ceilings and only warns attended ones; `true` stops every turn, `false` relaxes the USD caps only. The session, day, week and month caps are enforced either way |
 | `mesh.progress_guard = "enforce" \| "warn" \| "off"` | `warn` turns every stop into "would have stopped here" and lets the turn continue (how to calibrate on real work); `off` keeps the nudges and never stops |
 | `mesh.idle_nudge_steps`, `mesh.idle_stop_steps` | the idle lane's bars; `0` disables each |
 
@@ -184,13 +185,31 @@ Three corrections found on the way:
 - The bridge re-drive budget (8) counted every re-drive; it now counts re-drives that close no
   task.
 
-## 7. Not covered yet
+## 7. CLI bridges
 
-- **CLI bridges.** A bridge runs its own tool loop in a subprocess, so the ledger sees one step per
-  subprocess run, not per tool call. They keep the re-drive budget, the 300 s idle watchdog and the
-  per-turn bridge token ceiling.
-- **Attended spend.** The per-turn token and dollar ceilings still stop attended turns as well; only
-  step counts stopped being a default.
+A bridged model (`claude-cli`, `codex-cli`) runs its own tool loop in a subprocess, so the parent
+session sees one response per run and none of the calls. Every call does land in `forge mcp-serve`
+with its full result, so the same ledger runs there, call by call (`BridgeProgress`), with the
+narration and idle lanes off and the futile bars doubled (nudge at 10, stop at 20) because one call
+is one step. Cycle (3 and 5) and failure (3 and 6) are unchanged.
+
+- A nudge is put in front of the result of the call that earned it, so the model reads it in-band.
+- A stop replaces that result, and every later call's, with `Forge stopped this turn: ... Make no
+  more tool calls; reply now with a short summary of what you found and what is still open.`
+- `mcp-serve` also reports the stop through the sink (`{"k":"stall"}`), so the parent ends the turn
+  as `stalled` with the model's summary as the answer instead of re-driving a plan that is not
+  moving, and stores the same "Forge stopped your previous turn" note.
+- A model that keeps starting tools more than 30 s after the stop has its process group killed;
+  the turn still ends as stalled, and that call's usage is lost.
+- A stop is vetoed when the working tree changed since the nudge, and `progress_guard = "warn"` or
+  `"off"` never refuses a call, as on the direct path.
+
+The bridge keeps its re-drive budget (it now counts re-drives that close no task), the 300 s idle
+watchdog and the per-turn bridge token ceiling. The text-mode and `agy` bridges have no tool hook
+in `mcp-serve` and stay protected by those alone.
+
+## 8. Not covered yet
+
 - **MCP `forge_chat` and daemon workers in Default or AcceptEdits mode** count as attended, so they
   get nudges and lane stops but no idle stop.
 - The thresholds are priors from a small sample of real runaways. Run with

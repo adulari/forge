@@ -144,14 +144,6 @@ impl StallReport {
         )
     }
 
-    /// What the person is told when the turn stops: why, that the edits are kept, how to go on.
-    pub(crate) fn stop_text(&self) -> String {
-        format!(
-            "{}\nSend `continue`, or tell it what to try.",
-            self.stop_headline()
-        )
-    }
-
     /// The same, for `progress_guard = "warn"`: where the turn would have stopped.
     pub(crate) fn would_stop_text(&self) -> String {
         format!(
@@ -224,16 +216,15 @@ mod tests {
     }
 
     #[test]
-    fn the_stop_says_why_that_edits_are_kept_and_how_to_continue() {
-        let text = report(Lane::Futile).stop_text();
+    fn the_stop_says_why_and_that_edits_are_kept() {
+        let text = report(Lane::Futile).stop_headline();
         assert!(text.starts_with("Stopped: no progress for 4 steps (last change: step 31"));
-        assert!(text.contains("Your edits are kept."));
-        assert!(text.contains("Send `continue`"));
+        assert!(text.ends_with("Your edits are kept."));
         let bare = StallReport {
             last_progress: None,
             ..report(Lane::Futile)
         };
-        assert!(!bare.stop_text().contains("last change"));
+        assert!(!bare.stop_headline().contains("last change"));
     }
 
     #[test]

@@ -109,27 +109,53 @@ impl Session {
         }
         self.ledger.stopped();
         let _ = self.push_note(forge_types::MessageKind::LoopGuard, report.persisted_note());
-        Some(self.abort_for_stall(report, unattended))
+        Some(self.abort_for_stall(&report.stop_headline(), unattended))
+    }
+
+    /// `forge mcp-serve`'s ledger stopped the bridged turn that just streamed, if it did: the model
+    /// has answered, as it was told to, so that answer is the turn's result. The parent does not
+    /// re-drive a plan whose calls were going nowhere; `continue` starts it afresh.
+    pub(crate) fn take_bridge_stall(
+        &mut self,
+        reply: &str,
+        unattended: bool,
+    ) -> Result<Option<StallStop>, CoreError> {
+        let Some(headline) = self.bridge_stall.take() else {
+            return Ok(None);
+        };
+        let headline = headline.as_str();
+        let _ = self.push_note(
+            forge_types::MessageKind::LoopGuard,
+            format!(
+                "Forge stopped your previous turn. {headline} Do not resume the same calls: \
+                 change approach, or say what is blocking you."
+            ),
+        );
+        let mut stop = self.abort_for_stall(headline, unattended);
+        if !unattended {
+            stop.final_text = reply.to_string();
+            self.publish_terminal_answer(reply)?;
+        }
+        Ok(Some(stop))
     }
 
     /// End the turn for a stall. An attended turn gets a warning and a status the model writes;
     /// an unattended one has nobody to read a warning, so it fails with the uncommitted work
     /// preserved and the way to resume, like every other unattended abort.
-    fn abort_for_stall(&mut self, report: &StallReport, unattended: bool) -> StallStop {
+    fn abort_for_stall(&mut self, headline: &str, unattended: bool) -> StallStop {
         self.turn_forced_stop = Some(StopReason::Stalled);
         if !unattended {
             self.presenter
-                .emit(forge_types::PresenterEvent::Warning(report.stop_text()));
+                .emit(forge_types::PresenterEvent::Warning(format!(
+                    "{headline}\nSend `continue`, or tell it what to try."
+                )));
             return StallStop {
                 final_text: String::new(),
                 hard: false,
             };
         }
         let work = self.preserve_uncommitted_work();
-        let text = format!(
-            "ERROR: {}\n{work}\nResume: forge run --continue",
-            report.stop_headline()
-        );
+        let text = format!("ERROR: {headline}\n{work}\nResume: forge run --continue");
         self.presenter
             .emit(forge_types::PresenterEvent::Error(text.clone()));
         self.turn_hard_guard_abort = true;

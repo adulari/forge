@@ -36,6 +36,8 @@ pub(crate) struct SpendState {
     turn_usd: f64,
     turn_warned: bool,
     session_warned: bool,
+    /// A token ceiling was passed on an attended turn and only warned (`hard_stop = "auto"`).
+    ceiling_warned: bool,
 }
 
 impl SpendState {
@@ -44,9 +46,15 @@ impl SpendState {
         self.turn_usd
     }
 
+    /// Marks the passed-token-ceiling warning as given this turn; whether it already had been.
+    pub(crate) fn ceiling_warning_already_given(&mut self) -> bool {
+        std::mem::replace(&mut self.ceiling_warned, true)
+    }
+
     pub(crate) fn begin_turn(&mut self) {
         self.turn_usd = 0.0;
         self.turn_warned = false;
+        self.ceiling_warned = false;
     }
 }
 
@@ -70,10 +78,7 @@ impl Session {
     /// per-turn input-token ceiling. `Some` is the final text of the turn that must end now.
     pub(crate) fn hard_guard_after_call(&mut self, call_usd: f64) -> Option<String> {
         self.spend_guard_after_call(call_usd)
-            .or_else(|| {
-                self.turn_input_ceiling_hit()
-                    .then(|| self.abort_for_token_ceiling())
-            })
+            .or_else(|| self.token_ceiling_stop())
             .or_else(|| {
                 let hit = self.run_budget_tripped()?;
                 Some(self.abort_for_run_budget(hit))
@@ -85,17 +90,18 @@ impl Session {
     pub(crate) fn spend_guard_after_call(&mut self, call_usd: f64) -> Option<String> {
         self.spend.turn_usd += call_usd.max(0.0);
         let b = self.config.mesh.budget;
+        let unattended = self.turn_is_unattended();
         let turn = level(
             b.turn_warn_usd,
             b.turn_cap_usd,
-            b.hard_stop,
+            b.hard_stop.stops_turn_usd(unattended),
             self.spend.turn_usd,
         );
         let session_usd = self.store.session_cost(&self.id).unwrap_or(0.0);
         let session = level(
             b.session_warn_usd,
             b.session_cap_usd,
-            b.hard_stop,
+            b.hard_stop.enforces_between_turns(),
             session_usd,
         );
         let overridden = budget_override_active();
@@ -137,7 +143,12 @@ impl Session {
     pub(crate) fn session_spend_refusal(&self) -> Option<String> {
         let b = self.config.mesh.budget;
         let spent = self.store.session_cost(&self.id).unwrap_or(0.0);
-        if level(b.session_warn_usd, b.session_cap_usd, b.hard_stop, spent) != Level::Stop
+        if level(
+            b.session_warn_usd,
+            b.session_cap_usd,
+            b.hard_stop.enforces_between_turns(),
+            spent,
+        ) != Level::Stop
             || budget_override_active()
         {
             return None;

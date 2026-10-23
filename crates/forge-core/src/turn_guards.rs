@@ -53,6 +53,42 @@ impl Session {
         cap != 0 && self.turn_billable_input_tokens >= cap
     }
 
+    /// The per-turn token ceiling's verdict: `Some(final text)` when the turn must end. With
+    /// `hard_stop = "auto"` an attended turn only gets a warning, once: its person sees the spend
+    /// and can interrupt, where an unattended turn has nobody to.
+    pub(crate) fn token_ceiling_stop(&mut self) -> Option<String> {
+        if !self.turn_input_ceiling_hit() {
+            return None;
+        }
+        if self.cap_stops_turn_tokens("turn input-token ceiling") {
+            return Some(self.abort_for_token_ceiling());
+        }
+        None
+    }
+
+    /// Whether a per-turn token cap ends the turn. When it does not, say so once per turn.
+    pub(crate) fn cap_stops_turn_tokens(&mut self, what: &str) -> bool {
+        let unattended = self.turn_is_unattended();
+        if self
+            .config
+            .mesh
+            .budget
+            .hard_stop
+            .stops_turn_tokens(unattended)
+        {
+            return true;
+        }
+        if !self.spend.ceiling_warning_already_given() {
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "the {what} was passed (billable input {}, total {} incl. cache reads); this turn \
+                 goes on because you are attached — set `mesh.budget.hard_stop = true` to stop \
+                 turns at their ceilings",
+                self.turn_billable_input_tokens, self.turn_input_tokens
+            )));
+        }
+        false
+    }
+
     /// Preserve whatever the turn had reached before a hard guard ends it, and describe both the
     /// files and where they were saved.
     ///

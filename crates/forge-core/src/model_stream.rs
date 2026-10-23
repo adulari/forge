@@ -107,6 +107,8 @@ pub(super) fn handle_stream_event(
             })
         }
         StreamEvent::ModelCalls(calls) => bridge_trace.lock().unwrap().add_model_calls(calls),
+        // `mcp-serve`'s ledger stopped the turn; remembered until the response is recorded.
+        StreamEvent::Stall { headline } => bridge_trace.lock().unwrap().stalled(headline),
         StreamEvent::SubagentStarted { id, agent, task } => {
             presenter.emit(PresenterEvent::SubagentStart {
                 id,

@@ -146,6 +146,8 @@ pub(crate) struct ProgressLedger {
     idle_nudge: u32,
     idle_stop: u32,
     unattended: bool,
+    futile_nudge: u32,
+    futile_stop: u32,
 }
 
 impl Default for ProgressLedger {
@@ -178,11 +180,25 @@ impl Default for ProgressLedger {
             idle_nudge: DEFAULT_IDLE_NUDGE_STEPS,
             idle_stop: DEFAULT_IDLE_STOP_STEPS,
             unattended: false,
+            futile_nudge: FUTILE_NUDGE_AT,
+            futile_stop: FUTILE_STOP_AT,
         }
     }
 }
 
 impl ProgressLedger {
+    /// The ledger for one bridged turn, judged call by call from `forge mcp-serve`: each call is
+    /// one step, so the futile bars double, and with no prose to compare and no idle clock the
+    /// narration and idle lanes stay off.
+    pub(crate) fn for_bridge() -> Self {
+        let mut ledger = Self::default();
+        ledger.futile_nudge = FUTILE_NUDGE_AT * 2;
+        ledger.futile_stop = FUTILE_STOP_AT * 2;
+        ledger.idle_nudge = 0;
+        ledger.idle_stop = 0;
+        ledger
+    }
+
     /// The idle thresholds (`0` disables) and whether nobody is present to see the turn. Cheap,
     /// called before every judgement so a config change or a mode switch takes effect at once.
     pub(crate) fn configure(&mut self, idle_nudge: usize, idle_stop: usize, unattended: bool) {
@@ -518,7 +534,7 @@ impl ProgressLedger {
             Some(Lane::Failure)
         } else if self.narration_repeats() >= NARRATION_NUDGE_AT {
             Some(Lane::Narration)
-        } else if self.futile_run >= FUTILE_NUDGE_AT {
+        } else if self.futile_run >= self.futile_nudge {
             Some(Lane::Futile)
         } else if self.idle_nudge > 0 && self.idle_steps >= self.idle_nudge {
             Some(Lane::Idle)
@@ -539,7 +555,7 @@ impl ProgressLedger {
         } else if matches!(self.episode, Episode::Nudged { lane: Lane::Narration, relapses, .. } if relapses >= RELAPSE_STEPS)
         {
             Some(Lane::Narration)
-        } else if self.futile_run >= FUTILE_STOP_AT {
+        } else if self.futile_run >= self.futile_stop {
             Some(Lane::Futile)
         } else if self.unattended && self.idle_stop > 0 && self.idle_steps >= self.idle_stop {
             Some(Lane::Idle)
