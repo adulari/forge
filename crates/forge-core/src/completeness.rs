@@ -177,22 +177,28 @@ pub(crate) fn completeness_repository_search_ran(messages: &[Message]) -> bool {
     messages
         .iter()
         .flat_map(|message| &message.tool_calls)
-        .any(|call| {
-            if call.name == "search" {
-                return true;
-            }
-            if call.name != "shell" {
-                return false;
-            }
-            forge_types::shell_command_text(&call.args)
-                .map(|command| {
-                    let command = command.to_ascii_lowercase();
-                    command.contains("git grep")
-                        || command.contains("rg ")
-                        || command.contains("grep ")
-                })
-                .unwrap_or(false)
+        .any(|call| match call.name.as_str() {
+            "search" => true,
+            "shell" => forge_types::shell_command_text(&call.args)
+                .is_some_and(|command| is_search_command(&command)),
+            // A script runs the same tools: `tools.search(...)`, or a grep through `tools.shell`.
+            // The audit's search was counted as skipped when the model batched it this way, and
+            // the retry then repeated it.
+            "run_code" => call
+                .args
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|code| {
+                    code.contains("tools.search(")
+                        || (code.contains("tools.shell(") && is_search_command(code))
+                }),
+            _ => false,
         })
+}
+
+fn is_search_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    command.contains("git grep") || command.contains("rg ") || command.contains("grep ")
 }
 
 /// Production files returned by the primary solve's required plain-literal identifier search.
@@ -661,6 +667,54 @@ impl crate::Session {
             .store
             .add_message(&self.id, nseq, Role::System, &nudge, None);
         self.transcript.push(Message::system(nudge));
+    }
+}
+
+#[cfg(test)]
+mod audit_search_tests {
+    use super::completeness_repository_search_ran;
+    use forge_types::{Message, ToolCall};
+
+    fn called(name: &str, args: serde_json::Value) -> Vec<Message> {
+        vec![Message::assistant_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                args,
+            }],
+        )]
+    }
+
+    #[test]
+    fn a_search_made_from_a_script_counts() {
+        let code = "const a = await tools.search({query: 'provider_of', path: '.'}); return a;";
+        assert!(completeness_repository_search_ran(&called(
+            "run_code",
+            serde_json::json!({ "code": code })
+        )));
+        let grep = "return await tools.shell({command: \"git grep -n -F -e 'provider_of'\"});";
+        assert!(completeness_repository_search_ran(&called(
+            "run_code",
+            serde_json::json!({ "code": grep })
+        )));
+    }
+
+    #[test]
+    fn a_script_or_command_that_does_not_search_does_not_count() {
+        let code = "return await tools.shell({command: 'git diff --name-only'});";
+        assert!(!completeness_repository_search_ran(&called(
+            "run_code",
+            serde_json::json!({ "code": code })
+        )));
+        assert!(!completeness_repository_search_ran(&called(
+            "shell",
+            serde_json::json!({ "command": "cargo test" })
+        )));
+        assert!(completeness_repository_search_ran(&called(
+            "shell",
+            serde_json::json!({ "command": "rg -n provider_of crates" })
+        )));
     }
 }
 
