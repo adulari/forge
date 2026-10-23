@@ -1105,6 +1105,21 @@ fn errors_show_a_next_step_when_a_fix_is_known() {
 }
 
 #[test]
+fn an_error_that_already_says_what_to_run_gets_no_next_line() {
+    let mut app = App::default();
+    app.apply(PresenterEvent::Error(
+        "turn failed: model 'x' isn't available (not available on this account). Run /model to pick another."
+            .into(),
+    ));
+    let rows = rows_of(&mut app).join(" ");
+    assert!(
+        !rows.contains("Next:"),
+        "the line is its own next step: {rows}"
+    );
+    assert!(rows.contains("/model to pick another."), "{rows}");
+}
+
+#[test]
 fn the_bridge_notice_prints_once_per_session() {
     let mut app = App::default();
     let msg = "CLI-bridge runs your locally-installed claude/codex; Forge never sees your login.";

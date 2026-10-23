@@ -52,4 +52,7 @@ pub(crate) struct TranscriptUi {
     pub(crate) deferred_notices: Vec<(NoticeKind, String)>,
     /// The CLI-bridge notice has been shown this session (it prints once).
     pub(crate) bridge_notice_seen: bool,
+    /// This turn's error already says to pick another model (`/model`), so the composer border
+    /// does the same instead of suggesting the message be sent again.
+    pub(crate) model_unavailable: bool,
 }

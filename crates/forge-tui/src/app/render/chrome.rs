@@ -194,6 +194,22 @@ fn stop_line(
     }
 }
 
+/// The stop line of a turn that ended because its pinned model is not available: sending the
+/// message again would fail the same way, so the recovery is `/model`.
+const MODEL_UNAVAILABLE_STOP: (bool, &str, &str, &str, &str) = (
+    true,
+    "Model unavailable",
+    "Run /model to pick another",
+    "Model unavailable",
+    "/model",
+);
+
+fn model_unavailable(app: &App) -> bool {
+    app.done
+        && app.transcript_ui.model_unavailable
+        && app.last_stop_reason == Some(forge_types::StopReason::NoOutput)
+}
+
 /// The composer's live line: loading, an armed key, waiting for you, the working verb line, or a
 /// stop reason. `None` when idle with nothing to say.
 pub(crate) fn live_state(app: &App, room: usize) -> Option<LiveState> {
@@ -257,9 +273,12 @@ pub(crate) fn live_state(app: &App, room: usize) -> Option<LiveState> {
         });
     }
     if app.done {
-        if let Some((is_error, reason, recovery, short, minimal)) =
+        let stop = if model_unavailable(app) {
+            Some(MODEL_UNAVAILABLE_STOP)
+        } else {
             app.last_stop_reason.and_then(stop_line)
-        {
+        };
+        if let Some((is_error, reason, recovery, short, minimal)) = stop {
             let (glyph, style) = if is_error {
                 (glyphs.fail, styles::err())
             } else {
@@ -356,6 +375,13 @@ fn default_hints(app: &App) -> Vec<Hint> {
             hint("Enter", "queue"),
             hint("Ctrl+↑", "stronger model"),
             hint("Ctrl+O", "details"),
+            hint("?", "keys"),
+        ];
+    }
+    if model_unavailable(app) {
+        return vec![
+            hint("/model", "pick another"),
+            hint("Esc Esc", "rewind"),
             hint("?", "keys"),
         ];
     }

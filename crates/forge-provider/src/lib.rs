@@ -61,8 +61,8 @@ pub use custom_models::CustomModel;
 pub use embedder::{select_embedder, GenaiEmbedder};
 pub use error::ProviderError;
 pub use genai_provider::{
-    bundled_http_client, conversation_id, is_discoverable, list_custom_models, list_models,
-    set_conversation_id, GenAiProvider,
+    bundled_http_client, conversation_id, falls_back_to_local_ollama, is_discoverable,
+    list_custom_models, list_models, set_conversation_id, GenAiProvider,
 };
 pub use mock::MockProvider;
 pub use tool_recovery::{

@@ -81,5 +81,10 @@ pub(crate) async fn chat(
         }
     }
     session.fire_session_end("prompt_input_exit").await;
+    if std::io::stdout().is_terminal() {
+        if let Some(line) = super::exit_hint::exit_hint(&session) {
+            println!("{line}");
+        }
+    }
     Ok(())
 }

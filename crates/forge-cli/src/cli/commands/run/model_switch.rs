@@ -46,6 +46,7 @@ pub(super) async fn pin_from_command(
     app.note(&format!("⊕ model pinned: {model_id} (clear with /model)"));
     let unknown = super::dispatch_checks::model_not_in_catalog(session, &model_id).await;
     if unknown {
+        session.lock().await.mark_unverified_model(&model_id);
         app.note(&format!(
             "⚠ {model_id} is not in the model catalog — the provider may be unknown or have no key; /models lists what is usable"
         ));

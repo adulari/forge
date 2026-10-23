@@ -162,8 +162,17 @@ pub(crate) fn next_step(text: &str, in_turn: bool) -> Line<'static> {
     )
 }
 
+/// Whether an error already tells the person to pick another model: its own `Next:` line would
+/// only repeat it.
+pub(crate) fn says_pick_another_model(error: &str) -> bool {
+    error.to_lowercase().contains("run /model")
+}
+
 /// What to try next, for the errors that have one.
 pub(crate) fn fix_hint(error: &str) -> Option<&'static str> {
+    if says_pick_another_model(error) {
+        return None;
+    }
     let e = error.to_lowercase();
     let any = |needles: &[&str]| needles.iter().any(|n| e.contains(n));
     if any(&[

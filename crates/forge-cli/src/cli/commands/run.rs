@@ -23,7 +23,10 @@ use bang::{route_bang, spawn_bang, BangRoute, BANG_BUSY_NOTE, BANG_EMPTY_NOTE};
 pub(crate) mod claude_flags;
 mod commit_prompt;
 mod dispatch_checks;
+mod exit_hint;
+mod ui_events;
 pub(crate) use autonomous::*;
+pub(crate) use ui_events::INTERRUPTED_NOTE;
 
 mod gates;
 pub(crate) use gates::*;
@@ -3008,13 +3011,67 @@ pub(crate) async fn run_chat_tui(
             // Esc inside a permission note closes the note; the prompt answers it below.
             if matches!(key, KeyKind::Esc) && app.permission_note().is_none() {
                 if busy {
-                    if let Some(h) = turn_handle.take() {
-                        h.abort(); // cancel the turn task; its DoneGuard drop releases the lock
+                    // The turn may have ended since the last frame, its closing events and done
+                    // signal still queued. Show what it said first, and if it had in fact finished
+                    // there is nothing to stop: the done signal settles it below.
+                    ui_events::apply_ui_msgs(
+                        &rx,
+                        &mut app,
+                        &mut steer_tracker,
+                        &mut queued_prompts,
+                        ui_events::PromptState {
+                            pending: &mut pending,
+                            pending_question: &mut pending_question,
+                            prompt_seq: &mut prompt_seq,
+                            trust_hint: ui_events::TrustHintInputs {
+                                rules: &hint_rules,
+                                workspace: &hint_workspace,
+                            },
+                        },
+                    );
+                    if ui_events::esc_has_nothing_to_stop(
+                        app.done,
+                        turn_handle.as_ref().is_some_and(|h| h.is_finished()),
+                        loop_state.is_some() || goal_state.is_some(),
+                    ) {
+                        // Leave the rest of this batch of input for the next pass, after the done
+                        // signal has cleared `busy`: keys typed behind the Esc (`/quit`) would
+                        // otherwise still meet a turn that is already over.
+                        dirty = true;
+                        break;
+                    }
+                    if let Some(mut h) = turn_handle.take() {
+                        // Cancel the turn task; its DoneGuard drop releases the lock. A task past
+                        // its last await runs on to its result event, so wait for it to stop and
+                        // take what it said: a turn that finished anyway is not interrupted.
+                        let waits = pending.is_none() && pending_question.is_none();
+                        ui_events::stop_turn_task(&mut h, waits).await;
+                        ui_events::apply_ui_msgs(
+                            &rx,
+                            &mut app,
+                            &mut steer_tracker,
+                            &mut queued_prompts,
+                            ui_events::PromptState {
+                                pending: &mut pending,
+                                pending_question: &mut pending_question,
+                                prompt_seq: &mut prompt_seq,
+                                trust_hint: ui_events::TrustHintInputs {
+                                    rules: &hint_rules,
+                                    workspace: &hint_workspace,
+                                },
+                            },
+                        );
+                        if ui_events::esc_has_nothing_to_stop(
+                            app.done,
+                            false,
+                            loop_state.is_some() || goal_state.is_some(),
+                        ) {
+                            dirty = true;
+                            break;
+                        }
                     }
                     turn_gen += 1; // discard the aborted turn's (now stale) done-signal
-                                   // Events the aborted turn already queued would otherwise render as a ghost
-                                   // block (and get glued onto the next reply) on the next drain.
-                    while rx.try_recv().is_ok() {}
+                    while rx.try_recv().is_ok() {} // nothing more is coming; drop any leftover
                     busy = false;
                     loop_state = None; // a `/loop` in progress stops on interrupt
                     goal_state = None; // a `/goal` in progress stops on interrupt
@@ -3046,7 +3103,7 @@ pub(crate) async fn run_chat_tui(
                         ));
                         app.note("⏹ interrupted — continuing with the next queued prompt");
                     } else {
-                        app.note("⏹ interrupted — stopped responding");
+                        app.note(INTERRUPTED_NOTE);
                         pump_queue = !queued_prompts.is_empty();
                     }
                     dirty = true;
@@ -3697,38 +3754,22 @@ pub(crate) async fn run_chat_tui(
         }
 
         let apply_started = iter_started.map(|_| std::time::Instant::now());
-        let mut applied = false;
-        while let Ok(msg) = rx.try_recv() {
-            dirty = true;
-            applied = true;
-            match msg {
-                UiMsg::Event(e) => {
-                    // The running turn consumed a queued prompt: it must not run again as its own
-                    // turn once this one ends (and an interrupt must still send it, busy_queue.rs).
-                    steer_tracker.observe(&e, &mut queued_prompts, &mut app);
-                    app.apply(e)
-                }
-                UiMsg::Permission {
-                    tool,
-                    side_effect,
-                    reply,
-                } => {
-                    app.open_permission(&tool, &format!("{side_effect:?}"));
-                    let hint =
-                        trust_hint::trust_hint_for(&app, &tool, &hint_rules, &hint_workspace);
-                    app.set_permission_trust_hint(hint);
-                    pending = Some((tool, reply));
-                    // New prompt, new identity: remote answers rendered against an older prompt
-                    // now carry a stale seq and are ignored instead of approving this one.
-                    prompt_seq += 1;
-                }
-                UiMsg::Question { questions, reply } => {
-                    app.open_form(questions);
-                    pending_question = Some(reply);
-                    prompt_seq += 1;
-                }
-            }
-        }
+        let applied = ui_events::apply_ui_msgs(
+            &rx,
+            &mut app,
+            &mut steer_tracker,
+            &mut queued_prompts,
+            ui_events::PromptState {
+                pending: &mut pending,
+                pending_question: &mut pending_question,
+                prompt_seq: &mut prompt_seq,
+                trust_hint: ui_events::TrustHintInputs {
+                    rules: &hint_rules,
+                    workspace: &hint_workspace,
+                },
+            },
+        );
+        dirty |= applied;
         if let Some(started) = apply_started.filter(|_| applied) {
             forge_tui::perf::record(forge_tui::perf::Metric::Apply, started.elapsed());
         }
@@ -4307,7 +4348,7 @@ pub(crate) async fn run_chat_tui(
                                     "⏹ remote interrupted — continuing with the next queued prompt",
                                 );
                             } else {
-                                app.note("⏹ remote interrupted — stopped responding");
+                                app.note(INTERRUPTED_NOTE);
                                 pump_queue = !queued_prompts.is_empty();
                             }
                         }
@@ -5099,8 +5140,8 @@ pub(crate) async fn run_chat_tui(
         }
     }
     forge_tui::perf::flush();
-    {
-        let (hooks, sid, workspace) = {
+    let resume_hint = {
+        let (hooks, sid, workspace, hint) = {
             let s = session.lock().await;
             // Save the final view on clean exit so resuming this session restores the screen.
             if let Some(json) = app.view_snapshot_json() {
@@ -5110,6 +5151,7 @@ pub(crate) async fn run_chat_tui(
                 s.hooks().to_vec(),
                 s.session_id().to_string(),
                 s.workspace_root().to_path_buf(),
+                exit_hint::exit_hint(&s),
             )
         };
         forge_core::hooks::run_session_hooks_with(
@@ -5120,6 +5162,13 @@ pub(crate) async fn run_chat_tui(
             "prompt_input_exit",
         )
         .await;
+        hint
+    };
+    // The terminal is restored when the TUI drops; the hint goes after that so it lands in the
+    // scrollback the person is left with, not on the alternate screen that vanishes.
+    drop(tui);
+    if let Some(line) = resume_hint {
+        println!("{line}");
     }
     Ok(())
 }

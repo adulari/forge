@@ -288,7 +288,7 @@ impl DriverState {
                 let note = if self.interrupt_turn() {
                     "⏹ interrupted — continuing with the next queued prompt"
                 } else {
-                    "⏹ interrupted — stopped responding"
+                    crate::cli::commands::run::INTERRUPTED_NOTE
                 };
                 self.app.note(note);
                 self.drain_queue().await;

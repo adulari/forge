@@ -150,7 +150,9 @@ fn drive_pty_env(script: &[(&str, u64)], env: &[(&str, &str)]) -> (bool, String)
                     Instant::now() < deadline,
                     "timed out waiting for {marker:?}"
                 );
-                thread::sleep(Duration::from_millis(50));
+                // Tight: a step that must land the instant a marker renders (Esc as an answer
+                // ends) is lost to a 50 ms poll, which always arrives after the turn has settled.
+                thread::sleep(Duration::from_millis(2));
             }
         } else {
             send(keys);
@@ -342,6 +344,91 @@ fn tui_esc_sends_a_queued_prompt_the_turn_already_absorbed() {
 
 #[test]
 #[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_esc_during_a_turn_says_what_to_do_next() {
+    // The old notice, "interrupted — stopped responding", read like a hang. After a real
+    // interrupt the person is told what happened and what comes next.
+    let (clean, plain) = drive_pty_env(
+        &[("hello\r", 1000), ("\x1b", 600), ("/quit\r", 600)],
+        &[("FORGE_MOCK_STREAM_DELAY_MS", "500")],
+    );
+    assert!(clean, "clean exit: {plain}");
+    assert!(
+        plain.contains("Interrupted. Type what to do instead."),
+        "the interrupt notice says what to do next: {plain}"
+    );
+    assert!(
+        !plain.contains("stopped responding"),
+        "no hang-sounding wording: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_esc_the_instant_an_answer_finishes_never_reports_an_interruption() {
+    // The race: the turn's last events and its done signal are still queued when Esc arrives, and
+    // the loop used to treat that Esc as an interrupt. It threw the queued events away and printed
+    // an interruption under an answer whose result row was already on screen. Esc is sent the
+    // moment the answer's last line renders, which is inside that window; a handful of rounds,
+    // because landing in it depends on scheduling.
+    //
+    // The invariant: the turn's result row (`0.4s · ↑42 ↓18`) and an interruption notice never
+    // appear together. An Esc that lands before the result event is a real interrupt (no row ever
+    // follows); one that lands after it is no interrupt at all (no notice).
+    for round in 0..6 {
+        let (clean, plain) = drive_pty_env(
+            &[
+                ("mock:code a small question\r", 0),
+                (&format!("{WAIT_FOR}That's it."), 0),
+                ("\x1b", 900),
+                ("/quit\r", 600),
+            ],
+            &[("FORGE_MOCK_STREAM_DELAY_MS", "25")],
+        );
+        assert!(clean, "round {round}: clean exit: {plain}");
+        assert!(
+            plain.contains("That's it."),
+            "round {round}: the answer finished: {plain}"
+        );
+        assert!(
+            !(plain.contains("nterrupted") && plain.contains("· ↑42")),
+            "round {round}: Esc on a finished turn must not print an interruption: {plain}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_quit_prints_how_to_resume_once_something_was_said() {
+    let (clean, plain) = drive_pty(&[("say hi\r", 2500), ("/quit\r", 800)]);
+    assert!(clean, "clean exit: {plain}");
+    let hint = plain
+        .lines()
+        .find(|line| line.starts_with("Resume this session: forge chat --resume "))
+        .unwrap_or_else(|| panic!("no resume line: {plain}"));
+    let id = hint
+        .trim_start_matches("Resume this session: forge chat --resume ")
+        .split_whitespace()
+        .next()
+        .unwrap();
+    assert_eq!(id.len(), 8, "{hint}");
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{hint}");
+    assert!(
+        hint.contains("\"say hi\""),
+        "the session's name follows the command: {hint}"
+    );
+    assert_eq!(plain.matches("Resume this session").count(), 1, "{plain}");
+
+    // A session where nothing was said has nothing to resume.
+    let (clean, plain) = drive_pty(&[("/quit\r", 800)]);
+    assert!(clean, "clean exit: {plain}");
+    assert!(
+        !plain.contains("Resume this session"),
+        "an empty session is not offered back: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
 fn tui_btw_runs_and_compact_queues_while_a_turn_is_running() {
     // Paced mock so "hello" is still running when the commands are typed. `/btw` must run beside
     // the turn (no idle refusal), `/compact` must be queued rather than refused or steered, and
@@ -396,7 +483,7 @@ fn tui_unknown_command_and_rename_mid_turn_leave_the_ui_responsive() {
         .find("session renamed to “mid turn title”")
         .unwrap_or_else(|| panic!("/rename reported its result: {plain}"));
     let interrupted = plain
-        .find("interrupted —")
+        .find("Interrupted. Type what to do instead.")
         .unwrap_or_else(|| panic!("Esc reached the running turn: {plain}"));
     assert!(
         unknown < renamed && renamed < interrupted,

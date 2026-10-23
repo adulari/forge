@@ -395,36 +395,17 @@ pub(crate) async fn build_session_with_self_mcp(
     if let Some(pin) = pin.as_deref() {
         ensure_pin_providers_known(pin)?;
     }
-    let mut unverified_pins = Vec::new();
-    for id in pin.as_deref().map(pin_members).unwrap_or_default() {
-        let id = id.as_str();
-        let prefix = forge_config::provider_of(id);
-        // With a catalog, also flag a known-provider id that isn't in it (likely a typo). This
-        // stays a soft warning: a brand-new model may simply not be discovered yet.
-        if let Some(cat) = catalog.as_ref() {
-            let in_catalog = cat.models().contains(&id.to_string());
-            if pin_check::judge_pin(id, prefix, in_catalog, |k| k.routable())
-                == pin_check::PinVerdict::Unknown
-            {
-                let suggestions: Vec<&str> = cat
-                    .models()
-                    .iter()
-                    .filter(|m| m.starts_with(prefix))
-                    .map(String::as_str)
-                    .take(5)
-                    .collect();
-                let hint = if suggestions.is_empty() {
-                    format!("no '{prefix}' models in catalog — run `forge models` to see what's available")
-                } else {
-                    format!("try: {}", suggestions.join(", "))
-                };
-                presenter.emit(forge_tui::PresenterEvent::Warning(format!(
-                    "unknown model '{id}' — {hint}"
-                )));
-                unverified_pins.push(id.to_string());
-            }
-        }
-    }
+    // The offline mock answers to any id, so there is nothing to check a mock session's pin against.
+    let unverified_pins = if mock {
+        Vec::new()
+    } else {
+        pin_check::check_pins(
+            pin.as_deref(),
+            catalog.as_ref().map(|cat| cat.models()),
+            &mut *presenter,
+        )
+        .await
+    };
 
     let catalog = catalog
         .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));

@@ -114,6 +114,30 @@ async fn the_first_request_waits_for_the_window_lookup_and_names_a_window_it_nev
 }
 
 #[tokio::test]
+async fn a_window_notice_is_not_stacked_on_a_pin_startup_already_called_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, capture) = session(dir.path(), Arc::default());
+    session.set_unverified_models(vec!["nonexistent-model-xyz".to_string()]);
+    let (tx, lookup) = crate::WindowLookup::channel();
+    tx.send(Some(vec!["nonexistent-model-xyz".to_string()]))
+        .unwrap();
+    session.set_window_lookup(Some(lookup));
+    session.settle_window_lookup().await;
+    assert!(
+        warnings(&capture).is_empty(),
+        "one warning about a model the person is about to replace is enough: {:?}",
+        warnings(&capture)
+    );
+
+    // A model startup did not flag still gets its window notice.
+    let (tx, lookup) = crate::WindowLookup::channel();
+    tx.send(Some(vec!["gateway::model".to_string()])).unwrap();
+    session.set_window_lookup(Some(lookup));
+    session.settle_window_lookup().await;
+    assert_eq!(warnings(&capture).len(), 1);
+}
+
+#[tokio::test]
 async fn a_lookup_that_found_every_window_or_died_says_nothing_and_never_hangs() {
     let dir = tempfile::tempdir().unwrap();
     let (mut session, capture) = session(dir.path(), Arc::default());

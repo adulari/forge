@@ -55,7 +55,10 @@ impl Session {
             unknown.join(", "),
             forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW
         );
-        if self.presenter.is_attended() {
+        // A pin startup already called unknown does not also need its window explained: that is a
+        // second warning about a model the person is about to be sent to /model over.
+        let already_flagged = unknown.iter().all(|id| self.unverified_models.contains(id));
+        if self.presenter.is_attended() && !already_flagged {
             self.presenter.emit(PresenterEvent::Warning(notice));
         } else {
             tracing::warn!("{notice}");

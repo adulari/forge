@@ -1162,6 +1162,17 @@ What a mid-turn provider error may do is decided by exactly one chooser, `failov
 | yes | transient outage AND `mesh.pin_outage_wait_secs > 0` | `BackoffSameModel` (outage budget) |
 | yes | permanent error, or outage with the budget disabled | `FailTurn` — surface the real error |
 
+**A pin nothing serves.** A pinned id the provider has never heard of is a permanent answer, not an
+outage: `NoModelAccess` is `FailTurn` on the first call, with no retry and no backoff, and the turn
+ends with one plain line (`model 'x' isn't available (<why>). Run /model to pick another.`,
+`pinned_failure_error` in `crates/forge-core/src/failure_verdict.rs`). Provider wording is in
+`.forge/forge.log`, not on screen. Every provider's own "no such model" phrasing is read as
+`NoModelAccess` (`is_model_access_failure`, `crates/forge-provider/src/genai_provider/error_policy.rs`).
+A *bare* id (no `provider::`) that matches none of genai's name patterns is sent to the local Ollama
+server; when nothing answers there the id is the problem, so that connection failure is classed the
+same way (`explain_unrecognized_model`) instead of waiting out the 5 s first outage step. The launch
+check and the one-line warning are in [tui-errors-and-exit.md](tui-errors-and-exit.md).
+
 The pinned rate-limit backoff schedule (`pinned_backoff_delay`,
 `crates/forge-core/src/lib.rs:394`; constants at `lib.rs:377-388`): a server `Retry-After` is
 honored verbatim; otherwise exponential `PINNED_RL_BASE_SECS` = 5 s growing ×`PINNED_RL_GROWTH`
