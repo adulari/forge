@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use forge_types::{Message, Role};
+use forge_types::{Message, MessageKind, Role};
 
 use crate::working_tree::git_output;
 
@@ -340,6 +340,37 @@ const TESTS_EXPECTED_TO_CHANGE: [&str; 21] = [
     "tests to match",
 ];
 
+/// Words that make a following "pass" a noun, a round of work ("final pass", "one more pass over
+/// the diff", "a quick pass"), not tests going green. "Final pass: rerun everything and confirm each
+/// change is covered" asks for a review; read as "tests must pass" it armed the whole
+/// guard — contract text, restore and push-back round — on a turn that never promised green tests.
+/// "passes" is only a noun after a count ("two passes"): "it passes" is the verb.
+const PASS_NOUN_LEADS: [&str; 21] = [
+    "a", "an", "the", "this", "one", "another", "more", "extra", "final", "first", "second",
+    "third", "last", "next", "quick", "full", "review", "cleanup", "up", "careful", "thorough",
+];
+const PASSES_NOUN_LEADS: [&str; 7] = [
+    "two", "three", "several", "multiple", "few", "couple", "more",
+];
+
+/// A word of `words[at]` that says the tests must be green: `green`, `passing`, a verb "pass".
+fn wants_green(words: &[&str], at: usize) -> bool {
+    const GREEN_WORDS: [&str; 7] = [
+        "green", "passing", "pass", "passes", "intact", "succeed", "succeeds",
+    ];
+    let word = words[at];
+    if !GREEN_WORDS.contains(&word) {
+        return false;
+    }
+    let lead = at.checked_sub(1).map(|i| words[i]);
+    let noun_leads: &[&str] = match word {
+        "pass" => &PASS_NOUN_LEADS,
+        "passes" => &PASSES_NOUN_LEADS,
+        _ => &[],
+    };
+    !lead.is_some_and(|lead| noun_leads.contains(&lead))
+}
+
 /// "The existing tests must keep passing", "keep the tests green", "keep `go test -race ./...`
 /// green", "get `cargo test` green": one sentence that names tests and wants them green. Skipped
 /// for requests that expect tests to change (see [`TESTS_EXPECTED_TO_CHANGE`]) and for
@@ -349,9 +380,6 @@ pub(crate) fn prompt_expects_green_existing_tests(prompt: &str) -> bool {
         "test", "tests", "testing", "pytest", "unittest", "jest", "vitest", "mocha", "rspec",
         "phpunit",
     ];
-    const GREEN_WORDS: [&str; 7] = [
-        "green", "passing", "pass", "passes", "intact", "succeed", "succeeds",
-    ];
     let lowered = prompt.replace('\u{2019}', "'").to_lowercase();
     if TESTS_EXPECTED_TO_CHANGE.iter().any(|m| lowered.contains(m))
         || crate::completeness::direct_completeness_is_identifier_migration(&lowered)
@@ -359,14 +387,19 @@ pub(crate) fn prompt_expects_green_existing_tests(prompt: &str) -> bool {
         return false;
     }
     sentences(&lowered).iter().any(|s| {
-        tokens(s).any(|t| TEST_WORDS.contains(&t)) && tokens(s).any(|t| GREEN_WORDS.contains(&t))
+        let words: Vec<&str> = tokens(s).collect();
+        words.iter().any(|t| TEST_WORDS.contains(t))
+            && (0..words.len()).any(|at| wants_green(&words, at))
     })
 }
 
+/// What the person typed. A harness nudge is stored as a user message too, and its wording is the
+/// harness's: the push-back after a restore says "fix the production code rather than the tests",
+/// which read as a request to change tests and lifted the protection it had just enforced.
 fn user_messages(messages: &[Message]) -> impl Iterator<Item = &str> {
     messages
         .iter()
-        .filter(|m| m.role == Role::User)
+        .filter(|m| m.role == Role::User && m.kind == MessageKind::Normal)
         .map(|m| m.content.as_str())
 }
 
