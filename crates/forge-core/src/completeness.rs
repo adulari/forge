@@ -288,8 +288,30 @@ pub(crate) fn completeness_production_identifier_search_matches(
     matches
 }
 
+/// Phrases where "rename" moves a file rather than an identifier: the atomic-write idiom (write
+/// a temporary file, then rename it into place) and the rename call itself. A question about how
+/// a file gets written is not an identifier migration; read as one, it drew the migration sweep
+/// guidance, the completeness audit and its retry onto a read-only code question.
+const FILE_RENAME_IDIOMS: &[&str] = &[
+    "renamed into place",
+    "rename into place",
+    "renames into place",
+    "renaming into place",
+    "renamed over",
+    "rename over",
+    "atomic rename",
+    "renamed atomically",
+    "os.rename",
+    "fs.rename",
+    "fs::rename",
+    "rename(2)",
+];
+
 pub(crate) fn direct_completeness_is_identifier_migration(prompt: &str) -> bool {
-    let prompt = prompt.to_ascii_lowercase();
+    let mut prompt = prompt.to_ascii_lowercase();
+    for idiom in FILE_RENAME_IDIOMS {
+        prompt = prompt.replace(idiom, " ");
+    }
     [
         "deprecat",
         "renam",
