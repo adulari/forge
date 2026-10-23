@@ -17,9 +17,12 @@ mod chrome_surfaces;
 mod interaction;
 mod notice_during_stream;
 mod panels;
+mod queue_band;
 mod remote;
 mod state;
 mod transcript;
+mod trust_hint;
+mod welcome_narrow;
 
 /// Render the pinned live region at its natural (dynamic) live height — so the sticky task +
 /// subagent panels get their own rows, exactly as the real I/O shell sizes the viewport.

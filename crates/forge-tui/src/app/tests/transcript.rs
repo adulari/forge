@@ -989,11 +989,11 @@ fn a_turn_has_one_label_a_rail_on_every_row_and_a_footer() {
     );
     let label = rows.iter().find(|r| r.contains("✦ forge")).unwrap();
     assert!(
-        label.contains("llama3.2 · trivial") && !label.contains("ollama::"),
+        label.contains("llama3.2 · simple") && !label.contains("ollama::"),
         "the routed model sits on the label: {label}"
     );
     assert!(
-        label.trim_end().ends_with("trivial"),
+        label.trim_end().ends_with("simple"),
         "right-aligned: {label}"
     );
     for r in rows.iter().skip_while(|r| !r.contains("✦ forge")) {

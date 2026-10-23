@@ -29,6 +29,10 @@ pub(crate) struct PendingPermission {
     /// The note being typed (Tab opens it). It goes to the model with whichever choice Enter
     /// confirms.
     pub note: Option<String>,
+    /// What `forge trust` would let this call do without asking (`git`, `commands`), when the
+    /// project not being trusted is the only reason it asks. Set by the shell that can judge the
+    /// call; the block only prints it.
+    pub trust_hint: Option<String>,
 }
 
 /// State only the interaction surfaces read or write.
@@ -207,7 +211,21 @@ impl App {
             side_effect: side_effect.to_string(),
             focus: 0,
             note: None,
+            trust_hint: None,
         });
+    }
+
+    /// The raw JSON arguments of the call the open permission prompt is about.
+    pub fn pending_call_args(&self, tool: &str) -> String {
+        crate::app::render::permission::pending_args(self, tool)
+    }
+
+    /// Tell the open prompt that trusting the project would let this call run unasked: `what` is
+    /// `git` or `commands`. The prompt then says so in one line. `None` clears it.
+    pub fn set_permission_trust_hint(&mut self, what: Option<&str>) {
+        if let Some(p) = &mut self.interaction_ui.permission {
+            p.trust_hint = what.map(str::to_string);
+        }
     }
 
     /// Enter or Tab on the open `@path` picker. A file replaces the `@token` with `@path ` and

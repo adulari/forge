@@ -149,6 +149,7 @@ fn pending(app: &App) -> PendingPermission {
         side_effect: side.to_string(),
         focus: 0,
         note: None,
+        trust_hint: None,
     }
 }
 
@@ -199,7 +200,7 @@ fn tilde(path: &str) -> String {
 
 /// The pending call's raw arguments: the newest card of that tool (fullscreen), else the call
 /// recorded when it started (inline has no cards).
-fn pending_args(app: &App, tool: &str) -> String {
+pub(crate) fn pending_args(app: &App, tool: &str) -> String {
     app.tool_cards
         .iter()
         .rev()
@@ -340,6 +341,30 @@ fn subject(app: &App, p: &PendingPermission, args: &str, width: usize) -> Vec<Te
     vec![TextLine::from(parts)]
 }
 
+/// One line saying why a prompt for a read-only command exists and how to stop it: the project is
+/// not trusted. Shortened in steps as the panel narrows, down to the bare command; never wrapped,
+/// so the choices stay put.
+fn trust_row(what: &str, width: usize) -> TextLine<'static> {
+    let sep = ": ";
+    let command = "forge trust";
+    let candidates = [
+        format!("Trust this project to skip prompts for read-only {what}"),
+        "Trust this project to skip these prompts".to_string(),
+        "Skip these prompts".to_string(),
+        "Skip prompts".to_string(),
+    ];
+    match candidates
+        .iter()
+        .find(|c| c.width() + sep.width() + command.width() <= width)
+    {
+        Some(lead) => TextLine::from(vec![
+            Span::styled(format!("{lead}{sep}"), styles::muted()),
+            Span::styled(command, styles::key_chip()),
+        ]),
+        None => TextLine::from(Span::styled(fit(command, width), styles::key_chip())),
+    }
+}
+
 fn choice_row(
     focused: bool,
     number: usize,
@@ -400,6 +425,9 @@ pub(super) fn permission_block(app: &App, width: u16) -> Decision {
         w,
     ));
     rows.extend(subject(app, &p, &args, w));
+    if let Some(what) = &p.trust_hint {
+        rows.push(trust_row(what, w));
+    }
     rows.push(TextLine::default());
     let scope = if p.tool.contains("__") {
         "this session"

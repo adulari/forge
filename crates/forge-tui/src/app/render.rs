@@ -12,6 +12,7 @@ pub(crate) mod panels;
 pub(crate) mod permission;
 pub(crate) mod popups;
 mod question;
+mod queue_band;
 mod span_fit;
 pub(crate) mod status_line;
 pub(crate) mod status_panel;

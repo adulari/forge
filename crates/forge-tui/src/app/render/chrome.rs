@@ -294,12 +294,6 @@ pub(crate) fn chips(app: &App) -> Vec<Vec<Span<'static>>> {
             styles::faint(),
         )]);
     }
-    if !app.queued.is_empty() {
-        out.push(vec![Span::styled(
-            format!("{} queued", app.queued.len()),
-            styles::warn(),
-        )]);
-    }
     if let Some(loop_chip) = &app.loop_chip {
         out.push(vec![Span::styled(
             format!("{} {loop_chip}", glyphs.loop_),

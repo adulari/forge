@@ -303,7 +303,7 @@ fn tui_esc_sends_a_queued_prompt_the_turn_already_absorbed() {
     // mock then "thinks" for 3s before answering it. Esc lands inside that pause: the absorbed
     // prompt was never answered, so the interrupt must send it as the next turn. Before the fix
     // this printed "stopped responding" and the prompt was never answered.
-    let wait_steer = format!("{WAIT_FOR}steer");
+    let wait_steer = format!("{WAIT_FOR}you · follow-up");
     let (clean, plain) = drive_pty_env(
         &[
             ("hello\r", 1000),
@@ -318,15 +318,19 @@ fn tui_esc_sends_a_queued_prompt_the_turn_already_absorbed() {
     assert!(clean, "clean exit: {plain}");
     assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
     assert!(
-        plain.contains("queued (1 pending)"),
-        "queued mid-turn: {plain}"
+        plain.contains("1 queued"),
+        "the queue band showed the prompt mid-turn: {plain}"
+    );
+    assert!(
+        plain.contains("followup marker"),
+        "the band listed the queued text itself: {plain}"
     );
     // The notice reads `▲ interrupted — …` since the transcript re-glyphs legacy `⏹` notes.
     let first_esc = plain
         .find("interrupted — continuing")
         .expect("the first Esc interrupted the turn");
     assert!(
-        plain[..first_esc].contains("steer"),
+        plain[..first_esc].contains("you · follow-up"),
         "the turn absorbed the prompt before Esc (the case that used to stop): {plain}"
     );
     assert!(
@@ -360,8 +364,8 @@ fn tui_btw_runs_and_compact_queues_while_a_turn_is_running() {
         "neither command was refused: {plain}"
     );
     assert!(
-        plain.contains("queued /compact"),
-        "/compact waited in the queue: {plain}"
+        plain.contains("1 queued") && plain.contains("/compact"),
+        "/compact waited in the queue, listed in the band: {plain}"
     );
 }
 

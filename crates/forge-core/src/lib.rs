@@ -2504,16 +2504,22 @@ impl Session {
         Ok(())
     }
 
-    /// Show the CLI-bridge terms notice once per session, the first time a turn is about to run
-    /// on `claude-cli`/`codex-cli` — including when failover lands there, which is how a keyless
-    /// first run reaches a bridge. The provider layer keeps the same text at debug level for the
-    /// log; emitting it there as a `warn` printed a timestamped, module-prefixed line between the
-    /// routing line and the model's first token, unlike every other user-facing line.
+    /// Show the CLI-bridge terms notice once per installation, the first time a turn is about to
+    /// run on `claude-cli`/`codex-cli` — including when failover lands there, which is how a
+    /// keyless first run reaches a bridge. Repeating it in every session's transcript made it
+    /// noise; `/help` keeps the text for anyone who wants it again. The provider layer keeps the
+    /// same text at debug level for the log; emitting it there as a `warn` printed a timestamped,
+    /// module-prefixed line between the routing line and the model's first token, unlike every
+    /// other user-facing line.
     pub(crate) fn note_cli_bridge_once(&mut self, model: &str) {
         if self.cli_bridge_notice_shown || !forge_provider::is_cli_bridge(model) {
             return;
         }
         self.cli_bridge_notice_shown = true;
+        if forge_config::install_notice_seen(forge_config::CLI_BRIDGE_TERMS) {
+            return;
+        }
+        forge_config::mark_install_notice_seen(forge_config::CLI_BRIDGE_TERMS);
         self.presenter.emit(PresenterEvent::Warning(
             forge_provider::CLI_BRIDGE_NOTICE.to_string(),
         ));

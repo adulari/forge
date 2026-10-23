@@ -90,8 +90,9 @@ mod btw;
 mod busy_commands;
 mod busy_queue;
 mod queue_images;
+mod trust_hint;
 pub(crate) use busy_commands::*;
-pub(crate) use queue_images::queue_prompt;
+pub(crate) use queue_images::{pull_back_queued, queue_prompt};
 mod agents_cmd;
 mod catalog_dispatch;
 mod effort;
@@ -442,6 +443,7 @@ pub(crate) async fn run_chat_tui(
         .context("initializing TUI")?;
     let mut app = App::default();
     app.fullscreen = fullscreen;
+    app.queue_visible = true;
     app.fold_tool_groups = tui_config.tui.fold_tool_groups;
     app.transcript_follow = true;
     // Wire statusline config from the loaded config.
@@ -624,7 +626,14 @@ pub(crate) async fn run_chat_tui(
     for w in catalog.warnings() {
         app.note(&format!("⚠ {w}"));
     }
-    let trust_project = session.lock().await.commands_trust_project();
+    // `hint_workspace` and `hint_rules` are what a permission prompt needs to say whether `forge
+    // trust` would spare it. The session is locked by the turn while a prompt is open, so they are
+    // read once, here, under the lock this read takes anyway.
+    let (trust_project, hint_workspace) = {
+        let s = session.lock().await;
+        (s.commands_trust_project(), s.workspace_root().to_path_buf())
+    };
+    let hint_rules = tui_config.permission_rules();
     // Git attribution: install the commit hook up front when enabled (the session keeps the
     // hook's model file current itself, before every model request).
     maybe_install_git_hook(&tui_config);
@@ -3088,6 +3097,13 @@ pub(crate) async fn run_chat_tui(
                 // Enter is honored here, plus ↑/↓ history recall (so a prompt queued a moment
                 // ago can be recalled); palette, commands and temper-cycling wait until the turn
                 // is idle. A `/command` is held back (it needs the idle session).
+                if matches!(key, KeyKind::Up)
+                    && app.input.is_empty()
+                    && pull_back_queued(&mut queued_prompts, &steer, &mut app)
+                {
+                    dirty = true;
+                    continue;
+                }
                 let outcome =
                     if prompt_history.handle_key(&key, &mut app.input, &mut app.input_cursor)
                         || app.try_delete_paste_block(key)
@@ -3698,6 +3714,9 @@ pub(crate) async fn run_chat_tui(
                     reply,
                 } => {
                     app.open_permission(&tool, &format!("{side_effect:?}"));
+                    let hint =
+                        trust_hint::trust_hint_for(&app, &tool, &hint_rules, &hint_workspace);
+                    app.set_permission_trust_hint(hint);
                     pending = Some((tool, reply));
                     // New prompt, new identity: remote answers rendered against an older prompt
                     // now carry a stale seq and are ignored instead of approving this one.

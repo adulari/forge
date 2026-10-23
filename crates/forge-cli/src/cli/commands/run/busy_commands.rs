@@ -147,6 +147,9 @@ pub(crate) fn queue_command(queue: &mut Vec<String>, app: &mut App, line: &str) 
     let name = line.split_whitespace().next().unwrap_or("/").to_string();
     queue.push(line);
     app.set_queued(queue);
+    if app.queue_visible {
+        return;
+    }
     app.note(&format!(
         "⏳ queued {name} — runs when this turn finishes ({} pending)",
         queue.len()

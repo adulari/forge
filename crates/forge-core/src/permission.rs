@@ -438,6 +438,27 @@ fn specificity(rule: &PermissionRule) -> usize {
 mod ask_shell;
 #[cfg(test)]
 pub(crate) use ask_shell::stand_in_for_trust;
+
+/// What the permission prompt for a shell call may say about project trust. `Some("git")` (or
+/// `Some("commands")`) when, in the Ask temper, the call asks only because the project is not
+/// trusted: it is read-only by every other measure, no rule decided it, and `forge trust` would let
+/// it run unasked. Advisory only; it never changes what a call may do.
+pub fn shell_trust_hint(
+    mode: PermissionMode,
+    tool_name: &str,
+    args: &Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
+) -> Option<&'static str> {
+    if mode != PermissionMode::Default || !is_shell_tool(tool_name) {
+        return None;
+    }
+    // A rule that settles this call (an `ask` on one segment, say) is not lifted by trust.
+    if decide_shell_segments(tool_name, args, rules).is_some() {
+        return None;
+    }
+    ask_shell::trust_hint(args, rules, workspace)
+}
 mod auto;
 mod auto_safe;
 mod catastrophic;
@@ -1947,5 +1968,44 @@ mod tests {
             ),
             Deny
         );
+    }
+
+    // ---- the trust hint on a prompt ----
+
+    #[test]
+    fn the_trust_hint_is_for_ask_prompts_that_no_rule_settled() {
+        stand_in_for_trust(Some(std::rc::Rc::new(|_: &Path| false)));
+        let dir = std::env::temp_dir();
+        let ws = Some(dir.as_path());
+        let status = sh_call("git status");
+        let hint = |mode, tool: &str, args: &Value, rules: &[PermissionRule]| {
+            shell_trust_hint(mode, tool, args, rules, ws)
+        };
+        assert_eq!(
+            hint(PermissionMode::Default, "shell", &status, &[]),
+            Some("git")
+        );
+        for mode in [
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+            PermissionMode::Bypass,
+            PermissionMode::Plan,
+        ] {
+            assert_eq!(hint(mode, "shell", &status, &[]), None, "{mode:?}");
+        }
+        assert_eq!(
+            hint(PermissionMode::Default, "write_file", &status, &[]),
+            None
+        );
+        // An ask rule on the segment settles the prompt; trusting the project would not lift it.
+        let ask_git = cfg("shell", Ask, &["git *"]);
+        assert_eq!(
+            hint(PermissionMode::Default, "shell", &status, &[ask_git]),
+            None
+        );
+        // Trusted: nothing to say.
+        stand_in_for_trust(Some(std::rc::Rc::new(|_: &Path| true)));
+        assert_eq!(hint(PermissionMode::Default, "shell", &status, &[]), None);
+        stand_in_for_trust(None);
     }
 }

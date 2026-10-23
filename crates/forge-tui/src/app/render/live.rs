@@ -74,13 +74,21 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         full.width,
         avail.saturating_sub(MIN_STREAM + wf_band_h),
     );
-    let stream_h = avail.saturating_sub(band_h + wf_band_h);
+    // The queued follow-ups sit directly above whatever takes the user's input (composer or
+    // decision block), so a message that left the composer is still in view.
+    let queue_h = queue_band::height(
+        app,
+        full.width,
+        avail.saturating_sub(MIN_STREAM + wf_band_h + band_h),
+    );
+    let stream_h = avail.saturating_sub(band_h + wf_band_h + queue_h);
 
     let areas = Layout::vertical([
         Constraint::Length(header_h),
         Constraint::Length(stream_h),
         Constraint::Length(wf_band_h),
         Constraint::Length(band_h),
+        Constraint::Length(queue_h),
         Constraint::Length(decision_h),
         Constraint::Length(composer_h),
         Constraint::Length(compact_h),
@@ -92,12 +100,13 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         main_area,
         wf_area,
         band_area,
+        queue_area,
         decision_area,
         composer_area,
         compact_area,
         status_area,
     ) = (
-        areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6], areas[7],
+        areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6], areas[7], areas[8],
     );
 
     if header_h > 0 {
@@ -172,6 +181,9 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     }
     if band_h > 0 {
         panels::render_band(frame, band_area, app);
+    }
+    if queue_h > 0 {
+        queue_band::render(frame, queue_area, app);
     }
     if decision_h > 0 {
         permission::render_permission(frame, decision_area, app);

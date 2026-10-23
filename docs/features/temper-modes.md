@@ -89,7 +89,8 @@ programs a repository's config, attributes and hooks name, and `file` parses wha
 format it is handed. In a project you did not trust they ask every time and Forge never starts git
 there to find out more; every other command on the list stays unprompted there, since nothing a
 repository holds changes what it does. A project that ships nothing in `.forge/` is not asked at
-startup, so the first `git status` prompt is the cue to run `forge trust` once. Trust is read on
+startup, so the first `git status` prompt is the cue to run `forge trust` once (the prompt says so:
+a line above its choices names `forge trust`, see [project-trust.md](project-trust.md)). Trust is read on
 every call (`forge trust --revoke` applies to the next one), covers the directory the session
 started in and the one the command runs in, and a linked worktree has the trust of its main
 checkout.

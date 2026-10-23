@@ -7,7 +7,7 @@ use ratatui::text::{Line as TextLine, Span};
 use super::{notice, rail};
 use crate::app::{truncate, width_cap};
 
-/// The `you` label row of a user turn (or `you · steer` for a message that joined a running turn).
+/// The `you` label row of a user turn (or `you · follow-up` for a message that joined a running turn).
 pub(crate) fn user_label(extra: Option<&str>) -> TextLine<'static> {
     let label = match extra {
         Some(e) => format!("you {} {e}", crate::theme::glyphs::g().sep),
@@ -37,9 +37,21 @@ pub(crate) fn user_text(text: &str) -> TextLine<'static> {
     rail::text_row(RailKind::User, text, styles::fg())
 }
 
+/// A routing tier as the footer and the turn label name it. The tier names are the router's own
+/// vocabulary (`/mesh` and the status inspector keep them); beside a model name they read as
+/// noise, and "pinned" says nothing about who pinned what.
+pub(crate) fn plain_tier(tier: &str) -> &str {
+    match tier {
+        "trivial" => "simple",
+        "pinned" => "your pick",
+        other => other,
+    }
+}
+
 /// The assistant's label: identity on the left, the routed model and tier right-aligned.
 pub(crate) fn assistant_label(model: Option<&str>, tier: &str) -> TextLine<'static> {
     let g = crate::theme::glyphs::g();
+    let tier = plain_tier(tier);
     let label = vec![
         Span::styled(g.brand, styles::brand()),
         Span::styled(" forge", styles::fg().bold()),

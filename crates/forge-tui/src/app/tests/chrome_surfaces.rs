@@ -121,7 +121,7 @@ fn the_composer_border_carries_the_mode_chip_and_hints() {
 }
 
 #[test]
-fn queue_and_multiline_chips_join_the_mode_chip() {
+fn the_multiline_chip_joins_the_mode_chip_and_the_queue_has_its_own_band() {
     let mut app = located();
     app.temper = "Ask".into();
     app.queued = vec!["next".into(), "after".into()];
@@ -132,7 +132,15 @@ fn queue_and_multiline_chips_join_the_mode_chip() {
         .iter()
         .find(|r| r.starts_with('╭'))
         .expect("composer top border");
-    assert!(top.contains("2 lines · 2 queued · Ask"), "{top}");
+    assert!(top.contains("2 lines · Ask"), "{top}");
+    assert!(
+        !top.contains("queued"),
+        "the queue is not stated twice: {top}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("2 queued")),
+        "the band above the composer says it: {rows:#?}"
+    );
 }
 
 #[test]
@@ -231,7 +239,8 @@ fn the_status_line_is_one_row_with_the_model_cost_tokens_and_gauge() {
     assert_eq!(crate::app::render::statusline_height(&app), 1);
     let rows = screen_rows(&app, 100, 24);
     let status = rows.last().unwrap();
-    assert!(status.contains("llama3.2 · trivial"), "{status}");
+    assert!(status.contains("llama3.2 · simple"), "{status}");
+    assert!(!status.contains("trivial"), "{status}");
     assert!(status.contains("↑72 ↓30"), "{status}");
     assert!(status.contains("ctx ▱▱▱▱▱▱▱▱ 0% of 32k"), "{status}");
     assert!(status.contains("mesh auto"), "{status}");
