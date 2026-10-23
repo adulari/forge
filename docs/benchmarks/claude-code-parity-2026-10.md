@@ -809,3 +809,42 @@ _No after-fixes run set has been recorded yet. Append one to `runs.json` and run
 <!-- BEGIN:after-swe -->
 _No after-fixes run set has been recorded yet. Append one to `runs.json` and run `render.py`._
 <!-- END:after-swe -->
+
+### Rounds 3 and 4 (kit v2, 2026-10-23/24, hand-written)
+
+Kit v2, every arm in its own clean config and home, Forge and Claude Code arms of the same model started
+together so they share machine load. Claude Code 2.1.308 pinned. Forge `b6944b58` (main after round 3) for
+the suites; `ddce9d57` and the round-4 branch (#1657) where noted. These tables are written by hand from the
+kit's `aggregate.py` output; ingesting kit v2 run sets into `runs.json`/`render.py` is still to do. Forge ran
+2 attempts per task and Claude Code 1, so per-attempt rates are compared.
+
+Suites a+b+d (26 tasks), solved per attempt and agent wall time per attempt:
+
+| model | Claude Code | Forge | wall, Forge / Claude Code |
+|---|---|---|---|
+| DeepSeek V4.1 Flash (InferHub) | 69% (18/26) | 90% (47/52) | 0.67x (2,357 s vs 3,511 s) |
+| Haiku | 81% (21/26) | 92% (48/52) | 0.75x (1,655 s vs 2,202 s) |
+| Sonnet | 81% (21/26) | 90% (47/52) | 1.12x (1,081 s vs 963 s) |
+| Sonnet, round-4 build (1 attempt) | 81% (21/26) | 96% (25/26) | 0.85x (823 s vs 963 s) |
+
+Suite c (11 tasks in large real repositories):
+
+| model | Claude Code | Forge | wall, Forge / Claude Code |
+|---|---|---|---|
+| DeepSeek | 11/11 | 22/22 | 1.18x total, 0.82x median pair |
+| Haiku | 10/11 | 22/22 | 1.22x |
+| Haiku, round-4 build (1 attempt) | 10/11 | 11/11 | 0.87x (513 s vs 591 s) |
+| Sonnet | 11/11 | 22/22 | 1.02x |
+
+Input tokens per attempt are within 0.95-1.07x of Claude Code on every arm except Haiku suite c at
+`b6944b58` (1.21x, 1.07x on the round-4 build). The Sonnet gap at `b6944b58` was the bridge's completeness
+review (69-100% of tasks, 10-15% of wall, no outcome changed after a passing check); #1657 runs it only when
+nothing checked the change.
+
+SWE-bench Verified, 10 instances, host view (Forge `f8735a4c`): DeepSeek CC 16/20 vs Forge 17/20, Haiku
+21/30 vs 26/30, Sonnet 29/30 vs 28/30. Opus, 12 suite tasks, 1 attempt: CC 9/12 vs Forge 10/12 (1.38x wall).
+
+Blinded terminal UX (12 scenarios, 5 pairs, 3 judges, Forge `b6944b58`): Forge preferred in 178 of 180
+votes (2 ties, none for the other tool); rubric difference +0.99 [+0.79, +1.20] against Claude Code and
++1.35 [+1.03, +1.68] against Codex. Forge is slower to start on DeepSeek (415 vs 286 ms) and its Claude
+bridge idles at 457 MB in 3 processes against Claude Code's 280 MB in 1.
