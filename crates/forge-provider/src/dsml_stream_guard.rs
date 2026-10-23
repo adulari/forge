@@ -1,14 +1,12 @@
 //! Keeps DeepSeek DSML tool-call markup out of the LIVE text stream.
 //!
-//! `tool_recovery` strips a leaked `<｜｜DSML｜｜tool_calls>…` block from the stored reply, but by
+//! `tool_recovery` strips a leaked `<｜｜DSML｜｜ calls>…` block from the stored reply, but by
 //! then the streamed deltas have already reached the TUI / attach / app. The guard sits between
 //! the provider's chunks and `StreamEvent::Text`: text that could still turn into a DSML opener is
 //! held back, released as soon as it provably is not one, and everything after a confirmed opener
 //! is swallowed (the recovery pass turns that block into tool calls).
 
-use crate::tool_recovery::is_dsml_bar;
-
-const MARKER: &str = "DSML";
+use crate::dsml::{is_dsml_bar, MARKER};
 
 #[derive(Default)]
 pub(crate) struct DsmlStreamGuard {
@@ -113,6 +111,18 @@ mod tests {
         for chunks in every_split(&text) {
             let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
             assert_eq!(stream(&refs).trim_end(), "Looking.", "chunks: {chunks:?}");
+        }
+    }
+
+    #[test]
+    fn spaced_v41_block_never_reaches_the_live_view_at_any_split() {
+        let block = "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"read_file\">\n\
+            <｜｜DSML｜｜ parameter name=\"path\" string=\"true\">a.rs</｜｜DSML｜｜ parameter>\n\
+            </｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>";
+        let text = format!("I'll look.\n\n{block}");
+        for chunks in every_split(&text) {
+            let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            assert_eq!(stream(&refs).trim_end(), "I'll look.", "chunks: {chunks:?}");
         }
     }
 

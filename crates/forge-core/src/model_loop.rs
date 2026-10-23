@@ -255,10 +255,11 @@ impl Session {
             self.auto_compact_if_needed(&active_model).await;
             let bridge_cwd =
                 forge_provider::is_cli_bridge(&active_model).then(|| self.stored_cwd());
+            let step_specs = self.specs_for_step(specs);
             let (tools_before, mut resp) = crate::model_request::request_provider_response(
                 self,
                 &mut active_model,
-                specs,
+                &step_specs,
                 decision,
                 reuse_response_chain,
                 stream_idle,
@@ -627,14 +628,16 @@ impl Session {
                         const MAX_TOOLCALL_REPAIR_NUDGES: usize = 2;
                         if toolcall_repair_nudges < MAX_TOOLCALL_REPAIR_NUDGES {
                             toolcall_repair_nudges += 1;
+                            self.tools_advertised_once = true;
                             self.presenter.emit(PresenterEvent::Warning(format!(
                                 "model wrote a tool call as text instead of invoking it — nothing ran; asking it to retry ({toolcall_repair_nudges}/{MAX_TOOLCALL_REPAIR_NUDGES})"
                             )));
                             let nudge = "Your last message contained a tool call written as TEXT \
-                                         (e.g. `<invoke …>` or `default_api:` syntax). That tool DID \
-                                         NOT run — text is not a tool call. Make the call through the \
-                                         function-calling interface instead. Do not paste tool-call \
-                                         markup into your message.";
+                                         (`<invoke …>`, a DeepSeek DSML block or `default_api:` \
+                                         syntax), or a block that was cut off or malformed. That \
+                                         tool DID NOT run — text is not a tool call. Make the call \
+                                         through the function-calling interface instead. Do not paste \
+                                         tool-call markup into your message.";
                             let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
                             continue;
                         }
@@ -644,6 +647,7 @@ impl Session {
                             "model kept emitting tool calls as text that never executed — the turn did NOT complete its actions"
                                 .to_string(),
                         ));
+                        resp.content = forge_provider::strip_tool_call_markup(&resp.content);
                     }
                     // Direct model, non-empty text, no tool call — usually the real final answer.
                     // But a weaker model often narrates its NEXT action ("now I'll edit X") without

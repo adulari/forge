@@ -14,10 +14,12 @@
 //!   - Qwen / ollama-style:       `<tool_call>{"name":"T","arguments":{…}}</tool_call>`.
 //!   - Llama / Groq-style:        `<function=T>{"p":"v"}</function>`, optionally wrapped in
 //!     `<tool_call>…</tool_call>` (observed leaking from groq llama-3.x via the mesh).
-//!   - DeepSeek DSML:             `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="T"><｜｜DSML｜｜parameter
-//!     name="p" string="true">v</｜｜DSML｜｜parameter>…` — the Anthropic shape with a `｜DSML｜`
+//!   - DeepSeek DSML:             `<｜DSML｜ calls><｜DSML｜ invoke name="T"><｜DSML｜ parameter
+//!     name="p" string="true">v</｜DSML｜ parameter>…` — the Anthropic shape with a `｜DSML｜`
 //!     namespace in every tag, which DeepSeek's chat template emits as plain text when its
-//!     server-side tool parser does not claim the reply. Rewritten to the `<invoke>` form first.
+//!     server-side tool parser does not claim the reply. Parsed by the `dsml` module, which knows
+//!     every dialect (V3.2 `function_calls`, V4 `tool_calls`, V4.1 `calls` with a space) and
+//!     refuses partial or malformed blocks.
 //!
 //! Wrapper namespaces some SDKs prepend (`default_api:`, `default_api.`, `functions.`,
 //! `mcp__forge__`) are normalized back to the bare Forge tool name so the recovered call dispatches.
@@ -30,10 +32,16 @@ use serde_json::{Map, Value};
 /// unchanged when nothing tool-call-shaped is present — the overwhelmingly common case, so this is
 /// cheap (a couple of substring checks) on normal prose.
 pub fn recover_text_tool_calls(content: &str) -> (Vec<ToolCall>, String) {
-    if content.contains(DSML_MARKER) {
-        return recover_dsml(content);
+    if let Some(found) = crate::dsml::recover(content) {
+        return found;
     }
     recover_plain(content)
+}
+
+/// `content` with tool-call markup that never ran removed, for an answer shown to the user after
+/// the model kept writing calls as text. Only DeepSeek DSML is cut; other formats are left alone.
+pub fn strip_tool_call_markup(content: &str) -> String {
+    crate::dsml::recover(content).map_or_else(|| content.to_string(), |(_, shown)| shown)
 }
 
 fn recover_plain(content: &str) -> (Vec<ToolCall>, String) {
@@ -116,62 +124,6 @@ fn recover_plain(content: &str) -> (Vec<ToolCall>, String) {
 
     let cleaned = cleaned.trim().to_string();
     (calls, cleaned)
-}
-
-const DSML_MARKER: &str = "DSML";
-
-/// Whether `c` is one of the vertical bars DeepSeek's template puts around `DSML`: the fullwidth
-/// `｜` (U+FF5C) in the observed output, and ASCII `|` when a gateway normalizes it.
-pub(crate) fn is_dsml_bar(c: char) -> bool {
-    c == '\u{ff5c}' || c == '|'
-}
-
-/// Rewrite DeepSeek DSML tags (`<｜｜DSML｜｜invoke …>`, `</｜｜DSML｜｜parameter>`) into the plain
-/// tag spelling by dropping the `｜…DSML…｜` namespace. Observed in the wild with two bars on each
-/// side; any run of one or more is accepted so a template revision does not reopen the leak.
-fn strip_dsml_namespace(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        let after_lt = &rest[lt + 1..];
-        let (slash, body) = match after_lt.strip_prefix('/') {
-            Some(b) => ("/", b),
-            None => ("", after_lt),
-        };
-        let bars = body.trim_start_matches(is_dsml_bar);
-        let namespaced = bars.len() < body.len()
-            && bars
-                .strip_prefix(DSML_MARKER)
-                .is_some_and(|r| r.starts_with(is_dsml_bar));
-        if namespaced {
-            let tag = bars[DSML_MARKER.len()..].trim_start_matches(is_dsml_bar);
-            out.push('<');
-            out.push_str(slash);
-            rest = tag;
-        } else {
-            out.push('<');
-            rest = after_lt;
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Recover DSML tool calls from `content`. The calls come from the standard `<invoke>` parser run
-/// over the de-namespaced text; whatever DSML is left afterwards (a reply cut off mid-block, so the
-/// block never closes) is cut from the visible text, because raw template markup is never an
-/// answer the user wants to read.
-fn recover_dsml(content: &str) -> (Vec<ToolCall>, String) {
-    let normalized = strip_dsml_namespace(content);
-    let (calls, mut cleaned) = recover_plain(&normalized);
-    for tag in ["<tool_calls>", "</tool_calls>"] {
-        cleaned = cleaned.replace(tag, "");
-    }
-    if let Some(at) = cleaned.find("<invoke") {
-        cleaned.truncate(at);
-    }
-    (calls, cleaned.trim().to_string())
 }
 
 fn parse_json_tool_call(v: &Value, idx: usize) -> Option<ToolCall> {
@@ -329,7 +281,7 @@ fn attr_value(s: &str, attr: &str) -> Option<String> {
 /// A parameter's text value parsed as JSON when it looks like JSON (object/array/number/bool),
 /// else kept as a plain string. Models emit both `<parameter name="n">5</parameter>` and
 /// `<parameter name="tasks">[{…}]</parameter>`, and the tool schema expects the typed form.
-fn coerce(raw: &str) -> Value {
+pub(crate) fn coerce(raw: &str) -> Value {
     let looks_json = raw.starts_with('{')
         || raw.starts_with('[')
         || raw == "true"
@@ -347,7 +299,7 @@ fn coerce(raw: &str) -> Value {
 /// Strip SDK wrapper namespaces so the recovered name matches a registered Forge tool. Forge's
 /// own tools are advertised bare on the direct path (`update_tasks`, `shell`), but models copy
 /// the bridge/SDK spelling (`mcp__forge__update_tasks`, `default_api:update_tasks`).
-fn normalize_tool_name(raw: &str) -> String {
+pub(crate) fn normalize_tool_name(raw: &str) -> String {
     let n = raw.trim();
     for pre in ["default_api:", "default_api.", "functions.", "mcp__forge__"] {
         if let Some(s) = n.strip_prefix(pre) {
@@ -483,7 +435,7 @@ pub fn looks_like_unexecuted_tool_call(content: &str) -> bool {
     if content.contains("<invoke")
         || content.contains("<tool_call")
         || content.contains("<function=")
-        || (content.contains(DSML_MARKER) && strip_dsml_namespace(content).contains("<invoke"))
+        || crate::dsml::has_markup(content)
         || content.contains("default_api:")
         || content.contains("default_api.")
     {
@@ -993,5 +945,97 @@ mod tests {
         assert!(!looks_like_unexecuted_tool_call(
             "DSML is a template format."
         ));
+    }
+
+    /// What deepseek-v4.1-flash returned as plain content when the request declared no tools: a
+    /// space after the namespace and `calls` as the wrapper. The old parser saw no `<invoke`, so
+    /// the reply counted as a final answer and the turn ended with nothing run.
+    const DSML_V41_REPLY: &str = "I'll inspect the file.\n\n<｜｜DSML｜｜ calls>\n\
+<｜｜DSML｜｜ invoke name=\"read_file\">\n\
+<｜｜DSML｜｜ parameter name=\"path\" string=\"true\">src/app.rs</｜｜DSML｜｜ parameter>\n\
+</｜｜DSML｜｜ invoke>\n\
+</｜｜DSML｜｜ calls>\n";
+
+    #[test]
+    fn recovers_the_v41_dialect_and_keeps_only_the_prose() {
+        let (calls, cleaned) = recover_text_tool_calls(DSML_V41_REPLY);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].args["path"], "src/app.rs");
+        assert_eq!(cleaned, "I'll inspect the file.");
+    }
+
+    #[test]
+    fn v41_dsml_and_its_truncations_are_flagged_as_unexecuted() {
+        assert!(looks_like_unexecuted_tool_call(DSML_V41_REPLY));
+        let cut = &DSML_V41_REPLY[..DSML_V41_REPLY.find("src/").unwrap() + 4];
+        assert!(looks_like_unexecuted_tool_call(cut));
+        assert!(recover_text_tool_calls(cut).0.is_empty());
+    }
+
+    #[test]
+    fn strip_tool_call_markup_cuts_dsml_and_leaves_everything_else() {
+        assert_eq!(
+            strip_tool_call_markup(DSML_V41_REPLY),
+            "I'll inspect the file."
+        );
+        let cut = "Checking.\n<｜DSML｜ calls><｜DSML｜ invoke name=\"read_fi";
+        assert_eq!(strip_tool_call_markup(cut), "Checking.");
+        let plain = "Use `<invoke>` carefully; DSML is a template.";
+        assert_eq!(strip_tool_call_markup(plain), plain);
+    }
+
+    #[test]
+    fn dsml_recovery_never_panics_and_never_leaves_a_tag_behind() {
+        let mut state: u64 = 0xD5_31;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let fragments = [
+            "<",
+            "</",
+            "｜",
+            "｜｜",
+            "|",
+            "DSML",
+            " ",
+            "calls",
+            "tool_calls",
+            ">",
+            "invoke",
+            " name=\"x\"",
+            " string=\"false\"",
+            "parameter",
+            "[1,",
+            "\"",
+            "'",
+            "```",
+            "\n",
+            "é",
+            "🦀",
+            "<｜DSML｜ calls>",
+            "<｜DSML｜ invoke name=\"a\">",
+            "</｜DSML｜ invoke>",
+            "<｜DSML｜ parameter name=\"p\" string=\"true\">",
+            "</｜DSML｜ parameter>",
+        ];
+        for _ in 0..4000 {
+            let mut s = String::new();
+            for _ in 0..(next() % 14) {
+                s.push_str(fragments[(next() % fragments.len() as u64) as usize]);
+            }
+            let (calls, cleaned) = recover_text_tool_calls(&s);
+            let shown = strip_tool_call_markup(&s);
+            let _ = looks_like_unexecuted_tool_call(&s);
+            if !s.contains("```") {
+                assert!(!crate::dsml::has_markup(&shown), "{s:?} -> {shown:?}");
+                if !calls.is_empty() {
+                    assert!(!crate::dsml::has_markup(&cleaned), "{s:?} -> {cleaned:?}");
+                }
+            }
+        }
     }
 }
