@@ -154,3 +154,21 @@ The alias rule is narrower than it was:
 
 The exemption is one macro (`frozen_contract!`) shared by the first-pass guidance, the audit and
 its retry prompts, so the texts cannot drift apart.
+
+A rename that moves a file is not a migration. The atomic-write idiom ("written to a temporary
+file, then renamed into place", "renamed over", `os.rename`, `fs::rename`, `rename(2)`) is
+removed before the prompt is classified (`FILE_RENAME_IDIOMS` in
+`crates/forge-core/src/completeness.rs`). Before, a read-only question about which temporary
+file dulwich renames into place got the migration sweep guidance, the completeness audit and its
+retry: about 40 s of gate rounds per run on DeepSeek, and a first-pass instruction to sweep for
+"old identifiers" that the question did not have.
+
+The audit's evidence readers (`completeness_repository_search_ran`, the primary-sweep matches,
+the opened-but-unchanged paths) read top-level tool calls only, so a sweep done inside
+`run_code` is invisible to them and the "you skipped the REQUIRED repository search" retry
+follows nearly every audit on DeepSeek. That is left as it is on purpose. Making the readers see
+script calls (measured 2026-10-23, `inferhub::cb/deepseek-v4.1-flash`) dropped the retry, but
+the retry's extra repository-root grep is what caught a stale README line on the docs-drift task
+(solved 2/5 with the script-aware readers against 5/5 without), and the unresolved-path rule,
+once it could see scripts, told the model twice to rename the same-named unrelated functions
+the rename task says to keep. A cheaper replacement for that second look has to come first.
