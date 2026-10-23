@@ -438,7 +438,7 @@ An agent file is Markdown with front matter (the body is the system prompt). Bes
 | --- | --- |
 | `disallowedTools` | removed from the child's tool set, including the default one; naming `spawn_agents` stops it recursing |
 | `permissionMode` | the child's temper, applied only when stricter than the parent's (`plan`, `default`); a wider mode is ignored so a cloned repo cannot widen what a child does unasked |
-| `maxTurns` | the child's model-step cap, never above `[mesh] max_steps` |
+| `maxTurns` | the child's model-step cap, never above `[mesh] max_steps` when that is set (it defaults to none); a child that stops getting anywhere is stopped by its own [progress ledger](progress-supervision.md) and returns its last words with `ok = false` |
 | `skills` | each listed skill's methodology is appended to the child's system prompt (skipped when the model could not load it: `disable-model-invocation`, or a project skill in an untrusted project) |
 | `effort` | the reasoning rung sent with the child's model calls, resolved against the routed model |
 | `isolation: worktree` | the child runs in its own git worktree even when `worktree_isolation` is off |

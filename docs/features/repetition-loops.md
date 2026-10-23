@@ -6,6 +6,11 @@
 > gating in `crates/forge-provider/src/wire_params.rs`, and `CONTINUATION_MAX` in
 > `crates/forge-core/src/lib.rs`.
 
+> **Update:** the loop detectors this document describes (the doom and oscillation guard, the
+> failure-loop guard, the stagnation tracker) were folded into one per-turn progress ledger; see
+> [progress supervision](progress-supervision.md). The narration tracker, the sampling ladder, the
+> narration dedupe and the harness-note dedupe described here are unchanged and now feed it.
+
 ## 1. Problem
 
 A session on a long turn starts restating itself: a handful of near-identical sentences, step
@@ -74,7 +79,9 @@ one push-back the turn ends and says plainly what did not happen. The diminishin
 bookkeeping that existed to survive six re-drives is gone with them.
 
 **The detectors stay as the backstop.** The frequency-window narration guard (nudge at 4
-recurrences in 20 steps, halt after 2 more) and the identical-call doom-loop guard are unchanged.
+recurrences in 20 steps, halt after 2 more) is unchanged, and the identical-call check now lives in
+the progress ledger's cycle lane (nudge at the third identical call with an identical result, stop
+after two more).
 They now sit behind three layers that stop the pattern from forming, rather than being the only
 thing between a model and an unbounded loop.
 

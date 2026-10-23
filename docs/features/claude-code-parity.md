@@ -145,7 +145,7 @@ ones by `run/print_run.rs`.
 | `--continue`, `--resume`, `--model` | as before; a resumed run always stays in this process. `--continue` takes the most recent session of the current directory, as `claude -c` does; `--all-dirs` takes the most recent of any |
 | `--permission-mode default\|acceptEdits\|bypassPermissions\|plan\|auto\|dontAsk` | same as `--mode`; conflicts with it. `dontAsk` is `default` that never prompts, even at a terminal: anything not pre-approved is denied (what a run without a terminal always does) |
 | `--dangerously-skip-permissions` | same as `--mode bypass` |
-| `--max-turns N` | caps model steps for the run (`mesh.max_steps` and `max_steps_unattended`) |
+| `--max-turns N` | caps model steps for the run (`mesh.max_steps` and `max_steps_unattended`); without it there is no step cap, only the [progress supervisor](progress-supervision.md) |
 | `--allowedTools`, `--disallowedTools` | `"Bash(git log:*) Read"` becomes `[[permissions.rules]]` on `shell` / `read_file` (`:*` becomes ` *`); deny wins; space- or comma-separated, repeat the flag for more |
 
 `-p` and every session-shaping flag keep the run in this process instead of handing it to a

@@ -60,7 +60,7 @@ diagnostics = "delta"   # "delta" | "full" | "off"
 ## Safety
 
 Nothing that decides correctness reads this hint. The verification ledger, the phantom-edit
-gate, the failure-loop guards and the doom-loop guard all observe the tool result, and auto-lint
+gate and the progress ledger all observe the tool result, and auto-lint
 runs its own command. The delta only changes what advice the model reads, and errors the edit
 introduced still reach it in full.
 

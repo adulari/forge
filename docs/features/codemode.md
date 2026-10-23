@@ -78,13 +78,13 @@ Each `tools.<name>()` request is sent back to the session task and runs through
 workspace rooting, PreToolUse/PostToolUse hooks, the permission decision with its prompt, the /undo
 snapshot, `ToolStart`/`ToolResult` events, the output cap and an audit row under the same
 assistant message. After it returns, the same `observe_tool_outcome` bookkeeping that a plain call
-gets updates the phantom-edit gate (`mutations_ran`), the verification ledger, the failure-loop
-counts and the env-fight cap. A `cargo test` run inside a script counts as verification; a write
+gets updates the phantom-edit gate (`mutations_ran`), the verification ledger, the progress ledger's
+observations and the env-fight cap. A `cargo test` run inside a script counts as verification; a write
 inside a script counts as a mutation. The `run_code` wrapper itself is not evidence: it counts
 as a failure only when the script threw, failed or ran out of time (not when it returns a failing
-test's output), and a script that returns does not reset the failure-loop guard's nudge latch, so
-a script that re-runs the same failing test every step is still halted after the nudge. The
-footer's timing is ignored when judging whether a step brought new information.
+test's output), so a script that re-runs the same failing test every step is still a stale step
+for the progress ledger and ends in a nudge and a stop. The footer's timing is ignored when
+judging whether a step brought new information.
 
 Calls run one at a time, in the order the script makes them. `Promise.all` works but does not run
 calls in parallel; writes are therefore always serialized.

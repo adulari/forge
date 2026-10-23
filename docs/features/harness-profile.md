@@ -52,11 +52,11 @@ turn.
 
 ### `minimal` keeps the safety and integrity guards
 
-The permission broker, the doom-loop halt (and the "change approach" nudge that comes before it),
-the failure-loop halt, the stagnation halt, the phantom-edit gate (it now also runs when tasks are
-open and the continue nudge is off), the tool-call-as-text repair, the completion-verification
-gate, the step cap, the turn and session spend caps, the per-turn input-token ceiling and the
-empty-reply recovery all stay on. The tests in `tests/harness_profile.rs` prove each advisory
+The permission broker, the progress ledger's stops (the nudge that comes before each is dropped,
+the stop schedule is the same; see [progress supervision](progress-supervision.md)), the
+phantom-edit gate (it now also runs when tasks are open and the continue nudge is off), the
+tool-call-as-text repair, the completion-verification gate, an explicit step limit, the turn and
+session spend caps, the per-turn input-token ceiling and the empty-reply recovery all stay on. The tests in `tests/harness_profile.rs` prove each advisory
 nudge is off and each of these guards still fires under `minimal`.
 
 ### Not covered yet
