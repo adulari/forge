@@ -809,9 +809,11 @@ async fn run_agent_turn(run: &AgentRun<'_>) -> Result<RunOutcome> {
                 crate::build_session(run.mock, Some(Mode::Bypass), false, None, run.model.clone())
                     .await
                     .context("building session")?;
-            // One attempt per session, scored on the tree it leaves: per-unit commits are pure
-            // overhead, as they are for `forge run`.
-            session.set_default_commit_policy(forge_config::CommitPolicy::End);
+            // One attempt per session, scored on the tree it leaves, exactly as a `forge run`:
+            // per-unit commits are pure overhead, and so are the recap and the memory capture
+            // that would otherwise run after the answer and hold the process (and this task's
+            // wall time) open for two more model round trips, about 5 s a task on DeepSeek.
+            crate::cli::commands::run::mark_one_shot(&mut session, true);
             if run.expect_code_change {
                 session.set_expect_code_change(true);
             }
