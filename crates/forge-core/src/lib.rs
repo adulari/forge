@@ -1725,6 +1725,9 @@ pub struct Session {
     /// product was a `git commit` still did work. Reset at the start of each turn; the turn's
     /// no-output classification reads it.
     mutations_this_turn: u64,
+    /// The uncommitted work the tree held when the current turn began, so the bridge's completeness
+    /// review measures this turn's change and not the whole session's.
+    turn_start_baseline: review_gate::TurnBaseline,
     /// Cumulative provider-reported input/output tokens for the active turn. Reset at turn start
     /// and shared across primary/re-drive model loops so safety warnings report the whole turn's
     /// spend, not just the current inner loop.
@@ -3190,6 +3193,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         }
         self.current_turn_seq = seq;
         let turn_start_head = git_head(Some(self.workspace.root()));
+        self.turn_start_baseline = if self.config.mesh.verify_completeness
+            && forge_provider::is_cli_bridge(&routed_model)
+        {
+            review_gate::TurnBaseline::capture(self.workspace.root(), turn_start_head.as_deref())
+        } else {
+            review_gate::TurnBaseline::default()
+        };
         self.task_scope = Some(TaskScope::for_turn(
             prompt,
             contract,
@@ -15950,10 +15960,43 @@ mod tests {
         // The over-fire fix: a pure reasoning/analysis plan does NO inspectable work (the answer is
         // the deliverable). Demanding a tool inspection would wrongly flag it. Forge runs ONE
         // verification pass, sees there's nothing external to check, and ACCEPTS with a calm note —
-        // it does NOT loop to the cap or shout UNVERIFIED. `inspect_calls: 0` = never inspects.
-        let provider = Arc::new(BridgeProvider {
+        // it does NOT loop to the cap or shout UNVERIFIED. The plan is the turn's only tool use
+        // (`update_tasks`), never an inspection: a turn with no tool call at all has not touched
+        // the list, so the leftover all-Done list of an earlier turn is not its claim to verify.
+        struct PlanOnlyBridge {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl Provider for PlanOnlyBridge {
+            async fn complete(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSpec],
+                on_event: &mut forge_provider::EventSink<'_>,
+            ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                on_event(StreamEvent::ToolStarted {
+                    name: "update_tasks".into(),
+                    args: "{}".into(),
+                });
+                on_event(StreamEvent::ToolFinished {
+                    name: "update_tasks".into(),
+                    ok: true,
+                    summary: "task list updated".into(),
+                });
+                Ok(forge_provider::ModelResponse {
+                    reasoning: String::new(),
+                    reasoning_items: Vec::new(),
+                    content: "working".into(),
+                    tool_calls: vec![],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                })
+            }
+        }
+        let provider = Arc::new(PlanOnlyBridge {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            inspect_calls: 0,
         });
         let (store, mut session) = bridge_session(provider.clone());
         let capture = CapturePresenter::default();

@@ -21,7 +21,30 @@ than the tests").
 
 A prompt that expects tests to change ("update the tests ...", "fix the failing test", a refactor,
 a rename, a deprecation) does not arm `Rewrites`: there the tests are renamed along with the
-code. The strongest signal in any user message of the session applies to the whole session.
+code.
+
+**An explicit instruction to change tests wins over a prohibition the guard inferred.** The two
+cannot both hold (a signature refactor has to change the call sites in the tests), and the guard
+used to side with its own guess: the bench task a05 says "Update every caller, the tests, the
+README ... Don't touch `package.json`, `tsconfig.json` or `test/helpers.ts`, and keep the existing
+tests (updated for the new signature, not deleted or skipped)", the `test/helpers.ts` in that
+sentence read as "don't touch ... test", Forge told the model the tracked tests were immutable,
+and the model obeyed, left `npm test` red and said so (both seeds of the codex bridge). Now:
+
+- A prohibition names tests only when the prose word `test`/`tests` is the object of the
+  "don't ... edit/change/touch/weaken ..." clause. A path or file name (`test/helpers.ts`,
+  `tests/fixtures/big.json`) is not the tests, and the object ends at ", and ..." / ", but ..." /
+  a parenthesis, so "don't touch `package.json`, and keep the existing tests green" prohibits
+  nothing about the tests.
+- A request that points a change verb at the tests ("update every caller, the tests", "adjust the
+  tests to match", "fix the failing test", "keep the existing tests (updated for the new
+  signature)") arms no prohibition, neither the guidance nor `AnyEdit`. A verb of another action in
+  between ("update the README, add tests"), a negation ("don't update the tests") or "as is /
+  untouched / alone / unchanged" after the tests keeps it a prohibition.
+- Across a session the latest request that speaks to the tests decides: "don't edit the existing
+  tests" protects them through the unrelated messages that follow, and a later "now update the
+  tests" lifts that, and a later "leave the tests alone" restores it. (`expect_code_change` is a
+  property of the run, not of a message, and still arms `AnyEdit`.)
 
 `mesh.guard_test_edits = false` turns the guard off. It is skipped past the soft turn deadline.
 

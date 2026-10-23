@@ -278,6 +278,7 @@ impl Session {
             vision: Default::default(),
             edits_this_turn: 0,
             mutations_this_turn: 0,
+            turn_start_baseline: Default::default(),
             turn_input_tokens: 0,
             turn_billable_input_tokens: 0,
             bridge_trace: Default::default(),

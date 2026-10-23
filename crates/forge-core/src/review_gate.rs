@@ -7,7 +7,9 @@
 //! requirements, or a long request was never checked after the last edit.
 //!
 //! Size and content are measured against the commit the turn started from, not `HEAD`: a model
-//! that commits its own work leaves `git diff HEAD` empty.
+//! that commits its own work leaves `git diff HEAD` empty. Work an earlier turn left uncommitted
+//! is subtracted ([`TurnBaseline`]), and the byproducts of running the tests (`__pycache__/`,
+//! `node_modules/`) are not changes at all.
 
 use forge_types::Message;
 
@@ -25,6 +27,9 @@ pub(crate) struct CheckEvidence {
     pub(crate) passed_after_last_edit: bool,
     /// A check failed and has not passed since.
     pub(crate) failing: bool,
+    /// A file tool changed something, as opposed to commands that merely ran. Untracked files
+    /// count toward the size of the change only then: a server's state directory is not an edit.
+    pub(crate) authored: bool,
 }
 
 /// Why a turn earns the review. Only the first match is reported.
@@ -164,41 +169,116 @@ pub(crate) fn answer_looks_incomplete(answer: &str) -> bool {
     MARKERS.iter().any(|m| lower.contains(m))
 }
 
-/// How much the working tree differs from `base` (the turn's starting commit, else `HEAD`):
-/// files and changed lines, committed or not, counting untracked files. `None` is a git failure.
-fn diff_size(root: &std::path::Path, base: Option<&str>) -> Option<(usize, usize)> {
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-    let tracked = base
-        .and_then(|base| git(&["diff", base, "--numstat"]))
-        .or_else(|| git(&["diff", "HEAD", "--numstat"]))?;
-    let (mut files, mut lines) = (0usize, 0usize);
-    for row in tracked.lines() {
-        let mut cols = row.split_whitespace();
-        let added: usize = cols.next().and_then(|c| c.parse().ok()).unwrap_or(0);
-        let removed: usize = cols.next().and_then(|c| c.parse().ok()).unwrap_or(0);
-        files += 1;
-        lines += added + removed;
+/// What the tree already held when the turn began: the uncommitted work of earlier turns. A
+/// review is about this turn's change, and in a session whose earlier turns left their edits
+/// uncommitted `git diff <turn-start-commit>` is large before the model has done anything, so
+/// every later turn used to earn the review.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TurnBaseline {
+    /// Tracked files that differed from the turn's starting commit: added and removed lines.
+    tracked: std::collections::HashMap<String, (usize, usize)>,
+    /// Untracked work files and what they held.
+    untracked: std::collections::HashMap<String, (u64, u64)>,
+}
+
+/// More untracked files than this and the baseline stops listing them: a tree that crowded is
+/// not one where counting a few more changes anything.
+const BASELINE_UNTRACKED_CAP: usize = 500;
+
+impl TurnBaseline {
+    pub(crate) fn capture(root: &std::path::Path, base: Option<&str>) -> Self {
+        let mut baseline = Self::default();
+        if let Some(rows) = numstat(root, base) {
+            baseline.tracked = rows
+                .into_iter()
+                .map(|(path, added, removed)| (path, (added, removed)))
+                .collect();
+        }
+        baseline.untracked = crate::working_tree::untracked_work_files(root)
+            .unwrap_or_default()
+            .into_iter()
+            .take(BASELINE_UNTRACKED_CAP)
+            .map(|path| {
+                let digest = crate::working_tree::untracked_digest(root, &path);
+                (path, digest)
+            })
+            .collect();
+        baseline
     }
-    files += git(&["ls-files", "--others", "--exclude-standard"])
-        .unwrap_or_default()
-        .lines()
-        .count();
+}
+
+fn git_text(root: &std::path::Path, args: &[&str]) -> Option<String> {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// `git diff <base> --numstat` as `(path, added, removed)`; binary files count as 0/0. `None` is
+/// a git failure.
+fn numstat(root: &std::path::Path, base: Option<&str>) -> Option<Vec<(String, usize, usize)>> {
+    let raw = base
+        .and_then(|base| git_text(root, &["diff", base, "--numstat"]))
+        .or_else(|| git_text(root, &["diff", "HEAD", "--numstat"]))?;
+    Some(
+        raw.lines()
+            .filter_map(|row| {
+                let mut cols = row.splitn(3, '\t');
+                let added = cols.next()?.parse().unwrap_or(0);
+                let removed = cols.next()?.parse().unwrap_or(0);
+                Some((cols.next()?.to_string(), added, removed))
+            })
+            .collect(),
+    )
+}
+
+/// How much this turn changed the working tree: files and changed lines relative to `base` (the
+/// turn's starting commit, else `HEAD`), committed or not, minus what `baseline` says was already
+/// there and counting untracked files that are the model's work. `None` is a git failure.
+fn diff_size(
+    root: &std::path::Path,
+    base: Option<&str>,
+    baseline: &TurnBaseline,
+    count_untracked: bool,
+) -> Option<(usize, usize)> {
+    let (mut files, mut lines) = (0usize, 0usize);
+    for (path, added, removed) in numstat(root, base)? {
+        match baseline.tracked.get(&path) {
+            Some(&(was_added, was_removed)) if (added, removed) == (was_added, was_removed) => {}
+            Some(&(was_added, was_removed)) => {
+                files += 1;
+                lines += added.abs_diff(was_added) + removed.abs_diff(was_removed);
+            }
+            None => {
+                files += 1;
+                lines += added + removed;
+            }
+        }
+    }
+    if count_untracked {
+        for path in crate::working_tree::untracked_work_files(root).unwrap_or_default() {
+            let digest = crate::working_tree::untracked_digest(root, &path);
+            if baseline.untracked.get(&path) != Some(&digest) {
+                files += 1;
+            }
+        }
+    }
     Some((files, lines))
 }
 
-/// True when the tree differs from `base` by several files or many lines. A git failure reads as
+/// True when this turn changed the tree by several files or many lines. A git failure reads as
 /// "not large"; the other signals still apply.
-pub(crate) fn diff_is_large(root: &std::path::Path, base: Option<&str>) -> bool {
-    diff_size(root, base)
+pub(crate) fn diff_is_large(
+    root: &std::path::Path,
+    base: Option<&str>,
+    baseline: &TurnBaseline,
+    count_untracked: bool,
+) -> bool {
+    diff_size(root, base, baseline, count_untracked)
         .is_some_and(|(files, lines)| files >= LARGE_DIFF_FILES || lines >= LARGE_DIFF_LINES)
 }
 
@@ -216,6 +296,7 @@ pub(crate) fn review_reason(
     answer: &str,
     root: &std::path::Path,
     turn_start: Option<&str>,
+    baseline: &TurnBaseline,
     evidence: CheckEvidence,
 ) -> Option<ReviewReason> {
     if evidence.failing {
@@ -234,10 +315,19 @@ pub(crate) fn review_reason(
     {
         return Some(ReviewReason::UnverifiedMultiRequirement);
     }
-    diff_is_large(root, turn_start).then_some(ReviewReason::LargeDiff)
+    diff_is_large(root, turn_start, baseline, evidence.authored).then_some(ReviewReason::LargeDiff)
 }
 
 impl crate::Session {
+    /// Whether this turn ran a tool or changed anything, as opposed to answering from the
+    /// conversation. A question-only turn must not re-verify the all-Done list an earlier turn
+    /// left: a memory probe asked after a finished plan was answered correctly, then sent to run
+    /// the test suite, and finished with that run's one-line result as its answer. Both the
+    /// direct and the bridge completion gates ask this.
+    pub(crate) fn turn_did_work(&self, tools_ran: &std::sync::atomic::AtomicU64) -> bool {
+        tools_ran.load(std::sync::atomic::Ordering::Relaxed) > 0 || self.mutations_this_turn > 0
+    }
+
     /// The commit this turn started from, when the workspace is a git repository with one.
     pub(crate) fn turn_start_head(&self) -> Option<&str> {
         self.task_scope
@@ -256,6 +346,7 @@ impl crate::Session {
             CheckEvidence {
                 passed_after_last_edit: ledger.checked_since_edit(),
                 failing: ledger.has_failing_check(),
+                authored: ledger.authored(),
             }
         };
         let reason = review_reason(
@@ -263,6 +354,7 @@ impl crate::Session {
             answer,
             self.workspace_root(),
             self.turn_start_head(),
+            &self.turn_start_baseline,
             evidence,
         );
         tracing::debug!(?reason, ?evidence, "completeness review decision");
@@ -310,15 +402,24 @@ mod tests {
     const CHECKED: CheckEvidence = CheckEvidence {
         passed_after_last_edit: true,
         failing: false,
+        authored: true,
     };
     const UNCHECKED: CheckEvidence = CheckEvidence {
         passed_after_last_edit: false,
         failing: false,
+        authored: true,
     };
 
     fn reason(request: &str, answer: &str, evidence: CheckEvidence) -> Option<ReviewReason> {
         let (dir, start) = repo();
-        review_reason(request, answer, dir.path(), Some(&start), evidence)
+        review_reason(
+            request,
+            answer,
+            dir.path(),
+            Some(&start),
+            &TurnBaseline::default(),
+            evidence,
+        )
     }
 
     #[test]
@@ -412,6 +513,7 @@ mod tests {
         let failing = CheckEvidence {
             passed_after_last_edit: false,
             failing: true,
+            authored: true,
         };
         assert_eq!(
             reason("rename foo to bar", "Renamed.", failing),
@@ -451,7 +553,8 @@ mod tests {
     #[test]
     fn diff_size_counts_files_lines_and_untracked() {
         let (dir, start) = repo();
-        let large = |base: Option<&str>| diff_is_large(dir.path(), base);
+        let large =
+            |base: Option<&str>| diff_is_large(dir.path(), base, &TurnBaseline::default(), true);
         assert!(!large(Some(&start)));
         std::fs::write(dir.path().join("a.txt"), "2\n").unwrap();
         assert!(!large(Some(&start)), "one small edit");
@@ -475,16 +578,22 @@ mod tests {
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-qm", "the model's own commit"]);
         assert!(
-            !diff_is_large(dir.path(), None),
+            !diff_is_large(dir.path(), None, &TurnBaseline::default(), true),
             "against HEAD the committed work has vanished"
         );
-        assert!(diff_is_large(dir.path(), Some(&start)));
+        assert!(diff_is_large(
+            dir.path(),
+            Some(&start),
+            &TurnBaseline::default(),
+            true
+        ));
         assert_eq!(
             review_reason(
                 "rename foo to bar",
                 "Done.",
                 dir.path(),
                 Some(&start),
+                &TurnBaseline::default(),
                 CHECKED
             ),
             Some(ReviewReason::LargeDiff)
@@ -495,10 +604,100 @@ mod tests {
     fn an_unknown_turn_start_falls_back_to_head() {
         let (dir, _) = repo();
         std::fs::write(dir.path().join("a.txt"), "x\n".repeat(80)).unwrap();
+        let none = TurnBaseline::default();
         assert!(diff_is_large(
             dir.path(),
-            Some("0000000000000000000000000000000000000000")
+            Some("0000000000000000000000000000000000000000"),
+            &none,
+            true
         ));
-        assert!(diff_is_large(dir.path(), None));
+        assert!(diff_is_large(dir.path(), None, &none, true));
+    }
+
+    #[test]
+    fn test_run_byproducts_are_not_changed_files() {
+        let (dir, start) = repo();
+        std::fs::write(dir.path().join("a.txt"), "2\n").unwrap();
+        for path in [
+            "pkg/__pycache__/a.cpython-312.pyc",
+            "pkg/__pycache__/b.cpython-312.pyc",
+            "web/node_modules/x/index.js",
+        ] {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, "x").unwrap();
+        }
+        assert!(
+            !diff_is_large(dir.path(), Some(&start), &TurnBaseline::default(), true),
+            "one edited file and three cache files is a one-file change"
+        );
+        std::fs::write(dir.path().join("new.py"), "x\n").unwrap();
+        std::fs::write(dir.path().join("other.py"), "x\n").unwrap();
+        assert!(diff_is_large(
+            dir.path(),
+            Some(&start),
+            &TurnBaseline::default(),
+            true
+        ));
+    }
+
+    #[test]
+    fn untracked_files_count_only_when_the_turn_authored_something() {
+        let (dir, start) = repo();
+        for name in [
+            ".state/issued.log",
+            ".state/shutdown.log",
+            "report-token.txt",
+        ] {
+            let full = dir.path().join(name);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, "x").unwrap();
+        }
+        let none = TurnBaseline::default();
+        assert!(diff_is_large(dir.path(), Some(&start), &none, true));
+        assert!(
+            !diff_is_large(dir.path(), Some(&start), &none, false),
+            "what a started service wrote is not three edited files"
+        );
+        // A tracked edit is always an edit.
+        std::fs::write(dir.path().join("a.txt"), "x\n".repeat(80)).unwrap();
+        assert!(diff_is_large(dir.path(), Some(&start), &none, false));
+    }
+
+    #[test]
+    fn work_an_earlier_turn_left_uncommitted_is_not_this_turns_change() {
+        let (dir, start) = repo();
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            std::fs::write(dir.path().join(name), "v1\n").unwrap();
+        }
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "earlier"]);
+        let start = {
+            let _ = start;
+            head(dir.path())
+        };
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            std::fs::write(dir.path().join(name), "v2\nmore\n").unwrap();
+        }
+        std::fs::write(dir.path().join("notes.md"), "scratch").unwrap();
+        let baseline = TurnBaseline::capture(dir.path(), Some(&start));
+        assert!(
+            diff_is_large(dir.path(), Some(&start), &TurnBaseline::default(), true),
+            "without a baseline the leftovers alone read as a large change"
+        );
+        assert!(!diff_is_large(dir.path(), Some(&start), &baseline, true));
+
+        // This turn's own edits still count, on top of the leftovers.
+        std::fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
+        std::fs::write(dir.path().join("one.txt"), "v3\nmore\nmore\n").unwrap();
+        assert!(!diff_is_large(dir.path(), Some(&start), &baseline, true));
+        std::fs::write(dir.path().join("b.py"), "x\n").unwrap();
+        assert!(diff_is_large(dir.path(), Some(&start), &baseline, true));
+        std::fs::write(dir.path().join("notes.md"), "scratch, then rewritten").unwrap();
+        std::fs::remove_file(dir.path().join("b.py")).unwrap();
+        assert!(
+            diff_is_large(dir.path(), Some(&start), &baseline, true),
+            "a leftover file the turn rewrote counts again"
+        );
     }
 }

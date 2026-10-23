@@ -466,6 +466,15 @@ fn codex_command_started(item: Option<&Value>) -> Parsed {
     }
 }
 
+/// Whether a bridged tool call succeeded. A CLI reports the MCP call as completed whatever the
+/// command did: Forge's `shell` answers `shell: exit 101 ...` as an ordinary result, so codex
+/// marks it `completed` and claude `is_error: false`. Every ledger behind the bridge (checks that
+/// failed, checks that passed after the last edit) read that as a pass, and a failing `cargo
+/// test` counted as proof the work was verified. The result's first line says what happened.
+pub(super) fn tool_call_succeeded(name: &str, reported_ok: bool, summary: &str) -> bool {
+    reported_ok && !(name.ends_with("shell") && forge_types::shell_result_failed(summary))
+}
+
 /// Parse one Codex `exec --json` (JSONL) line into zero or more items. Handles agent text,
 /// reasoning summaries, `mcp_tool_call` (Forge's tools) and `command_execution` (codex's own
 /// read-only shell). Field-tolerant: unknown shapes are ignored so CLI drift degrades gracefully.

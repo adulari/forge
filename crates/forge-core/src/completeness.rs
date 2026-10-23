@@ -415,68 +415,33 @@ pub(crate) fn unresolved_completeness_production_paths(
     paths.into_iter().collect()
 }
 
-/// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
-/// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
-/// or `shell: failed to start …`; only `exit 0` is success.
+/// Whether a `shell` tool result reports a failure; see [`forge_types::shell_result_failed`].
 pub(crate) fn shell_command_did_fail(result: &str) -> bool {
-    let first = result.lines().next().unwrap_or("");
-    match first.strip_prefix("shell: exit ") {
-        Some(rest) => {
-            rest.split_whitespace()
-                .next()
-                .and_then(|t| t.parse::<i32>().ok())
-                != Some(0)
-        }
-        // Poll-ready, background-start and not-yet-ready poll results are not failures.
-        None => {
-            first.starts_with("shell:")
-                && ![
-                    "shell: ready after",
-                    "shell: started background job",
-                    "shell: not ready",
-                ]
-                .iter()
-                .any(|ok| first.starts_with(ok))
-        }
-    }
+    forge_types::shell_result_failed(result)
 }
 
-/// A cheap fingerprint of the working tree (HEAD, status and diff), or `None` outside a git
-/// repository. Tool counters can't tell a review that only ran `git diff` from one that edited:
-/// every successful shell command counts as a mutation.
-pub(crate) fn worktree_fingerprint(root: &std::path::Path) -> Option<u64> {
-    use std::hash::{Hash, Hasher};
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| o.stdout)
-    };
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    // A repository with no commits has no HEAD: `status` still succeeds there, so only a missing
-    // repository yields `None`.
-    git(&["rev-parse", "HEAD"])
-        .unwrap_or_default()
-        .hash(&mut hasher);
-    git(&["status", "--porcelain=v1", "-uall"])?.hash(&mut hasher);
-    git(&["diff", "HEAD"]).unwrap_or_default().hash(&mut hasher);
-    Some(hasher.finish())
-}
+pub(crate) use crate::working_tree::worktree_fingerprint;
 
-/// The turn's answer after a completeness review. A review that left the working tree as it
-/// found it only confirms the work, so the user keeps the real answer instead of the review's
-/// self-assessment; a review that changed the tree reports that change, so its reply stands.
+/// The turn's answer after a completeness review or a verification re-drive.
+///
+/// The user asked for the first answer, so it is never dropped. A re-drive that left the working
+/// tree as it found it only confirms the work, and the user keeps the real answer alone instead of
+/// the re-drive's self-assessment ("Final review: all requirements handled", "the tests passed").
+/// A re-drive that changed the tree has something of its own to report, and then both are shown:
+/// the answer, then what the re-drive did.
 pub(crate) fn answer_after_review(
     reply: String,
     pre_review: Option<(String, Option<u64>)>,
     tree_now: Option<u64>,
 ) -> String {
     match pre_review {
-        Some((answer, tree_then)) if tree_now == tree_then && !answer.trim().is_empty() => answer,
+        Some((answer, tree_then)) if !answer.trim().is_empty() => {
+            if tree_now == tree_then || reply.trim().is_empty() || reply.trim() == answer.trim() {
+                answer
+            } else {
+                format!("{}\n\n{}", answer.trim_end(), reply.trim_start())
+            }
+        }
         _ => reply,
     }
 }
@@ -810,11 +775,21 @@ mod review_answer_tests {
     }
 
     #[test]
-    fn review_that_edited_reports_its_own_change() {
+    fn review_that_edited_shows_the_answer_and_then_its_own_change() {
         let pre = Some(("Done.".to_string(), Some(7)));
         assert_eq!(
-            answer_after_review("Fixed the missing case too.".into(), pre, Some(8)),
-            "Fixed the missing case too."
+            answer_after_review("Fixed the missing case too.".into(), pre.clone(), Some(8)),
+            "Done.\n\nFixed the missing case too."
+        );
+        assert_eq!(
+            answer_after_review(String::new(), pre.clone(), Some(8)),
+            "Done.",
+            "a review that said nothing cannot erase the answer"
+        );
+        assert_eq!(
+            answer_after_review("Done.".into(), pre, Some(8)),
+            "Done.",
+            "the same text twice is shown once"
         );
         assert_eq!(answer_after_review("Plain.".into(), None, None), "Plain.");
     }

@@ -2306,6 +2306,7 @@ impl CliProvider {
                                 }
                                 Parsed::ToolFinished { id, ok, summary } => {
                                     let name = tool_names.get(&id).cloned().unwrap_or_default();
+                                    let ok = cli_stream::tool_call_succeeded(&name, ok, &summary);
                                     on_event(StreamEvent::ToolFinished { name, ok, summary });
                                 }
                                 Parsed::Usage(u) => usage = u,
@@ -5670,6 +5671,29 @@ mod tests {
                 summary: "denied by Forge permission policy: write_file".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_failing_forge_shell_command_is_not_a_successful_tool_call() {
+        use cli_stream::tool_call_succeeded as ok;
+        // codex reports the MCP call `completed` and claude `is_error: false` for all of these.
+        assert!(!ok(
+            "shell",
+            true,
+            "shell: exit 101 in 73ms (0/2 ok, stopped at #1)"
+        ));
+        assert!(!ok("mcp__forge__shell", true, "shell: exit 1 in 16ms"));
+        assert!(!ok("shell", true, "shell: timed out after 30s"));
+        assert!(!ok("shell", true, "shell: failed to start nope"));
+        assert!(ok("shell", true, "shell: exit 0 in 26ms (2/2 ok)"));
+        assert!(ok(
+            "shell",
+            true,
+            "shell: started background job 1 (pid 42)"
+        ));
+        assert!(ok("shell", true, "shell: not ready after 99s"));
+        assert!(ok("read_file", true, "shell: exit 1 appears in this file"));
+        assert!(!ok("shell", false, "anything"));
     }
 
     #[test]
