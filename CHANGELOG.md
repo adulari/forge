@@ -6,9 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- **A poll that waits on a background job stops when the job ends.** `shell` poll mode (`poll_until_exit_zero`) re-ran its status command until its budget ran out even after the job it was waiting on had died: on the parity benchmark a release build was killed 130 s in and the model's three `grep -q "build complete" <job log>` polls kept waiting another 4 minutes before it looked at the job. A poll now watches the running background jobs whose log path or pid its command names (or the only running job when it names none) and, as soon as one ends, returns "stopped waiting" with how it ended (exit code, or killed by a signal) and the last lines of its log (`crates/forge-tools/src/shell/poll.rs`).
+- **Each fact on the Forge screens is shown once, and jargon that carried no information is gone.** The bridge notice is one short row (`CLI bridge: uses your local login; provider terms may limit third-party use (/help)`; it was two wrapped rows and the full text stays in `/help`). A finished turn's tokens are in its footer only, so the status bar shows them while the turn runs and not after. The welcome's key row lists `Ctrl+J newline` and the model picker instead of repeating the five keys the composer border already shows. The status bar no longer draws the routing tier, `⟨auto⟩`, `mesh auto`, `ctx` before any number exists, or `untracked`; a pinned model's answer label no longer says `your pick`. Help is one full-width list below 180 columns (two half-width panes clipped most descriptions) and the longest command descriptions are shorter. After an approved edit the folded group names the file (`Edited calc.py (+1 −1)` instead of `edited 1 file`).
+- **An unknown model is stated once at launch and once when you try to use it, and Ollama is named only if you set it up.** `forge chat --model nonexistent-model-xyz` printed the launch warning, a `Model unavailable` composer title and a failed turn, and the warning said `Ollama isn't running` to people who never installed it. Now the launch warning says `no provider knows it` (adding `and Ollama isn't running` only with `[local] model`, `[local] autostart` or `OLLAMA_HOST`), and Enter on a prompt while the whole pin is known uncallable keeps the text in the composer and prints `not sent: model 'x' isn't available. Run /model to pick another.` instead of failing a turn. An id merely missing from the catalog still sends.
 
 ## [2.22.0] - 2026-10-24
 

@@ -396,12 +396,13 @@ pub(crate) async fn build_session_with_self_mcp(
         ensure_pin_providers_known(pin)?;
     }
     // The offline mock answers to any id, so there is nothing to check a mock session's pin against.
-    let unverified_pins = if mock {
-        Vec::new()
+    let pins = if mock {
+        pin_check::PinCheck::default()
     } else {
         pin_check::check_pins(
             pin.as_deref(),
             catalog.as_ref().map(|cat| cat.models()),
+            pin_check::ollama_configured(&config),
             &mut *presenter,
         )
         .await
@@ -604,7 +605,8 @@ pub(crate) async fn build_session_with_self_mcp(
         }
     }
     session.set_lattice(lattice);
-    session.set_unverified_models(unverified_pins);
+    session.set_unverified_models(pins.unverified);
+    session.set_unavailable_models(pins.unavailable);
 
     // Attach the command/skill catalog so the model can discover + load Forge's own skills via
     // the `use_skill` tool (instead of hunting ~/.claude). Cheap, sync, pure.

@@ -27,7 +27,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "context",
-        desc: "what fills the context window: system prompt, tools, instructions, conversation, free space",
+        desc: "what fills the context window: prompt, tools, instructions, conversation, free space",
         usage: "/context",
     },
     Command {
@@ -53,7 +53,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "replay",
         desc:
-            "show a session transcript inline (/replay <id>) or diff two sessions (/replay <a> <b>)",
+            "show a session transcript inline, or diff two sessions (/replay <a> <b>)",
         usage: "/replay <id> [<id2>]",
     },
     Command {
@@ -94,7 +94,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "config",
-        desc: "configure Forge — provider & search API keys, bridge plans, permission mode, credit conservation",
+        desc: "configure Forge — provider and search keys, bridge plans, permission mode",
         usage: "/config",
     },
     Command {
@@ -159,7 +159,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "rewind",
-        desc: "pick a past message to rewind to — chat, context AND file edits (alias /undo, Esc Esc)",
+        desc: "pick a past message to rewind to: chat, context and file edits (alias /undo)",
         usage: "/rewind",
     },
     Command {
@@ -194,7 +194,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "refine",
-        desc: "review the trajectory and persist learned harness state (prompt notes, skills, subagent specs)",
+        desc: "review the trajectory and keep what it learned (notes, skills, subagent specs)",
         usage: "/refine [instructions] | /refine --global [instructions] | /refine rollback <id> | /refine status",
     },
     Command {
@@ -214,32 +214,32 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "goal",
-        desc: "set a session goal and break it into a tracked task plan — optionally gated on quality checks and a token/time budget",
+        desc: "set a goal and break it into a tracked plan, optionally gated on checks and a budget",
         usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",
     },
     Command {
         name: "pr",
-        desc: "turn this session's work into a branch + commit + pull request (provenance-rich body)",
+        desc: "turn this session's work into a branch, a commit and a pull request",
         usage: "/pr [title]",
     },
     Command {
         name: "loop",
-        desc: "re-run a task each turn until the model signals it's complete — optionally gated on quality checks and a token/time budget",
+        desc: "re-run a task each turn until done, optionally gated on checks and a budget",
         usage: "/loop <task> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",
     },
     Command {
         name: "effort",
-        desc: "pin the reasoning-effort level (a ceiling the mesh optimises under), or with `exact` force the rung the provider actually runs at",
+        desc: "pin the reasoning effort (a ceiling for mesh), or `exact` to force the rung",
         usage: "/effort [low|medium|high|xhigh|whitehot] | /effort exact <level> | /effort exact off",
     },
     Command {
         name: "subagents",
-        desc: "let this session's subagents route off the active model pin (free), or bind them back to it (pinned)",
+        desc: "let subagents route off the model pin (free), or follow the pin (pinned)",
         usage: "/subagents [free|pinned]",
     },
     Command {
         name: "agents",
-        desc: "list the subagent types spawn_agents can use — built-in explore/plan plus your agent files",
+        desc: "list the subagent types spawn_agents can use (built-in plus your agent files)",
         usage: "/agents",
     },
     Command {
@@ -284,7 +284,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "self-mcp",
-        desc: "toggle self-MCP mode: start/stop a sub-Forge MCP agent so the session can call forge_chat / forge_assay as tools",
+        desc: "toggle self-MCP mode: a sub-Forge MCP agent this session can call as tools",
         usage: "/self-mcp [enable|disable]",
     },
     Command {
@@ -304,17 +304,17 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "workflow",
-        desc: "author and run a mesh-routed multi-agent workflow script for a goal, run a saved one, or list saved scripts",
+        desc: "author and run a mesh-routed workflow script, run a saved one, or list them",
         usage: "/workflow <goal> | /workflow run <name> [args] | /workflow list",
     },
     Command {
         name: "duel",
-        desc: "race 2-3 mesh models on the same task, each in its own worktree, then pick the winner",
+        desc: "race 2-3 mesh models on one task in separate worktrees, then pick the winner",
         usage: "/duel <task>",
     },
     Command {
         name: "voice",
-        desc: "record from the microphone and transcribe into the prompt (also Ctrl+V) — local whisper, never auto-sends",
+        desc: "transcribe the microphone into the prompt (also Ctrl+V); local, never auto-sends",
         usage: "/voice",
     },
 ];

@@ -47,11 +47,9 @@ fn gauge_limit(limit: Option<u32>) -> (u64, bool) {
 /// muted below 70 percent, warn from 70 and err from 90.
 pub(crate) fn context_gauge(used: u64, limit: Option<u32>, size: GaugeSize) -> Vec<Span<'static>> {
     let glyphs = crate::theme::glyphs::g();
+    // No number yet: a gauge with nothing in it says nothing.
     if used == 0 && limit.is_none() {
-        return vec![
-            Span::styled("ctx ", styles::faint()),
-            Span::styled(if glyphs.unicode { "—" } else { "-" }, styles::faint()),
-        ];
+        return Vec::new();
     }
     let (limit, approx) = gauge_limit(limit);
     let frac = (used as f64 / limit as f64).clamp(0.0, 1.0);

@@ -251,8 +251,8 @@ fn statusline_shows_model_and_cost() {
     );
     assert!(text.contains("$0.42"), "cost in statusline: {text}");
     assert!(
-        text.contains("gpt-4o-mini · standard"),
-        "tier joins the model: {text}"
+        !text.contains("standard"),
+        "the tier is router vocabulary, not status: {text}"
     );
 }
 
@@ -271,13 +271,13 @@ fn statusline_shows_forge_effort_labelled_as_meshs_own() {
         "effort in statusline: {text:?}"
     );
 
-    // Clearing the pin no longer hides the cell. It previously vanished, so the most common
-    // state of all — mesh choosing — showed nothing where a level had been.
+    // Clearing the pin removes the cell: "mesh auto" described a default nobody chose, and
+    // `/status` still names who is choosing.
     app.apply(PresenterEvent::Effort(None));
     let text = screen_wh(&app, 100, LIVE_H);
     assert!(
-        text.contains("mesh auto"),
-        "unpinned effort still names who is choosing: {text:?}"
+        !text.contains("mesh"),
+        "an unpinned effort draws no chip: {text:?}"
     );
 }
 
@@ -791,9 +791,10 @@ fn statusline_config_default_shows_model_and_cost() {
     let app = App::default();
     let out = screen(&app);
     // Default config has Model + SessionCost widgets on the left.
-    // Model widget shows "—" when no routing; SessionCost shows "untracked" for no-model.
+    // The model widget says so when nothing is routed yet; there is no cost cell to say
+    // "untracked" about a model nobody picked.
     assert!(
-        out.contains('—') || out.contains("untracked"),
+        out.contains("no model yet") && !out.contains("untracked"),
         "default statusline renders: {out:?}"
     );
 }

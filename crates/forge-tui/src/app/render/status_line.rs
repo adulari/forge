@@ -85,6 +85,9 @@ fn tokens_text(up: u64, down: u64) -> String {
     )
 }
 
+/// The marker `model_effort_marker` gives a model whose provider chose the rung: nothing to show.
+const AUTO_RUNG: &str = "⟨auto⟩";
+
 /// The tier chip text for the active routing, if any.
 fn tier_text(app: &App) -> Option<String> {
     app.routing
@@ -116,18 +119,12 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
                 model_short(Some(&routing.model)),
                 styles::fg().bold(),
             ));
+            // The routing tier is router vocabulary: the answer's label already says which
+            // model took the turn, and `/status` keeps the tier for anyone who wants it.
             let mut items = vec![Item::left(Class::Model, head)];
-            if let Some(tier) = tier_text(app) {
-                items.push(Item::glued(
-                    Class::Tier,
-                    vec![
-                        Span::styled(format!(" {} ", glyphs.sep), styles::faint()),
-                        Span::styled(tier, styles::muted()),
-                    ],
-                ));
-            }
             if let Some((marker, style)) =
                 model_effort_marker(&routing.model, app.routed_effort.or(app.effort))
+                    .filter(|(marker, _)| marker != AUTO_RUNG)
             {
                 items.push(Item::glued(
                     Class::Effort,
@@ -147,6 +144,9 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
             }
             let model_id = app.routing.as_ref().map(|r| r.model.as_str()).unwrap_or("");
             let text = cost_cell(model_id, app.cost_usd);
+            if text == "untracked" {
+                return Vec::new();
+            }
             let (text, style) = if text.starts_with('$') {
                 (fmt_cost(app.cost_usd), styles::ok())
             } else {
@@ -155,6 +155,10 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
             vec![Item::left(Class::Cost, vec![Span::styled(text, style)])]
         }
         W::Effort => {
+            // Auto routing is the default, and `/status` names it: a chip is for a choice made.
+            if app.effort.is_none() {
+                return Vec::new();
+            }
             let (label, style) = mesh_effort_chip(app.effort, app.tick);
             vec![Item::right(Class::Mesh, vec![Span::styled(label, style)])]
         }
@@ -323,8 +327,9 @@ fn collect_items(app: &App, w: u16) -> Vec<Item> {
     for widget in &app.statusline_config.left {
         items.extend(widget_items(widget, app, w));
     }
-    // The turn readout is built in, not a widget: tokens, then how fast.
-    if app.turn_ran && (app.turn_in > 0 || app.turn_out > 0) {
+    // The turn readout is built in, not a widget: tokens, then how fast. The tokens are a live
+    // counter; once the turn ends its footer in the transcript carries the same numbers.
+    if app.busy && app.turn_ran && (app.turn_in > 0 || app.turn_out > 0) {
         items.push(Item::left(
             Class::Tokens,
             vec![Span::styled(

@@ -184,8 +184,8 @@ impl App {
             if std::mem::replace(&mut self.transcript_ui.bridge_notice_seen, true) {
                 return;
             }
-            text = "CLI bridge: runs your local claude/codex login; provider terms may limit \
-                    third-party use, see docs/features/provider-integrations.md"
+            text = "CLI bridge: uses your local login; provider terms may limit third-party use \
+                    (/help)"
                 .to_string();
         }
         let in_turn = self.transcript_ui.turn_open;
