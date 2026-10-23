@@ -387,6 +387,8 @@ impl LiveSession {
         let mut tool_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut active_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // `tool_search` calls in flight: lookups the transcript never shows (see `bridge_call`).
+        let mut lookups: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut claude_stream = ClaudeStreamState::default();
         // Backstop against a wedged turn that never truly progresses (#714: a claude persistent-
         // bridge tool round-trip that deadlocks — claude goes silent on stdout while out-of-band
@@ -483,16 +485,28 @@ impl LiveSession {
                         }
                     }
                     Parsed::ToolStarted { id, name, args } => {
-                        data.tool_ran = true;
-                        active_tools.insert(id.clone());
-                        tool_names.insert(id, name.clone());
-                        on_event(StreamEvent::ToolStarted { name, args });
+                        match super::cli_stream::bridge_call(name, args) {
+                            super::cli_stream::BridgeCall::Run { name, args } => {
+                                data.tool_ran = true;
+                                active_tools.insert(id.clone());
+                                tool_names.insert(id, name.clone());
+                                on_event(StreamEvent::ToolStarted { name, args });
+                            }
+                            super::cli_stream::BridgeCall::Lookup => {
+                                lookups.insert(id);
+                                on_event(StreamEvent::ProviderActivity);
+                            }
+                        }
                     }
                     Parsed::ToolFinished { id, ok, summary } => {
-                        active_tools.remove(&id);
-                        let name = tool_names.get(&id).cloned().unwrap_or_default();
-                        let ok = super::cli_stream::tool_call_succeeded(&name, ok, &summary);
-                        on_event(StreamEvent::ToolFinished { name, ok, summary });
+                        if lookups.remove(&id) {
+                            on_event(StreamEvent::ProviderActivity);
+                        } else {
+                            active_tools.remove(&id);
+                            let name = tool_names.get(&id).cloned().unwrap_or_default();
+                            let ok = super::cli_stream::tool_call_succeeded(&name, ok, &summary);
+                            on_event(StreamEvent::ToolFinished { name, ok, summary });
+                        }
                     }
                     Parsed::Usage(u) => data.usage = u,
                     Parsed::ModelCalls(n) => on_event(StreamEvent::ModelCalls(n)),

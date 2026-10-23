@@ -1328,11 +1328,7 @@ fn bridge_mcp_env(
             }
         }
     }
-    for key in ["FORGE_SUBAGENT_DEPTH", "FORGE_DB"] {
-        if let Ok(val) = std::env::var(key) {
-            env.push((key.to_string(), val));
-        }
-    }
+    env.extend(carried_env(|key| std::env::var(key).ok()));
     // Evidence and background-job files live in a per-workspace state folder the child resolves
     // from its own environment. Handing it the parent's resolved root keeps both sides on one
     // folder even when the CLI scrubs the env it passes on or `FORGE_DB` differs.
@@ -1341,6 +1337,26 @@ fn bridge_mcp_env(
         forge_config::workspace_state_root().display().to_string(),
     ));
     env
+}
+
+/// The parent's own variables the bridge child needs to judge a call the way the parent would.
+/// `XDG_CONFIG_HOME` is where `forge trust` and the user's rules live: codex hands its MCP servers
+/// only `PATH`/`HOME`/`LANG`, so without it a read-only `git diff` in a trusted project still asked
+/// (the child looked for the trust store under `$HOME/.config` and found none).
+fn carried_env(get: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    [
+        "FORGE_SUBAGENT_DEPTH",
+        "FORGE_DB",
+        forge_config::project_trust::TRUST_ENV,
+        "XDG_CONFIG_HOME",
+    ]
+    .into_iter()
+    .filter_map(|key| {
+        get(key)
+            .filter(|value| !value.is_empty())
+            .map(|value| (key.to_string(), value))
+    })
+    .collect()
 }
 
 /// Env var naming the model a bridge's `forge mcp-serve` may use for `auto` mode's command
@@ -2147,6 +2163,10 @@ impl CliProvider {
         let mut tool_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut claude_stream = ClaudeStreamState::default();
+        // `tool_search` calls in flight: lookups the transcript never shows (see `bridge_call`).
+        let mut lookups: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Codex has no closing `result` event; its answer is the messages after its last tool call.
+        let mut closing = crate::bridge_answer::ClosingMessage::default();
 
         // IDLE timeout, not a hard cap: the window resets on every event, so a long but PRODUCTIVE
         // bridge turn (claude/codex streaming reasoning + tool calls for many minutes on a hard
@@ -2205,18 +2225,36 @@ impl CliProvider {
                                 Parsed::Reasoning(t) => on_event(StreamEvent::Reasoning(t)),
                                 Parsed::Text(t) => {
                                     if !is_cli_auth_instruction(&t) {
+                                        if self.kind == CliKind::Codex {
+                                            crate::bridge_answer::break_messages(&mut content);
+                                            closing.message(&t);
+                                        }
                                         content.push_str(&t);
                                         on_event(StreamEvent::Text(t));
                                     }
                                 }
                                 Parsed::ToolStarted { id, name, args } => {
-                                    tool_names.insert(id, name.clone());
-                                    on_event(StreamEvent::ToolStarted { name, args });
+                                    match cli_stream::bridge_call(name, args) {
+                                        cli_stream::BridgeCall::Run { name, args } => {
+                                            closing.tool_started();
+                                            tool_names.insert(id, name.clone());
+                                            on_event(StreamEvent::ToolStarted { name, args });
+                                        }
+                                        cli_stream::BridgeCall::Lookup => {
+                                            lookups.insert(id);
+                                            on_event(StreamEvent::ProviderActivity);
+                                        }
+                                    }
                                 }
                                 Parsed::ToolFinished { id, ok, summary } => {
-                                    let name = tool_names.get(&id).cloned().unwrap_or_default();
-                                    let ok = cli_stream::tool_call_succeeded(&name, ok, &summary);
-                                    on_event(StreamEvent::ToolFinished { name, ok, summary });
+                                    if lookups.remove(&id) {
+                                        on_event(StreamEvent::ProviderActivity);
+                                    } else {
+                                        let name = tool_names.get(&id).cloned().unwrap_or_default();
+                                        let ok =
+                                            cli_stream::tool_call_succeeded(&name, ok, &summary);
+                                        on_event(StreamEvent::ToolFinished { name, ok, summary });
+                                    }
                                 }
                                 Parsed::Usage(u) => usage = u,
                                 Parsed::ModelCalls(n) => on_event(StreamEvent::ModelCalls(n)),
@@ -2370,7 +2408,7 @@ impl CliProvider {
             ));
         }
 
-        let text = crate::bridge_answer::bridge_answer(content, final_text);
+        let text = crate::bridge_answer::bridge_answer(content, final_text.or(closing.into_text()));
 
         if text.is_empty() {
             let code = status.and_then(|s| s.code());
@@ -4489,6 +4527,36 @@ mod tests {
                 "codex bridge dropped the session mode {mode:?}: {codex:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_bridge_child_gets_the_parents_trust_and_config_location() {
+        let parent = |key: &str| match key {
+            "XDG_CONFIG_HOME" => Some("/home/u/cfg".to_string()),
+            "FORGE_TRUST_PROJECT" => Some("1".to_string()),
+            "FORGE_DB" => Some("/tmp/forge.db".to_string()),
+            "FORGE_SUBAGENT_DEPTH" => Some(String::new()),
+            _ => None,
+        };
+        let env = carried_env(parent);
+        let get = |k: &str| {
+            env.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("XDG_CONFIG_HOME"), Some("/home/u/cfg"));
+        assert_eq!(get("FORGE_TRUST_PROJECT"), Some("1"));
+        assert_eq!(get("FORGE_DB"), Some("/tmp/forge.db"));
+        assert_eq!(
+            get("FORGE_SUBAGENT_DEPTH"),
+            None,
+            "an empty value is not carried"
+        );
+        assert!(carried_env(|_| None).is_empty());
+        let codex = build_args(CliKind::Codex, "", true, "/bin/forge", &env, None);
+        assert!(codex
+            .iter()
+            .any(|a| a == "mcp_servers.forge.env.XDG_CONFIG_HOME=\"/home/u/cfg\""));
     }
 
     #[test]

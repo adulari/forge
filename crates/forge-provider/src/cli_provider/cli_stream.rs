@@ -466,6 +466,43 @@ fn codex_command_started(item: Option<&Value>) -> Parsed {
     }
 }
 
+/// What a bridged CLI's tool event stands for once Forge's lean-surface meta-tools are peeled off
+/// (docs/features/deferred-tools.md).
+pub(super) enum BridgeCall {
+    /// A tool the CLI ran: the tool inside a `tool_call`, or the call itself.
+    Run { name: String, args: String },
+    /// `tool_search`: a catalog lookup. It runs nothing and changes nothing, so it is not a tool
+    /// call for the transcript, the prompt or any ledger; the stream is still alive.
+    Lookup,
+}
+
+/// The CLI reports a deferred tool under the wrapper (`tool_call` / `tool_search`) with the real
+/// tool and its arguments nested in the wrapper's. Every surface below this keys on the real tool:
+/// the permission prompt finds the command through the card of the tool it asks about, the trust
+/// hint and the verification and mutation ledgers read its name and arguments. A wrapper left in
+/// place showed `tool_call shell` and no command, and an edit made through it counted as nothing.
+pub(super) fn bridge_call(name: String, args: String) -> BridgeCall {
+    use forge_types::deferred_call::{inner_call, TOOL_CALL, TOOL_SEARCH};
+    // claude names Forge's tools `mcp__forge__<tool>`; codex names them bare.
+    match name.strip_prefix("mcp__forge__").unwrap_or(&name) {
+        TOOL_SEARCH => BridgeCall::Lookup,
+        TOOL_CALL => {
+            let nested = serde_json::from_str::<Value>(&args)
+                .ok()
+                .and_then(|wrapped| inner_call(&wrapped).ok());
+            match nested {
+                Some((inner, inner_args)) => BridgeCall::Run {
+                    name: inner,
+                    args: inner_args.to_string(),
+                },
+                // Names nothing runnable: the CLI gets the refusal, the transcript shows the call.
+                None => BridgeCall::Run { name, args },
+            }
+        }
+        _ => BridgeCall::Run { name, args },
+    }
+}
+
 /// Whether a bridged tool call succeeded. A CLI reports the MCP call as completed whatever the
 /// command did: Forge's `shell` answers `shell: exit 101 ...` as an ordinary result, so codex
 /// marks it `completed` and claude `is_error: false`. Every ledger behind the bridge (checks that
