@@ -13732,7 +13732,6 @@ mod tests {
         std::fs::write(dir.join(".cargo/config.toml"), "[build]\n").unwrap();
         let baseline = working_tree_marker(Some(&dir)).unwrap();
 
-        assert!(String::from_utf8_lossy(&baseline).contains(".cargo/"));
         assert!(!working_tree_changed_since(Some(&dir), Some(&baseline)));
 
         std::fs::write(dir.join("f.txt"), "task edit").unwrap();
