@@ -36,6 +36,7 @@ mod setup;
 mod status_cmd;
 pub(crate) use setup::*;
 
+mod catalog_startup;
 mod pin_check;
 mod pin_window;
 pub(crate) mod session;

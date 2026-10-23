@@ -347,10 +347,15 @@ pub(crate) async fn build_session_with_self_mcp(
     // falls back to the seeds, and then it says so — here and in every routing rationale.
     let catalog = if !mock && config.mesh.auto_discover {
         let mut cached = read_cached_catalog();
-        // A pinned session routes nothing through the catalog, and an attended one outlives the
-        // detached refresh below, so one that is both has no reason to hold the first frame for the
-        // network (up to 12 s on a machine's first launch).
-        let routes_by_catalog = pin.is_none() || !presenter.is_attended();
+        // A session pinned to one model that names its provider routes nothing through the
+        // catalog: it holds neither the first frame (attended) nor the first token (a script) for
+        // the network, which on a machine's first run is up to 12 s and every installed agent CLI.
+        let need = catalog_startup::catalog_need(
+            pin.as_deref(),
+            presenter.is_attended(),
+            config.mesh.pin_failover,
+        );
+        let routes_by_catalog = need.routes_by_catalog;
         if cached.is_none() && routes_by_catalog {
             // No catalog at all: the seed fallback can pick a disabled/unreachable provider, and a
             // one-shot run exits before a detached refresh lands. Wait (bounded) just this once.
@@ -372,10 +377,11 @@ pub(crate) async fn build_session_with_self_mcp(
         let stale_for_bridge = cached.as_ref().is_some_and(|c| {
             pin_check::catalog_missing_routable_bridge(c.catalog.models(), |k| k.routable())
         });
-        if stale_for_bridge
-            || crate::cli::commands::models::startup_refresh_due(
-                cached.as_ref().map(|c| c.age_secs),
-            )
+        if need.refresh
+            && (stale_for_bridge
+                || crate::cli::commands::models::startup_refresh_due(
+                    cached.as_ref().map(|c| c.age_secs),
+                ))
         {
             spawn_catalog_refresh(&config);
         }
