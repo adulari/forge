@@ -99,6 +99,13 @@ pub(super) fn claude_assistant_context(line: &str) -> Option<u64> {
 /// `FORGE_BRIDGE_IDLE_TTL_SECS`.
 pub(super) const LIVE_IDLE_TTL: Duration = Duration::from_secs(20 * 60);
 
+/// How long to wait between `mcp_status` polls while Forge's tool server is still `pending`.
+/// claude usually asks for the status before the server (45 ms from its spawn to a handshake)
+/// has answered `initialize`, so the poll that finds it connected landed up to one interval late:
+/// with 50 ms, a median 34 to 53 ms of every fresh bridge process's start (two interleaved
+/// zero-quota runs, 12 and 20 spawns per arm, 316 and 351 ms from spawn to ready).
+const MCP_STATUS_POLL: Duration = Duration::from_millis(10);
+
 /// Max parked live processes per provider (one per conversation owner). Past it the least recently
 /// used idle one is torn down.
 pub(super) const LIVE_MAX_SLOTS: usize = 4;
@@ -343,7 +350,7 @@ impl LiveSession {
                 "connected" => return Ok(()),
                 "pending" => {
                     attempt = attempt.saturating_add(1);
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(MCP_STATUS_POLL).await;
                 }
                 other => {
                     return Err(std::io::Error::other(format!(

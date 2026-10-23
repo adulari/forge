@@ -37,6 +37,25 @@ A pinned id that no discovered catalog lists gets a startup warning. If the prov
 it quickly, the turn fails on that first refusal instead of waiting the first outage backoff step
 (~5 s) for a second identical one (`failure_verdict::rejection_warning`).
 
+## The tool server's handshake
+
+Before the prompt is written, the bridge asks the live `claude` for its MCP status until Forge's
+tool server reports `connected`. The server answers `initialize` about 45 ms after claude spawns
+it and claude asks for the status around then, so the poll that finds it connected landed up to
+one poll interval late. The interval was 50 ms and is 10 ms (`MCP_STATUS_POLL` in
+`cli_provider/live.rs`). Measured as the time from `bridge: spawn claude` to `bridge: forge mcp
+ready`, with claude run without a login so no model call is made (zero quota), arms interleaved:
+
+| run | 50 ms poll (median, range) | 10 ms poll (median, range) |
+|---|---|---|
+| 12 spawns per arm | 351 ms (282-418) | 298 ms (262-711) |
+| 20 spawns per arm | 316 ms (281-448) | 282 ms (255-436) |
+
+What remains of that wait is claude's own start. Forge's share before it spawns claude is the
+process start, the keyring injection (`forge::startup: inject keyring keys`, 50-64 ms in a clean
+profile and 100-131 ms with a live keyring), config, provider and routing: about 110 ms to
+`run_turn_with start` and 55 ms more to the spawn.
+
 ## After an interrupt
 
 Esc on a bridged turn abandons the live `claude` process, and the next prompt replaces it. The
