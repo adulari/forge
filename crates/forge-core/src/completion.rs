@@ -280,7 +280,10 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
 
 /// The entries of a `shell` call's `commands` batch, when it is one.
 fn shell_batch_entries(args: &serde_json::Value) -> Option<Vec<&str>> {
-    if args.get("command").is_some() {
+    // A blank `command` beside a batch is a placeholder the tool ignores (a model that fills in
+    // every property of the schema), so the batch is what ran.
+    let command = args.get("command").and_then(serde_json::Value::as_str);
+    if command.is_some_and(|command| !command.trim().is_empty()) {
         return None;
     }
     let entries: Vec<&str> = args
@@ -881,6 +884,24 @@ mod tests {
         assert!(!plain.has_failing_check());
         plain.observe(tests_then_diff, true);
         assert!(plain.checked_since_edit());
+    }
+
+    #[test]
+    fn a_blank_command_beside_a_batch_is_a_placeholder() {
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"","commands":["cargo test"],"stop_on_error":true}"#
+            ),
+            VerificationObservation::BatchCheck {
+                family: VerificationFamily::Test,
+                at: 1
+            }
+        );
+        assert_eq!(
+            classify_tool("shell", r#"{"command":"cargo test","commands":[]}"#),
+            VerificationObservation::Check(VerificationFamily::Test)
+        );
     }
 
     #[test]
