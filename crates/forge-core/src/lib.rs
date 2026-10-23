@@ -182,6 +182,7 @@ pub(crate) mod task_staleness;
 mod text_policy;
 pub mod tokens;
 mod tool_dispatch;
+mod tool_intent;
 mod tool_output;
 mod user_shell;
 pub use user_shell::UserShellRun;
@@ -2478,70 +2479,7 @@ impl Session {
     }
 
     fn should_advertise_tools(tier: TaskTier, prompt: &str) -> bool {
-        if tier != TaskTier::Trivial {
-            return true;
-        }
-        let prompt = prompt.to_ascii_lowercase();
-        [
-            "read ",
-            "inspect ",
-            "search ",
-            "find ",
-            "grep",
-            "rg ",
-            "file",
-            "directory",
-            "repo",
-            "code",
-            "test",
-            "build",
-            "compile",
-            "run ",
-            "execute",
-            "shell",
-            "command",
-            "git",
-            "commit",
-            "diff",
-            "write",
-            "edit",
-            "create",
-            "delete",
-            "implement",
-            "fix ",
-            "debug",
-            "diagnose",
-            "review",
-            "refactor",
-            "install",
-            "web",
-            "http",
-            "url",
-            "browser",
-            "fetch",
-            "download",
-            "mcp",
-            "database",
-            "query",
-            "rename",
-            "replace",
-            "add ",
-            "update",
-            "remove",
-            "change",
-            "summarize",
-            "readme",
-            "everywhere",
-            "across",
-            "subagent",
-            "sub-agent",
-            "spawn",
-            "delegate",
-            "parallel",
-            "workflow",
-        ]
-        .iter()
-        .any(|intent| prompt.contains(intent))
+        tier != TaskTier::Trivial || tool_intent::prompt_wants_tools(prompt)
     }
 
     /// Run one full turn: route -> (model -> tools)* -> final answer. Returns the outcome.
@@ -5085,6 +5023,9 @@ mod tests {
 
     #[path = "stall_guard.rs"]
     mod stall_guard_tests;
+
+    #[path = "text_tool_call.rs"]
+    mod text_tool_call_tests;
 
     #[path = "silence_guard.rs"]
     mod silence_guard_tests;
