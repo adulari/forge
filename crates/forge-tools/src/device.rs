@@ -144,8 +144,8 @@ impl Tool for DeviceTool {
                 "headless": {"type": "boolean", "description": "For emulator_start: boot with no window."},
                 "wipe_data": {"type": "boolean", "description": "For emulator_start: reset to a clean image."},
                 "cold_boot": {"type": "boolean", "description": "For emulator_start: ignore the quick-boot snapshot. Slower but certain."},
-                "memory_mb": {"type": "integer", "description": "For emulator_start: guest RAM. Default 2048 — a deliberately small emulator."},
-                "cores": {"type": "integer", "description": "For emulator_start: guest CPU cores. Default 2."},
+                "memory_mb": {"type": "integer", "minimum": 1, "description": "For emulator_start: guest RAM. Default 2048 — a deliberately small emulator."},
+                "cores": {"type": "integer", "minimum": 1, "description": "For emulator_start: guest CPU cores. Default 2."},
                 "gpu": {"type": "string", "description": "For emulator_start: -gpu mode. Default auto-no-window headless, host otherwise. swiftshader_indirect is available but renders on the CPU and can segfault the emulator."},
                 "writable_system": {
                     "type": "boolean",
@@ -178,14 +178,14 @@ impl Tool for DeviceTool {
                 "clickable_only": {"type": "boolean", "description": "Selector: only consider tappable elements."},
                 "key": {"type": "string", "description": "For key: back, home, enter, tab, delete, app_switch, or a KEYCODE_*."},
                 "all": {"type": "boolean", "description": "For ui: include every node, not just the actionable ones."},
-                "max_chars": {"type": "integer", "description": "Cap for ui/shell output. Default 20000."},
+                "max_chars": {"type": "integer", "minimum": 1, "description": "Cap for ui/shell output. Default 20000."},
                 "caption": {"type": "string", "description": "For screenshot: what the shot shows, recorded with it as session evidence."},
-                "timeout_secs": {"type": "integer", "description": "For wait_for/emulator_start. Defaults 30 / 300."},
+                "timeout_secs": {"type": "integer", "minimum": 1, "description": "For wait_for/emulator_start. Defaults 30 / 300."},
                 "command": {"type": "string", "description": "For shell: the command to run on the device."},
                 "local": {"type": "string", "description": "Host path, for push/pull."},
                 "remote": {"type": "string", "description": "Device path, for push/pull."},
                 "endpoint": {"type": "string", "description": "For proxy_set: host:port the device should route through."},
-                "port": {"type": "integer", "description": "For reverse: tunnel this device port to the same port on this machine."},
+                "port": {"type": "integer", "minimum": 1, "description": "For reverse: tunnel this device port to the same port on this machine."},
                 "cert": {"type": "string", "description": "For ca_install: path to a PEM CA certificate."},
                 "user_store": {
                     "type": "boolean",
@@ -599,8 +599,8 @@ impl Tool for DeviceLogsTool {
                     "description": "Minimum severity."
                 },
                 "contains": {"type": "string", "description": "Only lines containing this text."},
-                "limit": {"type": "integer", "description": "Most recent N lines. Default 200."},
-                "max_chars": {"type": "integer", "description": "Cap on output. Default 20000."}
+                "limit": {"type": "integer", "minimum": 1, "description": "Most recent N lines. Default 200."},
+                "max_chars": {"type": "integer", "minimum": 1, "description": "Cap on output. Default 20000."}
             }
         })
     }

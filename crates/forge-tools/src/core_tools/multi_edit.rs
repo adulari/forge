@@ -8,6 +8,12 @@ use super::edits::{apply_edits, EditStep};
 use super::{check_readable_size, confine, lang_from_path, shown};
 use crate::{Tool, ToolError};
 
+/// A `path` value that names a file. An empty one is a model that must fill in every property
+/// saying "none".
+fn named_path(value: Option<&Value>) -> Option<&str> {
+    value.and_then(Value::as_str).filter(|p| !p.is_empty())
+}
+
 /// The file each step targets, in first-appearance order. A step's own `path` wins; a step with
 /// none uses the call's top-level `path`.
 fn plan(args: &Value) -> Result<Vec<(String, Vec<EditStep>)>, ToolError> {
@@ -18,7 +24,7 @@ fn plan(args: &Value) -> Result<Vec<(String, Vec<EditStep>)>, ToolError> {
     if items.is_empty() {
         return Err(ToolError::Failed("`edits` is empty".to_string()));
     }
-    let default_path = args.get("path").and_then(Value::as_str);
+    let default_path = named_path(args.get("path"));
     let mut files: Vec<(String, Vec<EditStep>)> = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let (Some(old), Some(new)) = (
@@ -29,9 +35,7 @@ fn plan(args: &Value) -> Result<Vec<(String, Vec<EditStep>)>, ToolError> {
                 "each edit needs string `old` and `new`".to_string(),
             ));
         };
-        let path = item
-            .get("path")
-            .and_then(Value::as_str)
+        let path = named_path(item.get("path"))
             .or(default_path)
             .ok_or_else(|| {
                 ToolError::BadArgs(format!(
@@ -47,6 +51,8 @@ fn plan(args: &Value) -> Result<Vec<(String, Vec<EditStep>)>, ToolError> {
                 .get("replace_all")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            ordered: false,
+            after: None,
         };
         let key: std::path::PathBuf = std::path::Path::new(path).components().collect();
         match files

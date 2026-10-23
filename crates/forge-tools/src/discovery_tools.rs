@@ -170,6 +170,7 @@ impl Tool for SearchTool {
                 },
                 "head_limit": {
                     "type": "integer",
+                    "minimum": 1,
                     "description": "Return at most this many result lines/paths."
                 }
             },

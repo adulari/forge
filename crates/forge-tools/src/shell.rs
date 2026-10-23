@@ -37,7 +37,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 use crate::sandbox::{self, SandboxPolicy};
-use crate::{str_arg, Tool, ToolError};
+use crate::{Tool, ToolError};
 mod background;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
 mod preview;
@@ -215,7 +215,7 @@ impl Tool for ShellTool {
         if let Some(message) = batch::conflicting_args(args, use_pty) {
             return Err(ToolError::BadArgs(message.to_string()));
         }
-        if let Some(list) = args.get("commands") {
+        if let Some(list) = batch::batch_arg(args) {
             let single_only = ["background", "pty", "poll_until_exit_zero"]
                 .into_iter()
                 .find(|key| args.get(*key).and_then(Value::as_bool).unwrap_or(false));
@@ -237,7 +237,11 @@ impl Tool for ShellTool {
                 .run_batch(commands, &cwd, timeout_secs, stop_on_error)
                 .await);
         }
-        let command = str_arg(args, "command")?;
+        let Some(command) = batch::command_arg(args) else {
+            return Err(ToolError::BadArgs(
+                "shell: pass `command`, or a non-empty `commands` list".to_string(),
+            ));
+        };
         // The PTY path can't carry the Landlock sandbox (portable-pty owns the spawn). Refuse pty
         // when the sandbox is on, otherwise it's a trivial escape hatch (always pass pty:true).
         if use_pty && self.policy.enabled {

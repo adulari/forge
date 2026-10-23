@@ -932,25 +932,31 @@ pub const PATH_ARG_KEYS: &[&str] = &[
 mod path_args;
 pub use path_args::{all_path_args, is_dotenv_template, strip_line_range};
 
+/// The command text of a `shell` call: `command`, or a `commands` batch joined with newlines.
+/// Permission rules, auto-mode risk and the other shell-aware checks read this, so every entry of
+/// a batch is judged exactly like the lines of one multi-line command. A blank `command` next to a
+/// non-empty batch is a placeholder, not a command (the tool runs the batch), so the batch is what
+/// gets judged.
+pub fn shell_command_text(args: &serde_json::Value) -> Option<String> {
+    let command = args.get("command").and_then(serde_json::Value::as_str);
+    let entries: Vec<&str> = args
+        .get("commands")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    match command {
+        Some(command) if !command.trim().is_empty() || entries.is_empty() => {
+            Some(command.to_string())
+        }
+        _ => (!entries.is_empty()).then(|| entries.join("\n")),
+    }
+}
+
 /// Extract a tool call's target file path from any of the known [`PATH_ARG_KEYS`]. Returns the
 /// first present string value, or `None` if the args carry no recognizable path key (e.g. a shell
 /// call keyed on `command`, or a tool that takes no path).
-/// The command text of a `shell` call: `command`, or a `commands` batch joined with newlines.
-/// Permission rules, auto-mode risk and the other shell-aware checks read this, so every entry of
-/// a batch is judged exactly like the lines of one multi-line command.
-pub fn shell_command_text(args: &serde_json::Value) -> Option<String> {
-    if let Some(command) = args.get("command").and_then(serde_json::Value::as_str) {
-        return Some(command.to_string());
-    }
-    let entries: Vec<&str> = args
-        .get("commands")?
-        .as_array()?
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .collect();
-    (!entries.is_empty()).then(|| entries.join("\n"))
-}
-
 pub fn extract_path_arg(args: &serde_json::Value) -> Option<&str> {
     PATH_ARG_KEYS
         .iter()
@@ -1714,5 +1720,28 @@ mod tests {
             .with_fractions(fr)
             .with_paces(pc);
         assert!((q.effective_fraction_for("claude-cli") - 0.35).abs() < 1e-9);
+    }
+    #[test]
+    fn shell_command_text_judges_what_the_shell_tool_will_run() {
+        use serde_json::json;
+        let text = |args| shell_command_text(&args);
+        assert_eq!(text(json!({ "command": "ls" })).as_deref(), Some("ls"));
+        assert_eq!(
+            text(json!({ "commands": ["ls", "pwd"] })).as_deref(),
+            Some("ls\npwd")
+        );
+        // A placeholder next to the real request is not what runs.
+        assert_eq!(
+            text(json!({ "command": "", "commands": ["rm -rf x", "ls"] })).as_deref(),
+            Some("rm -rf x\nls"),
+            "a blank command must not hide the batch from the permission rules"
+        );
+        assert_eq!(
+            text(json!({ "command": "ls", "commands": [] })).as_deref(),
+            Some("ls")
+        );
+        assert_eq!(text(json!({ "command": "" })).as_deref(), Some(""));
+        assert_eq!(text(json!({ "commands": [] })), None);
+        assert_eq!(text(json!({})), None);
     }
 }

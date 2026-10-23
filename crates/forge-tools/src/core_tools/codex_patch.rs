@@ -24,8 +24,19 @@ enum CodexOp {
     Update {
         path: String,
         move_to: Option<String>,
-        hunks: Vec<(String, String)>,
+        hunks: Vec<Hunk>,
     },
+}
+
+/// One change inside an `Update File` section: `old` becomes `new`.
+#[derive(Debug)]
+struct Hunk {
+    old: String,
+    new: String,
+    /// The lines this hunk comes after, when the patch says so: its `@@ <line>` header, or a chunk
+    /// of nothing but context lines in front of it. Codex applies chunks in file order, so with
+    /// this the hunk lands on the first match after those lines instead of failing as ambiguous.
+    after: Option<String>,
 }
 
 /// Whether `patch` is the Codex envelope rather than a unified diff — checked before anything
@@ -105,18 +116,40 @@ fn parse(patch: &str) -> Result<Vec<CodexOp>, String> {
 }
 
 /// Parse the `@@`-delimited hunks of one `Update File` section starting at `start`, returning
-/// them as `(old, new)` text pairs plus the index just past the section.
-fn parse_update_hunks(lines: &[&str], start: usize) -> (Vec<(String, String)>, usize) {
+/// them plus the index just past the section.
+///
+/// A chunk that has no `-`/`+` line changes nothing, so it is not a hunk. Codex still reads it as
+/// a position: the next chunk is applied after it. That is kept as the next hunk's `after`, as is
+/// the text of a `@@ <line>` header; a context-only chunk that nothing follows is dropped.
+fn parse_update_hunks(lines: &[&str], start: usize) -> (Vec<Hunk>, usize) {
     let mut hunks = Vec::new();
     let mut old: Vec<&str> = Vec::new();
     let mut new: Vec<&str> = Vec::new();
+    let mut header: Option<String> = None;
+    let mut scope: Option<String> = None;
     let mut i = start;
     let mut started = false;
 
-    let flush = |old: &mut Vec<&str>, new: &mut Vec<&str>, hunks: &mut Vec<(String, String)>| {
+    let flush = |old: &mut Vec<&str>,
+                 new: &mut Vec<&str>,
+                 header: &mut Option<String>,
+                 scope: &mut Option<String>,
+                 hunks: &mut Vec<Hunk>| {
         if !old.is_empty() || !new.is_empty() {
-            hunks.push((old.join("\n"), new.join("\n")));
+            if old == new {
+                *scope = Some(old.join("\n"));
+            } else {
+                hunks.push(Hunk {
+                    old: old.join("\n"),
+                    new: new.join("\n"),
+                    after: header.take().or_else(|| scope.take()),
+                });
+                *scope = None;
+            }
+        } else if let Some(text) = header.take() {
+            *scope = Some(text);
         }
+        *header = None;
         old.clear();
         new.clear();
     };
@@ -124,11 +157,12 @@ fn parse_update_hunks(lines: &[&str], start: usize) -> (Vec<(String, String)>, u
     while i < lines.len() && !lines[i].starts_with("*** ") {
         let line = lines[i];
         i += 1;
-        if line.starts_with("@@") {
+        if let Some(rest) = line.strip_prefix("@@") {
             if started {
-                flush(&mut old, &mut new, &mut hunks);
+                flush(&mut old, &mut new, &mut header, &mut scope, &mut hunks);
             }
             started = true;
+            header = Some(rest.trim().to_string()).filter(|text| !text.is_empty());
             continue;
         }
         started = true;
@@ -145,7 +179,7 @@ fn parse_update_hunks(lines: &[&str], start: usize) -> (Vec<(String, String)>, u
             new.push(line);
         }
     }
-    flush(&mut old, &mut new, &mut hunks);
+    flush(&mut old, &mut new, &mut header, &mut scope, &mut hunks);
     (hunks, i)
 }
 
@@ -218,7 +252,13 @@ pub(super) async fn apply(patch: &str, cwd: &Path) -> Result<String, ToolError> 
                 move_to,
                 hunks,
             } => {
-                if hunks.iter().any(|(old, _)| old.is_empty()) {
+                if hunks.is_empty() {
+                    return Err(ToolError::Failed(format!(
+                        "apply_patch: {path} has no `-` or `+` lines, only context, so nothing \
+                         changes"
+                    )));
+                }
+                if hunks.iter().any(|hunk| hunk.old.is_empty()) {
                     return Err(ToolError::Failed(format!(
                         "apply_patch: {path} has a hunk with no context/removed lines to anchor \
                          on — a pure insertion needs at least one unchanged surrounding line"
@@ -237,11 +277,13 @@ pub(super) async fn apply(patch: &str, cwd: &Path) -> Result<String, ToolError> 
                 let steps: Vec<EditStep> = hunks
                     .into_iter()
                     .enumerate()
-                    .map(|(k, (old, new))| EditStep {
+                    .map(|(k, hunk)| EditStep {
                         number: k + 1,
-                        old,
-                        new,
+                        old: hunk.old,
+                        new: hunk.new,
                         replace_all: false,
+                        ordered: true,
+                        after: hunk.after,
                     })
                     .collect();
                 let hunk_count = steps.len();
@@ -332,8 +374,9 @@ mod tests {
             CodexOp::Update { path, hunks, .. } => {
                 assert_eq!(path, "f.rs");
                 assert_eq!(hunks.len(), 1);
-                assert_eq!(hunks[0].0, "fn a() {\n    old();\n}");
-                assert_eq!(hunks[0].1, "fn a() {\n    new();\n}");
+                assert_eq!(hunks[0].old, "fn a() {\n    old();\n}");
+                assert_eq!(hunks[0].new, "fn a() {\n    new();\n}");
+                assert_eq!(hunks[0].after, None);
             }
             _ => panic!("expected an Update op"),
         }
@@ -441,4 +484,229 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+    const TWO_FUNCTIONS: &str = "fn first() {\n    body();\n}\n\nfn second() {\n    body();\n}\n";
+
+    #[test]
+    fn a_context_only_chunk_scopes_the_next_hunk_and_is_not_a_hunk() {
+        let patch = "*** Begin Patch\n*** Update File: f.rs\n@@\n fn second() {\n@@\n-    body();\n+    other();\n*** End Patch\n";
+        let ops = parse(patch).unwrap();
+        match &ops[0] {
+            CodexOp::Update { hunks, .. } => {
+                assert_eq!(hunks.len(), 1, "the context-only chunk is no hunk");
+                assert_eq!(hunks[0].after.as_deref(), Some("fn second() {"));
+            }
+            _ => panic!("expected an Update op"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_hunk_after_a_context_only_chunk_lands_on_the_first_match_after_it() {
+        let dir = tmp("scope");
+        write(&dir, "f.rs", TWO_FUNCTIONS);
+        // `    body();` occurs twice, so on its own the hunk is ambiguous; after `fn second() {` it is not.
+        let patch = "*** Begin Patch\n*** Update File: f.rs\n@@\n fn second() {\n@@\n-    body();\n+    other();\n*** End Patch\n";
+        let out = apply(patch, &dir).await;
+        assert!(out.is_ok(), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "fn first() {\n    body();\n}\n\nfn second() {\n    other();\n}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_at_header_line_scopes_its_hunk_the_same_way() {
+        let dir = tmp("header");
+        write(&dir, "f.rs", TWO_FUNCTIONS);
+        let patch = "*** Begin Patch\n*** Update File: f.rs\n@@ fn second() {\n-    body();\n+    other();\n*** End Patch\n";
+        let out = apply(patch, &dir).await;
+        assert!(out.is_ok(), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "fn first() {\n    body();\n}\n\nfn second() {\n    other();\n}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_anchor_that_is_not_in_the_file_does_not_stop_a_hunk_that_would_apply() {
+        let dir = tmp("noanchor");
+        write(&dir, "f.rs", "fn only() {\n    body();\n}\n");
+        let patch = "*** Begin Patch\n*** Update File: f.rs\n@@ fn gone() {\n-    body();\n+    other();\n*** End Patch\n";
+        let out = apply(patch, &dir).await;
+        assert!(out.is_ok(), "{out:?}");
+        assert!(std::fs::read_to_string(dir.join("f.rs"))
+            .unwrap()
+            .contains("other();"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_trailing_context_only_chunk_is_ignored() {
+        let dir = tmp("trailing");
+        write(&dir, "f.rs", "fn a() {\n    old();\n}\n\nfn b() {}\n");
+        let patch = "*** Begin Patch\n*** Update File: f.rs\n@@\n-    old();\n+    new();\n@@\n fn b() {}\n*** End Patch\n";
+        let out = apply(patch, &dir).await;
+        assert!(out.is_ok(), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.rs")).unwrap(),
+            "fn a() {\n    new();\n}\n\nfn b() {}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_patch_of_only_context_says_so_instead_of_claiming_an_identical_edit() {
+        let dir = tmp("onlyctx");
+        write(&dir, "f.rs", "fn a() {}\n");
+        let patch = "*** Begin Patch\n*** Update File: f.rs\n@@\n fn a() {}\n*** End Patch\n";
+        let err = apply(patch, &dir).await.unwrap_err().to_string();
+        assert!(err.contains("only context"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// The patch `gpt-6-luna` sent for the first edit of the b01 benchmark task (stockctl, a long
+    /// multi-feature change to `src/cli.rs`), replayed on the task's original file. Its fourth chunk
+    /// names a closing `}` that occurs dozens of times; the patch was refused as ambiguous.
+    #[tokio::test]
+    async fn a_recorded_model_patch_with_a_bare_closing_brace_chunk_applies() {
+        let dir = tmp("b01-replay");
+        write(&dir, "cli.rs", CLI_RS);
+        let patch = B01_PATCH.replace("src/cli.rs", "cli.rs");
+        let out = apply(&patch, &dir).await;
+        assert!(out.is_ok(), "{out:?}");
+        let updated = std::fs::read_to_string(dir.join("cli.rs")).unwrap();
+        let export_at = updated.find("fn cmd_export").expect("cmd_export added");
+        let list_at = updated.find("fn cmd_list").unwrap();
+        let summary_at = updated.find("fn cmd_summary").unwrap();
+        assert!(
+            list_at < export_at && export_at < summary_at,
+            "cmd_export lands between cmd_list and cmd_summary, after cmd_list's closing brace"
+        );
+        assert!(
+            updated.contains("}\n\nfn cmd_export"),
+            "after the function's own `}}`, not one nested inside it:\n{updated}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const CLI_RS: &str = r####"//! Argument handling for the `stockctl` binary.
+
+use std::io::Write;
+
+use crate::model::Item;
+use crate::{csv, report};
+
+const USAGE: &str = "usage: stockctl <list|summary> <file>";
+
+/// Runs the CLI and returns the process exit code.
+pub fn run(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("list") => cmd_list(&args[1..], out, err),
+        Some("summary") => cmd_summary(&args[1..], out, err),
+        Some("--help") | Some("-h") => {
+            let _ = writeln!(out, "{USAGE}");
+            0
+        }
+        Some(other) => {
+            let _ = writeln!(err, "stockctl: unknown command `{other}`\n{USAGE}");
+            2
+        }
+        None => {
+            let _ = writeln!(err, "{USAGE}");
+            2
+        }
+    }
+}
+
+fn load(path: &str) -> Result<Vec<Item>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    csv::parse_items(&text).map_err(|e| format!("{path}: {e}"))
+}
+
+fn cmd_list(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let [path] = args else {
+        let _ = writeln!(err, "stockctl list: expected exactly one file\n{USAGE}");
+        return 2;
+    };
+    match load(path) {
+        Ok(items) => {
+            let _ = write!(out, "{}", report::list(&items));
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(err, "stockctl: {e}");
+            1
+        }
+    }
+}
+
+fn cmd_summary(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+    let [path] = args else {
+        let _ = writeln!(err, "stockctl summary: expected exactly one file\n{USAGE}");
+        return 2;
+    };
+    match load(path) {
+        Ok(items) => {
+            let _ = write!(out, "{}", report::summary(&items));
+            0
+        }
+        Err(e) => {
+            let _ = writeln!(err, "stockctl: {e}");
+            1
+        }
+    }
+}
+"####;
+
+    const B01_PATCH: &str = r####"*** Begin Patch
+*** Update File: src/cli.rs
+@@
+-const USAGE: &str = "usage: stockctl <list|summary> <file>";
++const USAGE: &str = "usage: stockctl <list|summary> <file> | stockctl export <file> --format <csv|json>";
+@@
+         Some("summary") => cmd_summary(&args[1..], out, err),
++        Some("export") => cmd_export(&args[1..], out, err),
+@@
+ fn cmd_list(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
+-    let [path] = args else {
+-        let _ = writeln!(err, "stockctl list: expected exactly one file\n{USAGE}");
++    let (path, min_qty) = match args {
++        [path] => (path.as_str(), None),
++        [path, flag, value] if flag == "--min-qty" => match value.parse::<u32>() {
++            Ok(n) => (path.as_str(), Some(n)),
++            Err(_) => { let _ = writeln!(err, "stockctl list: invalid minimum quantity `{value}`\n{USAGE}"); return 2; }
++        },
++        _ => {
++            let _ = writeln!(err, "stockctl list: expected <file> [--min-qty N]\n{USAGE}");
++            return 2;
++        }
++    };
+-        return 2;
+-    };
+     match load(path) {
+         Ok(items) => {
+-            let _ = write!(out, "{}", report::list(&items));
++            let filtered: Vec<Item> = items.into_iter().filter(|i| min_qty.is_none_or(|n| i.qty >= n)).collect();
++            let _ = write!(out, "{}", report::list(&filtered));
+@@
+ }
++
++fn cmd_export(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i32 {
++    let [path, flag, format] = args else {
++        let _ = writeln!(err, "stockctl export: expected <file> --format <csv|json>\n{USAGE}");
++        return 2;
++    };
++    if flag != "--format" { let _ = writeln!(err, "stockctl export: expected --format <csv|json>\n{USAGE}"); return 2; }
++    if !["csv", "json"].contains(&format.as_str()) { let _ = writeln!(err, "stockctl export: unsupported format `{format}`; supported formats: csv, json"); return 2; }
++    match load(path) {
++        Ok(items) => { let _ = write!(out, "{}", if format == "csv" { report::export_csv(&items) } else { report::export_json(&items) }); 0 }
++        Err(e) => { let _ = writeln!(err, "stockctl: {e}"); 1 }
++    }
++}
+@@
+-            let _ = write!(out, "{}", report::summary(&items));
++            let mut text = report::summary(&items);
++            text.push_str(&report::categories(&items));
++            let _ = write!(out, "{text}");
+*** End Patch"####;
 }

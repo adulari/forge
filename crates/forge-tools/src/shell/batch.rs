@@ -16,10 +16,35 @@ const MIN_ENTRY_BUDGET: usize = 2 * 1024;
 /// Exit code reported for an entry that timed out (the `timeout(1)` convention).
 const TIMED_OUT_CODE: i32 = 124;
 
+/// The `command` argument when it holds a command. A model that has to fill in every property
+/// sends `""` for the one it is not using.
+pub(super) fn command_arg(args: &Value) -> Option<&str> {
+    args.get("command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.trim().is_empty())
+}
+
+/// The `commands` argument when it asks for a batch. `null` and `[]` are how a model that has to
+/// fill in every property says "no batch", and a one-entry list repeating `command` is that one
+/// command said twice; none of the three is a second request.
+pub(super) fn batch_arg(args: &Value) -> Option<&Value> {
+    let list = args.get("commands")?;
+    let entries = match list {
+        Value::Null => return None,
+        Value::Array(entries) => entries.as_slice(),
+        _ => return Some(list),
+    };
+    match (command_arg(args), entries) {
+        (_, []) => None,
+        (Some(command), [only]) if only.as_str().map(str::trim) == Some(command.trim()) => None,
+        _ => Some(list),
+    }
+}
+
 /// A contradictory combination of arguments, as an error message.
 pub(super) fn conflicting_args(args: &Value, use_pty: bool) -> Option<&'static str> {
     let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
-    if args.get("commands").is_some() && args.get("command").is_some() {
+    if command_arg(args).is_some() && batch_arg(args).is_some() {
         Some("shell: pass either `command` or `commands`, not both")
     } else if flag("background") && flag("poll_until_exit_zero") {
         Some("shell: background and poll_until_exit_zero cannot be combined")
@@ -244,5 +269,87 @@ mod tests {
         let fail_len = out.len() - out.find("── [2]").unwrap();
         assert!(fail_len > pass_len, "pass {pass_len} fail {fail_len}");
         assert!(out.len() <= MODEL_BUDGET + 512);
+    }
+    #[tokio::test]
+    async fn an_empty_commands_list_next_to_command_is_just_the_command() {
+        // The shape a model that must fill in every property sends: it used to be rejected with
+        // "pass either `command` or `commands`, not both".
+        for placeholder in [json!([]), Value::Null] {
+            let out = tool()
+                .run(&json!({ "command": "echo single", "commands": placeholder }))
+                .await
+                .unwrap();
+            assert!(out.starts_with("shell: exit 0 in "), "{out}");
+            assert!(out.contains("single") && !out.contains("── [1]"), "{out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_command_next_to_a_batch_is_just_the_batch() {
+        for placeholder in ["", "  "] {
+            let out = tool()
+                .run(&json!({ "command": placeholder, "commands": ["echo one", "echo two"] }))
+                .await
+                .unwrap();
+            assert!(out.lines().next().unwrap().ends_with("(2/2 ok)"), "{out}");
+            assert!(out.contains("── [2] echo two"), "{out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_that_repeats_command_is_that_one_command() {
+        let out = tool()
+            .run(&json!({ "command": "echo once", "commands": ["echo once"] }))
+            .await
+            .unwrap();
+        assert!(out.starts_with("shell: exit 0 in "), "{out}");
+        assert!(!out.contains("── [1]"), "one command, not a batch: {out}");
+    }
+
+    #[tokio::test]
+    async fn two_different_requests_are_still_a_conflict() {
+        let err = tool()
+            .run(&json!({ "command": "echo a", "commands": ["echo b"] }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("either `command` or `commands`, not both"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_command_at_all_names_what_to_pass() {
+        for args in [
+            json!({}),
+            json!({ "command": "", "commands": [] }),
+            json!({ "commands": [] }),
+        ] {
+            let err = tool().run(&args).await.unwrap_err().to_string();
+            assert!(
+                err.contains("pass `command`, or a non-empty `commands` list"),
+                "{err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_other_placeholders_a_strict_model_sends_change_nothing() {
+        let out = tool()
+            .run(&json!({
+                "command": "echo plain",
+                "commands": [],
+                "background": false,
+                "pty": false,
+                "poll_until_exit_zero": false,
+                "stop_on_error": true,
+                "poll_interval_secs": 5,
+                "timeout_secs": 120
+            }))
+            .await
+            .unwrap();
+        assert!(out.starts_with("shell: exit 0 in "), "{out}");
+        assert!(out.contains("plain"), "{out}");
     }
 }

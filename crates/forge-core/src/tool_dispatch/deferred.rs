@@ -57,6 +57,38 @@ impl Session {
         self.route_external_mcp(inner)
     }
 
+    /// [`Self::resolve_deferred_call`], with the placeholder values a model that must fill in every
+    /// property sends for the optional ones it is not using (`commands: []`, `path: ""`,
+    /// `timeout_secs: 0`) removed from the arguments, so the permission rules, hooks, loop guards
+    /// and the tool all see the call the model meant. The transcript keeps what the model sent: it
+    /// is replayed as the provider produced it, and a request that differs from the response's own
+    /// items cannot reuse the previous one.
+    pub(crate) fn resolve_model_call(&self, call: &forge_types::ToolCall) -> forge_types::ToolCall {
+        let mut resolved = self.resolve_deferred_call(call);
+        resolved.args = self.normalized_call_args(&resolved.name, &resolved.args);
+        resolved
+    }
+
+    /// `args` against the schema of the tool `name` (a registry tool or a core-owned one).
+    /// External MCP tools keep their arguments as sent: their schemas are the server's, and an
+    /// empty string there can be a real value.
+    fn normalized_call_args(&self, name: &str, args: &serde_json::Value) -> serde_json::Value {
+        if !args.is_object() || self.mcp.as_ref().is_some_and(|m| m.knows_tool(name)) {
+            return args.clone();
+        }
+        if self.tools.get(name).is_some() {
+            return self.tools.normalize_args(name, args);
+        }
+        match self
+            .full_tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == name)
+        {
+            Some(spec) => forge_tools::normalize_args(&spec.schema, args),
+            None => args.clone(),
+        }
+    }
+
     /// `inner` unchanged unless it names an external `server__tool` the registry does not hold;
     /// that becomes an `mcp_call`. Shared with `run_code`, whose scripts call tools by bare name.
     pub(crate) fn route_external_mcp(&self, inner: forge_types::ToolCall) -> forge_types::ToolCall {

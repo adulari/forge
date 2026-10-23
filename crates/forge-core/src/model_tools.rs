@@ -26,7 +26,7 @@ impl Session {
         // the assistant message the model sent.
         let resolved: Vec<forge_types::ToolCall> = calls
             .iter()
-            .map(|call| self.resolve_deferred_call(call))
+            .map(|call| self.resolve_model_call(call))
             .collect();
         let calls = resolved.as_slice();
         // Doom-loop guard: if the model emits the exact same tool call(s) several steps running,

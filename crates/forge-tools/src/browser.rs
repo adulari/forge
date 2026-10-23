@@ -166,10 +166,10 @@ impl Tool for BrowserTool {
                 "accept_language": {"type": "string", "description": "For open: Accept-Language / navigator.language."},
                 "platform": {"type": "string", "description": "For open: navigator.platform, e.g. Win32, MacIntel."},
                 "timezone": {"type": "string", "description": "For open: IANA timezone, e.g. Europe/Amsterdam. Pair with proxy."},
-                "viewport_width": {"type": "integer", "description": "For open: emulated viewport width."},
-                "viewport_height": {"type": "integer", "description": "For open: emulated viewport height."},
+                "viewport_width": {"type": "integer", "minimum": 1, "description": "For open: emulated viewport width."},
+                "viewport_height": {"type": "integer", "minimum": 1, "description": "For open: emulated viewport height."},
                 "mobile": {"type": "boolean", "description": "For open: present as a mobile device (needs viewport)."},
-                "max_chars": {"type": "integer", "description": "Cap for html output."}
+                "max_chars": {"type": "integer", "minimum": 1, "description": "Cap for html output."}
             },
             "required": ["action"]
         })
@@ -464,7 +464,7 @@ impl Tool for BrowserNetworkTool {
                     "description": "Only requests that carried a body — the fast path to \
                                     \"what did this form submit\"."
                 },
-                "limit": {"type": "integer", "description": "Newest N matches. Default 50."},
+                "limit": {"type": "integer", "minimum": 1, "description": "Newest N matches. Default 50."},
                 "profile": {"type": "string"}
             },
             "required": ["action"]

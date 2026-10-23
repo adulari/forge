@@ -88,8 +88,8 @@ impl Tool for ProxyTool {
                     "enum": ["start", "status", "intercept", "intercept_clear", "replay", "stop"],
                     "description": "What to do."
                 },
-                "port": {"type": "integer", "description": "For start. Default 8080."},
-                "max_body": {"type": "integer", "description": "For start: per-body capture cap in bytes (default 131072). Raise it when a payload you need comes back clipped."},
+                "port": {"type": "integer", "minimum": 1, "description": "For start. Default 8080."},
+                "max_body": {"type": "integer", "minimum": 1, "description": "For start: per-body capture cap in bytes (default 131072). Raise it when a payload you need comes back clipped."},
                 "extra_addon": {"type": "string", "description": "For start: path to your own mitmproxy addon (.py), loaded ALONGSIDE the built-in capture addon for full custom control (decode a wire format, sign a request, etc.). Your file is never overwritten; the built-in addon is."},
                 "request_id": {"type": "string", "description": "For replay — the id from proxy_network list."},
                 "method": {"type": "string", "description": "For replay: override the HTTP method."},
@@ -296,7 +296,7 @@ impl Tool for ProxyNetworkTool {
                 "host": {"type": "string", "description": "Case-insensitive host filter."},
                 "with_body": {"type": "boolean", "description": "Only requests that carried a body."},
                 "failed": {"type": "boolean", "description": "Only requests that failed or were blocked."},
-                "limit": {"type": "integer", "description": "Max rows for list. Default 50, newest last."}
+                "limit": {"type": "integer", "minimum": 1, "description": "Max rows for list. Default 50, newest last."}
             },
             "required": ["action"]
         })

@@ -449,7 +449,7 @@ impl ForgeMcp {
 
         // PreToolUse hooks (hooks.md): fire before the permission gate so user hooks can block
         // or rewrite calls on the CLI-bridge path the same way they do on the direct path.
-        let mut args = args;
+        let mut args = forge_tools::normalize_args(&tool.schema(), &args);
         let mut note_prefix = String::new();
         if !self.config.hooks.is_empty() {
             let payload = bridge_hook_payload(&name, &args, None);
