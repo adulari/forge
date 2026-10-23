@@ -79,6 +79,7 @@ impl App {
         }
         self.flush_notice_run();
         let in_turn = self.transcript_ui.turn_open;
+        self.transcript_ui.model_unavailable = notice::says_pick_another_model(text);
         let mut rows = notice::notice_lines(NoticeKind::Err, in_turn, text);
         if let Some(fix) = notice::fix_hint(text) {
             rows.push(notice::next_step(fix, in_turn));
@@ -107,6 +108,7 @@ impl App {
         }
         let ui = &mut self.transcript_ui;
         ui.turn_open = false;
+        ui.model_unavailable = false;
         ui.cooling = None;
         ui.segments.clear();
         ui.tools_used = 0;

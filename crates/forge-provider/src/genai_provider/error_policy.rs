@@ -234,6 +234,51 @@ pub(super) fn is_auth_config_failure(text: &str) -> bool {
         || l.contains("requires api key")
 }
 
+/// A failure to reach the endpoint at all (refused, unresolved, reset before a response), as
+/// opposed to an answer from it.
+pub(super) fn is_transport_failure(text: &str) -> bool {
+    let l = text.to_lowercase();
+    [
+        "error sending request",
+        "connection refused",
+        "tcp connect error",
+        "error trying to connect",
+        "dns error",
+        "failed to lookup address",
+        "could not connect",
+    ]
+    .iter()
+    .any(|marker| l.contains(marker))
+}
+
+/// An id with no `provider::` prefix that matches none of genai's name patterns (`gpt-*`,
+/// `claude-*`, `gemini-*`, …). genai sends such an id to its Ollama fallback, which Forge points at
+/// the local Ollama server.
+pub fn falls_back_to_local_ollama(model: &str) -> bool {
+    use genai::adapter::AdapterKind;
+    !model.contains("::") && matches!(AdapterKind::from_model(model), Ok(AdapterKind::Ollama))
+}
+
+/// A bare model id nothing recognises, whose request found no server: the id is wrong, not the
+/// network. Waiting does not help (the pinned-outage backoff would wait seconds before the second
+/// identical failure), so this is the same permanent "this model is not callable" verdict a
+/// provider's own 404 gets. Every other error passes through unchanged.
+pub(crate) fn explain_unrecognized_model(model: &str, error: ProviderError) -> ProviderError {
+    match error {
+        ProviderError::Unavailable(message)
+            if falls_back_to_local_ollama(model) && is_transport_failure(&message) =>
+        {
+            let host =
+                std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".into());
+            tracing::warn!(model, %message, "unrecognized model id fell back to local Ollama, which did not answer");
+            ProviderError::NoModelAccess(format!(
+                "'{model}' is not a model id Forge recognizes, and no local Ollama answered at {host}"
+            ))
+        }
+        other => other,
+    }
+}
+
 /// A 429 whose quota is per-day or flat-out zero (a free-tier model that's disabled, like
 /// Gemini's `limit: 0`). The server still hands back a tiny `retryDelay` (e.g. 7s), but retrying
 /// in 7s just fails again and thrashes — so we drop that hint and let the longer default bench
@@ -417,6 +462,18 @@ pub(super) fn is_model_access_failure(text: &str) -> bool {
         // OpenRouter rejects an unrecognised id with "<id> is not a valid model ID".
         "is not a valid model",
         "invalid model id",
+        // The same refusal in other providers' words: DeepSeek's 400 `Model Not Exist`, Mistral's
+        // `Invalid model: x`, Gemini's `models/x is not found for API version v1beta`, Ollama's
+        // `model "x" not found, try pulling it first`, Together's `Unable to access model x`, xAI's
+        // `The model x does not exist or your team ...` and Azure's `DeploymentNotFound`.
+        "model not exist",
+        "invalid model:",
+        "is not found for api version",
+        "not found, try pulling it first",
+        "unable to access model",
+        "model_not_available",
+        "does not exist or your team",
+        "deploymentnotfound",
     ];
     if MARKERS.iter().any(|m| l.contains(m)) {
         return true;
@@ -553,6 +610,10 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
         // No-credentials / resolver failure surfaced via the streaming path — permanent (excluded),
         // not a transient outage.
         ProviderError::Auth(message)
+    } else if is_transport_failure(text) {
+        // The stream wrapper's first line only names the model; the cause is what says the endpoint
+        // never answered, and the caller needs it to tell "unreachable" from "refused".
+        ProviderError::Unavailable(short(&format!("could not connect: {}", text.trim())))
     } else {
         // A dropped/5xx stream — treat as a transient provider problem worth failing over.
         ProviderError::Unavailable(message)
@@ -662,3 +723,6 @@ pub(super) fn parse_secs(s: &str) -> Option<f64> {
     }
     num.parse::<f64>().ok()
 }
+
+#[cfg(test)]
+mod tests;

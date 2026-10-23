@@ -3,7 +3,7 @@
 use super::*;
 use crate::failure_verdict::{
     any_credentials_available, classify_attempt_failure, failure_verdict, in_set_advance_reason,
-    rejection_warning,
+    pinned_failure_error, rejected_model_error,
 };
 use crate::model_stream::handle_stream_event;
 
@@ -434,6 +434,7 @@ pub(super) async fn request_provider_response(
                 // so backing off would burn the whole outage budget on a lost cause.
                 let transient_outage =
                     !e.is_permanent() && !e.is_rate_limited() && !e.is_context_overflow();
+                let attended = session.presenter.is_attended();
                 match failover_policy(
                     pinned_turn,
                     session.config.mesh.pin_failover,
@@ -546,9 +547,7 @@ pub(super) async fn request_provider_response(
                         let rejected = fast && (repeated || unverified);
                         let reject_advance = rejected && !chain.as_slice().is_empty();
                         if rejected && !reject_advance {
-                            let warning = rejection_warning(active_model, &message, repeated);
-                            session.presenter.emit(PresenterEvent::Warning(warning));
-                            return Err(e.into());
+                            return Err(rejected_model_error(active_model, &e, repeated, attended));
                         }
                         let attempt = *pinned_outage_attempts + 1;
                         // Cheap jitter without a rand dependency: sub-second wall-clock
@@ -616,7 +615,7 @@ pub(super) async fn request_provider_response(
                         // outage with `mesh.pin_outage_wait_secs = 0` (outage backoff
                         // disabled), can't serve this turn, and switching models is
                         // forbidden: surface the real error.
-                        return Err(e.into());
+                        return Err(pinned_failure_error(active_model, e, attended));
                     }
                 }
                 // Rate-limit on the current (best-ranked) model with a SHORT reset: WAIT for

@@ -35,7 +35,10 @@ The result (`Done`, the stream-json `result` event) is emitted before any option
 
 A pinned id that no discovered catalog lists gets a startup warning. If the provider then refuses
 it quickly, the turn fails on that first refusal instead of waiting the first outage backoff step
-(~5 s) for a second identical one (`failure_verdict::rejection_warning`).
+(~5 s) for a second identical one (`failure_verdict::rejected_model_error`). A provider's explicit
+"no such model" answer is permanent and fails the turn on the first call with no wait at all, and
+so does a bare id nothing recognises when no local Ollama answers for it (S11: 5.4 to 6.0 s to the
+error, now about 0.26 s). See [tui-errors-and-exit.md](tui-errors-and-exit.md).
 
 ## The tool server's handshake
 

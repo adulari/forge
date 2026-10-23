@@ -398,6 +398,10 @@ pub enum CoreError {
     /// A tool aimed at a previous host's path after the session moved (host_move.rs).
     #[error("{0}")]
     StaleHostPath(String),
+    /// A pinned model that will not be served, in the one plain line the person reads: which model,
+    /// why in a few words, and `/model` as the way out. The provider's own wording is in the log.
+    #[error("{message}")]
+    ModelUnavailable { model: String, message: String },
     /// Failover walked the whole routed/fallback chain (and any last-resort model) without finding
     /// anything usable. `verdict` is derived from every observed provider failure in the chain;
     /// `last_error` preserves the final provider detail for diagnosis.
@@ -13383,7 +13387,10 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.mesh.pin_outage_wait_secs = 600; // the default budget: must NOT be spent
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
         let events = capture.events.clone();
         session.presenter = Box::new(capture);
         let started = std::time::Instant::now();
@@ -13393,14 +13400,17 @@ mod tests {
             "an identical instant rejection must fail inside the first backoff step, took {:?}",
             started.elapsed()
         );
-        assert!(
-            err.to_string().contains("502"),
-            "the REAL provider error must surface, got: {err}"
+        assert_eq!(
+            err.to_string(),
+            "model 'pin::model' isn't available (its provider rejected it twice). Run /model to pick another.",
+            "one plain line names the model and the way out; the provider text is in the log"
         );
         let events = events.lock().unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rejected this model twice") && w.contains("502"))),
-            "the warning must say the provider rejected the model and quote the error"
+            !events
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("pin_failover"))),
+            "no config jargon stacked above the error"
         );
         assert!(
             !events.iter().any(
@@ -13426,7 +13436,10 @@ mod tests {
         let (_store, mut session) = fixed_session(provider, router);
         session.config.mesh.pin_outage_wait_secs = 600;
         session.set_unverified_models(vec!["pin::model".to_string()]);
-        let capture = CapturePresenter::default();
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
         let events = capture.events.clone();
         session.presenter = Box::new(capture);
         let started = std::time::Instant::now();
@@ -13436,15 +13449,69 @@ mod tests {
             "must not wait for a second refusal, took {:?}",
             started.elapsed()
         );
-        assert!(
-            err.to_string().contains("502"),
-            "real error surfaces: {err}"
+        assert_eq!(
+            err.to_string(),
+            "model 'pin::model' isn't available (its provider rejected it and no catalog lists it). Run /model to pick another.",
+            "the plain line says why one refusal was enough"
         );
         let events = events.lock().unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("no discovered catalog lists it") && w.contains("502"))),
-            "the warning says why one refusal was enough and quotes the error"
+            !events
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Warning(_))),
+            "nothing stacks above the one line: {events:?}"
         );
+    }
+
+    fn no_model_access(model: &str) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::NoModelAccess(format!("the model `{model}` does not exist"))
+    }
+
+    /// The S11 defect: a pinned id the provider has never heard of took 5 to 6 s to fail (one
+    /// silent outage backoff, then a second identical refusal) and then showed three stacked
+    /// messages in provider and config jargon. A permanent "no such model" answer fails the turn
+    /// on the first call, with one line that names the model and says `/model`.
+    #[tokio::test]
+    async fn a_pinned_model_nobody_serves_fails_at_once_in_one_plain_line() {
+        for (model, why) in [
+            ("ollama::llama-9", "not available on this account"),
+            ("nonexistent-model-xyz", "no provider knows this id"),
+        ] {
+            let provider = Arc::new(EchoProvider {
+                bad: [model.to_string()].into_iter().collect(),
+                err: no_model_access,
+            });
+            let router = Arc::new(PinnedRouter {
+                model: model.into(),
+                fallbacks: vec![],
+            });
+            let (_store, mut session) = fixed_session(provider, router);
+            session.config.mesh.pin_outage_wait_secs = 600;
+            let capture = CapturePresenter {
+                attended: true,
+                ..CapturePresenter::default()
+            };
+            let events = capture.events.clone();
+            session.presenter = Box::new(capture);
+            let started = std::time::Instant::now();
+            let err = session.run_turn("fix the bug").await.unwrap_err();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "no retry and no backoff for a model that does not exist, took {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                err.to_string(),
+                format!("model '{model}' isn't available ({why}). Run /model to pick another.")
+            );
+            let events = events.lock().unwrap();
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, PresenterEvent::Warning(_))),
+                "nothing stacks above the one line: {events:?}"
+            );
+        }
     }
 
     #[tokio::test]

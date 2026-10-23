@@ -272,6 +272,14 @@ impl Session {
         self.unverified_models = models;
     }
 
+    /// Add one id the catalog does not list (`/model <id>` mid-session), so a refusal of it ends
+    /// the turn at once rather than after an outage backoff.
+    pub fn mark_unverified_model(&mut self, model: &str) {
+        if !self.unverified_models.iter().any(|m| m == model) {
+            self.unverified_models.push(model.to_string());
+        }
+    }
+
     /// Attach connected MCP servers (composition root). Their tools become advertisable via
     /// `tool_specs` and callable through `invoke_tool`, gated by the permission broker.
     pub fn set_mcp(&mut self, mcp: Option<Arc<forge_mcp::McpManager>>) {

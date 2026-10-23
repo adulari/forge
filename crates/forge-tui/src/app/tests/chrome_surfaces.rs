@@ -202,6 +202,62 @@ fn a_stop_reason_moves_to_the_border_and_leads_the_hints_with_recovery() {
 }
 
 #[test]
+fn a_turn_that_failed_on_a_missing_model_points_at_model_not_at_resending() {
+    let failed = |message: &str| {
+        let mut app = routed(located());
+        app.apply(PresenterEvent::Error(message.into()));
+        app.apply(PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: forge_types::StopReason::NoOutput,
+        });
+        screen_rows(&app, 120, 24)
+    };
+
+    let rows = failed(
+        "turn failed: model 'x' isn't available (no provider knows this id). Run /model to pick another.",
+    );
+    let top = rows.iter().find(|r| r.starts_with('╭')).unwrap();
+    assert!(
+        top.contains("✗ Model unavailable · Run /model to pick another"),
+        "{top}"
+    );
+    assert!(!top.contains("send the message again"), "{top}");
+    let bottom = rows.iter().find(|r| r.starts_with('╰')).unwrap();
+    assert!(bottom.contains("/model pick another"), "{bottom}");
+    assert!(!bottom.contains("continue resume"), "{bottom}");
+
+    // Any other failed turn keeps the generic recovery.
+    let rows = failed("the provider exploded");
+    let top = rows.iter().find(|r| r.starts_with('╭')).unwrap();
+    assert!(
+        top.contains("No output, the turn failed · send the message again"),
+        "{top}"
+    );
+}
+
+#[test]
+fn the_model_hint_does_not_outlive_the_turn_it_belongs_to() {
+    let mut app = routed(located());
+    app.apply(PresenterEvent::Error(
+        "model 'x' isn't available (not available on this account). Run /model to pick another."
+            .into(),
+    ));
+    app.apply(PresenterEvent::Done {
+        final_text: String::new(),
+        stop_reason: forge_types::StopReason::NoOutput,
+    });
+    app.submit_user("try again");
+    app.apply(PresenterEvent::Error("the provider exploded".into()));
+    app.apply(PresenterEvent::Done {
+        final_text: String::new(),
+        stop_reason: forge_types::StopReason::NoOutput,
+    });
+    let rows = screen_rows(&app, 120, 24);
+    let top = rows.iter().find(|r| r.starts_with('╭')).unwrap();
+    assert!(top.contains("send the message again"), "{top}");
+}
+
+#[test]
 fn hints_drop_from_the_second_to_last_backwards_and_keep_keys_last() {
     let all = vec![
         hint("/", "commands"),

@@ -954,6 +954,7 @@ fn short(s: &str) -> String {
 /// the *streaming* path Forge uses, genai only carries a string, so we scan it. Messages are
 /// shortened (`short`) so a multi-line JSON body never reaches the UI.
 mod error_policy;
+pub use error_policy::falls_back_to_local_ollama;
 use error_policy::*;
 mod bedrock_error;
 
@@ -1023,7 +1024,8 @@ impl Provider for GenAiProvider {
             let mut repeated = false;
             let mut resp = self
                 .complete_attempt(model, messages, tools, opts, on_event, &mut repeated)
-                .await?;
+                .await
+                .map_err(|e| explain_unrecognized_model(model, e))?;
             // Input stays the last attempt's: it is the live context size the gauge shows.
             resp.usage.output_tokens += output_spent;
             let note = if repeated
