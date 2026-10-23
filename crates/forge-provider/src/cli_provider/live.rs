@@ -484,6 +484,7 @@ impl LiveSession {
                     Parsed::ToolFinished { id, ok, summary } => {
                         active_tools.remove(&id);
                         let name = tool_names.get(&id).cloned().unwrap_or_default();
+                        let ok = super::cli_stream::tool_call_succeeded(&name, ok, &summary);
                         on_event(StreamEvent::ToolFinished { name, ok, summary });
                     }
                     Parsed::Usage(u) => data.usage = u,

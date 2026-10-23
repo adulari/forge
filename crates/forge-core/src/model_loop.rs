@@ -578,7 +578,7 @@ impl Session {
                             hit_step_cap = false;
                             break;
                         }
-                    } else if !self.tasks.is_empty() {
+                    } else if !self.tasks.is_empty() && self.turn_did_work(&tools_ran) {
                         // The bridge reports every task Done — but a self-reported status is exactly
                         // what produced the phantom release (claimed merged + tagged; nothing ran).
                         // Require fresh tool-grounded evidence when work changed external state.
@@ -727,10 +727,7 @@ impl Session {
                         }
                     } else if unfinished == 0
                         && !self.tasks.is_empty()
-                        // A question-only turn must not re-verify an all-Done list left over from
-                        // an earlier turn: the gate needs a tool call (or edit) in THIS turn.
-                        && (tools_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
-                            || self.mutations_this_turn > 0)
+                        && self.turn_did_work(&tools_ran)
                     {
                         // Every tracked task reported Done — same completion authority as the bridge:
                         // accept fresh evidence newer than the last mutation, otherwise request a

@@ -31,6 +31,13 @@ pub(crate) enum VerificationObservation {
     Mutation,
     Generic,
     Check(VerificationFamily),
+    /// A `shell` call with a `commands` batch whose entry number `at` (1-based) is the check. The
+    /// batch reports one status for all entries, so whether the check passed or failed has to be
+    /// read from the result ([`VerificationLedger::observe_result`]).
+    BatchCheck {
+        family: VerificationFamily,
+        at: usize,
+    },
 }
 
 /// Outcome-aware evidence for the completion gate. Failed verification families remain unresolved
@@ -45,6 +52,10 @@ pub(crate) struct VerificationLedger {
     /// A test, lint, typecheck or build passed after the latest successful artifact edit. Stricter
     /// than [`Self::verified_since`], which any successful read satisfies.
     checked_since_edit: bool,
+    /// A file tool (not a shell command) changed an artifact this turn. Untracked files that
+    /// appeared without one are what a command left behind (a server's state directory, a
+    /// build), not the model's authorship.
+    authored: bool,
 }
 
 impl VerificationLedger {
@@ -59,6 +70,7 @@ impl VerificationLedger {
                 if ok {
                     self.last_mutation_checkpoint = self.successful_observations;
                     self.checked_since_edit = false;
+                    self.authored = true;
                 }
             }
             VerificationObservation::Generic => {
@@ -75,6 +87,39 @@ impl VerificationLedger {
                     self.unresolved.insert(family);
                 }
             }
+            // Without the result there is no telling which entry failed: a pass is a pass, a
+            // failure proves nothing about the check.
+            VerificationObservation::BatchCheck { family, .. } => {
+                if ok {
+                    self.observe(VerificationObservation::Check(family), true);
+                }
+            }
+        }
+    }
+
+    /// [`Self::observe`] with the tool's result text, which a batched check needs: the batch's
+    /// exit status is its first failure's, so a failing `git diff --check` after a passing test
+    /// run must not read as a failed test.
+    pub(crate) fn observe_result(
+        &mut self,
+        observation: VerificationObservation,
+        ok: bool,
+        result: &str,
+    ) {
+        let VerificationObservation::BatchCheck { family, at } = observation else {
+            return self.observe(observation, ok);
+        };
+        let check = VerificationObservation::Check(family);
+        if ok {
+            return self.observe(check, true);
+        }
+        match batch_failure(result) {
+            // The batch stopped at the check: it failed. Stopped after it: it passed.
+            BatchFailure::StoppedAt(entry) if entry == at => self.observe(check, false),
+            BatchFailure::StoppedAt(entry) if entry > at => self.observe(check, true),
+            BatchFailure::Everything => self.observe(check, false),
+            // Stopped before the check ran, or kept going and one of several failed.
+            _ => {}
         }
     }
 
@@ -86,6 +131,11 @@ impl VerificationLedger {
     /// A real check (not just a read) passed after the latest edit and none is still failing.
     pub(crate) fn checked_since_edit(&self) -> bool {
         self.checked_since_edit && self.unresolved.is_empty()
+    }
+
+    /// A file tool changed an artifact this turn.
+    pub(crate) const fn authored(&self) -> bool {
+        self.authored
     }
 
     /// A check family failed and has not passed since.
@@ -101,6 +151,39 @@ impl VerificationLedger {
                 .collect::<Vec<_>>()
                 .join(", ")
         })
+    }
+}
+
+/// Which entries of a failed `commands` batch failed, from the header its result opens with:
+/// `shell: exit 1 in 353ms (2/3 ok, stopped at #3)`.
+#[derive(Debug, PartialEq, Eq)]
+enum BatchFailure {
+    StoppedAt(usize),
+    /// No entry succeeded, so the check failed too.
+    Everything,
+    Unknown,
+}
+
+fn batch_failure(result: &str) -> BatchFailure {
+    let header = result.lines().next().unwrap_or("");
+    let Some((_, counts)) = header.split_once("ms (") else {
+        return BatchFailure::Unknown;
+    };
+    let number = |text: &str| {
+        text.trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse::<usize>().ok())
+    };
+    if let Some((_, rest)) = counts.split_once("stopped at #") {
+        return number(rest).map_or(BatchFailure::Unknown, BatchFailure::StoppedAt);
+    }
+    let ok = number(counts);
+    let total = counts.split_once('/').and_then(|(_, rest)| number(rest));
+    match (ok, total) {
+        (Some(0), Some(_)) => BatchFailure::Everything,
+        (Some(_), Some(1)) => BatchFailure::StoppedAt(1),
+        _ => BatchFailure::Unknown,
     }
 }
 
@@ -156,17 +239,107 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
     .iter()
     .any(|suffix| name.ends_with(suffix))
     {
-        return VerificationObservation::Mutation;
+        // Sweeping up what a test run left (`__pycache__/`) is not an edit to the work: counting it
+        // as one made every passing check stale, and the model re-verified to clean up again.
+        return if touches_only_run_artifacts(args) {
+            VerificationObservation::Ignore
+        } else {
+            VerificationObservation::Mutation
+        };
     }
     if !name.ends_with("shell") && !name.ends_with("exec_command") {
         return VerificationObservation::Generic;
     }
+    let value = serde_json::from_str::<serde_json::Value>(args).ok();
+    // A `commands` batch runs each entry as its own process, so one entry's pipe or `;` cannot mask
+    // another's exit status, and the batch reports the first failure. Joined into one script it
+    // always looked like a multi-line command with unchecked status, and no batched test run ever
+    // counted as a check.
+    if let Some(entries) = value.as_ref().and_then(shell_batch_entries) {
+        let mut check = None;
+        let mut masked = false;
+        for (index, entry) in entries.into_iter().enumerate() {
+            match classify_command(entry) {
+                VerificationObservation::Check(family) => check = Some((family, index + 1)),
+                VerificationObservation::Ignore => masked = true,
+                _ => {}
+            }
+        }
+        return match (check, masked) {
+            (Some((family, at)), _) => VerificationObservation::BatchCheck { family, at },
+            (None, true) => VerificationObservation::Ignore,
+            (None, false) => VerificationObservation::Generic,
+        };
+    }
+    let command = value
+        .as_ref()
+        .and_then(forge_types::shell_command_text)
+        .unwrap_or_else(|| args.to_owned());
+    classify_command(&command)
+}
 
-    let command = serde_json::from_str::<serde_json::Value>(args)
-        .ok()
-        .and_then(|value| forge_types::shell_command_text(&value))
-        .unwrap_or_else(|| args.to_owned())
-        .to_ascii_lowercase();
+/// The entries of a `shell` call's `commands` batch, when it is one.
+fn shell_batch_entries(args: &serde_json::Value) -> Option<Vec<&str>> {
+    // A blank `command` beside a batch is a placeholder the tool ignores (a model that fills in
+    // every property of the schema), so the batch is what ran.
+    let command = args.get("command").and_then(serde_json::Value::as_str);
+    if command.is_some_and(|command| !command.trim().is_empty()) {
+        return None;
+    }
+    let entries: Vec<&str> = args
+        .get("commands")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    (!entries.is_empty()).then_some(entries)
+}
+
+/// Every path a file tool's arguments name is a build or test-run byproduct, and there is one.
+fn touches_only_run_artifacts(args: &str) -> bool {
+    fn collect<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, inner) in map {
+                    match inner {
+                        serde_json::Value::String(path)
+                            if matches!(key.as_str(), "path" | "file_path" | "from" | "to") =>
+                        {
+                            out.push(path)
+                        }
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                            collect(inner, out)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    match item {
+                        serde_json::Value::String(path) => out.push(path),
+                        other => collect(other, out),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(args) else {
+        return false;
+    };
+    let mut paths = Vec::new();
+    collect(&value, &mut paths);
+    !paths.is_empty()
+        && paths
+            .iter()
+            .all(|path| crate::working_tree::is_run_artifact(path))
+}
+
+/// One shell command line: which family of check it is, and whether its exit status can be
+/// trusted as that check's result.
+fn classify_command(command: &str) -> VerificationObservation {
+    let command = command.to_ascii_lowercase();
     let family = if command.contains("tsc")
         || command.contains("typecheck")
         || command.contains("type-check")
@@ -607,6 +780,172 @@ mod tests {
             ),
             CompletionDecision::AcceptClean
         );
+    }
+
+    #[test]
+    fn a_batched_test_run_is_a_check_like_the_same_commands_called_one_by_one() {
+        // Forge's own `shell` tool takes `commands`; each entry is its own process, so the
+        // entries cannot mask one another's status the way lines of one script can.
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"commands":["cargo build","cargo test -p forge-core"]}"#
+            ),
+            VerificationObservation::BatchCheck {
+                family: VerificationFamily::Test,
+                at: 2
+            }
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"commands":["python3 -m pytest tests/test_scheduler.py","git diff --check && git diff"]}"#
+            ),
+            VerificationObservation::BatchCheck {
+                family: VerificationFamily::Test,
+                at: 1
+            }
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"commands":["git status --short","git diff HEAD"]}"#
+            ),
+            VerificationObservation::Generic
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"commands":["pytest | tail -5","git status --short"]}"#
+            ),
+            VerificationObservation::Ignore,
+            "an entry whose own status is masked by a pipe proves nothing"
+        );
+        assert_eq!(
+            classify_tool("shell", "{\"command\":\"cargo test\\ngit status\"}"),
+            VerificationObservation::Ignore,
+            "lines of one script still share a status"
+        );
+    }
+
+    #[test]
+    fn a_failed_batch_blames_the_check_only_when_the_check_is_what_failed() {
+        let batch =
+            |commands: &str| classify_tool("shell", &format!(r#"{{"commands":{commands}}}"#));
+        let ran = |observation: VerificationObservation, ok: bool, result: &str| {
+            let mut ledger = VerificationLedger::default();
+            ledger.observe_result(observation, ok, result);
+            ledger
+        };
+        let tests_then_diff = batch(r#"["python3 -m unittest","git diff --check"]"#);
+        assert!(ran(tests_then_diff, true, "shell: exit 0 in 90ms (2/2 ok)").checked_since_edit());
+        // The test run passed and the second entry failed: not a failed test.
+        let diff_failed = ran(
+            tests_then_diff,
+            false,
+            "shell: exit 1 in 353ms (1/2 ok, stopped at #2)\n\n── [1] python3 -m unittest",
+        );
+        assert!(!diff_failed.has_failing_check());
+        assert!(diff_failed.checked_since_edit(), "the check ran and passed");
+        // The check itself stopped the batch.
+        let test_failed = ran(
+            tests_then_diff,
+            false,
+            "shell: exit 1 in 90ms (0/2 ok, stopped at #1)\n\n── [1] python3 -m unittest",
+        );
+        assert!(test_failed.has_failing_check());
+        // Stopped before the check ran, or one of several failed with no way to tell which.
+        let build_then_test = batch(r#"["cargo build","cargo test"]"#);
+        assert!(!ran(
+            build_then_test,
+            false,
+            "shell: exit 101 in 62ms (0/2 ok, stopped at #1)"
+        )
+        .checked_since_edit());
+        let build_failed_before_the_tests = ran(
+            build_then_test,
+            false,
+            "shell: exit 101 in 62ms (0/2 ok, stopped at #1)",
+        );
+        assert!(!build_failed_before_the_tests.has_failing_check());
+        let unknown = ran(
+            tests_then_diff,
+            false,
+            "shell: exit 1 in 353ms (2/3 ok)\n\n── [1] python3 -m unittest",
+        );
+        assert!(!unknown.has_failing_check() && !unknown.checked_since_edit());
+        // A batch of one is its own entry; all entries failing includes the check.
+        let single = batch(r#"["cargo test"]"#);
+        assert!(ran(single, false, "shell: exit 101 in 62ms (0/1 ok)").has_failing_check());
+        assert!(ran(tests_then_diff, false, "shell: exit 2 in 40ms (0/2 ok)").has_failing_check());
+        // Callers without the result text: a pass counts, a failure is not blamed.
+        let mut plain = VerificationLedger::default();
+        plain.observe(tests_then_diff, false);
+        assert!(!plain.has_failing_check());
+        plain.observe(tests_then_diff, true);
+        assert!(plain.checked_since_edit());
+    }
+
+    #[test]
+    fn a_blank_command_beside_a_batch_is_a_placeholder() {
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"","commands":["cargo test"],"stop_on_error":true}"#
+            ),
+            VerificationObservation::BatchCheck {
+                family: VerificationFamily::Test,
+                at: 1
+            }
+        );
+        assert_eq!(
+            classify_tool("shell", r#"{"command":"cargo test","commands":[]}"#),
+            VerificationObservation::Check(VerificationFamily::Test)
+        );
+    }
+
+    #[test]
+    fn sweeping_up_test_run_byproducts_does_not_stale_a_passing_check() {
+        let mut ledger = VerificationLedger::default();
+        ledger.observe(classify_tool("edit_file", r#"{"path":"src/a.py"}"#), true);
+        assert!(ledger.authored());
+        ledger.observe(classify_tool("shell", r#"{"command":"pytest"}"#), true);
+        assert!(ledger.checked_since_edit());
+        for cleanup in [
+            r#"{"path":"src/__pycache__/a.cpython-312.pyc"}"#,
+            r#"{"paths":["tests/__pycache__/t.pyc",".pytest_cache/x"]}"#,
+        ] {
+            assert_eq!(
+                classify_tool("delete_file", cleanup),
+                VerificationObservation::Ignore,
+                "{cleanup}"
+            );
+            ledger.observe(classify_tool("delete_file", cleanup), true);
+        }
+        assert!(ledger.checked_since_edit(), "the check still stands");
+        assert_eq!(
+            classify_tool("delete_file", r#"{"path":"src/a.py"}"#),
+            VerificationObservation::Mutation
+        );
+        assert_eq!(
+            classify_tool(
+                "multi_edit",
+                r#"{"edits":[{"path":"src/__pycache__/a.pyc"},{"path":"src/a.py"}]}"#
+            ),
+            VerificationObservation::Mutation,
+            "one real path makes it an edit"
+        );
+    }
+
+    #[test]
+    fn a_shell_only_turn_authored_nothing() {
+        let mut ledger = VerificationLedger::default();
+        ledger.observe(classify_tool("shell", r#"{"command":"./serve.sh"}"#), true);
+        assert!(!ledger.authored());
+        ledger.observe(classify_tool("write_file", r#"{"path":"notes.md"}"#), false);
+        assert!(!ledger.authored(), "a failed write changed nothing");
+        ledger.observe(classify_tool("write_file", r#"{"path":"notes.md"}"#), true);
+        assert!(ledger.authored());
     }
 
     #[test]

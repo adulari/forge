@@ -59,9 +59,10 @@ impl Session {
         } else {
             result
         };
-        ledgers.verification_ledger.lock().unwrap().observe(
+        ledgers.verification_ledger.lock().unwrap().observe_result(
             completion::classify_tool(&call.name, &call.args.to_string()),
             failure.is_none(),
+            result,
         );
         let side_effect = self.tools.get(&call.name).map(|tool| tool.side_effect());
         let writes = side_effect == Some(forge_types::SideEffect::Write);

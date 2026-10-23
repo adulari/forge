@@ -113,8 +113,39 @@ fn tokens(sentence: &str) -> impl Iterator<Item = &str> {
         .filter(|t| !t.is_empty())
 }
 
+/// A word that is a file path or a name with an extension (`test/helpers.ts`, `package.json`),
+/// not prose. Naming a file under `test/` is not naming the tests.
+fn is_path_like(word: &str) -> bool {
+    let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.');
+    word.contains('/')
+        || word
+            .split_once('.')
+            .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().any(char::is_alphabetic))
+}
+
+/// The prose word `test`/`tests` (also `unit-tests`, `testing`), not a path under a `test/` folder.
+fn names_tests(words: &str) -> bool {
+    words
+        .split_whitespace()
+        .any(|word| word.contains("test") && !is_path_like(word))
+}
+
+/// Where a prohibition's object ends: a new clause ("..., and keep the existing tests") or a
+/// parenthetical starts a different statement, whatever it says about tests.
+fn prohibited_object(rest: &str) -> &str {
+    const CLAUSE_BREAKS: [&str; 7] = [", and ", ", but ", " but ", " then ", " while ", " (", ": "];
+    let end = CLAUSE_BREAKS
+        .iter()
+        .filter_map(|brk| rest.find(brk))
+        .min()
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
 /// "Don't change or weaken the existing tests", "never touch the tests", ... — a negation, then a
-/// modifying verb, then "test", all inside one sentence.
+/// modifying verb, then "test" as the thing it applies to, all inside one clause. Files that merely
+/// live under `test/` do not count: "Don't touch `package.json` or `test/helpers.ts`" leaves the
+/// tests to be updated.
 fn forbids_touching_tests(prompt: &str) -> bool {
     const NEGATIONS: [&str; 8] = [
         "do not",
@@ -138,9 +169,117 @@ fn forbids_touching_tests(prompt: &str) -> bool {
             VERBS.iter().any(|verb| {
                 after
                     .find(verb)
-                    .is_some_and(|v| after[v + verb.len()..].contains("test"))
+                    .is_some_and(|v| names_tests(prohibited_object(&after[v + verb.len()..])))
             })
         })
+    })
+}
+
+/// The request itself tells the model to change tests: "update every caller, the tests, the README",
+/// "adjust the tests to match", "keep the existing tests (updated for the new signature)". That
+/// instruction wins over a prohibition the guard inferred from the same text, because the two
+/// cannot both hold: a signature refactor has to change the call sites in the tests. A change verb
+/// followed by the tests in the same clause counts; a verb of another action in between ("update
+/// the README, add tests") or a negation does not.
+pub(crate) fn prompt_asks_to_change_tests(prompt: &str) -> bool {
+    const CHANGE: [&str; 13] = [
+        "update", "updated", "updating", "adjust", "fix", "rewrite", "edit", "modify", "migrate",
+        "port", "rename", "refactor", "amend",
+    ];
+    const OTHER_ACTIONS: [&str; 18] = [
+        "add",
+        "write",
+        "create",
+        "implement",
+        "keep",
+        "make",
+        "ensure",
+        "run",
+        "check",
+        "verify",
+        "use",
+        "put",
+        "remove",
+        "delete",
+        "leave",
+        "preserve",
+        "retain",
+        "respect",
+    ];
+    // "existing tests as is", "tests untouched": the tests are being kept, not changed.
+    const STAY_PUT: [&str; 7] = [
+        "as",
+        "untouched",
+        "alone",
+        "unchanged",
+        "intact",
+        "pristine",
+        "unmodified",
+    ];
+    const NEGATIONS: [&str; 9] = [
+        "not",
+        "don't",
+        "dont",
+        "never",
+        "no",
+        "without",
+        "mustn't",
+        "shouldn't",
+        "cannot",
+    ];
+    const PAST: [&str; 8] = [
+        "updated",
+        "adjusted",
+        "migrated",
+        "rewritten",
+        "edited",
+        "modified",
+        "changed",
+        "fixed",
+    ];
+    const REACH: usize = 10;
+    let lowered = prompt.replace('\u{2019}', "'").to_lowercase();
+    let word = |w: &str| {
+        w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '/' && c != '.')
+            .to_string()
+    };
+    sentences(&lowered).iter().any(|sentence| {
+        let words: Vec<String> = sentence.split_whitespace().map(word).collect();
+        let is_test_word = |w: &String| w.contains("test") && !is_path_like(w);
+        let negated = |from: usize, to: usize| {
+            words[from..to]
+                .iter()
+                .any(|w| NEGATIONS.contains(&w.as_str()))
+        };
+        let stays_put = |at: usize| {
+            words[at + 1..words.len().min(at + 4)]
+                .iter()
+                .any(|w| STAY_PUT.contains(&w.as_str()))
+        };
+        // "<change verb> ... tests"
+        let verb_then_tests = words.iter().enumerate().any(|(i, w)| {
+            CHANGE.contains(&w.as_str())
+                && !negated(i.saturating_sub(3), i)
+                && words[i + 1..words.len().min(i + 1 + REACH)]
+                    .iter()
+                    .enumerate()
+                    .map(|(k, w)| (i + 1 + k, w))
+                    .take_while(|(_, w)| {
+                        !OTHER_ACTIONS.contains(&w.as_str()) && !NEGATIONS.contains(&w.as_str())
+                    })
+                    .any(|(at, w)| is_test_word(w) && !stays_put(at))
+        });
+        // "tests (updated for ...)"
+        let tests_then_participle = words.iter().enumerate().any(|(j, w)| {
+            is_test_word(w)
+                && !negated(j.saturating_sub(3), j)
+                && !stays_put(j)
+                && words[j + 1..words.len().min(j + 1 + REACH)]
+                    .iter()
+                    .take_while(|w| !NEGATIONS.contains(&w.as_str()))
+                    .any(|w| PAST.contains(&w.as_str()))
+        });
+        verb_then_tests || tests_then_participle
     })
 }
 
@@ -163,6 +302,7 @@ pub(crate) fn prompt_requires_pristine_existing_tests(prompt: &str) -> bool {
     ];
     let prompt = prompt.replace('\u{2019}', "'").to_lowercase();
     prompt.contains("test")
+        && !prompt_asks_to_change_tests(&prompt)
         && (forbids_touching_tests(&prompt)
             || PHRASES.iter().any(|phrase| prompt.contains(phrase))
             || sentences(&prompt).iter().any(|s| {
@@ -230,8 +370,18 @@ fn user_messages(messages: &[Message]) -> impl Iterator<Item = &str> {
         .map(|m| m.content.as_str())
 }
 
+/// Whether the session still protects the existing tests: the latest request that speaks to it
+/// decides, so "update the tests" after an earlier "don't touch the tests" lifts the protection.
 pub(crate) fn session_requires_pristine_existing_tests(messages: &[Message]) -> bool {
-    user_messages(messages).any(prompt_requires_pristine_existing_tests)
+    user_messages(messages).fold(false, |pristine, prompt| {
+        if prompt_requires_pristine_existing_tests(prompt) {
+            true
+        } else if prompt_asks_to_change_tests(prompt) {
+            false
+        } else {
+            pristine
+        }
+    })
 }
 
 fn session_expects_green_existing_tests(messages: &[Message]) -> bool {
@@ -258,7 +408,8 @@ pub(crate) fn guidance(
     transcript: &[Message],
 ) -> Option<(&'static str, &'static str)> {
     if prompt_requires_pristine_existing_tests(prompt)
-        || session_requires_pristine_existing_tests(transcript)
+        || (!prompt_asks_to_change_tests(prompt)
+            && session_requires_pristine_existing_tests(transcript))
     {
         Some(("pristine existing-test contract", PRISTINE_TEST_GUIDANCE))
     } else if prompt_expects_green_existing_tests(prompt)

@@ -954,6 +954,34 @@ pub fn shell_command_text(args: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
+/// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
+/// or `shell: failed to start …`; only `exit 0` is success. A batch reports the first failing
+/// entry's code. Not every harness carries that status out of band: a CLI bridge's MCP call
+/// completes "successfully" whatever the command's exit code, so the text is the only evidence.
+pub fn shell_result_failed(result: &str) -> bool {
+    let first = result.lines().next().unwrap_or("");
+    match first.strip_prefix("shell: exit ") {
+        Some(rest) => {
+            rest.split_whitespace()
+                .next()
+                .and_then(|t| t.parse::<i32>().ok())
+                != Some(0)
+        }
+        // Poll-ready, background-start and not-yet-ready poll results are not failures.
+        None => {
+            first.starts_with("shell:")
+                && ![
+                    "shell: ready after",
+                    "shell: started background job",
+                    "shell: not ready",
+                ]
+                .iter()
+                .any(|ok| first.starts_with(ok))
+        }
+    }
+}
+
 /// Extract a tool call's target file path from any of the known [`PATH_ARG_KEYS`]. Returns the
 /// first present string value, or `None` if the args carry no recognizable path key (e.g. a shell
 /// call keyed on `command`, or a tool that takes no path).

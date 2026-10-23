@@ -3,9 +3,10 @@
 
 use super::*;
 use crate::test_guard::{
-    guidance, level, modified_existing_tests, parse_name_status,
+    guidance, level, modified_existing_tests, parse_name_status, prompt_asks_to_change_tests,
     prompt_expects_green_existing_tests, prompt_requires_pristine_existing_tests, push_back,
-    restore_originals, sentences, Level, KEEP_TESTS_GUIDANCE, PRISTINE_TEST_GUIDANCE,
+    restore_originals, sentences, session_requires_pristine_existing_tests, Level,
+    KEEP_TESTS_GUIDANCE, PRISTINE_TEST_GUIDANCE,
 };
 
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
@@ -100,6 +101,117 @@ fn leave_the_existing_tests_alone_is_an_explicit_prohibition() {
     ] {
         assert!(!prompt_requires_pristine_existing_tests(prompt), "{prompt}");
     }
+}
+
+/// The bench task a05, verbatim. "Don't touch `package.json`, `tsconfig.json` or `test/helpers.ts`"
+/// read as a ban on the tests (a word `test` after a "don't touch"), so Forge told the model the
+/// tracked tests were immutable while the same request said to update them; the model obeyed Forge,
+/// left `npm test` red and said so.
+const MAILER_REQUEST: &str = "`sendMail(to, subject, body, isHtml, retries, cc)` has too many \
+positional arguments. Please change it to take a single options object instead:\n\n    \
+sendMail({ to, subject, body, html?, retries?, cc? })\n\n`isHtml` becomes `html`; the defaults \
+stay exactly as they are today. There should be no compatibility overload for the old positional \
+form: I want old-style calls to be a compile error.\n\nUpdate every caller, the tests, the README \
+and `docs/`, and anything else in the repo that sends mail. `npm run typecheck` and `npm test` \
+should both be clean at the end (`tsc` is on the PATH). Don't touch `package.json`, \
+`tsconfig.json` or `test/helpers.ts`, and keep the existing tests (updated for the new signature, \
+not deleted or skipped).";
+
+#[test]
+fn a_request_to_update_the_tests_does_not_make_them_immutable() {
+    assert!(prompt_asks_to_change_tests(MAILER_REQUEST));
+    assert!(!prompt_requires_pristine_existing_tests(MAILER_REQUEST));
+    assert_eq!(guidance(MAILER_REQUEST, &[]), None);
+    assert_eq!(
+        level(false, &[Message::user(MAILER_REQUEST)], false),
+        Level::Off
+    );
+    assert_eq!(
+        level(false, &[Message::user(MAILER_REQUEST)], true),
+        Level::Off
+    );
+}
+
+#[test]
+fn a_file_under_a_test_folder_is_not_the_tests() {
+    for prompt in [
+        "Don't touch `test/helpers.ts`.",
+        "Do not modify package.json or test/helpers.ts.",
+        "Never edit `tests/fixtures/big.json` or `tsconfig.json`.",
+        "Don't change the schema, and keep the existing tests green.",
+        "Don't modify the public API (the tests exercise it).",
+    ] {
+        assert!(!prompt_requires_pristine_existing_tests(prompt), "{prompt}");
+    }
+    for prompt in [
+        "Don't touch the tests.",
+        "Never edit the existing tests or the fixtures.",
+        "Do not modify package.json or the tests.",
+        "Don't change `tsconfig.json`, and don't modify the unit-tests either.",
+    ] {
+        assert!(prompt_requires_pristine_existing_tests(prompt), "{prompt}");
+    }
+}
+
+#[test]
+fn only_a_change_verb_aimed_at_the_tests_asks_to_change_them() {
+    for prompt in [
+        "Update every caller, the tests, the README and docs.",
+        "Adjust the tests to match the new output.",
+        "Fix the failing test.",
+        "Rename it everywhere, including the tests.",
+        "Keep the existing tests (updated for the new signature, not deleted or skipped).",
+        "Migrate the call sites and the tests to the new API.",
+    ] {
+        assert!(prompt_asks_to_change_tests(prompt), "{prompt}");
+    }
+    for prompt in [
+        "Update the README, add tests for the new flag.",
+        "Fix the parser and leave existing tests untouched.",
+        "Fix the parser, existing tests as is.",
+        "Don't update the tests.",
+        "Fix the parser without changing the tests.",
+        "Add tests for the parser.",
+        "Make sure the tests pass.",
+    ] {
+        assert!(!prompt_asks_to_change_tests(prompt), "{prompt}");
+    }
+}
+
+#[test]
+fn the_latest_request_about_the_tests_decides_whether_they_are_protected() {
+    let protected = vec![
+        Message::user("Fix the parser. Don't edit the existing tests."),
+        Message::assistant("ok"),
+        Message::user("Now handle the empty case."),
+    ];
+    assert!(session_requires_pristine_existing_tests(&protected));
+    assert!(guidance("Now handle the empty case.", &protected).is_some());
+
+    let lifted = vec![
+        Message::user("Fix the parser. Don't edit the existing tests."),
+        Message::assistant("ok"),
+        Message::user("Now rename the helper and update the tests to match."),
+    ];
+    assert!(!session_requires_pristine_existing_tests(&lifted));
+    assert_eq!(
+        guidance(
+            "Now rename the helper and update the tests to match.",
+            &protected
+        ),
+        None,
+        "the request being sent lifts the earlier ban before it is in the transcript"
+    );
+    assert_eq!(level(false, &lifted, true), Level::Off);
+
+    let restored = [
+        lifted.clone(),
+        vec![Message::user(
+            "Leave the existing tests alone from here on.",
+        )],
+    ]
+    .concat();
+    assert!(session_requires_pristine_existing_tests(&restored));
 }
 
 #[test]
