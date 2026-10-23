@@ -35,6 +35,14 @@ impl Session {
         !self.presenter.is_attended()
     }
 
+    /// Give the progress ledger the tree a pass of the turn starts from, which is what it judges
+    /// what shell-driven steps did to the tree against.
+    pub(crate) fn rebase_progress_tree(&mut self, fingerprint: Option<u64>) {
+        let state = fingerprint
+            .or_else(|| crate::working_tree::progress_fingerprint(self.workspace_root()));
+        self.ledger.rebase_tree(state);
+    }
+
     /// Judge the step that just finished. A nudge is delivered into the transcript after the
     /// step's tool results, so message ordering stays valid; `Some` means the turn must end now.
     pub(crate) fn supervise_step(
