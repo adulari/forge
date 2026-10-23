@@ -105,35 +105,27 @@ impl BridgeProgress {
             name: tool.to_string(),
             args: args.clone(),
         };
-        let flipped = self
-            .verification
-            .observe(classify_tool(tool, &args.to_string()), ok);
-        let observation =
-            CallObservation::for_call(&call, ok, mutating, result).with_check_flip(flipped);
+        let verification = classify_tool(tool, &args.to_string());
+        let flipped = self.verification.observe(verification, ok);
+        let observation = CallObservation::for_call(&call, ok, mutating, result)
+            .with_check(verification.check_family(), flipped);
         let task_closed = tasks_done.is_some_and(|done| {
             let closed = done > self.tasks_done;
             self.tasks_done = done;
             closed
         });
-        let verdict = self.ledger.observe_step("", &[observation], task_closed);
+        let verdict = self
+            .ledger
+            .observe_step("", &[observation], task_closed, &mut || {
+                crate::working_tree::progress_fingerprint(root)
+            });
         match verdict {
             Verdict::Fine => BridgeVerdict::Fine,
-            Verdict::Nudge(report) => {
-                self.ledger
-                    .record_nudge_tree(crate::completeness::worktree_fingerprint(root));
-                BridgeVerdict::Nudge(
-                    report.nudge_text(self.verification.unresolved_summary().as_deref(), 0),
-                )
-            }
+            Verdict::Nudge(report) => BridgeVerdict::Nudge(
+                report.nudge_text(self.verification.unresolved_summary().as_deref(), 0),
+            ),
             Verdict::Stop(report) => match self.mode {
                 ProgressGuardMode::Enforce => {
-                    if self.ledger.has_nudge_tree() {
-                        let now = crate::completeness::worktree_fingerprint(root);
-                        if self.ledger.tree_changed_since_nudge(now) {
-                            self.ledger.veto_stop("the working tree changed");
-                            return BridgeVerdict::Fine;
-                        }
-                    }
                     self.ledger.stopped();
                     let headline = report.stop_headline();
                     let refusal = format!(
@@ -333,6 +325,117 @@ mod tests {
         assert_eq!(v, BridgeVerdict::Fine);
         for _ in 0..2 {
             assert_eq!(same_read(&mut p, 1), BridgeVerdict::Fine);
+        }
+    }
+
+    fn shell_call(
+        p: &mut BridgeProgress,
+        root: &Path,
+        command: &str,
+        ok: bool,
+        result: &str,
+    ) -> BridgeVerdict {
+        p.observe_call(
+            Some(1),
+            "shell",
+            &serde_json::json!({ "command": command }),
+            ok,
+            false,
+            result,
+            None,
+            root,
+        )
+    }
+
+    #[test]
+    fn a_bridged_wait_on_a_running_job_or_a_slept_poll_is_never_a_loop() {
+        let root = Path::new("/nonexistent-forge-bridge-root");
+        let mut p = BridgeProgress::new(ProgressGuardMode::Enforce);
+        for _ in 0..40 {
+            let v = p.observe_call(
+                Some(1),
+                "shell_job",
+                &serde_json::json!({"action": "status", "id": 7}),
+                true,
+                false,
+                "job 7 is running\n  command: cargo build\n  log: /tmp/j.log",
+                None,
+                root,
+            );
+            assert_eq!(v, BridgeVerdict::Fine);
+        }
+        let mut p = BridgeProgress::new(ProgressGuardMode::Enforce);
+        for _ in 0..40 {
+            let v = shell_call(
+                &mut p,
+                root,
+                "sleep 60; gh run view 9",
+                true,
+                "shell: exit 0 in 60004ms\n\nin progress",
+            );
+            assert!(!matches!(v, BridgeVerdict::Stop { .. }), "{v:?}");
+        }
+        assert!(
+            p.refusal().is_none(),
+            "a bridge never stops a wait: it cannot tell if anyone is watching"
+        );
+    }
+
+    #[test]
+    fn searches_that_find_nothing_are_not_a_failure_even_in_parallel_batches() {
+        let root = Path::new("/nonexistent-forge-bridge-root");
+        let mut p = BridgeProgress::new(ProgressGuardMode::Enforce);
+        for i in 0..12 {
+            let v = shell_call(
+                &mut p,
+                root,
+                &format!("rg needle_{i} src"),
+                false,
+                "shell: exit 1 in 4ms",
+            );
+            assert!(!matches!(v, BridgeVerdict::Stop { .. }), "call {i}: {v:?}");
+        }
+    }
+
+    /// A file rewritten into states it already was in is stopped, one that keeps reaching new
+    /// states is not, whatever the period.
+    #[test]
+    fn a_bridged_file_that_flips_between_known_states_is_stopped_but_one_that_grows_is_not() {
+        for period in [2usize, 3, 4] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut p = BridgeProgress::new(ProgressGuardMode::Enforce);
+            std::fs::write(dir.path().join("f.txt"), "state 0").unwrap();
+            // A first call establishes the baseline: the bridge has no earlier state to compare.
+            shell_call(&mut p, dir.path(), "true", true, "shell: exit 0 in 3ms");
+            let mut stopped = None;
+            for i in 1..=60 {
+                std::fs::write(dir.path().join("f.txt"), format!("state {}", i % period)).unwrap();
+                let command = format!("sed -i s/x/y/ f.txt # {}", i % period);
+                if let BridgeVerdict::Stop { .. } =
+                    shell_call(&mut p, dir.path(), &command, true, "shell: exit 0 in 3ms")
+                {
+                    stopped = Some(i);
+                    break;
+                }
+            }
+            assert!(
+                stopped.is_some_and(|i| i <= 40),
+                "period {period}: {stopped:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = BridgeProgress::new(ProgressGuardMode::Enforce);
+        shell_call(&mut p, dir.path(), "true", true, "shell: exit 0 in 3ms");
+        for i in 1..=120 {
+            std::fs::write(dir.path().join("log.txt"), "x".repeat(i)).unwrap();
+            let v = shell_call(
+                &mut p,
+                dir.path(),
+                "echo x >> log.txt",
+                true,
+                "shell: exit 0 in 3ms",
+            );
+            assert_eq!(v, BridgeVerdict::Fine, "call {i}");
         }
     }
 }

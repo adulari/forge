@@ -3,21 +3,21 @@
 use super::*;
 use crate::progress_report::Lane;
 
-const REPEATED: &str =
+pub(super) const REPEATED: &str =
     "You're right — I looped. Answering the question from evidence, then finishing the revert.";
 
 /// Narration with nothing in common from one step to the next, so wording never counts as a
 /// repeat.
-fn distinct(i: usize) -> String {
+pub(super) fn distinct(i: usize) -> String {
     format!("alpha{i} beta{i} gamma{i} delta{i} epsilon{i} zeta{i}")
 }
 
-fn obs(sig: u64, ok: bool, mutating: bool, result: &str) -> CallObservation {
+pub(super) fn obs(sig: u64, ok: bool, mutating: bool, result: &str) -> CallObservation {
     CallObservation::new(sig, ok, mutating, result)
 }
 
 /// A successful read whose result shows lines nothing else printed.
-fn novel(n: usize) -> CallObservation {
+pub(super) fn novel(n: usize) -> CallObservation {
     obs(
         1_000_000 + n as u64,
         true,
@@ -27,27 +27,27 @@ fn novel(n: usize) -> CallObservation {
 }
 
 /// A read of something already seen: a different call (so no cycle) with a result already shown.
-fn stale(n: usize) -> CallObservation {
+pub(super) fn stale(n: usize) -> CallObservation {
     let text: String = (0..20).map(|i| format!("old line {i}\n")).collect();
     obs(2_000_000 + n as u64, true, false, &text)
 }
 
 /// A read that shows `n` lines of a file, the first `n - 1` of which an earlier read already
 /// showed (`limit` creeping up by one).
-fn creeping_read(n: usize) -> CallObservation {
+pub(super) fn creeping_read(n: usize) -> CallObservation {
     let text: String = (0..n).map(|i| format!("line {i} of the file\n")).collect();
     obs(3_000_000 + n as u64, true, false, &text)
 }
 
-fn edit(n: usize) -> CallObservation {
+pub(super) fn edit(n: usize) -> CallObservation {
     obs(4_000_000 + n as u64, true, true, "edited src/lib.rs")
 }
 
-fn failing(n: usize, tool: &str) -> CallObservation {
+pub(super) fn failing(n: usize, tool: &str) -> CallObservation {
     obs(5_000_000 + n as u64, false, false, "error: nothing matched").named(tool)
 }
 
-fn wait(n: usize) -> CallObservation {
+pub(super) fn wait(n: usize) -> CallObservation {
     obs(
         6_000_000 + n as u64,
         true,
@@ -57,28 +57,43 @@ fn wait(n: usize) -> CallObservation {
     .waiting_for_job()
 }
 
-fn feed(ledger: &mut ProgressLedger, text: &str, calls: Vec<CallObservation>) -> Verdict {
-    ledger.observe_step(text, &calls, false)
+pub(super) fn feed(
+    ledger: &mut ProgressLedger,
+    text: &str,
+    calls: Vec<CallObservation>,
+) -> Verdict {
+    ledger.observe_step(text, &calls, false, &mut || None)
+}
+
+/// A scripted working tree: each sample returns the next state, and the last one again after
+/// that.
+pub(super) fn tree_of(states: &[u64]) -> impl FnMut() -> Option<u64> + '_ {
+    let mut next = 0;
+    move || {
+        let state = states[next.min(states.len() - 1)];
+        next += 1;
+        Some(state)
+    }
 }
 
 /// 1-based index of the first verdict satisfying `pred`.
-fn first(verdicts: &[Verdict], pred: impl Fn(&Verdict) -> bool) -> Option<usize> {
+pub(super) fn first(verdicts: &[Verdict], pred: impl Fn(&Verdict) -> bool) -> Option<usize> {
     verdicts.iter().position(pred).map(|i| i + 1)
 }
 
-fn nudge_of(lane: Lane) -> impl Fn(&Verdict) -> bool {
+pub(super) fn nudge_of(lane: Lane) -> impl Fn(&Verdict) -> bool {
     move |v| matches!(v, Verdict::Nudge(r) if r.lane == lane)
 }
 
-fn stop_of(lane: Lane) -> impl Fn(&Verdict) -> bool {
+pub(super) fn stop_of(lane: Lane) -> impl Fn(&Verdict) -> bool {
     move |v| matches!(v, Verdict::Stop(r) if r.lane == lane)
 }
 
-fn any_event(verdicts: &[Verdict]) -> bool {
+pub(super) fn any_event(verdicts: &[Verdict]) -> bool {
     verdicts.iter().any(|v| *v != Verdict::Fine)
 }
 
-fn run(steps: Vec<(String, Vec<CallObservation>)>) -> Vec<Verdict> {
+pub(super) fn run(steps: Vec<(String, Vec<CallObservation>)>) -> Vec<Verdict> {
     let mut ledger = ProgressLedger::default();
     steps
         .into_iter()
@@ -361,7 +376,8 @@ fn failed_calls_and_repeated_mutations_are_not_progress() {
             vec![obs(8, false, true, "error: no match")],
         );
     }
-    assert!(ledger.futile_run >= 4, "{}", ledger.futile_run);
+    // The failed call is new information the first time it is seen, and a repeat of it is not.
+    assert_eq!(ledger.futile_run, 2, "{}", ledger.futile_run);
     assert_eq!(ledger.idle_steps, 4);
 }
 
@@ -394,23 +410,24 @@ fn a_gate_does_not_hide_real_progress() {
 }
 
 #[test]
-fn two_hundred_poll_waits_are_neutral() {
+fn poll_waits_are_neutral_and_only_the_waiting_lane_counts_them() {
     let steps: Vec<_> = (0..200)
+        .map(|i| (REPEATED.to_string(), vec![wait(i)]))
+        .collect();
+    assert_eq!(events(&run(steps)), vec![(24, "nudge", "waiting")]);
+    let steps: Vec<_> = (0..23)
         .map(|i| (REPEATED.to_string(), vec![wait(i)]))
         .collect();
     assert!(!any_event(&run(steps)));
 }
 
 #[test]
-fn a_wait_mixed_with_a_real_call_is_judged_like_any_other_step() {
+fn a_wait_batched_with_another_call_is_still_a_wait() {
     let mut ledger = ProgressLedger::default();
     for i in 0..8 {
         feed(&mut ledger, &distinct(i), vec![wait(i), stale(i)]);
     }
-    assert!(
-        ledger.futile_run > 0,
-        "a step that did more than wait counts"
-    );
+    assert_eq!((ledger.futile_run, ledger.wait_steps), (0, 8));
 }
 
 #[test]
@@ -505,7 +522,7 @@ fn a_closed_task_and_a_steer_are_strong_progress() {
     for i in 0..4 {
         feed(&mut ledger, &distinct(i), vec![stale(i)]);
     }
-    ledger.observe_step(&distinct(5), &[stale(5)], true);
+    ledger.observe_step(&distinct(5), &[stale(5)], true, &mut || None);
     assert_eq!((ledger.futile_run, ledger.idle_steps), (0, 0));
     for i in 6..9 {
         feed(&mut ledger, &distinct(i), vec![stale(i)]);
@@ -669,7 +686,8 @@ fn a_continue_that_repeats_the_stopped_opening_is_stopped_at_once() {
     assert!(first(&verdicts, |v| matches!(v, Verdict::Stop(_))).is_some());
     ledger.stopped();
     ledger.begin_turn();
-    let resumed = feed(&mut ledger, REPEATED, vec![creeping_read(77)]);
+    // The same words over lines it had already read.
+    let resumed = feed(&mut ledger, REPEATED, vec![creeping_read(30)]);
     assert!(stop_of(Lane::Resumed)(&resumed), "{resumed:?}");
 }
 
@@ -694,39 +712,12 @@ fn a_stop_that_is_only_reported_is_not_repeated_in_the_episode() {
     let mut ledger = ProgressLedger::default();
     let mut stops = 0;
     for i in 0..30 {
-        match feed(&mut ledger, &distinct(i), vec![stale(i)]) {
-            Verdict::Stop(_) => {
-                stops += 1;
-                ledger.suppress_stop();
-            }
-            _ => {}
+        if let Verdict::Stop(_) = feed(&mut ledger, &distinct(i), vec![stale(i)]) {
+            stops += 1;
+            ledger.suppress_stop();
         }
     }
     assert_eq!(stops, 1, "warn mode reports a stop once per episode");
-}
-
-#[test]
-fn the_tree_check_compares_the_nudge_and_the_stop_and_a_veto_starts_over() {
-    let mut ledger = ProgressLedger::default();
-    assert!(!ledger.has_nudge_tree());
-    ledger.record_nudge_tree(Some(1));
-    assert!(ledger.has_nudge_tree());
-    assert!(!ledger.tree_changed_since_nudge(Some(1)));
-    assert!(ledger.tree_changed_since_nudge(Some(2)));
-    assert!(
-        !ledger.tree_changed_since_nudge(None),
-        "outside git there is nothing to compare"
-    );
-    for i in 0..6 {
-        feed(&mut ledger, &distinct(i), vec![stale(i)]);
-    }
-    ledger.veto_stop("the working tree changed");
-    assert_eq!(ledger.futile_run, 0);
-    assert!(matches!(ledger.episode, Episode::Quiet));
-    assert_eq!(
-        ledger.last_progress.as_ref().map(|p| p.1.as_str()),
-        Some("the working tree changed")
-    );
 }
 
 #[test]
@@ -835,6 +826,19 @@ fn bench_replay(name: &str) -> (Vec<Verdict>, usize) {
     replay_in(include_str!("../tests/fixtures/bench_replays.json"), name)
 }
 
+/// An id as letters: the ledger masks digits in failures, so ids made of digits would all read
+/// as one line.
+fn letters(mut id: u64) -> String {
+    let mut out = String::new();
+    loop {
+        out.push((b'a' + (id % 26) as u8) as char);
+        id /= 26;
+        if id == 0 {
+            return out;
+        }
+    }
+}
+
 fn replay_in(fixture: &str, name: &str) -> (Vec<Verdict>, usize) {
     let all: serde_json::Value = serde_json::from_str(fixture).unwrap();
     let seg = all
@@ -852,7 +856,7 @@ fn replay_in(fixture: &str, name: &str) -> (Vec<Verdict>, usize) {
             for run in runs.as_array().unwrap() {
                 let (start, count) = (run[0].as_u64().unwrap(), run[1].as_u64().unwrap());
                 for id in start..start + count {
-                    text.push_str(&format!("L{id}\n"));
+                    text.push_str(&format!("L{}\n", letters(id)));
                 }
             }
             text
@@ -885,7 +889,7 @@ fn replay_in(fixture: &str, name: &str) -> (Vec<Verdict>, usize) {
                 ledger.note_gate();
             }
             let closed = step["closed"].as_bool().unwrap_or(false);
-            ledger.observe_step(step["text"].as_str().unwrap(), &calls, closed)
+            ledger.observe_step(step["text"].as_str().unwrap(), &calls, closed, &mut || None)
         })
         .collect();
     (verdicts, steps.len())
@@ -912,7 +916,7 @@ fn working_stretches_the_old_guard_nudged_are_left_alone() {
     }
 }
 
-fn events(verdicts: &[Verdict]) -> Vec<(usize, &'static str, &'static str)> {
+pub(super) fn events(verdicts: &[Verdict]) -> Vec<(usize, &'static str, &'static str)> {
     verdicts
         .iter()
         .enumerate()
@@ -959,13 +963,14 @@ fn a_true_failure_streak_is_nudged_on_the_third_failed_step() {
     assert_eq!(events(&verdicts), vec![(5, "nudge", "failure")]);
 }
 
-/// 46 steps of real work with 12 failed ones scattered through it: one nudge, for the one place
-/// three failed steps really did come in a row, and no stop.
+/// 46 steps of real work with 12 failed ones scattered through it. Three failed steps do come in a
+/// row once (22 to 24), but with two different errors, so it is not the same failure again: no
+/// nudge and no stop.
 #[test]
-fn a_long_session_with_scattered_failures_is_nudged_only_where_three_came_in_a_row() {
+fn a_long_session_with_scattered_failures_says_nothing() {
     let (verdicts, steps) = bench_replay(BENCH_NAMES[9]);
     assert_eq!(steps, 46);
-    assert_eq!(events(&verdicts), vec![(23, "nudge", "failure")]);
+    assert_eq!(events(&verdicts), vec![]);
 }
 
 /// Long productive sessions say nothing at all.

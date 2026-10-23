@@ -40,6 +40,17 @@ pub(crate) enum VerificationObservation {
     },
 }
 
+impl VerificationObservation {
+    /// The check family of a call that ran exactly one check; a batch of commands has no result
+    /// of its own to compare run to run.
+    pub(crate) const fn check_family(self) -> Option<&'static str> {
+        match self {
+            Self::Check(family) => Some(family.label()),
+            _ => None,
+        }
+    }
+}
+
 /// Outcome-aware evidence for the completion gate. Failed verification families remain unresolved
 /// until that same family succeeds; unrelated reads can add evidence but cannot erase a failure.
 #[derive(Debug, Default)]

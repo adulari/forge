@@ -96,6 +96,65 @@ pub(crate) fn worktree_fingerprint(root: &std::path::Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
+/// The state of the working tree as the progress ledger tells states apart: a repository's
+/// [`worktree_fingerprint`], or outside one a bounded scan of the directory's files, so that
+/// shell-driven work is just as visible in a scratch directory. `None` when the tree cannot be
+/// read or is too large to scan cheaply, which the ledger treats as "no evidence".
+pub(crate) fn progress_fingerprint(root: &std::path::Path) -> Option<u64> {
+    worktree_fingerprint(root).or_else(|| scan_fingerprint(root))
+}
+
+/// Entries, depth and bytes a scan may cover before it gives up or stops reading contents.
+const SCAN_MAX_ENTRIES: usize = 5000;
+const SCAN_MAX_DEPTH: usize = 8;
+const SCAN_READ_BUDGET: u64 = 4 << 20;
+const SCAN_SMALL_FILE: u64 = 64 << 10;
+
+/// A fingerprint of every file under `root` by path and content (size and mtime for the large
+/// ones), build byproducts and `.git` left out. Contents rather than mtimes for ordinary files, so
+/// a file that flips between two texts is in a known state each time it comes back to one.
+fn scan_fingerprint(root: &std::path::Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut files: Vec<(String, u64, u64)> = Vec::new();
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut read = 0u64;
+    while let Some((dir, depth)) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+            let path = entry.path();
+            let rel = path.strip_prefix(root).ok()?.to_string_lossy().into_owned();
+            if rel == ".git" || rel.ends_with("/.git") || is_run_artifact(&rel) {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(&path).ok()?;
+            if meta.is_dir() {
+                if depth + 1 > SCAN_MAX_DEPTH {
+                    return None;
+                }
+                pending.push((path, depth + 1));
+                continue;
+            }
+            if files.len() >= SCAN_MAX_ENTRIES {
+                return None;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            if meta.is_file()
+                && meta.len() <= SCAN_SMALL_FILE
+                && read + meta.len() <= SCAN_READ_BUDGET
+            {
+                read += meta.len();
+                std::fs::read(&path).unwrap_or_default().hash(&mut hasher);
+            } else {
+                meta.modified().ok().hash(&mut hasher);
+            }
+            files.push((rel, meta.len(), hasher.finish()));
+        }
+    }
+    files.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    files.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
 /// What an untracked file holds, cheaply: its size, and its bytes up to a bound.
 pub(crate) fn untracked_digest(root: &std::path::Path, path: &str) -> (u64, u64) {
     use std::hash::{Hash, Hasher};
@@ -253,5 +312,33 @@ mod tests {
     fn outside_a_repository_reports_changed() {
         let dir = tempfile::tempdir().unwrap();
         assert!(working_tree_changed_since(Some(dir.path()), Some(b"")));
+    }
+
+    #[test]
+    fn a_scan_tells_contents_apart_and_a_file_that_comes_back_is_in_a_known_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a").unwrap();
+        let a = progress_fingerprint(dir.path()).unwrap();
+        std::fs::write(dir.path().join("f.txt"), "b").unwrap();
+        let b = progress_fingerprint(dir.path()).unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a, progress_fingerprint(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn a_scan_ignores_build_byproducts_and_gives_up_on_a_huge_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "a").unwrap();
+        let before = progress_fingerprint(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/out.o"), "x").unwrap();
+        std::fs::create_dir(dir.path().join("__pycache__")).unwrap();
+        std::fs::write(dir.path().join("__pycache__/m.pyc"), "x").unwrap();
+        assert_eq!(before, progress_fingerprint(dir.path()).unwrap());
+        for i in 0..SCAN_MAX_ENTRIES + 1 {
+            std::fs::write(dir.path().join(format!("n{i}.txt")), "").unwrap();
+        }
+        assert_eq!(progress_fingerprint(dir.path()), None);
     }
 }

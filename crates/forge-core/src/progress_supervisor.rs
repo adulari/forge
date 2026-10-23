@@ -29,6 +29,12 @@ impl Session {
             .count()
     }
 
+    /// Whether no person is watching this turn: nobody to read a warning or answer a prompt. A
+    /// person who chose `Bypass` is still watching, so the permission mode is not asked.
+    pub(crate) fn turn_is_headless(&self) -> bool {
+        !self.presenter.is_attended()
+    }
+
     /// Judge the step that just finished. A nudge is delivered into the transcript after the
     /// step's tool results, so message ordering stays valid; `Some` means the turn must end now.
     pub(crate) fn supervise_step(
@@ -38,17 +44,20 @@ impl Session {
         task_closed: bool,
         unresolved_checks: Option<&str>,
     ) -> Option<StallStop> {
-        let unattended = self.turn_is_unattended();
+        let headless = self.turn_is_headless();
         let mesh = &self.config.mesh;
         let (idle_nudge, idle_stop, mode) = (
             mesh.idle_nudge_steps,
             mesh.idle_stop_steps,
             mesh.progress_guard,
         );
-        self.ledger.configure(idle_nudge, idle_stop, unattended);
+        self.ledger.configure(idle_nudge, idle_stop, headless);
+        let root = self.workspace_root().to_path_buf();
         let verdict = self
             .ledger
-            .observe_step(narration, observations, task_closed);
+            .observe_step(narration, observations, task_closed, &mut || {
+                crate::working_tree::progress_fingerprint(&root)
+            });
         // Carried into the NEXT request's sampling (see `model_request`).
         self.repetition_pressure = self.ledger.pressure();
         match verdict {
@@ -57,15 +66,11 @@ impl Session {
                 self.deliver_stall_nudge(&report, unresolved_checks);
                 None
             }
-            Verdict::Stop(report) => self.settle_stop(&report, mode, unattended),
+            Verdict::Stop(report) => self.settle_stop(&report, mode, headless),
         }
     }
 
     fn deliver_stall_nudge(&mut self, report: &StallReport, unresolved_checks: Option<&str>) {
-        self.ledger
-            .record_nudge_tree(crate::completeness::worktree_fingerprint(
-                self.workspace_root(),
-            ));
         // A `minimal` profile sends no nudge, but the ledger still counts, so a model that keeps
         // finding nothing new is stopped on the same schedule.
         if !self.advisory_nudges_on() {
@@ -82,7 +87,7 @@ impl Session {
         &mut self,
         report: &StallReport,
         mode: ProgressGuardMode,
-        unattended: bool,
+        headless: bool,
     ) -> Option<StallStop> {
         match mode {
             ProgressGuardMode::Enforce => {}
@@ -98,18 +103,9 @@ impl Session {
                 return None;
             }
         }
-        // Shell-driven work (a silent `sed -i`, a `git commit`) looks stale to the ledger. If the
-        // tree moved since the nudge, the turn did something: start over instead of stopping.
-        if self.ledger.has_nudge_tree() {
-            let now = crate::completeness::worktree_fingerprint(self.workspace_root());
-            if self.ledger.tree_changed_since_nudge(now) {
-                self.ledger.veto_stop("the working tree changed");
-                return None;
-            }
-        }
         self.ledger.stopped();
         let _ = self.push_note(forge_types::MessageKind::LoopGuard, report.persisted_note());
-        Some(self.abort_for_stall(&report.stop_headline(), unattended))
+        Some(self.abort_for_stall(&report.stop_headline(), headless))
     }
 
     /// `forge mcp-serve`'s ledger stopped the bridged turn that just streamed, if it did: the model
@@ -118,8 +114,8 @@ impl Session {
     pub(crate) fn take_bridge_stall(
         &mut self,
         reply: &str,
-        unattended: bool,
     ) -> Result<Option<StallStop>, CoreError> {
+        let headless = self.turn_is_headless();
         let Some(headline) = self.bridge_stall.take() else {
             return Ok(None);
         };
@@ -131,8 +127,8 @@ impl Session {
                  change approach, or say what is blocking you."
             ),
         );
-        let mut stop = self.abort_for_stall(headline, unattended);
-        if !unattended {
+        let mut stop = self.abort_for_stall(headline, headless);
+        if !headless {
             stop.final_text = reply.to_string();
             self.publish_terminal_answer(reply)?;
         }
@@ -140,11 +136,11 @@ impl Session {
     }
 
     /// End the turn for a stall. An attended turn gets a warning and a status the model writes;
-    /// an unattended one has nobody to read a warning, so it fails with the uncommitted work
+    /// a headless one has nobody to read a warning, so it fails with the uncommitted work
     /// preserved and the way to resume, like every other unattended abort.
-    fn abort_for_stall(&mut self, headline: &str, unattended: bool) -> StallStop {
+    fn abort_for_stall(&mut self, headline: &str, headless: bool) -> StallStop {
         self.turn_forced_stop = Some(StopReason::Stalled);
-        if !unattended {
+        if !headless {
             self.presenter
                 .emit(forge_types::PresenterEvent::Warning(format!(
                     "{headline}\nSend `continue`, or tell it what to try."

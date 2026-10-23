@@ -9,13 +9,37 @@
 //!
 //! Built where the result is in hand so the (possibly huge) text is hashed once and never copied.
 
-use std::hash::{Hash, Hasher};
+mod text;
+mod waiting;
 
-/// One-line results at most this long are treated as status messages (`no matches for 'x'`,
-/// `ok`): their quoted parts are masked so varying only the query does not read as new.
-const SHORT_RESULT_CHARS: usize = 160;
-/// Longest label or error excerpt kept for a progress report.
-const EXCERPT_CHARS: usize = 60;
+use std::hash::{Hash, Hasher};
+use text::{
+    error_text, excerpt, has_body, hash_lines, line_fingerprints, mask_digits, stable_fingerprint,
+};
+
+pub(crate) use text::hash_str;
+
+/// Tools that cannot change the working tree: a step made only of these is never a reason to
+/// look at it. Everything else (a shell command, a script, an external server's tool) might.
+const TREE_SAFE_TOOLS: [&str; 14] = [
+    "read_file",
+    "list_dir",
+    "glob",
+    "search",
+    "web_fetch",
+    "web_search",
+    "lattice",
+    "shell_job",
+    "update_tasks",
+    "ask_user",
+    "present_plan",
+    "spawn_agents",
+    "browser_network",
+    "proxy_network",
+];
+
+/// Tools whose first read of a path is information by itself, whatever the lines in it repeat.
+const FIRST_READ_TOOLS: [&str; 2] = ["read_file", "list_dir"];
 
 #[derive(Debug, Clone)]
 pub(crate) struct CallObservation {
@@ -25,10 +49,16 @@ pub(crate) struct CallObservation {
     ok: bool,
     mutating: bool,
     waiting: bool,
+    opaque: bool,
+    silent: bool,
     check_flip: bool,
+    check: Option<&'static str>,
     result_fp: u64,
+    failure_fp: u64,
     error_head: Option<String>,
+    cause: Option<u64>,
     lines: Vec<u64>,
+    read_targets: Vec<u64>,
 }
 
 impl CallObservation {
@@ -57,10 +87,22 @@ impl CallObservation {
         self.mutating
     }
 
-    /// A poll-mode wait that came back "not ready yet": the model is waiting on something
-    /// external exactly as it was told to, which is neither progress nor a loop.
+    /// A call that waits for something outside the turn (see [`waiting`]): neither progress nor
+    /// a loop.
     pub(crate) fn waiting(&self) -> bool {
         self.waiting
+    }
+
+    /// The call could have changed the working tree without being a recognised write: a shell
+    /// command, a script, an external tool.
+    pub(crate) fn opaque(&self) -> bool {
+        self.opaque
+    }
+
+    /// A shell command that succeeded and printed nothing: all it says is that it ran, so its
+    /// effect, if any, is somewhere else.
+    pub(crate) fn silent(&self) -> bool {
+        self.silent
     }
 
     /// A verification family that was failing passed on this call.
@@ -68,24 +110,48 @@ impl CallObservation {
         self.check_flip
     }
 
+    /// The verification family (`test`, `build`, ...) this call ran, when it was one command of
+    /// one family.
+    pub(crate) fn check(&self) -> Option<&'static str> {
+        self.check
+    }
+
     /// Hash of the result's line fingerprints: identical across runs of the same call that differ
-    /// only in the shell's `exit N in Xms` header (output that changes, a poll's progress, hashes
-    /// differently).
+    /// only in the shell's `exit N in Xms` header (output that changes, a poll's progress,
+    /// hashes differently). A failure's lines have their digits masked first.
     pub(crate) fn result_fp(&self) -> u64 {
         self.result_fp
     }
 
+    /// What a failing result says without its durations, times and ids: equal for two runs of a
+    /// check that fail the same way.
+    pub(crate) fn failure_fp(&self) -> u64 {
+        self.failure_fp
+    }
+
+    /// The line of a failure that says what went wrong; `None` when there was none to read.
     pub(crate) fn error_head(&self) -> Option<&str> {
         self.error_head.as_deref()
+    }
+
+    /// The failure's cause, ignoring digits: `attempt 3 refused` and `attempt 4 refused` are one.
+    pub(crate) fn cause(&self) -> Option<u64> {
+        self.cause
     }
 
     pub(crate) fn lines(&self) -> &[u64] {
         &self.lines
     }
 
+    /// The paths this call read for the first time, when it was a read.
+    pub(crate) fn read_targets(&self) -> &[u64] {
+        &self.read_targets
+    }
+
     /// Anonymous observation, for fixtures that carry only a signature and a result.
     pub(crate) fn new(signature: u64, ok: bool, mutating: bool, result: &str) -> Self {
-        let lines = line_fingerprints(result);
+        let lines = line_fingerprints(result, !ok);
+        let error = if ok { None } else { error_text(result) };
         Self {
             signature,
             tool: "tool".to_string(),
@@ -93,10 +159,16 @@ impl CallObservation {
             ok,
             mutating,
             waiting: false,
+            opaque: false,
+            silent: false,
             check_flip: false,
+            check: None,
             result_fp: hash_lines(&lines),
-            error_head: (!ok).then(|| error_head(result)),
+            failure_fp: stable_fingerprint(result),
+            cause: error.as_deref().map(|e| hash_str(&mask_digits(e))),
+            error_head: error,
             lines,
+            read_targets: Vec::new(),
         }
     }
 
@@ -109,11 +181,17 @@ impl CallObservation {
         let mut observation = Self::new(call_signature(call), ok, mutating, result);
         observation.tool = call.name.clone();
         observation.label = call_label(call);
-        observation.waiting = call.name == "shell" && is_waiting_result(result);
+        observation.waiting = waiting::is_waiting(call, ok, result);
+        observation.opaque = !mutating && !TREE_SAFE_TOOLS.contains(&call.name.as_str());
+        observation.silent = call.name == "shell" && ok && !has_body(result);
+        if FIRST_READ_TOOLS.contains(&call.name.as_str()) {
+            observation.read_targets = read_targets(call);
+        }
         observation
     }
 
-    pub(crate) fn with_check_flip(mut self, flipped: bool) -> Self {
+    pub(crate) fn with_check(mut self, family: Option<&'static str>, flipped: bool) -> Self {
+        self.check = family;
         self.check_flip = flipped;
         self
     }
@@ -132,8 +210,50 @@ impl CallObservation {
 
     #[cfg(test)]
     pub(crate) fn flipping_a_check(self) -> Self {
-        self.with_check_flip(true)
+        self.with_check(None, true)
     }
+
+    #[cfg(test)]
+    pub(crate) fn running_check(self, family: &'static str) -> Self {
+        self.with_check(Some(family), false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn opaquely(mut self) -> Self {
+        self.opaque = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn silently(mut self) -> Self {
+        self.silent = true;
+        self.opaque = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reading(mut self, path: &str) -> Self {
+        self.read_targets = vec![hash_str(path)];
+        self
+    }
+}
+
+/// The paths a read names, hashed.
+fn read_targets(call: &forge_types::ToolCall) -> Vec<u64> {
+    let paths = if call.name == "read_file" {
+        crate::recent_files::read_paths(&call.args)
+    } else {
+        ["path", "dir"]
+            .iter()
+            .find_map(|key| call.args.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    };
+    paths
+        .iter()
+        .map(|path| hash_str(&format!("{}:{path}", call.name)))
+        .collect()
 }
 
 /// Stable hash of one call's tool name and JSON arguments (object keys are ordered, so equal
@@ -143,11 +263,6 @@ pub(crate) fn call_signature(call: &forge_types::ToolCall) -> u64 {
     call.name.hash(&mut h);
     call.args.to_string().hash(&mut h);
     h.finish()
-}
-
-/// Whether a `shell` result is the resumable "call again to keep waiting" answer of poll mode.
-pub(crate) fn is_waiting_result(result: &str) -> bool {
-    result.trim_start().starts_with("shell: not ready after")
 }
 
 /// `read_file src/lib.rs`, `shell cargo test`: the tool and the one argument that says what it
@@ -171,107 +286,9 @@ pub(crate) fn call_label(call: &forge_types::ToolCall) -> String {
     }
 }
 
-fn excerpt(text: &str) -> String {
-    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= EXCERPT_CHARS {
-        return flat;
-    }
-    let head: String = flat.chars().take(EXCERPT_CHARS).collect();
-    format!("{head}…")
-}
-
-/// The line of a failed result that says what went wrong: the first one, unless that is only the
-/// shell's `exit N in Xms` header.
-fn error_head(result: &str) -> String {
-    let mut lines = result.lines().map(str::trim).filter(|l| !l.is_empty());
-    let first = lines.next().unwrap_or("");
-    let line = if first.starts_with("shell: exit") {
-        lines.next().unwrap_or(first)
-    } else {
-        first
-    };
-    excerpt(line)
-}
-
-fn hash_lines(lines: &[u64]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    lines.hash(&mut hasher);
-    hasher.finish()
-}
-
-pub(crate) fn line_fingerprints(result: &str) -> Vec<u64> {
-    let mut lines = result.lines().map(str::trim).filter(|l| !l.is_empty());
-    let first = lines.next();
-    let rest: Vec<&str> = lines.collect();
-    let mut out = Vec::with_capacity(rest.len() + 1);
-    let single_short = rest.is_empty() && first.is_some_and(|l| l.len() <= SHORT_RESULT_CHARS);
-    if let Some(first) = first {
-        // `shell: exit 0 in 42ms` — the timing differs on every run of an identical command, so a
-        // silent command (`true`, `git add`) whose whole result is that header would otherwise
-        // look like new output every time it ran.
-        let header = if first.starts_with("shell:") {
-            mask_digits(first)
-        } else {
-            first.to_string()
-        };
-        out.push(hash_str(&if single_short {
-            mask_quoted(&header)
-        } else {
-            header
-        }));
-    }
-    out.extend(rest.into_iter().map(hash_str));
-    out
-}
-
-/// Every run of digits becomes one `#`: `3ms` and `41ms` are the same timing.
-fn mask_digits(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_digits = false;
-    for c in s.chars() {
-        if c.is_ascii_digit() {
-            if !in_digits {
-                out.push('#');
-            }
-            in_digits = true;
-        } else {
-            in_digits = false;
-            out.push(c);
-        }
-    }
-    out
-}
-
-pub(crate) fn hash_str(s: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
-}
-
-/// Replace everything between matching quote characters with nothing.
-fn mask_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut open: Option<char> = None;
-    for c in s.chars() {
-        match open {
-            Some(q) if c == q => {
-                open = None;
-                out.push(c);
-            }
-            Some(_) => {}
-            None => {
-                if matches!(c, '\'' | '"' | '`') {
-                    open = Some(c);
-                }
-                out.push(c);
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
+    use super::text::{line_fingerprints, EXCERPT_CHARS};
     use super::*;
 
     fn shell(command: &str) -> forge_types::ToolCall {
@@ -284,8 +301,8 @@ mod tests {
 
     #[test]
     fn shell_timing_in_the_header_does_not_change_the_fingerprints() {
-        let a = line_fingerprints("shell: exit 0 in 42ms\n\nsame output\nmore output");
-        let b = line_fingerprints("shell: exit 0 in 19ms\n\nsame output\nmore output");
+        let a = line_fingerprints("shell: exit 0 in 42ms\n\nsame output\nmore output", false);
+        let b = line_fingerprints("shell: exit 0 in 19ms\n\nsame output\nmore output", false);
         assert_eq!(a, b);
         let a = CallObservation::new(1, true, false, "shell: exit 0 in 42ms\nsame");
         let b = CallObservation::new(1, true, false, "shell: exit 0 in 19ms\nsame");
@@ -304,16 +321,16 @@ mod tests {
     #[test]
     fn a_silent_shell_command_is_the_same_result_whatever_its_timing() {
         assert_eq!(
-            line_fingerprints("shell: exit 0 in 3ms"),
-            line_fingerprints("shell: exit 0 in 41ms")
+            line_fingerprints("shell: exit 0 in 3ms", false),
+            line_fingerprints("shell: exit 0 in 41ms", false)
         );
     }
 
     #[test]
     fn varying_only_the_quoted_query_of_a_short_result_is_not_new() {
         assert_eq!(
-            line_fingerprints("no matches for 'a'"),
-            line_fingerprints("no matches for 'b'")
+            line_fingerprints("no matches for 'a'", false),
+            line_fingerprints("no matches for 'b'", false)
         );
     }
 
@@ -355,5 +372,117 @@ mod tests {
         assert!(CallObservation::new(1, true, false, "fine")
             .error_head()
             .is_none());
+        let silent =
+            CallObservation::for_call(&shell("grep nope f"), false, false, "shell: exit 1 in 3ms");
+        assert_eq!(
+            silent.error_head(),
+            None,
+            "a failure with no words has no cause to compare"
+        );
+    }
+
+    fn result_of(name: &str, command: &str, ok: bool, result: &str) -> CallObservation {
+        let call = forge_types::ToolCall {
+            id: "c".into(),
+            name: name.into(),
+            args: if name == "shell_job" {
+                serde_json::json!({ "action": command, "id": 4242 })
+            } else {
+                serde_json::json!({ "command": command })
+            },
+        };
+        CallObservation::for_call(&call, ok, false, result)
+    }
+
+    #[test]
+    fn calls_that_wait_for_something_outside_the_turn_are_recognised() {
+        let running = "job 4242 is running\n  command: cargo build\n  log: /tmp/j.log";
+        assert!(result_of("shell_job", "status", true, running).waiting());
+        let log = "job 4242 is running — last 50 lines of /tmp/j.log:\n\ncompiling";
+        assert!(result_of("shell_job", "log", true, log).waiting());
+        assert!(!result_of(
+            "shell_job",
+            "status",
+            true,
+            "job 4242 is exited 0\n  command: x"
+        )
+        .waiting());
+        let cut = "shell: timed out after 120s (killed) in 120013ms\n\nwatching run 9";
+        assert!(result_of("shell", "gh run watch 9", false, cut).waiting());
+        let ok = "shell: exit 0 in 60004ms\n\nin progress";
+        assert!(result_of("shell", "sleep 60; gh run view 9", true, ok).waiting());
+        assert!(result_of("shell", "gh run watch 9", true, ok).waiting());
+        assert!(!result_of(
+            "shell",
+            "sleep 60; false",
+            false,
+            "shell: exit 1 in 60004ms"
+        )
+        .waiting());
+        assert!(!result_of("shell", "cargo test", true, "shell: exit 0 in 4210ms").waiting());
+        assert!(!result_of("shell", "tail -n 1 build.log", true, ok).waiting());
+    }
+
+    #[test]
+    fn a_failure_is_the_same_failure_whatever_its_timing_and_not_when_it_moved() {
+        let run = |extra: &str| {
+            let result = format!(
+                "shell: exit 1 in 953ms\n\nFAILED tests::header\nassertion failed: left == right\n{extra}"
+            );
+            CallObservation::new(1, false, false, &result).failure_fp()
+        };
+        assert_eq!(
+            run("finished in 0.41s\nstarted 2026-10-23 12:00:01"),
+            run("finished in 0.52s\nstarted 2026-10-23 12:07:45")
+        );
+        assert_ne!(run(""), run("FAILED tests::footer"));
+    }
+
+    #[test]
+    fn only_a_call_that_may_change_files_unseen_is_opaque() {
+        let named = |name: &str| {
+            let call = forge_types::ToolCall {
+                id: "c".into(),
+                name: name.into(),
+                args: serde_json::json!({ "path": "a" }),
+            };
+            CallObservation::for_call(&call, true, false, "x")
+        };
+        for pure in [
+            "read_file",
+            "search",
+            "glob",
+            "list_dir",
+            "web_fetch",
+            "shell_job",
+        ] {
+            assert!(!named(pure).opaque(), "{pure}");
+        }
+        for open in ["shell", "run_code", "mcp__server__tool"] {
+            assert!(named(open).opaque(), "{open}");
+        }
+        let call = forge_types::ToolCall {
+            id: "c".into(),
+            name: "write_file".into(),
+            args: serde_json::json!({ "path": "a" }),
+        };
+        assert!(
+            !CallObservation::for_call(&call, true, true, "wrote").opaque(),
+            "a recognised write is not an unseen change"
+        );
+    }
+
+    #[test]
+    fn a_silent_shell_command_has_nothing_to_say_and_a_read_names_its_paths() {
+        assert!(result_of("shell", "mkdir out", true, "shell: exit 0 in 3ms").silent());
+        assert!(!result_of("shell", "ls", true, "shell: exit 0 in 3ms\n\na\nb").silent());
+        assert!(!result_of("shell", "false", false, "shell: exit 1 in 3ms").silent());
+        let call = forge_types::ToolCall {
+            id: "c".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({ "paths": ["a.rs:10-20", "b.rs"] }),
+        };
+        let read = CallObservation::for_call(&call, true, false, "x");
+        assert_eq!(read.read_targets().len(), 2);
     }
 }

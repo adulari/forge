@@ -1,12 +1,15 @@
 # Feature: progress supervision, with no default step cap
 
 > Status: **SHIPPED** (direct tool loop). Code: `crates/forge-core/src/progress_ledger.rs` (the
-> judgement), `progress_report.rs` (what the model and the person are told),
-> `progress_supervisor.rs` (the session side), `loop_progress.rs` (what one call looked like),
+> judgement) with `progress_ledger/tree.rs` (working-tree states) and `check.rs` (checks across a
+> turn), `progress_report.rs` (what the model and the person are told),
+> `progress_supervisor.rs` (the session side), `loop_progress.rs` (what one call looked like;
+> `loop_progress/waiting.rs` and `text.rs`),
 > `stall_guard.rs` (the narration lane), `turn_guards.rs` (explicit limits and spend ceilings),
 > `crates/forge-config/src/progress_guard.rs`, `hard_stop.rs`. Bridges: `bridge_progress.rs` and
 > `crates/forge-cli/src/mcp_serve/progress.rs`. Tests: `progress_ledger/tests.rs`,
-> `tests/progress_supervision.rs`, `tests/fixtures/bench_replays.json`.
+> `progress_ledger/regressions.rs`, `tests/progress_supervision.rs`,
+> `tests/fixtures/bench_replays.json`.
 
 ## 1. Problem
 
@@ -44,7 +47,7 @@ A turn ends only when:
 - the progress supervisor decides it is stuck: one nudge, then a clean stop;
 - an explicit limit the user set is reached (`mesh.max_steps`, `--max-turns`, `--max-budget-usd`,
   goal and loop budgets);
-- on an unattended turn, a spend ceiling is hit.
+- on a turn nobody is watching, a spend ceiling is hit.
 
 **Step count is never a default limit.** `mesh.max_steps` and `mesh.max_steps_unattended` default
 to `0` (none). Every stop says why and how to continue; `continue` is an ordinary prompt.
@@ -56,48 +59,80 @@ tool step it classifies what the step produced:
 
 | Class | Condition | Effect |
 |---|---|---|
-| Strong | a successful file write whose arguments were not tried this turn; a tracked task moved to Done during the step; a failing check (test, lint, typecheck, build) passed; the person steered | resets every lane and the episode |
-| Informative | at least a quarter of the result's lines were not seen this turn | breaks a run of futile steps only |
-| Neutral | every call was a poll-mode wait that came back "not ready"; or the first step after a harness gate (a verify, completeness or continue re-drive) | counts nowhere |
+| Strong | a successful file write whose arguments were not tried this turn; a tracked task moved to Done during the step; a failing check (test, lint, typecheck, build) passed, the first time that failure was fixed; the working tree reached a state it was never in this turn; the person steered | resets every lane and the episode, except a check's run of identical failures (below) |
+| Informative | at least a quarter of the result's lines were not seen this turn; a path read for the first time; a silent shell command with arguments not tried this turn | breaks a run of futile steps only |
+| Neutral | a wait for something outside the turn (below); or the first step after a harness gate (a verify, completeness or continue re-drive) | counts nowhere, except that waits are counted by the waiting lane |
 | All-failed | at least one call and every call failed | stale evidence |
 | Stale | anything else | stale evidence |
 
 A compaction makes the ledger forget what was seen (the model lost it, so reading it again is
-legitimate) but keeps the counters and any pending nudge.
+legitimate, and a note it was told is worth telling again) but keeps the counters and any pending
+nudge.
 
-Shell-driven work (a silent `sed -i`, a `git commit`) looks stale to the ledger. Each nudge records
-the working-tree fingerprint, and before any stop it is taken again: if it differs, that counts as
-Strong progress, the episode starts over, and the turn is not stopped. Outside a git repository
-there is nothing to compare and no veto.
+**Waits.** The harness tells the model to wait for a background job, a CI run or a server by
+polling, and a poll returns the same answer until the thing is ready. These calls are neutral:
+`shell` in poll mode that came back "not ready", `shell` cut by its time limit, a successful
+`shell` whose command sleeps or watches first (`sleep 60; gh run view`, `gh run watch`), and
+`shell_job` status or log of a job that is still running. A step with a wait in it is a wait step
+even if it also peeked at a log. How long a turn may wait is the waiting lane's business.
+
+**The working tree.** Shell-driven work (a silent `sed -i`, a `git commit`, a generator script)
+returns `exit 0` every time, so a ledger that only reads results sees nothing. After a step whose
+calls could have changed files unseen (anything but a read, a search or a task-list update) the
+tree is sampled: in a git repository HEAD, status and diff plus the content of untracked files,
+outside one a bounded scan of the directory's files by content. A state no earlier sample was in
+is Strong progress. A state seen before is not, so a file that flips between two or five contents
+is in a known state from its second visit on, however often it moves. A change the model made
+with a write tool is not credited to the shell step that follows it (that step only moves the
+baseline), a sample slower than 0.4 s makes the next eight skip, and a tree that cannot be read is
+no evidence either way.
+
+**Checks.** A check (test, lint, typecheck, build) is judged by its verdict, not by the edits
+around it. A flip from failing to passing is Strong only the first time that failure (its output
+without durations, times and ids) is fixed; breaking and repairing the same thing each round is
+not progress each time it passes. And a check that fails with the same output run after run is
+not listening to the edits between the runs, which is the check lane below.
 
 ### Lanes
 
-Five lanes watch the stale evidence under one latch.
+Seven lanes watch the evidence under one latch.
 
 | Lane | Counts | Nudge | Stop |
 |---|---|---|---|
-| Narration | restated openings on stale steps (`NarrationTracker`, window of 10) | 3 in the window | 2 relapse steps in the 4 after the nudge |
+| Narration | restated openings on stale steps (`NarrationTracker`, window of 10) | 3 in the window | 2 relapsing steps in the 4 after the nudge: stale, or the same opening over output that only looked new (a step that read a path for the first time is not one) |
 | Futile | consecutive stale or all-failed steps | 5 | 10 |
-| Failure | consecutive all-failed steps on the same tool, no success between | 3 | 6 |
-| Cycle | the same batch of calls with the same result 3 times in a row, or at most two distinct batches in the last 6 with one recurring 3 times and identical results | when it holds | after 2 further repeats |
-| Idle | steps since the last Strong step | `mesh.idle_nudge_steps` (60), on every surface | `mesh.idle_stop_steps` (200), on unattended turns only |
+| Failure | consecutive steps in which every call failed with the same error (digits ignored) and printed nothing new; a failure with no message (a search that found nothing) is not one | 3 | 6 |
+| Cycle | the same batch of calls with the same result 3 times in a row, or at most two distinct batches in the last 6, one recurring 3 times, each with one result throughout | when it holds | after 2 further repeats |
+| Check | runs of one check failing with the same output, however much was edited between them | 6 | 12 |
+| Waiting | wait steps since the last Strong step | 24, on every surface | 96, on headless turns only |
+| Idle | steps since the last Strong step | `mesh.idle_nudge_steps` (60), on every surface | `mesh.idle_stop_steps` (200), on headless turns only |
 
 Rules that tie them together:
 
 - **One latch.** One nudge per episode, whichever lane fires first.
 - **A stop needs a nudge first**, at least two steps after it, and then the lane's own stop bar.
 - **An episode closes** on a Strong step, or after four consecutive steps with every lane under its
-  nudge line.
-- **Idle is generous on purpose.** It is the only lane that can end a read-only turn of novel
-  output, so its bars sit well above anything healthy that was measured (the longest stretch
-  without an edit in a solved task was 37 steps). An attended turn is never stopped for idleness:
-  the person can see it and press escape.
+  nudge line. The check lane's episode is the exception: edits do not end it, only the check
+  passing or failing differently does.
+- **Headless means no person is watching**: a headless `forge run`, JSON and stream-json output,
+  bench. `--mode bypass` in a terminal someone is looking at is not headless, so the person gets
+  the warning and the status, not an error, and no idle or waiting stop. `mesh.idle_stop_steps = 0`
+  turns off both headless stops.
+- **Idle and waiting are generous on purpose.** They are the only lanes that can end a turn whose
+  every step looks new or is a poll, so their bars sit well above anything healthy that was
+  measured (the longest stretch without an edit in a solved task was 37 steps). A person watching
+  can press escape.
+- **A subagent has no idle or waiting stop of its own**: whether anyone watches it is the
+  parent's business, and it is held to the other lanes and to its agent type's `maxTurns`.
 
 ### After a stop
 
-- The ledger remembers what the stop was on (the call and the opening sentence). If one of the
-  first four steps after a `continue` repeats either, the turn is stopped again at once with no
-  second nudge. This is the "you are getting stuck" typed three times, handled by the harness.
+- The ledger remembers what the stop was on (the call and its result, and the opening sentence). If
+  one of the first four steps after a `continue` repeats the call and it comes back the same, or
+  repeats the opening over nothing new, the turn is stopped again at once with no second nudge.
+  This is the "you are getting stuck" typed three times, handled by the harness. The same call
+  that now comes back differently (the person started the service it was probing) is the
+  `continue` working and is left alone.
 - A system note, `Forge stopped your previous turn (<lane>: <reason>). Do not resume the same
   calls`, is stored so the next turn's model knows why it was stopped.
 - A re-drive cannot restart a stalled turn: `hard_guard_short_circuit` refuses to enter the loop
@@ -107,9 +142,12 @@ Rules that tie them together:
 ### Harness notes do not talk to themselves
 
 `push_note` drops the fourth identical copy (same kind, same text) of a `Hint`, `LoopGuard`,
-`Continue` or `Silence` note within a turn. A harness that repeats a hint every step is feeding the
+`Continue` or `Silence` note in a burst. A harness that repeats a hint every step is feeding the
 model the pattern it then repeats; this is also what keeps an LSP-style runaway, whose writes count
 as Strong progress and so are invisible to the lanes, from filling the context with one notice.
+A copy that comes 25 steps after the last one, or after a compaction (the model no longer has the
+earlier copies), is admitted again, so a diagnostic that persists is not lost for the rest of the
+turn.
 
 ## 4. What the person sees
 
@@ -135,9 +173,10 @@ Stopped: no progress for 10 steps (last change: step 31, edit_file src/lib.rs). 
 Send `continue`, or tell it what to try.
 ```
 
-On an unattended turn (headless `forge run`, JSON and stream-json output, bench, `--mode bypass`)
-the same headline is an error with the uncommitted work preserved
-(`refs/forge/aborted-turns`) and `Resume: forge run --continue`; the process exits non-zero.
+On a headless turn (`forge run`, JSON and stream-json output, bench; a person at a terminal in
+`--mode bypass` still counts as watching) the same headline is an error with the uncommitted work
+preserved (`refs/forge/aborted-turns`) and `Resume: forge run --continue`; the process exits
+non-zero.
 
 The turn ends with `StopReason::Stalled` (wire `stalled`, outcome `failed`). The TUI shows
 "Paused: no progress" with the way on; the board shows "stalled, no progress"; the JSON result keeps
@@ -154,7 +193,11 @@ The turn ends with `StopReason::Stalled` (wire `stalled`, outcome `failed`). The
 | `mesh.max_turn_input_tokens`, `mesh.bridge_turn_token_cap`, the USD turn cap | stop an unattended turn as `budget_exhausted` (a token-ceiling or dollar-cap abort used to be reported as a finished answer); an attended turn gets one warning, see `mesh.budget.hard_stop` below |
 | `mesh.budget.hard_stop = true \| false \| "auto"` | `auto` (the default) stops unattended turns at those ceilings and only warns attended ones; `true` stops every turn, `false` relaxes the USD caps only. The session, day, week and month caps are enforced either way |
 | `mesh.progress_guard = "enforce" \| "warn" \| "off"` | `warn` turns every stop into "would have stopped here" and lets the turn continue (how to calibrate on real work); `off` keeps the nudges and never stops |
-| `mesh.idle_nudge_steps`, `mesh.idle_stop_steps` | the idle lane's bars; `0` disables each |
+| `mesh.idle_nudge_steps`, `mesh.idle_stop_steps` | the idle lane's bars; `0` disables each. The stop applies to headless turns only, and `idle_stop_steps = 0` also turns off the headless waiting stop |
+
+"Unattended" in the spend rows is the older notion (headless, or `--mode bypass`, where no prompt
+can be answered); the idle and waiting stops are narrower and ask only whether a person is
+watching.
 
 An explicit step limit is counted against the turn's model calls across every re-drive pass.
 Subagents use the same rule: `maxTurns` is capped by `mesh.max_steps` only when that is set, and a
@@ -201,17 +244,38 @@ is one step. Cycle (3 and 5) and failure (3 and 6) are unchanged.
   moving, and stores the same "Forge stopped your previous turn" note.
 - A model that keeps starting tools more than 30 s after the stop has its process group killed;
   the turn still ends as stalled, and that call's usage is lost.
-- A stop is vetoed when the working tree changed since the nudge, and `progress_guard = "warn"` or
-  `"off"` never refuses a call, as on the direct path.
+- Each call that could have changed files is followed by a look at the working tree, as on the
+  direct path (the first call of a turn has no earlier state to compare with). `progress_guard =
+  "warn"` or `"off"` never refuses a call.
+- The waiting lane nudges at 48 calls (one call is one step) and never stops a bridged turn: a
+  bridge has no way to know whether anyone is watching.
 
 The bridge keeps its re-drive budget (it now counts re-drives that close no task), the 300 s idle
 watchdog and the per-turn bridge token ceiling. The text-mode and `agy` bridges have no tool hook
 in `mcp-serve` and stay protected by those alone.
 
-## 8. Not covered yet
+## 8. Known limits
 
+- **A loop in which some step's output always changes is caught only by the idle lane.** A step
+  that prints a timestamp, a counter or a fresh log line every time looks new, so reading file a,
+  running `date`, reading file b, forever, is nudged at 60 steps and stopped only on a headless
+  turn at 200. The same holds for repeating one sentence over a novel read every step. Text
+  cannot tell noise from news; the person's escape key and the spend ceilings are the bound.
+- **A headless read-only audit of more than 200 files** with no edit, no closed task and no check
+  is stopped at 200 with a way to resume. Close tasks as you go, or set `idle_stop_steps = 0`.
+- **A compaction every few steps hides a re-read loop** from the stale lanes (the model forgot, so
+  each re-read is new); the idle nudge at 60 still fires.
+- **A process that keeps writing inside the workspace** (a dev server logging to an untracked
+  file) moves the tree on every sample, so every shell step looks like progress while it runs.
+- **Shell work that leaves no trace in the tree and prints nothing** (a restart, an install
+  outside the workspace) counts as a new action only while its arguments are new.
+- **A quiet hand-rolled poll without a sleep** (`tail -n 1 build.log` five times in a row, no pause
+  between) is a loop and is stopped; the same poll with `sleep 30;` in front of it, or through
+  poll mode or `shell_job`, is a wait.
+- **The first sample of a bridged turn** has nothing to compare with, so a bridged turn's first
+  silent shell command is judged by its arguments alone.
 - **MCP `forge_chat` and daemon workers in Default or AcceptEdits mode** count as attended, so they
-  get nudges and lane stops but no idle stop.
+  get nudges and lane stops but no idle or waiting stop.
 - The thresholds are priors from a small sample of real runaways. Run with
   `progress_guard = "warn"` for a while before trusting the stops on your own work.
 

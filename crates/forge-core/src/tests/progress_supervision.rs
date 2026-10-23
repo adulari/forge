@@ -192,10 +192,10 @@ async fn three_hundred_productive_steps_are_never_interrupted_attended() {
 }
 
 #[tokio::test]
-async fn three_hundred_productive_steps_are_never_interrupted_unattended() {
+async fn three_hundred_productive_steps_are_never_interrupted_headless() {
     let provider = Scripted::new(productive_plan(300));
     let calls = Arc::clone(&provider.calls);
-    let mut h = Harness::new(provider, PermissionMode::Bypass, true, |_| {});
+    let mut h = Harness::new(provider, PermissionMode::Bypass, false, |_| {});
     let out = h.session.run_turn("add the cases").await.unwrap();
     assert_eq!(out.stop_reason, StopReason::FinalAnswer);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 301);
@@ -234,9 +234,9 @@ async fn an_attended_read_only_investigation_is_nudged_but_never_stopped() {
 }
 
 #[tokio::test]
-async fn an_unattended_read_only_turn_is_stopped_with_a_stalled_outcome_and_a_way_back() {
+async fn a_headless_read_only_turn_is_stopped_with_a_stalled_outcome_and_a_way_back() {
     let provider = Scripted::new(Box::new(|n| Some(novel_read(n))));
-    let mut h = Harness::new(provider, PermissionMode::Bypass, true, |config| {
+    let mut h = Harness::new(provider, PermissionMode::Bypass, false, |config| {
         config.mesh.idle_nudge_steps = 6;
         config.mesh.idle_stop_steps = 12;
     });
@@ -357,7 +357,7 @@ async fn a_poll_mode_wait_that_is_not_ready_is_never_a_loop() {
             ),
         )
     };
-    let provider = Scripted::new(Box::new(move |n| (n < 25).then(wait)));
+    let provider = Scripted::new(Box::new(move |n| (n < 20).then(wait)));
     let mut h = Harness::new(provider, PermissionMode::Bypass, true, |_| {});
     let out = h
         .session
@@ -382,17 +382,31 @@ fn git(root: &std::path::Path, args: &[&str]) {
     assert!(out.status.success(), "git {args:?}");
 }
 
-fn git_harness(command: &'static str, steps: usize) -> Harness {
-    let run = move || {
-        (
-            "Running it again.".to_string(),
-            tool("shell", serde_json::json!({ "command": command })),
-        )
-    };
+/// A harness over a git repository whose model runs `command(n)` as its n-th step, `steps` times.
+fn git_harness_with(
+    command: impl Fn(usize) -> String + Send + Sync + 'static,
+    steps: usize,
+    attended: bool,
+) -> Harness {
+    git_harness_plan(
+        Box::new(move |n| {
+            (n < steps).then(|| {
+                (
+                    "Running it again.".to_string(),
+                    tool("shell", serde_json::json!({ "command": command(n) })),
+                )
+            })
+        }),
+        attended,
+    )
+}
+
+/// A harness over a git repository holding one tracked file, `tracked.txt`.
+fn git_harness_plan(plan: Plan, attended: bool) -> Harness {
     let h = Harness::new(
-        Scripted::new(Box::new(move |n| (n < steps).then(run))),
+        Scripted::new(plan),
         PermissionMode::Bypass,
-        true,
+        attended,
         |_| {},
     );
     git(h.dir.path(), &["init", "-q", "-b", "main"]);
@@ -402,18 +416,19 @@ fn git_harness(command: &'static str, steps: usize) -> Harness {
     h
 }
 
+fn git_harness(command: &'static str, steps: usize) -> Harness {
+    git_harness_with(move |_| command.to_string(), steps, true)
+}
+
 #[tokio::test]
-async fn shell_driven_work_that_changes_the_tree_vetoes_the_stop() {
-    // Every step runs the same silent command, so the ledger sees a cycle; but each run edits a
-    // tracked file, so the turn is doing something and must not be stopped.
-    let mut h = git_harness("echo more >> tracked.txt", 14);
+async fn shell_driven_work_that_changes_the_tree_is_progress_and_is_never_nudged() {
+    // Every step runs the same silent command, so a ledger that reads results sees a cycle; but
+    // each run edits a tracked file into a state it never had, so the turn is doing something.
+    let mut h = git_harness("echo more >> tracked.txt", 40);
     let out = h.session.run_turn("append to the file").await.unwrap();
     assert_eq!(out.stop_reason, StopReason::FinalAnswer);
     assert_eq!(h.errors("Stopped:"), 0);
-    assert!(
-        h.system_notes("Progress check from Forge") >= 1,
-        "it was nudged"
-    );
+    assert_eq!(h.warnings("progress check"), 0, "not even a nudge");
 }
 
 #[tokio::test]
@@ -421,7 +436,295 @@ async fn the_same_silent_command_that_changes_nothing_is_stopped() {
     let mut h = git_harness("true", 14);
     let out = h.session.run_turn("do nothing, repeatedly").await.unwrap();
     assert_eq!(out.stop_reason, StopReason::Stalled);
+    assert_eq!(
+        h.warnings("Stopped:"),
+        1,
+        "a person is watching: a warning, and the model writes a status"
+    );
+    assert_eq!(h.errors("Stopped:"), 0);
+}
+
+#[tokio::test]
+async fn a_headless_stall_is_an_error_with_the_way_to_resume() {
+    let mut h = git_harness_with(|_| "true".to_string(), 14, false);
+    let out = h.session.run_turn("do nothing, repeatedly").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::Stalled);
     assert_eq!(h.errors("Stopped:"), 1);
+    assert_eq!(h.errors("Resume: forge run --continue"), 1);
+}
+
+/// A tracked file that goes through three contents and round again: the first three states are
+/// new, every state after that is one it was already in.
+#[tokio::test]
+async fn a_tracked_file_rewritten_through_three_known_states_is_stopped() {
+    let mut h = git_harness_with(
+        |n| format!("printf 'state {}\\n' > tracked.txt", n % 3),
+        60,
+        true,
+    );
+    let out = h.session.run_turn("keep rewriting the file").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::Stalled);
+    assert!(
+        h.model_calls() <= 24,
+        "stopped after {} model calls",
+        h.model_calls()
+    );
+    assert_eq!(h.warnings("progress check"), 1);
+}
+
+#[tokio::test]
+async fn a_shell_migration_outside_git_is_progress_too() {
+    let mut h = Harness::new(
+        Scripted::new(Box::new(|n| {
+            (n < 30).then(|| {
+                (
+                    "Converting the next file.".to_string(),
+                    tool(
+                        "shell",
+                        serde_json::json!({ "command": format!("printf 'converted {n}\\n' > out_{n}.txt") }),
+                    ),
+                )
+            })
+        })),
+        PermissionMode::AcceptEdits,
+        true,
+        |_| {},
+    );
+    let out = h.session.run_turn("convert the files").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert!(h.dir.path().join("out_29.txt").exists());
+    assert_eq!(h.warnings("progress check"), 0);
+    assert_eq!(h.errors("Stopped:"), 0);
+}
+
+/// Different edits, then the same failing test, again and again: the edits do not touch what
+/// fails. No edit repeats, so only the check's own verdict gives it away.
+#[tokio::test]
+async fn different_edits_between_the_same_failing_test_run_are_nudged_then_stopped() {
+    let mut h = Harness::new(
+        Scripted::new(Box::new(|n| {
+            (n < 60).then(|| {
+                if n % 2 == 0 {
+                    (
+                        "Trying another fix.".to_string(),
+                        tool(
+                            "write_file",
+                            serde_json::json!({"path": "fix.txt", "content": format!("attempt {n}\n")}),
+                        ),
+                    )
+                } else {
+                    (
+                        "Running the tests.".to_string(),
+                        tool("shell", serde_json::json!({"command": "sh run_tests.sh"})),
+                    )
+                }
+            })
+        })),
+        PermissionMode::AcceptEdits,
+        true,
+        |_| {},
+    );
+    std::fs::write(
+        h.dir.path().join("run_tests.sh"),
+        "echo 'FAILED tests::parses_the_header'\necho 'assertion failed: left == right'\nexit 1\n",
+    )
+    .unwrap();
+    let out = h.session.run_turn("make the tests pass").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::Stalled);
+    assert_eq!(h.warnings("progress check"), 1);
+    assert!(
+        h.system_notes("failed 6 times with the same output") >= 1,
+        "the nudge names the check"
+    );
+    assert!(h.model_calls() <= 26, "{} model calls", h.model_calls());
+}
+
+/// Break a tracked file, read it, repair it, read it: the same four calls with the same results,
+/// on a file git tracks. It is stopped wherever in the cycle the nudge lands.
+#[tokio::test]
+async fn breaking_and_repairing_a_tracked_file_in_a_cycle_is_stopped() {
+    let plan: Plan = Box::new(|n| {
+        (n < 80).then(|| match n % 4 {
+            0 => (
+                "Trying a change.".to_string(),
+                tool(
+                    "edit_file",
+                    serde_json::json!({"path": "tracked.txt", "old": "start", "new": "broken"}),
+                ),
+            ),
+            2 => (
+                "That did not help, putting it back.".to_string(),
+                tool(
+                    "edit_file",
+                    serde_json::json!({"path": "tracked.txt", "old": "broken", "new": "start"}),
+                ),
+            ),
+            _ => (
+                "Looking at the file.".to_string(),
+                tool("read_file", serde_json::json!({"path": "tracked.txt"})),
+            ),
+        })
+    });
+    let mut h = git_harness_plan(plan, true);
+    let out = h.session.run_turn("fix the file").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::Stalled);
+    assert!(h.model_calls() <= 24, "{} model calls", h.model_calls());
+}
+
+/// The person fixes whatever the probe was failing on and says `continue`: the model runs the
+/// same probe again, and this time it works.
+#[tokio::test]
+async fn a_continue_after_the_cause_was_fixed_may_repeat_the_call_that_failed() {
+    let second_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let calls_this_turn = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (flag, count) = (Arc::clone(&second_turn), Arc::clone(&calls_this_turn));
+    let probe = || {
+        (
+            "Probing the service again.".to_string(),
+            tool("shell", serde_json::json!({"command": "sh probe.sh"})),
+        )
+    };
+    let mut h = Harness::new(
+        Scripted::new(Box::new(move |_| {
+            let k = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                (k < 1).then(probe)
+            } else {
+                Some(probe())
+            }
+        })),
+        PermissionMode::AcceptEdits,
+        true,
+        |_| {},
+    );
+    std::fs::write(
+        h.dir.path().join("probe.sh"),
+        "if test -f ready.flag; then echo 'service is up'; else echo 'probe failed: connection refused'; exit 1; fi\n",
+    )
+    .unwrap();
+    let first = h.session.run_turn("check the service").await.unwrap();
+    assert_eq!(first.stop_reason, StopReason::Stalled);
+
+    std::fs::write(h.dir.path().join("ready.flag"), "").unwrap();
+    second_turn.store(true, std::sync::atomic::Ordering::SeqCst);
+    calls_this_turn.store(0, std::sync::atomic::Ordering::SeqCst);
+    let second = h
+        .session
+        .run_turn("I started the service, continue")
+        .await
+        .unwrap();
+    assert_eq!(second.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.warnings("Stopped:"), 1, "only the first turn was stopped");
+}
+
+#[tokio::test]
+async fn bypass_mode_with_a_person_attending_is_not_stopped_for_idleness() {
+    let provider = Scripted::new(Box::new(|n| (n < 20).then(|| novel_read(n))));
+    let mut h = Harness::new(provider, PermissionMode::Bypass, true, |config| {
+        config.mesh.idle_nudge_steps = 6;
+        config.mesh.idle_stop_steps = 8;
+    });
+    write_novel_file(h.dir.path());
+    let out = h.session.run_turn("read it all").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.warnings("Stopped:"), 0);
+    assert_eq!(h.errors("Stopped:"), 0);
+}
+
+async fn start_job(h: &Harness, command: &str) -> u32 {
+    let shell = h.session.tools.get("shell").expect("shell tool");
+    let out = shell
+        .run(&serde_json::json!({"command": command, "background": true}))
+        .await
+        .unwrap();
+    out.split("started background job ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|id| id.parse().ok())
+        .unwrap_or_else(|| panic!("no job id in: {out}"))
+}
+
+async fn stop_job(h: &Harness, id: u32) {
+    let job = h.session.tools.get("shell_job").expect("shell_job tool");
+    let _ = job
+        .run(&serde_json::json!({"action": "stop", "id": id}))
+        .await;
+    // The id is the pid of a process this test started.
+    let _ = std::process::Command::new("kill")
+        .arg(id.to_string())
+        .status();
+}
+
+/// Waits on a job that is still running, polling it with `shell_job status` once per step the
+/// way the harness tells the model to.
+async fn poll_a_running_job(polls: usize, attended: bool) -> (Harness, LoopOutcome) {
+    // The jobs registry lives under a process-wide state directory.
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _only_one = ONE_AT_A_TIME.lock().await;
+    let state = tempfile::tempdir().unwrap();
+    std::env::set_var("FORGE_STATE_DIR", state.path());
+    let id = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let plan_id = Arc::clone(&id);
+    let mut h = Harness::new(
+        Scripted::new(Box::new(move |n| {
+            (n < polls).then(|| {
+                (
+                    "The build is still running; checking on it again.".to_string(),
+                    tool(
+                        "shell_job",
+                        serde_json::json!({"action": "status", "id": plan_id.load(std::sync::atomic::Ordering::SeqCst)}),
+                    ),
+                )
+            })
+        })),
+        PermissionMode::AcceptEdits,
+        attended,
+        |_| {},
+    );
+    let job = start_job(&h, "sleep 600").await;
+    id.store(job, std::sync::atomic::Ordering::SeqCst);
+    let out = h.session.run_turn("wait for the release build").await;
+    stop_job(&h, job).await;
+    (h, out.unwrap())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn polling_a_running_background_job_is_waiting_not_looping() {
+    let (h, out) = poll_a_running_job(14, true).await;
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.warnings("progress check"), 0);
+    assert_eq!(h.warnings("Stopped:"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_that_goes_on_is_nudged_once_attended_and_never_stopped() {
+    let (h, out) = poll_a_running_job(40, true).await;
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert_eq!(h.system_notes("waited 24 steps"), 1);
+    assert_eq!(h.warnings("Stopped:"), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_that_goes_on_is_stopped_when_nobody_is_watching() {
+    let (h, out) = poll_a_running_job(200, false).await;
+    assert_eq!(out.stop_reason, StopReason::Stalled);
+    let said: Vec<String> = h
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            PresenterEvent::Error(text) | PresenterEvent::Warning(text) => {
+                Some(text.chars().take(160).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        h.errors("still waiting for something that is not ready"),
+        1,
+        "{said:#?}"
+    );
 }
 
 #[tokio::test]

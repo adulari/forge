@@ -321,7 +321,12 @@ async fn run_agent_loop(
     let mut active_model = decision.model.clone();
 
     let step_limit = progress::step_limit(agent.max_turns, ctx.config.mesh.max_steps);
-    let mut supervisor = progress::ChildSupervisor::new(&ctx.config);
+    let mut supervisor = progress::ChildSupervisor::new(
+        &ctx.config,
+        ctx.worktree_root
+            .clone()
+            .unwrap_or_else(|| ctx.repo_root.clone()),
+    );
     let mut stalled: Option<String> = None;
     for step in 0usize.. {
         if step_limit.is_some_and(|limit| step >= limit) {

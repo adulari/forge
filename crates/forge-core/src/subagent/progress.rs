@@ -52,23 +52,26 @@ pub(super) fn stalled_outcome(last_words: String, headline: &str) -> SubagentOut
 }
 
 /// The child is judged like the parent: nudged once, then stopped when it stops getting anywhere.
-/// Nobody watches a child, so it gets the unattended idle stop.
+/// A child has no idle stop of its own: whether a person watches it is the parent's business, and
+/// a child that really loops is stopped by the same lanes as the parent. It is held to its agent
+/// type's `maxTurns` where that is set.
 pub(super) struct ChildSupervisor {
     ledger: ProgressLedger,
     guard: ProgressGuardMode,
+    root: std::path::PathBuf,
 }
 
 impl ChildSupervisor {
-    pub(super) fn new(config: &Config) -> Self {
+    /// `root` is the directory the child works in, which is where its shell commands leave their
+    /// mark.
+    pub(super) fn new(config: &Config, root: std::path::PathBuf) -> Self {
         let mut ledger = ProgressLedger::default();
-        ledger.configure(
-            config.mesh.idle_nudge_steps,
-            config.mesh.idle_stop_steps,
-            true,
-        );
+        ledger.configure(config.mesh.idle_nudge_steps, 0, false);
+        ledger.rebase_tree(crate::working_tree::progress_fingerprint(&root));
         Self {
             ledger,
             guard: config.mesh.progress_guard,
+            root,
         }
     }
 
@@ -82,7 +85,13 @@ impl ChildSupervisor {
         transcript: &mut [Message],
         on_delta: &mut (dyn FnMut(StreamEvent) + Send),
     ) -> Option<String> {
-        match self.ledger.observe_step(narration, observations, false) {
+        let root = &self.root;
+        let verdict = self
+            .ledger
+            .observe_step(narration, observations, false, &mut || {
+                crate::working_tree::progress_fingerprint(root)
+            });
+        match verdict {
             Verdict::Fine => None,
             Verdict::Nudge(report) => {
                 if let Some(last) = transcript.last_mut() {
@@ -104,5 +113,84 @@ impl ChildSupervisor {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loop_progress::CallObservation;
+
+    /// A child that converts a file per step with the same silent command.
+    fn migrate(files_change: bool) -> Option<usize> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = ChildSupervisor::new(&Config::default(), dir.path().to_path_buf());
+        let mut transcript = vec![Message::tool_result("c", "ok".to_string())];
+        let mut sink = |_: StreamEvent| {};
+        for n in 0..40 {
+            if files_change {
+                std::fs::write(dir.path().join(format!("out_{n}.txt")), format!("{n}")).unwrap();
+            }
+            let same = {
+                let call = forge_types::ToolCall {
+                    id: format!("c{n}"),
+                    name: "shell".into(),
+                    args: serde_json::json!({ "command": "./convert-next.sh" }),
+                };
+                CallObservation::for_call(&call, true, false, "shell: exit 0 in 3ms")
+            };
+            if child
+                .observe(
+                    "Converting the next one.",
+                    &[same],
+                    &mut transcript,
+                    &mut sink,
+                )
+                .is_some()
+            {
+                return Some(n + 1);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_child_whose_shell_commands_change_the_tree_is_never_stopped() {
+        assert_eq!(migrate(true), None);
+    }
+
+    #[test]
+    fn a_child_whose_shell_commands_change_nothing_is_stopped() {
+        assert!(migrate(false).is_some_and(|step| step <= 8));
+    }
+
+    #[test]
+    fn a_child_has_no_idle_stop_but_is_still_nudged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = ChildSupervisor::new(&Config::default(), dir.path().to_path_buf());
+        let mut transcript = vec![Message::tool_result("c", "ok".to_string())];
+        let mut sink = |_: StreamEvent| {};
+        let mut stopped = false;
+        for n in 0..300 {
+            let call = forge_types::ToolCall {
+                id: format!("c{n}"),
+                name: "read_file".into(),
+                args: serde_json::json!({ "path": format!("f{n}.rs") }),
+            };
+            let read = CallObservation::for_call(
+                &call,
+                true,
+                false,
+                &format!("fn item_{n}() {{}}\nfn other_{n}() {{}}"),
+            );
+            stopped |= child
+                .observe(&format!("reading {n}"), &[read], &mut transcript, &mut sink)
+                .is_some();
+        }
+        assert!(!stopped, "300 steps of new reads");
+        assert!(
+            transcript[0].content.contains("Progress check from Forge"),
+            "the idle nudge was appended to the last tool result"
+        );
     }
 }

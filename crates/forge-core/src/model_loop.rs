@@ -156,6 +156,11 @@ impl Session {
         let mut pre_review: Option<(String, Option<u64>)> = None;
         // Gates the review on a real change: shell commands like `./build.sh` count as mutations.
         let turn_start_tree = crate::completeness::worktree_fingerprint(self.workspace_root());
+        // The progress ledger judges what shell-driven steps did to the tree against this.
+        self.ledger.rebase_tree(
+            turn_start_tree
+                .or_else(|| crate::working_tree::progress_fingerprint(self.workspace_root())),
+        );
         // Direct path only: the `inspect_ran` count at the moment the verify nudge was last issued.
         // An inspection that runs AFTER this point is the model responding to the request to verify
         // (on the direct path, tools run in separate steps from the text claim, so a step-local
@@ -318,7 +323,7 @@ impl Session {
                 break;
             }
 
-            if let Some(stop) = self.take_bridge_stall(&resp.content, unattended)? {
+            if let Some(stop) = self.take_bridge_stall(&resp.content)? {
                 final_text = stop.final_text;
                 (hard_guard_abort, halted_by_loop_guard, hit_step_cap) = (stop.hard, true, false);
                 break;

@@ -1979,8 +1979,11 @@ pub struct MeshConfig {
     /// `0` disables the nudge. Default 60: the longest healthy stretch measured was 37.
     #[serde(default = "default_idle_nudge_steps")]
     pub idle_nudge_steps: usize,
-    /// Steps without any of those after which an UNATTENDED turn is stopped (attended turns are
-    /// never stopped by this: the person can see them and press escape). `0` disables. Default 200.
+    /// Steps without any of those after which a HEADLESS turn (nobody watching: `forge run`, a
+    /// detached session, JSON output) is stopped. A person at a terminal is never stopped by this,
+    /// even in `--mode bypass`: they can see the turn and press escape. A headless turn that does
+    /// nothing but wait on a job that never finishes is stopped on the same switch, after 96 wait
+    /// steps. `0` disables both. Default 200.
     #[serde(default = "default_idle_stop_steps")]
     pub idle_stop_steps: usize,
     /// Cumulative input tokens a single turn may consume before it is ended with an error, on any

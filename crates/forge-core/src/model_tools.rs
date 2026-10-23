@@ -6,6 +6,7 @@ impl Session {
     /// Run one model response's tool calls through the permission broker and record what each
     /// returned. Returns whether a `PostToolBatch` hook ended the turn. Judging whether the turn
     /// is getting anywhere is the progress ledger's job, after the step (`progress_supervisor`).
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_model_tool_step(
         &mut self,
         msg_id: &str,
@@ -83,8 +84,9 @@ impl Session {
                 if batch_hooks {
                     batch.push((call, result.clone()));
                 }
+                let verification = completion::classify_tool(&call.name, &call.args.to_string());
                 let flipped = ledgers.verification_ledger.lock().unwrap().observe_result(
-                    completion::classify_tool(&call.name, &call.args.to_string()),
+                    verification,
                     kind.is_none(),
                     &result,
                 );
@@ -95,7 +97,7 @@ impl Session {
                         false,
                         &result,
                     )
-                    .with_check_flip(flipped),
+                    .with_check(verification.check_family(), flipped),
                 );
             }
             // Deliver any queued system hints (the serial path does this per call): a hint left

@@ -15,6 +15,10 @@ pub(crate) enum Lane {
     Failure,
     /// The same calls with identical results.
     Cycle,
+    /// A check that keeps failing with the same output however much is edited between runs.
+    Check,
+    /// A wait for something external that does not end.
+    Waiting,
     /// Many steps without a file change, a closed task, a passing check or a steer.
     Idle,
     /// A resumed turn repeated what it was stopped on.
@@ -28,6 +32,8 @@ impl Lane {
             Lane::Futile => "futile",
             Lane::Failure => "failure",
             Lane::Cycle => "cycle",
+            Lane::Check => "check",
+            Lane::Waiting => "waiting",
             Lane::Idle => "idle",
             Lane::Resumed => "resumed",
         }
@@ -40,6 +46,8 @@ impl Lane {
             Lane::Futile => "no progress",
             Lane::Failure => "the same calls failing",
             Lane::Cycle => "the same calls returning the same results",
+            Lane::Check => "the same check failing the same way after every edit",
+            Lane::Waiting => "still waiting for something that is not ready",
             Lane::Idle => "no file change or finished task",
             Lane::Resumed => "the same steps again after a stop",
         }
@@ -57,6 +65,8 @@ pub(crate) struct StallReport {
     pub(crate) repeated: Option<(String, u32)>,
     /// A tool that kept failing, the failure's cause and how often.
     pub(crate) failing: Option<(String, String, u32)>,
+    /// A check family that failed with the same output, and how many runs in a row.
+    pub(crate) check: Option<(&'static str, u32)>,
 }
 
 impl StallReport {
@@ -69,6 +79,14 @@ impl StallReport {
         if let Some((label, times)) = &self.repeated {
             parts.push(format!(
                 "`{label}` ran {times} times with identical results"
+            ));
+        }
+        if let Some((family, runs)) = self
+            .check
+            .filter(|(_, runs)| *runs >= 2 && self.lane != Lane::Check)
+        {
+            parts.push(format!(
+                "`{family}` failed {runs} times with the same output"
             ));
         }
         if let Some(checks) = unresolved_checks {
@@ -99,6 +117,19 @@ impl StallReport {
                  otherwise make the change.",
                 self.steps
             ),
+            Lane::Waiting => format!(
+                "Progress check from Forge. You have waited {} steps for something that is still \
+                 not ready. Tell the person what you are waiting for and for how long, and stop \
+                 polling; if they say to keep waiting, poll again.",
+                self.steps
+            ),
+            Lane::Check => format!(
+                "Progress check from Forge. The same check has now failed {} times with the same \
+                 output, so the edits in between are not changing what it reports. Read the \
+                 failing output again, confirm the edits touch the code that fails, or say what \
+                 is blocking you.",
+                self.steps
+            ),
             _ => format!(
                 "Progress check from Forge. In your last {} steps nothing changed and nothing \
                  new turned up.",
@@ -111,7 +142,10 @@ impl StallReport {
         if let Some(line) = self.last_progress_line() {
             text.push_str(&format!("\n{line}"));
         }
-        if !matches!(self.lane, Lane::Narration | Lane::Idle) {
+        if !matches!(
+            self.lane,
+            Lane::Narration | Lane::Idle | Lane::Waiting | Lane::Check
+        ) {
             text.push_str(
                 "\nEither fix the cause, try a different approach, answer from what you have and \
                  say what is uncertain, or, if waiting on something external, say so and stop \
@@ -123,8 +157,13 @@ impl StallReport {
 
     /// The one-line notice that goes with the nudge.
     pub(crate) fn nudge_notice(&self) -> String {
+        // An attended turn is never stopped for taking long, so promising a stop would be false.
+        let then = match self.lane {
+            Lane::Idle | Lane::Waiting => "asking the model to report",
+            _ => "nudging the model once before stopping",
+        };
         format!(
-            "progress check ({}): {} for {} steps — nudging the model once before stopping",
+            "progress check ({}): {} for {} steps — {then}",
             self.lane.as_str(),
             self.lane.reason(),
             self.steps
@@ -139,6 +178,7 @@ impl StallReport {
         };
         let span = match self.lane {
             Lane::Resumed => String::new(),
+            Lane::Check => format!(" ({} runs)", self.steps),
             _ => format!(" for {} steps", self.steps),
         };
         format!(
@@ -161,18 +201,27 @@ impl StallReport {
     /// resume the calls that stalled it.
     pub(crate) fn persisted_note(&self) -> String {
         let evidence = self
-            .failing
-            .as_ref()
-            .map(|(tool, cause, times)| format!(": `{tool}` failed {times} times ({cause})"))
+            .check
+            .filter(|_| self.lane == Lane::Check)
+            .map(|(family, runs)| format!(": `{family}` failed {runs} times with the same output"))
+            .or_else(|| {
+                self.failing.as_ref().map(|(tool, cause, times)| {
+                    format!(": `{tool}` failed {times} times ({cause})")
+                })
+            })
             .or_else(|| {
                 self.repeated.as_ref().map(|(label, times)| {
                     format!(": `{label}` ran {times} times with identical results")
                 })
             })
             .unwrap_or_default();
+        let advice = if self.lane == Lane::Waiting {
+            "If the person says to keep waiting, poll again; otherwise say what you were waiting for."
+        } else {
+            "Do not resume the same calls: change approach, or say what is blocking you."
+        };
         format!(
-            "Forge stopped your previous turn ({}: {}{evidence}). Do not resume the same calls: \
-             change approach, or say what is blocking you.",
+            "Forge stopped your previous turn ({}: {}{evidence}). {advice}",
             self.lane.as_str(),
             self.lane.reason()
         )
@@ -190,6 +239,7 @@ mod tests {
             last_progress: Some((31, "edit_file src/lib.rs".into())),
             repeated: Some(("read_file a.rs".into(), 3)),
             failing: Some(("shell".into(), "command not found: x".into(), 4)),
+            check: Some(("test", 7)),
         }
     }
 
@@ -228,6 +278,35 @@ mod tests {
             ..report(Lane::Futile)
         };
         assert!(!bare.stop_headline().contains("last change"));
+    }
+
+    #[test]
+    fn the_check_and_waiting_lanes_say_what_to_do_and_how_long_it_went_on() {
+        let check = report(Lane::Check);
+        let text = check.nudge_text(None, 0);
+        assert!(
+            text.contains("failed 4 times with the same output"),
+            "{text}"
+        );
+        assert_eq!(
+            text.matches("failed 7 times").count(),
+            0,
+            "the lane's own sentence is not repeated under Observed"
+        );
+        assert!(check
+            .stop_headline()
+            .contains("the same check failing the same way"));
+        assert!(check.stop_headline().contains("(4 runs)"));
+        assert!(check.persisted_note().contains("`test` failed 7 times"));
+
+        let waiting = report(Lane::Waiting);
+        assert!(waiting.nudge_text(None, 0).contains("waited 4 steps"));
+        assert!(waiting
+            .persisted_note()
+            .contains("If the person says to keep waiting, poll again"));
+        assert!(!waiting
+            .persisted_note()
+            .contains("Do not resume the same calls"));
     }
 
     #[test]

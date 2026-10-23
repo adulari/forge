@@ -56,8 +56,9 @@ impl Session {
         } else {
             result
         };
+        let verification = completion::classify_tool(&call.name, &call.args.to_string());
         let flipped = ledgers.verification_ledger.lock().unwrap().observe_result(
-            completion::classify_tool(&call.name, &call.args.to_string()),
+            verification,
             failure.is_none(),
             result,
         );
@@ -70,7 +71,7 @@ impl Session {
                 writes,
                 observed,
             )
-            .with_check_flip(flipped),
+            .with_check(verification.check_family(), flipped),
         );
         // Count the mutation only once it SUCCEEDED. A denied or failing write changed nothing,
         // so treating the attempt as evidence would let both the phantom-edit gate and the
