@@ -12,6 +12,13 @@ const out = await tools.shell({ command: "cargo check -p forge-agent-config" });
 return out.split("\n").slice(0, 20).join("\n");
 ```
 
+`run_code` is a direct-path tool. A CLI bridge (`claude-cli::`, `codex-cli::`) never sees it, and its
+requests never carry the guidance block that teaches it: the block rides with the tool, and
+`Session::transcript_with_preamble_and_tools` leaves it out for a bridge model even though the
+request is sized against the direct tool catalog. (Until the fix it reached both bridges: a bridged
+codex was told to end a script with `return`, a syntax error in its code mode, and 13 of the 20
+failed `exec` scripts of a 52-task `codex-cli::gpt-6-luna` benchmark were exactly that.)
+
 ## When the model reaches for it
 
 Advertising the tool was not enough: before the guidance below, `inferhub::glm-5.3-flash` made zero
