@@ -154,3 +154,29 @@ requirement in a small, checked, single-file change is no longer run: that is th
 A live check on two small tasks (d06, d07; `claude-cli::haiku`, one run each, a debug build against
 the release baseline binary) ran no review (2 of 2 before) and used 15 model calls against 18 and
 292k input tokens against 364k.
+
+## 7. The change travels with the review
+
+When the gate says review, the nudge used to tell the model to run `git status --short` and
+`git diff <start>` and read each new file, so the model's first step in the review was a tool call
+whose only purpose was to see what Forge could have shown it: a full request (the whole context
+again) before the review itself could begin. `review_evidence::gather` now runs the same two
+commands, minus the test byproducts, adds the content of each new untracked file, and puts the
+output in the nudge inside `<change>` tags, marked as data to check and not instructions. The text
+then says "Do not run those commands again". A change too big to carry (more than 12,000 bytes of
+evidence, or a new file over 6,000 bytes) keeps the old wording, which sends the model to fetch it.
+
+Measured on `codex-cli::gpt-6-luna` (`results/runs/codex-a2`, 52 tasks, against 13 tasks on the
+build with this change; review turns are the `codex exec resume` that carries the nudge):
+
+| | review turns | model calls per review | tool calls per review | reviews that made no tool call |
+|---|---|---|---|---|
+| before (two seeds) | 17 and 16 | 2.4 and 3.3 | 1.4 and 2.3 | 0 and 0 |
+| with the evidence | 10 (9 carried it) | 1.4 | 0.4 | 7 of 10 |
+
+and on `claude-cli::sonnet` (a02, a05, a08 and b04, reviewed in both baseline seeds), the assistant
+events of the review turn: a02 3 and 3, a05 2 and 2, a08 3 and 2, b04 3 and 3 before; a02 1, a05 2,
+a08 1, b04 2 with the evidence (a05's change was too big to carry and kept the old wording, so it
+made its one tool call; the other three made none). The review's own reading of the change is
+unchanged; what went is the round trip before it. The gate is untouched: the same turns are
+reviewed.

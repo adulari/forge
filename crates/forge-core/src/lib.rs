@@ -154,6 +154,7 @@ mod recent_files;
 pub mod redact;
 mod refinement;
 mod replay;
+mod review_evidence;
 mod review_gate;
 mod routing_policy;
 pub mod run_budget;
