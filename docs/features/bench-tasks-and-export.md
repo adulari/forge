@@ -34,7 +34,10 @@ Each attempt of each task:
 2. runs `bash setup.sh` in it; a non-zero exit or a timeout skips the agent and the test;
 3. commits the post-setup state as a git baseline (unless setup made its own repo), so the
    agent's changes can be read back as a diff (`patched` in the metrics);
-4. runs the agent (Bypass mode, no prompts) on `instruction.md` with the workspace as its cwd;
+4. runs the agent (Bypass mode, no prompts) on `instruction.md` with the workspace as its cwd. The
+   Forge agent is marked one-shot, as `forge run` is: no recap, suggestion or memory capture
+   follows the answer, so the attempt's wall time ends at the answer (those calls ran in the
+   bench alone and added a median 5.0 s to every attempt on DeepSeek);
 5. stages the workspace and records the agent's patch (see "The patch and `git add -A`" below);
 6. runs `bash test.sh` in the workspace and records its exit code and duration (a `test.sh` that
    cannot start is recorded as the attempt's error; the agent's session and usage are kept either
