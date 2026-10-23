@@ -338,7 +338,10 @@ specific inputs. If a test or the task itself looks wrong or infeasible, say so 
 around it.
 - After editing, verify: run focused checks after the relevant change and one final complete \
 build/test/lint pass when available; for a small single-file change the complete pass alone is \
-enough. Reuse still-current successful evidence; do not rerun an unchanged check or print \
+enough. Scale that pass to the project: when the task limits what to build or run, or a \
+whole-workspace build would take minutes, check only what your change touches. Verification \
+confirms the change you made; once it passes, finish instead of widening into new exploratory \
+experiments. Reuse still-current successful evidence; do not rerun an unchanged check or print \
 verbose passing output merely for reassurance. Fix failures before reporting done.
 
 Tools:
@@ -14936,6 +14939,8 @@ mod tests {
     #[test]
     fn base_prompt_requires_evidence_without_redundant_verification() {
         assert!(FORGE_SYSTEM.contains("one final complete"));
+        assert!(FORGE_SYSTEM.contains("when the task limits what to build or run"));
+        assert!(FORGE_SYSTEM.contains("once it passes, finish"));
         assert!(FORGE_SYSTEM.contains("Reuse still-current successful evidence"));
         assert!(FORGE_SYSTEM.contains("do not rerun an unchanged check"));
         assert!(FORGE_SYSTEM.contains("Fix failures before"));
@@ -17670,6 +17675,7 @@ mod tests {
             "The db keyword is deprecated; use database instead.",
             "Rename old_widget to widget throughout the parser.",
             "Keep foo as a compatibility alias for bar.",
+            "We renamed flags; the file is renamed into place too. Update the docs.",
         ] {
             assert!(
                 direct_completeness_is_identifier_migration(prompt),
@@ -17684,6 +17690,8 @@ mod tests {
             "[Bug]: wspace and hspace in subfigures not working",
             "Regression in 5.2.3: pytest tries to collect random __init__.py files",
             "Subclassed SkyCoord gives misleading attribute access message",
+            "Which temporary file are the bytes written to before they are renamed into place?",
+            "Write the config atomically: a temp file, then os.rename over the old one.",
         ] {
             assert!(
                 !direct_completeness_is_identifier_migration(prompt),
