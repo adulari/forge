@@ -41,6 +41,11 @@ fn ask_session(configure: impl FnOnce(&mut Config)) -> Ask {
     let root = dir.path().canonicalize().unwrap();
     std::fs::write(root.join("calc.py"), "def add(a, b):\n    return a - b\n").unwrap();
     std::fs::write(root.join(".env"), "API_KEY=hunter2\n").unwrap();
+    let git = root.join(".git");
+    std::fs::create_dir_all(git.join("objects")).unwrap();
+    std::fs::create_dir_all(git.join("refs")).unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(git.join("config"), "[core]\n\tbare = false\n").unwrap();
     let mut config = Config {
         permission_mode: forge_types::PermissionMode::Default,
         ..Config::default()

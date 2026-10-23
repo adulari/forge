@@ -159,16 +159,22 @@ pub(super) fn strip_harmless_redirects(cmd: &str) -> Option<String> {
 /// Index just past a redirect starting at `chars[at] == '>'` when it writes nowhere, else `None`.
 /// A leading fd digit or `&` was already copied to the output; they are inert without the `>`.
 fn harmless_redirect_end(chars: &[char], at: usize) -> Option<usize> {
+    let delimited = |end: usize| {
+        chars
+            .get(end)
+            .is_none_or(|c| c.is_whitespace() || ";&|)".contains(*c))
+    };
     let mut i = at + 1;
     if chars.get(i) == Some(&'&') {
         i += 1;
+        // `>&1` duplicates a descriptor, but `>&1file` is a redirect into a file called `1file`.
         return match chars.get(i) {
             Some(c) if c.is_ascii_digit() || *c == '-' => {
                 let mut end = i + 1;
                 while chars.get(end).is_some_and(char::is_ascii_digit) {
                     end += 1;
                 }
-                Some(end)
+                delimited(end).then_some(end)
             }
             _ => None,
         };
@@ -181,10 +187,7 @@ fn harmless_redirect_end(chars: &[char], at: usize) -> Option<usize> {
     }
     let target: String = chars[i..].iter().take("/dev/null".len()).collect();
     let end = i + "/dev/null".len();
-    let delimited = chars
-        .get(end)
-        .is_none_or(|c| c.is_whitespace() || ";&|)".contains(*c));
-    (target == "/dev/null" && delimited).then_some(end)
+    (target == "/dev/null" && delimited(end)).then_some(end)
 }
 
 fn segment_is_read_only(segment: &str) -> bool {
@@ -219,9 +222,10 @@ fn segment_is_read_only(segment: &str) -> bool {
 pub(super) fn shared_args_read_only(cmd: &str, rest: &[&str]) -> Option<bool> {
     let long = |full: &str| rest.iter().any(|w| is_long_option(w, full));
     Some(match cmd {
-        // `uniq IN OUT` writes OUT; `sort -o` / `tree -o` write a file. `sort` also execs the
-        // `--compress-program` it is given and writes spill files under `-T`.
-        "uniq" => rest.iter().filter(|w| !w.starts_with('-')).count() <= 1,
+        // `uniq IN OUT` writes OUT, and a wildcard can turn one operand into two (`uniq *.txt`);
+        // `sort -o` / `tree -o` write a file. `sort` also execs the `--compress-program` it is
+        // given and writes spill files under `-T`.
+        "uniq" => uniq_operands(rest) <= 1 && !rest.iter().any(|w| w.contains(['*', '?', '['])),
         "sort" => {
             !(rest
                 .iter()
@@ -243,6 +247,8 @@ pub(super) fn shared_args_read_only(cmd: &str, rest: &[&str]) -> Option<bool> {
                     | "-fprint0"
                     | "-fprintf"
                     | "-fls"
+                    // bfs spells `-delete` this way too.
+                    | "-rm"
             )
         }),
         // `--pre` runs a preprocessor command over every file searched, `--hostname-bin` runs a
@@ -255,6 +261,22 @@ pub(super) fn shared_args_read_only(cmd: &str, rest: &[&str]) -> Option<bool> {
         }
         _ => return None,
     })
+}
+
+/// How many operands `uniq` was given. `-` (standard input) and everything after `--` are
+/// operands too, so `uniq - out` is `INPUT OUTPUT` and counts as two. A value given as a separate
+/// word (`-f 1`) counts as one as well, which only ever over-counts.
+fn uniq_operands(rest: &[&str]) -> usize {
+    let mut after_dashes = false;
+    let mut count = 0;
+    for word in rest {
+        if after_dashes || *word == "-" || !word.starts_with('-') {
+            count += 1;
+        } else if *word == "--" {
+            after_dashes = true;
+        }
+    }
+    count
 }
 
 /// Whether `word` is the long option `full` or something a getopt_long-style parser accepts as an
@@ -272,25 +294,7 @@ pub(super) fn git_read_only(rest: &[&str], subcommands: &[&str]) -> bool {
     let Some((sub, args)) = rest.split_first() else {
         return false;
     };
-    // `--output`, `--ext-diff` and `--textconv` run helpers or write files; `-c` injects config;
-    // `git grep -O<cmd>` runs a pager command; `--exec*` and `--config-env` redirect what runs.
-    let hostile = args.iter().any(|a| {
-        a.starts_with("--output")
-            || *a == "-c"
-            || a.starts_with("-O")
-            || a.starts_with("--exec")
-            || [
-                "--ext-diff",
-                "--textconv",
-                "--open-files-in-pager",
-                "--config-env",
-            ]
-            .iter()
-            .any(|full| is_long_option(a, full))
-            || is_long_option(a, "--output")
-            || is_long_option(a, "--exec-path")
-    });
-    if hostile {
+    if args.iter().any(|a| git_arg_is_hostile(sub, a)) {
         return false;
     }
     match *sub {
@@ -298,8 +302,64 @@ pub(super) fn git_read_only(rest: &[&str], subcommands: &[&str]) -> bool {
             .iter()
             .all(|a| matches!(*a, "-a" | "-r" | "-v" | "-vv" | "--list" | "--show-current")),
         "remote" if subcommands.contains(&"remote") => args.iter().all(|a| *a == "-v"),
+        "tag" if subcommands.contains(&"tag") => tag_only_lists(args),
+        "reflog" if subcommands.contains(&"reflog") => {
+            args.first().is_none_or(|first| *first == "show")
+        }
+        "stash" | "worktree" if subcommands.contains(sub) => args.first() == Some(&"list"),
         s => subcommands.contains(&s),
     }
+}
+
+/// `git tag` with no arguments lists; with arguments it creates or deletes unless it is told to
+/// list, and then only the listing flags are accepted.
+fn tag_only_lists(args: &[&str]) -> bool {
+    args.is_empty()
+        || (args.iter().any(|a| matches!(*a, "-l" | "--list"))
+            && args
+                .iter()
+                .filter(|a| a.starts_with('-'))
+                .all(|a| matches!(*a, "-l" | "--list" | "-n" | "-i" | "--ignore-case")))
+}
+
+/// A git argument that writes a file or runs a helper. `--output`, `--ext-diff` and `--textconv`
+/// run helpers or write files; `-c` injects config; `-O<cmd>` is `git grep`'s pager command and may
+/// sit inside a cluster of short flags (`-nOsh`); `--exec*` and `--config-env` redirect what runs;
+/// `--show-signature` and the `%G` placeholders run `gpg` over a signature the repository supplied;
+/// `--submodule` and `--recurse-submodules` read through a submodule's own repository.
+fn git_arg_is_hostile(sub: &str, arg: &str) -> bool {
+    let name = arg.split_once('=').map_or(arg, |(name, _)| name);
+    // Real options that only start like a hostile one: git takes an exact name over an
+    // abbreviation, but only for the subcommands that have the option.
+    if matches!(sub, "diff" | "log" | "show" | "grep")
+        && matches!(
+            name,
+            "--text"
+                | "--output-indicator-new"
+                | "--output-indicator-old"
+                | "--output-indicator-context"
+        )
+    {
+        return false;
+    }
+    arg.starts_with("--output")
+        || arg == "-c"
+        || is_short_flag(arg, 'O')
+        || arg.starts_with("--exec")
+        || arg.contains("%G")
+        || [
+            "--ext-diff",
+            "--textconv",
+            "--open-files-in-pager",
+            "--config-env",
+            "--show-signature",
+            "--submodule",
+            "--recurse-submodules",
+            "--exec-path",
+            "--output",
+        ]
+        .iter()
+        .any(|full| is_long_option(arg, full))
 }
 
 pub(super) fn is_short_flag(word: &str, c: char) -> bool {
@@ -350,6 +410,15 @@ mod tests {
             "ls 2>&1 | wc -l",
             "echo $(pwd)",
             "git status > /dev/null",
+            "ls >&2",
+            "ls >&1 2>&1 | wc -l",
+            "ls 2>&-",
+            "git diff --text",
+            "git diff --output-indicator-new=+",
+            "uniq",
+            "uniq -c",
+            "uniq calc.py",
+            "cat f | uniq -",
         ] {
             assert!(ro(cmd), "should allow: {cmd}");
         }
@@ -365,6 +434,11 @@ mod tests {
             "cat < f",
             "cat <(ls)",
             "ls &> out",
+            "ls >&1out",
+            "ls >&2err",
+            "ls >&-x",
+            "ls 2>&1out",
+            "ls >&1>out",
             "ls 2> err.log",
             "find . -delete",
             "find . -name x -exec rm {} ;",
@@ -385,7 +459,20 @@ mod tests {
             "sort -T /tmp in",
             "git grep -O'sh -c x' foo",
             "git grep --open=sh foo",
+            "git grep -nOsh foo",
+            "git grep -inO'touch x;' foo",
             "git show --textc HEAD:f",
+            "git log --show-signature",
+            "git log --format=%G? -1",
+            "git diff --submodule=diff",
+            "uniq - out",
+            "uniq -c - out",
+            "uniq -- -x out",
+            "uniq *.txt",
+            "uniq a?.txt",
+            "uniq 'a[1].txt'",
+            "echo x | uniq - out",
+            "find . -name x -rm",
             "rg -z x",
             "rg --pr ./evil x",
             "git branch newbranch",

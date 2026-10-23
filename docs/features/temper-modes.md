@@ -69,22 +69,33 @@ Ask used to prompt for every shell call, `git status` and `cat calc.py` included
 shell command without a prompt when the broker can prove it only reads (`permission/ask_shell.rs`,
 ADR-0008): every statement is one of `ls cat head tail wc pwd echo stat du nl tac cut tr sort uniq
 basename dirname realpath readlink which md5sum sha1sum sha256sum b3sum diff cmp grep egrep fgrep
-rg find sed git`, written plainly, with arguments that cannot write, run code or reach the
-network. Pipelines and `&&`/`;` chains qualify when every stage does. The call still shows in the
-transcript as an ordinary tool row, just with no prompt.
+rg find sed git printf column rev fold expand comm paste nproc whoami uname id df file hostname`,
+written plainly, with arguments that cannot write, run code or reach the network. Pipelines and
+`&&`/`;` chains qualify when every stage does. The call still shows in the transcript as an
+ordinary tool row, just with no prompt.
 
 It does not qualify, so it asks as before, when it has a redirect (other than `2>&1` and
 `>/dev/null`), a `$`/backtick/`<(` substitution, a subshell or brace, a `&`, a `VAR=value`
 prefix, a wrapper (`env`, `command`, `nohup`, `time`), a binary named by path or in quotes, a newline,
 or a flag such as `find -exec/-delete`, `sort -o`, `rg --pre`, `tail -f`; for `sed` only
 `sed -n 'N,Mp'` qualifies, for `git` only the read subcommands (`status diff log show branch`
-listing, `rev-parse ls-files blame grep ls-tree rev-list shortlog describe merge-base show-ref`) with no `-c`, `-C`, `--output`, `--ext-diff`, `--textconv` or `-O`.
+listing, `rev-parse ls-files blame grep ls-tree rev-list shortlog describe merge-base show-ref
+for-each-ref name-rev`, `tag` and `reflog` for listing, `stash list`, `worktree list`) with no
+`-c`, `-C`, `--output`, `--ext-diff`, `--textconv`, `-O`, `--no-index` or `--show-signature`.
+
+`git` also asks outside a repository, in one whose own `.git/config` (or a submodule's, or a
+`post-index-change` hook) names a program or anything else the broker does not know to be inert
+(`core.fsmonitor`, a `textconv` driver, `core.hooksPath`, a promisor remote, an `include`), and
+`git diff` asks when an operand lies outside the repository's work tree. Git runs those programs
+on `git status` and `git diff`, and a checkout can bring its own.
 
 Secrets are not a way around the secret rules. The built-in deny verbs (`cat .env`, ...) refuse as
 before, and the paths a read-only command names are also checked against the same secret globs
 (`.env*` but not `.env.example`, `*.pem`, `id_rsa`, `~/.ssh/**`, `/proc/*/environ`, ...), through
-symlinks, `~` and wildcards: `wc -c .env`, `git show HEAD:.env` and `cat .e*` ask. A recursive
-`grep -r` asks when its tree holds such a file.
+symlinks, `~` and wildcards: `wc -c .env`, `git show HEAD:.env` and `cat .e*` ask. A command that
+reads every file below a directory (`grep -r`, `diff` of two directories, `rg`, `git grep
+--untracked`) asks unless the directory is inside the workspace and holds no such file; a plain
+`rg` ignores hidden files, so a hidden `.env` does not stop it, but a visible `server.pem` does.
 
 What outranks it still does: the safety floor, deny rules, ask rules, hooks (`PreToolUse` runs
 first and may block), and the Read-only temper (which has its own classifier). Auto-edit, Auto and

@@ -8,6 +8,8 @@
 //! refusal. The globs are the `read_file` deny list (so `.env.example` stays readable), the
 //! configured `read_file` denies, and a few credential locations the list does not name.
 
+use std::cell::OnceCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -20,6 +22,7 @@ use super::super::{lexical_clean, path_candidates};
 /// Paths the secret rules do not name but that hold credentials all the same.
 const EXTRA_SECRET_GLOBS: &[&str] = &[
     "/proc/**/environ",
+    "/proc/**/cmdline",
     "**/.aws/**",
     "**/.kube/**",
     "**/.docker/**",
@@ -41,7 +44,11 @@ const BUDGET: Duration = Duration::from_millis(250);
 /// How arguments are judged. Built once per call; it owns the time budget.
 pub(super) struct Guard {
     cwd: PathBuf,
+    /// The session root, resolved. A recursive search may not leave it.
+    workspace: PathBuf,
     home: Option<PathBuf>,
+    /// The repository `git` would use here, once worked out.
+    repo: OnceCell<Option<super::git_repo::Repo>>,
     /// Secret globs configured through `read_file` deny rules, on top of the built-in ones.
     configured: Option<GlobSet>,
     started: Instant,
@@ -58,7 +65,12 @@ enum Target {
 }
 
 impl Guard {
-    pub(super) fn new(rules: &[PermissionRule], cwd: PathBuf, home: Option<PathBuf>) -> Self {
+    pub(super) fn new(
+        rules: &[PermissionRule],
+        cwd: PathBuf,
+        workspace: PathBuf,
+        home: Option<PathBuf>,
+    ) -> Self {
         let mut builder = GlobSetBuilder::new();
         let mut any = false;
         for rule in rules {
@@ -74,7 +86,9 @@ impl Guard {
         }
         Self {
             cwd,
+            workspace: std::fs::canonicalize(&workspace).unwrap_or(workspace),
             home: home.map(|h| std::fs::canonicalize(&h).unwrap_or(h)),
+            repo: OnceCell::new(),
             configured: any.then(|| builder.build().ok()).flatten(),
             started: Instant::now(),
         }
@@ -239,65 +253,124 @@ impl Guard {
                 .is_some_and(|set| set.is_match(probe))
     }
 
-    /// A recursive search must not be able to reach the home directory: the working directory is
-    /// home or above it, or an operand is. Home holds every credential file the user has.
-    pub(super) fn recursive_root_is_safe(&self, operands: &[&str]) -> bool {
-        // Without a home directory there is nothing to compare the search roots against.
-        self.home.is_some()
-            && !self.covers_home(&self.cwd)
-            && !operands.iter().any(|word| self.names_home_or_above(word))
+    /// The repository `git` would use from the working directory, if it runs nothing of its own
+    /// when asked to look (see [`super::git_repo`]). Judged once per call.
+    pub(super) fn git_repo(&self) -> Option<&super::git_repo::Repo> {
+        self.repo
+            .get_or_init(|| super::git_repo::inspect(&self.cwd))
+            .as_ref()
     }
 
-    fn names_home_or_above(&self, word: &str) -> bool {
+    /// Whether every word that could name a path lies inside `root`. Wildcards are expanded and
+    /// symlinks resolved; a word that cannot be resolved is not inside.
+    pub(super) fn all_inside(&self, root: &Path, words: &[&str]) -> bool {
+        words.iter().all(|word| match self.target(word) {
+            None => false,
+            Some(Target::Literal(path)) => within(Path::new(&path), root),
+            Some(Target::Pattern {
+                pattern,
+                relative_to,
+            }) => self
+                .expand(&pattern, relative_to.as_deref())
+                .is_some_and(|paths| paths.iter().all(|p| within(Path::new(p), root))),
+        })
+    }
+
+    /// Whether `word` names a directory, or could: `diff DIR DIR` compares the files of two
+    /// directories and prints how they differ, which reads them the way a recursive search does.
+    pub(super) fn names_directory(&self, word: &str) -> bool {
         match self.target(word) {
-            Some(Target::Literal(path)) => self.covers_home(Path::new(&path)),
-            Some(Target::Pattern { .. }) => false,
-            // An unresolvable tilde form could be anyone's home.
             None => true,
+            Some(Target::Literal(path)) => Path::new(&path).is_dir(),
+            Some(Target::Pattern {
+                pattern,
+                relative_to,
+            }) => self
+                .expand(&pattern, relative_to.as_deref())
+                .is_none_or(|paths| paths.iter().any(|p| Path::new(p).is_dir())),
         }
     }
 
-    fn covers_home(&self, path: &Path) -> bool {
-        let Some(home) = &self.home else {
+    /// Whether a command that reads every file under the directories `operands` name (the working
+    /// directory when none is one) may run unasked. Every root must lie inside the workspace and
+    /// outside the way to the home directory, and no file under it may be a secret. A search reads
+    /// what it meets, not what it was told to read, and no list of secret names is complete, so
+    /// the sweep itself is confined rather than only screened. `skip_hidden` is set for a search
+    /// that never opens a hidden file or directory below its roots (plain `rg`).
+    pub(super) fn search_is_safe(&self, operands: &[&str], skip_hidden: bool) -> bool {
+        // Without a home directory there is nothing to compare the search roots against.
+        if self.home.is_none() {
+            return false;
+        }
+        let Some(roots) = self.search_roots(operands) else {
             return false;
         };
-        let clean = PathBuf::from(lexical_clean(&path.to_string_lossy()));
-        let resolved = std::fs::canonicalize(&clean).unwrap_or_else(|_| clean.clone());
-        home.starts_with(&clean) || home.starts_with(&resolved)
+        roots.iter().all(|root| {
+            self.inside_workspace(root)
+                && !self.covers_home(root)
+                && !self.tree_holds_secret(root, skip_hidden)
+        })
     }
 
-    /// No file under the directories `operands` name (the working directory when none is one) is
-    /// a secret. A recursive `grep` prints matching lines from every file it meets, `.env` too.
-    pub(super) fn trees_hold_no_secret(&self, operands: &[&str]) -> bool {
+    /// The directories a search walks. `None` when an operand cannot be resolved (`~user`, a
+    /// wildcard that cannot be expanded), which could be anyone's directory.
+    fn search_roots(&self, operands: &[&str]) -> Option<Vec<PathBuf>> {
         let mut roots: Vec<PathBuf> = Vec::new();
         for operand in operands {
-            match self.target(operand) {
-                None => return false,
-                Some(Target::Literal(path)) => roots.push(PathBuf::from(path)),
-                Some(Target::Pattern {
+            match self.target(operand)? {
+                Target::Literal(path) => roots.push(PathBuf::from(path)),
+                Target::Pattern {
                     pattern,
                     relative_to,
-                }) => {
-                    let Some(paths) = self.expand(&pattern, relative_to.as_deref()) else {
-                        return false;
-                    };
-                    roots.extend(paths.into_iter().map(PathBuf::from));
-                }
+                } => roots.extend(
+                    self.expand(&pattern, relative_to.as_deref())?
+                        .into_iter()
+                        .map(PathBuf::from),
+                ),
             }
         }
         roots.retain(|root| root.is_dir());
         if roots.is_empty() {
             roots.push(self.cwd.clone());
         }
-        roots.iter().all(|root| !self.tree_holds_secret(root))
+        Some(roots)
     }
 
-    /// Walk `root` without following symlinks (each one is judged by where it leads). Too many
-    /// entries or too long is "cannot tell", which counts as a secret.
-    fn tree_holds_secret(&self, root: &Path) -> bool {
+    /// Whether `path` is the home directory or one of its ancestors. `a/link/..` is read the way
+    /// the filesystem reads it as well as the way the text does.
+    fn covers_home(&self, path: &Path) -> bool {
+        let Some(home) = &self.home else {
+            return false;
+        };
+        let clean = PathBuf::from(lexical_clean(&path.to_string_lossy()));
+        [
+            Some(clean.clone()),
+            std::fs::canonicalize(path).ok(),
+            std::fs::canonicalize(&clean).ok(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|candidate| home.starts_with(candidate))
+    }
+
+    /// Resolved through symlinks first: lexically `link/..` is the directory holding `link`, but on
+    /// disk it is the parent of wherever `link` points.
+    fn inside_workspace(&self, path: &Path) -> bool {
+        within(path, &self.workspace)
+    }
+
+    /// Walk `root`, judging every entry. A symlink is judged by where it leads and followed when
+    /// it leads to a directory (`grep -R`, `rg -L`, `diff -r` may all do so), and one that leaves
+    /// the workspace is unprovable. Too many entries or too long is "cannot tell", which counts as
+    /// a secret.
+    fn tree_holds_secret(&self, root: &Path, skip_hidden: bool) -> bool {
         let mut pending = vec![root.to_path_buf()];
+        let mut visited: HashSet<PathBuf> = HashSet::new();
         let mut seen = 0usize;
         while let Some(dir) = pending.pop() {
+            if !visited.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+                continue;
+            }
             // A directory the search cannot read is one it reads nothing from.
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
@@ -307,6 +380,9 @@ impl Guard {
                 if seen > MAX_WALK_ENTRIES || self.expired() {
                     return true;
                 }
+                if skip_hidden && entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
                 let path = entry.path();
                 let text = path.to_string_lossy();
                 if self.is_secret(&text, &text) {
@@ -314,13 +390,29 @@ impl Guard {
                 }
                 match entry.file_type() {
                     Ok(kind) if kind.is_dir() => pending.push(path),
-                    Ok(kind) if kind.is_symlink() && !self.is_not_secret(&text) => return true,
+                    Ok(kind) if kind.is_symlink() => {
+                        if !self.is_not_secret(&text) || !self.inside_workspace(&path) {
+                            return true;
+                        }
+                        if path.is_dir() {
+                            pending.push(path);
+                        }
+                    }
                     _ => {}
                 }
             }
         }
         false
     }
+}
+
+/// Whether `path` is `root` or below it, resolved through symlinks first: lexically `link/..` is the
+/// directory holding `link`, but on disk it is the parent of wherever `link` points. `root` is
+/// already resolved.
+fn within(path: &Path, root: &Path) -> bool {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| PathBuf::from(lexical_clean(&path.to_string_lossy())))
+        .starts_with(root)
 }
 
 /// Whether `sh` itself would list `path` for `pattern`: a component beginning with `.` is matched

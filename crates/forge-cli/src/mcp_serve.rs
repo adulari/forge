@@ -1222,9 +1222,11 @@ mod tests {
             .expect("shell is a core tool")
             .side_effect();
         let cwd = std::env::current_dir().unwrap();
+        // No git here: it is judged by the repository's own config, which a checkout's is not
+        // ours to fix. `ask_shell`'s tests cover it against a repository they build.
         for (command, expected) in [
-            ("git status", Allow),
-            ("git diff --stat", Allow),
+            ("cat Cargo.toml", Allow),
+            ("wc -l Cargo.toml", Allow),
             ("ls -la", Allow),
             ("grep -rn fn src | head", Allow),
             ("touch bridge_probe.txt", Ask),
@@ -1269,7 +1271,7 @@ mod tests {
             PermissionMode::Default,
             effect,
             "shell",
-            &serde_json::json!({ "command": "git status" }),
+            &serde_json::json!({ "command": "cat Cargo.toml" }),
             &server.rules,
             None,
         );

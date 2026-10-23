@@ -42,7 +42,9 @@ fn fixture() -> Fixture {
     for (path, body) in files {
         std::fs::write(path, body).unwrap();
     }
+    write_repo(&root, INERT_CONFIG);
     symlink(root.join(".env"), root.join("notes.txt")).unwrap();
+    symlink(home.join("docs"), root.join("escape")).unwrap();
     std::fs::create_dir_all(root.join("deep/a/b")).unwrap();
     std::fs::write(root.join("deep/a/b/.env"), "TOKEN=1\n").unwrap();
     std::fs::write(root.join("deep/a/readme.txt"), "hi\n").unwrap();
@@ -53,6 +55,22 @@ fn fixture() -> Fixture {
         root,
         home,
     }
+}
+
+/// What `git clone` leaves in `.git/config`, which runs nothing.
+const INERT_CONFIG: &str =
+    "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\
+[remote \"origin\"]\n\turl = https://example.invalid/calc.git\n\
+\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n\
+\tmerge = refs/heads/main\n";
+
+/// A directory git takes for a repository: `<dir>/.git` with the files discovery looks for.
+fn write_repo(dir: &Path, config: &str) {
+    let git = dir.join(".git");
+    std::fs::create_dir_all(git.join("objects")).unwrap();
+    std::fs::create_dir_all(git.join("refs")).unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(git.join("config"), config).unwrap();
 }
 
 fn rules() -> Vec<PermissionRule> {
@@ -106,10 +124,8 @@ const ALLOWED: &[&str] = &[
     "grep -rn \"name=\" src",
     "rg 'a=b' src",
     "ls FOO=1",
-    "rg -n add",
     "rg -n add src",
     "rg 'foo|bar' src",
-    "rg --files | wc -l",
     "wc -l calc.py",
     "wc -l src/*.rs",
     "head -n 5 calc.py",
@@ -120,6 +136,9 @@ const ALLOWED: &[&str] = &[
     "ls && git status",
     "ls; pwd",
     "git diff 2>&1 | head",
+    "ls >&2",
+    "ls 2>&1 | wc -l",
+    "ls 2>&-",
     "git status > /dev/null",
     "echo hello",
     "stat calc.py",
@@ -131,6 +150,44 @@ const ALLOWED: &[&str] = &[
     "git log | sed -n '1,10p'",
     "basename src/lib.rs",
     "git status --short ; git diff --stat",
+    "git diff --text",
+    "git log --text -1",
+    "git tag",
+    "git tag -l 'v*'",
+    "git tag --list",
+    "git for-each-ref --format='%(refname)'",
+    "git name-rev HEAD",
+    "git reflog",
+    "git reflog show -3",
+    "git stash list",
+    "git worktree list",
+    "git worktree list --porcelain",
+    "rg --files src | wc -l",
+    "printf '%s\\n' b a | sort",
+    "whoami",
+    "uname -a",
+    "id",
+    "id -un",
+    "df -h",
+    "hostname",
+    "hostname --fqdn",
+    "nproc",
+    "file calc.py",
+    "file -b src/lib.rs",
+    "column -t calc.py",
+    "rev calc.py",
+    "fold -w 20 calc.py",
+    "expand calc.py",
+    "comm calc.py calc.py",
+    "paste calc.py calc.py",
+    "uniq calc.py",
+    "uniq -c calc.py",
+    "sort calc.py | uniq - ",
+    "git diff calc.py src/lib.rs",
+    "sha256sum calc.py",
+    "md5sum -b calc.py",
+    "cat calc.py | uniq -",
+    "diff src src",
 ];
 
 /// Every way a command can write, run other code, reach out, or be mistaken for something else,
@@ -146,6 +203,12 @@ const REFUSED: &[(&str, &str)] = &[
     ("redirect", "ls 2> err.log"),
     ("redirect", "ls 1>out"),
     ("redirect", "ls >&out"),
+    ("redirect", "ls >&1out"),
+    ("redirect", "ls >&2err"),
+    ("redirect", "ls >&-x"),
+    ("redirect", "ls 2>&1out"),
+    ("redirect", "echo hi >&1file"),
+    ("redirect", "ls >&1>out"),
     ("redirect", "ls > /dev/null/../x"),
     ("redirect", "cat < calc.py"),
     ("redirect", "cat <<EOF"),
@@ -295,12 +358,12 @@ const REFUSED: &[(&str, &str)] = &[
     ("not on the list", "cd src && ls"),
     ("not on the list", "source x"),
     ("not on the list", ". x"),
-    ("not on the list", "printf x"),
     ("not on the list", "jq . calc.py"),
+    ("not on the list", "jq -n env"),
     ("not on the list", "date"),
     ("not on the list", "env"),
     ("not on the list", "printenv"),
-    ("not on the list", "id"),
+    ("not on the list", "ps aux"),
     ("not on the list", "touch x"),
     ("not on the list", "rm x"),
     ("not on the list", "cp calc.py x"),
@@ -390,6 +453,202 @@ const REFUSED: &[(&str, &str)] = &[
     ("secret in a searched tree", "git grep --untracked KEY"),
     ("secret in a searched tree", "git grep --no-index KEY"),
     ("not on the list", "tree -L 2"),
+    // The reviewers' bypasses, each as the command that proved it.
+    ("uniq writes its second operand", "uniq - out"),
+    ("uniq writes its second operand", "uniq *.txt"),
+    ("uniq writes its second operand", "uniq src/*.rs"),
+    ("uniq writes its second operand", "uniq calc.p?"),
+    ("uniq writes its second operand", "uniq calc.p[y]"),
+    ("uniq writes its second operand", "uniq -c - out"),
+    ("uniq writes its second operand", "cat calc.py | uniq - out"),
+    ("uniq writes its second operand", "echo hi | uniq - out"),
+    ("uniq writes its second operand", "uniq -- -x out"),
+    ("uniq writes its second operand", "uniq - ~/.bashrc"),
+    ("uniq writes its second operand", "uniq - .git/config"),
+    ("uniq writes its second operand", "uniq - package.json"),
+    ("uniq writes its second operand", "uniq -f 1 calc.py out"),
+    ("clustered git pager", "git grep -nO'touch /tmp/pwned;' add"),
+    ("clustered git pager", "git grep -nOsh add"),
+    ("clustered git pager", "git grep -inOsh add"),
+    ("clustered git pager", "git grep -n -Osh add"),
+    ("clustered git pager", "git grep -O sh add"),
+    (
+        "git reads outside the repository",
+        "git diff --no-index /var/empty .",
+    ),
+    (
+        "git reads outside the repository",
+        "git diff --no-index calc.py src/lib.rs",
+    ),
+    (
+        "git reads outside the repository",
+        "git diff --no-ind calc.py src/lib.rs",
+    ),
+    (
+        "git reads outside the repository",
+        "git --no-pager diff --no-index calc.py src/lib.rs",
+    ),
+    (
+        "git reads outside the repository",
+        "git grep --no-index add src",
+    ),
+    ("git signature check", "git log --show-signature"),
+    ("git signature check", "git log --show-sig -1"),
+    ("git signature check", "git show --show-signature HEAD"),
+    ("git signature check", "git log --format=%G? -1"),
+    ("git signature check", "git log --pretty=format:%GS"),
+    ("git signature check", "git log '--pretty=%h %GK'"),
+    ("git reads through a submodule", "git diff --submodule=diff"),
+    ("git reads through a submodule", "git log -p --submodule"),
+    (
+        "git reads through a submodule",
+        "git grep --recurse-submodules add",
+    ),
+    ("git write", "git tag v1"),
+    ("git write", "git tag -d v1"),
+    ("git write", "git tag -l -f v1"),
+    ("git write", "git tag -a v1 -m x"),
+    ("git write", "git stash pop"),
+    ("git write", "git stash drop"),
+    ("git write", "git stash push"),
+    ("git write", "git reflog expire --all"),
+    ("git write", "git reflog delete HEAD@{1}"),
+    ("git write", "git worktree add ../x"),
+    ("git write", "git worktree remove x"),
+    ("directories are searched without -r", "diff . src"),
+    ("directories are searched without -r", "diff src .."),
+    ("directories are searched without -r", "diff config deep"),
+    (
+        "directories are searched without -r",
+        "diff --from-file=src calc.py",
+    ),
+    (
+        "directories are searched without -r",
+        "diff --to-file src calc.py",
+    ),
+    (
+        "a plain rg reads every file it is not told to skip",
+        "rg -N .",
+    ),
+    (
+        "a plain rg reads every file it is not told to skip",
+        "rg BEGIN",
+    ),
+    (
+        "a plain rg reads every file it is not told to skip",
+        "rg -n add",
+    ),
+    (
+        "a plain rg reads every file it is not told to skip",
+        "rg --files",
+    ),
+    (
+        "a plain rg reads every file it is not told to skip",
+        "rg -L hunter2",
+    ),
+    (
+        "a plain rg reads every file it is not told to skip",
+        "rg --follow hunter2",
+    ),
+    (
+        "a plain rg reads every file it is not told to skip",
+        "rg --foll hunter2 .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "grep -d rec -h KEY .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "grep -drec -h KEY .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "grep -nd rec KEY .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "grep --directories=rec -h KEY .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "grep --dir=rec -h KEY .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "grep --directories rec KEY .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "grep -d re KEY .",
+    ),
+    (
+        "grep abbreviates the action it recurses with",
+        "egrep -d rec KEY .",
+    ),
+    ("names read from a file", "wc --files0-from=calc.py"),
+    ("names read from a file", "wc --files0-from=-"),
+    ("names read from a file", "sort --files0-from=-"),
+    ("names read from a file", "sort --files0-from=calc.py"),
+    ("names read from a file", "du --files0-from=calc.py"),
+    (
+        "names read from a file",
+        "printf '.env\\0' | sort --files0=-",
+    ),
+    ("find", "find . -name x -rm"),
+    (
+        "git diff outside the work tree is a no-index diff",
+        "git diff calc.py ../home/docs/notes.txt",
+    ),
+    (
+        "git diff outside the work tree is a no-index diff",
+        "git diff /var/empty .",
+    ),
+    (
+        "git diff outside the work tree is a no-index diff",
+        "git diff ~/docs/notes.txt calc.py",
+    ),
+    (
+        "git diff outside the work tree is a no-index diff",
+        "git diff -- ../home/docs/notes.txt calc.py",
+    ),
+    (
+        "git diff outside the work tree is a no-index diff",
+        "git diff escape/notes.txt calc.py",
+    ),
+    (
+        "git diff outside the work tree is a no-index diff",
+        "git diff /etc/hostname calc.py",
+    ),
+    (
+        "git diff outside the work tree is a no-index diff",
+        "git --no-pager diff /var/empty .",
+    ),
+    (
+        "a checksum list is a guessing oracle",
+        "sha256sum -c calc.py",
+    ),
+    (
+        "a checksum list is a guessing oracle",
+        "md5sum --check calc.py",
+    ),
+    (
+        "a checksum list is a guessing oracle",
+        "sha1sum -bc calc.py",
+    ),
+    (
+        "a checksum list is a guessing oracle",
+        "b3sum --che calc.py",
+    ),
+    ("secret", "cat /proc/self/cmdline"),
+    ("host name set", "hostname newname"),
+    ("host name set", "hostname -F calc.py"),
+    ("file compiles a magic file", "file -C"),
+    ("file compiles a magic file", "file -m magic calc.py"),
+    ("file compiles a magic file", "file -f calc.py"),
+    ("file compiles a magic file", "file --compile"),
+    ("a symlink out of the searched tree", "grep -rn add escape"),
+    ("a symlink out of the searched tree", "grep -R add escape"),
 ];
 
 #[test]
@@ -659,6 +918,182 @@ fn a_long_line_is_refused_rather_than_scanned() {
     let f = fixture();
     let long = format!("echo {}", "a".repeat(MAX_LINE_CHARS));
     assert!(!allows(&f, &long));
+}
+
+/// `allows_args` for `command` run from `cwd`, a directory relative to the workspace.
+fn allows_in(f: &Fixture, command: &str, cwd: &str) -> bool {
+    allows_args(f, json!({ "command": command, "cwd": cwd }))
+}
+
+#[test]
+fn a_plain_rg_skips_hidden_files_but_not_a_visible_secret() {
+    let f = fixture();
+    assert!(allows_in(&f, "rg -n add", "src"));
+    assert!(allows_in(&f, "rg --files", "src"));
+    // `deep/a/b/.env` is hidden, so rg never opens it; `grep -r` and `rg --hidden` do.
+    assert!(allows_in(&f, "rg -n add", "deep/a"));
+    assert!(!allows_in(&f, "grep -rn add .", "deep/a"));
+    assert!(!allows_in(&f, "rg --hidden add", "deep/a"));
+    // A key file is not hidden, and rg reads it unless it is told to skip it.
+    std::fs::write(f.root.join("deep/a/b/deploy.key"), "x").unwrap();
+    assert!(!allows_in(&f, "rg -n add", "deep/a"));
+    assert!(!allows_in(&f, "rg -n add", "."));
+}
+
+#[test]
+fn a_recursive_search_stays_inside_the_workspace() {
+    let f = fixture();
+    let docs = f.home.join("docs");
+    let docs = docs.to_string_lossy();
+    // `docs` holds nothing a secret glob names, and lies below the home directory, not above it.
+    for command in [
+        "grep -rn plain .",
+        "grep -rn plain",
+        "rg plain .",
+        "diff -r . .",
+    ] {
+        assert!(!allows_in(&f, command, &docs), "{command} in {docs}");
+    }
+    for command in [
+        format!("grep -rn plain {docs}"),
+        "grep -rn plain ../home/docs".to_string(),
+        "grep -rn plain ../home".to_string(),
+        "rg plain ../home/docs".to_string(),
+        // A symlink in the workspace that leads out of it, named plainly or walked through.
+        "grep -rn plain escape".to_string(),
+        "grep -rn plain escape/..".to_string(),
+        "rg plain escape".to_string(),
+    ] {
+        assert!(!allows(&f, &command), "{command}");
+    }
+    // Naming a file outside the workspace is a read of that file, which the secret globs judge.
+    assert!(allows_in(&f, "grep -n plain notes.txt", &docs));
+    assert!(allows(&f, "cat ../home/docs/notes.txt"));
+}
+
+#[test]
+fn a_symlink_out_of_a_searched_tree_is_unprovable_and_a_loop_ends() {
+    let f = fixture();
+    let tree = f.root.join("tree");
+    std::fs::create_dir(&tree).unwrap();
+    std::fs::write(tree.join("a.txt"), "x").unwrap();
+    assert!(allows(&f, "grep -rn x tree"));
+    symlink(&tree, tree.join("loop")).unwrap();
+    assert!(allows(&f, "grep -rn x tree"));
+    symlink(f.home.join("docs"), tree.join("out")).unwrap();
+    assert!(!allows(&f, "grep -rn x tree"));
+    assert!(!allows(&f, "rg -L x tree"));
+    std::fs::remove_file(tree.join("out")).unwrap();
+    // Inside the workspace, but it leads to a tree that holds a secret `tree` does not.
+    symlink(f.root.join("deep"), tree.join("in")).unwrap();
+    assert!(!allows(&f, "grep -R x tree"));
+    // rg skips the hidden `.env` down there, but follows the link to a visible key file.
+    assert!(allows(&f, "rg -L x tree"));
+    std::fs::write(f.root.join("deep/leak.key"), "x").unwrap();
+    assert!(!allows(&f, "rg -L x tree"));
+}
+
+#[test]
+fn two_clean_directories_may_be_compared_and_a_dirty_one_may_not() {
+    let f = fixture();
+    for dir in ["one", "two"] {
+        std::fs::create_dir(f.root.join(dir)).unwrap();
+        std::fs::write(f.root.join(dir).join("a.txt"), dir).unwrap();
+    }
+    assert!(allows(&f, "diff one two"));
+    assert!(allows(&f, "diff -r one two"));
+    std::fs::write(f.root.join("two/.env"), "K=v\n").unwrap();
+    assert!(!allows(&f, "diff one two"));
+    assert!(!allows(&f, "diff two one"));
+}
+
+#[test]
+fn git_runs_only_in_a_repository_whose_config_runs_nothing() {
+    let f = fixture();
+    let config = f.root.join(".git/config");
+    let ask = |command: &str| !allows(&f, command);
+    assert!(allows(&f, "git status"));
+    for hostile in [
+        "[core]\n\tfsmonitor = touch fsmonitor_ran; echo\n",
+        "[core]\n\tpager = sh -c x\n",
+        "[diff \"x\"]\n\ttextconv = touch ran; cat\n",
+        "[filter \"x\"]\n\tclean = touch ran\n",
+        "[extensions]\n\tpartialClone = origin\n",
+        "[remote \"origin\"]\n\tpromisor = true\n",
+        "[include]\n\tpath = /tmp/evil\n",
+        "[includeIf \"gitdir:/\"]\n\tpath = /tmp/evil\n",
+    ] {
+        std::fs::write(&config, format!("{INERT_CONFIG}{hostile}")).unwrap();
+        for command in [
+            "git status",
+            "git diff",
+            "git log -p",
+            "git show HEAD",
+            "git blame calc.py",
+        ] {
+            assert!(ask(command), "{command} under {hostile:?}");
+        }
+        // Nothing but git is judged by the repository's config.
+        assert!(allows(&f, "ls"), "{hostile:?}");
+    }
+    std::fs::write(
+        &config,
+        format!("{INERT_CONFIG}[core]\n\tfsmonitor = true\n"),
+    )
+    .unwrap();
+    assert!(allows(&f, "git status"));
+    std::fs::write(&config, INERT_CONFIG).unwrap();
+    std::fs::create_dir_all(f.root.join(".git/hooks")).unwrap();
+    std::fs::write(f.root.join(".git/hooks/post-index-change"), "#!/bin/sh\n").unwrap();
+    assert!(ask("git status"));
+    std::fs::remove_file(f.root.join(".git/hooks/post-index-change")).unwrap();
+    assert!(allows(&f, "git status"));
+}
+
+#[test]
+fn git_outside_a_repository_asks_because_diff_and_grep_turn_into_no_index_there() {
+    let f = fixture();
+    if f.home.ancestors().any(|dir| dir.join(".git").exists()) {
+        return;
+    }
+    let home = f.home.to_string_lossy();
+    for command in [
+        "git status",
+        "git log",
+        "git grep plain",
+        "git diff notes.txt docs",
+        "git diff .ssh docs",
+    ] {
+        assert!(!allows_in(&f, command, &home), "{command}");
+    }
+}
+
+#[test]
+fn a_committed_bare_repository_is_not_trusted_as_the_repository() {
+    let f = fixture();
+    let nested = f.root.join("tests/fixtures/repo.git");
+    std::fs::create_dir_all(nested.join("objects")).unwrap();
+    std::fs::create_dir_all(nested.join("refs")).unwrap();
+    std::fs::write(nested.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        nested.join("config"),
+        "[diff \"x\"]\n\ttextconv = touch ran; cat\n[core]\n\tbare = true\n",
+    )
+    .unwrap();
+    for command in [
+        "git log -p",
+        "git diff HEAD~1 HEAD",
+        "git status",
+        "git log --oneline",
+        "git blame f.txt",
+        "git show HEAD",
+    ] {
+        assert!(allows(&f, command), "{command} from the workspace");
+        assert!(
+            !allows_in(&f, command, "tests/fixtures/repo.git"),
+            "{command} inside the committed repository"
+        );
+    }
 }
 
 // ---- the broker: what wins over the auto-allow, and what it leaves alone ----
