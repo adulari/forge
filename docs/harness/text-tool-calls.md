@@ -68,7 +68,7 @@ nothing to parse a call against, and the model, which has no definitions to foll
 (the V4.1 shape above, with a space and `calls`, is what `deepseek-v4.1-flash` produced). Two
 things close the gap:
 
-- a prompt that names a source file (`grid/ranges.py`, `src/lib.rs:12`, `Cargo.toml`) is shown tools
+- a prompt that names a source file (`pkg/limits.py`, `src/lib.rs:12`, `Cargo.toml`) is shown tools
 - a model that writes a call as text, or whose call was recovered from text, gets the tools on its
   next request and for the rest of the session
 

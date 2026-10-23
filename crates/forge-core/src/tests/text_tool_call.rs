@@ -140,8 +140,8 @@ async fn a_recovered_call_on_a_toolless_request_keeps_tools_for_the_next_step() 
 #[tokio::test]
 async fn a_prompt_naming_a_file_starts_with_tools() {
     let (_, tools, _) = run(
-        "Which function in `grid/ranges.py` rejects a reversed range?",
-        vec![("It is _check_order.".into(), vec![])],
+        "What does `pkg/limits.py` do with a negative interval?",
+        vec![("It clamps it to zero.".into(), vec![])],
     )
     .await;
     assert_eq!(tools.len(), 1);

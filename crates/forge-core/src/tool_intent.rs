@@ -3,7 +3,7 @@
 //! A trivial-tier turn is sent without tools unless the prompt shows a workspace or external-action
 //! intent: a small model handed a tool list for "reply with exactly X" tends to answer with a call.
 //! The heuristic is a keyword list, so it misses questions that only name a file ("which function
-//! in `a/b.py` rejects ...") and the model, with nothing to call, writes the call as text. Two
+//! in `a/b.py` validates X") and the model, with nothing to call, writes the call as text. Two
 //! backstops: a prompt that names a source file is let through, and a model that writes a tool call
 //! as text gets the tools on its next request.
 
@@ -68,7 +68,7 @@ const INTENT_WORDS: &[&str] = &[
     "workflow",
 ];
 
-/// Extensions that make a bare word a file name (`ranges.py`, `src/lib.rs`, `Cargo.toml`).
+/// Extensions that make a bare word a file name (`limits.py`, `src/lib.rs`, `Cargo.toml`).
 const FILE_EXTENSIONS: &[&str] = &[
     "rs", "py", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "mod", "sum", "java", "kt", "kts",
     "swift", "c", "h", "cc", "cpp", "hpp", "cs", "rb", "php", "sh", "bash", "zsh", "toml", "yaml",
@@ -76,14 +76,9 @@ const FILE_EXTENSIONS: &[&str] = &[
     "svelte", "lua", "ex", "exs", "hs", "ml", "scala", "dart", "zig", "nix", "gradle", "xml",
 ];
 
-const EXTENSIONLESS_FILES: &[&str] = &["makefile", "dockerfile", "justfile", "gemfile", "rakefile"];
-
 fn is_file_name(token: &str) -> bool {
     let name = token.trim_matches(['.', '-']);
     let name = name.rsplit('/').next().unwrap_or(name);
-    if EXTENSIONLESS_FILES.contains(&name) {
-        return true;
-    }
     name.rsplit_once('.').is_some_and(|(stem, ext)| {
         !stem.is_empty()
             && FILE_EXTENSIONS
@@ -123,11 +118,10 @@ mod tests {
     #[test]
     fn a_prompt_that_names_a_source_file_is_shown_tools() {
         for prompt in [
-            "Which function in `grid/ranges.py` rejects a reversed range?",
+            "What does `pkg/limits.py` do with a negative interval?",
             "what does src/lib.rs export",
             "explain (Cargo.toml) to me",
             "Why does main.go:12 panic?",
-            "what is in Makefile",
             "look at ./scripts/run.SH.",
         ] {
             assert!(prompt_wants_tools(prompt), "{prompt}");
