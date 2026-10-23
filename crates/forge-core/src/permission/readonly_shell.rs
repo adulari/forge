@@ -159,10 +159,14 @@ pub(super) fn strip_harmless_redirects(cmd: &str) -> Option<String> {
 /// Index just past a redirect starting at `chars[at] == '>'` when it writes nowhere, else `None`.
 /// A leading fd digit or `&` was already copied to the output; they are inert without the `>`.
 fn harmless_redirect_end(chars: &[char], at: usize) -> Option<usize> {
+    // Where the shell ends the redirect's word: a blank or an operator. NOT `char::is_whitespace`,
+    // which also takes no-break and other Unicode spaces that `sh` keeps inside the word: with
+    // `>&2` followed by U+00A0 and a name, the shell redirects into a file called `2<nbsp>name`
+    // while a Unicode-aware reading sees `>&2`, a separator and a harmless word.
     let delimited = |end: usize| {
         chars
             .get(end)
-            .is_none_or(|c| c.is_whitespace() || ";&|)".contains(*c))
+            .is_none_or(|c| matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|' | ')'))
     };
     let mut i = at + 1;
     if chars.get(i) == Some(&'&') {
@@ -430,6 +434,42 @@ mod tests {
             "cat f | uniq -",
         ] {
             assert!(ro(cmd), "should allow: {cmd}");
+        }
+    }
+
+    /// `sh` ends the word of `>&2` at a blank or an operator. `>&2<nbsp>h/out` is one word, so the
+    /// shell redirects both streams into a file called `2<nbsp>h/out`; an end test that takes any
+    /// Unicode space for a separator strips `>&2` as a harmless descriptor copy and sees `h/out`
+    /// as a lone argument.
+    #[test]
+    fn a_redirect_ends_at_a_blank_and_never_at_a_unicode_space() {
+        let spaces = [
+            '\u{a0}', '\u{85}', '\u{b}', '\u{c}', '\r', '\u{1680}', '\u{2000}', '\u{2003}',
+            '\u{200a}', '\u{2028}', '\u{2029}', '\u{202f}', '\u{205f}', '\u{3000}',
+        ];
+        for space in spaces {
+            for cmd in [
+                format!("printf x >&2{space}h/out"),
+                format!("printf x >&1{space}out"),
+                format!("printf x >&-{space}out"),
+                format!("printf x 2>&1{space}out"),
+                format!("printf x >/dev/null{space}out"),
+                format!("printf x 2>/dev/null{space}out"),
+                format!("printf x >> /dev/null{space}out"),
+                format!("cat f >&2{space}h/.bashrc"),
+            ] {
+                assert!(!ro(&cmd), "should deny: {cmd:?}");
+            }
+        }
+        for cmd in [
+            "printf x >&2",
+            "printf x >&2 ; ls",
+            "printf x >&2\tcalc.py",
+            "ls 2>&1 | wc -l",
+            "ls >/dev/null && cat f",
+            "ls >&2|wc -l",
+        ] {
+            assert!(ro(cmd), "should allow: {cmd:?}");
         }
     }
 

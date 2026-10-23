@@ -8,8 +8,9 @@
 //! refusal. The globs are the `read_file` deny list (so `.env.example` stays readable), the
 //! configured `read_file` denies, and a few credential locations the list does not name.
 
-use std::cell::OnceCell;
-use std::collections::HashSet;
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::{BTreeSet, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -18,6 +19,8 @@ use forge_types::{is_dotenv_template, PermissionDecision, PermissionRule, RuleSo
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 
 use super::super::{lexical_clean, path_candidates};
+use super::path_env::{Found, SearchPath};
+use super::{git_repo, Host};
 
 /// Paths the secret rules do not name but that hold credentials all the same.
 const EXTRA_SECRET_GLOBS: &[&str] = &[
@@ -42,16 +45,24 @@ const MAX_WALK_ENTRIES: usize = 50_000;
 const BUDGET: Duration = Duration::from_millis(250);
 
 /// How arguments are judged. Built once per call; it owns the time budget.
-pub(super) struct Guard {
+pub(super) struct Guard<'a> {
     cwd: PathBuf,
     /// The session root, resolved. A recursive search may not leave it.
     workspace: PathBuf,
     home: Option<PathBuf>,
+    path: Option<OsString>,
+    trusted: &'a dyn Fn(&Path) -> bool,
     /// The repository `git` would use here, once worked out.
-    repo: OnceCell<Option<super::git_repo::Repo>>,
+    repo: OnceCell<Option<git_repo::Repo>>,
     /// Secret globs configured through `read_file` deny rules, on top of the built-in ones.
     configured: Option<GlobSet>,
     started: Instant,
+    /// What the statements judged so far would start, kept for [`Guard::finish`].
+    programs: RefCell<BTreeSet<String>>,
+    needs_trust: Cell<bool>,
+    uses_git: Cell<bool>,
+    /// The operands of every `git diff`, which [`Guard::finish`] checks against the work tree.
+    git_diffs: RefCell<Vec<Vec<String>>>,
 }
 
 enum Target {
@@ -64,12 +75,12 @@ enum Target {
     },
 }
 
-impl Guard {
+impl<'a> Guard<'a> {
     pub(super) fn new(
         rules: &[PermissionRule],
         cwd: PathBuf,
         workspace: PathBuf,
-        home: Option<PathBuf>,
+        host: Host<'a>,
     ) -> Self {
         let mut builder = GlobSetBuilder::new();
         let mut any = false;
@@ -87,11 +98,104 @@ impl Guard {
         Self {
             cwd,
             workspace: std::fs::canonicalize(&workspace).unwrap_or(workspace),
-            home: home.map(|h| std::fs::canonicalize(&h).unwrap_or(h)),
+            home: host.home.map(|h| std::fs::canonicalize(&h).unwrap_or(h)),
+            path: host.path,
+            trusted: host.trusted,
             repo: OnceCell::new(),
             configured: any.then(|| builder.build().ok()).flatten(),
             started: Instant::now(),
+            programs: RefCell::new(BTreeSet::new()),
+            needs_trust: Cell::new(false),
+            uses_git: Cell::new(false),
+            git_diffs: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Record that the call starts `program`, which [`Guard::finish`] looks up in `PATH`.
+    pub(super) fn note_program(&self, program: &str) {
+        self.programs.borrow_mut().insert(program.to_string());
+    }
+
+    /// Record that the call uses a binary only a trusted project may run unasked.
+    pub(super) fn note_needs_trust(&self) {
+        self.needs_trust.set(true);
+    }
+
+    /// Record a `git` statement; `diff_operands` is `Some` for `git diff`, whose operands must lie
+    /// inside the work tree.
+    pub(super) fn note_git(&self, diff_operands: Option<Vec<String>>) {
+        self.uses_git.set(true);
+        self.needs_trust.set(true);
+        if let Some(operands) = diff_operands {
+            self.git_diffs.borrow_mut().push(operands);
+        }
+    }
+
+    /// The checks that look at the machine instead of the text, run once every statement of every
+    /// line has passed so that a call that asks anyway costs none of them. In order: a binary that
+    /// needs trust needs a trusted project, which is a read of one small file; the programs the call
+    /// starts must be the system's and not the checkout's; and git runs only in a repository that
+    /// runs nothing of its own, found by running git itself.
+    pub(super) fn finish(&self) -> bool {
+        if self.needs_trust.get() && !self.project_is_trusted() {
+            return false;
+        }
+        self.programs_are_the_systems() && (!self.uses_git.get() || self.git_is_safe())
+    }
+
+    /// The workspace and the directory the command runs in, both: either can be somewhere the user
+    /// never vouched for, and a trusted workspace can be given a `cwd` that leads out of it.
+    fn project_is_trusted(&self) -> bool {
+        (self.trusted)(&self.workspace) && (self.trusted)(&self.cwd)
+    }
+
+    fn search_path(&self) -> Option<SearchPath> {
+        let path = self.path.as_deref()?;
+        Some(SearchPath::new(
+            path,
+            &self.cwd,
+            &self.workspace,
+            self.home.as_deref(),
+        ))
+    }
+
+    /// `sh` starts every call, and `rtk` may be put in front of the command (token savings), so
+    /// both count with the programs the statements name.
+    fn programs_are_the_systems(&self) -> bool {
+        let Some(search) = self.search_path() else {
+            return true;
+        };
+        let programs = self.programs.borrow();
+        let planted = ["sh", "rtk"]
+            .into_iter()
+            .chain(programs.iter().map(String::as_str))
+            .any(|name| search.find(name) == Found::Planted);
+        !planted
+    }
+
+    fn git_is_safe(&self) -> bool {
+        let Some(repo) = self.git_repo() else {
+            return false;
+        };
+        self.git_diffs.borrow().iter().all(|operands| {
+            let words: Vec<&str> = operands.iter().map(String::as_str).collect();
+            repo.work_tree
+                .as_deref()
+                .is_some_and(|tree| self.all_inside(tree, &words))
+        })
+    }
+
+    /// The repository `git` would use from the working directory, if it runs nothing of its own
+    /// when asked to look (see [`git_repo`]). Judged once per call, with the `git` the system has.
+    fn git_repo(&self) -> Option<&git_repo::Repo> {
+        self.repo
+            .get_or_init(|| {
+                let Found::System(git) = self.search_path()?.find("git") else {
+                    return None;
+                };
+                git_repo::inspect(&self.cwd, &git, self.trusted)
+            })
+            .as_ref()
     }
 
     fn expired(&self) -> bool {
@@ -160,6 +264,11 @@ impl Guard {
             (Some(self.cwd.as_path()), path)
         };
         let wildcard = rest.contains(['*', '?', '[']);
+        // The expansion below is the `glob` crate's, which reads some bracket expressions
+        // differently from `sh`: a pattern it matches to nothing can name `.env` to the shell.
+        if wildcard && !wildcards_mean_the_same(rest) {
+            return None;
+        }
         // Each wildcard component multiplies the directories the expansion must read; a glob is
         // not interruptible once started, so deep fan-out is refused up front.
         let fan_out = rest
@@ -251,14 +360,6 @@ impl Guard {
                 .configured
                 .as_ref()
                 .is_some_and(|set| set.is_match(probe))
-    }
-
-    /// The repository `git` would use from the working directory, if it runs nothing of its own
-    /// when asked to look (see [`super::git_repo`]). Judged once per call.
-    pub(super) fn git_repo(&self) -> Option<&super::git_repo::Repo> {
-        self.repo
-            .get_or_init(|| super::git_repo::inspect(&self.cwd))
-            .as_ref()
     }
 
     /// Whether every word that could name a path lies inside `root`. Wildcards are expanded and
@@ -413,6 +514,57 @@ fn within(path: &Path, root: &Path) -> bool {
     std::fs::canonicalize(path)
         .unwrap_or_else(|_| PathBuf::from(lexical_clean(&path.to_string_lossy())))
         .starts_with(root)
+}
+
+/// Whether the wildcards in `pattern` mean to `sh` what they mean to the `glob` crate, so that the
+/// files the crate lists are the files the shell would. `*` and `?` do. A bracket expression is
+/// trusted only as a plain set of letters, digits, `_` and `.`, negated with `!` or not, with digit
+/// ranges; everything else disagrees somewhere: `[^a]` negates in `sh` and is a literal caret to
+/// the crate (`cat .[^a]nv` reads `.env`), `[[:lower:]]`, `[[=e=]]` and `[[.e.]]` are classes the
+/// crate does not know, a range of letters follows the locale's collation in some shells, and a
+/// backslash escapes in `sh`. `[` with no `]` after it is an ordinary character to both.
+fn wildcards_mean_the_same(pattern: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    if chars.contains(&'\\') {
+        return false;
+    }
+    let mut at = 0;
+    while at < chars.len() {
+        if chars[at] != '[' {
+            at += 1;
+            continue;
+        }
+        let inner = at + 1;
+        let first = inner + usize::from(chars.get(inner) == Some(&'!'));
+        // A `]` right after the opening is a member of the set in `sh`; too odd to vouch for.
+        if chars.get(first) == Some(&']') {
+            return false;
+        }
+        let Some(len) = chars[first..].iter().position(|c| *c == ']') else {
+            at += 1;
+            continue;
+        };
+        let set = &chars[first..first + len];
+        let mut i = 0;
+        while i < set.len() {
+            let plain = set[i].is_ascii_alphanumeric() || matches!(set[i], '_' | '.');
+            let digit_range = set[i].is_ascii_digit()
+                && set.get(i + 1) == Some(&'-')
+                && set.get(i + 2).is_some_and(char::is_ascii_digit);
+            if digit_range {
+                i += 3;
+            } else if plain {
+                i += 1;
+            } else {
+                return false;
+            }
+        }
+        if set.is_empty() {
+            return false;
+        }
+        at = first + len + 1;
+    }
+    true
 }
 
 /// Whether `sh` itself would list `path` for `pattern`: a component beginning with `.` is matched

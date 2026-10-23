@@ -24,6 +24,14 @@
 //! about what a checkout can bring with it. Anything git cannot answer in time (no `git`, a refusal
 //! to open the repository, a dubious owner, too much output) is a refusal.
 //!
+//! Running git inside a repository somebody else wrote is itself the exposure, so this runs only
+//! for a project the user trusted (`forge trust`): the caller checks that before asking at all, and
+//! the git directory git found must lie inside trusted ground too (a trusted subdirectory of an
+//! untrusted checkout does not make the checkout's git directory trusted). Every probe also forces
+//! `core.fsmonitor=false`, forbids lazy fetching and every transport, and starts with none of the
+//! provider keys Forge holds in its own environment, so that a probe that went wrong would still
+//! run nothing, reach nothing and leak nothing.
+//!
 //! Outside a repository git is refused too, because it stops being a repository tool there:
 //! `git diff A B` is `git diff --no-index A B`, which reads plain files and whole trees, hidden ones
 //! included. The same happens inside one when a `git diff` operand lies outside the work tree,
@@ -36,15 +44,17 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// Everything the probes may take, summed over all of them: a repository with a huge index, or a
-/// git that hangs on a FIFO named by an include, must not stall the broker.
-const BUDGET: Duration = Duration::from_secs(5);
+/// Everything the probes may take, summed over all of them. The decision is made on the thread that
+/// runs the turn, so a git that hangs on a FIFO standing in for `.git/config` stalls it for this
+/// long, no longer; a legitimate repository takes a few milliseconds per probe (a 400,000-entry
+/// index under 0.6 s, a repository with 30 submodules about half a second).
+pub(super) const BUDGET: Duration = Duration::from_millis(1500);
 /// Most output read from a probe that lists config or paths.
 const MAX_LISTING_BYTES: u64 = 1 << 20;
 /// Most index listing read while looking for gitlinks.
 const MAX_INDEX_BYTES: u64 = 64 << 20;
 /// Repositories examined for one call (the one asked about and the nested ones under it).
-const MAX_REPOS: usize = 64;
+const MAX_REPOS: usize = 32;
 const MAX_DEPTH: usize = 5;
 
 /// Hooks git runs while only looking: when an index refresh writes the index, and when a ref
@@ -142,12 +152,15 @@ pub(super) struct Repo {
 }
 
 /// The repository a read-only `git` command would use from `cwd`, if it is one that runs nothing
-/// the checkout supplied. `None` is a refusal: no repository, one git will not open, one that
-/// names a helper, or one that cannot be judged in time.
-pub(super) fn inspect(cwd: &Path) -> Option<Repo> {
+/// the checkout supplied. `git` is the system's program (the caller found it on a `PATH` the
+/// checkout does not control) and `trusted` says whether the user vouched for a directory. `None`
+/// is a refusal: no repository, one git will not open, one outside trusted ground, one that names
+/// a helper, or one that cannot be judged in time.
+pub(super) fn inspect(cwd: &Path, git: &Path, trusted: &dyn Fn(&Path) -> bool) -> Option<Repo> {
     let cwd = std::fs::canonicalize(cwd).ok()?;
     let mut probe = Probe {
-        git: locate_git(&cwd)?,
+        git,
+        trusted,
         deadline: Instant::now() + BUDGET,
         seen: HashSet::new(),
     };
@@ -156,36 +169,16 @@ pub(super) fn inspect(cwd: &Path) -> Option<Repo> {
     })
 }
 
-/// The `git` the shell would run, as an absolute path. A relative or empty `PATH` entry means a
-/// checkout can supply the binary, so one that holds a `git` makes the answer "none".
-fn locate_git(cwd: &Path) -> Option<PathBuf> {
-    locate_git_in(&std::env::var_os("PATH")?, cwd)
-}
-
-fn locate_git_in(path: &std::ffi::OsStr, cwd: &Path) -> Option<PathBuf> {
-    let name = if cfg!(windows) { "git.exe" } else { "git" };
-    for dir in std::env::split_paths(path) {
-        if dir.is_absolute() {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        } else if cwd.join(&dir).join(name).symlink_metadata().is_ok() {
-            return None;
-        }
-    }
-    None
-}
-
-struct Probe {
-    git: PathBuf,
+struct Probe<'a> {
+    git: &'a Path,
+    trusted: &'a dyn Fn(&Path) -> bool,
     deadline: Instant,
     /// The git directories examined so far. Where a nested directory has no repository of its own,
     /// git finds the one above it again; and the same submodule can be named twice.
     seen: HashSet<PathBuf>,
 }
 
-impl Probe {
+impl Probe<'_> {
     /// The work tree of the repository `git` finds from `dir` when that repository, and every
     /// repository nested under it, runs nothing. `None` is a refusal; `Some(None)` is a repository
     /// without a work tree, or one already judged.
@@ -218,6 +211,12 @@ impl Probe {
             _ => return None,
         };
         let git_dir = std::fs::canonicalize(lines.next()?).ok()?;
+        // Trust covers the directories below the one the user trusted. A repository whose git
+        // directory is elsewhere (found above a trusted subdirectory, or a gitfile or a symlinked
+        // module that leads out) was not vouched for.
+        if !(self.trusted)(&git_dir) {
+            return None;
+        }
         if !self.seen.insert(git_dir) {
             return Some(None);
         }
@@ -250,10 +249,20 @@ impl Probe {
         }
 
         if !inside {
-            return Some(None);
+            // A nested repository is judged by the work tree it has. Outside it (its own
+            // `core.worktree` puts the work tree somewhere else) the parent's `git status` still
+            // reads that work tree, which nothing here has looked at.
+            return if nested { None } else { Some(None) };
         }
         let top = self.output(dir, nested, &["rev-parse", "--show-toplevel"])?;
         let top = std::fs::canonicalize(top.strip_suffix('\n')?).ok()?;
+        // A submodule's work tree is the directory the gitlink names. One that is moved
+        // elsewhere (`core.worktree` of its own) makes the parent's `git status` compare, and
+        // print the difference of, whatever files that directory holds: an oracle for any file the
+        // user can read, which no argument of the call names and the path guard never sees.
+        if nested && top != std::fs::canonicalize(dir).ok()? {
+            return None;
+        }
         for link in self.gitlinks(&top, nested)? {
             // Where the directory has no repository of its own, git finds the one above again,
             // which `seen` knows. Where it has, that one is judged whatever its work tree is: a
@@ -269,44 +278,37 @@ impl Probe {
     /// directory.
     fn gitlinks(&self, top: &Path, nested: bool) -> Option<Vec<String>> {
         let checkout = top.to_path_buf();
-        self.run(
-            top,
-            nested,
-            // The config was read and holds no `core.fsmonitor`; this makes sure of it for the one
-            // probe that reads the index.
-            &["-c", "core.fsmonitor=false", "ls-files", "--stage", "-z"],
-            move |stdout| {
-                let mut reader = BufReader::new(stdout.take(MAX_INDEX_BYTES + 1));
-                let mut entry = Vec::new();
-                let mut read = 0u64;
-                let mut links: Vec<String> = Vec::new();
-                loop {
-                    entry.clear();
-                    let n = reader.read_until(0, &mut entry).ok()?;
-                    if n == 0 {
-                        return Some(links);
-                    }
-                    read += n as u64;
-                    if read > MAX_INDEX_BYTES {
-                        return None;
-                    }
-                    // `<mode> <object> <stage>\t<path>`
-                    if !entry.starts_with(b"160000 ") {
-                        continue;
-                    }
-                    let path = entry.splitn(2, |byte| *byte == b'\t').nth(1)?;
-                    let path =
-                        String::from_utf8(path.strip_suffix(&[0]).unwrap_or(path).to_vec()).ok()?;
-                    let checked_out = checkout.join(&path).join(".git").symlink_metadata().is_ok();
-                    if checked_out && links.last() != Some(&path) {
-                        links.push(path);
-                    }
-                    if links.len() > MAX_REPOS {
-                        return None;
-                    }
+        self.run(top, nested, &["ls-files", "--stage", "-z"], move |stdout| {
+            let mut reader = BufReader::new(stdout.take(MAX_INDEX_BYTES + 1));
+            let mut entry = Vec::new();
+            let mut read = 0u64;
+            let mut links: Vec<String> = Vec::new();
+            loop {
+                entry.clear();
+                let n = reader.read_until(0, &mut entry).ok()?;
+                if n == 0 {
+                    return Some(links);
                 }
-            },
-        )
+                read += n as u64;
+                if read > MAX_INDEX_BYTES {
+                    return None;
+                }
+                // `<mode> <object> <stage>\t<path>`
+                if !entry.starts_with(b"160000 ") {
+                    continue;
+                }
+                let path = entry.splitn(2, |byte| *byte == b'\t').nth(1)?;
+                let path =
+                    String::from_utf8(path.strip_suffix(&[0]).unwrap_or(path).to_vec()).ok()?;
+                let checked_out = checkout.join(&path).join(".git").symlink_metadata().is_ok();
+                if checked_out && links.last() != Some(&path) {
+                    links.push(path);
+                }
+                if links.len() > MAX_REPOS {
+                    return None;
+                }
+            }
+        })
     }
 
     /// The text a probe prints, if it succeeds in time with a bounded amount of valid UTF-8.
@@ -332,9 +334,13 @@ impl Probe {
         read: impl FnOnce(ChildStdout) -> Option<T> + Send + 'static,
     ) -> Option<T> {
         let left = self.deadline.checked_duration_since(Instant::now())?;
-        let mut command = Command::new(&self.git);
+        let mut command = Command::new(self.git);
+        // `core.fsmonitor=false` is forced on every probe, not only the one that reads the index:
+        // it shows up as command-scope config, which the listing trusts, and a probe that read the
+        // index by some other route would still start no fsmonitor program or daemon.
         command
             .arg("--no-pager")
+            .args(["-c", "core.fsmonitor=false"])
             .args(args)
             .current_dir(dir)
             .stdin(Stdio::null())
@@ -342,7 +348,14 @@ impl Probe {
             .stderr(Stdio::null())
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "none")
             .env("LC_ALL", "C");
+        // The keys Forge copied from its secret store into its own environment are not for git;
+        // the shell tool strips the same names from every command it starts.
+        for var in forge_types::child_env::scrubbed_vars() {
+            command.env_remove(var);
+        }
         // Tests must not see the developer's own repository variables or global config (a commit
         // hook runs with `GIT_DIR` set); production keeps them, because the command being judged
         // runs with them.
@@ -421,8 +434,9 @@ fn key_is_inert(key: &str, value: Option<&str>, nested: bool) -> bool {
         // daemon, which outlives the call.
         ("core", "fsmonitor") => value.is_some_and(|v| v.eq_ignore_ascii_case("false")),
         // Moving the work tree makes `git diff` read whatever the index names from elsewhere. Git
-        // itself writes it into the config of a submodule's repository, which is judged only as a
-        // nested one: `git status` there prints names, never contents.
+        // itself writes it into the config of a submodule's repository, so a nested one may name
+        // it, but only to the directory the gitlink sits in: `inspect_repo` compares the work tree
+        // git reports with that directory.
         ("core", "worktree") => nested,
         pair => INERT_KEYS.contains(&pair),
     }

@@ -38,6 +38,16 @@ What was dropped is named once at startup of `forge run` / `forge chat` / `forge
 and run `forge trust` to enable them`), and by `forge doctor` (`project trust` warning). An
 interactive `forge chat` (or `forge run --tui`) asks once: `Trust this folder and load them? [y/N]`.
 
+## What trust also gates
+
+In the Ask temper, shell commands that only read run without a prompt (`git status`, `ls`,
+[temper-modes.md](temper-modes.md)). `git` and `file` are the two such commands a repository can
+influence (git runs the programs the repository's config, attributes and hooks name; `file` parses
+arbitrary binary formats), so they run unprompted only in a trusted project, and in an untrusted one
+Forge never starts git to find out whether the repository is safe. Everything else on that list
+stays unprompted in an untrusted project. Trust is read from the store on every call, so
+`forge trust --revoke` applies to the very next command.
+
 ## Trusting
 
 ```sh

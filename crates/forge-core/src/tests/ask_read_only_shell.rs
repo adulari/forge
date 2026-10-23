@@ -37,6 +37,15 @@ struct Ask {
 }
 
 fn ask_session(configure: impl FnOnce(&mut Config)) -> Ask {
+    ask_session_trusting(true, configure)
+}
+
+/// A session in a workspace the user did (`true`) or did not (`false`) trust with `forge trust`,
+/// on this test's thread only.
+fn ask_session_trusting(trusted: bool, configure: impl FnOnce(&mut Config)) -> Ask {
+    crate::permission::stand_in_for_trust(Some(std::rc::Rc::new(move |_: &std::path::Path| {
+        trusted
+    })));
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     std::fs::write(root.join("calc.py"), "def add(a, b):\n    return a - b\n").unwrap();
@@ -202,4 +211,35 @@ async fn other_tempers_do_not_change() {
     assert!(denied.starts_with("permission denied"), "{denied}");
     assert_eq!(plan.prompts(), 0);
     assert!(plan.run("ls").await.contains("calc.py"));
+}
+
+/// The trust gate through the native loop's seam: git is the one auto-allowed binary a repository
+/// can influence, so in a project nobody trusted it keeps its prompt while everything else that
+/// only reads still runs, and trust withdrawn between two calls applies to the second.
+#[tokio::test]
+async fn git_asks_in_an_untrusted_project_and_runs_in_a_trusted_one() {
+    let mut untrusted = ask_session_trusting(false, |_| {});
+    let listing = untrusted.run("ls").await;
+    assert!(listing.contains("calc.py"), "{listing}");
+    untrusted.run("cat calc.py | head -1").await;
+    assert_eq!(untrusted.prompts(), 0, "non-git reads need no trust");
+    untrusted.run("git status --short").await;
+    assert_eq!(untrusted.prompts(), 1, "git in an untrusted project asks");
+    untrusted.run("ls && git log -1").await;
+    assert_eq!(untrusted.prompts(), 2);
+
+    let mut trusted = ask_session_trusting(true, |_| {});
+    trusted.run("git status --short").await;
+    trusted.run("git log -1").await;
+    assert_eq!(trusted.prompts(), 0, "git in a trusted project does not");
+
+    crate::permission::stand_in_for_trust(Some(std::rc::Rc::new(|_: &std::path::Path| false)));
+    trusted.run("git status --short").await;
+    assert_eq!(
+        trusted.prompts(),
+        1,
+        "trust withdrawn applies to the next call"
+    );
+    trusted.run("ls").await;
+    assert_eq!(trusted.prompts(), 1);
 }

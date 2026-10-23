@@ -13,13 +13,16 @@
 //! What is stricter than Plan mode, on purpose: a smaller allow-list, no wrapper binaries (`env`,
 //! `command`, `nohup`, `time`) and no path-named binaries, no `$` expansion, no subshells or
 //! backgrounding, one physical line per command, a path guard over the arguments, searches that
-//! stay inside the workspace, and git only in a repository whose own config runs nothing.
+//! stay inside the workspace, and git only in a trusted project, in a repository whose own config
+//! runs nothing, with a `git` (and `sh`, and every other program the line starts) that `PATH` does
+//! not take from the checkout.
 //!
 //! This runs only after the safety floor, every deny rule, the Plan contract and every ask rule
 //! have been consulted, and `PreToolUse` hooks run before the broker is asked at all, so none of
 //! them can be overridden from here. Like the rest of the broker it is a floor against accidents
 //! and lazy injection, not a sandbox.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use forge_types::PermissionRule;
@@ -33,6 +36,7 @@ use guard::Guard;
 
 mod git_repo;
 mod guard;
+mod path_env;
 
 /// Binaries whose every argument form is read-only, or whose flags [`args_read_only`] vets. Short
 /// on purpose: a binary earns a place by being what an agent reaches for to look, not to act.
@@ -86,6 +90,24 @@ const ALLOWED: &[&str] = &[
     "hostname",
 ];
 
+/// Binaries only a project the user trusted (`forge trust`) may have run unasked, because the
+/// repository can influence what they do. Every other binary above is judged by its arguments
+/// alone, and stays auto-allowed in a project that is not trusted, because nothing a repository
+/// holds reaches it: each is a filter or a lookup that reads its arguments, standard input and the
+/// files they name as plain data, takes no configuration, ignore rule, attributes file, hook or
+/// helper path from the repository or from a directory an argument names (its options come from
+/// the user's own environment, which is trusted), and starts no other program under the flags
+/// accepted. `rg` reads `.gitignore` and `.ignore` files, which only decide which files it opens
+/// (and the guard already screens every file a search could open); `find`, `grep`, `diff` and
+/// `sort` have no repository-supplied configuration at all.
+///
+/// - `git` runs what the repository's config, attributes and hooks name (`core.fsmonitor`,
+///   `textconv`, a pager, the `post-index-change` hook) and follows its submodules; the checks
+///   against that are the config inspection, and they themselves run git inside the repository.
+/// - `file` is libmagic: it parses arbitrary binary formats, which is exposure to a hostile file
+///   that no argument bounds, and `-z` hands compressed content to external decompressors.
+const NEEDS_TRUST: &[&str] = &["git", "file"];
+
 const GIT_SUBCOMMANDS: &[&str] = &[
     "status",
     "diff",
@@ -116,6 +138,19 @@ const GIT_LEADING_FLAGS: &[&str] = &["--no-pager", "-P", "--no-optional-locks"];
 const MAX_LINE_CHARS: usize = 4096;
 const MAX_WORDS: usize = 256;
 
+/// What a decision takes from the machine instead of from the call. Production reads the process
+/// ([`auto_allows`]); a test supplies its own, so none of them has to change the real `PATH` or
+/// `HOME`, or the user's trust store.
+pub(super) struct Host<'a> {
+    /// What `~` means.
+    pub(super) home: Option<PathBuf>,
+    /// `PATH` as the shell that runs the call sees it.
+    pub(super) path: Option<OsString>,
+    /// Whether the user trusted the project that contains a directory (`forge trust`). Asked every
+    /// time, never remembered, so trust revoked between two calls applies to the second.
+    pub(super) trusted: &'a dyn Fn(&Path) -> bool,
+}
+
 /// Whether this `shell` call may run in the Ask temper without a prompt. `workspace` is the
 /// session root; `rules` the session's rules (for the opt-out setting and configured read denies).
 pub(super) fn auto_allows(
@@ -123,20 +158,49 @@ pub(super) fn auto_allows(
     rules: &[PermissionRule],
     workspace: Option<&Path>,
 ) -> bool {
-    auto_allows_with(
+    auto_allows_on(
         args,
         rules,
         workspace,
-        std::env::var_os("HOME").map(PathBuf::from),
+        Host {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            path: std::env::var_os("PATH"),
+            trusted: &project_is_trusted,
+        },
     )
 }
 
-/// [`auto_allows`] with the home directory `~` means supplied, so a test can name one.
-fn auto_allows_with(
+fn project_is_trusted(dir: &Path) -> bool {
+    #[cfg(test)]
+    if let Some(stand_in) = TRUST_STAND_IN.with(|cell| cell.borrow().clone()) {
+        return stand_in(dir);
+    }
+    forge_config::project_trust::is_trusted(dir)
+}
+
+#[cfg(test)]
+pub(crate) type TrustStandIn = std::rc::Rc<dyn Fn(&Path) -> bool>;
+
+#[cfg(test)]
+thread_local! {
+    static TRUST_STAND_IN: std::cell::RefCell<Option<TrustStandIn>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Make the decisions taken on this thread ask `stand_in` whether a directory is trusted, instead
+/// of the user's trust store (`None` goes back to it). Tests run on a thread each, so this reaches
+/// no other test.
+#[cfg(test)]
+pub(crate) fn stand_in_for_trust(stand_in: Option<TrustStandIn>) {
+    TRUST_STAND_IN.with(|cell| *cell.borrow_mut() = stand_in);
+}
+
+/// [`auto_allows`] against a `host` the caller describes.
+fn auto_allows_on(
     args: &Value,
     rules: &[PermissionRule],
     workspace: Option<&Path>,
-    home: Option<PathBuf>,
+    host: Host<'_>,
 ) -> bool {
     if !forge_types::auto_allow_read_only_shell_enabled(rules) {
         return false;
@@ -161,8 +225,11 @@ fn auto_allows_with(
     let Some(lines) = command_lines(args) else {
         return false;
     };
-    let guard = Guard::new(rules, cwd, base, home);
-    lines.iter().all(|line| line_is_read_only(line, &guard))
+    let guard = Guard::new(rules, cwd, base, host);
+    // Every statement first, which costs nothing but string work and a few directory reads; then
+    // the checks that need the machine (trust, `PATH`, and above all running git), which a line
+    // that asks anyway must not pay for.
+    lines.iter().all(|line| line_is_read_only(line, &guard)) && guard.finish()
 }
 
 /// The command lines of a call. A `commands` batch runs each entry as a command of its own, so
@@ -196,8 +263,15 @@ fn command_cwd(args: &Value, base: &Path) -> Option<PathBuf> {
     }
 }
 
-fn line_is_read_only(line: &str, guard: &Guard) -> bool {
-    let line = line.trim();
+/// Blanks are what `sh` splits words on: space and tab. `str::trim` and `char::is_whitespace`
+/// also take no-break and other Unicode spaces, which `sh` keeps inside the word, so a line that
+/// ends in one would be judged as a file that does not exist while the shell reads the one that does.
+fn is_blank(c: char) -> bool {
+    matches!(c, ' ' | '\t')
+}
+
+fn line_is_read_only(line: &str, guard: &Guard<'_>) -> bool {
+    let line = line.trim_matches(is_blank);
     if line.is_empty() || line.chars().count() > MAX_LINE_CHARS {
         return false;
     }
@@ -210,7 +284,7 @@ fn line_is_read_only(line: &str, guard: &Guard) -> bool {
     let mut words_seen = 0;
     let mut segments = 0;
     for raw in split_operators(&clean) {
-        let segment = raw.trim();
+        let segment = raw.trim_matches(is_blank);
         if segment.is_empty() {
             continue;
         }
@@ -287,7 +361,7 @@ fn plain_syntax(line: &str) -> bool {
     quote.is_none()
 }
 
-fn segment_is_read_only(segment: &str, words: &[String], guard: &Guard) -> bool {
+fn segment_is_read_only(segment: &str, words: &[String], guard: &Guard<'_>) -> bool {
     let Some((cmd, rest)) = words.split_first() else {
         return false;
     };
@@ -300,25 +374,34 @@ fn segment_is_read_only(segment: &str, words: &[String], guard: &Guard) -> bool 
     // quoted command word has no honest use and is what a disguised command looks like.
     let plain = segment
         .strip_prefix(cmd.as_str())
-        .is_some_and(|after| after.is_empty() || after.starts_with(char::is_whitespace));
+        .is_some_and(|after| after.is_empty() || after.starts_with(is_blank));
     if !plain {
         return false;
     }
     let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
-    args_read_only(cmd, &rest)
-        && operands_are_safe(cmd, &rest, guard)
-        && (cmd != "git" || git_runs_nothing_of_its_own(&rest, guard))
+    if !(args_read_only(cmd, &rest) && operands_are_safe(cmd, &rest, guard)) {
+        return false;
+    }
+    guard.note_program(cmd);
+    // `egrep` and `fgrep` are scripts that run `grep` through `PATH`.
+    if matches!(cmd.as_str(), "egrep" | "fgrep") {
+        guard.note_program("grep");
+    }
+    if NEEDS_TRUST.contains(&cmd.as_str()) {
+        guard.note_needs_trust();
+    }
+    if cmd == "git" {
+        guard.note_git(git_diff_operands(&rest));
+    }
+    true
 }
 
-/// Git only in a repository whose own files run nothing, and `git diff` only on operands inside
-/// its work tree: given two paths of which one lies outside it, or any two outside a repository,
-/// `git diff` is `git diff --no-index` and prints whatever files or trees it is handed.
-fn git_runs_nothing_of_its_own(rest: &[&str], guard: &Guard) -> bool {
-    let Some(repo) = guard.git_repo() else {
-        return false;
-    };
+/// For `git diff`, the operands the guard will hold to the work tree once it is known: given two
+/// paths of which one lies outside it, or any two outside a repository, `git diff` is `git diff
+/// --no-index` and prints whatever files or trees it is handed.
+fn git_diff_operands(rest: &[&str]) -> Option<Vec<String>> {
     if git_subcommand(rest) != Some("diff") {
-        return true;
+        return None;
     }
     let after_subcommand = rest
         .iter()
@@ -326,10 +409,12 @@ fn git_runs_nothing_of_its_own(rest: &[&str], guard: &Guard) -> bool {
         .skip_while(|word| GIT_LEADING_FLAGS.contains(word))
         .skip(1)
         .collect::<Vec<_>>();
-    let operands = operand_words(&after_subcommand);
-    repo.work_tree
-        .as_deref()
-        .is_some_and(|tree| guard.all_inside(tree, &operands))
+    Some(
+        operand_words(&after_subcommand)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 fn args_read_only(cmd: &str, rest: &[&str]) -> bool {
@@ -393,12 +478,17 @@ fn args_read_only(cmd: &str, rest: &[&str]) -> bool {
                     | "--all-fqdns"
             )
         }),
-        // `file -C` compiles a magic file, writing it; `-m` and `-f` read files nothing vetted.
+        // `file -C` compiles a magic file, writing it; `-m` and `-f` read files nothing vetted;
+        // `-z` and `-Z` hand compressed content to external decompressors found through `PATH`.
         "file" => !rest.iter().any(|w| {
-            ['C', 'm', 'f'].iter().any(|c| is_short_flag(w, *c))
+            ['C', 'm', 'f', 'z', 'Z']
+                .iter()
+                .any(|c| is_short_flag(w, *c))
                 || is_long_option(w, "--compile")
                 || is_long_option(w, "--magic-file")
                 || is_long_option(w, "--files-from")
+                || is_long_option(w, "--uncompress")
+                || is_long_option(w, "--uncompress-noreport")
         }),
         _ => true,
     }
@@ -446,7 +536,7 @@ fn operand_words<'a>(words: &[&'a str]) -> Vec<&'a str> {
     operands
 }
 
-fn operands_are_safe(cmd: &str, rest: &[&str], guard: &Guard) -> bool {
+fn operands_are_safe(cmd: &str, rest: &[&str], guard: &Guard<'_>) -> bool {
     if !rest.iter().all(|word| guard.word_is_safe(word)) {
         return false;
     }
@@ -466,7 +556,12 @@ enum Search {
 }
 
 /// Whether the command walks directory trees reading file contents, and how far it looks.
-fn recursive_search(cmd: &str, rest: &[&str], operands: &[&str], guard: &Guard) -> Option<Search> {
+fn recursive_search(
+    cmd: &str,
+    rest: &[&str],
+    operands: &[&str],
+    guard: &Guard<'_>,
+) -> Option<Search> {
     let long = |full: &str| rest.iter().any(|w| is_long_option(w, full));
     let short = |c: char| rest.iter().any(|w| is_short_flag(w, c));
     let recursive = short('r') || short('R') || long("--recursive");
@@ -535,5 +630,7 @@ fn rg_reads_hidden_files(rest: &[&str]) -> bool {
     })
 }
 
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod tests;

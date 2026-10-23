@@ -1222,8 +1222,9 @@ mod tests {
             .expect("shell is a core tool")
             .side_effect();
         let cwd = std::env::current_dir().unwrap();
-        // No git here: it is judged by the repository's own config, which a checkout's is not
-        // ours to fix. `ask_shell`'s tests cover it against a repository they build.
+        // No git here: it is judged by whether the user trusted the project and by the
+        // repository's own config, neither of which a checkout's is ours to fix. `ask_shell`'s
+        // tests cover it against a repository they build.
         for (command, expected) in [
             ("cat Cargo.toml", Allow),
             ("wc -l Cargo.toml", Allow),

@@ -83,13 +83,34 @@ listing, `rev-parse ls-files blame grep ls-tree rev-list shortlog describe merge
 for-each-ref name-rev`, `tag` and `reflog` for listing, `stash list`, `worktree list`) with no
 `-c`, `-C`, `--output`, `--ext-diff`, `--textconv`, `-O`, `--no-index` or `--show-signature`.
 
-`git` also asks outside a repository, in one whose own config (or a nested repository's, behind a
-submodule entry) names a program or anything else the broker does not know to be inert
-(`core.fsmonitor` other than `false`, a `textconv` driver, a promisor remote, an `include`), where
-a `post-index-change` or `reference-transaction` hook is, and `git diff` asks when an operand lies
-outside the repository's work tree. Git runs those programs on `git status` and `git diff`, and a
-checkout can bring its own. The check asks git itself (`rev-parse`, `config --list`, `ls-files`)
-rather than reading `.git`, so it needs git 2.31 or later; an older git asks.
+`git` and `file` run without a prompt only in a project you trusted (`forge trust`,
+[project-trust.md](project-trust.md)), because a repository can influence them: git runs the
+programs a repository's config, attributes and hooks name, and `file` parses whatever binary
+format it is handed. In a project you did not trust they ask every time and Forge never starts git
+there to find out more; every other command on the list stays unprompted there, since nothing a
+repository holds changes what it does. A project that ships nothing in `.forge/` is not asked at
+startup, so the first `git status` prompt is the cue to run `forge trust` once. Trust is read on
+every call (`forge trust --revoke` applies to the next one), covers the directory the session
+started in and the one the command runs in, and a linked worktree has the trust of its main
+checkout.
+
+Even in a trusted project `git` also asks outside a repository, in one whose own config (or a
+nested repository's, behind a submodule entry) names a program or anything else the broker does
+not know to be inert (`core.fsmonitor` other than `false`, a `textconv` driver, a promisor remote,
+an `include`), where a `post-index-change` or `reference-transaction` hook is, with a nested
+repository whose work tree is not the directory it sits in, with a git directory outside the
+trusted tree, with more than 32 nested repositories, or when the check takes over 1.5 s; and
+`git diff` asks when an operand lies outside the repository's work tree. Git runs those programs
+on `git status` and `git diff`, and a checkout can bring its own. The check asks git itself
+(`rev-parse`, `config --list`, `ls-files`) rather than reading `.git`, with `core.fsmonitor`
+forced off, lazy fetching and every transport forbidden and none of Forge's provider keys in its
+environment, so it needs git 2.31 or later; an older git asks. It runs last, once per call, and
+only for a line that passed every other check.
+
+The programs themselves must be the system's: when `PATH` holds a relative or empty entry (`bin`,
+`.`, a trailing colon) or one that lies inside the workspace, and that entry holds a program the
+call starts (`ls`, `git`, the `sh` that runs it), the call asks, because a repository could ship
+that file. A virtualenv's `python` and `pip` in `PATH` cost nothing.
 
 Secrets are not a way around the secret rules. The built-in deny verbs (`cat .env`, ...) refuse as
 before, and the paths a read-only command names are also checked against the same secret globs

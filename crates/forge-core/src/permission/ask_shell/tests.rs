@@ -1,4 +1,5 @@
 use std::os::unix::fs::symlink;
+use std::rc::Rc;
 
 use forge_types::{PermissionDecision, PermissionMode, PermissionRule, SideEffect};
 use serde_json::json;
@@ -9,13 +10,72 @@ use crate::permission::{decide_in, denial_note};
 
 /// A workspace and a separate home directory under one parent, so `..` from the workspace reaches
 /// an ancestor of home.
-struct Fixture {
+pub(super) struct Fixture {
     _parent: TempDir,
-    root: PathBuf,
-    home: PathBuf,
+    pub(super) root: PathBuf,
+    pub(super) home: PathBuf,
 }
 
-fn fixture() -> Fixture {
+fn always_trusted(_: &Path) -> bool {
+    true
+}
+
+/// `PATH` as the shell would see it on a sane machine: the real one without the relative and empty
+/// entries a developer's shell may carry, which a decision refuses by design.
+pub(super) fn sane_path() -> OsString {
+    let kept: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    std::env::join_paths(kept).unwrap()
+}
+
+/// [`auto_allows_on`] for a trusted project on a sane `PATH`, with the home directory supplied.
+fn auto_allows_with(
+    args: &serde_json::Value,
+    rules: &[PermissionRule],
+    workspace: Option<&Path>,
+    home: Option<PathBuf>,
+) -> bool {
+    auto_allows_on(
+        args,
+        rules,
+        workspace,
+        Host {
+            home,
+            path: Some(sane_path()),
+            trusted: &always_trusted,
+        },
+    )
+}
+
+/// The first `git` on the real `PATH`.
+fn real_git_path() -> PathBuf {
+    std::env::split_paths(&sane_path())
+        .map(|dir| dir.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("git is installed")
+}
+
+/// A `git` in `dir` that appends its arguments and its environment to a log, then runs the real
+/// one: how a test sees what the probe started and with what. Returns the program and the log.
+pub(super) fn logging_git(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let log = dir.join("git-calls.log");
+    let program = dir.join("git");
+    let body = format!(
+        "#!/bin/sh\n{{ echo \"ARGS $*\"; env; echo END; }} >> '{}'\nexec '{}' \"$@\"\n",
+        log.display(),
+        real_git_path().display()
+    );
+    std::fs::write(&program, body).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (program, log)
+}
+
+pub(super) fn fixture() -> Fixture {
+    // The decisions taken through the broker (`decide_in`) read the user's trust store; a fixture
+    // is a project the user trusted, on this test's thread only.
+    stand_in_for_trust(Some(Rc::new(always_trusted)));
     let parent = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(parent.path()).unwrap();
     let root = base.join("ws");
@@ -58,14 +118,14 @@ fn fixture() -> Fixture {
 }
 
 /// What `git clone` leaves in `.git/config`, which runs nothing.
-const INERT_CONFIG: &str =
+pub(super) const INERT_CONFIG: &str =
     "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\
 [remote \"origin\"]\n\turl = https://example.invalid/calc.git\n\
 \tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n\
 \tmerge = refs/heads/main\n";
 
 /// A directory git takes for a repository: `<dir>/.git` with the files discovery looks for.
-fn write_repo(dir: &Path, config: &str) {
+pub(super) fn write_repo(dir: &Path, config: &str) {
     let git = dir.join(".git");
     std::fs::create_dir_all(git.join("objects")).unwrap();
     std::fs::create_dir_all(git.join("refs")).unwrap();
@@ -73,7 +133,7 @@ fn write_repo(dir: &Path, config: &str) {
     std::fs::write(git.join("config"), config).unwrap();
 }
 
-fn rules() -> Vec<PermissionRule> {
+pub(super) fn rules() -> Vec<PermissionRule> {
     forge_config::Config::default().permission_rules()
 }
 
@@ -651,6 +711,15 @@ const REFUSED: &[(&str, &str)] = &[
     ("file compiles a magic file", "file -m magic calc.py"),
     ("file compiles a magic file", "file -f calc.py"),
     ("file compiles a magic file", "file --compile"),
+    ("file runs decompressors", "file -z calc.py"),
+    ("file runs decompressors", "file -Z calc.py"),
+    ("file runs decompressors", "file -bz calc.py"),
+    ("file runs decompressors", "file --uncompress calc.py"),
+    (
+        "file runs decompressors",
+        "file --uncompress-noreport calc.py",
+    ),
+    ("file runs decompressors", "file --unc calc.py"),
     ("a symlink out of the searched tree", "grep -rn add escape"),
     ("a symlink out of the searched tree", "grep -R add escape"),
     // Round 2: bash's printf is a variable assignment with -v.
@@ -817,6 +886,133 @@ fn a_wildcard_is_judged_by_the_files_it_expands_to() {
     assert!(!allows(&f, "cat config/.*"));
     assert!(!allows(&f, "cat config/.env.p*"));
     assert!(!allows(&f, "cat config/.e[n]v.production"));
+}
+
+/// Bracket expressions the `glob` crate and `sh` read differently. `cat .[^a]nv` printed `.env`
+/// while the guard, which expands wildcards with the crate, listed nothing for it.
+#[test]
+fn a_bracket_expression_the_shell_reads_differently_is_refused() {
+    let f = fixture();
+    for command in [
+        "cat .[^a]nv",
+        "cat .e[^x]v",
+        "cat .[[:lower:]]nv",
+        "cat .e[[:alpha:]]v",
+        "cat .[[=e=]]nv",
+        "cat .[[.e.]]nv",
+        "cat .[a-f]nv",
+        "cat .[]e]nv",
+        "cat .[!]x]nv",
+        "cat .[\\e]nv",
+        "cat server.[^x]em",
+        "cat config/.e[^x]v.production",
+        "grep -n KEY .[^a]nv",
+        "wc -c .[^a]nv",
+        "git show HEAD:.[^a]nv",
+        "head --lines=1 .[^a]nv",
+        "sort -f.[^a]nv",
+    ] {
+        assert!(!allows(&f, command), "{command}");
+    }
+    // Plain sets, negations and digit ranges mean the same to both, and read nothing secret here.
+    for command in [
+        "cat src/[lm]*.rs",
+        "cat calc.[p]y",
+        "cat src/*.r[s]",
+        "cat src/[!z]*.rs",
+        "cat deep/[!z]/readme.txt",
+        "ls [0-9]*",
+        "cat calc.p[xy]",
+        "cat src/ma[i]n.rs",
+    ] {
+        assert!(allows(&f, command), "{command}");
+    }
+}
+
+/// The property behind it: whatever `sh` expands a pattern to, a secret it reaches is never
+/// allowed. Each pattern is expanded by the real shell in the fixture's workspace.
+#[test]
+fn a_wildcard_the_shell_expands_to_a_secret_is_never_allowed() {
+    let f = fixture();
+    let secrets = [
+        ".env",
+        "notes.txt",
+        "server.pem",
+        "config/.env.production",
+        "deep/a/b/.env",
+        "linked/config.txt",
+    ];
+    let classes = [
+        "[^a]",
+        "[^x]",
+        "[[:lower:]]",
+        "[[:alpha:]]",
+        "[[:alnum:]]",
+        "[[=e=]]",
+        "[[.e.]]",
+        "[a-f]",
+        "[!a]",
+        "[!x]",
+        "[e]",
+        "[e-e]",
+        "[]e]",
+        "[!]x]",
+        "[\\e]",
+        "[n-o]",
+        "[^]x]",
+        "[[:punct:]]",
+        "?",
+        "*",
+        "[0-9]",
+        "[^0-9]",
+        "[.]",
+        "[!.]",
+        "[.a]",
+        "[a.]",
+    ];
+    let templates = [
+        ".{}nv",
+        ".e{}v",
+        ".en{}",
+        ".{}{}v",
+        "{}env",
+        "server.{}em",
+        "serv{}r.pem",
+        "not{}s.txt",
+        "config/.env.{}roduction",
+        "config/.e{}v.production",
+        "deep/a/b/.{}nv",
+        "deep/a/{}/.env",
+        "deep/{}/b/.env",
+        "link{}/config.txt",
+        "lin{}d/config.txt",
+        "{}",
+    ];
+    let mut reached_a_secret = 0;
+    for template in templates {
+        for class in classes {
+            let pattern = template.replacen("{}", class, 2);
+            let script = format!("for f in {pattern}; do [ -e \"$f\" ] && echo \"$f\"; done");
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .current_dir(&f.root)
+                .output()
+                .unwrap();
+            let reached = String::from_utf8_lossy(&out.stdout).into_owned();
+            let secret = reached.lines().any(|name| secrets.contains(&name));
+            reached_a_secret += usize::from(secret);
+            if secret {
+                assert!(
+                    !allows(&f, &format!("cat {pattern}")),
+                    "sh expands `{pattern}` to a secret: {reached:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        reached_a_secret >= 20,
+        "the patterns no longer reach any secret ({reached_a_secret})"
+    );
 }
 
 #[test]

@@ -436,6 +436,8 @@ fn specificity(rule: &PermissionRule) -> usize {
 }
 
 mod ask_shell;
+#[cfg(test)]
+pub(crate) use ask_shell::stand_in_for_trust;
 mod auto;
 mod auto_safe;
 mod catastrophic;

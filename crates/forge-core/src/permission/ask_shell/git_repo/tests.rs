@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
 
+use super::super::tests::logging_git;
 use super::*;
 
 const INERT: &str = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\
@@ -14,6 +15,15 @@ const INERT: &str = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\
 const HOSTILE: &str = "[core]\n\tfsmonitor = touch ran; echo\n";
 
 const SOME_OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// [`super::inspect`] with the `git` on the test's `PATH`, in a project the user trusted.
+fn inspect(cwd: &Path) -> Option<Repo> {
+    inspect_trusting(cwd, &|_| true)
+}
+
+fn inspect_trusting(cwd: &Path, trusted: &dyn Fn(&Path) -> bool) -> Option<Repo> {
+    super::inspect(cwd, Path::new("git"), trusted)
+}
 
 fn workspace() -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -540,25 +550,72 @@ fn a_gitlink_with_nothing_checked_out_has_nothing_to_run() {
     );
 }
 
-/// `core.worktree` of the nested repository's own moves its work tree, but `git status` still
-/// runs there, with that repository's config; the repository must be judged by its git directory,
-/// not by whether its work tree is the directory it sits in.
+/// `core.worktree` of the nested repository's own moves its work tree, but `git status` of the
+/// parent still runs there, with that repository's config: the repository is judged by its git
+/// directory, and one that moved its work tree away from the gitlink is refused outright (it is an
+/// oracle for any file the work tree names, see the next test).
 #[test]
-fn a_nested_repository_that_moves_its_own_work_tree_is_still_judged() {
+fn a_nested_repository_that_moves_its_own_work_tree_is_refused_whatever_its_config_holds() {
     let (_dir, root) = workspace();
     init_with_commit(&root);
     init_with_commit(&root.join("sub"));
     git(&root, &["add", "sub"]);
-    let mut config = std::fs::read_to_string(root.join("sub/.git/config")).unwrap();
-    config.push_str("[core]\n\tworktree = ../..\n");
-    std::fs::write(root.join("sub/.git/config"), &config).unwrap();
-    assert!(
-        is_inert_at(&root),
-        "control: a moved work tree runs nothing"
-    );
-    config.push_str(HOSTILE);
-    std::fs::write(root.join("sub/.git/config"), config).unwrap();
+    let config = std::fs::read_to_string(root.join("sub/.git/config")).unwrap();
+    assert!(is_inert_at(&root), "control: nothing moved");
+    for moved in ["../..", "../../..", "/", "../../elsewhere", "../inner"] {
+        std::fs::write(
+            root.join("sub/.git/config"),
+            format!("{config}[core]\n\tworktree = {moved}\n"),
+        )
+        .unwrap();
+        assert!(!is_inert_at(&root), "worktree = {moved}");
+    }
+    std::fs::write(
+        root.join("sub/.git/config"),
+        format!("{config}[core]\n\tworktree = ../..\n{HOSTILE}"),
+    )
+    .unwrap();
     assert!(!is_inert_at(&root));
+}
+
+/// A nested repository whose `core.worktree` names a directory that is not the gitlink's own
+/// makes the parent's `git status` compare the index of the nested repository with that directory
+/// and print `A  sub` or `Am sub`: one bit about any file the user can read, none of which any
+/// argument of the call names. Only a work tree that is the gitlink's own directory is accepted,
+/// however it is spelled.
+#[test]
+fn a_nested_work_tree_elsewhere_is_an_oracle_and_is_refused() {
+    let (_dir, root) = workspace();
+    let victim = root.join("victim");
+    std::fs::create_dir_all(victim.join(".ssh")).unwrap();
+    std::fs::write(victim.join(".ssh/id_rsa"), "secret\n").unwrap();
+    let top = root.join("top");
+    init_with_commit(&top);
+    init_with_commit(&top.join("sub"));
+    git(&top, &["add", "sub"]);
+    let config = std::fs::read_to_string(top.join("sub/.git/config")).unwrap();
+    let point = |work_tree: &str| {
+        std::fs::write(
+            top.join("sub/.git/config"),
+            format!("{config}[core]\n\tworktree = {work_tree}\n"),
+        )
+        .unwrap();
+    };
+    point(victim.to_str().unwrap());
+    assert!(!is_inert_at(&top), "an absolute work tree elsewhere");
+    assert!(
+        !is_inert_at(&top.join("sub")),
+        "from inside the nested repository too"
+    );
+    // The gitlink's own directory, spelled three ways, is the work tree git would pick anyway.
+    for same in ["..", "../.", &format!("{}/sub", top.display())] {
+        point(same);
+        assert!(is_inert_at(&top), "worktree = {same}");
+    }
+    // A work tree with a directory between it and the gitlink is not the gitlink.
+    std::fs::create_dir_all(top.join("sub/inner")).unwrap();
+    point(top.join("sub/inner").to_str().unwrap());
+    assert!(!is_inert_at(&top));
 }
 
 /// A module directory that is a symlink was skipped by the scan (`DirEntry::file_type` does not
@@ -733,33 +790,105 @@ fn the_listing_parser_only_trusts_scopes_it_knows() {
     ));
 }
 
+/// Trust covers the directories below the one the user trusted. The git directory git finds must
+/// lie inside trusted ground too, so a trusted subdirectory of an untrusted checkout, or a gitfile
+/// that leads out of the trusted tree, is refused before the config is listed or the index read.
 #[test]
-fn a_relative_path_entry_that_holds_a_git_is_not_taken_for_the_one_the_shell_runs() {
-    let (_dir, root) = workspace();
-    let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let real = root.join("real");
-    std::fs::create_dir_all(&real).unwrap();
-    std::fs::write(real.join("git"), "").unwrap();
-    let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap();
-    assert_eq!(
-        locate_git_in(&path(&[&real]), &root),
-        Some(real.join("git"))
+fn a_git_directory_outside_trusted_ground_is_refused_first() {
+    let (_dir, root) = repo_with(INERT);
+    let sub = root.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    assert!(inspect_trusting(&sub, &|dir| dir.starts_with(&root)).is_some());
+    assert!(
+        inspect_trusting(&sub, &|dir| dir.starts_with(&sub)).is_none(),
+        "the checkout above the trusted directory is not trusted"
     );
-    // A relative entry with no `git` in it is skipped, and the absolute one after it is used.
+    let asked = std::cell::RefCell::new(Vec::new());
+    let verdict = inspect_trusting(&root, &|dir| {
+        asked.borrow_mut().push(dir.to_path_buf());
+        false
+    });
+    assert_eq!(verdict, None);
     assert_eq!(
-        locate_git_in(&path(&[Path::new("bin"), &real]), &root),
-        Some(real.join("git"))
+        asked.borrow().as_slice(),
+        [root.join(".git")],
+        "asked once, about the git directory"
     );
-    std::fs::write(bin.join("git"), "").unwrap();
+
+    // A gitfile that leads out of the trusted tree.
+    let (_other, outside) = workspace();
+    make_git_dir(&outside.join("gd"), INERT);
+    std::fs::write(
+        root.join("sub/.git"),
+        format!("gitdir: {}\n", outside.join("gd").display()),
+    )
+    .unwrap();
+    assert!(inspect_trusting(&sub, &|dir| dir.starts_with(&root)).is_none());
+    assert!(inspect_trusting(&sub, &|_| true).is_some());
+}
+
+/// What a probe is started with, recorded by a stand-in for git that then runs the real one.
+#[test]
+fn every_probe_starts_with_the_hardening_on_and_no_provider_key() {
+    const KEY: &str = "FORGE_GIT_PROBE_TEST_PROVIDER_KEY";
+    const KEPT: &str = "FORGE_GIT_PROBE_TEST_USER_VARIABLE";
+    let (_dir, root) = repo_with(INERT);
+    let (_bin, bin) = workspace();
+    let (git, log) = logging_git(&bin);
+    forge_types::child_env::scrub(KEY);
+    std::env::set_var(KEY, "sk-not-a-real-key");
+    std::env::set_var(KEPT, "visible");
+    let verdict = super::inspect(&root, &git, &|_| true);
+    forge_types::child_env::unscrub(KEY);
+    std::env::remove_var(KEY);
+    std::env::remove_var(KEPT);
+    assert!(verdict.is_some());
+    let log = std::fs::read_to_string(log).unwrap();
+    let calls: Vec<&str> = log.lines().filter(|l| l.starts_with("ARGS ")).collect();
     assert_eq!(
-        locate_git_in(&path(&[Path::new("bin"), &real]), &root),
-        None
+        calls.len(),
+        4,
+        "rev-parse, config, rev-parse, ls-files: {calls:?}"
     );
-    assert_eq!(
-        locate_git_in(&path(&[Path::new(""), &real]), &root.join("bin")),
-        None
+    for call in &calls {
+        assert!(
+            call.contains("--no-pager -c core.fsmonitor=false "),
+            "{call}"
+        );
+    }
+    assert!(!log.contains(KEY), "a provider key reached the probe");
+    assert!(
+        log.contains(&format!("{KEPT}=visible")),
+        "control: the rest is inherited"
     );
-    assert_eq!(locate_git_in(&path(&[Path::new(".")]), &root), None);
-    assert_eq!(locate_git_in(std::ffi::OsStr::new(""), &root), None);
+    for set in [
+        "GIT_NO_LAZY_FETCH=1",
+        "GIT_ALLOW_PROTOCOL=none",
+        "GIT_OPTIONAL_LOCKS=0",
+        "GIT_TERMINAL_PROMPT=0",
+    ] {
+        assert!(log.contains(set), "{set}");
+    }
+}
+
+/// A FIFO standing in for `.git/config` (an unpacked archive can carry one) blocks git on open; the
+/// probe gives up at its budget and kills it.
+#[test]
+fn a_git_that_blocks_is_given_up_on_at_the_budget() {
+    let (_dir, root) = repo_with(INERT);
+    std::fs::remove_file(root.join(".git/config")).unwrap();
+    let made = Command::new("mkfifo")
+        .arg(root.join(".git/config"))
+        .status()
+        .expect("mkfifo");
+    assert!(made.success());
+    let started = std::time::Instant::now();
+    assert_eq!(inspect(&root), None);
+    let took = started.elapsed();
+    assert!(
+        BUDGET <= Duration::from_secs(2),
+        "the decision runs on the turn's thread"
+    );
+    assert!(took >= BUDGET.mul_f32(0.5), "{took:?}");
+    assert!(took < Duration::from_millis(2500), "{took:?}");
 }
