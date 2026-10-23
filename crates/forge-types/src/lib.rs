@@ -16,6 +16,7 @@ pub mod child_env;
 pub mod effort;
 pub mod interaction;
 mod permission_mode;
+pub mod self_exe;
 mod subscription_pacing;
 mod turn_outcome;
 pub use harness_notice::{

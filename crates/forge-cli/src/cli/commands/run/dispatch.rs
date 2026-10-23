@@ -149,6 +149,45 @@ pub(crate) enum VoiceStart {
     Error,
 }
 
+/// [`dispatch_command`] for the interactive chat loop. A command that fails says so in the
+/// transcript and the chat carries on: the loop used to propagate the error with `?`, which ended
+/// the whole chat — and the terminal session with it — over, for example, `/resume` finding the
+/// store newer than this binary after an upgrade.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_chat_command(
+    line: &str,
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    tui: Option<&mut forge_tui::Tui>,
+    app: &mut forge_tui::App,
+    catalog: &forge_skills::Catalog,
+    armed: &mut std::collections::HashSet<String>,
+    trust_project: bool,
+    busy: bool,
+    assay_lenses: &mut Vec<forge_types::FindingCategory>,
+    assay_scope: &mut forge_types::AssayScope,
+) -> Result<DispatchOutcome> {
+    match dispatch_command(
+        line,
+        session,
+        tui,
+        app,
+        catalog,
+        armed,
+        trust_project,
+        busy,
+        assay_lenses,
+        assay_scope,
+    )
+    .await
+    {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            app.note(&format!("⚠ {line}: {error:#}"));
+            Ok(DispatchOutcome::Handled)
+        }
+    }
+}
+
 /// Execute a slash command (command-skill-system.md). Builtins are matched first; an unrecognised
 /// `/name` falls through to the file-based command/skill [`forge_skills::Catalog`]. Returns
 /// [`DispatchOutcome`]. Session-mutating commands (`/new`, `/resume`, `/clear`) and file
@@ -957,8 +996,7 @@ and keep going."
                 Err(e) => app.note(&format!("⚠ self-mcp: failed to write config: {e}")),
                 Ok(_) => {
                     if enable {
-                        let exe = std::env::current_exe()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("forge"));
+                        let exe = forge_types::self_exe::forge_executable();
                         let server = forge_config::McpServerConfig {
                             name: "forge".to_string(),
                             transport: forge_config::McpTransport::Stdio {

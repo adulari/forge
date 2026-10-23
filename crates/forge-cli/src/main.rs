@@ -99,6 +99,7 @@ mod serve_schedules;
 mod serve_terminal;
 mod serve_workspace;
 mod telemetry;
+mod terminal_owner;
 mod update;
 mod update_check;
 mod voice;

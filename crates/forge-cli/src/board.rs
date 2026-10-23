@@ -499,7 +499,7 @@ async fn attach_child(
 ) {
     input.pause().await;
     guard.suspend();
-    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("forge"));
+    let exe = forge_types::self_exe::forge_executable();
     let spawned = tokio::process::Command::new(exe)
         .arg("attach")
         .arg(id)

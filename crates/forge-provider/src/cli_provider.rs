@@ -1219,10 +1219,12 @@ impl CliProvider {
 
     fn forge_executable(&self) -> String {
         self.forge_binary.clone().unwrap_or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| path.to_str().map(str::to_string))
-                .unwrap_or_else(|| "forge".to_string())
+            // Not `std::env::current_exe()` directly: after the installed binary is replaced under
+            // this running process it names `<path> (deleted)`, and the bridged CLI's `mcp-serve`
+            // launch then failed every turn.
+            forge_types::self_exe::forge_executable()
+                .to_str()
+                .map_or_else(|| "forge".to_string(), str::to_string)
         })
     }
 

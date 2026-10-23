@@ -1430,11 +1430,7 @@ pub(crate) async fn start_session(
                 "resume cannot create a new worktree; it restores the session's recorded workspace",
             ));
         }
-        if state
-            .store
-            .is_session_local_read_only(session_id)
-            .unwrap_or(false)
-        {
+        if crate::terminal_owner::terminal_owns_session(&state.store, session_id).await {
             return Err(StartSessionError::coded(
                 StatusCode::CONFLICT,
                 "session_open_in_terminal",
@@ -1817,6 +1813,19 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
     for id in live {
         if attempted >= RESURRECT_LIMIT {
             break;
+        }
+        // A session a terminal has open is that terminal's, whatever the fleet flag says: it was
+        // moved there after this daemon last hosted it (`forge chat --resume`), or the chat is
+        // alive and merely slow to beat. Restoring it would put a second driver beside the chat
+        // and, with a stale heartbeat, clear the chat's own presence. The flag is dropped so
+        // later restarts do not ask again; the terminal's claim is what protects the session now.
+        if crate::terminal_owner::terminal_owns_session(&state.store, &id).await {
+            let _ = state.store.set_session_daemon_live(&id, false);
+            println!(
+                "  session {} is open in a terminal; leaving it there",
+                &id[..id.len().min(8)]
+            );
+            continue;
         }
         let request = CreateSessionReq {
             resume: Some(id.clone()),
@@ -2662,10 +2671,8 @@ async fn reject_if_open_in_terminal(
     if state.registry.get(session_id).await.is_some() {
         return None;
     }
-    state
-        .store
-        .is_session_local_read_only(session_id)
-        .unwrap_or(false)
+    crate::terminal_owner::terminal_owns_session(&state.store, session_id)
+        .await
         .then(|| {
             err_response(
                 axum::http::StatusCode::CONFLICT,
@@ -7764,6 +7771,100 @@ pub(crate) mod tests {
             dead.iter().all(|id| store.session_exists(id).unwrap()),
             "the session records themselves are kept"
         );
+
+        std::env::remove_var("FORGE_DB");
+    }
+
+    /// The restarted daemon's restore must leave a session a terminal still has open with that
+    /// terminal. A chat whose loop is stalled stops beating for longer than the staleness window
+    /// while its process and control channel live on; resuming the session beside it put two
+    /// drivers on one transcript and cleared the chat's presence for good.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restore_leaves_a_stalled_but_live_terminal_its_session() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("restore-terminal.db");
+        std::env::set_var("FORGE_DB", &db);
+        let store = Arc::new(crate::open_store().unwrap());
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // The chat's control channel: answers on its token path, like `remote::start` does.
+        let control = axum::Router::new().route("/tok", axum::routing::get(|| async { "page" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_url = format!("http://{}/tok", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, control).await.unwrap();
+        });
+
+        let backdate = |id: &str| {
+            rusqlite::Connection::open(&db)
+                .unwrap()
+                .execute(
+                    "UPDATE session SET local_last_seen = strftime('%s','now') - 300 WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+        };
+        let mk = |text: &str| {
+            let id = store
+                .create_session(ws.to_str().unwrap(), "default")
+                .unwrap();
+            store
+                .add_message(&id, 0, forge_types::Role::User, text, None)
+                .unwrap();
+            store.set_session_daemon_live(&id, true).unwrap();
+            id
+        };
+        // Held by a chat that stopped beating five minutes ago but still answers.
+        let stalled = mk("typed in a stalled chat");
+        store.set_session_local_live(&stalled, true).unwrap();
+        store
+            .set_session_local_control_url(&stalled, Some(&control_url))
+            .unwrap();
+        backdate(&stalled);
+        // Held by a chat that was killed: stale, and nothing listens where it was.
+        let killed = mk("typed in a killed chat");
+        store.set_session_local_live(&killed, true).unwrap();
+        store
+            .set_session_local_control_url(&killed, Some("http://127.0.0.1:1/tok"))
+            .unwrap();
+        backdate(&killed);
+        // No terminal at all: the daemon's own.
+        let hosted = mk("started in the daemon");
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        resurrect_fleet(state.clone()).await;
+
+        assert!(
+            state.registry.get(&stalled).await.is_none(),
+            "a session the stalled-but-live chat holds must not get a second driver"
+        );
+        assert!(
+            store.local_claim(&stalled).unwrap().is_some(),
+            "the chat's claim is untouched, not cleared by a resume"
+        );
+        assert!(
+            !store.daemon_live_sessions().unwrap().contains(&stalled),
+            "the daemon stops claiming a session that lives in a terminal"
+        );
+        assert!(
+            state.registry.get(&killed).await.is_some(),
+            "a dead terminal's leftover claim must not strand the session"
+        );
+        assert!(state.registry.get(&hosted).await.is_some());
 
         std::env::remove_var("FORGE_DB");
     }
