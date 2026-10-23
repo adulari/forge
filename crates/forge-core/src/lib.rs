@@ -35,7 +35,7 @@ mod build_command;
 mod test_guard;
 #[cfg(test)]
 mod test_state;
-pub use test_guard::is_test_path;
+pub use test_guard::{is_assertion_line, is_skip_marker_line, is_test_path};
 pub mod git_attribution;
 mod memory_scope;
 mod transcript_mark;
@@ -698,7 +698,7 @@ impl EnvFightTracker {
 /// seaborn quality win) while unblocking verification.
 const MINIMAL_DIFF_BIAS: &str = "Prefer the most local fix at the failure site. Do not change \
 data-flow or filtering semantics when a value-level fallback suffices. Do not edit changelogs. \
-Hidden tests assert on unchanged surrounding behavior — keep the diff minimal. Throwaway build or \
+Callers and tests depend on the unchanged surrounding behavior — keep the diff minimal. Throwaway build or \
 verification scaffolding in /tmp, and stubbing an unrelated failing C-extension to unblock \
 verification, are fine as long as the FINAL committed diff stays minimal.";
 
@@ -3607,16 +3607,17 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
-        // ── Existing-tests-are-spec guard (quality guards wave 4, fix 1) ──────────────────────
-        // A turn whose diff REWRITES existing test files is the xarray-3364 failure shape: the
-        // model changes test expectations to match its own behavior, the evaluator restores the
-        // pristine tests, and the run fails. Before the turn completes: put the originals back
-        // (the edits are kept as a patch outside the repo, never stashed) and push back ONCE —
-        // re-verify against the originals, shrink the fix rather than editing tests. The diff is
-        // taken against the commit the turn started on, because the harness has the model commit
-        // each verified unit and `git status` is then clean. Armed by `expect_code_change`, an
-        // explicit "don't edit the tests" (any edit counts) or "keep the existing tests green"
-        // (only rewritten content counts; appended and new tests are fine, see `test_guard`).
+        // ── Existing-tests guard (quality guards wave 4, fix 1; policy in `test_guard`) ───────
+        // A turn that edits existing tests is either following a behavior change the request asked
+        // for or making a failure disappear (the xarray-3364 shape). Edits that hide a failure
+        // (deleted test file, removed assertions, added skip/xfail, an assertion that cannot fail,
+        // changed expectations with no code change behind them, or any change when a person said to
+        // leave the tests alone) are put back (kept as a patch outside the repo, never stashed).
+        // Changed lines of an existing test with a code change behind them stay, and the model is
+        // asked once whether the request changes what they pin down. The diff is taken against the
+        // commit the turn started on, because the harness has the model commit each verified unit
+        // and `git status` is then clean. Armed by `expect_code_change`, an explicit "don't edit
+        // the tests", or "keep the existing tests green" in an unattended run.
         // One-shot by construction (straight-line code, like the empty-diff nudge above); runs
         // BEFORE self-review/autofix so whatever state the model settles on is still checked.
         // Skipped past the soft deadline: no budget for a guard turn (same rationale as the
@@ -3632,27 +3633,32 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && !halted_by_loop_guard
         {
             let root = self.workspace.root();
-            let test_edits = test_guard::modified_existing_tests(
-                Some(root),
-                turn_start_head.as_deref(),
-                test_guard_level,
-            );
-            let restored = (!test_edits.is_empty())
+            let mut test_edits =
+                test_guard::assess(Some(root), turn_start_head.as_deref(), test_guard_level);
+            let restored = (!test_edits.restore.is_empty())
                 .then(|| {
                     test_guard::restore_originals(
                         Some(root),
                         turn_start_head.as_deref(),
-                        &test_edits,
+                        &test_edits.restore_paths(),
                     )
                 })
                 .flatten();
-            if let Some(restored) = restored {
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "turn modified {} existing test file(s) — restored the originals and pushing \
-                     back once: existing tests must keep their original assertions",
-                    test_edits.len()
-                )));
-                let guard = test_guard::push_back(self.expect_code_change, &test_edits, &restored);
+            if restored.is_none() {
+                test_edits.restore.clear();
+            }
+            if !test_edits.is_empty() {
+                self.presenter
+                    .emit(PresenterEvent::Warning(test_guard::warning(
+                        test_guard_level,
+                        &test_edits,
+                    )));
+                let guard = test_guard::push_back(
+                    test_guard_level,
+                    &test_edits,
+                    restored.as_deref(),
+                    turn_start_head.as_deref(),
+                );
                 self.push_nudge(guard)?;
                 let guard_specs = self.tool_specs();
                 let guard_outcome = self
@@ -3942,29 +3948,26 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
 
             // The existing-tests guard runs before this audit, but a weaker reviewer can ignore
-            // the audit prompt's "do not modify tests" rule and introduce fresh expectation edits.
-            // There is no later model pass that needs those changes, so restore the original tests
-            // deterministically before patch capture. New tests remain allowed by
-            // `test_guard::modified_existing_tests`, matching the main guard's contract.
+            // the audit prompt's rule against hiding failures in tests and do it anyway. There is
+            // no later model pass that needs those changes, so put the hiding edits back
+            // deterministically before patch capture. Appended tests and expectation edits with a
+            // code change behind them stay, matching the main guard's contract.
             if self.config.mesh.guard_test_edits && test_guard_level != test_guard::Level::Off {
                 let root = self.workspace.root();
-                let test_edits = test_guard::modified_existing_tests(
-                    Some(root),
-                    turn_start_head.as_deref(),
-                    test_guard_level,
-                );
-                if !test_edits.is_empty()
+                let test_edits =
+                    test_guard::assess(Some(root), turn_start_head.as_deref(), test_guard_level);
+                if !test_edits.restore.is_empty()
                     && test_guard::restore_originals(
                         Some(root),
                         turn_start_head.as_deref(),
-                        &test_edits,
+                        &test_edits.restore_paths(),
                     )
                     .is_some()
                 {
                     self.presenter.emit(PresenterEvent::Warning(format!(
-                        "completeness audit modified {} existing test file(s) — restored the \
-                         originals so evaluation keeps the original specification",
-                        test_edits.len()
+                        "completeness audit changed {} existing test file(s) in a way that hides \
+                         a failure — restored the originals",
+                        test_edits.restore.len()
                     )));
                 }
             }
@@ -5097,6 +5100,9 @@ mod tests {
 
     #[path = "plan_shell.rs"]
     mod plan_shell_tests;
+
+    #[path = "ask_read_only_shell.rs"]
+    mod ask_read_only_shell_tests;
 
     #[path = "turn_grant.rs"]
     mod turn_grant_tests;

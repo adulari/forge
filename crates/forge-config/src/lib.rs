@@ -1506,6 +1506,12 @@ pub struct PermissionsConfig {
     /// recognise. Off means such a command always asks.
     #[serde(default = "default_true")]
     pub auto_classifier: bool,
+    /// `ask` temper: run shell commands the broker can prove read-only (`git status`, `ls`,
+    /// `cat file`, `grep -rn x src`) without a prompt, as Claude Code does. Deny and ask rules,
+    /// the secret-path rules and every other temper are unaffected; false makes every shell
+    /// command prompt again (ADR-0008).
+    #[serde(default = "default_true")]
+    pub auto_allow_read_only_shell: bool,
 }
 
 impl Default for PermissionsConfig {
@@ -1513,6 +1519,7 @@ impl Default for PermissionsConfig {
         Self {
             rules: Vec::new(),
             auto_classifier: true,
+            auto_allow_read_only_shell: true,
         }
     }
 }
@@ -2021,13 +2028,15 @@ pub struct MeshConfig {
     /// runs are affected, so interactive use never sees it. Set false to disable even for bench.
     #[serde(default = "default_nudge_empty_diff")]
     pub nudge_empty_diff: bool,
-    /// Existing-tests-are-spec guard (quality guards wave 4): when a headless code-change run
-    /// (`bench swe` marks the session as expecting a code change) is about to complete with the
-    /// working diff MODIFYING existing test files, stash those test edits and push back ONCE —
-    /// hidden evaluation runs the ORIGINAL tests, so rewriting their expectations converts a
-    /// near-solve into a guaranteed fail (the xarray-3364 forensic). New test files are fine
-    /// (common practice); only modifications to tracked tests trip the guard. Default true;
-    /// only code-change runs are affected, so interactive use never sees it.
+    /// Existing-tests guard (quality guards wave 4): when a code-change run (`bench swe`, a
+    /// worktree build session), an unattended "keep the tests green" run, or a request that says
+    /// to leave the existing tests alone is about to complete, edits to tracked test files are
+    /// sorted. Edits that hide a failure (a deleted test file, removed assertions, an added
+    /// skip/xfail marker, an assertion that cannot fail, changed expectations with no code change
+    /// behind them) are put back and the model is pushed back ONCE; changed lines of an existing
+    /// test with a code change behind them stay and the model is asked once to justify them. New
+    /// test files and appended tests are fine. A request that says to leave the tests alone
+    /// restores any change. Default true.
     #[serde(default = "default_guard_test_edits")]
     pub guard_test_edits: bool,
     /// Timeout reconciliation window (quality guards wave 4): when the caller has set a turn
@@ -2938,6 +2947,9 @@ impl Config {
                 .iter()
                 .filter_map(RuleConfig::to_rule),
         );
+        if !self.permissions.auto_allow_read_only_shell {
+            rules.push(forge_types::read_only_shell_opt_out_rule());
+        }
         rules
     }
 }
@@ -5077,6 +5089,32 @@ auto = "local"
         std::env::set_var("FORGE_TEST_TEL_TELEMETRY", "0");
         assert!(fig.extract::<Config>().is_ok());
         std::env::remove_var("FORGE_TEST_TEL_TELEMETRY");
+    }
+
+    #[test]
+    fn the_read_only_shell_auto_allow_is_on_by_default_and_the_setting_reaches_the_rules() {
+        let on = Config::default();
+        assert!(on.permissions.auto_allow_read_only_shell);
+        assert!(forge_types::auto_allow_read_only_shell_enabled(
+            &on.permission_rules()
+        ));
+
+        let off: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                "[permissions]\nauto_allow_read_only_shell = false",
+            ))
+            .extract()
+            .unwrap();
+        assert!(!off.permissions.auto_allow_read_only_shell);
+        let rules = off.permission_rules();
+        assert!(!forge_types::auto_allow_read_only_shell_enabled(&rules));
+        // The marker rule names no real tool, so it can never match (or deny) a call.
+        let marker = rules
+            .iter()
+            .find(|r| r.tool == forge_types::NO_AUTO_ALLOW_READ_ONLY_SHELL)
+            .unwrap();
+        assert_eq!(marker.source, RuleSource::Configured);
+        assert!(marker.tool.starts_with('@'));
     }
 
     #[test]

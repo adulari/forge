@@ -287,6 +287,16 @@ fn sanitize_permissions(value: &mut toml::Table, dropped: &mut Vec<String>) {
         table.remove("auto_classifier");
         dropped.push("permissions.auto_classifier".to_string());
     }
+    // Turning the read-only auto-allow off only adds prompts; a project may not turn it on over a
+    // user who turned it off.
+    if table
+        .get("auto_allow_read_only_shell")
+        .and_then(toml::Value::as_bool)
+        == Some(true)
+    {
+        table.remove("auto_allow_read_only_shell");
+        dropped.push("permissions.auto_allow_read_only_shell".to_string());
+    }
     let mut allow_rules = 0;
     if let Some(rules) = table.get_mut("rules").and_then(toml::Value::as_array_mut) {
         rules.retain(|rule| {
@@ -306,7 +316,12 @@ fn sanitize_permissions(value: &mut toml::Table, dropped: &mut Vec<String>) {
             if allow_rules == 1 { "" } else { "s" }
         ));
     }
-    table.retain(|k, _| k == "rules" || k == "auto_classifier");
+    table.retain(|k, _| {
+        matches!(
+            k,
+            "rules" | "auto_classifier" | "auto_allow_read_only_shell"
+        )
+    });
 }
 
 #[cfg(test)]
@@ -368,6 +383,27 @@ mod tests {
         ] {
             assert!(dropped.iter().any(|d| d == label), "{label}: {dropped:?}");
         }
+    }
+
+    #[test]
+    fn an_untrusted_project_may_turn_the_read_only_auto_allow_off_but_not_on() {
+        let (kept, dropped) =
+            sanitize_untrusted(table("[permissions]\nauto_allow_read_only_shell = false"));
+        let text = toml::to_string(&kept).unwrap();
+        assert!(
+            text.contains("auto_allow_read_only_shell = false"),
+            "{text}"
+        );
+        assert!(dropped.is_empty(), "{dropped:?}");
+
+        let (kept, dropped) =
+            sanitize_untrusted(table("[permissions]\nauto_allow_read_only_shell = true"));
+        assert!(!toml::to_string(&kept)
+            .unwrap()
+            .contains("auto_allow_read_only_shell"));
+        assert!(dropped
+            .iter()
+            .any(|d| d == "permissions.auto_allow_read_only_shell"));
     }
 
     #[test]

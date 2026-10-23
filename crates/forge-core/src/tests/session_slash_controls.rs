@@ -86,7 +86,7 @@ fn add_dir_extends_the_roots_the_file_tools_and_auto_edit_trust() {
 fn a_session_rule_joins_the_rules_in_force() {
     let dir = tempfile::tempdir().unwrap();
     let mut session = session_in(dir.path(), Config::default());
-    let call = serde_json::json!({ "command": "git log --oneline" });
+    let call = serde_json::json!({ "command": "cargo build --release" });
     let decide = |session: &Session| {
         crate::permission::decide(
             PermissionMode::Default,
@@ -100,7 +100,7 @@ fn a_session_rule_joins_the_rules_in_force() {
     let before = session.permission_rules().len();
     session.add_session_rule(
         "shell".into(),
-        vec!["git log *".into()],
+        vec!["cargo build *".into()],
         PermissionDecision::Allow,
     );
     assert_eq!(session.permission_rules().len(), before + 1);

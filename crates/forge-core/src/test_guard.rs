@@ -1,48 +1,67 @@
-//! The existing-tests-are-spec guard: recognise a request that keeps the existing tests as the
-//! specification, detect a turn that rewrote them, and put the originals back.
+//! The existing-tests guard: recognise a request that keeps the existing tests as the
+//! specification, detect a turn that changed them, and tell an edit that makes a failure
+//! disappear from an edit that follows a behaviour change the request asked for.
 //!
-//! Two strengths, because the two kinds of request mean different things:
+//! What a turn may do to an existing test depends on who asked for what ([`Level`]):
 //!
-//! * [`Level::AnyEdit`] — an explicit prohibition ("don't edit the existing tests") or an
-//!   `expect_code_change` run (`bench swe`). Any modification of a tracked test file counts, an
-//!   appended test included.
-//! * [`Level::Rewrites`] — "keep the existing tests green", in unattended runs. Appending tests,
-//!   or adding a new test file, is ordinary practice and stays allowed; what counts is existing content that is no
-//!   longer a byte prefix of the file it came from (a changed line, a removed or reordered test,
-//!   a deleted file).
+//! * [`Level::Frozen`] — a person said to leave the existing tests alone. Any change to a tracked
+//!   test file is put back, an appended test included.
+//! * [`Level::Guarded`] — an `expect_code_change` run (`bench swe`, a worktree build session) or
+//!   "keep the existing tests green" in an unattended run. Appending tests or adding a test file is
+//!   ordinary practice. An edit that hides a failure is put back: a deleted test file, removed
+//!   assertions, an added skip/xfail marker, an assertion that cannot fail ([`Why`]). Changed lines
+//!   of an existing test stay when a code change stands behind them, and the model is asked once
+//!   to justify them; with no code change behind them they are put back.
+//! * [`Level::Concealing`] — the request itself says to change the tests ("update the tests",
+//!   "fix the failing test"). Only the edits that hide a failure are put back.
+//!
+//! Nothing here says how the work will be judged: the guard cannot know whether the tests that
+//! count are the ones in the tree, and a task whose behaviour change contradicts an existing
+//! assertion must be allowed to update that assertion.
 //!
 //! Detection compares the working tree with the commit the turn started on, not with `HEAD`:
 //! the harness asks the model to commit each verified unit, so by the end of the turn a rewritten
 //! test is usually committed and `git status` is clean.
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
-use forge_types::{Message, Role};
+use forge_types::{Message, MessageKind, Role};
+use regex::Regex;
 
-use crate::working_tree::git_output;
+use crate::working_tree::{git_output, untracked_work_files};
 
-/// How strictly the existing tests are protected for the current session.
+/// How an existing test may be changed in the current session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Level {
     Off,
-    /// Existing content must stay a prefix of the file; appends and new files are fine.
-    Rewrites,
-    /// Any modification of a tracked test file.
-    AnyEdit,
+    /// The request asks for test changes: only edits that hide a failure are put back.
+    Concealing,
+    /// Hiding edits are put back; a changed test with a code change behind it is questioned.
+    Guarded,
+    /// A person asked for the existing tests to be left alone: any change is put back.
+    Frozen,
 }
 
-/// The pushed-back instruction for an `expect_code_change` run: the hidden evaluation restores the
-/// original tests, so a fix that only passes rewritten expectations fails.
-const SPEC_HEAD: &str = "Your change edits existing test expectations. Hidden evaluation uses \
-the ORIGINAL tests. Re-verify your core change against the pristine tests (they have been \
-restored); if they fail, shrink your fix rather than editing tests.";
-
 /// The pushed-back instruction when a person asked for the existing tests to be left alone.
-const REQUESTED_HEAD: &str = "The request asked for the existing tests to be kept, but your \
-change rewrote or removed content of an existing test file. Those files are back at the state \
-they had when this turn started. Re-run the original tests against your change; if they fail, \
-fix the production code rather than the tests. New tests belong in a new test file or at the end \
-of an existing one.";
+const REQUESTED_HEAD: &str = "The request asked for the existing tests to be left as they are, \
+but your change touched an existing test file. Those files are back at the state they had when \
+this turn started. Re-run the tests as they were against your change; if they fail, fix the \
+production code rather than the tests. If the request cannot be met without changing a test, say \
+which test and why in your answer instead of editing it.";
+
+/// The pushed-back instruction when test edits that hide a failure were taken out.
+const HIDING_HEAD: &str = "Some of your test edits would make a failure disappear instead of \
+fixing it, so those files are back at the state they had when this turn started (the reason for \
+each is below). Make the code satisfy the tests as they were. If the request itself changes what \
+one of them expects, re-apply only that changed expectation, not a removal, a skip or a weaker check, \
+and say which test and why in your answer.";
+
+/// The question asked about changed test lines that stay in the tree.
+const JUSTIFY_HEAD: &str = "These existing tests have changed lines, and the edits are still in \
+place:";
 
 /// Proactive counterpart for an explicit prohibition. Makes the recoverable post-hoc guard
 /// exceptional rather than the normal path: coverage goes into a new file, so the original
@@ -50,13 +69,38 @@ of an existing one.";
 pub(crate) const PRISTINE_TEST_GUIDANCE: &str =
     "Existing tracked test files are immutable for this session. \
 Read and run them, but do not edit, delete, or rename them—even to add coverage. Put useful new \
-coverage in a new test file, and fix production code so the original pristine tests still pass.";
+coverage in a new test file, and fix production code so the existing tests still pass as they \
+are. If the request cannot be met without changing one of them, stop and say which test and why.";
 
 /// Proactive counterpart for "keep the existing tests green": says what the guard will check.
-pub(crate) const KEEP_TESTS_GUIDANCE: &str = "The existing tests are the specification of current \
-behavior. Do not rewrite, reorder, rename or delete what they already contain to make them pass; \
-fix the production code instead. Put new tests in a new test file, or append them to the end of \
-an existing one.";
+pub(crate) const KEEP_TESTS_GUIDANCE: &str = "The existing tests describe the current behavior. \
+If your change makes one fail, decide which side is wrong. When the request itself changes that \
+behavior, update that test's expected value minimally and say which test and why in your final \
+answer. Otherwise fix the code, not the test. Never delete a test or an assertion, skip or xfail \
+one, or loosen one so that a failure disappears. Put new tests in a new test file where you can.";
+
+const SKIP_MARKER_PATTERN: &str = r"@pytest\.mark\.(?:skip|skipif|xfail)\b|\bpytest\.(?:skip|xfail|importorskip)\s*\(|@unittest\.(?:skip|skipIf|skipUnless|expectedFailure)\b|\bself\.skipTest\s*\(|\braise\s+(?:unittest\.)?SkipTest\b|#\[ignore\b|\b(?:it|test|describe)\.(?:skip|todo)\s*\(|\bx(?:it|describe|test)\s*\(|\bt\.Skip(?:Now|f)?\s*\(";
+
+const ASSERTION_PATTERN: &str = r"^\s*assert\b|\bself\.assert[A-Z]\w*\s*\(|\bassert(?:_eq|_ne|_matches)?!\s*\(|\bexpect\s*\(|\bpytest\.raises\s*\(|\bassertThat\s*\(|\bt\.(?:Error|Fatal)f?\s*\(";
+
+const ALWAYS_TRUE_PATTERN: &str = r"^\s*assert\s+(?:True|1)\s*(?:,.*)?$|\bassertTrue\(\s*True\s*\)|\bassert!\(\s*true\s*\)|\bexpect\(\s*(?:true|1)\s*\)\s*\.\s*(?:toBe|toEqual)\(\s*(?:true|1)\s*\)|\bassert\w*\b.*(?:\bor\s+True\b|\|\|\s*true\b)";
+
+static SKIP_MARKER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(SKIP_MARKER_PATTERN).expect("skip marker regex"));
+static ASSERTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(ASSERTION_PATTERN).expect("assertion regex"));
+static ALWAYS_TRUE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(ALWAYS_TRUE_PATTERN).expect("always-true regex"));
+
+/// A line that keeps a test from running: a skip, xfail, ignore or todo marker.
+pub fn is_skip_marker_line(line: &str) -> bool {
+    SKIP_MARKER.is_match(line)
+}
+
+/// A line that checks something: an assert, an `expect(...)`, `pytest.raises`, `t.Errorf`, ...
+pub fn is_assertion_line(line: &str) -> bool {
+    ASSERTION.is_match(line)
+}
 
 /// Whether `path` looks like a test file — the small, extensible pattern list the
 /// existing-tests-are-spec guard keys on. Matches by basename (`test_*.py`, `*_test.py`,
@@ -340,6 +384,37 @@ const TESTS_EXPECTED_TO_CHANGE: [&str; 21] = [
     "tests to match",
 ];
 
+/// Words that make a following "pass" a noun, a round of work ("final pass", "one more pass over
+/// the diff", "a quick pass"), not tests going green. "Final pass: rerun everything and confirm each
+/// change is covered" asks for a review; read as "tests must pass" it armed the whole
+/// guard — contract text, restore and push-back round — on a turn that never promised green tests.
+/// "passes" is only a noun after a count ("two passes"): "it passes" is the verb.
+const PASS_NOUN_LEADS: [&str; 21] = [
+    "a", "an", "the", "this", "one", "another", "more", "extra", "final", "first", "second",
+    "third", "last", "next", "quick", "full", "review", "cleanup", "up", "careful", "thorough",
+];
+const PASSES_NOUN_LEADS: [&str; 7] = [
+    "two", "three", "several", "multiple", "few", "couple", "more",
+];
+
+/// A word of `words[at]` that says the tests must be green: `green`, `passing`, a verb "pass".
+fn wants_green(words: &[&str], at: usize) -> bool {
+    const GREEN_WORDS: [&str; 7] = [
+        "green", "passing", "pass", "passes", "intact", "succeed", "succeeds",
+    ];
+    let word = words[at];
+    if !GREEN_WORDS.contains(&word) {
+        return false;
+    }
+    let lead = at.checked_sub(1).map(|i| words[i]);
+    let noun_leads: &[&str] = match word {
+        "pass" => &PASS_NOUN_LEADS,
+        "passes" => &PASSES_NOUN_LEADS,
+        _ => &[],
+    };
+    !lead.is_some_and(|lead| noun_leads.contains(&lead))
+}
+
 /// "The existing tests must keep passing", "keep the tests green", "keep `go test -race ./...`
 /// green", "get `cargo test` green": one sentence that names tests and wants them green. Skipped
 /// for requests that expect tests to change (see [`TESTS_EXPECTED_TO_CHANGE`]) and for
@@ -349,9 +424,6 @@ pub(crate) fn prompt_expects_green_existing_tests(prompt: &str) -> bool {
         "test", "tests", "testing", "pytest", "unittest", "jest", "vitest", "mocha", "rspec",
         "phpunit",
     ];
-    const GREEN_WORDS: [&str; 7] = [
-        "green", "passing", "pass", "passes", "intact", "succeed", "succeeds",
-    ];
     let lowered = prompt.replace('\u{2019}', "'").to_lowercase();
     if TESTS_EXPECTED_TO_CHANGE.iter().any(|m| lowered.contains(m))
         || crate::completeness::direct_completeness_is_identifier_migration(&lowered)
@@ -359,46 +431,69 @@ pub(crate) fn prompt_expects_green_existing_tests(prompt: &str) -> bool {
         return false;
     }
     sentences(&lowered).iter().any(|s| {
-        tokens(s).any(|t| TEST_WORDS.contains(&t)) && tokens(s).any(|t| GREEN_WORDS.contains(&t))
+        let words: Vec<&str> = tokens(s).collect();
+        words.iter().any(|t| TEST_WORDS.contains(t))
+            && (0..words.len()).any(|at| wants_green(&words, at))
     })
 }
 
+/// What the person typed. A harness nudge is stored as a user message too, and its wording is the
+/// harness's: the push-back after a restore says "fix the production code rather than the tests",
+/// which read as a request to change tests and lifted the protection it had just enforced.
 fn user_messages(messages: &[Message]) -> impl Iterator<Item = &str> {
     messages
         .iter()
-        .filter(|m| m.role == Role::User)
+        .filter(|m| m.role == Role::User && m.kind == MessageKind::Normal)
         .map(|m| m.content.as_str())
+}
+
+/// What the session's requests say about the existing tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stance {
+    Silent,
+    /// "Don't edit the existing tests".
+    Frozen,
+    /// "Update the tests", "fix the failing test".
+    Revisable,
+}
+
+/// The latest request that speaks to the tests decides, so "update the tests" after an earlier
+/// "don't touch the tests" lifts the protection, and a later "leave them alone" restores it.
+fn session_stance(messages: &[Message]) -> Stance {
+    user_messages(messages).fold(Stance::Silent, |stance, prompt| {
+        if prompt_requires_pristine_existing_tests(prompt) {
+            Stance::Frozen
+        } else if prompt_asks_to_change_tests(prompt) {
+            Stance::Revisable
+        } else {
+            stance
+        }
+    })
 }
 
 /// Whether the session still protects the existing tests: the latest request that speaks to it
 /// decides, so "update the tests" after an earlier "don't touch the tests" lifts the protection.
 pub(crate) fn session_requires_pristine_existing_tests(messages: &[Message]) -> bool {
-    user_messages(messages).fold(false, |pristine, prompt| {
-        if prompt_requires_pristine_existing_tests(prompt) {
-            true
-        } else if prompt_asks_to_change_tests(prompt) {
-            false
-        } else {
-            pristine
-        }
-    })
+    session_stance(messages) == Stance::Frozen
 }
 
 fn session_expects_green_existing_tests(messages: &[Message]) -> bool {
     user_messages(messages).any(prompt_expects_green_existing_tests)
 }
 
-/// How strictly this session protects the existing tests. "Keep the tests green" is enforced
-/// only where nobody is watching (`forge run`, bench, scripted runs): a person in a chat who says
-/// "make sure the tests pass" is not asking for an extra restore-and-retry round whenever a test
-/// case is edited, and sees the diff anyway.
+/// How this session treats edits to the existing tests. A run is guarded when it expects a code
+/// change, or when it says the tests must stay green and nobody is watching (`forge run`, bench,
+/// scripted runs): a person in a chat who says "make sure the tests pass" is not asking for an
+/// extra round whenever a test case is edited, and sees the diff anyway. A person's explicit
+/// "don't edit the tests" freezes them in any run.
 pub(crate) fn level(expect_code_change: bool, transcript: &[Message], attended: bool) -> Level {
-    if expect_code_change || session_requires_pristine_existing_tests(transcript) {
-        Level::AnyEdit
-    } else if !attended && session_expects_green_existing_tests(transcript) {
-        Level::Rewrites
-    } else {
-        Level::Off
+    let guarded_run =
+        expect_code_change || (!attended && session_expects_green_existing_tests(transcript));
+    match session_stance(transcript) {
+        Stance::Frozen => Level::Frozen,
+        Stance::Revisable if guarded_run => Level::Concealing,
+        Stance::Silent if guarded_run => Level::Guarded,
+        Stance::Revisable | Stance::Silent => Level::Off,
     }
 }
 
@@ -435,28 +530,216 @@ pub(crate) fn parse_name_status(raw: &[u8]) -> Vec<(char, String)> {
     out
 }
 
-/// Whether `path` at `base` is a byte prefix of the working copy: the edit only appended.
-fn only_appended(root: Option<&Path>, base: &str, path: &str) -> bool {
-    let Some(original) = git_output(root, &["show", &format!("{base}:./{path}")]) else {
-        return false;
+/// Why an edit to an existing test is taken out of the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Why {
+    /// A person asked for the existing tests to be left alone.
+    Requested,
+    Deleted,
+    AssertionsRemoved(usize),
+    SkipAdded(usize),
+    AlwaysTrue,
+    /// Lines the test already had were changed, and no code outside the tests was.
+    CodeUnchanged,
+}
+
+impl Why {
+    fn text(&self) -> String {
+        match self {
+            Why::Requested => "the request said to leave it alone".to_string(),
+            Why::Deleted => "the file was deleted or replaced".to_string(),
+            Why::AssertionsRemoved(n) => format!("{n} assertion(s) were removed"),
+            Why::SkipAdded(n) => format!("{n} skip/xfail marker(s) were added"),
+            Why::AlwaysTrue => "an assertion that cannot fail was added".to_string(),
+            Why::CodeUnchanged => {
+                "lines it already had were changed while no code outside the tests was".to_string()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Restore {
+    pub path: String,
+    pub why: Vec<Why>,
+}
+
+/// What a turn did to the existing test files, sorted by what the guard does about it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TestEdits {
+    /// Files to put back, with the reasons.
+    pub restore: Vec<Restore>,
+    /// Existing tests whose lines changed with a code change behind them: they stay, and the
+    /// model is asked once whether the request changes what they pin down.
+    pub revised: Vec<String>,
+    pub(crate) excerpt: String,
+}
+
+impl TestEdits {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.restore.is_empty() && self.revised.is_empty()
+    }
+
+    pub(crate) fn restore_paths(&self) -> Vec<String> {
+        self.restore.iter().map(|r| r.path.clone()).collect()
+    }
+}
+
+enum Edit {
+    Same,
+    Added,
+    Hides(Vec<Why>),
+    Revises,
+}
+
+/// Lines (trimmed, non-blank) of `text` that `other` does not have as often. Comparing as
+/// multisets keeps a moved or re-indented line from counting as a change.
+fn lines_missing_from<'a>(text: &'a str, other: &str) -> Vec<&'a str> {
+    let mut available: HashMap<&str, usize> = HashMap::new();
+    for line in other.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        *available.entry(line).or_default() += 1;
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|line| match available.get_mut(line) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+fn classify(before: &str, after: &str) -> Edit {
+    let removed = lines_missing_from(before, after);
+    let added = lines_missing_from(after, before);
+    let count = |lines: &[&str], matches: fn(&str) -> bool| {
+        lines.iter().filter(|line| matches(line)).count()
     };
-    let current = match root {
+    let always_true = |line: &str| ALWAYS_TRUE.is_match(line);
+    let mut why = Vec::new();
+    let skips =
+        count(&added, is_skip_marker_line).saturating_sub(count(&removed, is_skip_marker_line));
+    if skips > 0 {
+        why.push(Why::SkipAdded(skips));
+    }
+    let lost = count(&removed, is_assertion_line).saturating_sub(count(&added, is_assertion_line));
+    if lost > 0 {
+        why.push(Why::AssertionsRemoved(lost));
+    }
+    if count(&added, always_true) > count(&removed, always_true) {
+        why.push(Why::AlwaysTrue);
+    }
+    if !why.is_empty() {
+        Edit::Hides(why)
+    } else if !removed.is_empty() {
+        Edit::Revises
+    } else if !added.is_empty() {
+        Edit::Added
+    } else {
+        Edit::Same
+    }
+}
+
+fn is_prose_path(path: &str) -> bool {
+    path.starts_with("docs/")
+        || [".md", ".rst", ".txt", ".adoc"]
+            .iter()
+            .any(|ext| path.ends_with(ext))
+}
+
+/// Whether the turn changed anything that is neither a test nor prose: the code a changed
+/// expectation could be following.
+fn code_changed(root: Option<&Path>, changes: &[(char, String)]) -> bool {
+    let is_code = |path: &str| !is_test_path(path) && !is_prose_path(path);
+    changes.iter().any(|(_, path)| is_code(path))
+        || root
+            .and_then(untracked_work_files)
+            .is_some_and(|files| files.iter().any(|path| is_code(path)))
+}
+
+fn file_at(root: Option<&Path>, base: &str, path: &str) -> Option<String> {
+    git_output(root, &["show", &format!("{base}:./{path}")])
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn file_now(root: Option<&Path>, path: &str) -> Option<String> {
+    let bytes = match root {
         Some(root) => std::fs::read(root.join(path)),
         None => std::fs::read(path),
     };
-    current.is_ok_and(|current| current.starts_with(&original))
+    bytes
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Existing tracked test files the working tree changes relative to `base` (the commit the turn
-/// started on; `HEAD` when unknown), committed or not. New files never count: writing a fresh
+const EXCERPT_FILES: usize = 6;
+const EXCERPT_LINES_PER_FILE: usize = 24;
+const EXCERPT_CHARS: usize = 3_000;
+
+/// The changed lines of `paths` against `base`, bounded: what the model needs to see to say why.
+fn excerpt(root: Option<&Path>, base: &str, paths: &[String]) -> String {
+    let mut out = String::new();
+    for path in paths.iter().take(EXCERPT_FILES) {
+        let Some(raw) = git_output(
+            root,
+            &[
+                "diff",
+                "--unified=0",
+                "--no-color",
+                "--relative",
+                base,
+                "--",
+                path,
+            ],
+        ) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&raw);
+        let body: Vec<&str> = text
+            .lines()
+            .filter(|line| {
+                line.starts_with("@@")
+                    || (line.starts_with(['+', '-'])
+                        && !line.starts_with("+++")
+                        && !line.starts_with("---"))
+            })
+            .collect();
+        let _ = write!(out, "\n{path}:");
+        for line in body.iter().take(EXCERPT_LINES_PER_FILE) {
+            let _ = write!(out, "\n  {line}");
+        }
+        if body.len() > EXCERPT_LINES_PER_FILE {
+            let _ = write!(
+                out,
+                "\n  ... {} more changed lines",
+                body.len() - EXCERPT_LINES_PER_FILE
+            );
+        }
+    }
+    if paths.len() > EXCERPT_FILES {
+        let _ = write!(out, "\n... and {} more files", paths.len() - EXCERPT_FILES);
+    }
+    if out.len() > EXCERPT_CHARS {
+        let cut = (0..=EXCERPT_CHARS)
+            .rev()
+            .find(|&i| out.is_char_boundary(i))
+            .unwrap_or(0);
+        out.truncate(cut);
+        out.push_str("\n  ...");
+    }
+    out
+}
+
+/// What the turn did to the existing tracked test files, committed or not, relative to `base`
+/// (the commit the turn started on; `HEAD` when unknown). New files never count: writing a fresh
 /// reproduction test is normal practice. Empty outside a repository.
-pub(crate) fn modified_existing_tests(
-    root: Option<&Path>,
-    base: Option<&str>,
-    level: Level,
-) -> Vec<String> {
+pub(crate) fn assess(root: Option<&Path>, base: Option<&str>, level: Level) -> TestEdits {
+    let mut edits = TestEdits::default();
     if level == Level::Off {
-        return Vec::new();
+        return edits;
     }
     let base = base.unwrap_or("HEAD");
     let Some(raw) = git_output(
@@ -471,16 +754,61 @@ pub(crate) fn modified_existing_tests(
             "--",
         ],
     ) else {
-        return Vec::new();
+        return edits;
     };
-    parse_name_status(&raw)
-        .into_iter()
+    let changes = parse_name_status(&raw);
+    let tests: Vec<&(char, String)> = changes
+        .iter()
         .filter(|(status, path)| matches!(status, 'M' | 'D' | 'T') && is_test_path(path))
-        .filter(|(status, path)| {
-            level == Level::AnyEdit || *status != 'M' || !only_appended(root, base, path)
-        })
-        .map(|(_, path)| path)
-        .collect()
+        .collect();
+    if tests.is_empty() {
+        return edits;
+    }
+    if level == Level::Frozen {
+        edits.restore = tests
+            .iter()
+            .map(|(_, path)| Restore {
+                path: path.clone(),
+                why: vec![Why::Requested],
+            })
+            .collect();
+        return edits;
+    }
+    let mut code: Option<bool> = None;
+    for (status, path) in tests {
+        if *status != 'M' {
+            edits.restore.push(Restore {
+                path: path.clone(),
+                why: vec![Why::Deleted],
+            });
+            continue;
+        }
+        let (Some(before), Some(after)) = (file_at(root, base, path), file_now(root, path)) else {
+            continue;
+        };
+        match classify(&before, &after) {
+            Edit::Same | Edit::Added => {}
+            Edit::Hides(why) => edits.restore.push(Restore {
+                path: path.clone(),
+                why,
+            }),
+            Edit::Revises if level == Level::Guarded => {
+                if *code.get_or_insert_with(|| code_changed(root, &changes)) {
+                    edits.revised.push(path.clone());
+                } else {
+                    edits.restore.push(Restore {
+                        path: path.clone(),
+                        why: vec![Why::CodeUnchanged],
+                    });
+                }
+            }
+            Edit::Revises => {}
+        }
+    }
+    if !edits.revised.is_empty() {
+        edits.excerpt = excerpt(root, base, &edits.revised);
+    }
+    edits
 }
 
 /// Put the tests in `paths` back to their state at `base` (`HEAD` when unknown) and keep the
@@ -523,26 +851,70 @@ pub(crate) fn restore_originals(
     Some(file)
 }
 
-/// The instruction pushed back at the model after its test edits were taken out.
-pub(crate) fn push_back(expect_code_change: bool, edits: &[String], patch: &Path) -> String {
-    let recover = format!(
-        "Your test edits are saved as a patch (`git apply {}` re-applies them)",
-        patch.display()
-    );
-    let (head, tail) = if expect_code_change {
-        (
-            SPEC_HEAD,
-            "re-apply only if genuinely justified by the issue text.",
-        )
-    } else {
-        (
-            REQUESTED_HEAD,
-            "re-apply only if the task genuinely requires changing what a test expects, and say \
-             so in your answer.",
-        )
-    };
-    format!(
-        "{head} {recover}; {tail}\n\nRestored test files:\n- {}",
-        edits.join("\n- ")
-    )
+/// The message pushed at the model after the guard acted. `patch` is where the restored edits
+/// were saved (`None` when nothing was restored).
+pub(crate) fn push_back(
+    level: Level,
+    edits: &TestEdits,
+    patch: Option<&Path>,
+    base: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    if let Some(patch) = patch.filter(|_| !edits.restore.is_empty()) {
+        out.push_str(if level == Level::Frozen {
+            REQUESTED_HEAD
+        } else {
+            HIDING_HEAD
+        });
+        let _ = write!(
+            out,
+            " Your edits are saved as a patch (`git apply {}` re-applies them).\n\nRestored test files:",
+            patch.display()
+        );
+        for restored in &edits.restore {
+            let reasons: Vec<String> = restored.why.iter().map(Why::text).collect();
+            if level == Level::Frozen {
+                let _ = write!(out, "\n- {}", restored.path);
+            } else {
+                let _ = write!(out, "\n- {}: {}", restored.path, reasons.join("; "));
+            }
+        }
+    }
+    if !edits.revised.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        let base = base.unwrap_or("HEAD");
+        let _ = write!(
+            out,
+            "{JUSTIFY_HEAD}{}\n\nDoes the request change the behavior these tests pin down? If it \
+             does, keep the edit and name the old and the new expectation in your answer. If it \
+             does not, the old test is still the specification: put it back with `git checkout \
+             {} -- {}` and make the code satisfy it.",
+            edits.excerpt,
+            &base[..base.len().min(12)],
+            edits.revised.join(" ")
+        );
+    }
+    out
+}
+
+/// The one-line notice for the person: what the guard did before pushing back.
+pub(crate) fn warning(level: Level, edits: &TestEdits) -> String {
+    let mut parts = Vec::new();
+    if !edits.restore.is_empty() {
+        let n = edits.restore.len();
+        parts.push(if level == Level::Frozen {
+            format!("restored {n} existing test file(s) the request asked to leave alone")
+        } else {
+            format!("restored {n} existing test file(s) whose edits hide a failure")
+        });
+    }
+    if !edits.revised.is_empty() {
+        parts.push(format!(
+            "asking whether the request justifies the changed lines in {} existing test file(s)",
+            edits.revised.len()
+        ));
+    }
+    format!("{} — pushing back once", parts.join("; "))
 }

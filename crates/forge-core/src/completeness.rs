@@ -67,8 +67,8 @@ affected subsystem that still consumes the old name is a CONCRETE OMISSION until
 replacement while retaining the old alias for compatibility (unless the task requires removal); a \
 different call shape or downstream consumer does not exempt that path. A plain rename needs no \
 alias unless the task asks for compatibility. ", frozen_contract!(), "Do not finish with an \
-unhandled occurrence that is not exempt. Passing existing tests alone is not proof: hidden tests \
-often exercise an omitted sibling path.
+unhandled occurrence that is not exempt. Passing the existing tests alone is not proof: they \
+often do not exercise an omitted sibling path.
 4. Coverage check: list the places and the kinds of fact the task names, then check each place \
 against each kind in the final files, not in your memory of the diff. ", named_coverage!(), "Fix \
 every gap with a focused edit.
@@ -91,14 +91,14 @@ Run ONE final fallback from the repository root with a plain-literal shell searc
 old name). Scope with a directory path OR a file glob, never duplicate the repo-relative prefix in \
 both. If it finds an old/deprecated term in an unedited production sibling, OPEN that code and \
 handle the concrete omission under the prior compatibility rule. If the fallback truly finds no \
-related production occurrence, make no edit and finish. Do not modify tests.";
+related production occurrence, make no edit and finish. Do not skip, delete or weaken tests.";
 
 pub(crate) const DIRECT_COMPLETENESS_MISSING_SEARCH_RETRY_PROMPT: &str = "\
 You skipped the REQUIRED repository search in the completeness audit. Do not finish yet. Run ONE \
 plain-literal search from the repository root for the old/deprecated identifier(s), using a command \
 such as `git grep -n -F -e '<old-name>' -- <nearest-production-directory>`. If it finds an \
 old/deprecated term in an unedited production sibling, OPEN that code and handle the concrete \
-omission under the prior compatibility rule. Do not modify tests.";
+omission under the prior compatibility rule. Do not skip, delete or weaken tests.";
 
 pub(crate) const DIRECT_COMPLETENESS_UNHANDLED_PATH_PROMPT: &str = concat!(
     "\
@@ -112,7 +112,7 @@ different consumer or call shape is not an exemption. ",
     frozen_contract!(),
     "If it reads an old \
 identifier from configuration/options and is not exempt, edit it to prefer the replacement. Do \
-not edit tests, and do not finish with prose that merely repeats the changes already made."
+not skip, delete or weaken tests, and do not finish with prose that merely repeats the changes already made."
 );
 
 pub(crate) const DIRECT_COMPLETENESS_UNRESOLVED_RETRY_PROMPT: &str = concat!(
@@ -123,7 +123,7 @@ NOW. For a deprecation, any path that reads an old identifier from configuration
 prefer the replacement and keep the old name only as fallback compatibility; for a plain rename, \
 change it to the new name; a different consumer or call shape is not an exemption. ",
     frozen_contract!(),
-    "Inspect the final diff and run focused verification. Do not edit tests or \
+    "Inspect the final diff and run focused verification. Do not skip, delete or weaken tests, and do not \
 repeat the prior summary without acting."
 );
 

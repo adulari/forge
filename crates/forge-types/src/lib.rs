@@ -870,6 +870,9 @@ pub struct PermissionRule {
     pub reason: Option<String>,
 }
 
+mod read_only_shell_setting;
+pub use read_only_shell_setting::*;
+
 /// What kind of change a [`FileDiff`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiffKind {
