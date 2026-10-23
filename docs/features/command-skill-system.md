@@ -500,13 +500,26 @@ used by the local keyboard, the remote prompt path, the palette and the daemon d
 
 | Class | Commands |
 | --- | --- |
-| Immediate | `/btw` (`/side`), `/help`, `/keys`, `/sessions` (`/resume` with no id), `/board`, `/config`, `/cls`, `/diff`, `/doctor`, `/remote`, `/anywhere`, `/thinking`, `/output`, `/image`, `/statusline`, `/voice` |
-| Queue | `/compact`, `/uncompact`, `/reground`, `/commit`, `/pr`, `/new` (`/clear`, `/reset`), `/context`, `/permissions`, `/add-dir`, `/rename`, `/mcp reconnect`, `/mode`, `/model`, `/models`, `/effort`, `/subagents`, `/plan`, `/execute`, `/goal`, `/loop`, `/duel`, `/assay`, `/refine`, `/workflow`, `/heartbeat`, `/init`, `/dispatch`, `/mcp`, `/lattice`, `/replay`, `/export`, `/usage`, `/mesh`, `/copy`, `/remember`, `/memories`, `/self-mcp`, `/checkpoint`, file commands and skills |
+| Immediate | `/btw` (`/side`), `/help`, `/keys`, `/sessions` (`/resume` with no id), `/board`, `/config`, `/cls`, `/diff`, `/doctor`, `/remote`, `/anywhere`, `/thinking`, `/output`, `/image`, `/statusline`, `/voice`, `/rename` |
+| Queue | `/compact`, `/uncompact`, `/reground`, `/commit`, `/pr`, `/new` (`/clear`, `/reset`), `/context`, `/permissions`, `/add-dir`, `/mcp reconnect`, `/mode`, `/model`, `/models`, `/effort`, `/subagents`, `/plan`, `/execute`, `/goal`, `/loop`, `/duel`, `/assay`, `/refine`, `/workflow`, `/heartbeat`, `/init`, `/dispatch`, `/mcp`, `/lattice`, `/replay`, `/export`, `/usage`, `/mesh`, `/copy`, `/remember`, `/memories`, `/self-mcp`, `/checkpoint`, file commands and skills |
 | Refuse | `/resume <id>`, `/undo`, `/checkpoints`, `/claude`, `/quit` |
 
 `/usage`, `/replay`, `/export`, `/model` and `/effort` look read-only but await the session lock, so
-they are Queue, not Immediate. An unknown `/name` (no builtin, command or skill) still just prints
-`unknown command` immediately.
+they are Queue, not Immediate. An unknown `/name` (no builtin, command or skill) just prints
+`unknown command` immediately, and so does a command or skill typed mid-turn (`finish or Esc the
+current turn first`): resolving the line reads the catalog only, never the session
+(`dispatch_catalog`).
+
+The rule behind the classes is that **nothing on the render loop may await the session lock while
+a turn runs.** The turn holds it for its whole length, so a loop that waits for it stops drawing
+and reading keys (not even Esc), and deadlocks for good if the turn then asks the UI a question or
+for a permission: the turn waits for the UI, the UI for the lock. Work that must run beside a turn
+uses a handle that does not need the lock instead: `/btw` the detached `BtwAsker`, `/rename` the
+session store and id from that same asker (the write runs on a blocking thread and posts its result
+to the chat's deferred inbox), a phone's image attach `with_session` (runs when the lock is free,
+else right after the turn, before anything queued later). Regression tests hold the session lock
+the way a turn does and type these inputs (`driver::tests::*_during_a_turn_*`), and
+`tui_unknown_command_and_rename_mid_turn_leave_the_ui_responsive` does the same over a real PTY.
 
 ## 6. Definition of done
 

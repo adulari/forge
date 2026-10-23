@@ -44,7 +44,9 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Voice
         // Neither takes the session lock: git and the checks run on their own thread.
         | CommandAction::Diff(_)
-        | CommandAction::Doctor => Immediate,
+        | CommandAction::Doctor
+        // Writes the title through the session's detached store handle, never the session lock.
+        | CommandAction::Rename(_) => Immediate,
         CommandAction::Dispatch(_)
         | CommandAction::PinModel(_)
         | CommandAction::ListModels
@@ -84,7 +86,6 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Permissions(_)
         | CommandAction::McpReconnect(_)
         | CommandAction::AddDir(_)
-        | CommandAction::Rename(_)
         // A file command/skill; `route_busy_line` refines this once the catalog says which.
         | CommandAction::Unknown(_) => Queue,
         // Resume/Undo/Checkpoints pick a different point of the conversation to return to, which
@@ -203,6 +204,7 @@ mod tests {
             "/image a.png",
             "/statusline",
             "/voice",
+            "/rename x",
         ];
         let queued = [
             "/dispatch build it",
@@ -216,7 +218,6 @@ mod tests {
             "/context",
             "/permissions",
             "/add-dir ../lib",
-            "/rename x",
             "/mode",
             "/assay",
             "/checkpoint x",

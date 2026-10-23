@@ -1,7 +1,9 @@
 //! Everyday Claude Code commands: `/context`, `/diff`, `/permissions`, `/mcp reconnect`,
 //! `/add-dir`, `/doctor` and `/rename`. Each answers from data the session already keeps; the
-//! slow ones (`/diff`, `/doctor`, `/mcp reconnect`) run on their own task and post to the chat's
-//! deferred inbox so the render loop never waits on git, a subprocess or a server connect.
+//! slow ones (`/diff`, `/doctor`, `/mcp reconnect`, `/rename`) run on their own task and post to
+//! the chat's deferred inbox so the render loop never waits on git, a subprocess, a server connect
+//! or a store write. `/diff`, `/doctor` and `/rename` also run while a turn holds the session lock,
+//! so they never await it.
 
 use std::sync::Arc;
 
@@ -105,23 +107,45 @@ fn expand_home(path: &str) -> std::path::PathBuf {
     }
 }
 
-/// `/rename <title>`: the name `/sessions`, the resume picker and the apps show.
+/// `/rename <title>`: the name `/sessions`, the resume picker and the apps show. It touches the
+/// session store and nothing else, so it never waits for a running turn: while one holds the
+/// session lock the store comes from the session's detached asker, and the write runs on a
+/// blocking thread (the store retries a busy database by sleeping) that posts its result back.
 async fn rename(session: &SharedSession, app: &mut App, title: &str) {
     let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    let s = session.lock().await;
-    if title.is_empty() {
-        match s.store.session_title(s.session_id()) {
-            Ok(Some(current)) => app.note(&format!(
-                "this session is named “{current}” — /rename <title> to change it"
-            )),
-            _ => app.note("usage: /rename <title>"),
-        }
+    let Some((store, id)) = session_store(session, &app.session_id) else {
+        app.note("/rename is not ready for this turn yet; try again in a moment");
         return;
+    };
+    let inbox = app.deferred_inbox();
+    tokio::task::spawn_blocking(move || {
+        let note = if title.is_empty() {
+            match store.session_title(&id) {
+                Ok(Some(current)) => {
+                    format!("this session is named “{current}” — /rename <title> to change it")
+                }
+                _ => "usage: /rename <title>".to_string(),
+            }
+        } else {
+            match store.set_session_title(&id, &title) {
+                Ok(()) => format!("✓ session renamed to “{title}”"),
+                Err(e) => format!("⚠ /rename: {e}"),
+            }
+        };
+        inbox.post(Deferred::Notes(vec![note]));
+    });
+}
+
+/// The session's store and id without waiting for the session lock.
+fn session_store(
+    session: &SharedSession,
+    live_id: &str,
+) -> Option<(Arc<forge_store::Store>, String)> {
+    if let Ok(s) = session.try_lock() {
+        return Some((s.store.clone(), s.session_id().to_string()));
     }
-    match s.store.set_session_title(s.session_id(), &title) {
-        Ok(()) => app.note(&format!("✓ session renamed to “{title}”")),
-        Err(e) => app.note(&format!("⚠ /rename: {e}")),
-    }
+    let asker = forge_core::busy_asker(live_id)?;
+    Some((asker.store().clone(), asker.session_id().to_string()))
 }
 
 #[cfg(test)]

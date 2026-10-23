@@ -367,6 +367,41 @@ fn tui_btw_runs_and_compact_queues_while_a_turn_is_running() {
 
 #[test]
 #[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_unknown_command_and_rename_mid_turn_leave_the_ui_responsive() {
+    // Paced mock so "hello" is still running when the lines are typed. A `/name` that is not a
+    // built-in used to await the session lock the running turn holds: the render loop stopped
+    // drawing and reading keys (not even Esc) until the turn ended, and for good once the turn
+    // asked the UI something. Esc must still interrupt the turn afterwards, and `/rename` must
+    // report its result while the turn is running, not when it ends.
+    let (clean, plain) = drive_pty_env(
+        &[
+            ("hello\r", 1000),
+            ("/definitely-not-a-command\r", 400),
+            ("/rename mid turn title\r", 600),
+            ("\x1b", 800),
+            ("/quit\r", 600),
+        ],
+        &[("FORGE_MOCK_STREAM_DELAY_MS", "500")],
+    );
+    assert!(clean, "clean exit: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    let unknown = plain
+        .find("unknown command: /definitely-not-a-command")
+        .unwrap_or_else(|| panic!("the unknown command was answered: {plain}"));
+    let renamed = plain
+        .find("session renamed to “mid turn title”")
+        .unwrap_or_else(|| panic!("/rename reported its result: {plain}"));
+    let interrupted = plain
+        .find("interrupted —")
+        .unwrap_or_else(|| panic!("Esc reached the running turn: {plain}"));
+    assert!(
+        unknown < renamed && renamed < interrupted,
+        "both lines were handled while the turn ran, before Esc stopped it: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
 fn tui_config_opens_wizard_fullscreen_and_returns_to_chat() {
     // /config takes over the screen with the setup wizard; Esc cancels it and the inline chat
     // loop must resume cleanly (raw mode re-enabled, viewport rebuilt) — then /quit exits. This
