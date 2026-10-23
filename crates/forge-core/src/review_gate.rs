@@ -205,6 +205,32 @@ impl TurnBaseline {
             .collect();
         baseline
     }
+
+    /// The paths this turn changed: tracked files whose diff against `base` is not what the
+    /// baseline recorded, and untracked work files that are new or different. `None` is a git
+    /// failure, or a row that is no usable path: a rename (`old => new`) or a quoted name.
+    pub(crate) fn changed_paths(
+        &self,
+        root: &std::path::Path,
+        base: Option<&str>,
+    ) -> Option<Vec<String>> {
+        let mut paths = Vec::new();
+        for (path, added, removed) in numstat(root, base)? {
+            if path.contains(" => ") || path.starts_with('"') {
+                return None;
+            }
+            if self.tracked.get(&path) != Some(&(added, removed)) {
+                paths.push(path);
+            }
+        }
+        for path in crate::working_tree::untracked_work_files(root).unwrap_or_default() {
+            let digest = crate::working_tree::untracked_digest(root, &path);
+            if self.untracked.get(&path) != Some(&digest) {
+                paths.push(path);
+            }
+        }
+        Some(paths)
+    }
 }
 
 fn git_text(root: &std::path::Path, args: &[&str]) -> Option<String> {
