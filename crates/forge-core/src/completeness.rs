@@ -567,6 +567,10 @@ pub(crate) fn adopt_redrive_text(final_text: &mut String, redrive_text: String) 
 /// `evidence` is that status and diff, run by Forge ([`crate::review_evidence::gather`]); with it
 /// the model compares the change with the request at once instead of first spending a round trip
 /// on two git commands. Without it (nothing to show, or too big) the model is told to run them.
+/// The whole reply a review that found nothing missing is asked for. It is never shown: the
+/// turn's earlier answer stands when the review leaves the tree as it was.
+pub(crate) const REVIEW_CLEAN: &str = "No change needed.";
+
 pub(crate) fn completeness_nudge(turn_start: Option<&str>, evidence: Option<&str>) -> String {
     let diff = match turn_start {
         Some(sha) => format!(
@@ -586,11 +590,13 @@ pub(crate) fn completeness_nudge(turn_start: Option<&str>, evidence: Option<&str
     };
     let mut nudge = format!(
         "Before finishing, do ONE final review (a single bounded pass — do NOT re-explore the \
-         codebase): {see} Re-read the original request and write the distinct requirements/cases \
-         it lists (issues routinely specify several, e.g. \"reject a dotted blueprint name AND a \
-         dotted endpoint\"), and for each confirm your change already handles it. Only if the \
-         change is MISSING a requirement, add that specific fix — otherwise finish. A change that \
-         handles only the first of several cases is INCOMPLETE."
+         codebase): {see} Re-read the original request, go through the distinct \
+         requirements/cases it lists (issues routinely specify several, e.g. \"reject a dotted \
+         blueprint name AND a dotted endpoint\"), and for each confirm your change already \
+         handles it. Only if the change is MISSING a requirement, add that specific fix. A change \
+         that handles only the first of several cases is INCOMPLETE. If nothing is missing, reply \
+         with exactly `{REVIEW_CLEAN}` and nothing else: your earlier answer is what the user \
+         reads, so do not list the requirements or repeat the summary."
     );
     if let Some(evidence) = evidence {
         // File content is data the review reads, never instructions it follows.
@@ -661,6 +667,20 @@ impl crate::Session {
 #[cfg(test)]
 mod review_answer_tests {
     use super::{answer_after_review, completeness_nudge};
+
+    #[test]
+    fn a_clean_review_is_asked_for_one_line_not_a_second_summary() {
+        let nudge = completeness_nudge(None, None);
+        assert!(
+            nudge.contains(&format!("`{}`", super::REVIEW_CLEAN)),
+            "{nudge}"
+        );
+        assert!(nudge.contains("do not list the requirements"), "{nudge}");
+        assert!(
+            !nudge.contains("write the distinct requirements"),
+            "{nudge}"
+        );
+    }
 
     #[test]
     fn review_nudge_points_at_untracked_files_not_just_the_tracked_diff() {

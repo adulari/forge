@@ -1,10 +1,12 @@
 //! When the bridge's one-shot completeness review earns its extra model round trips.
 //!
 //! The review re-drives the whole bridged loop once more (a full request per step, each carrying
-//! the entire tool surface). Measured over 71 bridged turns it changed content twice, so it only
-//! runs when something about the turn makes a missed requirement likely: the change is large, the
-//! answer admits unfinished work, a check is still failing, the request enumerates several
-//! requirements, or a long request was never checked after the last edit.
+//! the entire tool surface). Measured over 71 bridged turns it changed content twice, and on the
+//! Claude Code parity suites it fired on 70-100% of tasks, added 10-15% of the wall time and
+//! changed no outcome once a check had passed after the last edit. So it only runs when something
+//! about the turn makes a missed requirement likely: a check is still failing, the answer admits
+//! unfinished work, or nothing was checked after the last edit and the request names several
+//! requirements or the change is large.
 //!
 //! Size and content are measured against the commit the turn started from, not `HEAD`: a model
 //! that commits its own work leaves `git diff HEAD` empty. Work an earlier turn left uncommitted
@@ -15,9 +17,7 @@ use forge_types::Message;
 
 const LARGE_DIFF_FILES: usize = 3;
 const LARGE_DIFF_LINES: usize = 60;
-/// Enumerated requirements that justify a review even after a passing check.
-const LISTED_REQUIREMENTS: usize = 3;
-/// Prose sentences that make a request long enough for a requirement to slip past a passing check.
+/// Prose sentences that make a request long enough for an unchecked change to miss a requirement.
 const LONG_REQUEST_SENTENCES: usize = 5;
 
 /// What the tool ledger saw this turn.
@@ -37,7 +37,6 @@ pub(crate) struct CheckEvidence {
 pub(crate) enum ReviewReason {
     FailingCheck,
     HedgedAnswer,
-    ListedRequirements,
     UnverifiedMultiRequirement,
     LargeDiff,
 }
@@ -331,14 +330,11 @@ pub(crate) fn review_reason(
     if answer_looks_incomplete(answer) {
         return Some(ReviewReason::HedgedAnswer);
     }
-    let prose = request_prose(request);
-    let items = list_items(&prose);
-    if items >= LISTED_REQUIREMENTS {
-        return Some(ReviewReason::ListedRequirements);
+    if evidence.passed_after_last_edit {
+        return None;
     }
-    if !evidence.passed_after_last_edit
-        && (items >= 2 || prose_sentences(&prose) >= LONG_REQUEST_SENTENCES)
-    {
+    let prose = request_prose(request);
+    if list_items(&prose) >= 2 || prose_sentences(&prose) >= LONG_REQUEST_SENTENCES {
         return Some(ReviewReason::UnverifiedMultiRequirement);
     }
     diff_is_large(root, turn_start, baseline, evidence.authored).then_some(ReviewReason::LargeDiff)
@@ -520,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn two_listed_requirements_need_a_check_and_three_do_not_get_one_waived() {
+    fn listed_requirements_are_reviewed_only_when_nothing_checked_them() {
         let two = "Fix it:\n1. reject dotted blueprint names\n2. reject dotted endpoint names";
         assert_eq!(
             reason(two, "Done.", UNCHECKED),
@@ -528,10 +524,7 @@ mod tests {
         );
         assert_eq!(reason(two, "Done.", CHECKED), None);
         let three = format!("{two}\n3. reject dotted view names");
-        assert_eq!(
-            reason(&three, "Done.", CHECKED),
-            Some(ReviewReason::ListedRequirements)
-        );
+        assert_eq!(reason(&three, "Done.", CHECKED), None);
     }
 
     #[test]
@@ -613,16 +606,21 @@ mod tests {
             &TurnBaseline::default(),
             true
         ));
-        assert_eq!(
+        let large_change = |evidence| {
             review_reason(
                 "rename foo to bar",
                 "Done.",
                 dir.path(),
                 Some(&start),
                 &TurnBaseline::default(),
-                CHECKED
-            ),
-            Some(ReviewReason::LargeDiff)
+                evidence,
+            )
+        };
+        assert_eq!(large_change(UNCHECKED), Some(ReviewReason::LargeDiff));
+        assert_eq!(
+            large_change(CHECKED),
+            None,
+            "a check passed after the last edit"
         );
     }
 
