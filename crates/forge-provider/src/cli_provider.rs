@@ -1031,6 +1031,7 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Cap on captured stderr (for error messages) so a chatty CLI can't blow memory.
 const STDERR_CAP: usize = 16 * 1024;
 
+mod codex_usage;
 mod resume;
 use resume::ResumeState;
 
@@ -2057,6 +2058,11 @@ impl CliProvider {
             }
         };
         let images = images::turn_images(messages, seen);
+        let prior_codex_total = if resume_id.is_some() && self.kind == CliKind::Codex {
+            self.resume.lock().ok().and_then(|st| st.codex_total)
+        } else {
+            None
+        };
         // Soft nudge: steer the CLI to route web access through Forge's MCP tools rather than
         // its own native search/browsing. codex's subscription-backed web search (web.run)
         // can't be hard-disabled from here, so this instruction is best-effort; claude has no
@@ -2510,6 +2516,12 @@ impl CliProvider {
             }
         }
 
+        // A resumed codex thread reports its running total, not this turn's share.
+        let codex_total = usage;
+        if self.kind == CliKind::Codex {
+            usage = codex_usage::turn_delta(&codex_total, prior_codex_total.as_ref());
+        }
+
         // Success: record the live session so the next turn can resume it and send just the new
         // messages. claude's id is `captured_session` (its stream `session_id`); codex's is its
         // `thread_id` (`codex_thread`). `sent = messages.len()` marks everything the CLI has now seen;
@@ -2529,6 +2541,11 @@ impl CliProvider {
                 checkpoint.map(|c| c.session.as_str()),
                 checkpoint.map_or(0, |c| c.epoch),
             );
+            if self.kind == CliKind::Codex {
+                if let Ok(mut st) = self.resume.lock() {
+                    st.codex_total = Some(codex_total);
+                }
+            }
         }
 
         // Prose-fallback recovery (matches the direct/genai path). A bridge model sometimes writes a
@@ -3134,6 +3151,7 @@ impl CliProvider {
                                 model: bare.to_string(),
                                 owner: owner.map(str::to_string),
                                 epoch,
+                                codex_total: None,
                             };
                             if self.resumes() {
                                 self.record_session(
@@ -7596,6 +7614,60 @@ done
             matches!(err, ProviderError::Request(ref msg) if msg.contains("no assistant content")),
             "got {err:?}"
         );
+    }
+
+    /// `codex exec resume` reports the thread's running total on `turn.completed`. The first turn
+    /// of a task and its review resume used to record 266 085 + 328 308 input tokens for a thread
+    /// that had sent 328 308 in all; each turn must record only what it added.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resumed_codex_turn_records_only_its_own_usage() {
+        let fake = install_fake_cli(
+            "forge-fake-codex-resume",
+            r#"#!/bin/sh
+if [ "$2" = resume ]; then
+cat <<'FORGE_EOF'
+{"type":"thread.started","thread_id":"thread-1"}
+{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"reviewed"}}
+{"type":"turn.completed","usage":{"input_tokens":328308,"cached_input_tokens":279552,"cache_write_input_tokens":0,"output_tokens":4430,"reasoning_output_tokens":976}}
+FORGE_EOF
+else
+cat <<'FORGE_EOF'
+{"type":"thread.started","thread_id":"thread-1"}
+{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":266085,"cached_input_tokens":220544,"cache_write_input_tokens":0,"output_tokens":3979,"reasoning_output_tokens":715}}
+FORGE_EOF
+fi
+"#,
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        let options = CompletionOptions {
+            checkpoint: Some(warm_checkpoint(workspace.path())),
+            ..CompletionOptions::default()
+        };
+        let provider = CliProvider::codex().with_harness(false).with_binary(&fake);
+        let mut on_event = |_: StreamEvent| {};
+        let mut messages = vec![Message::user("a")];
+        let first = provider
+            .complete_with("codex-cli::gpt-5", &messages, &[], &options, &mut on_event)
+            .await
+            .expect("first turn");
+        assert_eq!(first.usage.input_tokens, 266_085);
+        messages.push(Message::assistant("done"));
+        messages.push(Message::user("review it"));
+        let second = provider
+            .complete_with("codex-cli::gpt-5", &messages, &[], &options, &mut on_event)
+            .await
+            .expect("resumed turn");
+        assert_eq!(
+            second.content.trim(),
+            "reviewed",
+            "the second turn was the resume"
+        );
+        assert_eq!(second.usage.input_tokens, 62_223);
+        assert_eq!(second.usage.cached_input_tokens, Some(59_008));
+        assert_eq!(second.usage.output_tokens, 451);
+        assert_eq!(second.usage.reasoning_tokens, Some(261));
     }
 
     #[cfg(unix)]

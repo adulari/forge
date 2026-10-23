@@ -42,6 +42,10 @@ pub(super) struct ResumeState {
     /// leading system run, which a resume delta never re-sends, so a change to it is carried in
     /// the delta explicitly.
     pub(super) pinned: Option<u64>,
+    /// Codex only: the usage total the session's thread had reported after its last turn. A
+    /// resumed `codex exec` reports the thread's running total, so this is what the next turn's
+    /// report is measured from (see [`super::codex_usage`]).
+    pub(super) codex_total: Option<forge_types::Usage>,
 }
 
 /// Fingerprints of the last two messages a CLI session was sent, which is how a later call finds

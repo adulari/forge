@@ -115,6 +115,15 @@ now keeps what the CLI streamed while the response was recorded
 Codex's bridge streams its tool calls, so they are recorded the same way, but it reports no model
 call count and keeps one call per usage row.
 
+`turn.completed.usage` from `codex exec` is the running total of the whole thread. A
+`codex exec resume` (the completeness review, a guard or verification re-drive) reports its own
+calls plus every earlier call of the thread, so the bridge keeps the total each thread last
+reported (`ResumeState::codex_total`) and records the difference
+(`crates/forge-provider/src/cli_provider/codex_usage.rs`); a total that went down is a new thread
+and is taken as it stands. Recorded straight, a two-turn task that sent 328,308 input tokens was
+stored as 266,085 + 328,308, and a 26-task seed of `codex-cli::gpt-6-luna` as 22.3M input tokens
+against 10.6M in the Codex rollout files.
+
 ## Notional cost
 
 About a quarter of real usage rows record `cost_usd = 0` (subscription bridges, free routes), so
