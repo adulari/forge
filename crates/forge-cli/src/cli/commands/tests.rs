@@ -94,8 +94,24 @@ fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
     assert!(matches!(
         approve.command.unwrap(),
         Command::Anywhere {
-            cmd: AnywhereCmd::Approve { ref challenge }
+            cmd: AnywhereCmd::Approve { ref challenge, expect_signing_key: None }
         } if challenge == "challenge"
+    ));
+
+    let unattended = Cli::try_parse_from([
+        "forge",
+        "anywhere",
+        "approve",
+        "challenge",
+        "--expect-signing-key",
+        "key",
+    ])
+    .expect("unattended approval");
+    assert!(matches!(
+        unattended.command.unwrap(),
+        Command::Anywhere {
+            cmd: AnywhereCmd::Approve { expect_signing_key: Some(ref key), .. }
+        } if key == "key"
     ));
 
     let setup = Cli::try_parse_from(["forge", "anywhere", "setup", "--recovery"])

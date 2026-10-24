@@ -26,6 +26,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{AnywhereCmd, ShareExpiry};
 
+mod approval_key;
 mod connector;
 mod display;
 use display::{configured_host_name, display_timestamp};
@@ -340,7 +341,10 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
         AnywhereCmd::Setup { name, recovery } => setup(name, recovery).await,
         AnywhereCmd::Login { recovery } => login(recovery).await,
         AnywhereCmd::Approvals => list_approvals().await,
-        AnywhereCmd::Approve { challenge } => approve_pairing(&challenge).await,
+        AnywhereCmd::Approve {
+            challenge,
+            expect_signing_key,
+        } => approve_pairing(&challenge, expect_signing_key.as_deref()).await,
         AnywhereCmd::Enable { name } => enable(name).await,
         AnywhereCmd::Status => status().await,
         AnywhereCmd::Doctor => doctor().await,
@@ -806,7 +810,7 @@ async fn list_approvals() -> Result<()> {
     Ok(())
 }
 
-async fn approve_pairing(encoded_challenge: &str) -> Result<()> {
+async fn approve_pairing(encoded_challenge: &str, expect_signing_key: Option<&str>) -> Result<()> {
     let store = StateStore::platform()?;
     let mut state = store.load()?;
     let access_token = ensure_access_token(&store, &mut state).await?;
@@ -829,28 +833,33 @@ async fn approve_pairing(encoded_challenge: &str) -> Result<()> {
         state.account_id.as_deref().context("missing account id")?,
         "account id",
     )?;
-    let safety_code = pairing_safety_code(&challenge, &details.signing_public_key, &account_id)?;
-    let account = state.github_login.as_deref().unwrap_or("signed-in account");
-    let remaining = challenge.expires_at_ms.saturating_sub(now_ms()) / 1_000;
-    print!(
-        "{}",
-        format_approval_prompt(&details.device_name, account, remaining, &safety_code)
-    );
-    std::io::stdout().flush().context("show approval prompt")?;
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .context("read approval decision")?;
-    match answer.trim() {
-        "APPROVE" => {}
-        "DENY" => {
-            println!(
-                "Denied. No account access was granted; the request will expire automatically."
-            );
-            return Ok(());
-        }
-        _ => {
-            bail!("approval not confirmed; type exactly APPROVE or DENY and run the command again")
+    if let Some(expected) = expect_signing_key {
+        approval_key::ensure_expected_signing_key(&details.signing_public_key, expected)?;
+    } else {
+        let safety_code =
+            pairing_safety_code(&challenge, &details.signing_public_key, &account_id)?;
+        let account = state.github_login.as_deref().unwrap_or("signed-in account");
+        let remaining = challenge.expires_at_ms.saturating_sub(now_ms()) / 1_000;
+        print!(
+            "{}",
+            format_approval_prompt(&details.device_name, account, remaining, &safety_code)
+        );
+        std::io::stdout().flush().context("show approval prompt")?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .context("read approval decision")?;
+        match answer.trim() {
+            "APPROVE" => {}
+            "DENY" => {
+                println!(
+                    "Denied. No account access was granted; the request will expire automatically."
+                );
+                return Ok(());
+            }
+            _ => bail!(
+                "approval not confirmed; type exactly APPROVE or DENY and run the command again"
+            ),
         }
     }
 
