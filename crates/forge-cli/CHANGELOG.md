@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A poll that waits on a background job stops when the job ends.** `shell` poll mode (`poll_until_exit_zero`) re-ran its status command until its budget ran out even after the job it was waiting on had died: on the parity benchmark a release build was killed 130 s in and the model's three `grep -q "build complete" <job log>` polls kept waiting another 4 minutes before it looked at the job. A poll now watches the running background jobs whose log path or pid its command names (or the only running job when it names none) and, as soon as one ends, returns "stopped waiting" with how it ended (exit code, or killed by a signal) and the last lines of its log (`crates/forge-tools/src/shell/poll.rs`).
+
 ## [2.22.0] - 2026-10-24
 
 ### Security

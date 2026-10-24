@@ -39,7 +39,9 @@ use tokio::process::{Child, Command};
 use crate::sandbox::{self, SandboxPolicy};
 use crate::{Tool, ToolError};
 mod background;
+mod poll;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
+use poll::{run_poll, watched_jobs, PollJobs};
 mod preview;
 pub use preview::{
     reap_orphan_tunnels, set_preview_settings, PreviewSettings, ReapReason, ReapReport,
@@ -286,8 +288,20 @@ impl Tool for ShellTool {
                 .unwrap_or(DEFAULT_POLL_INTERVAL_SECS)
                 .clamp(1, 60);
             let budget = timeout_secs.min(POLL_MAX_BUDGET_SECS);
+            let watched = watched_jobs(command, workspace.as_deref(), &cwd);
             return Ok(crate::ToolRun::from(
-                run_poll(command, &cwd, budget, interval, &self.policy).await,
+                run_poll(
+                    command,
+                    &cwd,
+                    budget,
+                    interval,
+                    &self.policy,
+                    PollJobs {
+                        workspace: workspace.as_deref(),
+                        pids: &watched,
+                    },
+                )
+                .await,
             ));
         }
         if use_pty {
@@ -314,50 +328,6 @@ impl Tool for ShellTool {
 /// NON-error, resumable result telling the model to call again with the same args — never the
 /// hard "timed out … killed" path. Each call stays under the request cap, so the model can wait
 /// out a job far longer than any single command by calling repeatedly.
-async fn run_poll(
-    command: &str,
-    cwd: &str,
-    budget_secs: u64,
-    interval_secs: u64,
-    policy: &SandboxPolicy,
-) -> String {
-    let budget = Duration::from_secs(budget_secs);
-    let interval = Duration::from_secs(interval_secs);
-    let start = Instant::now();
-    loop {
-        // Give each attempt the remaining budget as its own timeout so a single hung attempt
-        // can never outlive the poll call.
-        let attempt_timeout = budget.saturating_sub(start.elapsed()).as_secs().max(1);
-        let (result, code, _) = run_command_inner(command, cwd, attempt_timeout, policy).await;
-        let elapsed = start.elapsed().as_secs();
-        let body = result.split_once("\n\n").map(|(_, b)| b).unwrap_or("");
-        if code == Some(0) {
-            return if body.trim().is_empty() {
-                format!("shell: ready after {elapsed}s (exit 0)")
-            } else {
-                format!("shell: ready after {elapsed}s (exit 0)\n\n{body}")
-            };
-        }
-        // Not ready yet. If the next sleep would cross the budget, yield a resumable result so
-        // the model can keep waiting by calling again — never the hard killed-timeout path.
-        if start.elapsed() + interval >= budget {
-            let code_str = code
-                .map(|c| format!("exit {c}"))
-                .unwrap_or_else(|| "no exit".into());
-            let tail = if body.trim().is_empty() {
-                String::new()
-            } else {
-                format!("\n\n{body}")
-            };
-            return format!(
-                "shell: not ready after {elapsed}s (last {code_str}) — call shell again with the \
-                 same poll args to keep waiting.{tail}"
-            );
-        }
-        tokio::time::sleep(interval).await;
-    }
-}
-
 /// Execute `command` and format a model-facing result. Never returns `Err`: a failed spawn,
 /// a non-zero exit, and a timeout are all normal results the model can react to.
 ///
@@ -988,6 +958,52 @@ mod tests {
             SandboxPolicy::default()
         }
 
+        const NO_JOBS: PollJobs<'static> = PollJobs {
+            workspace: None,
+            pids: &[],
+        };
+
+        #[tokio::test]
+        async fn a_poll_on_a_job_that_dies_stops_waiting_and_says_so() {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().to_str().unwrap().to_string();
+            let job = background::start(
+                "echo compiling; sleep 1; exit 3",
+                &cwd,
+                Some(dir.path()),
+                &no_sandbox(),
+            )
+            .await
+            .unwrap();
+            let command = format!("grep -q 'build complete' {}", job.log.display());
+            let watched = watched_jobs(&command, Some(dir.path()), &cwd);
+            assert_eq!(watched, vec![job.pid], "the poll names the job's log");
+            let start = Instant::now();
+            let out = run_poll(
+                &command,
+                &cwd,
+                30,
+                1,
+                &no_sandbox(),
+                PollJobs {
+                    workspace: Some(dir.path()),
+                    pids: &watched,
+                },
+            )
+            .await;
+            assert!(out.contains("stopped waiting"), "{out}");
+            assert!(out.contains("exited 3"), "{out}");
+            assert!(out.contains("compiling"), "the log tail travels: {out}");
+            assert!(start.elapsed() < Duration::from_secs(10), "{out}");
+        }
+
+        #[tokio::test]
+        async fn a_poll_with_no_job_to_watch_waits_out_its_budget() {
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().to_str().unwrap().to_string();
+            assert!(watched_jobs("test -f done", Some(dir.path()), &cwd).is_empty());
+        }
+
         #[tokio::test]
         async fn runs_and_captures_stdout_and_exit() {
             let out = run_command("echo hello", ".", 30, &no_sandbox()).await;
@@ -1129,7 +1145,7 @@ mod tests {
 
         #[tokio::test]
         async fn poll_returns_immediately_on_exit_zero() {
-            let out = run_poll("true", ".", 10, 1, &no_sandbox()).await;
+            let out = run_poll("true", ".", 10, 1, &no_sandbox(), NO_JOBS).await;
             assert!(
                 out.contains("ready after"),
                 "true exits 0 immediately: {out}"
@@ -1149,7 +1165,7 @@ mod tests {
             let cmd = format!(
                 "n=$(cat {fp} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {fp}; [ \"$n\" -ge 3 ]"
             );
-            let out = run_poll(&cmd, ".", 30, 1, &no_sandbox()).await;
+            let out = run_poll(&cmd, ".", 30, 1, &no_sandbox(), NO_JOBS).await;
             let _ = std::fs::remove_file(&f);
             assert!(
                 out.contains("ready after") && !out.contains("not ready"),
@@ -1178,7 +1194,7 @@ mod tests {
         #[tokio::test]
         async fn poll_yields_resumable_result_when_budget_elapses() {
             let start = Instant::now();
-            let out = run_poll("false", ".", 2, 1, &no_sandbox()).await;
+            let out = run_poll("false", ".", 2, 1, &no_sandbox(), NO_JOBS).await;
             assert!(
                 out.contains("not ready"),
                 "always-failing yields resumable: {out}"
