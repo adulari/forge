@@ -88,6 +88,10 @@ fn tokens_text(up: u64, down: u64) -> String {
 /// The marker `model_effort_marker` gives a model whose provider chose the rung: nothing to show.
 const AUTO_RUNG: &str = "⟨auto⟩";
 
+fn is_cli_bridge(provider: &str) -> bool {
+    matches!(provider, "claude-cli" | "codex-cli" | "agy-cli")
+}
+
 /// The tier chip text for the active routing, if any.
 fn tier_text(app: &App) -> Option<String> {
     app.routing
@@ -111,8 +115,12 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
             };
             let mut head = Vec::new();
             if w >= 100 {
-                if let Some((provider, _)) = routing.model.split_once("::") {
-                    head.push(Span::styled(format!("{provider}::"), styles::faint()));
+                // A CLI bridge's name is plumbing: `haiku` already says which model answers.
+                // A bare bridge id has no model to say, so its provider stays.
+                if let Some((provider, model)) = routing.model.split_once("::") {
+                    if model.is_empty() || !is_cli_bridge(provider) {
+                        head.push(Span::styled(format!("{provider}::"), styles::faint()));
+                    }
                 }
             }
             head.push(Span::styled(
@@ -144,7 +152,8 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
             }
             let model_id = app.routing.as_ref().map(|r| r.model.as_str()).unwrap_or("");
             let text = cost_cell(model_id, app.cost_usd);
-            if text == "untracked" {
+            // Billing vocabulary: `/status` and `/usage` still say how a model is paid for.
+            if text == "untracked" || text == "subscription" {
                 return Vec::new();
             }
             let (text, style) = if text.starts_with('$') {

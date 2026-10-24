@@ -191,6 +191,7 @@ pub(crate) fn verb(name: &str) -> String {
         "web_fetch" => "Fetch",
         "web_search" => "Web",
         "spawn_agents" => "Agents",
+        "run_code" => "Script",
         other => return other.to_string(),
     }
     .to_string()
@@ -575,6 +576,9 @@ fn arg_rows_for(card: &ToolCard) -> Vec<(String, String)> {
 /// The one-line "what did this call do" text: the argument a human identifies the call BY (the
 /// shell command, the file path, the search pattern), never the raw JSON envelope.
 pub(crate) fn headline(name: &str, args: &str) -> String {
+    if name == "run_code" {
+        return super::script_row::headline(args);
+    }
     let Some(value) = serde_json::from_str::<Value>(args).ok() else {
         return oneline(args);
     };
@@ -792,6 +796,23 @@ mod tests {
     fn a_shell_batch_headline_names_the_first_command_and_the_rest() {
         let args = r#"{"commands":["cargo build","cargo test"],"cwd":"/w"}"#;
         assert_eq!(headline("shell", args), "cargo build (+1 more)");
+    }
+
+    #[test]
+    fn a_script_row_names_what_it_calls_never_its_source() {
+        let code = "await tools.edit_file({path: 'calc.py', old: 'a - b', new: 'a + b'});\n\
+                    const r = await tools.shell({command: 'pytest'});\n\
+                    await tools.edit_file({path: 'b.py', old: 'x', new: 'y'}); // tools.read_file";
+        assert_eq!(headline("run_code", code), "edit, run");
+        let json = serde_json::json!({"code": code, "timeout_secs": 30}).to_string();
+        assert_eq!(headline("run_code", &json), "edit, run");
+        assert_eq!(headline("run_code", "return 1 + 1"), "");
+        let mut c = card("run_code", code);
+        c.status = CardStatus::Ok;
+        c.summary = "script finished".to_string();
+        let row = &text(&card_lines(&c, 100))[0];
+        assert!(row.contains("Script"), "{row:?}");
+        assert!(!row.contains("old:") && !row.contains("await"), "{row:?}");
     }
 
     fn text(lines: &[TextLine<'_>]) -> Vec<String> {
