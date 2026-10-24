@@ -21,33 +21,36 @@ import { useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
-import { useBreakpoint } from "../../theme/useBreakpoint";
 import { usePullRefresh } from "../../lib/usePullRefresh";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 
 const EVERYTHING_COPY = "That's everything — nothing else needs you.";
 
 function InboxHeader({ count }: { count: number }) {
   const tokens = useTokens();
   const unseen = totalUnseen(useNoticesStore().hosts);
+  // The desktop sidebar/rail already has a Notices button; here it was a full-width bar.
+  const { isExpanded } = useBreakpoint();
   return (
     <View style={styles.header}>
       <Text style={[typeScale.title, styles.titleText, { color: tokens.ink }]}>Inbox</Text>
       <Text style={[typeScale.sub, { color: count > 0 ? tokens.danger : tokens.ink3 }]}>
-        {count > 0 ? `${count} decision${count === 1 ? "" : "s"} waiting` : EVERYTHING_COPY}
+        {count > 0 ? `${count} decision${count === 1 ? "" : "s"} waiting` : "No decisions waiting"}
       </Text>
-      <Button
-        label={unseen > 0 ? `Notices (${unseen} new)` : "Notices"}
-        variant="secondary"
-        onPress={() => router.push("/notices")}
-      />
+      {isExpanded ? null : (
+        <Button
+          label={unseen > 0 ? `Notices (${unseen} new)` : "Notices"}
+          variant="secondary"
+          onPress={() => router.push("/notices")}
+        />
+      )}
     </View>
   );
 }
 
 export function InboxScreen() {
   const tokens = useTokens();
-  const { isExpanded } = useBreakpoint();
   const query = useSessions();
   const pull = usePullRefresh(query.refetch);
   const rows = useMemo(() => (query.data ?? []).filter((s) => s.waiting), [query.data]);
@@ -61,23 +64,6 @@ export function InboxScreen() {
     [onPeek],
   );
   const keyExtractor = useCallback((item: SessionRow) => item.id, []);
-
-  // T5.1 (fixed): expanded's MasterDetail rail (ExpandedRail in (tabs)/_layout.tsx) already
-  // renders this same waiting-filtered list via its "Waiting" pill — this screen just fills
-  // the detail pane's `<Slot/>` there, so rendering the full Inbox list here too duplicated it.
-  if (isExpanded) {
-    if (query.isLoading) {
-      return <Screen scroll={false}><View style={styles.skeletonRow}><Skeleton width="55%" height={17} /><Skeleton width="70%" height={12} /></View></Screen>;
-    }
-    if (query.isError) {
-      return <Screen scroll={false}><EmptyState icon={CircleCheck} message={query.error instanceof ApiError ? query.error.message : "Could not load waiting sessions."} action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />} /></Screen>;
-    }
-    return (
-      <Screen scroll={false}>
-        <EmptyState icon={CircleCheck} message="select a waiting session to see it here." />
-      </Screen>
-    );
-  }
 
   if (query.isLoading) {
     return (

@@ -7,30 +7,28 @@ import { TabPager } from "../../components/TabPager";
 import { router } from "expo-router";
 import { Flame, Search } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { FlatList, Keyboard, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { FlatList, Keyboard, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { DecisionCard } from "../../components/cards/DecisionCard";
 import { DecisionPeek } from "../../components/cards/DecisionPeek";
 import { SessionCard } from "../../components/fleet/SessionCard";
-import { HostDot } from "../../components/anywhere/HostDot";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
 import { Card } from "../../components/ds/Card";
-import { Chip } from "../../components/ds/Chip";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { TaskComposer } from "../../components/ds/TaskComposer";
+import { ServerScopePills } from "../../components/fleet/ServerScopePills";
 import { ApiError, type SessionRow } from "../../lib/api";
-import { useAuth } from "../../lib/auth";
-import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
-import { unrepresentedAnywhereHosts } from "../../lib/serverTargets";
-import { useServerFleets, useSessions } from "../../lib/queries";
+import { ServerScope } from "../../lib/auth";
+import { modKey } from "../../lib/platform";
+import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
 import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
-import { radii, space } from "../../theme/tokens";
+import { space } from "../../theme/tokens";
 import { formatCostSummary, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
@@ -100,106 +98,10 @@ function FleetRowSkeleton() {
   );
 }
 
-// Hearth Fleet screen's server chips: a row of pill chips directly under the summary
-// line (HANDOFF "server chips"), no section label/border — same switching behavior.
-function FleetServerSwitcher() {
-  const tokens = useTokens();
-  const { servers, activeServerId, setActive } = useAuth();
-  const fleets = useServerFleets(servers);
-
-  // Hearth "server chips" (HANDOFF Fleet screen): always shown, even for a single
-  // server — a single server just renders as a single chip.
-  if (servers.length === 0) return null;
-
-  return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      style={styles.serverListScroll}
-      contentContainerStyle={styles.serverList}
-    >
-      {servers.map((server, index) => {
-        const fleet = fleets[index];
-        // One failed poll is a blip, not an outage: with `retry: false` a single dropped relay
-        // exchange flipped the chip red for the whole 15s backoff while the list beside it
-        // still showed live data. `failureCount` resets on the next success.
-        const reachable = fleet.isSuccess || (fleet.data !== undefined && fleet.failureCount < 2);
-        const rows: SessionRow[] = fleet.data ?? [];
-        const count = rows.filter((row) => row.waiting).length;
-        const active = server.id === activeServerId;
-        return (
-          <Pressable
-            key={server.id}
-            onPress={() => setActive(server.id)}
-            accessibilityRole="button"
-            accessibilityLabel={`${server.name}, ${reachable ? "reachable" : "unreachable"}, ${count} waiting`}
-            accessibilityState={{ selected: active }}
-            // Chip stays visually compact (28pt, matching the prototype) — hitSlop
-            // brings the actual touch target up to the 44pt minimum.
-            hitSlop={space.space8}
-            style={({ pressed }) => [
-              styles.serverChip,
-              { backgroundColor: active ? tokens.selection : tokens.bg3, opacity: pressed ? 0.72 : 1 },
-            ]}
-          >
-            <View style={[styles.serverDot, { backgroundColor: fleet.isPending ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />
-            <Text style={[typeScale.meta, { color: active ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
-              {server.name}
-            </Text>
-            <Text style={[typeScale.monoMeta, tabularNums, { color: reachable ? tokens.ink3 : tokens.ink4, fontFamily: monoFamily.regular }]}>{count}</Text>
-          </Pressable>
-        );
-      })}
-    </ScrollView>
-  );
-}
-
-
-// Forge Anywhere: host filter chips — "All" plus one chip per session source (this
-// server + any signed-in Anywhere hosts), gated to ≥2 sources per the design's "no
-// second dashboard" rule (mobile.dc.html "AW Fleet", lines 476-482). Distinct from
-// FleetServerSwitcher above (which switches the *active* server) — this filters the
-// visible list. Real session data today only ever comes from the active server over
-// direct transport, so selecting any other source honestly shows zero rows until
-// relay-backed sessions land (see `hostFilteredData` in FleetScreen below).
-function FleetHostFilter({ selected, onSelect }: { selected: string | null; onSelect: (id: string | null) => void }) {
-  const tokens = useTokens();
-  const { servers, activeServerId } = useAuth();
-  const { signedIn } = useAnywhere();
-  const { hosts } = useAnywhereHosts();
-
-  const serverSources = servers.map((server) => ({
-    id: `server:${server.id}`,
-    name: server.name,
-    dot: <View style={[styles.hostFilterDot, { backgroundColor: server.id === activeServerId ? tokens.success : tokens.ink4 }]} />,
-  }));
-  const hostSources = signedIn
-    ? unrepresentedAnywhereHosts(servers, hosts).map((host) => ({ id: `host:${host.id}`, name: host.name, dot: <HostDot state={host.state} size={5} /> }))
-    : [];
-  const sources = [...serverSources, ...hostSources];
-
-  if (sources.length < 2) return null;
-
-  return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      style={styles.hostFilterScroll}
-      contentContainerStyle={styles.hostFilterList}
-    >
-      <Chip label="All" selected={selected === null} onPress={() => onSelect(null)} />
-      {sources.map((source) => (
-        <Chip key={source.id} label={source.name} selected={selected === source.id} onPress={() => onSelect(source.id)} icon={source.dot} />
-      ))}
-    </ScrollView>
-  );
-}
-
 export function FleetScreen() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
-  const { activeServerId } = useAuth();
-  const query = useSessions();
+  const fleet = useScopedFleet();
   const listRef = React.useRef<FlatList<FleetDeckItem>>(null);
 
   // `useSessions` still has a slow recovery poll in addition to fleet events. React Query's
@@ -207,8 +109,7 @@ export function FleetScreen() {
   // here and never animate the spinner without a gesture.
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
-  const [hostFilter, setHostFilter] = useState<string | null>(null);
-  const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
+  const [peek, setPeek] = useState<{ sessionId: string; serverId: string } | null>(null);
   const [composerText, setComposerText] = useState("");
   // The composer is `position: absolute`, so it never participates in layout resize — neither
   // iOS (which never resizes the window for the keyboard) nor Android (Android 15+ enforces
@@ -243,13 +144,14 @@ export function FleetScreen() {
       hide.remove();
     };
   }, []);
-  const { refetch } = query;
+  const { refetch } = fleet;
   const onRefresh = useCallback(() => {
     setManualRefreshing(true);
     void refetch().finally(() => setManualRefreshing(false));
   }, [refetch]);
-  const onPeek = useCallback((row: SessionRow) => setPeekSessionId(row.id), []);
-  const closePeek = useCallback(() => setPeekSessionId(null), []);
+  const serverByRowId = useMemo(() => new Map(fleet.rows.map((item) => [item.row.id, item.serverId])), [fleet.rows]);
+  const onPeek = useCallback((row: SessionRow) => setPeek({ sessionId: row.id, serverId: serverByRowId.get(row.id) ?? "" }), [serverByRowId]);
+  const closePeek = useCallback(() => setPeek(null), []);
   // Hearth core rule 6: the composer replaces the "new session" affordance everywhere —
   // it hands its typed text off to the full "Forge a task" sheet, which owns project/
   // model/permission selection.
@@ -258,45 +160,37 @@ export function FleetScreen() {
     router.push({ pathname: "/new-session", params: { title: text } });
   }, []);
 
-  const data = useMemo(() => query.data ?? [], [query.data]);
-  // Forge Anywhere: the host filter chips (FleetHostFilter above) only ever match the
-  // active server's source id — real rows have no host/server id of their own to filter
-  // on beyond "the server this fleet is currently fetched from" — so any other source
-  // selection honestly yields zero rows until relay-backed sessions carry that data.
-  const activeHostSourceId = activeServerId ? `server:${activeServerId}` : null;
-  const hostFilteredData = useMemo(
-    () => (hostFilter === null || hostFilter === activeHostSourceId ? data : []),
-    [data, hostFilter, activeHostSourceId],
-  );
-  const filteredData = useMemo(() => filterSessions(hostFilteredData, "", needsYouOnly), [hostFilteredData, needsYouOnly]);
+  const data = useMemo(() => fleet.rows.map((item) => item.row), [fleet.rows]);
+  const filteredData = useMemo(() => filterSessions(data, "", needsYouOnly), [data, needsYouOnly]);
   const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
   const hasData = data.length > 0;
-  const isFirstLoad = query.isLoading && !hasData;
-  // Seeded from the last-known fleet and not yet confirmed by the host.
-  const showingLastKnown = hasData && query.dataUpdatedAt === 0;
-  const pickerState = sessionPickerState({ isLoading: isFirstLoad, isError: query.isError, visibleCount: filteredData.length });
+  const isFirstLoad = fleet.isLoading && !hasData;
+  const showingLastKnown = fleet.showingLastKnown;
+  const pickerState = sessionPickerState({ isLoading: isFirstLoad, isError: fleet.isError, visibleCount: filteredData.length });
 
   const renderItem = useCallback(
     ({ item }: { item: FleetDeckItem }) => {
       if (item.type === "label") {
         return <Text style={[typeScale.section, styles.groupLabel, { color: tokens.ink4 }]}>{item.label}</Text>;
       }
-      return item.row.waiting ? (
+      const card = item.row.waiting ? (
         <DecisionCard row={item.row} index={item.sourceIndex} onPeek={onPeek} />
       ) : (
         <SessionCard row={item.row} index={item.sourceIndex} />
       );
+      const serverId = serverByRowId.get(item.row.id);
+      return serverId ? <ServerScope serverId={serverId}>{card}</ServerScope> : card;
     },
-    [tokens.ink4, onPeek],
+    [tokens.ink4, onPeek, serverByRowId],
   );
   const keyExtractor = useCallback((item: (typeof deckRows)[number]) => item.type === "label" ? `label:${item.label}` : item.row.id, []);
 
   const emptyComponent = useMemo(() => {
-    if (query.isError) {
+    if (fleet.isError) {
       return (
         <EmptyState
           icon={Flame}
-          message={isOfflineError(query.error) ? "Forge is offline. Check the server connection and try again." : query.error instanceof ApiError ? query.error.message : "Unable to load sessions."}
+          message={isOfflineError(fleet.error) ? "Forge is offline. Check the server connection and try again." : fleet.error instanceof ApiError ? fleet.error.message : "Unable to load sessions."}
           action={<Button label="Retry" variant="secondary" onPress={() => void refetch()} accessibilityLabel="Retry loading sessions" />}
         />
       );
@@ -313,7 +207,7 @@ export function FleetScreen() {
         />
       </View>
     );
-  }, [query.isError, query.error, refetch, tokens.ink4]);
+  }, [fleet.isError, fleet.error, refetch, tokens.ink4]);
 
   // Hearth "Fleet" (web.dc.html:82-93): the expanded detail pane's empty state when no
   // session is selected — centered flame + copy + a composer pill (⌘N hint), not the old
@@ -335,7 +229,7 @@ export function FleetScreen() {
               testID="fleet-empty-composer"
             />
             <View style={styles.expandedComposerHintWrap} pointerEvents="none">
-              <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>⌘N</Text>
+              <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>{modKey}N</Text>
             </View>
           </View>
         </View>
@@ -347,11 +241,10 @@ export function FleetScreen() {
     <Screen scroll={false} contentContainerStyle={styles.screen}>
       <FleetTitle />
       {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
-      <FleetServerSwitcher />
-      <FleetHostFilter selected={hostFilter} onSelect={setHostFilter} />
+      <ServerScopePills />
       {showingLastKnown ? (
         <Text style={[typeScale.monoMeta, styles.lastKnown, { color: tokens.ink4 }]} accessibilityLiveRegion="polite">
-          {query.isError ? "Last known fleet — host not reachable" : "Last known fleet — updating…"}
+          {fleet.isError ? "Last known fleet — host not reachable" : "Last known fleet — updating…"}
         </Text>
       ) : null}
       {isFirstLoad ? (
@@ -388,7 +281,9 @@ export function FleetScreen() {
         testID="fleet-composer"
       />
 
-      <DecisionPeek sessionId={peekSessionId} visible={peekSessionId != null} onClose={closePeek} />
+      <ServerScope serverId={peek?.serverId ?? ""}>
+        <DecisionPeek sessionId={peek?.sessionId ?? null} visible={peek != null} onClose={closePeek} />
+      </ServerScope>
     </Screen>
   );
 }
@@ -400,14 +295,6 @@ const styles = StyleSheet.create({
   // The header rows below (title/summary/chip strips) carry the single 16pt gutter directly
   // instead, so they land flush with the cards rather than the old extra 16pt step.
   screen: { paddingHorizontal: 0 },
-  // Horizontal ScrollViews stretch on their cross-axis in a flex column on web; pin to content.
-  serverListScroll: { flexGrow: 0, flexShrink: 0 },
-  serverList: { gap: space.space8, paddingTop: space.space12, paddingHorizontal: space.space16 },
-  serverChip: { minHeight: 28, maxWidth: 220, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space12, borderRadius: radii.radiusPill },
-  serverDot: { width: 6, height: 6, borderRadius: 3 },
-  hostFilterScroll: { flexGrow: 0, flexShrink: 0 },
-  hostFilterList: { gap: space.space8, paddingTop: space.space8, paddingHorizontal: space.space16 },
-  hostFilterDot: { width: 5, height: 5, borderRadius: 2.5 },
   titleRow: { flexDirection: "row", alignItems: "center", paddingTop: space.space12, paddingHorizontal: space.space16 },
   titleText: { letterSpacing: -0.4 },
   mark: { fontSize: 14, marginLeft: space.space8, padding: space.space4 },

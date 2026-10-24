@@ -19,6 +19,7 @@ import { usePullRefresh } from "../lib/usePullRefresh";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { monoFamily, type as typeScale } from "../theme/typography";
+import { useBreakpoint } from "../theme/useBreakpoint";
 
 function NoticeRowView({ row, titles }: { row: Extract<NoticeListRow, { kind: "notice" }>; titles: ReadonlyMap<string, string> }) {
   const tokens = useTokens();
@@ -55,6 +56,7 @@ function NoticeRowView({ row, titles }: { row: Extract<NoticeListRow, { kind: "n
 
 export default function NoticesScreen() {
   const tokens = useTokens();
+  const { isExpanded } = useBreakpoint();
   const { servers } = useAuth();
   const { hosts } = useNoticesStore();
   const sessions = useSessions();
@@ -88,7 +90,8 @@ export default function NoticesScreen() {
   return (
     <Screen scroll={false}>
       <View style={styles.header}>
-        <BackLink label="Inbox" />
+        {/* The desktop sidebar opens Notices directly, so "back to Inbox" was only true on phones. */}
+        {isExpanded ? null : <BackLink label="Inbox" />}
         <Text style={[typeScale.title, { color: tokens.ink }]}>Notices</Text>
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Messages your sessions sent you.</Text>
       </View>

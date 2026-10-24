@@ -355,3 +355,22 @@ export function useAuth(): AuthContextValue {
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
 }
+
+/**
+ * Point a subtree at one server without changing the app's active server. A fleet row from
+ * another server (the Fleet "All" scope) renders its card, live socket, swipe actions and host
+ * label against its own daemon, because every one of those reads `baseUrl`/`activeServerId`
+ * from this context. `setActive` stays the real one, so opening the row can switch to it.
+ */
+export function ServerScope({ serverId, children }: { serverId: string; children: React.ReactNode }) {
+  const auth = useAuth();
+  const server = auth.servers.find((item) => item.id === serverId);
+  const value = useMemo<AuthContextValue>(
+    () =>
+      !server || server.id === auth.activeServerId
+        ? auth
+        : { ...auth, baseUrl: server.baseUrl, token: server.token, host: server.host, activeServerId: server.id },
+    [auth, server],
+  );
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
