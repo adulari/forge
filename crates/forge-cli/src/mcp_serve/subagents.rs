@@ -53,6 +53,79 @@ pub(super) struct SubagentSupport {
     /// Built once alongside `ctx` so it's shared across every `spawn_agents`/`cancel_subagent`
     /// call this long-lived `forge mcp-serve` process handles.
     pub(super) detached_registry: subagent::DetachedRegistry,
+    /// The session detached children belong to: the bridged Forge session that spawned this
+    /// process when it says so (`FORGE_CHECKPOINT_SESSION`), so that session delivers their
+    /// results at its next turn boundary and its `list_subagents` agrees with this one; this
+    /// process's own `parent_id` otherwise.
+    pub(super) detached_parent: String,
+}
+
+/// The bridged Forge session that spawned this process, if it names one this store knows.
+fn bridging_session(store: &forge_store::Store) -> Option<String> {
+    let id = std::env::var(forge_core::snapshot::ENV_SESSION).ok()?;
+    let id = id.trim();
+    store
+        .session_times(id)
+        .ok()
+        .flatten()
+        .map(|_| id.to_string())
+}
+
+/// The out-of-band sink the parent Forge process tails (`FORGE_SUBAGENT_SINK`), as a lifecycle
+/// callback: one JSON line per event, so bridge-spawned children show natively in the parent's
+/// agents panel (RFC subagent-orchestration Phase 3c). Shared with detached children, which keep
+/// reporting after the spawning call returned. `None` when the bridge gave no sink.
+fn lifecycle_sink() -> Option<subagent::DetachedSink> {
+    let path = std::env::var(forge_provider::SUBAGENT_SINK_ENV).ok()?;
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => std::sync::Mutex::new(f),
+        Err(error) => {
+            tracing::warn!(
+                path,
+                %error,
+                "mcp-serve: cannot open the subagent sink; the parent session will not see this \
+                 spawn's lifecycle"
+            );
+            return None;
+        }
+    };
+    Some(std::sync::Arc::new(move |ev: subagent::Lifecycle| {
+        let line = match ev {
+            subagent::Lifecycle::Start {
+                id,
+                agent,
+                task,
+                model,
+            } => serde_json::json!({"k":"start","id":id,"agent":agent,"task":task,"model":model}),
+            subagent::Lifecycle::Progress { id, snippet } => {
+                serde_json::json!({"k":"progress","id":id,"snippet":snippet})
+            }
+            subagent::Lifecycle::Done {
+                id,
+                agent,
+                ok,
+                summary,
+                cost_usd,
+            } => {
+                serde_json::json!({"k":"done","id":id,"agent":agent,"ok":ok,"summary":summary,"cost":cost_usd})
+            }
+        };
+        use std::io::Write;
+        let mut f = file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(error) = writeln!(f, "{line}").and_then(|()| f.flush()) {
+            tracing::warn!(
+                path,
+                %error,
+                "mcp-serve: failed to append a subagent lifecycle event to the sink"
+            );
+        }
+    }))
 }
 
 /// Subagent support for one `forge mcp-serve` process, built on the first call that needs it.
@@ -68,6 +141,9 @@ pub(super) struct LazySubagents {
     depth: usize,
     store: std::sync::Arc<forge_store::Store>,
     built: tokio::sync::OnceCell<Result<SubagentSupport, String>>,
+    /// Created eagerly (it is just an empty map) so [`Self::interrupt_running`] can reach it
+    /// after the server has consumed `ForgeMcp`.
+    detached_registry: subagent::DetachedRegistry,
 }
 
 impl LazySubagents {
@@ -91,7 +167,21 @@ impl LazySubagents {
             depth,
             store,
             built: tokio::sync::OnceCell::new(),
+            detached_registry: subagent::DetachedRegistry::new(),
         })
+    }
+
+    /// What [`Self::interrupt_running`] needs, detached from `self` so it outlives the server.
+    pub(super) fn exit_handle(
+        &self,
+    ) -> (
+        subagent::DetachedRegistry,
+        std::sync::Arc<forge_store::Store>,
+    ) {
+        (
+            self.detached_registry.clone(),
+            std::sync::Arc::clone(&self.store),
+        )
     }
 
     async fn get(&self) -> Result<&SubagentSupport, &str> {
@@ -139,11 +229,32 @@ impl LazySubagents {
         };
         Ok(SubagentSupport {
             ctx,
-            parent_id,
             max_agents: config.mesh.subagents.max_agents,
             max_concurrency: config.mesh.subagents.max_concurrency,
-            detached_registry: subagent::DetachedRegistry::new(),
+            detached_registry: self.detached_registry.clone(),
+            detached_parent: bridging_session(&self.store).unwrap_or_else(|| parent_id.clone()),
+            parent_id,
         })
+    }
+}
+
+/// Settle the detached children still running when this process exits: the bridge CLI that owned
+/// it is gone, and so are their tasks. Marking them failed keeps `list_subagents` truthful and lets
+/// the parent session deliver the outcome (and settle the panel row) at its next turn boundary.
+pub(super) fn interrupt_running(
+    (registry, store): (
+        subagent::DetachedRegistry,
+        std::sync::Arc<forge_store::Store>,
+    ),
+) {
+    for child_id in registry.running_ids() {
+        registry.abort(&child_id);
+        let _ = store.finish_detached_child(
+            &child_id,
+            false,
+            "error: interrupted — the bridge process running this detached agent exited before \
+             it finished",
+        );
     }
 }
 
@@ -278,9 +389,10 @@ impl ForgeMcp {
             return match subagent::spawn_detached(
                 &s.ctx,
                 &s.detached_registry,
-                &s.parent_id,
+                &s.detached_parent,
                 requests,
                 budget,
+                lifecycle_sink(),
             )
             .await
             {
@@ -293,62 +405,10 @@ impl ForgeMcp {
 
         // Report subagent lifecycle to the out-of-band sink (if the bridge gave us one) so the
         // parent Forge TUI shows these children natively (RFC subagent-orchestration Phase 3c).
-        let mut sink = std::env::var(forge_provider::SUBAGENT_SINK_ENV)
-            .ok()
-            .and_then(|p| {
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&p)
-                {
-                    Ok(f) => Some((f, p)),
-                    Err(error) => {
-                        tracing::warn!(
-                            path = p,
-                            %error,
-                            "mcp-serve: cannot open the subagent sink; the parent session \
-                             will not see this spawn's lifecycle"
-                        );
-                        None
-                    }
-                }
-            });
-        let mut write = move |v: serde_json::Value| {
-            if let Some((f, path)) = sink.as_mut() {
-                use std::io::Write;
-                if let Err(error) = writeln!(f, "{v}").and_then(|()| f.flush()) {
-                    tracing::warn!(
-                        path = path.as_str(),
-                        %error,
-                        "mcp-serve: failed to append a subagent lifecycle event to the sink"
-                    );
-                }
-            }
-        };
-        let mut on_event = |ev: subagent::Lifecycle| match ev {
-            subagent::Lifecycle::Start {
-                id,
-                agent,
-                task,
-                model,
-            } => {
-                write(
-                    serde_json::json!({"k":"start","id":id,"agent":agent,"task":task,"model":model}),
-                );
-            }
-            subagent::Lifecycle::Progress { id, snippet } => {
-                write(serde_json::json!({"k":"progress","id":id,"snippet":snippet}));
-            }
-            subagent::Lifecycle::Done {
-                id,
-                agent,
-                ok,
-                summary,
-                cost_usd,
-            } => {
-                write(
-                    serde_json::json!({"k":"done","id":id,"agent":agent,"ok":ok,"summary":summary,"cost":cost_usd}),
-                );
+        let sink = lifecycle_sink();
+        let mut on_event = |ev: subagent::Lifecycle| {
+            if let Some(sink) = &sink {
+                sink(ev);
             }
         };
 
@@ -378,7 +438,7 @@ impl ForgeMcp {
         let children = s
             .ctx
             .store
-            .list_detached_children(&s.parent_id)
+            .list_detached_children(&s.detached_parent)
             .unwrap_or_default();
         CallToolResult::success(vec![ContentBlock::text(subagent::format_subagent_list(
             &children,
@@ -407,7 +467,7 @@ impl ForgeMcp {
         let children = s
             .ctx
             .store
-            .list_detached_children(&s.parent_id)
+            .list_detached_children(&s.detached_parent)
             .unwrap_or_default();
         let Some(child) = subagent::resolve_detached_address(&children, &address) else {
             let known: Vec<String> = children

@@ -8,7 +8,55 @@
 
 use super::*;
 
+/// The presenter event for one subagent lifecycle step, shared by blocking and detached spawns so
+/// both reach the agents panel (TUI rows, the remote snapshot's `subagents`) the same way.
+pub(crate) fn lifecycle_event(ev: subagent::Lifecycle) -> PresenterEvent {
+    match ev {
+        subagent::Lifecycle::Start {
+            id,
+            agent,
+            task,
+            model,
+        } => PresenterEvent::SubagentStart {
+            id: id.to_string(),
+            agent: agent.to_string(),
+            task: task.to_string(),
+            model: Some(model.to_string()),
+            phase: None,
+        },
+        subagent::Lifecycle::Progress { id, snippet } => PresenterEvent::SubagentProgress {
+            id: id.to_string(),
+            snippet: snippet.to_string(),
+        },
+        subagent::Lifecycle::Done {
+            id,
+            agent,
+            ok,
+            summary,
+            cost_usd,
+        } => PresenterEvent::SubagentResult {
+            id: id.to_string(),
+            agent: agent.to_string(),
+            ok,
+            summary: summary.to_string(),
+            cost_usd,
+        },
+    }
+}
+
 impl Session {
+    /// Where detached children report their lifecycle after the admitting turn has ended: the
+    /// presenter's background sink. `None` on a surface without one (plain headless output),
+    /// where the labeled result message at the next turn boundary is the only report.
+    pub(crate) fn detached_sink(&self) -> Option<subagent::DetachedSink> {
+        let sink = std::sync::Mutex::new(self.presenter.recap_sink()?);
+        Some(Arc::new(move |ev: subagent::Lifecycle| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .emit(lifecycle_event(ev));
+        }))
+    }
+
     /// Handle a `list_subagents` call: report every detached child spawned this session (RFC
     /// retained-async-subagents), with live status.
     pub(crate) fn list_subagents(
@@ -83,6 +131,14 @@ impl Session {
         // the store transition is what `list_subagents`/delivery actually consult).
         self.detached_registry.abort(&child_id);
         self.store.cancel_detached_child(&child_id)?;
+        // The aborted task never reports Done itself, so settle its panel row here.
+        self.presenter.emit(PresenterEvent::SubagentResult {
+            id: child_id.clone(),
+            agent: name.clone(),
+            ok: false,
+            summary: "cancelled".to_string(),
+            cost_usd: self.store.session_cost(&child_id).unwrap_or(0.0),
+        });
         let result = format!(
             "cancelled '{name}' ({})",
             &child_id[..child_id.len().min(8)]
@@ -109,6 +165,15 @@ impl Session {
                     .as_deref()
                     .unwrap_or("(no result recorded)"),
             );
+            // Settles a panel row nothing else did: a child whose process ended before it
+            // reported (a bridge turn, a restart). A row already settled ignores the repeat.
+            self.presenter.emit(PresenterEvent::SubagentResult {
+                id: child.child_id.clone(),
+                agent: child.name.clone(),
+                ok: child.status == forge_store::DetachedChildStatus::Done,
+                summary: subagent::summary(child.result_ref.as_deref().unwrap_or("")),
+                cost_usd: self.store.session_cost(&child.child_id).unwrap_or(0.0),
+            });
             self.presenter.emit(PresenterEvent::Warning(format!(
                 "detached agent '{}' {} — result delivered",
                 child.name,

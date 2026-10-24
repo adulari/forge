@@ -4989,6 +4989,8 @@ mod tests {
     #[path = "deferred_dispatch.rs"]
     mod deferred_dispatch_tests;
 
+    #[path = "detached_agents.rs"]
+    mod detached_agents_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
 

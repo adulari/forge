@@ -322,6 +322,10 @@ pub struct App {
     /// this batch's rows, not every retained row from earlier phases too.
     pub(crate) subagents: Vec<SubRow>,
     subagent_batch_start: usize,
+    /// Ids of subagents whose result already landed. Outlives the rows (cleared each turn) so a
+    /// repeated result — a detached child's delivery after its own Done — is dropped, not printed
+    /// twice.
+    settled_subagents: std::collections::HashSet<String>,
     /// Per-critic rows for the live assay panel. Populated from AssayCriticRow events; cleared
     /// when the AssayReport arrives (the full report lands in scrollback instead).
     assay_critics: Vec<forge_types::AssayCriticRow>,
@@ -1513,6 +1517,8 @@ impl App {
                 phase,
             } => {
                 self.set_turn_activity(TurnPhase::Coordinating, "subagent work is running");
+                // `send_to_agent` reruns a child under its old id: live again, so its result counts.
+                self.settled_subagents.remove(&id);
                 // A live workflow owns its agents: rows fold into the dedicated workflow view,
                 // never the sticky activity panel (its scrollback record is written by the
                 // WorkflowPhase/WorkflowFinished handlers instead of the batch header/footer).
@@ -1624,6 +1630,14 @@ impl App {
                     self.workflow.on_result(&id, ok, &summary, cost_usd);
                     return;
                 }
+                if !id.is_empty() {
+                    if self.settled_subagents.len() >= 4096 {
+                        self.settled_subagents.clear();
+                    }
+                    if !self.settled_subagents.insert(id.clone()) {
+                        return;
+                    }
+                }
                 self.flush.push(subagent_branch_line(
                     &agent,
                     ok,
@@ -1631,7 +1645,9 @@ impl App {
                     &summary,
                     self.last_width.get(),
                 ));
+                let mut found = false;
                 if let Some(row) = self.subagents.iter_mut().find(|r| r.id == id && !r.done) {
+                    found = true;
                     row.done = true;
                     row.ok = ok;
                     row.cost = cost_usd;
@@ -1656,7 +1672,7 @@ impl App {
                 // Ctrl+O until the next batch starts; the live panel collapses on its own (no rows
                 // are running).
                 let current_batch = &self.subagents[self.subagent_batch_start..];
-                if current_batch.iter().all(|r| r.done) {
+                if found && current_batch.iter().all(|r| r.done) {
                     let n = current_batch.len();
                     let total: f64 = current_batch.iter().map(|r| r.cost).sum();
                     self.flush.push(subagent_footer_line(n, total));
