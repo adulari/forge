@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import fixture from "../../../protocol/remote-v10.json";
 import { PROTOCOL_VERSION, isValidSnapshotFrame } from "./remoteProtocol";
-import { decideSnapshotRevision, reconcilePendingMessages } from "./sessionReconciler";
+import { decideSnapshotRevision, reconcilePendingMessages, unqueuedPendingMessages } from "./sessionReconciler";
 
 describe("remote protocol conformance", () => {
   it("uses the same protocol version and accepts every golden frame", () => {
@@ -40,5 +40,23 @@ describe("optimistic message reconciliation", () => {
 
   it("clears only the matching user message newer than its baseline", () => {
     expect(reconcilePendingMessages(pending, [{ seq: 6, role: "user", content: "first" }])).toEqual([pending[1]]);
+  });
+});
+
+describe("unqueuedPendingMessages", () => {
+  const msg = (id: string, text: string) => ({ id, text, baselineSeq: 0 });
+
+  it("hides a prompt still waiting in the daemon queue", () => {
+    const pending = [msg("a", "first"), msg("b", "follow-up")];
+    expect(unqueuedPendingMessages(pending, ["follow-up "]).map((m) => m.id)).toEqual(["a"]);
+  });
+
+  it("shows it again once the daemon takes it off the queue", () => {
+    expect(unqueuedPendingMessages([msg("b", "follow-up")], []).map((m) => m.id)).toEqual(["b"]);
+  });
+
+  it("hides one message per queued entry", () => {
+    const pending = [msg("a", "again"), msg("b", "again")];
+    expect(unqueuedPendingMessages(pending, ["again"]).map((m) => m.id)).toEqual(["a"]);
   });
 });
