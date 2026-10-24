@@ -568,7 +568,10 @@ async fn drive_session(
                     side_effect,
                     reply,
                 } => {
-                    st.app.prompt = Some(format!("allow {tool} ({side_effect:?}) [y/n]"));
+                    st.app.prompt = Some(
+                        st.app
+                            .wire_permission_prompt(&tool, &format!("{side_effect:?}")),
+                    );
                     st.pending = Some((tool, reply));
                     // New prompt, new identity: stale remote answers must never resolve it.
                     st.prompt_seq += 1;
