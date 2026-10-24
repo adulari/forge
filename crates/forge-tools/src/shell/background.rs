@@ -132,6 +132,11 @@ impl Job {
         }
     }
 
+    /// The recorded exit code, once Forge saw the job end.
+    pub fn exit_code(&self) -> Option<i64> {
+        self.exit
+    }
+
     pub fn status(&self) -> String {
         match (self.is_running(), self.exit) {
             (true, _) => "running".to_string(),
