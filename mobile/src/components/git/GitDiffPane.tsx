@@ -201,6 +201,7 @@ function SplitBody({
               horizontal
               showsHorizontalScrollIndicator={false}
               style={[styles.column, { borderRightColor: tokens.border }]}
+              contentContainerStyle={styles.hscrollContent}
             >
               <View style={styles.columnBody}>
                 {block.pairs.map((pair) => (
@@ -219,7 +220,7 @@ function SplitBody({
                 ))}
               </View>
             </ScrollView>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.columnLast}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.columnLast} contentContainerStyle={styles.hscrollContent}>
               <View style={styles.columnBody}>
                 {block.pairs.map((pair) => (
                   pair.right ? (
@@ -416,7 +417,7 @@ export function GitDiffPane({
               onSelect={selectLine}
             />
           ) : (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.hscrollContent}>
               <View style={styles.columnBody}>
                 {unifiedRows.map((row) =>
                   row.kind === "hunk" ? (
@@ -557,7 +558,11 @@ const styles = StyleSheet.create({
   splitRow: { flexDirection: "row" },
   column: { flex: 1, borderRightWidth: StyleSheet.hairlineWidth },
   columnLast: { flex: 1 },
-  columnBody: { minWidth: "100%", paddingVertical: space.space4 },
+  // `minWidth: "100%"` on the body (and on each line) resolves against the horizontal scroll's
+  // content container, which hugs the longest line unless it is told to fill the viewport: the
+  // added/removed tint then stopped at the text instead of spanning the pane.
+  hscrollContent: { minWidth: "100%" },
+  columnBody: { minWidth: "100%", flexGrow: 1, paddingVertical: space.space4 },
   reviewableLine: { position: "relative", borderLeftWidth: 2 },
   selectionOverlay: {
     position: "absolute",

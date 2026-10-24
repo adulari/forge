@@ -294,7 +294,7 @@ function DiffFileSection({
           // told to be at least as wide as the viewport itself.
           contentContainerStyle={styles.hunkScrollContent}
         >
-          <View>
+          <View style={styles.hunkColumn}>
             {file.hunks.map((hunk, hIdx) => (
               <View key={hIdx} style={styles.hunk}>
                 <Text selectable style={[typeScale.codeSmall, { color: tokens.info }, styles.hunkHeader]}>{hunk.header}</Text>
@@ -367,6 +367,9 @@ const styles = StyleSheet.create({
   hunkScroll: { marginBottom: space.space4 },
   horizontalScroll: { flexGrow: 0, flexShrink: 0 },
   hunkScrollContent: { minWidth: "100%" },
+  // Grows to the content container's full width, so the rows' own `minWidth: "100%"` resolves
+  // against the card rather than the longest line (the tint stopped at the text otherwise).
+  hunkColumn: { flexGrow: 1 },
   hunk: { paddingBottom: space.space8 },
   hunkHeader: { paddingHorizontal: space.space12, paddingVertical: space.space4 },
   footer: { paddingHorizontal: space.space12, paddingVertical: space.space8 },

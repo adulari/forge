@@ -29,7 +29,9 @@ import { EmptyState } from "../ds/EmptyState";
 const FILE_COLUMN_WIDTH = 264;
 /** Below this the 264px column plus a readable diff no longer fit side by side. */
 const STACK_BELOW = 700;
-const STACKED_COLUMN_HEIGHT = 260;
+/** The stacked file column holds the branch picker and the ~170px commit box as well as the
+ * file list; at 260 the list was left one clipped row tall. */
+const STACKED_COLUMN_HEIGHT = 400;
 
 /** The daemon's repo-resolution failures ([`repo_root_of`] in serve_git.rs) are facts about the
  * session, not transient faults — retrying them is pointless, so they get the quiet empty-state
