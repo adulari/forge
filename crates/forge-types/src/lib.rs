@@ -18,7 +18,7 @@ pub mod effort;
 pub mod interaction;
 mod permission_mode;
 pub mod self_exe;
-mod subscription_pacing;
+pub mod subscription_pacing;
 mod turn_outcome;
 pub use harness_notice::{
     format_heartbeat_delivery, format_wakeup_delivery, format_wakeup_prompt, parse_harness_notice,
