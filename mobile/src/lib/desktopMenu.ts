@@ -16,10 +16,20 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 import { useEffect, useRef } from "react";
 
+import { isAppLockEngaged } from "../components/AppLock";
+import { answer as answerPermission } from "./api";
 import { useAuth } from "./auth";
 import { decisionCopy, isContentLocked, redactTrayTitle } from "./desktopNotifyCore";
 import { isTauri } from "./platform";
 import { useDiagnostics, useSessions } from "./queries";
+import {
+  answerTrayDecision,
+  buildTrayDecision,
+  newestWaiting,
+  type TrayDecisionSummary,
+  type TrayDecisionTarget,
+} from "./trayDecisionCore";
+import { useSessionSocket } from "./ws";
 import { checkDesktopUpdate } from "./updater";
 import { PROTOCOL_VERSION } from "./remoteProtocol";
 import { useTheme } from "../theme/ThemeProvider";
@@ -73,6 +83,8 @@ export type DesktopMenuId =
   | "help:acknowledgements"
   | "tray:open"
   | "tray:quick-composer"
+  | "tray:decision:allow"
+  | "tray:decision:deny"
   | "tray:decision:review";
 
 export type DesktopMenuHandler = () => void;
@@ -149,11 +161,8 @@ function runDefault(id: string): void {
       router.push("/new-session");
       return;
     // The waiting decisions the design's "Approve" item acts on are exactly Inbox's contents;
-    // an open session claims this id itself and answers in place. The tray's review row is
-    // claimed by `useDesktopNativeSync` with the waiting session it summarised; Inbox is only the
-    // fallback before that has mounted.
+    // an open session claims this id itself and answers in place.
     case "session:approve":
-    case "tray:decision:review":
       router.push("/inbox");
       return;
     case "session:handoff":
@@ -250,9 +259,9 @@ export interface TraySummary {
   busy: number;
   waiting: number;
   costUsd?: number;
-  /** Pre-redacted headline of the decision at the top of the dropdown — see
-   * `desktopNotifyCore.ts`'s `decisionCopy`, which produces the generic form when locked. */
-  decision?: { title: string };
+  /** The newest waiting decision. `title` is pre-redacted (`decisionCopy`); `promptSeq` is set
+   * only when the tray may offer Allow/Deny — see `trayDecisionCore.ts`. */
+  decision?: TrayDecisionSummary;
   sessions: TraySessionSummary[];
 }
 
@@ -327,11 +336,6 @@ export function useDesktopNativeSync(): void {
   useDesktopMenuAction("view:appearance:light", () => setScheme("light"));
   useDesktopMenuAction("view:appearance:dark", () => setScheme("dark"));
   useDesktopMenuAction("view:appearance:system", () => setScheme("system"));
-  useDesktopMenuAction("tray:decision:review", () => {
-    const waiting = (sessions ?? []).find((row) => row.waiting);
-    router.push(waiting ? `/session/${waiting.id}` : "/inbox");
-  });
-
   const activeServer = servers.find((server) => server.id === activeServerId);
   const host = activeServer?.name;
   // The About panel's "daemon x.y.z · host" line; without the version it showed only the host.
@@ -344,6 +348,62 @@ export function useDesktopNativeSync(): void {
     void pushAboutInfo({ host, daemonVersion });
   }, [host, daemonVersion]);
 
+  // The tray's decision rows need what the fleet list does not carry — whether the newest
+  // waiting session is asking a permission (yes/no) or a question, and its `prompt_seq` — so
+  // that one session is watched over its socket, the same short attach DecisionCard uses.
+  const newest = newestWaiting(sessions ?? []);
+  const { snapshot: decisionSnapshot } = useSessionSocket(
+    isTauri && newest ? (activeServer?.baseUrl ?? null) : null,
+    isTauri ? (newest?.id ?? null) : null,
+  );
+  const decision = newest
+    ? buildTrayDecision({
+        title: decisionCopy({ sessionTitle: newest.title, locked }).title,
+        serverId: activeServerId,
+        sessionId: newest.id,
+        snapshot: decisionSnapshot,
+        contentLocked: locked,
+      })
+    : undefined;
+
+  const live = useRef({ servers, activeServerId, decisionSnapshot });
+  useEffect(() => {
+    live.current = { servers, activeServerId, decisionSnapshot };
+  }, [servers, activeServerId, decisionSnapshot]);
+  useEffect(() => {
+    if (!isTauri) return;
+    decisionHandler = (id, target) => {
+      const { servers: stored, activeServerId: activeId, decisionSnapshot: snap } = live.current;
+      const openTarget = () => {
+        void openMainWindow();
+        router.push(target && target.serverId === activeId ? `/session/${target.sessionId}` : "/inbox");
+      };
+      if (id === "tray:decision:review") {
+        openTarget();
+        return;
+      }
+      if (id !== "tray:decision:allow" && id !== "tray:decision:deny") return;
+      void answerTrayDecision(target, id === "tray:decision:allow", {
+        appLocked: isAppLockEngaged(),
+        currentPromptSeq: (sessionId) =>
+          target?.serverId === activeId && snap?.session_id === sessionId && snap.permission_prompt != null
+            ? snap.prompt_seq
+            : null,
+        resolveBaseUrl: (serverId) => stored.find((server) => server.id === serverId)?.baseUrl ?? null,
+        answer: answerPermission,
+      }).then((result) => {
+        if (result === "answered") return;
+        // Locked: bring the app up to its unlock gate and go nowhere. Anything else (prompt
+        // changed, server gone, daemon refused): show the user the session as it is now.
+        if (result === "locked") void openMainWindow();
+        else openTarget();
+      });
+    };
+    return () => {
+      decisionHandler = null;
+    };
+  }, []);
+
   useEffect(() => {
     if (!isTauri) return;
     const rows = sessions ?? [];
@@ -352,9 +412,7 @@ export function useDesktopNativeSync(): void {
       busy: rows.filter((row) => row.busy && !row.waiting).length,
       waiting: waiting.length,
       costUsd: rows.reduce((total, row) => total + (row.cost_usd || 0), 0) || undefined,
-      decision: waiting[0]
-        ? { title: decisionCopy({ sessionTitle: waiting[0].title, locked }).title }
-        : undefined,
+      decision,
       sessions: rows.slice(0, TRAY_SESSION_LIMIT).map((row) => ({
         id: row.id,
         title: redactTrayTitle(row.title, locked),
@@ -367,7 +425,20 @@ export function useDesktopNativeSync(): void {
     if (encoded === lastPushed.current) return;
     lastPushed.current = encoded;
     void pushTraySummary(summary);
-  }, [sessions, locked]);
+  }, [sessions, locked, decision]);
+}
+
+/** Tray decision rows are answered here rather than through the menu registry: they carry the
+ * exact prompt they were built for, which a plain `() => void` handler cannot receive. */
+let decisionHandler: ((id: string, target: TrayDecisionTarget | null) => void) | null = null;
+
+async function openMainWindow(): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("tray_open_main");
+  } catch {
+    // The window is already up whenever this runs from an in-app path.
+  }
 }
 
 /**
@@ -382,7 +453,15 @@ export function useDesktopMenu(): void {
 
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      const stop = await listen<{ id: string }>(MENU_EVENT, (event) => dispatch(event.payload.id));
+      const stop = await listen<{ id: string; decision?: TrayDecisionTarget }>(MENU_EVENT, (event) => {
+        const { id, decision } = event.payload;
+        if (id.startsWith("tray:decision:")) {
+          if (decisionHandler) decisionHandler(id, decision ?? null);
+          else router.push("/inbox");
+          return;
+        }
+        dispatch(id);
+      });
       if (active) unlisten = stop;
       else stop();
     })();
