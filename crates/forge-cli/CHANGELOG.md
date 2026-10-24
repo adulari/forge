@@ -6,6 +6,12 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-10-24
+
+### Security
+
+- **Dependency advisory RUSTSEC-2026-0387 is cleared.** `crypto-bigint` 0.7.6 (0.7.5 had timing variability in operations meant to be constant-time; reached through `p256`/`ecdsa`).
+
 ### Changed
 
 - **Each fact on the Forge screens is shown once, and jargon that carried no information is gone.** The bridge notice is one short row (`CLI bridge: uses your local login; provider terms may limit third-party use (/help)`; it was two wrapped rows and the full text stays in `/help`). A finished turn's tokens are in its footer only, so the status bar shows them while the turn runs and not after. The welcome's key row lists `Ctrl+J newline` and the model picker instead of repeating the five keys the composer border already shows. The status bar no longer draws the routing tier, `⟨auto⟩`, `mesh auto`, `ctx` before any number exists, or `untracked`; a pinned model's answer label no longer says `your pick`. Help is one full-width list below 180 columns (two half-width panes clipped most descriptions) and the longest command descriptions are shorter. After an approved edit the folded group names the file (`Edited calc.py (+1 −1)` instead of `edited 1 file`).
@@ -5159,7 +5165,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.22.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.23.0...HEAD
+[2.23.0]: https://github.com/Adulari/forge/compare/v2.22.0...v2.23.0
 [2.22.0]: https://github.com/Adulari/forge/compare/v2.21.0...v2.22.0
 [2.21.0]: https://github.com/Adulari/forge/compare/v2.20.0...v2.21.0
 [2.20.0]: https://github.com/Adulari/forge/compare/v2.19.0...v2.20.0
