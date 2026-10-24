@@ -26,6 +26,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{AnywhereCmd, ShareExpiry};
 
+mod approval_key;
 mod connector;
 mod display;
 use display::{configured_host_name, display_timestamp};
@@ -833,7 +834,7 @@ async fn approve_pairing(encoded_challenge: &str, expect_signing_key: Option<&st
         "account id",
     )?;
     if let Some(expected) = expect_signing_key {
-        ensure_expected_signing_key(&details.signing_public_key, expected)?;
+        approval_key::ensure_expected_signing_key(&details.signing_public_key, expected)?;
     } else {
         let safety_code =
             pairing_safety_code(&challenge, &details.signing_public_key, &account_id)?;
@@ -1051,17 +1052,6 @@ fn safe_display_text(value: &str) -> String {
 /// platform line has nothing real to show. Rather than guess from the APPROVING machine (which
 /// tells you nothing about the device being approved), the line is dropped; `device_name` is
 /// already the service's own description of the requesting device.
-/// The relay hands back the key the new device registered. A mismatch means the relay swapped
-/// it, so the approval would wrap the Account Data Key for someone else.
-fn ensure_expected_signing_key(relayed: &str, expected: &str) -> Result<()> {
-    let relayed = decode_base64_array::<32>(relayed, "device signing key")?;
-    let expected = decode_base64_array::<32>(expected, "expected signing key")?;
-    if relayed != expected {
-        bail!("the device approval request does not carry the expected signing key; nothing was approved");
-    }
-    Ok(())
-}
-
 fn format_approval_prompt(
     device_name: &str,
     account: &str,
@@ -2358,15 +2348,6 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn unattended_approval_requires_the_exact_signing_key_the_local_app_generated() {
-        let key = URL_SAFE_NO_PAD.encode([7u8; 32]);
-        let other = URL_SAFE_NO_PAD.encode([8u8; 32]);
-        assert!(ensure_expected_signing_key(&key, &key).is_ok());
-        assert!(ensure_expected_signing_key(&other, &key).is_err());
-        assert!(ensure_expected_signing_key(&key, "not-a-key").is_err());
-    }
 
     #[test]
     fn approval_prompt_shows_the_requesting_devices_own_name_not_a_hardcoded_platform() {
