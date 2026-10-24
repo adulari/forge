@@ -929,7 +929,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
                 accessibilityLabel="Close"
               />
             </Animated.View>
-            <View style={[styles.centerWrap, { pointerEvents: "box-none" }]}>
+            <View pointerEvents="box-none" style={styles.centerWrap}>
               <Animated.View
                 style={[
                   styles.centeredPanel,

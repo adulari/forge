@@ -17,6 +17,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import { isTauri } from "../../lib/platform";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space } from "../../theme/tokens";
@@ -40,6 +41,12 @@ const GRABBER_H = 4;
 const CLOSE_VELOCITY = 800;
 const CLOSE_DISTANCE_RATIO = 0.3;
 const SHEET_ANIMATION_MS = 150;
+// Height of DesktopWindowChrome's title bar (not imported: that module pulls in the palette).
+// The modal covers the whole webview, so on desktop an open sheet hid the only way to move the
+// window. A transparent drag strip over the bar keeps it draggable, and the sheet stays below it.
+const DESKTOP_TITLE_BAR = 36;
+type WebViewProps = React.ComponentProps<typeof View> & { dataSet?: Record<string, string> };
+const WebView = View as unknown as React.ComponentType<WebViewProps>;
 
 export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightRatio = 0.9, accessibilityLabel }: SheetProps) {
   const tokens = useTokens();
@@ -60,7 +67,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   // y=0.
   const maxSheetHeight = Math.min(
     windowHeight * maxHeightRatio * Math.max(...snapPoints.map((point) => Math.max(0, Math.min(1, point)))),
-    windowHeight - insets.top,
+    windowHeight - insets.top - (isTauri ? DESKTOP_TITLE_BAR : 0),
   );
   const [contentHeight, setContentHeight] = useState(0);
   const sheetHeight = contentHeight > 0 ? Math.min(contentHeight, maxSheetHeight) : maxSheetHeight;
@@ -208,6 +215,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
           accessibilityLabel="Close"
         />
       </Animated.View>
+      {isTauri ? <WebView dataSet={{ tauriDragRegion: "deep" }} style={styles.dragStrip} /> : null}
       <Animated.View
           style={[
             styles.sheet,
@@ -269,6 +277,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
 // the whole sheet felt rubbery and slow.
 const styles = StyleSheet.create({
   sheet: { position: "absolute", bottom: 0, overflow: "hidden" },
+  dragStrip: { position: "absolute", top: 0, left: 0, right: 0, height: DESKTOP_TITLE_BAR },
   grabberRow: { alignItems: "center", paddingVertical: space.space12 },
   grabber: { width: GRABBER_W, height: GRABBER_H, borderRadius: 999 },
   bodyScroll: { flexShrink: 1 },

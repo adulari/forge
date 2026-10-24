@@ -86,3 +86,24 @@ fn http_scope_reaches_daemons_on_any_port() {
         );
     }
 }
+
+/// Windows and Linux run undecorated and draw their own title bar. `core:default` only grants
+/// reading window state, so dragging and the minimize/maximize/close buttons were all refused.
+#[test]
+fn custom_title_bar_can_move_and_control_the_window() {
+    let granted: Vec<String> = capability()["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .collect();
+    for needed in [
+        "core:window:allow-start-dragging",
+        "core:window:allow-minimize",
+        "core:window:allow-maximize",
+        "core:window:allow-unmaximize",
+        "core:window:allow-close",
+    ] {
+        assert!(granted.iter().any(|g| g == needed), "missing {needed}");
+    }
+}

@@ -24,7 +24,8 @@ export function NoticeBanner({ notices, onOpen, onDismiss }: NoticeBannerProps) 
   const copy = bannerCopy(notices);
   return (
     <SafeAreaView
-      style={[styles.host, { pointerEvents: "box-none", paddingTop: isTauri ? 44 : 0 }]}
+      pointerEvents="box-none"
+      style={[styles.host, { paddingTop: isTauri ? 44 : 0 }]}
       edges={["top"]}
     >
       <View

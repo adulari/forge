@@ -8,10 +8,12 @@ import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { type ChangelogEntry, type ChangelogRelease } from "../../lib/api";
+import { splitEntry } from "../../lib/changelogEntry";
 import { useChangelog } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
+import { Markdown } from "../chat/Markdown";
 import { EmptyState } from "../ds/EmptyState";
 import { Sheet } from "../ds/Sheet";
 
@@ -70,15 +72,13 @@ function ReleaseBlock({ release, latest }: { release: ChangelogRelease; latest: 
               <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{group.section.toUpperCase()}</Text>
             ) : null}
             {group.texts.map((text, index) => (
-              <Text key={index} style={[typeScale.sub, { color: tokens.ink2 }]}>
-                {text}
-              </Text>
+              <Markdown key={index} content={text} style={[typeScale.sub, { color: tokens.ink2 }]} />
             ))}
           </View>
         ))
       ) : (
         <Text style={[typeScale.sub, { color: tokens.ink3 }]} numberOfLines={2}>
-          {release.entries.map((entry) => entry.text).join(" · ")}
+          {release.entries.map((entry) => splitEntry(entry.text).lead.replace(/`/g, "")).join(" · ")}
         </Text>
       )}
     </View>

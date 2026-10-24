@@ -6,6 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.23.2] - 2026-10-24
+
+### Changed
+
+- **The desktop app installs updates on its own.** At launch it checks for a newer signed release, installs it and restarts, without waiting for the Install button. A release whose UI could not be clicked (2.23.0) left users with no way to update, because the button lived in that UI; the check now runs natively (`mobile/src-tauri/src/auto_update.rs`). Linux does this for the AppImage only, since a .deb install would need a root password; .deb users keep the button. Set `FORGE_DESKTOP_AUTO_UPDATE=0` to turn it off.
+
+### Fixed
+
+- **The desktop title bar moves the window again, and its minimize, maximize and close buttons work.** Windows and Linux draw their own title bar, but the app never had permission to drag or control the window, so every call was refused. Clicks also never reached the bar: an empty toast container sat over it, because `pointerEvents: "box-none"` inside an inline style becomes invalid CSS on the web and the box caught every click (the notice banner had the same fault). The bar now counts clicks anywhere on it, and an open sheet leaves a drag strip over it.
+- **The "Installed Forge app" sheet shows the notes for the version you installed.** It used to show the server's newest release, so a 2.23.1 app on a 2.21.0 server listed 2.21.0's changes under a 2.23.1 heading. When the server has no notes for the version yet, the sheet says so and links to the published release notes. Entries render their formatting instead of raw `**` and backticks, show the summary line with the detail behind a tap, and the sheet has side padding again. The What's New panel renders formatting too.
+
 ## [2.23.1] - 2026-10-24
 
 ### Fixed
@@ -5171,7 +5182,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.23.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.23.2...HEAD
+[2.23.2]: https://github.com/Adulari/forge/compare/v2.23.1...v2.23.2
 [2.23.1]: https://github.com/Adulari/forge/compare/v2.23.0...v2.23.1
 [2.23.0]: https://github.com/Adulari/forge/compare/v2.22.0...v2.23.0
 [2.22.0]: https://github.com/Adulari/forge/compare/v2.21.0...v2.22.0
