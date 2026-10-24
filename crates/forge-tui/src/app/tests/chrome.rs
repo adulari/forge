@@ -257,6 +257,46 @@ fn statusline_shows_model_and_cost() {
 }
 
 #[test]
+fn a_bridged_model_reads_as_its_plain_name_without_the_billing_word() {
+    let route = |app: &mut App, model: &str| {
+        app.apply(PresenterEvent::Routing {
+            effort: None,
+            tier: "simple".into(),
+            model: model.into(),
+            rationale: "x".into(),
+        });
+    };
+    let mut app = App::default();
+    route(&mut app, "claude-cli::haiku");
+    let text = screen_wh(&app, 120, LIVE_H);
+    assert!(text.contains("haiku"), "plain model name: {text:?}");
+    assert!(
+        !text.contains("claude-cli"),
+        "bridge id is plumbing: {text:?}"
+    );
+    assert!(
+        !text.contains("subscription"),
+        "billing word stays off the bar: {text:?}"
+    );
+
+    // A bare bridge id has no model name to show, so the provider stays.
+    route(&mut app, "codex-cli::");
+    let text = screen_wh(&app, 120, LIVE_H);
+    assert!(
+        text.contains("codex-cli"),
+        "bare bridge keeps its name: {text:?}"
+    );
+
+    // A gateway keeps its provider: it tells two routes to one model apart.
+    route(&mut app, "inferhub::cb/deepseek-v4.1-flash");
+    let text = screen_wh(&app, 120, LIVE_H);
+    assert!(
+        text.contains("inferhub::"),
+        "gateway provider kept: {text:?}"
+    );
+}
+
+#[test]
 fn statusline_shows_forge_effort_labelled_as_meshs_own() {
     // The cell is labelled "mesh" because the statusline now carries TWO efforts: this one,
     // which biases routing, and the rung glued to the model id, which is what the model runs

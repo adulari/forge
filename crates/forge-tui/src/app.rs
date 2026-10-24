@@ -3514,6 +3514,7 @@ mod screen_select;
 #[cfg(test)]
 mod steer_esc_tests;
 pub use output_view::{page_file, OutputAction, OutputView};
+mod script_row;
 mod tool_cards;
 mod tool_groups;
 /// The shared list component, for the takeover screens outside `app` (Help, select).
