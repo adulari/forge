@@ -16,14 +16,16 @@
 use ratatui::text::Line as TextLine;
 use std::collections::HashSet;
 
+use super::group_body::children_of;
+use super::group_rows::{self, CallRow};
 use super::tool_cards::{self, CardStatus, ToolCard};
-use super::tool_groups::{self, RowState, Summary};
+use super::tool_groups::{self, RowState};
 use super::{App, KeyKind, WrapCache};
 
 /// Running calls a collapsed group shows rows for.
-const RUNNING_ROWS: usize = 3;
+pub(super) const RUNNING_ROWS: usize = 3;
 /// Below this width a summary row drops its duration to keep more of its words.
-const COMPACT_WIDTH: usize = 80;
+pub(super) const COMPACT_WIDTH: usize = 80;
 
 /// Where a group sits in `main_log`, and the indices of its cards in `tool_cards`.
 #[derive(Debug, Clone)]
@@ -44,6 +46,14 @@ pub(crate) enum FoldRowKind {
         indent: bool,
     },
     Failed,
+    /// A row of a call inside an open group; `first` is its header row, the one that animates.
+    Call {
+        card: u64,
+        depth: usize,
+        first: bool,
+    },
+    /// The blank row that sets a group apart from the prose around it.
+    Spacer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,17 +80,17 @@ pub(crate) struct FoldKey {
 }
 
 /// Rows being built for the wrap cache, with the fold annotations alongside.
-struct Builder<'a> {
-    width: usize,
-    log: &'a [TextLine<'static>],
-    rows: Vec<TextLine<'static>>,
-    origins: Vec<usize>,
-    fold_rows: Vec<FoldRow>,
-    hits: Vec<GroupHit>,
+pub(super) struct Builder<'a> {
+    pub(super) width: usize,
+    pub(super) log: &'a [TextLine<'static>],
+    pub(super) rows: Vec<TextLine<'static>>,
+    pub(super) origins: Vec<usize>,
+    pub(super) fold_rows: Vec<FoldRow>,
+    pub(super) hits: Vec<GroupHit>,
 }
 
 impl Builder<'_> {
-    fn log_lines(&mut self, from: usize, to: usize) {
+    pub(super) fn log_lines(&mut self, from: usize, to: usize) {
         if from >= to {
             return;
         }
@@ -90,7 +100,12 @@ impl Builder<'_> {
         self.origins.extend(origins.into_iter().map(|i| i + from));
     }
 
-    fn row(&mut self, line: TextLine<'static>, origin: usize, fold: Option<(u64, FoldRowKind)>) {
+    pub(super) fn row(
+        &mut self,
+        line: TextLine<'static>,
+        origin: usize,
+        fold: Option<(u64, FoldRowKind)>,
+    ) {
         for row in crate::transcript::wrap_lines(&[line], self.width) {
             if let Some((group, kind)) = fold {
                 self.fold_rows.push(FoldRow {
@@ -178,7 +193,7 @@ impl App {
     }
 
     /// The newest running call, which a permission prompt belongs to.
-    fn newest_running(&self) -> Option<u64> {
+    pub(super) fn newest_running(&self) -> Option<u64> {
         self.tool_cards
             .iter()
             .rev()
@@ -217,6 +232,7 @@ impl App {
             at = span.end;
             let cards: Vec<&ToolCard> = span.cards.iter().map(|&i| &self.tool_cards[i]).collect();
             let summary = self.fold_ui.summary(span.id, &cards);
+            b.spacer(span.start, span.id, None);
             let first = b.rows.len();
             let compact = b.width < COMPACT_WIDTH;
             if self.group_expanded(span.id) {
@@ -236,10 +252,8 @@ impl App {
                     rows: 1,
                     group: span.id,
                 });
-                // The cards hang under the header, exactly as they render unfolded.
-                for at in span.start..span.end {
-                    b.row(tool_groups::indented(self.main_log[at].clone()), at, None);
-                }
+                self.open_rows(&mut b, span, &cards, awaiting);
+                b.spacer(span.end, span.id, self.main_log.get(span.end));
                 continue;
             }
             let hint = (hinted == Some(span.id))
@@ -251,6 +265,7 @@ impl App {
                 rows: b.rows.len() - first,
                 group: span.id,
             });
+            b.spacer(span.end, span.id, self.main_log.get(span.end));
         }
         let live: HashSet<u64> = spans.iter().map(|s| s.id).collect();
         self.fold_ui.keep_summaries(|group| live.contains(&group));
@@ -259,73 +274,6 @@ impl App {
         cache.origins = b.origins;
         cache.fold_rows = b.fold_rows;
         cache.group_hits = b.hits;
-    }
-
-    /// A collapsed group: its summary (once a call has finished), its failures, and the calls
-    /// still running. A call waiting for permission also shows its diff, because that is what
-    /// the decision is about.
-    fn collapsed_rows(
-        &self,
-        b: &mut Builder<'_>,
-        span: &GroupSpan,
-        cards: &[&ToolCard],
-        summary: &Summary,
-        awaiting: Option<u64>,
-        hint: Option<String>,
-    ) {
-        let has_summary = summary.finished > 0;
-        if has_summary {
-            let state = RowState {
-                compact: b.width < COMPACT_WIDTH,
-                width: b.width,
-                // A group still running has nothing to open yet.
-                hint: hint.filter(|_| summary.running == 0),
-                ..RowState::default()
-            };
-            b.row(
-                tool_groups::summary_row(summary, state),
-                span.start,
-                Some((span.id, FoldRowKind::Summary)),
-            );
-        }
-        if summary.finished > 1 {
-            let failed: Vec<&&ToolCard> = cards
-                .iter()
-                .filter(|c| c.status == CardStatus::Failed)
-                .collect();
-            let skip = failed.len().saturating_sub(tool_groups::FAILED_ROWS);
-            for card in failed.into_iter().skip(skip) {
-                // A click here opens the group, not the card, so the card's own triangle goes.
-                let row = tool_groups::without_disclosure(tool_cards::live_header(card, 0, false));
-                let row = tool_groups::indented(row);
-                b.row(row, card.start, Some((span.id, FoldRowKind::Failed)));
-            }
-        }
-        for card in cards
-            .iter()
-            .filter(|c| c.status == CardStatus::Running)
-            .take(RUNNING_ROWS)
-        {
-            let waiting = awaiting == Some(card.id);
-            let mut row = tool_cards::live_header(card, 0, waiting);
-            if has_summary {
-                row = tool_groups::indented(row);
-            }
-            let kind = FoldRowKind::Running {
-                card: card.id,
-                indent: has_summary,
-            };
-            b.row(row, card.start, Some((span.id, kind)));
-            if waiting {
-                for at in card.start + 1..card.start + card.len {
-                    let mut body = self.main_log[at].clone();
-                    if has_summary {
-                        body = tool_groups::indented(body);
-                    }
-                    b.row(body, at, None);
-                }
-            }
-        }
     }
 
     /// The fold row drawn at wrapped row `row`, if the fold put one there.
@@ -377,7 +325,29 @@ impl App {
                     row
                 }
             }
-            FoldRowKind::Failed => return None,
+            FoldRowKind::Call {
+                card,
+                depth,
+                first: true,
+            } => {
+                let card = self.tool_cards.iter().find(|c| c.id == card)?;
+                if card.status != CardStatus::Running {
+                    return None;
+                }
+                let cards: Vec<&ToolCard> = self.group_cards(fold.group).collect();
+                let children = children_of(&cards, card.id);
+                let row = CallRow {
+                    card,
+                    depth,
+                    children: &children,
+                    width: width.saturating_sub(1) as usize,
+                    tick: Some(self.tick),
+                    awaiting: self.prompt.is_some() && self.newest_running() == Some(card.id),
+                    disclosure: true,
+                };
+                return group_rows::call_rows(&row).into_iter().next();
+            }
+            FoldRowKind::Failed | FoldRowKind::Call { .. } | FoldRowKind::Spacer => return None,
         };
         crate::transcript::wrap_lines(&[line], width.saturating_sub(1) as usize)
             .into_iter()

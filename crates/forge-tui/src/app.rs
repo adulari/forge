@@ -1461,13 +1461,21 @@ impl App {
                         "shell diagnosis ready",
                     );
                 }
-                self.flush.extend(shell_diagnosis_lines(
+                let lines = shell_diagnosis_lines(
                     &command,
                     &diagnosis,
                     fix.as_deref(),
                     self.last_width.get(),
                     in_turn,
-                ));
+                );
+                if self.attach_diagnosis(&command, &diagnosis, fix.as_deref()) {
+                    // The card shows it; a phone reads the transcript, which has no card.
+                    let origin = LineOrigin::default();
+                    self.remote_only
+                        .extend(lines.into_iter().map(|l| (l, origin.clone())));
+                } else {
+                    self.flush.extend(lines);
+                }
             }
             PresenterEvent::BtwAnswer {
                 question,
@@ -1722,7 +1730,11 @@ impl App {
                     self.flush.push(row);
                 }
             }
-            PresenterEvent::Progress(text) => self.push_notice(NoticeKind::Info, &text),
+            PresenterEvent::Progress(text) => {
+                if !self.absorb_silence_note(&text) {
+                    self.push_notice(NoticeKind::Info, &text);
+                }
+            }
             PresenterEvent::SuggestionReady { text } => {
                 // Silent — no scrollback line. It only ever shows as ghost text in the (by now
                 // empty, idle) input box; see `render_input`.
@@ -3485,7 +3497,10 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 }
 
 mod card_flow;
+mod card_text;
+mod group_body;
 mod group_flow;
+mod group_rows;
 mod lines;
 mod state;
 mod transcript_flow;

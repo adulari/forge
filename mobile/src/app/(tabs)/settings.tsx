@@ -39,6 +39,8 @@ import { Input } from "../../components/ds/Input";
 import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
+import { BackLink } from "../../components/ds/BackLink";
+import { leaveSettings } from "../../lib/nav";
 import { Sheet } from "../../components/ds/Sheet";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
@@ -158,6 +160,7 @@ export function SettingsNavRail({ active }: { active: string }) {
   const railHoverFill = hexToRgba(tokens.ink, 0.04);
   return (
     <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border }]}>
+      <BackLink label="Back" accessibilityLabel="Leave Settings" onPress={leaveSettings} />
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
       {SETTINGS_NAV_ITEMS.map((item) => {
         const selected = item.key === active;

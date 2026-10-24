@@ -58,6 +58,7 @@ import {
   runReservedBrowserFlow,
   type ReservedBrowserAuthWindow,
 } from "./anywhereExternalAuth";
+import { linkWithLocalCli } from "./anywhereCliLink";
 import { isTauri } from "./platform";
 import {
   AnywhereJobClient,
@@ -955,6 +956,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     };
     await persistCredentials(next);
     await enrollmentStore.clear();
+    setCliLinkOptedOut(false);
     setPending(null);
     setRecoverySetup(null);
     setClaimantPairing(null);
@@ -963,6 +965,33 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     setPhase("ready");
     await refresh();
   }, [persistCredentials, refresh]);
+
+  // Forge Desktop adopts the account the Forge CLI on this computer is already signed in to,
+  // once per launch, unless the user signed this app out on purpose. An expired sign-in of the
+  // same account is replaced the same way; one of another account is left for the user.
+  const cliLinkAttempted = useRef(false);
+  useEffect(() => {
+    const expired = phase === "reauthentication_required";
+    if ((phase !== "signed_out" && !expired) || !isTauri || cliLinkAttempted.current || cliLinkOptedOut()) return;
+    cliLinkAttempted.current = true;
+    const expectedAccountId = expired ? credentialsRef.current?.accountIdHex : undefined;
+    if (expired && !expectedAccountId) return;
+    void (async () => {
+      setPhase("starting");
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const linked = await linkWithLocalCli(SERVICE_URL, deviceName(), { invoke }, expectedAccountId);
+        if (!linked) {
+          setPhase((current) => (current === "starting" ? phase : current));
+          return;
+        }
+        await finishEnrollment({ auth: linked.auth, keys: linked.keys }, linked.dataKey, linked.epoch, 0n);
+      } catch (reason) {
+        console.warn("[anywhere] could not use the Forge CLI sign-in:", message(reason));
+        setPhase((current) => (current === "starting" ? phase : current));
+      }
+    })();
+  }, [finishEnrollment, phase]);
 
   useEffect(() => {
     if (phase !== "awaiting_approval" || !claimantPairing) return;
@@ -1686,6 +1715,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   }, [pushApi]);
 
   const logout = useCallback(async () => {
+    setCliLinkOptedOut(true);
     const current = credentialsRef.current;
     if (current) {
       try {
@@ -1812,6 +1842,21 @@ function message(reason: unknown): string {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+const CLI_LINK_OPT_OUT_KEY = "forge.anywhere.cliLinkOptOut";
+
+function cliLinkOptedOut(): boolean {
+  try { return globalThis.localStorage?.getItem(CLI_LINK_OPT_OUT_KEY) === "1"; } catch { return false; }
+}
+
+function setCliLinkOptedOut(value: boolean): void {
+  try {
+    if (value) globalThis.localStorage?.setItem(CLI_LINK_OPT_OUT_KEY, "1");
+    else globalThis.localStorage?.removeItem(CLI_LINK_OPT_OUT_KEY);
+  } catch {
+    // Without storage the app simply offers the CLI sign-in again next launch.
+  }
 }
 
 function deviceName(): string {

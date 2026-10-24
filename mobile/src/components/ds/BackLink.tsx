@@ -7,11 +7,11 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, tapTarget } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
-export function BackLink({ label = "Settings", onPress }: { label?: string; onPress?: () => void }) {
+export function BackLink({ label = "Settings", onPress, accessibilityLabel }: { label?: string; onPress?: () => void; accessibilityLabel?: string }) {
   const tokens = useTokens();
   const [focused, setFocused] = useState(false);
   return (
-    <Pressable onPress={onPress ?? (() => router.back())} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} accessibilityRole="button" accessibilityLabel={`Back to ${label}`} style={[styles.button, { borderColor: focused ? tokens.accent : "transparent" }]}>
+    <Pressable onPress={onPress ?? (() => router.back())} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? `Back to ${label}`} style={[styles.button, { borderColor: focused ? tokens.accent : "transparent" }]}>
       <ArrowLeft size={18} strokeWidth={1.75} color={tokens.accent} />
       <Text style={[type.bodyBold, { color: tokens.accent }]}>{label}</Text>
     </Pressable>

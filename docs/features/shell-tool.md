@@ -112,7 +112,9 @@ When a background job exits, the model is told through a user-role message
 turn and the model must see it (`crates/forge-core/src/job_wake.rs`). That message is not the
 person's; every surface recognises it with `forge_types::parse_job_notices` and shows a harness
 notice instead of a "you" row: in the TUI (live, mid-turn, resume) one `⚙ job 3429249 ✓ exited 0 ·
-<cmd>` line per job (`✗` for a non-zero exit) with the last four log lines dim underneath; headless
+<cmd>` line per job (`✗` for a non-zero exit; the command without a leading `exec` and with the
+home directory as `~`) with the last four log lines underneath, a step fainter than the notice so
+they are not read as the assistant's text; headless
 prints the same lines; the remote history API tags the row `kind: "job_notice"` (the stored role
 stays `user`) and live remote rows carry `kind: "job_notice"` with `meta` `ok`/`failed`/`tail`;
 the web app and mobile render it as dim system output. A prompt that merely mentions a notice

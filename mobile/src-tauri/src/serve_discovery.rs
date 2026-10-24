@@ -262,6 +262,88 @@ pub fn forge_anywhere_host_enrolled() -> bool {
         .is_some_and(|token| !token.is_empty())
 }
 
+/// Public details of the local CLI's Forge Anywhere sign-in. No keys or tokens leave this file.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct CliAnywhereAccount {
+    account_id: String,
+    github_login: Option<String>,
+}
+
+fn cli_anywhere_account_from(contents: &str) -> Option<CliAnywhereAccount> {
+    let state = serde_json::from_str::<serde_json::Value>(contents).ok()?;
+    let signed_in = state
+        .get("refresh_token")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|token| !token.is_empty());
+    let account_id = state.get("account_id")?.as_str()?;
+    if !signed_in || account_id.len() != 32 || !account_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(CliAnywhereAccount {
+        account_id: account_id.to_ascii_lowercase(),
+        github_login: state
+            .get("github_login")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    })
+}
+
+#[tauri::command]
+pub fn forge_anywhere_cli_account() -> Option<CliAnywhereAccount> {
+    let contents = std::fs::read_to_string(anywhere_state_path()?).ok()?;
+    cli_anywhere_account_from(&contents)
+}
+
+/// Lets the signed-in CLI on this computer approve the desktop app as a new device of the same
+/// account. The app generated `signing_public_key`, so the CLI approves without a prompt only
+/// when the relay hands back that exact key.
+#[tauri::command(async)]
+pub fn approve_anywhere_pairing_with_cli(
+    challenge: String,
+    signing_public_key: String,
+) -> Result<(), String> {
+    let well_formed = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 4096
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    if !well_formed(&challenge) || !well_formed(&signing_public_key) {
+        return Err("the device approval request is malformed".to_string());
+    }
+    let forge_binary =
+        find_forge_binary().ok_or_else(|| "Forge is not installed on this computer".to_string())?;
+    let mut cmd = std::process::Command::new(&forge_binary);
+    cmd.args([
+        "anywhere",
+        "approve",
+        &challenge,
+        "--expect-signing-key",
+        &signing_public_key,
+    ])
+    .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
+        .output()
+        .map_err(|error| format!("start Forge CLI approval: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().chars().take(240).collect::<String>())
+        .unwrap_or_default();
+    Err(format!("the Forge CLI did not approve this app: {detail}"))
+}
+
 /// Install a distinct, encrypted-pairing-derived CLI identity and activate it as a host.
 /// Existing CLI enrollment is never overwritten.
 ///
@@ -453,6 +535,22 @@ mod tests {
         .unwrap();
         assert!(read_and_validate(&dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_account_exposes_only_public_fields_of_a_signed_in_state() {
+        let state = r#"{"account_id":"0123456789ABCDEF0123456789abcdef","github_login":"floris","refresh_token":"r","access_token":"a","account_data_key":"k"}"#;
+        assert_eq!(
+            cli_anywhere_account_from(state),
+            Some(CliAnywhereAccount {
+                account_id: "0123456789abcdef0123456789abcdef".to_string(),
+                github_login: Some("floris".to_string()),
+            })
+        );
+        let signed_out = r#"{"account_id":"0123456789abcdef0123456789abcdef","refresh_token":""}"#;
+        assert_eq!(cli_anywhere_account_from(signed_out), None);
+        assert_eq!(cli_anywhere_account_from(r#"{"account_id":"x","refresh_token":"r"}"#), None);
+        assert_eq!(cli_anywhere_account_from("not json"), None);
     }
 
     #[test]

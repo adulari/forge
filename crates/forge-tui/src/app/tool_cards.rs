@@ -15,6 +15,10 @@
 //! is printed ONCE, finished, when its result lands; the running call is shown only in the
 //! composer border.
 
+pub(crate) use super::card_text::{
+    cells, display_path, group, oneline, shorten, shorten_in, size_label, truncate_cells,
+    wrap_plain,
+};
 use super::lines::rail;
 use crate::copy_mark;
 use crate::theme::glyphs::g;
@@ -32,7 +36,7 @@ const FAILURE_TAIL_LINES: usize = 3;
 /// User-turn rows shown before the rest folds.
 pub(crate) const USER_FOLD_ROWS: usize = 6;
 /// Width of the verb column (the longest verb is six cells).
-const VERB_W: usize = 6;
+pub(crate) const VERB_W: usize = 6;
 
 /// How a card's call ended. `Running` is the state between `ToolStart` and `ToolResult`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,18 @@ pub(crate) struct ToolCard {
     pub(crate) interactive: bool,
     /// The tool group this call belongs to (the id of the group's first card), full-screen only.
     pub(crate) batch: Option<u64>,
+    /// The `run_code` call this call ran inside, full-screen only.
+    pub(crate) parent: Option<u64>,
+    /// Why a failed shell command failed, from the shell-error interceptor, shown under the card
+    /// instead of as a notice repeating the command.
+    pub(crate) note: Option<CardNote>,
+}
+
+/// A diagnosis attached to a failed call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CardNote {
+    pub(crate) diagnosis: String,
+    pub(crate) fix: Option<String>,
 }
 
 impl ToolCard {
@@ -121,6 +137,8 @@ impl ToolCard {
             fold: None,
             interactive: true,
             batch: None,
+            parent: None,
+            note: None,
         }
     }
 
@@ -231,6 +249,9 @@ fn clean_summary(card_name: &str, summary: &str) -> String {
 pub(crate) fn outcome_text(card: &ToolCard) -> String {
     match card.status {
         CardStatus::Running => "running".to_string(),
+        // A script's summary is the first line of whatever it returned (often an inner call's
+        // `shell: exit 0`), which reads as this call's outcome when it is not.
+        CardStatus::Ok if card.name == "run_code" => "done".to_string(),
         _ => {
             if let Some(diff) = &card.diff {
                 return diff_outcome(diff, card.diff_counts);
@@ -264,7 +285,7 @@ fn diff_outcome(diff: &FileDiff, (adds, dels): (usize, usize)) -> String {
 }
 
 /// The right-hand text of the header row: outcome, kept-output size, duration.
-fn right_text(card: &ToolCard) -> String {
+pub(crate) fn right_text(card: &ToolCard) -> String {
     let sep = format!(" {} ", g().sep);
     let mut parts = vec![outcome_text(card)];
     if card.status != CardStatus::Running {
@@ -286,7 +307,7 @@ fn right_text(card: &ToolCard) -> String {
 }
 
 /// Status glyph and its style. `tick` animates the running spinner when given.
-fn status_mark(card: &ToolCard, tick: Option<usize>, awaiting: bool) -> (String, Style) {
+pub(crate) fn status_mark(card: &ToolCard, tick: Option<usize>, awaiting: bool) -> (String, Style) {
     let glyphs = g();
     match card.status {
         CardStatus::Running if awaiting => (glyphs.awaiting.to_string(), styles::warn()),
@@ -373,7 +394,7 @@ fn prefixed(spans: Vec<Span<'static>>, line_style: Style) -> TextLine<'static> {
     rail::with_prefix(row, line)
 }
 
-fn text_row(text: String, style: Style) -> TextLine<'static> {
+pub(crate) fn text_row(text: String, style: Style) -> TextLine<'static> {
     body_row(vec![Span::styled(text, style)])
 }
 
@@ -456,6 +477,7 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
             }
         }
     }
+    out.extend(note_rows(card));
     // The preview above is bounded; this row is the way to everything. It sits directly above the
     // collapse hint so `full_output_row` can find it without re-rendering the card.
     if let Some(full) = &card.full {
@@ -511,7 +533,28 @@ fn collapsed_body(card: &ToolCard, out: &mut Vec<TextLine<'static>>) {
                 out.push(text_row(truncate_cells(l, 200), styles::err()));
             }
         }
+        out.extend(note_rows(card));
     }
+}
+
+/// A failed call's diagnosis, dim under its header: the likely cause, then the fix.
+pub(crate) fn note_rows(card: &ToolCard) -> Vec<TextLine<'static>> {
+    let Some(note) = &card.note else {
+        return Vec::new();
+    };
+    let mut out: Vec<TextLine<'static>> = note
+        .diagnosis
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| text_row(l.trim().to_string(), styles::muted()))
+        .collect();
+    if let Some(fix) = note.fix.as_deref().filter(|f| !f.trim().is_empty()) {
+        out.push(body_row(vec![
+            Span::styled("fix ", styles::muted().bold()),
+            Span::styled(fix.trim().to_string(), styles::muted()),
+        ]));
+    }
+    out
 }
 
 /// The rows of a folded user turn.
@@ -586,12 +629,12 @@ pub(crate) fn headline(name: &str, args: &str) -> String {
     let cwd = get("cwd");
     let show_path = |p: String| display_path(&p, cwd.as_deref());
     let first = match name {
-        "shell" => get("command").or_else(|| {
+        "shell" => get("command").map(|c| shorten_in(&c)).or_else(|| {
             let list = value.get("commands")?.as_array()?;
             let first = list.first()?.as_str()?;
             Some(match list.len() {
-                1 => first.to_string(),
-                n => format!("{first} (+{} more)", n - 1),
+                1 => shorten_in(first),
+                n => format!("{} (+{} more)", shorten_in(first), n - 1),
             })
         }),
         "read_file" | "write_file" | "edit_file" | "list_dir" => get("path").map(show_path),
@@ -655,137 +698,6 @@ fn arg_rows(args: &str) -> Vec<(String, String)> {
             Some((k.clone(), rendered))
         })
         .collect()
-}
-
-/// How a path is shown: relative to the call's own `cwd` when it sits under it, else with the
-/// home directory folded to `~`. A tool call's path is almost always inside the workspace, and
-/// repeating that prefix on every row costs the width the interesting tail needs.
-fn display_path(path: &str, cwd: Option<&str>) -> String {
-    // A bridged claude call carries absolute paths and no `cwd` of its own; the TUI's directory is
-    // the session's, so it stands in.
-    let own = std::env::current_dir().ok();
-    let own = own.as_deref().and_then(std::path::Path::to_str);
-    for cwd in [cwd, own].into_iter().flatten().filter(|c| !c.is_empty()) {
-        if let Ok(rest) = std::path::Path::new(path).strip_prefix(cwd) {
-            let rest = rest.to_string_lossy();
-            if !rest.is_empty() {
-                return rest.into_owned();
-            }
-        }
-    }
-    shorten(path)
-}
-
-/// Replace the home directory with `~` so a path row reads as a path, not as a margin-eating
-/// absolute prefix repeated on every call.
-pub(crate) fn shorten(path: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
-            format!("~{}", &path[home.len()..])
-        }
-        _ => path.to_string(),
-    }
-}
-
-/// Collapse a multi-line value onto one line for the header row.
-fn oneline(s: &str) -> String {
-    let mut out = String::new();
-    for (i, part) in s
-        .split('\n')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .enumerate()
-    {
-        if i > 0 {
-            out.push_str(" ⏎ ");
-        }
-        out.push_str(part);
-    }
-    out
-}
-
-/// Hard-wrap plain text to `width` cells. Never returns an empty vector, so a blank line in tool
-/// output still occupies a row (blank lines are structure in most command output).
-pub(crate) fn wrap_plain(text: &str, width: usize) -> Vec<String> {
-    use unicode_width::UnicodeWidthChar;
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut cells = 0usize;
-    for ch in text.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(1);
-        if cells + w > width && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-            cells = 0;
-        }
-        cur.push(ch);
-        cells += w;
-    }
-    out.push(cur);
-    out
-}
-
-/// The display width of a string in terminal cells.
-pub(crate) fn cells(s: &str) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    s.chars()
-        .map(|c| UnicodeWidthChar::width(c).unwrap_or(1))
-        .sum()
-}
-
-/// Truncate to `cells` display columns with an ellipsis, counting terminal cells (a CJK glyph is
-/// two) so the header's right-hand status column stays put on any content.
-pub(crate) fn truncate_cells(s: &str, cells: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
-    if cells == 0 {
-        return String::new();
-    }
-    let total: usize = s
-        .chars()
-        .map(|c| UnicodeWidthChar::width(c).unwrap_or(1))
-        .sum();
-    if total <= cells {
-        return s.to_string();
-    }
-    let ellipsis = g().ellipsis;
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(1);
-        if used + w > cells.saturating_sub(ellipsis.chars().count()) {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push_str(ellipsis);
-    out
-}
-
-/// `1234567` → `1,234,567`.
-pub(crate) fn group(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// `5,012 lines · 212 KB`.
-pub(crate) fn size_label(lines: usize, bytes: usize) -> String {
-    let size = match bytes {
-        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1u64 << 20) as f64),
-        b if b >= 1 << 10 => format!("{} KB", b.div_ceil(1 << 10)),
-        b => format!("{b} B"),
-    };
-    let unit = if lines == 1 { "line" } else { "lines" };
-    format!("{} {unit} · {size}", group(lines))
 }
 
 #[cfg(test)]

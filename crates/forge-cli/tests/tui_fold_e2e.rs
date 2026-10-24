@@ -21,6 +21,9 @@ struct Screen {
     cells: Vec<Vec<char>>,
     row: usize,
     col: usize,
+    /// The tail of the last read when it ended inside an escape sequence or a UTF-8 character:
+    /// a read boundary can fall anywhere, and feeding half a sequence prints its bytes.
+    pending: Vec<u8>,
 }
 
 impl Screen {
@@ -29,7 +32,24 @@ impl Screen {
             cells: vec![vec![' '; COLS]; ROWS],
             row: 0,
             col: 0,
+            pending: Vec::new(),
         }
+    }
+
+    /// Feed raw output, holding back an incomplete trailing escape or UTF-8 sequence.
+    fn feed_bytes(&mut self, bytes: &[u8]) {
+        let mut all = std::mem::take(&mut self.pending);
+        all.extend_from_slice(bytes);
+        let valid = match std::str::from_utf8(&all) {
+            Ok(_) => all.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => all.len(),
+        };
+        let text = String::from_utf8_lossy(&all[..valid]).to_string();
+        let cut = incomplete_escape(&text);
+        self.pending = text.as_bytes()[cut..].to_vec();
+        self.pending.extend_from_slice(&all[valid..]);
+        self.feed(&text[..cut]);
     }
 
     fn feed(&mut self, text: &str) {
@@ -167,7 +187,7 @@ impl Session {
                                 let _ = w.flush();
                             }
                         }
-                        s.lock().unwrap().feed(&chunk);
+                        s.lock().unwrap().feed_bytes(&buf[..n]);
                     }
                 }
             }
@@ -243,6 +263,25 @@ impl Session {
     }
 }
 
+/// Where an escape sequence that has not ended yet starts in `text`, or its length.
+fn incomplete_escape(text: &str) -> usize {
+    let Some(at) = text.rfind('\u{1b}') else {
+        return text.len();
+    };
+    let tail = &text[at + 1..];
+    let done = match tail.chars().next() {
+        None => false,
+        Some('[') => tail[1..].chars().any(|d| ('@'..='~').contains(&d)),
+        Some(']') => tail.contains('\u{7}') || tail.contains("\u{1b}\\"),
+        Some(_) => true,
+    };
+    if done {
+        text.len()
+    } else {
+        at
+    }
+}
+
 fn has(rows: &[String], needle: &str) -> bool {
     rows.iter().any(|r| r.contains(needle))
 }
@@ -299,7 +338,7 @@ fn clicking_a_folded_tool_group_opens_it_and_clicking_again_folds_it() {
     // Alt+O opens every group from the keyboard.
     s.send("\x1bo");
     s.wait_until("every group to open", |r| {
-        has(r, "▾ Created 1 file") && has(r, "✓ Write") && has(r, "✓ Edit")
+        has(r, "▾ Created mock-summary.md") && has(r, "✓ Write") && has(r, "✓ Edit")
     });
     assert!(s.quit(), "clean exit");
 }

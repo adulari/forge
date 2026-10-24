@@ -18,6 +18,7 @@ mod interaction;
 mod notice_during_stream;
 mod panels;
 mod queue_band;
+mod readability;
 mod remote;
 mod state;
 mod transcript;

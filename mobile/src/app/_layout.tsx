@@ -46,6 +46,7 @@ import { AuthProvider, useAuth } from "../lib/auth";
 import { rememberPendingRoute } from "../lib/pendingRoute";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
+import { rememberShellRoute } from "../lib/nav";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useDesktopMenuAction } from "../lib/desktopMenu";
@@ -129,6 +130,9 @@ function RootNavigator() {
   }, []);
   const pathname = usePathname();
   const railless = RAILLESS_ROUTES.test(pathname);
+  useEffect(() => {
+    if (!railless) rememberShellRoute(pathname);
+  }, [pathname, railless]);
 
   // Browser tab badge — mounted here (inside the providers, since it reads the fleet) so the
   // waiting count keeps tracking after the user navigates away from Settings. No-op off web.

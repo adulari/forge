@@ -186,6 +186,8 @@ pub fn run(process_start: Instant) {
             serve_discovery::forge_anywhere_host_enrolled,
             serve_discovery::install_forge_anywhere_host,
             serve_discovery::activate_forge_anywhere_host,
+            serve_discovery::forge_anywhere_cli_account,
+            serve_discovery::approve_anywhere_pairing_with_cli,
             preview::preview_open,
             preview::preview_set_bounds,
             preview::preview_navigate,

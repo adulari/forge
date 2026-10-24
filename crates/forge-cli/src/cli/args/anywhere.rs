@@ -26,6 +26,10 @@ pub(crate) enum AnywhereCmd {
     Approve {
         /// Challenge printed by `forge anywhere setup` on the new device.
         challenge: String,
+        /// Approve without a prompt when the new device's signing key matches this one. Used by
+        /// Forge Desktop on the same computer, which generated the key and so can vouch for it.
+        #[arg(long, value_name = "KEY")]
+        expect_signing_key: Option<String>,
     },
     /// Register this machine as a managed host and enable its connector.
     Enable {
