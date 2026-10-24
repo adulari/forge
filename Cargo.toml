@@ -100,7 +100,7 @@ x25519-dalek = { version = "3", features = ["static_secrets"] }
 hkdf = "0.13"
 sha2 = "0.11"
 zeroize = { version = "1", features = ["derive"] }
-bip39 = "2"
+bip39 = "3"
 
 [profile.release]
 lto = "thin"
