@@ -3688,6 +3688,7 @@ pub fn search_provider_label(provider: &str) -> &'static str {
 /// Export keyring-stored search keys into the environment so the `web_search` tool (which
 /// reads `BRAVE_API_KEY`) sees them. Mirrors [`inject_provider_keys`]; best-effort.
 pub fn inject_search_keys() {
+    finish_warming_secrets();
     for (provider, var) in SEARCH_ENV_VARS {
         if std::env::var(var).is_ok() {
             continue;
@@ -3978,12 +3979,9 @@ pub fn delete_secret(key: &str) -> Result<bool, ConfigError> {
     secret_store::delete(key)
 }
 
-/// Make stored keys visible to the provider client (genai reads keys from the environment): for
-/// each known provider with no env var set, inject the PRIMARY stored key. Only the first key is
-/// injected — the keyring may hold a newline-separated list of several, and the env var must be a
-/// single key; the provider client rotates across the full list separately (see `api_keys`).
-/// Best-effort — providers without a stored key are simply left unset.
-pub fn inject_provider_keys() {
+/// Every (provider, env var) pair a key can be injected for, and the providers whose secret has to
+/// be asked of the secret store because no environment variable already answers.
+fn provider_secret_lookups() -> (Vec<(&'static str, &'static str)>, Vec<&'static str>) {
     use key_adoption::INJECTED;
     let injected = |var: &str| {
         INJECTED
@@ -4000,9 +3998,6 @@ pub fn inject_provider_keys() {
         .into_iter()
         .map(|a| (AZURE_NS, a.env_var.as_str()));
     let all: Vec<(&str, &str)> = native.chain(custom).chain(azure).collect();
-    // ~144 serial secret-store lookups (a D-Bus round trip each) cost 218 ms before the first
-    // frame. Ask for them in parallel; `secret_store::get` memoizes, so the loop below then only
-    // reads the cache.
     let to_lookup: Vec<&str> = all
         .iter()
         .filter(|(p, var)| {
@@ -4012,9 +4007,15 @@ pub fn inject_provider_keys() {
         })
         .map(|(p, _)| *p)
         .collect();
+    (all, to_lookup)
+}
+
+/// Read each provider's secret on up to eight threads. The read cache in `secret_store` keeps the
+/// answers, so whoever asks next gets them without another round trip.
+fn lookup_secrets_in_parallel(providers: &[&str]) {
     std::thread::scope(|scope| {
-        let per_thread = to_lookup.len().div_ceil(8).max(1);
-        for chunk in to_lookup.chunks(per_thread) {
+        let per_thread = providers.len().div_ceil(8).max(1);
+        for chunk in providers.chunks(per_thread) {
             scope.spawn(move || {
                 for provider in chunk {
                     let _ = secret_store::get(provider);
@@ -4022,6 +4023,67 @@ pub fn inject_provider_keys() {
             });
         }
     });
+}
+
+/// Start reading the stored provider and search-API secrets on a detached thread, so the
+/// round trips to the secret service overlap whatever the caller does before
+/// [`inject_provider_keys`] and its lookups find them cached. Reads only: nothing is injected, no
+/// environment variable is touched. Call it as early in a start-up as the process is allowed to
+/// spawn a thread.
+pub fn warm_provider_secrets() {
+    let spawned = std::thread::Builder::new()
+        .name("forge-secret-warm".into())
+        .spawn(|| {
+            let (_, mut lookups) = provider_secret_lookups();
+            lookups.extend(
+                SEARCH_ENV_VARS
+                    .iter()
+                    .filter(|(_, var)| std::env::var(var).is_err())
+                    .map(|(provider, _)| *provider),
+            );
+            lookup_secrets_in_parallel(&lookups);
+        });
+    if let Ok(handle) = spawned {
+        *WARMING_SECRETS.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+}
+
+static WARMING_SECRETS: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+/// Wait for [`warm_provider_secrets`] to finish. The injectors set environment variables, which
+/// must not overlap another thread's secret-service calls (they read the environment), so they
+/// wait here first; with the warm-up started early there is nothing left to wait for.
+fn finish_warming_secrets() {
+    let handle = WARMING_SECRETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+}
+
+/// Make stored keys visible to the provider client (genai reads keys from the environment): for
+/// each known provider with no env var set, inject the PRIMARY stored key. Only the first key is
+/// injected — the keyring may hold a newline-separated list of several, and the env var must be a
+/// single key; the provider client rotates across the full list separately (see `api_keys`).
+/// Best-effort — providers without a stored key are simply left unset.
+pub fn inject_provider_keys() {
+    use key_adoption::INJECTED;
+    finish_warming_secrets();
+    let injected = |var: &str| {
+        INJECTED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(var)
+    };
+    let user_set = |var: &str| env_set(var) && !injected(var);
+    let (all, to_lookup) = provider_secret_lookups();
+    // ~144 serial secret-store lookups (a D-Bus round trip each) cost 218 ms before the first
+    // frame. Ask for them in parallel; `secret_store::get` memoizes, so the loop below then only
+    // reads the cache.
+    lookup_secrets_in_parallel(&to_lookup);
     for (provider, var) in all {
         // Keyless custom providers (local servers) carry an empty env_var — nothing to inject.
         if var.is_empty() || user_set(var) {

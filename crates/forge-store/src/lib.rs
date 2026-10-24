@@ -383,8 +383,56 @@ impl Drop for ModelReservation {
     }
 }
 
+/// The connection pool behind one or more [`Store`] handles. Handles from [`Store::open_shared`]
+/// for the same file hold the same `Arc`, so the registry can hand the pool out again while any of
+/// them lives and let it close (checkpointing the WAL) when the last one is dropped.
+struct SharedPool(r2d2::Pool<SqliteManager>);
+
+impl std::ops::Deref for SharedPool {
+    type Target = r2d2::Pool<SqliteManager>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Handles of one database file within a process, keyed by canonical path. The identity guards
+/// against a file that was deleted and recreated under the same name: its old pool still points
+/// at the unlinked inode and must not be handed out.
+type SharedRegistry =
+    std::collections::HashMap<PathBuf, (FileIdentity, std::sync::Weak<SharedPool>)>;
+
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = ();
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Sharing is only attempted where a file's identity can be told; elsewhere every open is its own.
+#[cfg(not(unix))]
+fn file_identity(_path: &Path) -> Option<FileIdentity> {
+    None
+}
+
+fn shared_registry() -> std::sync::MutexGuard<'static, SharedRegistry> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<SharedRegistry>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(SharedRegistry::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Connections a file store may hold at once.
+const FILE_POOL_MAX: u32 = 8;
+/// Handles that share one pool draw on it together, so it gets more room than a lone store.
+const SHARED_POOL_MAX: u32 = 16;
+
 pub struct Store {
-    pool: r2d2::Pool<SqliteManager>,
+    pool: std::sync::Arc<SharedPool>,
     reservation_store_id: String,
     db_path: Option<std::path::PathBuf>,
     usage_attribution: usage_attribution::UsageAttribution,
@@ -1383,12 +1431,48 @@ impl Store {
     /// Open (creating if needed) a database file and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         restrict_db_permissions(path.as_ref());
-        Self::build(ConnSource::File(path.as_ref().to_path_buf()))
+        Self::build(ConnSource::File(path.as_ref().to_path_buf()), FILE_POOL_MAX)
+    }
+
+    /// Like [`Store::open`], but a second call for the same file while an earlier handle is alive
+    /// reuses that handle's connection pool instead of opening, migrating and pooling the file
+    /// again (about 15-30 ms and 7-10 MB each on a warm machine; `forge chat` used to do it five
+    /// times before its first frame). The pool closes when the last handle is dropped, exactly as
+    /// a lone `open` does, so the last close still checkpoints the WAL. Handles share connections,
+    /// so use `open` where a test or tool wants an independent connection to the same file.
+    pub fn open_shared(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let mut registry = shared_registry();
+        if let (Some(identity), Some((known, pool))) = (file_identity(&key), registry.get(&key)) {
+            if *known == identity {
+                if let Some(pool) = pool.upgrade() {
+                    return Ok(Self {
+                        pool,
+                        reservation_store_id: key.to_string_lossy().into_owned(),
+                        db_path: Some(path.to_path_buf()),
+                        usage_attribution: Default::default(),
+                    });
+                }
+            }
+        }
+        restrict_db_permissions(path);
+        let store = Self::build(ConnSource::File(path.to_path_buf()), SHARED_POOL_MAX)?;
+        let key = std::fs::canonicalize(path).unwrap_or(key);
+        match file_identity(&key) {
+            Some(identity) => {
+                registry.insert(key, (identity, std::sync::Arc::downgrade(&store.pool)));
+            }
+            None => {
+                registry.remove(&key);
+            }
+        }
+        Ok(store)
     }
 
     /// In-memory store, primarily for tests.
     pub fn open_in_memory() -> Result<Self> {
-        Self::build(ConnSource::Memory)
+        Self::build(ConnSource::Memory, FILE_POOL_MAX)
     }
 
     /// The database file, or `None` for an in-memory store. Files that belong beside the session
@@ -1398,7 +1482,7 @@ impl Store {
         self.db_path.as_deref()
     }
 
-    fn build(source: ConnSource) -> Result<Self> {
+    fn build(source: ConnSource, max_pool_size: u32) -> Result<Self> {
         if let ConnSource::File(path) = &source {
             create_owner_only(path);
         }
@@ -1429,7 +1513,13 @@ impl Store {
                 .max_lifetime(None)
                 .build(manager)
         } else {
-            builder.max_size(8).build(manager)
+            // Only the first connections are opened now; the rest appear when something needs to
+            // read while another connection is busy. Eight eager connections cost every open their
+            // setup and each keeps its own parsed schema and page cache resident.
+            builder
+                .max_size(max_pool_size)
+                .min_idle(Some(2))
+                .build(manager)
         }
         .map_err(|e| StoreError::Pool(e.to_string()))?;
 
@@ -1477,7 +1567,7 @@ impl Store {
             ConnSource::Memory => next_memory_store_id(),
         };
         Ok(Self {
-            pool,
+            pool: std::sync::Arc::new(SharedPool(pool)),
             reservation_store_id,
             db_path,
             usage_attribution: Default::default(),
@@ -5675,6 +5765,72 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert!(store.benched_models(500).unwrap().is_benched("m"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_shared_reuses_the_pool_while_a_handle_lives_and_lets_it_go_after() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(forge_types::new_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shared.db");
+        let first = Store::open_shared(&path).unwrap();
+        let second = Store::open_shared(&path).unwrap();
+        assert!(
+            Arc::ptr_eq(&first.pool, &second.pool),
+            "a second open of a live file must not pool it again"
+        );
+        let sid = first.create_session("/repo", "default").unwrap();
+        first
+            .add_message(&sid, 0, Role::User, "hello", None)
+            .unwrap();
+        assert_eq!(second.next_seq_for_session(&sid).unwrap(), 1);
+
+        let other = Store::open_shared(dir.join("other.db")).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first.pool, &other.pool),
+            "another file has its own pool"
+        );
+        let plain = Store::open(&path).unwrap();
+        assert!(
+            !Arc::ptr_eq(&first.pool, &plain.pool),
+            "a plain open stays independent"
+        );
+
+        let gone = Arc::downgrade(&first.pool);
+        drop((first, second, plain));
+        assert!(
+            gone.upgrade().is_none(),
+            "the pool closes with its last handle, so the WAL is checkpointed as before"
+        );
+        let third = Store::open_shared(&path).unwrap();
+        assert_eq!(
+            third.next_seq_for_session(&sid).unwrap(),
+            1,
+            "the data outlives the pool"
+        );
+        drop((third, other));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_shared_does_not_hand_out_the_pool_of_a_replaced_file() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(forge_types::new_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("replaced.db");
+        let old = Store::open_shared(&path).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = path.clone().into_os_string();
+            file.push(suffix);
+            let _ = std::fs::remove_file(file);
+        }
+        let new = Store::open_shared(&path).unwrap();
+        assert!(
+            !Arc::ptr_eq(&old.pool, &new.pool),
+            "the old pool points at a deleted inode"
+        );
+        drop((old, new));
         std::fs::remove_dir_all(&dir).ok();
     }
 

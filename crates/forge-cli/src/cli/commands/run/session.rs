@@ -695,9 +695,10 @@ impl StartupClock {
         let now = std::time::Instant::now();
         tracing::debug!(
             target: "forge::startup",
-            "{phase}: {} ms (t+{} ms)",
+            "{phase}: {} ms (t+{} ms, rss {} MB)",
             now.duration_since(self.last).as_millis(),
-            now.duration_since(self.started).as_millis()
+            now.duration_since(self.started).as_millis(),
+            crate::startup_trace::resident_mb()
         );
         self.last = now;
     }

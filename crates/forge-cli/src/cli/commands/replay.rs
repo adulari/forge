@@ -70,6 +70,29 @@ fn restrict_data_dir(dir: &Path) {
 }
 
 pub(crate) fn open_store() -> Result<Store> {
+    if SHARE_STORE_HANDLES.load(std::sync::atomic::Ordering::Relaxed) {
+        open_store_with(|path| Store::open_shared(path))
+    } else {
+        open_store_with(|path| Store::open(path))
+    }
+}
+
+/// Set once by `forge chat`: one terminal session wants the same file for the resume lookup, the
+/// presence guard, the session and the pricing table within a few hundred milliseconds, and every
+/// one of those used to open, migrate and pool it again. From here on, handles opened while
+/// another is alive reuse its connections ([`Store::open_shared`]). The daemon hosts many
+/// sessions and keeps opening independent handles.
+static SHARE_STORE_HANDLES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn share_store_handles() {
+    SHARE_STORE_HANDLES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn open_store_with(
+    open: impl Fn(&Path) -> std::result::Result<Store, forge_store::StoreError>,
+) -> Result<Store> {
+    let _opened = crate::startup_trace::Span::new("open_store");
     // The store lives in a stable per-user data dir so usage/budget and session history persist
     // across restarts and don't reset when `forge` is launched from a different directory (the
     // budget is global per FR-5). Fall back to the legacy cwd-local path only if no data dir
@@ -83,7 +106,7 @@ pub(crate) fn open_store() -> Result<Store> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("creating store directory")?;
         }
-        Store::open(&path).context("opening session store")?
+        open(&path).context("opening session store")?
     };
     #[cfg(not(test))]
     let store = if let Ok(custom) = std::env::var("FORGE_DB") {
@@ -91,7 +114,7 @@ pub(crate) fn open_store() -> Result<Store> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("creating store directory")?;
         }
-        Store::open(&path).context("opening session store")?
+        open(&path).context("opening session store")?
     } else if let Some(dir) = forge_config::data_dir() {
         std::fs::create_dir_all(&dir).context("creating data directory")?;
         restrict_data_dir(&dir);
@@ -102,10 +125,10 @@ pub(crate) fn open_store() -> Result<Store> {
         if !db.exists() && legacy.exists() {
             let _ = std::fs::copy(legacy, &db);
         }
-        Store::open(&db).context("opening session store")?
+        open(&db).context("opening session store")?
     } else {
         std::fs::create_dir_all(".forge").context("creating .forge directory")?;
-        Store::open(Path::new(".forge/forge.db")).context("opening session store")?
+        open(Path::new(".forge/forge.db")).context("opening session store")?
     };
     let anywhere_enabled = forge_config::load()
         .map(|config| config.anywhere.enabled && config.anywhere.sync)

@@ -11,8 +11,11 @@ pub(crate) async fn chat(
     pin: Option<String>,
     mut first_prompt: Option<String>,
 ) -> Result<()> {
+    crate::startup_trace::mark("chat entered");
     maybe_first_run_setup(mock)?;
+    crate::startup_trace::mark("first-run check");
     maybe_autostart_local();
+    crate::startup_trace::mark("local autostart check");
     // Default to the interactive (animated) TUI on a real terminal.
     let dumb_term = std::env::var("TERM").is_ok_and(|t| t == "dumb");
     if !plain && !dumb_term && std::io::stdout().is_terminal() {

@@ -635,12 +635,23 @@ fn models_for_provider_lists_models_with_badges() {
 
 #[test]
 fn onboarding_only_when_nothing_is_configured() {
+    let needs = |has_any_key: bool, any_bridge: bool, config_exists: bool| {
+        needs_onboarding_with(config_exists, || has_any_key, || any_bridge)
+    };
     // Fresh machine: no key, no bridge, no config → onboard.
-    assert!(needs_onboarding(false, false, false));
+    assert!(needs(false, false, false));
     // Any one signal of prior setup suppresses it.
-    assert!(!needs_onboarding(true, false, false)); // has a key
-    assert!(!needs_onboarding(false, true, false)); // a bridge is installed
-    assert!(!needs_onboarding(false, false, true)); // a saved config exists
+    assert!(!needs(true, false, false)); // has a key
+    assert!(!needs(false, true, false)); // a bridge is installed
+    assert!(!needs(false, false, true)); // a saved config exists
+
+    // With a saved config neither answer is computed: the key scan is a keyring round trip per
+    // provider, and it used to run on every `forge chat` start.
+    assert!(!needs_onboarding_with(
+        true,
+        || panic!("the key scan must not run when a config exists"),
+        || panic!("the bridge probe must not run when a config exists"),
+    ));
 }
 
 #[test]

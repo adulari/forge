@@ -110,6 +110,15 @@ fn persist_configured_windows(store: &forge_store::Store) {
 /// Fetch per-model context windows AND prices from all reachable provider APIs, persisting
 /// results into the DB. Best-effort and fail-soft — any error just leaves the conservative floor.
 pub async fn fetch_and_persist(models: &[String]) {
+    sweep_and_persist(models).await;
+    // The sweep holds several MB of provider model listings as JSON trees (about 100 MB allocated
+    // on a store that had never been swept). All of it is dropped when the sweep returns, but the
+    // allocator keeps the pages: without this a session that merely waited for a first answer sat
+    // about 65 MB higher for its whole life.
+    crate::alloc_policy::release_free_memory();
+}
+
+async fn sweep_and_persist(models: &[String]) {
     let Ok(store) = crate::open_store() else {
         return;
     };

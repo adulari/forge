@@ -162,8 +162,21 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             fullscreen,
             model,
         } => {
+            crate::startup_trace::mark("dispatch chat");
+            crate::cli::commands::replay::share_store_handles();
+            if !mock {
+                forge_config::warm_provider_secrets();
+            }
+            // A resumed session counts its transcript's tokens for the gauge while it is built,
+            // and a prompt given on the command line is sent at once: both need the vocabulary
+            // before anyone has typed a key, so its build starts here, beside the terminal setup.
+            if r#continue || resume.is_some() || !prompt.is_empty() {
+                forge_core::tokens::warm_now();
+            }
             let store = open_store()?;
+            crate::startup_trace::mark("store opened for resume mode");
             let resume_mode = resolve_resume_mode(r#continue, all_dirs, resume, &store, plain)?;
+            crate::startup_trace::mark("resume mode resolved");
             // Full-screen unless `--inline`; `--fullscreen` / `--inline` override the config default.
             let fullscreen = if inline {
                 false
