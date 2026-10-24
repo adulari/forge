@@ -266,15 +266,30 @@ mod tests {
 
     #[tokio::test]
     async fn stream_close_is_exposed_as_reader_failure() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            // Answer only after the request: a response that arrives before it is a protocol
+            // error to hyper (`UnexpectedMessage`), not the stream closing.
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
             let response =
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\n\r\n";
             socket.write_all(response.as_bytes()).await.unwrap();
+            // Hold the connection until the client hangs up: dropping it right after the write
+            // can reset it before the client has read the response.
+            let mut sink = Vec::new();
+            let _ = socket.read_to_end(&mut sink).await;
         });
 
         let mut transport = SseClientTransport::connect(
