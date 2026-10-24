@@ -9,6 +9,7 @@ import type { ColorTokens } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { useTheme } from "../../theme/ThemeProvider";
 import { safeExternalHref } from "../../lib/linkSafety";
+import { fitRow, opensTable, tableCells } from "../../lib/markdownTable";
 import { CodeBlock } from "./CodeBlock";
 
 // ---------------------------------------------------------------------------
@@ -18,8 +19,9 @@ import { CodeBlock } from "./CodeBlock";
 type Block =
   | { kind: "heading"; level: number; text: string; inline: InlineNode[] }
   | { kind: "paragraph"; text: string; inline: InlineNode[] }
-  | { kind: "list"; ordered: boolean; items: string[]; inlineItems: InlineNode[][] }
-  | { kind: "code"; language: string; code: string };
+  | { kind: "list"; ordered: boolean; start: number; items: string[]; inlineItems: InlineNode[][] }
+  | { kind: "code"; language: string; code: string }
+  | { kind: "table"; header: InlineNode[][]; rows: InlineNode[][][] };
 
 function parseBlocks(content: string): Block[] {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
@@ -27,6 +29,9 @@ function parseBlocks(content: string): Block[] {
   let paragraphLines: string[] = [];
   let listItems: string[] = [];
   let listOrdered = false;
+  // A loose list ("1. a", blank line, "2. b") arrives as one list per item; numbering from the
+  // source's own first number keeps it 1, 2 instead of restarting at 1.
+  let listStart = 1;
 
   const flushParagraph = () => {
     if (paragraphLines.length) {
@@ -37,7 +42,7 @@ function parseBlocks(content: string): Block[] {
   };
   const flushList = () => {
     if (listItems.length) {
-      blocks.push({ kind: "list", ordered: listOrdered, items: listItems, inlineItems: listItems.map(parseInline) });
+      blocks.push({ kind: "list", ordered: listOrdered, start: listStart, items: listItems, inlineItems: listItems.map(parseInline) });
       listItems = [];
     }
   };
@@ -72,14 +77,29 @@ function parseBlocks(content: string): Block[] {
       continue;
     }
 
+    if (opensTable(line, lines[i + 1])) {
+      flushParagraph();
+      flushList();
+      const header = tableCells(line);
+      const rows: InlineNode[][][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
+        rows.push(fitRow(tableCells(lines[i]), header.length).map(parseInline));
+        i++;
+      }
+      blocks.push({ kind: "table", header: header.map(parseInline), rows });
+      continue;
+    }
+
     const unordered = /^\s*[-*]\s+(.*)$/.exec(line);
-    const ordered = /^\s*\d+\.\s+(.*)$/.exec(line);
+    const ordered = /^\s*(\d+)\.\s+(.*)$/.exec(line);
     if (unordered || ordered) {
       flushParagraph();
       const nowOrdered = Boolean(ordered);
       if (listItems.length && nowOrdered !== listOrdered) flushList();
+      if (!listItems.length) listStart = ordered ? Number(ordered[1]) : 1;
       listOrdered = nowOrdered;
-      listItems.push((ordered ?? unordered)![1]);
+      listItems.push(ordered ? ordered[2] : unordered![1]);
       i++;
       continue;
     }
@@ -199,6 +219,12 @@ function renderInline(nodes: InlineNode[], keyPrefix: string, tokens: ColorToken
 // Component
 // ---------------------------------------------------------------------------
 
+/** An ordered list's marker column fits its widest number ("10." is wider than the bullet's
+ * 18px), so the period never wraps onto a line of its own under the number. */
+function orderedMarkerWidth(last: number): number {
+  return Math.max(18, String(last).length * 9 + 6);
+}
+
 export interface MarkdownProps {
   content: string;
   style?: StyleProp<TextStyle>;
@@ -235,12 +261,47 @@ export function Markdown({ content, style }: MarkdownProps) {
               <View key={key} style={styles.block}>
                 {block.items.map((item, itemIdx) => (
                   <View key={itemIdx} style={styles.listRow}>
-                    <Text style={[type.body, styles.listMarker, { color: tokens.ink3 }]}>
-                      {block.ordered ? `${itemIdx + 1}.` : "•"}
+                    <Text
+                      numberOfLines={1}
+                      style={[type.body, styles.listMarker, block.ordered ? { width: orderedMarkerWidth(block.start + block.items.length - 1) } : null, { color: tokens.ink3 }]}
+                    >
+                      {block.ordered ? `${block.start + itemIdx}.` : "•"}
                     </Text>
                     <Text selectable style={[type.body, styles.listText, { color: tokens.ink }, style]}>
                       {renderInline(block.inlineItems[itemIdx], `${key}-${itemIdx}`, tokens)}
                     </Text>
+                  </View>
+                ))}
+              </View>
+            );
+          case "table":
+            return (
+              <View key={key} style={[styles.block, styles.table, { borderColor: tokens.border }]}>
+                {[block.header, ...block.rows].map((row, rowIdx) => (
+                  <View
+                    key={rowIdx}
+                    style={[
+                      styles.tableRow,
+                      rowIdx > 0 ? { borderTopColor: tokens.border, borderTopWidth: StyleSheet.hairlineWidth } : null,
+                      rowIdx === 0 ? { backgroundColor: tokens.bg2 } : null,
+                    ]}
+                  >
+                    {row.map((cell, cellIdx) => (
+                      <Text
+                        key={cellIdx}
+                        selectable
+                        style={[
+                          type.body,
+                          styles.tableCell,
+                          rowIdx === 0 ? styles.bold : null,
+                          cellIdx > 0 ? { borderLeftColor: tokens.border, borderLeftWidth: StyleSheet.hairlineWidth } : null,
+                          { color: tokens.ink },
+                          style,
+                        ]}
+                      >
+                        {renderInline(cell, `${key}-${rowIdx}-${cellIdx}`, tokens)}
+                      </Text>
+                    ))}
                   </View>
                 ))}
               </View>
@@ -268,6 +329,19 @@ const styles = StyleSheet.create({
   },
   paragraph: {
     marginVertical: 4,
+  },
+  table: {
+    borderWidth: StyleSheet.hairlineWidth,
+    alignSelf: "stretch",
+  },
+  tableRow: {
+    flexDirection: "row",
+  },
+  tableCell: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   listRow: {
     flexDirection: "row",
