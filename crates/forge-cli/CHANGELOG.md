@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The desktop app opens to a working window again on Windows and Linux.** Since 2.13.6 it showed the title bar and tabs over an empty grey pane and ignored clicks, while the same bundle worked in a browser. Two configuration faults in `mobile/src-tauri` caused it. First, Tauri adds nonces to the page's `style-src` at build time, and a nonce makes the WebView ignore `'unsafe-inline'`. That refused the three `<style>` tags Reanimated injects, so every entering animation stayed at its hidden first frame, and the invisible "Installed Forge app" sheet sat over the window catching clicks. `style-src` is now excluded from that rewrite (`dangerousDisableAssetCspModification`). Second, the HTTP scope `http://*/*` follows URLPattern rules, where a missing port means the default port only. Every request to a `forge serve` daemon on 7420 failed with `url not allowed on the configured scope`, so the fleet never loaded. The scope now also allows `http://*:*/*` and `https://*:*/*`. Two tests in `security_config.rs` fail on the old configuration.
+
 ## [2.23.0] - 2026-10-24
 
 ### Security

@@ -51,6 +51,12 @@ libc = "0.2"
 # request. Without an embedder permission handler WebKitGTK denies microphone capture outright.
 webkit2gtk = { version = "2.0", features = ["v2_8"] }
 
+[dev-dependencies]
+# security_config.rs parses the HTTP scope exactly as tauri-plugin-http 2.5 does.
+regex = "1"
+url = "2"
+urlpattern = "0.3"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
