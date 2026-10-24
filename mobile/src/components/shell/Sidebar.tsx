@@ -15,12 +15,16 @@ import { hostStateText } from "../../lib/anywhere/format";
 import type { SessionRow } from "../../lib/api";
 import { modKey } from "../../lib/platform";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
+import { useAuth } from "../../lib/auth";
 import { useSessions } from "../../lib/queries";
+import { useScopedFleet, type ScopedSessionRow } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../theme/tokens";
 import { formatCost, formatCwd, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { HostDot } from "../anywhere/HostDot";
+import { useRelativeClock } from "../ds/relativeClock";
 import { StatusDot } from "../ds/StatusDot";
+import { ServerScopePills } from "../fleet/ServerScopePills";
 import { usePalette } from "../overlay/CommandPalette";
 import { useProviderPace, UsageRing } from "./UsageRing";
 
@@ -35,18 +39,27 @@ function projectNameFromCwd(cwd: string): string {
   return (wtIndex >= 0 ? label.slice(0, wtIndex) : label).toUpperCase();
 }
 
-function groupSessionsByProject(rows: SessionRow[]): { project: string; rows: SessionRow[] }[] {
-  const order: string[] = [];
-  const map = new Map<string, SessionRow[]>();
-  for (const row of rows) {
-    const project = projectNameFromCwd(row.cwd);
-    if (!map.has(project)) {
-      map.set(project, []);
-      order.push(project);
+interface ProjectGroup {
+  key: string;
+  project: string;
+  serverId: string;
+  rows: ScopedSessionRow[];
+}
+
+/** Same-named projects on two servers are two checkouts, so the group key includes the server. */
+function groupSessionsByProject(rows: ScopedSessionRow[]): ProjectGroup[] {
+  const groups = new Map<string, ProjectGroup>();
+  for (const item of rows) {
+    const project = projectNameFromCwd(item.row.cwd);
+    const key = `${item.serverId}\u0000${project}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, project, serverId: item.serverId, rows: [] };
+      groups.set(key, group);
     }
-    map.get(project)!.push(row);
+    group.rows.push(item);
   }
-  return order.map((project) => ({ project, rows: map.get(project)! }));
+  return [...groups.values()];
 }
 
 function hostShortMeta(host: AnywhereHost): string {
@@ -56,14 +69,21 @@ function hostShortMeta(host: AnywhereHost): string {
   return hostStateText(host);
 }
 
-function DenseSessionRow({ row, selected }: { row: SessionRow; selected: boolean }) {
+function DenseSessionRow({ row, serverId, selected }: { row: SessionRow; serverId: string; selected: boolean }) {
   const tokens = useTokens();
+  const { setActive } = useAuth();
+  // Re-render on the shared clock: the list only re-renders when the fleet changes, so a
+  // computed "4m" otherwise froze at whatever it read when the row last changed.
+  useRelativeClock();
   const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
   const title = row.title || `session ${row.id.slice(0, 8)}`;
 
   return (
     <Pressable
-      onPress={() => router.push(`/session/${row.id}`)}
+      onPress={() => {
+        if (serverId) setActive(serverId);
+        router.push(`/session/${row.id}`);
+      }}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${state}${row.waiting ? ", needs a decision" : ""}`}
       style={[styles.denseRow, (row.waiting || selected) && { backgroundColor: tokens.selection }]}
@@ -109,12 +129,13 @@ function HostRow({ host }: { host: AnywhereHost }) {
   );
 }
 
-function GroupLabel({ label, count }: { label: string; count: number }) {
+function GroupLabel({ label, server, count }: { label: string; server?: string; count: number }) {
   const tokens = useTokens();
   return (
     <View style={styles.groupLabelRow}>
       <Text style={[typeScale.section, styles.groupLabelText, { color: tokens.ink3 }]} numberOfLines={1}>
         {label}
+        {server ? <Text style={{ color: tokens.ink4 }}>{` · ${server}`}</Text> : null}
       </Text>
       <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{count}</Text>
     </View>
@@ -133,11 +154,16 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
   const tokens = useTokens();
   const pathname = usePathname();
   const palette = usePalette();
-  const sessionsQuery = useSessions();
-  const rows = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const { servers } = useAuth();
+  const fleet = useScopedFleet();
+  const rows = fleet.rows;
   const groups = useMemo(() => groupSessionsByProject(rows), [rows]);
+  const labelServers = fleet.showAll && new Set(groups.map((group) => group.serverId)).size > 1;
+  const serverName = (id: string) => servers.find((server) => server.id === id)?.name;
   const noticesUnseen = totalUnseen(useNoticesStore().hosts);
-  const waitingCount = useMemo(() => rows.filter((r) => r.waiting).length, [rows]);
+  // The Inbox lists the active server's waiting sessions, so its badge counts the same set.
+  const { data: activeRows } = useSessions();
+  const waitingCount = useMemo(() => (activeRows ?? []).filter((r) => r.waiting).length, [activeRows]);
   const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
 
   const { signedIn: anywhereSignedIn } = useAnywhere();
@@ -169,17 +195,19 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
         <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{modKey}N</Text>
       </Pressable>
 
+      <ServerScopePills layout="wrap" />
+
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
-        {sessionsQuery.isLoading && rows.length === 0 ? (
+        {fleet.isLoading && rows.length === 0 ? (
           <Text style={[typeScale.sub, styles.emptyText, { color: tokens.ink3 }]}>Connecting…</Text>
         ) : rows.length === 0 ? (
           <Text style={[typeScale.sub, styles.emptyText, { color: tokens.ink3 }]}>No sessions — forge one above.</Text>
         ) : (
-          groups.map(({ project, rows: groupRows }) => (
-            <View key={project}>
-              <GroupLabel label={project} count={groupRows.length} />
-              {groupRows.map((row) => (
-                <DenseSessionRow key={row.id} row={row} selected={row.id === selectedSessionId} />
+          groups.map((group) => (
+            <View key={group.key}>
+              <GroupLabel label={group.project} server={labelServers ? serverName(group.serverId) : undefined} count={group.rows.length} />
+              {group.rows.map(({ row, serverId }) => (
+                <DenseSessionRow key={row.id} row={row} serverId={serverId} selected={row.id === selectedSessionId} />
               ))}
             </View>
           ))
@@ -202,7 +230,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
             disabled={!onToggleDock}
             accessibilityRole={onToggleDock ? "button" : undefined}
             accessibilityLabel="Toggle usage dock"
-            accessibilityHint="Command U"
+            accessibilityHint={`${modKey} U`}
             style={styles.usageBlock}
           >
             <Text style={[typeScale.section, styles.usageLabel, { color: tokens.ink3 }]}>Usage</Text>
@@ -218,8 +246,9 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           <Pressable
             onPress={() => router.push("/inbox")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/inbox" }}
             accessibilityLabel={waitingCount > 0 ? `Inbox, ${waitingCount} needs you` : "Inbox"}
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/inbox" && { backgroundColor: tokens.selection }]}
           >
             <BellDot size={15} strokeWidth={1.75} color={tokens.ink2} />
             {waitingCount > 0 ? <View style={[styles.footerBadge, { backgroundColor: tokens.danger, borderColor: tokens.bg1 }]} /> : null}
@@ -227,8 +256,9 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           <Pressable
             onPress={() => router.push("/notices")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/notices" }}
             accessibilityLabel={noticesUnseen > 0 ? `Notices, ${noticesUnseen} new` : "Notices"}
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/notices" && { backgroundColor: tokens.selection }]}
           >
             <Bell size={15} strokeWidth={1.75} color={tokens.ink2} />
             {noticesUnseen > 0 ? <View style={[styles.footerBadge, { backgroundColor: tokens.accent, borderColor: tokens.bg1 }]} /> : null}
@@ -236,8 +266,9 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           <Pressable
             onPress={() => router.push("/history")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/history" }}
             accessibilityLabel="History"
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/history" && { backgroundColor: tokens.selection }]}
           >
             <History size={15} strokeWidth={1.75} color={tokens.ink2} />
           </Pressable>
@@ -245,8 +276,9 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           <Pressable
             onPress={() => router.push("/settings")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/settings" }}
             accessibilityLabel="Settings"
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/settings" && { backgroundColor: tokens.selection }]}
           >
             <Settings2 size={15} strokeWidth={1.75} color={tokens.ink2} />
           </Pressable>
@@ -254,7 +286,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
             onPress={onCollapse}
             accessibilityRole="button"
             accessibilityLabel="Collapse sidebar"
-            accessibilityHint="Command Backslash"
+            accessibilityHint={`${modKey} Backslash`}
             style={styles.footerIconButton}
           >
             <PanelLeftClose size={15} strokeWidth={1.75} color={tokens.ink2} />

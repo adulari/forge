@@ -7,18 +7,24 @@
 // interactive islands. "deep" makes clicks on child views count too; the bare attribute only
 // matches clicks on the bar element itself, which the flex spacer covers. Double-click to
 // maximize comes from Tauri's drag script, so the bar has no onDoubleClick of its own.
-import { Flame, Minus, Search, Square, X } from "lucide-react-native";
-import React, { useEffect, useState } from "react";
-import { Pressable, StyleSheet, Text, View, type ViewProps } from "react-native";
+import { useQueries } from "@tanstack/react-query";
+import { router } from "expo-router";
+import { Check, ChevronDown, Flame, Minus, Search, Square, X } from "lucide-react-native";
+import React, { useEffect, useRef, useState } from "react";
+import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions, type ViewProps } from "react-native";
 
-import { useAuth } from "../lib/auth";
+import { getSessions } from "../lib/api";
 import { isMacOS, isTauri } from "../lib/platform";
+import { transportForBaseUrl } from "../lib/serverTargets";
+import { useFleetScope } from "../lib/useScopedFleet";
+import { fleetStatuses, type ServerReachability } from "./fleet/ServerScopePills";
 import { usePalette } from "./overlay/CommandPalette";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { monoFamily } from "../theme/typography";
 
 export const DESKTOP_WINDOW_CHROME_HEIGHT = 36;
+const CENTERED_TITLE_MIN_WIDTH = 900;
 
 // This bar only ever renders inside the Tauri desktop shell (the `!isTauri` guard below), so
 // it always has a real hardware keyboard behind it — no touch-surface case to gate on here,
@@ -41,8 +47,35 @@ interface WindowControls {
 export function DesktopWindowChrome() {
   const tokens = useTokens();
   const palette = usePalette();
-  const { servers, activeServerId } = useAuth();
+  const { servers, activeServerId, showAll, multiServer, selectAll, selectServer } = useFleetScope();
   const activeServer = servers.find((server) => server.id === activeServerId);
+  // Observe the per-server fleet polls the Fleet/sidebar run (same query keys) without adding
+  // polling of its own: the bar sits outside every screen, so it has no focus state to gate on.
+  const statuses = fleetStatuses(
+    servers,
+    useQueries({
+      queries: servers.map((server) => ({
+        queryKey: ["sessions", server.baseUrl] as const,
+        queryFn: () => getSessions(server.baseUrl),
+        enabled: false,
+      })),
+    }),
+  );
+  const activeStatus = statuses.find((status) => status.id === activeServerId);
+  const dotColor = (reachability: ServerReachability | undefined) =>
+    reachability === "unreachable" ? tokens.danger : reachability === "reachable" ? tokens.success : tokens.warn;
+  const { width: windowWidth } = useWindowDimensions();
+  const chipRef = useRef<View>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const openMenu = () =>
+    chipRef.current?.measureInWindow((x, y, width, height) =>
+      setMenuAnchor({ top: y + height + 4, right: Math.max(8, windowWidth - x - width) }),
+    );
+  const closeMenu = () => setMenuAnchor(null);
+  const choose = (pick: () => void) => {
+    pick();
+    closeMenu();
+  };
   const [windowControls, setWindowControls] = useState<WindowControls | null>(null);
 
   useEffect(() => {
@@ -74,10 +107,11 @@ export function DesktopWindowChrome() {
         <Text style={[styles.brand, { color: tokens.ink }]}>Forge</Text>
       </View>
 
-      {activeServer ? (
+      {/* Centered over the whole bar, so on a narrow window it ran into the server chip. */}
+      {activeServer && windowWidth >= CENTERED_TITLE_MIN_WIDTH ? (
         <View style={styles.titleWrap} pointerEvents="none">
           <Text style={[styles.title, { color: tokens.ink3 }]} numberOfLines={1}>
-            {activeServer.name}
+            {showAll ? "All servers" : activeServer.name}
           </Text>
         </View>
       ) : null}
@@ -85,13 +119,59 @@ export function DesktopWindowChrome() {
       <View style={styles.spacer} />
 
       {activeServer ? (
-        <View style={[styles.hostChip, { borderColor: tokens.border }]} pointerEvents="none">
-          <View style={[styles.hostDot, { backgroundColor: tokens.success }]} />
-          <Text style={[styles.hostChipText, { color: tokens.ink2 }]} numberOfLines={1}>
-            {activeServer.name} · Direct
-          </Text>
-        </View>
+        <WebView dataSet={{ tauriDragRegion: "false" }}>
+          <Pressable
+            ref={chipRef}
+            onPress={openMenu}
+            accessibilityRole="button"
+            accessibilityLabel={showAll ? "Showing all servers. Change server" : `Server ${activeServer.name}. Change server`}
+            style={({ pressed, hovered }: { pressed: boolean; hovered?: boolean }) => [
+              styles.hostChip,
+              { borderColor: hovered || pressed || menuAnchor ? tokens.borderStrong : tokens.border },
+            ]}
+          >
+            <View style={[styles.hostDot, { backgroundColor: showAll ? tokens.ink3 : dotColor(activeStatus?.reachability) }]} />
+            <Text style={[styles.hostChipText, { color: tokens.ink2 }]} numberOfLines={1}>
+              {showAll ? `All servers · ${servers.length}` : `${activeServer.name} · ${transportLabel(activeServer.baseUrl)}`}
+            </Text>
+            <ChevronDown size={11} color={tokens.ink4} strokeWidth={2} />
+          </Pressable>
+        </WebView>
       ) : null}
+
+      <Modal visible={menuAnchor != null} transparent animationType="none" onRequestClose={closeMenu}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={closeMenu} accessibilityLabel="Close server menu" />
+        {menuAnchor ? (
+          <View
+            style={[styles.menu, { top: menuAnchor.top, right: menuAnchor.right, backgroundColor: tokens.bg2, borderColor: tokens.border }]}
+            accessibilityRole="menu"
+          >
+            {multiServer ? (
+              <MenuItem
+                label="All servers"
+                meta={`${servers.length} servers`}
+                selected={showAll}
+                onPress={() => choose(selectAll)}
+              />
+            ) : null}
+            {servers.map((server) => {
+              const status = statuses.find((item) => item.id === server.id);
+              return (
+                <MenuItem
+                  key={server.id}
+                  label={server.name}
+                  meta={status && status.waiting > 0 ? `${transportLabel(server.baseUrl)} · ${status.waiting} waiting` : transportLabel(server.baseUrl)}
+                  dotColor={dotColor(status?.reachability)}
+                  selected={!showAll && server.id === activeServerId}
+                  onPress={() => choose(() => selectServer(server.id))}
+                />
+              );
+            })}
+            <View style={[styles.menuDivider, { backgroundColor: tokens.border }]} />
+            <MenuItem label="Manage servers…" onPress={() => choose(() => router.push("/settings"))} />
+          </View>
+        ) : null}
+      </Modal>
 
       <WebView dataSet={{ tauriDragRegion: "false" }}>
         <Pressable
@@ -119,6 +199,44 @@ export function DesktopWindowChrome() {
         </WebView>
       ) : null}
     </WebView>
+  );
+}
+
+function transportLabel(baseUrl: string): string {
+  return transportForBaseUrl(baseUrl) === "anywhere" ? "Anywhere" : "Direct";
+}
+
+function MenuItem({
+  label,
+  meta,
+  dotColor,
+  selected = false,
+  onPress,
+}: {
+  label: string;
+  meta?: string;
+  dotColor?: string;
+  selected?: boolean;
+  onPress: () => void;
+}) {
+  const tokens = useTokens();
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="menuitem"
+      accessibilityState={{ selected }}
+      style={({ pressed, hovered, focused }: { pressed: boolean; hovered?: boolean; focused?: boolean }) => [
+        styles.menuItem,
+        (hovered || focused || pressed) && { backgroundColor: tokens.bg3 },
+      ]}
+    >
+      <View style={[styles.hostDot, { backgroundColor: dotColor ?? "transparent" }]} />
+      <Text style={[styles.menuLabel, { color: selected ? tokens.accent : tokens.ink }]} numberOfLines={1}>
+        {label}
+      </Text>
+      {meta ? <Text style={[styles.menuMeta, { color: tokens.ink4 }]}>{meta}</Text> : null}
+      <View style={styles.menuCheck}>{selected ? <Check size={12} color={tokens.accent} strokeWidth={2} /> : null}</View>
+    </Pressable>
   );
 }
 
@@ -155,6 +273,23 @@ const styles = StyleSheet.create({
   },
   hostDot: { width: 5, height: 5, borderRadius: 2.5 },
   hostChipText: { fontFamily: monoFamily.regular, fontSize: 10.5 },
+  menu: {
+    position: "absolute",
+    minWidth: 240,
+    maxWidth: 360,
+    borderWidth: 1,
+    borderRadius: radii.radius8,
+    paddingVertical: space.space4,
+    shadowColor: "#000",
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  menuItem: { flexDirection: "row", alignItems: "center", gap: space.space8, height: 30, paddingHorizontal: space.space12 },
+  menuLabel: { flex: 1, fontSize: 12.5 },
+  menuMeta: { fontFamily: monoFamily.regular, fontSize: 10.5 },
+  menuCheck: { width: 12 },
+  menuDivider: { height: StyleSheet.hairlineWidth, marginVertical: space.space4 },
   kbdChip: {
     flexDirection: "row",
     alignItems: "center",

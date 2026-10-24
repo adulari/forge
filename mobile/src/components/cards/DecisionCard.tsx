@@ -4,13 +4,13 @@
 // permission/question text (a short-lived socket attach, same pattern as FloorTile/
 // DecisionPeek), and Respond (open the session)/Peek (answer inline via the existing
 // DecisionPeek sheet) actions. Used by Fleet's needs-you rows and every Inbox row.
-import { router } from "expo-router";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
+import { useOpenSession } from "../../lib/useScopedFleet";
 import { useSessionSocket } from "../../lib/ws";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -34,6 +34,7 @@ function DecisionCardBase({ row, index, onPeek }: DecisionCardProps) {
   const entrance = useForgeline(index);
   const { baseUrl } = useAuth();
   const { snapshot } = useSessionSocket(baseUrl, row.id);
+  const openSession = useOpenSession();
   const title = row.title || `session ${row.id.slice(0, 8)}`;
   const hasWorktree = !!row.worktree;
   const preview = snapshot?.permission_prompt
@@ -69,7 +70,7 @@ function DecisionCardBase({ row, index, onPeek }: DecisionCardProps) {
           <Button
             label="Respond"
             variant="primary"
-            onPress={() => router.push(`/session/${row.id}`)}
+            onPress={() => openSession(row.id)}
             accessibilityLabel={`Respond to ${title}`}
             style={styles.respond}
           />
