@@ -396,11 +396,9 @@ async fn run_agent_loop(
                 Err(e) => return Err(e.into()),
             }
         };
-        resp.usage.cost_usd = ctx.pricing.cost_for(
-            &active_model,
-            resp.usage.input_tokens,
-            resp.usage.output_tokens,
-        );
+        // `cost_for_usage`, not the bare rate: it bills a subscription (codex) call at $0 and
+        // prices cache hits at their discounted rate, exactly like the parent turn.
+        resp.usage.cost_usd = ctx.pricing.cost_for_usage(&active_model, &resp.usage);
 
         transcript.push(Message::assistant_tool_calls(
             &resp.content,

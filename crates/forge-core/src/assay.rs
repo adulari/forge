@@ -405,7 +405,7 @@ async fn complete_with_failover(
         for attempt in 0..MAX_ATTEMPTS {
             match provider.complete(model, messages, &[], &mut sink).await {
                 Ok(r) => {
-                    let cost = pricing.cost_for(model, r.usage.input_tokens, r.usage.output_tokens);
+                    let cost = pricing.cost_for_usage(model, &r.usage);
                     return Ok((r.content, cost, model.clone()));
                 }
                 Err(e) => {
