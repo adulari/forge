@@ -2,9 +2,9 @@ import Constants from "expo-constants";
 import { useEffect, useState } from "react";
 
 import { isTauri } from "./platform";
-import { formatVersionMeta, resolveAppVersion } from "./appVersionCore";
+import { formatVersionMeta, resolveAppVersion, settledAppVersion } from "./appVersionCore";
 
-export { formatVersionMeta, resolveAppVersion } from "./appVersionCore";
+export { formatVersionMeta, resolveAppVersion, settledAppVersion } from "./appVersionCore";
 
 /**
  * Version stamped into the installed Tauri bundle — the authoritative desktop release number, and
@@ -35,6 +35,12 @@ function useDesktopBundleVersion(): string | null {
 export function useAppVersion(): string {
   const bundleVersion = useDesktopBundleVersion();
   return resolveAppVersion(isTauri, bundleVersion, Constants.expoConfig?.version ?? null);
+}
+
+/** `useAppVersion`, but null until the desktop bundle version has actually resolved. */
+export function useSettledAppVersion(): string | null {
+  const bundleVersion = useDesktopBundleVersion();
+  return settledAppVersion(isTauri, bundleVersion, Constants.expoConfig?.version ?? null);
 }
 
 /** Settings' `v… · protocol v…` meta line, with the desktop bundle labelled separately. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatVersionMeta, resolveAppVersion } from "./appVersionCore";
+import { formatVersionMeta, resolveAppVersion, settledAppVersion } from "./appVersionCore";
 
 describe("resolveAppVersion", () => {
   it("uses the authoritative Tauri bundle version on desktop", () => {
@@ -34,5 +34,18 @@ describe("formatVersionMeta", () => {
     expect(formatVersionMeta(true, "  ", "1.0.1", 9)).toBe("v1.0.1 · protocol v9");
     expect(formatVersionMeta(true, "2.7.0", null, 9)).toBe("v2.7.0 · protocol v9");
     expect(formatVersionMeta(false, null, null, 9)).toBe("v— · protocol v9");
+  });
+});
+
+describe("settledAppVersion", () => {
+  it("waits for the desktop bundle version instead of reporting the client version first", () => {
+    expect(settledAppVersion(true, null, "1.0.1")).toBeNull();
+    expect(settledAppVersion(true, " ", "1.0.1")).toBeNull();
+    expect(settledAppVersion(true, "2.23.2", "1.0.1")).toBe("2.23.2");
+  });
+
+  it("uses the Expo version on every other surface", () => {
+    expect(settledAppVersion(false, null, "1.0.1")).toBe("1.0.1");
+    expect(settledAppVersion(false, null, null)).toBeNull();
   });
 });
