@@ -3,7 +3,7 @@
 // session with a status-dot badge, a usage-pace ring column, settings, and the
 // expand affordance. `Sidebar`'s dense-row twin — same session data, icon density.
 import { router, usePathname } from "expo-router";
-import { Flame, Search, Settings2, SquareChevronRight } from "lucide-react-native";
+import { Flame, Gauge, Search, Settings2, SquareChevronRight } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
@@ -76,9 +76,10 @@ export interface IconRailProps {
   onExpand: () => void;
   /** See Sidebar's identical prop — the ring column doubles as the ⌘U dock toggle. */
   onToggleDock?: () => void;
+  dockOpen?: boolean;
 }
 
-export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
+export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailProps) {
   const tokens = useTokens();
   const pathname = usePathname();
   const palette = usePalette();
@@ -138,6 +139,15 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
           </>
         ) : null}
         <View style={[styles.divider, { backgroundColor: tokens.border }]} />
+        {onToggleDock ? (
+          <RailIconButton
+            icon={<Gauge size={14} strokeWidth={1.75} color={dockOpen ? tokens.ink : tokens.ink2} />}
+            onPress={onToggleDock}
+            accessibilityLabel={dockOpen ? "Hide usage panel" : "Show usage panel"}
+            accessibilityHint="Command U"
+            active={dockOpen}
+          />
+        ) : null}
         <RailIconButton
           icon={<Settings2 size={14} strokeWidth={1.75} color={tokens.ink2} />}
           onPress={() => router.push("/settings")}

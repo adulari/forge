@@ -5,7 +5,7 @@
 // group, and a footer (usage-pace rings + Inbox/History/Settings + the collapse
 // control). Replaces `ExpandedFleetRail` (components/fleet/DesktopDrillDown.tsx).
 import { router, usePathname } from "expo-router";
-import { Bell, BellDot, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
+import { Bell, BellDot, Gauge, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
@@ -127,9 +127,10 @@ export interface SidebarProps {
    * usage-ring row double as the ⌘U dock-toggle affordance (design calls for
    * "⌘U + a top-bar/icon-rail affordance", this rail's half of that). */
   onToggleDock?: () => void;
+  dockOpen?: boolean;
 }
 
-export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
+export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarProps) {
   const tokens = useTokens();
   const pathname = usePathname();
   const palette = usePalette();
@@ -242,6 +243,20 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
             <History size={15} strokeWidth={1.75} color={tokens.ink2} />
           </Pressable>
           <View style={styles.footerSpacer} />
+          {/* Always present: the ring row above only renders once a subscription window has
+              been observed, and without this the dock had no visible way to open. */}
+          {onToggleDock ? (
+            <Pressable
+              onPress={onToggleDock}
+              accessibilityRole="button"
+              accessibilityLabel={dockOpen ? "Hide usage panel" : "Show usage panel"}
+              accessibilityHint="Command U"
+              accessibilityState={{ selected: dockOpen }}
+              style={[styles.footerIconButton, dockOpen && { backgroundColor: tokens.bg3 }]}
+            >
+              <Gauge size={15} strokeWidth={1.75} color={dockOpen ? tokens.ink : tokens.ink2} />
+            </Pressable>
+          ) : null}
           <Pressable
             onPress={() => router.push("/settings")}
             accessibilityRole="button"
