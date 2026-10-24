@@ -9,7 +9,7 @@ import { Segmented } from "../components/ds/Segmented";
 import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
-import { setWrapCodeBlocks, useAppearancePreferences } from "../lib/appearancePreferences";
+import { setFoldToolGroups, setWrapCodeBlocks, useAppearancePreferences } from "../lib/appearancePreferences";
 import { useTheme } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
@@ -22,6 +22,12 @@ export default function AppearanceScreen() {
 
   const updateCodeWrap = (value: boolean) => {
     void setWrapCodeBlocks(value).catch(() => {
+      toast.show("couldn't save appearance preference.", { tone: "danger" });
+    });
+  };
+
+  const updateFoldToolGroups = (value: boolean) => {
+    void setFoldToolGroups(value).catch(() => {
       toast.show("couldn't save appearance preference.", { tone: "danger" });
     });
   };
@@ -71,6 +77,26 @@ export default function AppearanceScreen() {
             />
             <Text style={[type.sub, styles.note, { color: tokens.ink3 }]}>
               Git diffs remain horizontally scrollable so side-by-side alignment and line annotations stay exact.
+            </Text>
+          </View>
+
+          <View>
+            <SectionHeader>Transcript</SectionHeader>
+            <ListRow
+              title="Fold tool calls"
+              subtitle="Show each run of tool calls as one summary row, such as “Read 3 files, ran 2 shell commands”. Tap a row to see every call."
+              showSeparator={false}
+              trailing={
+                <Switch
+                  value={appearance.foldToolGroups}
+                  onValueChange={updateFoldToolGroups}
+                  disabled={!appearance.loaded}
+                  accessibilityLabel="Fold tool calls"
+                />
+              }
+            />
+            <Text style={[type.sub, styles.note, { color: tokens.ink3 }]}>
+              Failed calls and calls still running stay listed under their summary.
             </Text>
           </View>
         </Screen>

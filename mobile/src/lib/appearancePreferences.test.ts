@@ -10,8 +10,16 @@ vi.mock("@react-native-async-storage/async-storage", () => ({
 }));
 
 it("accepts only an explicit persisted code-wrap preference", () => {
-  expect(parseAppearancePreferences('{"wrapCodeBlocks":true}')).toEqual({ wrapCodeBlocks: true });
-  expect(parseAppearancePreferences('{"wrapCodeBlocks":"true"}')).toEqual({ wrapCodeBlocks: false });
-  expect(parseAppearancePreferences("{bad json")).toEqual({ wrapCodeBlocks: false });
-  expect(parseAppearancePreferences(null)).toEqual({ wrapCodeBlocks: false });
+  expect(parseAppearancePreferences('{"wrapCodeBlocks":true}').wrapCodeBlocks).toBe(true);
+  expect(parseAppearancePreferences('{"wrapCodeBlocks":"true"}').wrapCodeBlocks).toBe(false);
+  expect(parseAppearancePreferences("{bad json").wrapCodeBlocks).toBe(false);
+  expect(parseAppearancePreferences(null).wrapCodeBlocks).toBe(false);
+});
+
+it("folds tool groups unless explicitly turned off", () => {
+  expect(parseAppearancePreferences(null).foldToolGroups).toBe(true);
+  expect(parseAppearancePreferences('{"wrapCodeBlocks":true}')).toEqual({ wrapCodeBlocks: true, foldToolGroups: true });
+  expect(parseAppearancePreferences('{"foldToolGroups":false}').foldToolGroups).toBe(false);
+  expect(parseAppearancePreferences('{"foldToolGroups":"false"}').foldToolGroups).toBe(true);
+  expect(parseAppearancePreferences("{bad json").foldToolGroups).toBe(true);
 });

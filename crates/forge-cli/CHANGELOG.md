@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The app folds tool activity into one dim row per run of calls, like the full-screen TUI.** In a session's chat on iOS, Android, web and desktop, tool calls the assistant makes without writing anything in between collapse into a summary such as `Read 3 files, searched for 2 patterns, ran 4 shell commands` or, when the run touched one thing, `Ran cargo test -p upload` or `Read src/big.rs`. Files, directories, patterns and pages are counted once however many calls touched them, and bridged `mcp__forge__<tool>` calls count as the tool. A failed call is never counted as done: it is left out of the sentence, the row says `1 failed` on the right, the failed call stays listed under the row, and a run where nothing succeeded says `Tried to edit sample.rs`. While a call runs, the row shows a spinner and the call in flight stays under it; permission prompts are unaffected, because they sit above the composer. Tap or click a row (or focus it and press Enter or Space) to open the per-call cards in place; open rows stay open while the list scrolls and grows. Settings > Appearance > Fold tool calls turns it off. History rows carry no diff or timing, so the app's rows have no `(+a −d)` or duration and a written file reads as edited rather than created. Each group's summary is reused until its calls change, so streamed tokens and history refetches do not rebuild settled groups (`mobile/src/lib/toolGroups.ts`, `mobile/src/components/chat/ToolGroupRow.tsx`).
+
 ## [2.23.2] - 2026-10-24
 
 ### Changed
