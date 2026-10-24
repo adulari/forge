@@ -19,6 +19,8 @@ use tauri::webview::{PageLoadEvent, PageLoadPayload};
 mod about;
 mod menu;
 mod preview;
+#[cfg(test)]
+mod security_config;
 mod serve_discovery;
 mod tray;
 

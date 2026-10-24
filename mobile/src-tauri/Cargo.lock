@@ -1139,6 +1139,7 @@ version = "1.0.0"
 dependencies = [
  "directories",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
@@ -1150,6 +1151,8 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tauri-plugin-websocket",
+ "url",
+ "urlpattern",
  "webkit2gtk",
 ]
 
