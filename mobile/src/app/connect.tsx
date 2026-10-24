@@ -15,7 +15,6 @@ import Svg, { Path } from "react-native-svg";
 import { EntitlementBadge } from "../components/anywhere/EntitlementBadge";
 import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
-import { Card } from "../components/ds/Card";
 import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
@@ -384,12 +383,6 @@ export default function ConnectScreen() {
         />
       </View>
 
-      <Card variant="feature" style={styles.gapCard}>
-        <Text style={[typeScale.heading, { color: tokens.ink }]}>Connect from anywhere</Text>
-        <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Forge Anywhere adds managed, end-to-end encrypted access and sync. Direct, LAN, and your own tunnels remain free.</Text>
-        <Button label="Set up Forge Anywhere" variant="secondary" onPress={() => router.push("/anywhere")} fullWidth />
-      </Card>
-
       {testState !== "idle" && testState !== "testing" && testState !== "ok" ? (
         <Banner tone="danger" message={STATE_COPY[testState]} />
       ) : null}
@@ -406,7 +399,8 @@ export default function ConnectScreen() {
       <View style={styles.anywhereSection}>
         <Text style={[typeScale.section, { color: tokens.ink4 }]}>anywhere</Text>
         <Text style={[typeScale.sub, styles.anywhereDescription, { color: tokens.ink2 }]}>
-          Optional managed encrypted relay. Leave your desk without leaving your session.
+          Optional managed encrypted relay. Leave your desk without leaving your session; Direct, LAN,
+          and your own tunnels stay free.
         </Text>
 
         {anywhereSignedIn && anywhereAccount ? (
@@ -497,7 +491,6 @@ const styles = StyleSheet.create({
   urlBlock: { gap: space.space4, width: "100%" },
   urlBlockWide: { maxWidth: 480 },
   connectButton: { marginTop: space.space8 },
-  gapCard: { maxWidth: 480, width: "100%" },
   successText: { textAlign: "center" },
   anywhereSection: { gap: space.space4, maxWidth: 480, width: "100%" },
   anywhereDescription: { marginBottom: space.space4 },
