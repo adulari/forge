@@ -676,6 +676,8 @@ Findings F1 to F9 are listed above; the audit's gaps are G1 to G25.
 
 ## Not yet measured
 
+Status at the baseline. The [final round](#final-round-kit-v2-2026-10-24) measured the TUI and UX comparison, latency, the Opus subset, and Haiku and Sonnet on suite c, multi-turn and SWE-bench; robustness beyond the static audit, the quota and dollar comparison and the other items below remain open.
+
 - The scripted TUI and UX comparison (launch, permission prompt, diff, interrupt, resume, narrow terminal, paste) with a blinded rubric. The harness is in the kit; there are no results.
 - Trivial-prompt and first-token latency, TUI startup and keystroke latency.
 - The Opus subset.
@@ -810,41 +812,158 @@ _No after-fixes run set has been recorded yet. Append one to `runs.json` and run
 _No after-fixes run set has been recorded yet. Append one to `runs.json` and run `render.py`._
 <!-- END:after-swe -->
 
-### Rounds 3 and 4 (kit v2, 2026-10-23/24, hand-written)
+### Final round (kit v2, 2026-10-24)
 
-Kit v2, every arm in its own clean config and home, Forge and Claude Code arms of the same model started
-together so they share machine load. Claude Code 2.1.308 pinned. Forge `b6944b58` (main after round 3) for
-the suites; `ddce9d57` and the round-4 branch (#1657) where noted. These tables are written by hand from the
-kit's `aggregate.py` output; ingesting kit v2 run sets into `runs.json`/`render.py` is still to do. Forge ran
-2 attempts per task and Claude Code 1, so per-attempt rates are compared.
+Final numbers of the study. Forge `23385aac` (main 2.22.0 plus #1659, #1660 and #1661, the build v2.23.0
+ships) against Claude Code 2.1.308, pinned for every spawn, on the same models: DeepSeek V4.1 Flash (Forge's
+own loop against Claude Code pointed at the same endpoint), and Haiku 5.5, Sonnet 5.5 and Opus 5.5 (Forge's
+Claude bridge, which runs the same `claude` binary underneath). Kit v2 throughout: every arm has its own
+empty configuration directory and home, workspaces outside `$HOME`, no user instruction files. The Forge and
+Claude Code arms of one model started together so they share machine load. Suites a+b+d (26 tasks) and c
+(11 tasks) ran 2 attempts per task per arm; Opus ran 1. Everything below is the clean rerun ("after5")
+except the SWE-bench and latency rows, which come from the previous build (`3974f6fe`, same code paths) and
+the blinded UI round.
 
-Suites a+b+d (26 tasks), solved per attempt and agent wall time per attempt:
+**Environment fault disclosed.** From about 23:00 on Oct 23 to 04:00 on Oct 24 a stale editable matplotlib
+install, left in the host Python by an earlier benchmark task and pointing into a directory the Oct 23
+shutdown had wiped, made every `python3` start print a traceback on stderr. It failed stderr-asserting tasks
+(one task failed identically for both Opus arms) and ran underneath an earlier full suite round ("after4",
+every arm), the multi-turn and Opus runs of the measure lane, and the first part of the UI round's captures,
+for both tools alike. The stale files were set aside at 04:07 and the whole suite round was rerun from
+scratch with `python3` verified silent; **the after4 suite numbers are discarded and the tables below are
+the rerun.** Not affected and kept: SWE-bench (the host view hides those files), latency, and multi-turn
+graders (no stderr assertions; their token and call counts do not depend on load, their walls do). The
+Opus table in this section is the rerun, not the one measured during the fault.
 
-| model | Claude Code | Forge | wall, Forge / Claude Code |
+Suites a+b+d, solved per attempt (sign test on the same task and attempt; 95% Wilson interval in brackets):
+
+| model | Claude Code | Forge | only Forge / only Claude Code | median wall per attempt, Forge / Claude Code |
+|---|---|---|---|---|
+| DeepSeek V4.1 Flash | 39/52 = 75% (62-85) | 47/52 = 90% (79-96) | 11 / 3, p=0.057 | 74.3 s / 77.0 s (paired median 0.97x) |
+| Haiku | 40/52 = 77% (64-86) | 48/52 = 92% (82-97) | 8 / 0, p=0.0078 | 35.1 s / 49.2 s (0.71x) |
+| Sonnet | 45/52 = 87% (75-93) | 47/52 = 90% (79-96) | 4 / 2, p=0.69 | 23.2 s / 24.5 s (0.95x) |
+| Opus (1 attempt) | 21/26 = 81% (62-92) | 24/26 = 92% (76-98) | 3 / 0, p=0.25 | 45.8 s / 48.4 s (0.95x) |
+
+Pooled over the four models Forge solved 166 of 182 attempts and Claude Code 145 of 182. Read the lead with
+the caveat that follows: of the attempts Claude Code lost, 7 of 13 (DeepSeek), 8 of 12 (Haiku), 3 of 5 (Opus)
+and 3 of 7 (Sonnet) failed a protected-file integrity check (it edited or rewrote an existing test file),
+where Forge's guidance puts new tests in new files. The checks are part of the tasks and the table counts
+them as failures, but if they are counted as passes the models are at 48 vs 46 (DeepSeek, Forge first), 49 vs
+48 (Haiku), 47 vs 48 (Sonnet) and 24 vs 24 (Opus). The lead is mostly a behaviour difference, not a stronger
+solver; on Sonnet and Opus it is parity. The attempts only Claude Code solved are Sonnet a09 (Forge failed an
+edge case in both attempts), DeepSeek a09 and d01 (one attempt each).
+
+Suite c (11 tasks in large real repositories, 2 attempts; Opus 1):
+
+| model | Claude Code | Forge | median wall, Forge / Claude Code |
 |---|---|---|---|
-| DeepSeek V4.1 Flash (InferHub) | 69% (18/26) | 90% (47/52) | 0.67x (2,357 s vs 3,511 s) |
-| Haiku | 81% (21/26) | 92% (48/52) | 0.75x (1,655 s vs 2,202 s) |
-| Sonnet | 81% (21/26) | 90% (47/52) | 1.12x (1,081 s vs 963 s) |
-| Sonnet, round-4 build (1 attempt) | 81% (21/26) | 96% (25/26) | 0.85x (823 s vs 963 s) |
+| DeepSeek | 22/22 | 22/22 | 83.9 s / 74.2 s (1.13x paired) |
+| Haiku | 22/22 | 22/22 | 42.8 s / 53.6 s (0.80x) |
+| Sonnet | 22/22 | 22/22 | 25.5 s / 25.3 s (1.01x) |
+| Opus | 11/11 | 11/11 | 46.6 s / 47.6 s (0.98x) |
 
-Suite c (11 tasks in large real repositories):
+Suite c is at the ceiling for every pair, so it separates nothing on quality. It does show cost: on DeepSeek
+Forge used 1.40x the input tokens and 1.38x the model calls of Claude Code (669k vs 478k tokens per solved attempt).
 
-| model | Claude Code | Forge | wall, Forge / Claude Code |
+Effort on suites a+b+d (all attempts; tokens per solved attempt count input plus output):
+
+| model | input tokens, Forge / Claude Code | tokens per solved | model calls | tool calls issued |
+|---|---|---|---|---|
+| DeepSeek | 13.27 M / 16.16 M (0.82x) | 294k / 430k | 665 / 668 | 622 / 1,029 |
+| Haiku | 11.19 M / 13.42 M (0.83x) | 242k / 348k | 458 / 452 | 530 / 550 |
+| Sonnet | 4.86 M / 4.82 M (1.01x) | 106k / 110k | 295 / 232 (1.27x) | 255 / 184 (1.39x) |
+| Opus | 3.53 M / 3.80 M (0.93x) | 152k / 186k | 188 / 170 (1.11x) | 190 / 146 (1.30x) |
+
+On Sonnet and Opus the bridge still issues more calls than Claude Code (Forge edits through structured edit
+tools where Claude Code edits through shell heredocs); it no longer costs wall time. The bridge's
+completeness review still runs in 22 of 52 Haiku, 31 of 52 Sonnet and 8 of 26 Opus sessions on a+b+d but
+costs 2-7% of the wall and changed something afterwards in 1, 2 and 1 sessions.
+
+Codex (gpt-6-luna, same rules; CX is the Codex CLI's own loop, FX Forge's bridge to it, FO Forge's native
+loop on the Codex login):
+
+| | CX | FX | FO |
 |---|---|---|---|
-| DeepSeek | 11/11 | 22/22 | 1.18x total, 0.82x median pair |
-| Haiku | 10/11 | 22/22 | 1.22x |
-| Haiku, round-4 build (1 attempt) | 10/11 | 11/11 | 0.87x (513 s vs 591 s) |
-| Sonnet | 11/11 | 22/22 | 1.02x |
+| a+b+d solved (52 attempts) | 38 (73%) | 39 (75%), p=1.0 vs CX | 42 (81%), p=0.34 vs CX |
+| suite c solved (11 tasks, 1 attempt) | 10 | 8 | 7 |
+| median wall per attempt, a+b+d | 25.4 s | 37.4 s (1.47x) | 30.0 s (1.18x) |
+| input tokens, a+b+d | 7.91 M | 12.94 M (1.64x) | 7.33 M (0.81x) |
 
-Input tokens per attempt are within 0.95-1.07x of Claude Code on every arm except Haiku suite c at
-`b6944b58` (1.21x, 1.07x on the round-4 build). The Sonnet gap at `b6944b58` was the bridge's completeness
-review (69-100% of tasks, 10-15% of wall, no outcome changed after a passing check); #1657 runs it only when
-nothing checked the change.
+SWE-bench Verified, 10 instances, host view, official evaluator (build `3974f6fe`, 2-3 attempts per instance):
 
-SWE-bench Verified, 10 instances, host view (Forge `f8735a4c`): DeepSeek CC 16/20 vs Forge 17/20, Haiku
-21/30 vs 26/30, Sonnet 29/30 vs 28/30. Opus, 12 suite tasks, 1 attempt: CC 9/12 vs Forge 10/12 (1.38x wall).
+| model | Claude Code | Forge | Fisher p | cell median wall, Forge / Claude Code |
+|---|---|---|---|---|
+| DeepSeek | 17/20 | 15/20 | 0.69 | 319 s / 295 s |
+| Haiku | 24/30 | 25/30 | 1.0 | 31 s / 65 s |
+| Sonnet | 28/30 | 29/30 | 1.0 | 15 s / 17 s |
 
-Blinded terminal UX (12 scenarios, 5 pairs, 3 judges, Forge `b6944b58`): Forge preferred in 178 of 180
-votes (2 ties, none for the other tool); rubric difference +0.99 [+0.79, +1.20] against Claude Code and
-+1.35 [+1.03, +1.68] against Codex. Forge is slower to start on DeepSeek (415 vs 286 ms) and its Claude
-bridge idles at 457 MB in 3 processes against Claude Code's 280 MB in 1.
+No pair is significant. Of the eight instance-level flips only one has a harness mechanism: on Haiku, Claude
+Code ended the turn with an explanation and no edit on one instance (3 of 3 attempts), where Forge's turn
+contract made the model edit. The rest are model variance in fix shape or an evaluator flake.
+
+Multi-turn (3 seeds of 3 sessions, per-seed totals, medians; build `3974f6fe`): all graders pass except one
+DeepSeek session on Forge (a stale phrase left in a README), 8/9 against 9/9. Forge vs Claude Code wall: +9%
+(DeepSeek), -21% (Haiku), -1% (Sonnet); input tokens 0%, -27%, +14%; tool calls 1.2x, 0.8x, 2.0x.
+
+Latency, headless `Reply with exactly: ok`, 5 runs per cell and two cells per pair (build `3974f6fe`):
+
+| model | wall, Forge / Claude Code | time to first token | exit after the result |
+|---|---|---|---|
+| Haiku | 2.59 s / 3.72 s | 2.02 s / 2.03 s | 15 ms / 0.7 s |
+| Sonnet | 2.09 s / 2.58 s | 1.92 s / 1.81 s | 15 ms / 0.6 s |
+| DeepSeek | 3.08 s / 2.93 s | 2.28 s / 2.51 s | 12 ms / 16 ms |
+
+Forge's wall advantage on the Claude models is the process tail (Claude Code lingers 0.6-0.8 s after its
+result); first-token time is level. The DeepSeek ordering flips between the two cells because the endpoint's
+own response time varied from 1.4 to 4.4 s for an identical call, so no latency difference is resolved
+there. Forge's trivial turn sends 1.2k input tokens on DeepSeek against 10.8k.
+
+Blinded terminal UX (12 scenarios, 5 pairs, 3 judges, 795 criterion cells, 180 votes; Forge `23385aac`):
+Forge was preferred in 162 votes, 15 tied and 3 for the other tool (164 / 15 / 1 after correcting one
+judge's swapped A/B labels). Rubric difference, scenario-level bootstrap with 95% interval: +0.82 [+0.58,
++1.06] against Claude Code over three pairs and +1.35 [+1.02, +1.70] against Codex over two. The previous round
+was 178 / 2 / 0 and +0.99 against Claude Code; the fall in preference share is mostly judge variance on the
+keystroke-echo scenario (both tools now score 5/5), and without it the lead is unchanged at +1.14. Measured:
+ready in 56-90 ms against 335-709 ms, keystroke echo 0.7-2.2 ms against 10-37 ms, idle memory 60-62 MB for the
+native Forge arms against 253-594 MB for their counterparts. The judges are brand-blind but not tool-blind,
+the rubric was written by the Forge team, and Forge's own UI is the same in all five packs, so the votes are
+not independent: the direction is solid, the magnitude is indicative.
+
+Trajectory of the Forge arms on suites a+b+d (solved of 52 attempts, median wall per attempt; kit v1 baseline is
+not comparable, the later rounds are):
+
+| arm | baseline (kit v1) | first kit v2 round | second | third | final |
+|---|---|---|---|---|---|
+| DeepSeek, Forge native | 35 | 40 (79.9 s) | 47 (69.4 s) | 47 (61.6 s) | 47 (74.3 s) |
+| Haiku, Forge bridge | 32 | 43 (36.9 s) | 47 (42.2 s) | 48 (40.4 s) | 48 (35.1 s) |
+| Sonnet, Forge bridge | 18 of 26, 1 attempt | 23 of 26, 1 attempt (28.2 s) | 47 (30.6 s) | 47 (29.3 s) | 47 (23.2 s) |
+
+Input tokens against Claude Code fell from 0.98x to 0.82x (DeepSeek), 0.95x to 0.83x (Haiku) and 1.17x to
+1.01x (Sonnet); the median wall against Claude Code from 1.35x to 0.97x, 0.78x to 0.71x and 1.11x to 0.95x.
+The PRs behind the later rounds are #1640 to #1661 (progress-based turn supervision instead of step caps,
+cross-process resume of the Claude session, slimmer bridge preambles and review evidence, review only for
+unchecked changes, verification scaled to the project, queued follow-ups, trust prompts, a ready-in-125-ms
+start with an idle chat at 65 MB), #1642 and #1656 for the Codex bridge, and the release PRs #1658 and #1663.
+
+What remains behind or only at parity:
+
+- Quality against Claude Code is at parity on Sonnet and Opus and ahead on DeepSeek and Haiku mostly because
+  Forge does not edit protected test files (see the caveat above).
+- The Claude bridge issues 1.3-1.4x the tool calls of Claude Code on Sonnet and Opus (2.0x in multi-turn),
+  and uses +14% input tokens in the Sonnet multi-turn sessions.
+- Forge's native loop on DeepSeek is slower and heavier than Claude Code on long work: suite c 1.13x wall and
+  1.40x input tokens at the same 22/22, SWE cell median 1.08x, multi-turn
+  +9% wall and +19% output tokens, SWE 15 vs 17 of 20. Its multi-turn input rose 50% against the
+  second-round build with no harness cause found.
+- The Codex side: the Forge bridge is 1.47x slower and 1.64x heavier on input than Codex on a+b+d, both
+  Forge Codex arms are behind on suite c (8 and 7 of 11 against 10, three tasks each, not significant) and the
+  bridge is slower than Codex on every turn after the first in the UI round.
+- First-token latency on the Claude bridge is level with Claude Code, not ahead; the bridge's idle footprint is
+  334 MB over 3 processes against Claude Code's 273 MB in 1.
+- Information density is Forge's weakest UI criterion; two Forge UI gaps remain (a raw tool-call row on
+  DeepSeek edits, two permission prompts where Claude Code asks once).
+- Small samples throughout: 10 SWE instances (flips of one instance move a pair), 3 multi-turn seeds at a
+  53 of 54 ceiling, 5 runs per latency cell, 11 suite c tasks, 12 UI scenarios, and about two dozen tests
+  without multiplicity correction; only the Haiku a+b+d difference (p=0.0078) clears 0.05 and it carries the
+  protected-file effect. The suites were written by the Forge team, seven suite c tasks use a snapshot of Forge's
+  source, and Forge arms see a Forge-specific prompt that Claude Code arms do not.
