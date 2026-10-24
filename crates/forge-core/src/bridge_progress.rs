@@ -106,7 +106,7 @@ impl BridgeProgress {
             args: args.clone(),
         };
         let verification = classify_tool(tool, &args.to_string());
-        let flipped = self.verification.observe(verification, ok);
+        let flipped = self.verification.observe_result(verification, ok, result);
         let observation = CallObservation::for_call(&call, ok, mutating, result)
             .with_check(verification.check_family(), flipped);
         let task_closed = tasks_done.is_some_and(|done| {
