@@ -116,8 +116,8 @@
   {
     "file": "mobile/src/components/UpdateNotice.tsx",
     "platform": "desktop",
-    "reason": "runtime-gated update-seen capture seeding for unattended desktop performance launches; normal update UX remains shared",
-    "category": "capability"
+    "reason": "desktop shows the changelog section matching its installed version (shared with the daemon) and links to the published release notes; mobile builds have their own version line and show the newest daemon release; plus runtime-gated update-seen seeding for unattended desktop performance launches",
+    "category": "behavior"
   },
   {
     "file": "mobile/src/components/cards/PermissionCard.tsx",
@@ -188,8 +188,8 @@
   {
     "file": "mobile/src/components/ds/Sheet.tsx",
     "platform": "web/native",
-    "reason": "shared surface contains platform-specific handling",
-    "category": "capability"
+    "reason": "shared surface contains platform-specific handling; on desktop the sheet stays below the custom title bar and leaves a drag strip over it",
+    "category": "behavior"
   },
   {
     "file": "mobile/src/components/ds/ToastHost.tsx",

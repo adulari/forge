@@ -17,6 +17,7 @@ use tauri::{RunEvent, WindowEvent};
 use tauri::webview::{PageLoadEvent, PageLoadPayload};
 
 mod about;
+mod auto_update;
 mod menu;
 mod preview;
 #[cfg(test)]
@@ -240,6 +241,8 @@ pub fn run(process_start: Instant) {
             if let Err(error) = tray::install(app.handle()) {
                 eprintln!("forge: tray unavailable: {error}");
             }
+
+            auto_update::spawn(app.handle().clone());
 
             Ok(())
         })

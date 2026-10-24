@@ -75,4 +75,24 @@ if ! run_gate "$scratch/moderate.json" >/dev/null; then
   exit 1
 fi
 
+# A fix that exists only in a major a dependency pins out of the tree is waived while every
+# installed copy is below that major, and fails once one reaches it.
+cat > "$scratch/zod.json" <<'JSON'
+{"vulnerabilities": {
+  "zod": {"severity": "high", "range": "<4.6.6", "fixAvailable": false,
+    "via": [{"url": "https://github.com/advisories/GHSA-mrhx-c7xc-m3w5"}]}
+}}
+JSON
+mkdir -p "$scratch/pinned" "$scratch/moved"
+echo '{"packages": {"node_modules/zod": {"version": "3.25.76"}}}' > "$scratch/pinned/package-lock.json"
+echo '{"packages": {"node_modules/zod": {"version": "4.2.0"}, "node_modules/x/node_modules/zod": {"version": "3.25.76"}}}' > "$scratch/moved/package-lock.json"
+if ! (cd "$scratch/pinned" && run_gate "$scratch/zod.json" >/dev/null); then
+  echo "expected a major-locked advisory to pass while the tree is pinned below the fix" >&2
+  exit 1
+fi
+if (cd "$scratch/moved" && run_gate "$scratch/zod.json" >/dev/null 2>&1); then
+  echo "expected a major-locked advisory to fail once the fixed major is installed" >&2
+  exit 1
+fi
+
 echo "npm audit gate behaviour passed"

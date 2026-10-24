@@ -9,11 +9,12 @@
 // it is where the features are described — but it means the sheet stays empty rather than lying when
 // no server is paired.
 import React from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import * as Updates from "expo-updates";
 
 import { useAppVersion } from "../lib/appVersion";
 import { useAuth } from "../lib/auth";
+import { releaseForApp, releaseNotesUrl, splitEntry } from "../lib/changelogEntry";
 import { useChangelog } from "../lib/queries";
 import { isTauri } from "../lib/platform";
 import {
@@ -25,6 +26,7 @@ import {
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { type } from "../theme/typography";
+import { Markdown } from "./chat/Markdown";
 import { Button } from "./ds/Button";
 import { Sheet } from "./ds/Sheet";
 
@@ -33,7 +35,7 @@ export function UpdateNotice() {
   const appVersion = useAppVersion();
   const { isPaired } = useAuth();
   const [notice, setNotice] = React.useState<Notice | null>(null);
-  const changelog = useChangelog(1);
+  const changelog = useChangelog(isTauri ? 20 : 1);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -79,7 +81,7 @@ export function UpdateNotice() {
 
   if (!notice) return null;
 
-  const release = changelog.data?.[0];
+  const release = releaseForApp(changelog.data, notice.appVersion, isTauri);
   const heading = notice.kind === "app"
     ? `Installed Forge app: ${notice.appVersion}`
     : "Installed Forge update";
@@ -102,20 +104,29 @@ export function UpdateNotice() {
             </Text>
             <ScrollView style={styles.entries} contentContainerStyle={styles.entryList}>
               {release.entries.map((entry, position) => (
-                <View key={`${entry.section}-${position}`} style={styles.entry}>
-                  <View style={[styles.bullet, { backgroundColor: tokens.accent }]} />
-                  <Text style={[type.sub, styles.entryText, { color: tokens.ink2 }]}>{entry.text}</Text>
-                </View>
+                <Entry key={`${entry.section}-${position}`} text={entry.text} />
               ))}
             </ScrollView>
           </>
         ) : (
           <Text style={[type.meta, styles.section, { color: tokens.ink4 }]}>
-            {/* Honest about WHY rather than showing an empty panel: the changelog lives on the
-                daemon, so without one paired there is nothing to read. */}
-            Connect a server to read what changed.
+            {/* The notes live on the daemon. Without one paired, or with an older one that has no
+                section for this version, say so instead of showing another release's notes. */}
+            {changelog.data?.length
+              ? "Your server runs an older Forge, so it has no notes for this version yet."
+              : "Connect a server to read what changed."}
           </Text>
         )}
+
+        {isTauri && notice.kind === "app" ? (
+          <Pressable
+            onPress={() => void openReleaseNotes(notice.appVersion)}
+            accessibilityRole="link"
+            style={styles.link}
+          >
+            <Text style={[type.sub, { color: tokens.accent }]}>Full release notes</Text>
+          </Pressable>
+        ) : null}
 
         <Button label="Got it" onPress={() => setNotice(null)} />
       </View>
@@ -123,12 +134,41 @@ export function UpdateNotice() {
   );
 }
 
+async function openReleaseNotes(version: string): Promise<void> {
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(releaseNotesUrl(version)).catch(() => undefined);
+}
+
+/** The bold summary always shows; the detail opens on tap so the sheet stays short. */
+function Entry({ text }: { text: string }) {
+  const tokens = useTokens();
+  const [open, setOpen] = React.useState(false);
+  const { lead, detail } = splitEntry(text);
+  return (
+    <Pressable
+      onPress={() => setOpen((value) => !value)}
+      disabled={!detail}
+      accessibilityRole={detail ? "button" : undefined}
+      accessibilityState={detail ? { expanded: open } : undefined}
+      style={styles.entry}
+    >
+      <View style={[styles.bullet, { backgroundColor: tokens.accent }]} />
+      <View style={styles.entryText}>
+        <Markdown content={lead} style={[type.sub, { color: tokens.ink }]} />
+        {detail && open ? <Markdown content={detail} style={[type.sub, { color: tokens.ink3 }]} /> : null}
+        {detail && !open ? <Text style={[type.meta, { color: tokens.ink4 }]}>Details</Text> : null}
+      </View>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
-  body: { gap: space.space8, paddingBottom: space.space8 },
+  body: { gap: space.space8, paddingHorizontal: space.space16, paddingBottom: space.space16 },
   section: { marginTop: space.space8 },
   entries: { maxHeight: 320, marginBottom: space.space8 },
   entryList: { gap: space.space8, paddingVertical: space.space8 },
   entry: { flexDirection: "row", gap: space.space8, alignItems: "flex-start" },
   bullet: { width: 5, height: 5, borderRadius: radii.radius4, marginTop: 7 },
-  entryText: { flex: 1, lineHeight: 19 },
+  entryText: { flex: 1, gap: 2 },
+  link: { alignSelf: "flex-start", paddingVertical: space.space4 },
 });

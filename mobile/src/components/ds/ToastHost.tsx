@@ -2,7 +2,7 @@
 // stacks Toasts bottom-up, auto-dismiss 3.5s.
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { isTauri } from "../../lib/platform";
 import { notifySupported, notify } from "../../lib/notify";
@@ -114,6 +114,7 @@ export function ToastHost({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(() => ({ show, dismiss }), [show, dismiss]);
+  const insets = useSafeAreaInsets();
 
   return (
     <ToastContext.Provider value={value}>
@@ -121,16 +122,16 @@ export function ToastHost({ children }: { children: React.ReactNode }) {
       {/* Top-anchored: the bottom edge is owned by composers/tab bars on every surface
           (the "another session finished" toast used to sit on top of the input bar).
           On Tauri the 36px chrome bar owns the very top, so toasts start below it. */}
-      <SafeAreaView
-        style={[styles.host, { pointerEvents: "box-none", paddingTop: isTauri ? 44 : 0 }]}
-        edges={["top"]}
-      >
-        <View style={[styles.stack, { pointerEvents: "box-none" }]}>
+      {/* `pointerEvents` as a prop: inside an inline style object react-native-web writes
+          `pointer-events: box-none`, which is not CSS, so the empty 44px box swallowed every
+          click on the desktop title bar beneath it. */}
+      <View pointerEvents="box-none" style={[styles.host, { paddingTop: isTauri ? 44 : insets.top }]}>
+        <View pointerEvents="box-none" style={styles.stack}>
           {toasts.map((t) => (
             <Toast key={t.id} toast={t} onDismiss={dismiss} />
           ))}
         </View>
-      </SafeAreaView>
+      </View>
     </ToastContext.Provider>
   );
 }

@@ -4,7 +4,9 @@
 // label), a host-status chip + compact ⌘K chip trailing, native window controls
 // (non-macOS; macOS keeps its overlay traffic lights, so only the drag region +
 // content render there). The whole bar is a Tauri drag region except the
-// interactive islands.
+// interactive islands. "deep" makes clicks on child views count too; the bare attribute only
+// matches clicks on the bar element itself, which the flex spacer covers. Double-click to
+// maximize comes from Tauri's drag script, so the bar has no onDoubleClick of its own.
 import { Flame, Minus, Search, Square, X } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View, type ViewProps } from "react-native";
@@ -25,7 +27,7 @@ export const DESKTOP_WINDOW_CHROME_HEIGHT = 36;
 // choice for the same reason).
 const MOD_KEY = isMacOS ? "⌘" : "Ctrl";
 
-type WebViewProps = ViewProps & { dataSet?: Record<string, string>; onDoubleClick?: () => void };
+type WebViewProps = ViewProps & { dataSet?: Record<string, string> };
 const WebView = View as unknown as React.ComponentType<WebViewProps>;
 
 interface WindowControls {
@@ -63,8 +65,7 @@ export function DesktopWindowChrome() {
 
   return (
     <WebView
-      dataSet={{ tauriDragRegion: "" }}
-      onDoubleClick={() => void toggleMaximize()}
+      dataSet={{ tauriDragRegion: "deep" }}
       style={[styles.bar, { backgroundColor: tokens.bg1, borderBottomColor: tokens.border }, isMacOS && styles.macos]}
       accessible={false}
     >
