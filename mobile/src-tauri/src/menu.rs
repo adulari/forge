@@ -28,6 +28,10 @@ pub const MENU_EVENT: &str = "forge://menu";
 #[derive(Clone, serde::Serialize)]
 pub struct MenuEventPayload {
     pub id: String,
+    /// Only on the tray's decision rows: the exact prompt the clicked row was built for, so the
+    /// webview answers that prompt and nothing newer. `None` there means the row was stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<crate::tray::DecisionTarget>,
 }
 
 // Item ids. Kept as consts so the Rust menu tree and the TS switch can be diffed by grepping
@@ -365,5 +369,11 @@ pub fn handle_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         raise_main_window(app);
     }
 
-    let _ = app.emit(MENU_EVENT, MenuEventPayload { id: id.to_string() });
+    let _ = app.emit(
+        MENU_EVENT,
+        MenuEventPayload {
+            id: id.to_string(),
+            decision: None,
+        },
+    );
 }

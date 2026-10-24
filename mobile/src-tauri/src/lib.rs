@@ -8,13 +8,13 @@
 //
 // `Manager::get_webview_window` is used in the non-macOS setup hook; `menu.rs` and `about.rs`
 // bring their own imports.
-#[cfg(not(target_os = "macos"))]
-use tauri::Manager;
 use serde::Serialize;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
-use tauri::{RunEvent, WindowEvent};
 use tauri::webview::{PageLoadEvent, PageLoadPayload};
+#[cfg(not(target_os = "macos"))]
+use tauri::Manager;
+use tauri::{RunEvent, WindowEvent};
 
 mod about;
 mod auto_update;
@@ -64,9 +64,10 @@ where
 }
 
 fn perf_elapsed_ms() -> f64 {
-    PERF_START.get().map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0)
+    PERF_START
+        .get()
+        .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0)
 }
-
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,8 +91,14 @@ fn perf_seed_server() -> Result<Option<PerfSeedServer>, String> {
         .join("serve-state.json");
     let raw = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
     let state: serde_json::Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-    let token = state.get("token").and_then(serde_json::Value::as_str).ok_or_else(|| "serve state missing token".to_string())?;
-    let port = state.get("port").and_then(serde_json::Value::as_u64).unwrap_or(7420);
+    let token = state
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "serve state missing token".to_string())?;
+    let port = state
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(7420);
     // The LOOPBACK origin, never `serve-state.json`'s `base_url`. When the daemon runs with
     // `--tunnel` that field is a cloudflared quick-tunnel URL whose hostname is regenerated on
     // every launch, so seeding it (a) measured tunnel round-trips instead of local daemon
@@ -108,11 +115,16 @@ fn perf_seed_server() -> Result<Option<PerfSeedServer>, String> {
     }))
 }
 #[tauri::command]
-fn perf_native_now() -> f64 { perf_elapsed_ms() }
+fn perf_native_now() -> f64 {
+    perf_elapsed_ms()
+}
 
 #[tauri::command]
 fn perf_native_timeline() -> PerfNativeTimeline {
-    perf_timeline().lock().map(|timeline| *timeline).unwrap_or_default()
+    perf_timeline()
+        .lock()
+        .map(|timeline| *timeline)
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -184,6 +196,7 @@ pub fn run(process_start: Instant) {
             preview::preview_hide,
             preview::preview_close,
             tray::set_tray_summary,
+            tray::tray_open_main,
             menu::set_menu_accelerators,
             about::set_about_info,
             about::open_about_window,
@@ -197,11 +210,9 @@ pub fn run(process_start: Instant) {
             perf_seed_update_seen,
         ])
         .on_page_load(|_webview, payload: &PageLoadPayload<'_>| {
-            perf_mark(|timeline| {
-                match payload.event() {
-                    PageLoadEvent::Started => timeline.navigation_start_ms = Some(perf_elapsed_ms()),
-                    PageLoadEvent::Finished => timeline.dom_content_loaded_ms = Some(perf_elapsed_ms()),
-                }
+            perf_mark(|timeline| match payload.event() {
+                PageLoadEvent::Started => timeline.navigation_start_ms = Some(perf_elapsed_ms()),
+                PageLoadEvent::Finished => timeline.dom_content_loaded_ms = Some(perf_elapsed_ms()),
             });
         })
         .setup(|app| {
