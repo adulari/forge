@@ -233,6 +233,12 @@ function runDefault(id: string): void {
   }
 }
 
+/** Run a menu action as if its menu item had been chosen — for in-app surfaces (the command
+ * palette) that offer the same action on platforms without a native menu bar. */
+export function runDesktopMenuAction(id: DesktopMenuId): void {
+  dispatch(id);
+}
+
 function dispatch(id: string): void {
   const stack = registry.get(id);
   const handler = stack?.[stack.length - 1];

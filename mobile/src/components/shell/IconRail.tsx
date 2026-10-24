@@ -3,7 +3,7 @@
 // session with a status-dot badge, a usage-pace ring column, settings, and the
 // expand affordance. `Sidebar`'s dense-row twin — same session data, icon density.
 import { router, usePathname } from "expo-router";
-import { Bell, BellDot, Flame, History, Plus, Search, Settings2, SquareChevronRight } from "lucide-react-native";
+import { Bell, BellDot, Flame, Gauge, History, Plus, Search, Settings2, SquareChevronRight } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
@@ -83,9 +83,10 @@ export interface IconRailProps {
   onExpand: () => void;
   /** See Sidebar's identical prop — the ring column doubles as the ⌘U dock toggle. */
   onToggleDock?: () => void;
+  dockOpen?: boolean;
 }
 
-export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
+export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailProps) {
   const tokens = useTokens();
   const usageHint = useShortcutLabel("shell.usage");
   const sidebarHint = useShortcutLabel("shell.sidebar");
@@ -181,6 +182,15 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
           accessibilityLabel="History"
           active={pathname === "/history"}
         />
+        {onToggleDock ? (
+          <RailIconButton
+            icon={<Gauge size={14} strokeWidth={1.75} color={dockOpen ? tokens.ink : tokens.ink2} />}
+            onPress={onToggleDock}
+            accessibilityLabel={dockOpen ? "Hide usage panel" : "Show usage panel"}
+            accessibilityHint={usageHint}
+            active={dockOpen}
+          />
+        ) : null}
         <RailIconButton
           icon={<Settings2 size={14} strokeWidth={1.75} color={tokens.ink2} />}
           onPress={() => router.push("/settings")}

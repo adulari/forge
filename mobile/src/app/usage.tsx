@@ -10,8 +10,8 @@ import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
 import { BoundedList } from "../components/ds/BoundedList";
 import { Segmented } from "../components/ds/Segmented";
-import { type UsagePacing, type UsageProvider } from "../lib/api";
 import { useSessions, useUsage } from "../lib/queries";
+import { buildProviderBlocks, formatDurationShort, isModelScopedWindow, isSubscription, quotaAccount, kindLabel, priceLabel, quotaSummary, quotaTiming, windowLabel, windowShortLabel, type DisplayQuota, type ProviderBlock } from "../lib/usageWindows";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
@@ -20,27 +20,12 @@ import { usePullRefresh } from "../lib/usePullRefresh";
 
 const compact = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
 const kindTone = (kind: string) => kind === "api" ? "neutral" : "success";
-// Quota window names on the wire -> the prototype's short mono labels.
-const WINDOW_LABEL: Record<string, string> = { five_hour: "5h", weekly: "week", monthly: "month", secondary: "2nd" };
-const resetLabel = (resetsAt: number | null) => resetsAt == null ? null : `resets ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(resetsAt * 1000))}`;
-const observationLabel = (updatedAt: number | undefined, nowSec: number) => updatedAt == null ? null : `as of ${formatDurationShort(nowSec - updatedAt)} ago`;
-
-type QuotaRow = { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null; updatedAt?: number; pacing?: UsagePacing | null };
 
 // Fixed window durations for the quota kinds the wire actually sends (api.ts UsageQuota;
 // "secondary" has no known fixed length, so it's excluded from pace projection). "monthly" is
 // OpenCode Go's calendar window — 30 days nominal, matching nominal_window_secs in Rust.
-const WINDOW_DURATION_SEC: Record<string, number> = { five_hour: 5 * 3600, weekly: 7 * 24 * 3600, monthly: 30 * 24 * 3600 };
-
-function formatDurationShort(totalSec: number): string {
-  const sec = Math.max(0, Math.round(totalSec));
-  const days = Math.floor(sec / 86400);
-  const hours = Math.floor((sec % 86400) / 3600);
-  const minutes = Math.floor((sec % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${Math.max(1, minutes)}m`;
-}
+const WEEK_SEC = 7 * 24 * 3600;
+const WINDOW_DURATION_SEC: Record<string, number> = { five_hour: 5 * 3600, weekly: WEEK_SEC, weekly_fable: WEEK_SEC, weekly_opus: WEEK_SEC, weekly_sonnet: WEEK_SEC, monthly: 30 * 24 * 3600 };
 
 /**
  * Pace-dot annotation ("● ≈75% by reset" warn / "● runs out 1d 8h" danger), computed
@@ -50,7 +35,7 @@ function formatDurationShort(totalSec: number): string {
  * (linear extrapolation of the current fraction over the elapsed portion of the window)
  * only ever runs on top of that real signal.
  */
-function paceAnnotation(quota: QuotaRow, nowSec: number): { text: string; tone: "warn" | "danger" } | null {
+function paceAnnotation(quota: DisplayQuota, nowSec: number): { text: string; tone: "warn" | "danger" } | null {
   if (quota.status !== "warning" && quota.status !== "exhausted") return null;
   const duration = WINDOW_DURATION_SEC[quota.windowKind];
   if (!duration || quota.fraction == null || quota.resetsAt == null) return null;
@@ -75,31 +60,22 @@ function paceAnnotation(quota: QuotaRow, nowSec: number): { text: string; tone: 
  * "pace unknown" when no reset time was known (`usedNominalFallback`), so nothing is
  * re-derived here from `fraction` and `resetsAt`.
  */
-function pacingAnnotation(quota: QuotaRow): { text: string; over: boolean } | null {
+function pacingAnnotation(quota: DisplayQuota): { text: string; over: boolean } | null {
   const pacing = quota.pacing;
   if (!pacing) return null;
   return { text: pacing.summary, over: pacing.overPace && !pacing.usedNominalFallback };
 }
 
-/** One rendered provider block: token usage (when any), quota windows (when any) — a
- * provider with live quota but no recorded tokens still shows, bars visible. */
-interface ProviderItem {
-  provider: string;
-  kind: string;
-  usage: UsageProvider | null;
-  quotas: QuotaRow[];
-}
-
-const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: { item: ProviderItem; showSeparator: boolean; nowSec: number }) {
+const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: { item: ProviderBlock; showSeparator: boolean; nowSec: number }) {
   const tokens = useTokens();
-  const costUsd = item.usage?.costUsd ?? 0;
-  const priceLabel = costUsd > 0 ? `$${costUsd.toFixed(2)}` : item.kind === "api" ? "No price" : "Included";
+  const price = priceLabel(item);
+  const billed = price.startsWith("$");
   return (
     <View style={[styles.provider, showSeparator ? { borderBottomColor: tokens.hairline, borderBottomWidth: StyleSheet.hairlineWidth } : null]}>
       <View style={styles.row}>
         <Text style={[styles.providerName, { color: tokens.ink }]} numberOfLines={1}>{item.provider}</Text>
-        <Badge label={item.kind} tone={kindTone(item.kind) as never} lowercase />
-        <Text style={[styles.price, tabularNums, { color: costUsd > 0 ? tokens.success : tokens.ink3 }]}>{priceLabel}</Text>
+        <Badge label={kindLabel(item.kind)} tone={kindTone(item.kind) as never} lowercase />
+        <Text style={[styles.price, tabularNums, { color: billed ? tokens.success : tokens.ink3 }]}>{price}</Text>
       </View>
       {item.usage ? (
         <Text style={[styles.detail, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>
@@ -107,20 +83,21 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
         </Text>
       ) : null}
       {item.quotas.map((quota) => {
-        const pct = quota.fraction == null ? null : Math.round(quota.fraction * 100);
         const barColor = quota.status === "exhausted" ? tokens.danger : quota.status === "warning" ? tokens.warn : tokens.accent;
-        const right = [pct == null ? "—" : `${pct}%`, resetLabel(quota.resetsAt), observationLabel(quota.updatedAt, nowSec)].filter(Boolean).join(" · ");
+        const right = quotaSummary(quota, nowSec);
         const pace = paceAnnotation(quota, nowSec);
         const pacing = pacingAnnotation(quota);
         return (
           <View key={quota.windowKind}>
-            <View style={styles.quota} accessibilityLabel={`${WINDOW_LABEL[quota.windowKind] ?? quota.windowKind} window ${right}`}>
-              <Text style={[styles.quotaLabel, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{WINDOW_LABEL[quota.windowKind] ?? quota.windowKind}</Text>
+            <View style={styles.quota} accessibilityLabel={`${windowLabel(quota.windowKind)} window ${right}`}>
+              <Text style={[styles.quotaLabel, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{windowShortLabel(quota.windowKind)}</Text>
               <View style={[styles.track, { backgroundColor: tokens.border }]}>
                 <View style={[styles.fill, { width: `${Math.min(100, Math.max(0, (quota.fraction ?? 0) * 100))}%`, backgroundColor: barColor }]} />
               </View>
-              <Text style={[styles.quotaPct, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{right}</Text>
+              <Text style={[styles.quotaPct, tabularNums, { color: quota.seen ? tokens.ink2 : tokens.ink4, fontFamily: monoFamily.regular }]} numberOfLines={1}>{quota.fraction == null ? "unknown" : `${Math.round(quota.fraction * 100)}%`}</Text>
             </View>
+            {/* Timing sits under the bar so every bar keeps the same length. */}
+            <Text style={[type.monoMeta, tabularNums, styles.quotaTiming, { color: tokens.ink4 }]} numberOfLines={1}>{quota.seen ? quotaTiming(quota, nowSec) || "no reset time reported" : "not seen yet"}</Text>
             {pace ? (
               <View style={styles.paceRow}>
                 <View style={[styles.paceDot, { backgroundColor: pace.tone === "danger" ? tokens.danger : tokens.warn }]} />
@@ -158,29 +135,18 @@ function UsageScreenBody() {
   // Merge token usage + quota windows into one provider list: a provider with a live quota
   // window but zero recorded tokens (fresh daemon, subscription bridges) still gets a block —
   // previously the quota data was invisible until usage.providers had entries.
-  const providers = useMemo<ProviderItem[]>(() => {
-    const result = new Map<string, ProviderItem>();
-    const keyOf = (provider: string, kind: string) => `${kind}:${provider}`;
-    for (const usage of selected?.providers ?? []) {
-      result.set(keyOf(usage.provider, usage.kind), { provider: usage.provider, kind: usage.kind, usage, quotas: [] });
-    }
-    for (const quota of quotaRows ?? []) {
-      const key = keyOf(quota.provider, quota.kind);
-      const existing = result.get(key) ?? { provider: quota.provider, kind: quota.kind, usage: null, quotas: [] };
-      existing.quotas.push(quota);
-      result.set(key, existing);
-    }
-    return [...result.values()].sort((a, b) => (b.usage?.costUsd ?? 0) - (a.usage?.costUsd ?? 0) || b.quotas.length - a.quotas.length || a.provider.localeCompare(b.provider));
-  }, [selected?.providers, quotaRows]);
-  const renderItem = useCallback(({ item, index }: { item: ProviderItem; index: number }) => <ProviderRow item={item} showSeparator={index < providers.length - 1} nowSec={nowSec} />, [providers.length, nowSec]);
-  const keyExtractor = useCallback((item: ProviderItem) => `${item.kind}:${item.provider}`, []);
+  const providers = useMemo(() => buildProviderBlocks(selected?.providers, quotaRows), [selected?.providers, quotaRows]);
+  const renderItem = useCallback(({ item, index }: { item: ProviderBlock; index: number }) => <ProviderRow item={item} showSeparator={index < providers.length - 1} nowSec={nowSec} />, [providers.length, nowSec]);
+  const keyExtractor = useCallback((item: ProviderBlock) => `${item.kind}:${item.provider}`, []);
   // The binding constraint, not an average: the fullest subscription window is what
   // actually gates the next turn.
-  const subscriptionQuotas = (quotaRows ?? []).filter((quota) => quota.kind !== "api" && quota.fraction != null);
-  const combinedSubscriptionPercent = window === "week" && subscriptionQuotas.length > 0
-    ? Math.round(Math.max(...subscriptionQuotas.map((quota) => quota.fraction ?? 0)) * 100)
+  const subscriptionQuotas = (quotaRows ?? []).filter((quota) => isSubscription(quota.kind) && quota.fraction != null && !isModelScopedWindow(quota.windowKind));
+  const fullest = window === "week" && subscriptionQuotas.length > 0
+    ? subscriptionQuotas.reduce((max, quota) => ((quota.fraction ?? 0) > (max.fraction ?? 0) ? quota : max))
     : null;
-  const hasMeteredApi = providers.some((item) => item.kind === "api" && item.usage != null);
+  const combinedSubscriptionPercent = fullest ? Math.round((fullest.fraction ?? 0) * 100) : null;
+  const sessionTitle = sessions?.find((session) => session.id === sessionId)?.title;
+  const hasMeteredApi = providers.some((item) => !isSubscription(item.kind) && item.usage != null);
   const apiCostUsd = providers.reduce((total, item) => total + (item.kind === "api" ? item.usage?.costUsd ?? 0 : 0), 0);
   const usageLabel = hasMeteredApi ? "API spend" : "Subscription usage";
   const totalTokens = (selected?.combined.inputTokens ?? 0) + (selected?.combined.outputTokens ?? 0);
@@ -197,13 +163,18 @@ function UsageScreenBody() {
             never drift on stroke width or color steps. Combined %-of-quota only — API-spend
             and session-activity states keep the text-only layout, nothing to ring there. */}
         {combinedSubscriptionPercent != null ? (
-          <UsageRing pct={combinedSubscriptionPercent} size={44} strokeWidth={4} accessibilityLabel={`${combinedSubscriptionPercent} percent combined subscription usage`} />
+          <UsageRing pct={combinedSubscriptionPercent} size={44} strokeWidth={4} accessibilityLabel={`${combinedSubscriptionPercent} percent of the fullest plan limit`} />
         ) : null}
         <View style={styles.heroText}>
-          <Text style={[type.section, { color: tokens.ink4 }]}>{combinedSubscriptionPercent != null ? "combined subscription usage" : window === "session" ? "this session" : usageLabel}</Text>
+          <Text style={[type.section, { color: tokens.ink4 }]}>{combinedSubscriptionPercent != null ? "fullest plan limit" : window === "session" ? "this session" : usageLabel}</Text>
           {combinedSubscriptionPercent != null ? <Text style={[styles.cost, tabularNums, { color: tokens.accent }]}>{combinedSubscriptionPercent}%</Text> : hasMeteredApi ? <Text style={[styles.cost, tabularNums, { color: tokens.accent }]}>{`$${apiCostUsd.toFixed(2)}`}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>{window === "session" ? "Session activity" : "Included with plan"}</Text>}
+          {fullest ? <Text style={[styles.split, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{quotaAccount(fullest.provider)} · {windowLabel(fullest.windowKind)}</Text> : null}
+          {window === "session" && sessionTitle ? <Text style={[styles.split, { color: tokens.ink3 }]} numberOfLines={1}>{sessionTitle}</Text> : null}
+          {fullest && hasMeteredApi ? <Text style={[styles.split, tabularNums, { color: tokens.ink2, fontFamily: monoFamily.regular }]}>{`$${apiCostUsd.toFixed(2)} API spend`}</Text> : null}
           <Text style={[styles.tokens, tabularNums, { color: tokens.ink2, fontFamily: monoFamily.regular }]}>{compact(totalTokens)} tokens</Text>
-          <Text style={[styles.split, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>{compact(selected.combined.inputTokens)} in · {compact(selected.combined.outputTokens)} out</Text>
+          <Text style={[styles.split, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>
+            {compact(selected.combined.inputTokens)} in{selected.combined.cachedInputTokens ? ` (${compact(selected.combined.cachedInputTokens)} cached)` : ""} · {compact(selected.combined.outputTokens)} out
+          </Text>
         </View>
       </View> : null}
       {isLoading ? <Text style={[styles.empty, { color: tokens.ink3 }]}>Loading usage…</Text> : null}
@@ -211,7 +182,7 @@ function UsageScreenBody() {
       {window === "session" && !selected && !isLoading && !isError ? <Text style={[styles.empty, { color: tokens.ink2 }]}>No session usage is available yet. Start or open a session to see its activity.</Text> : null}
       {providers.length > 0 ? <Text style={[type.section, styles.providersLabel, { color: tokens.ink4 }]}>providers</Text> : null}
     </View>
-  ), [apiCostUsd, combinedSubscriptionPercent, hasMeteredApi, isError, isLoading, providers.length, selected, tokens, totalTokens, usageLabel, window]);
+  ), [apiCostUsd, combinedSubscriptionPercent, fullest, sessionTitle, hasMeteredApi, isError, isLoading, providers.length, selected, tokens, totalTokens, usageLabel, window]);
   const empty = isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
 
   return (
@@ -249,11 +220,12 @@ const styles = StyleSheet.create({
   price: { fontSize: 13, fontWeight: "600", flexShrink: 0 },
   detail: { fontSize: 11.5 },
   quota: { flexDirection: "row", alignItems: "center", gap: space.space8, marginTop: 8 },
-  quotaLabel: { fontSize: 11, width: 34 },
-  quotaPct: { fontSize: 11, flexShrink: 0 },
+  quotaLabel: { fontSize: 11, width: 40 },
+  quotaPct: { fontSize: 11, width: 56, textAlign: "right" },
+  quotaTiming: { paddingLeft: 48, marginTop: 2 },
   track: { flex: 1, height: 3, borderRadius: 2, overflow: "hidden" },
   fill: { height: "100%", borderRadius: 2 },
-  paceRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: 3, paddingLeft: 42 },
+  paceRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: 3, paddingLeft: 48 },
   paceDot: { width: 5, height: 5, borderRadius: 2.5 },
   empty: { fontSize: 15, lineHeight: 21 },
 });

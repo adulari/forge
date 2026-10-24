@@ -22,6 +22,7 @@ import {
   Clock,
   Eye,
   Flame,
+  Gauge,
   History,
   MoonStar,
   Plus,
@@ -69,6 +70,7 @@ import { ApiError } from "../../lib/api";
 import { entitlementBadge, hostStateText } from "../../lib/anywhere/format";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
+import { runDesktopMenuAction } from "../../lib/desktopMenu";
 import { haptics } from "../../lib/haptics";
 import {
   useArchiveSession,
@@ -222,6 +224,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
   const fleetHint = useShortcutLabel("nav.fleet");
   const inboxHint = useShortcutLabel("nav.inbox");
   const historyHint = useShortcutLabel("nav.history");
+  const usageHint = useShortcutLabel("shell.usage");
   const settingsHint = useShortcutLabel("nav.settings");
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const toast = useToast();
@@ -397,6 +400,23 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
       });
     }
 
+    // The usage dock lives in the wide desktop shell only; Linux and Windows have no menu bar, so
+    // this is their menu-equivalent route to it alongside ⌘U and the sidebar button.
+    if (!isCompact) {
+      items.push({
+        id: "action:usage-dock",
+        group: "actions",
+        title: "Toggle usage panel",
+        keywords: "usage dock panel limits quota subscription spend right sidebar",
+        leading: <Gauge size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        trailing: <KeyHint label={usageHint} />,
+        onSelect: () => {
+          close();
+          runDesktopMenuAction("view:usage");
+        },
+      });
+    }
+
     items.push({
       id: "action:theme-toggle",
       group: "actions",
@@ -453,7 +473,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
     }
 
     return items;
-  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact, newSessionHint]);
+  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact, newSessionHint, usageHint]);
 
   const navigationItems = useMemo<PaletteItem[]>(
     () => [

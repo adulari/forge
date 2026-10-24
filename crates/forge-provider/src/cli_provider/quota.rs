@@ -1,10 +1,16 @@
 use serde_json::Value;
 
-/// Normalise a Claude `rateLimitType` to Forge's window vocabulary (`five_hour` / `weekly`).
-/// Claude uses `seven_day` for the weekly window; everything else passes through unchanged.
+/// Normalise a Claude `rateLimitType` to Forge's window vocabulary (`five_hour` / `weekly` and the
+/// per-model `weekly_fable` / `weekly_opus` / `weekly_sonnet`). Claude uses `seven_day` for the
+/// weekly window; everything else passes through unchanged.
 pub(super) fn normalize_window(rate_limit_type: &str) -> String {
     let t = rate_limit_type.to_lowercase();
-    if t.contains("seven") || t.contains("week") || t == "7d" {
+    // Per-model weekly meters must not collapse into the all-models `weekly` window.
+    if t.contains("overage_included") || t == "7d_oi" {
+        forge_types::subscription_pacing::FABLE_WEEKLY_WINDOW.to_string()
+    } else if t.ends_with("_opus") || t.ends_with("_sonnet") {
+        format!("weekly_{}", t.rsplit('_').next().unwrap_or_default())
+    } else if t.contains("seven") || t.contains("week") || t == "7d" {
         "weekly".to_string()
     } else if t.contains("five") || t.contains("5h") || t == "hour" {
         "five_hour".to_string()

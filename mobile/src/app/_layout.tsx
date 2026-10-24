@@ -146,6 +146,7 @@ function RootNavigator() {
   const rightSurface = activeWorkbenchSurface(workbench.state, "right");
   const bottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
   const dockOpen = rightSurface != null;
+  const usageDockOpen = rightSurface?.kind === "usage";
 
   const activeSessionId = useActiveSessionId();
   // Desktop-only: on compact/medium the split reports inactive and nothing extra renders.
@@ -249,9 +250,9 @@ function RootNavigator() {
   );
 
   const rail = railless ? null : sidebarCollapsed ? (
-    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
+    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} dockOpen={usageDockOpen} />
   ) : (
-    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
+    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} dockOpen={usageDockOpen} />
   );
 
   // The split wraps the live route stack rather than replacing it (see SplitPanes.tsx), and the
@@ -289,7 +290,7 @@ function RootNavigator() {
           {isWeb && !isTauri ? (
             <WebTopBar
               onToggleDock={toggleUsageDock}
-              dockOpen={rightSurface?.kind === "usage"}
+              dockOpen={usageDockOpen}
             />
           ) : null}
           <View style={styles.shellRow}>

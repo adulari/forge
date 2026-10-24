@@ -15,6 +15,30 @@ pub struct ModelUsageRow {
 }
 
 impl Store {
+    /// The latest observation of every subscription window, for the usage surfaces. Unlike
+    /// [`Self::subscription_windows`] this keeps an observation past its routing freshness gate
+    /// (Codex's is five minutes) so the user still sees the last reading with its age; only a
+    /// window whose reset has passed is dropped, because its reading no longer describes anything.
+    pub fn subscription_windows_for_display(&self, now: i64) -> Result<Vec<SubscriptionWindow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT provider, window_kind, status, resets_at, fraction, updated_at
+             FROM subscription_usage WHERE resets_at IS NULL OR resets_at > ?1
+             ORDER BY provider, window_kind",
+        )?;
+        let rows = stmt.query_map([now], |row| {
+            Ok(SubscriptionWindow {
+                provider: row.get(0)?,
+                window_kind: row.get(1)?,
+                status: row.get(2)?,
+                resets_at: row.get(3)?,
+                fraction: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Provider-consumed usage across the complete session ledger.
     ///
     /// Unlike [`Store::session_tokens`], this includes inactive synthetic side calls (recap,

@@ -646,11 +646,7 @@ fn quota_alias_members(provider: &str) -> Vec<&str> {
 /// A quota observation is useful only while the window it describes can still be active. Unknown
 /// window names are retained briefly for forward compatibility, then discarded as dead kinds.
 fn quota_observation_is_current(provider: &str, window: &str, updated_at: i64, now: i64) -> bool {
-    let window_age = match window {
-        "five_hour" => 5 * 60 * 60,
-        "weekly" => 7 * 24 * 60 * 60,
-        _ => 30 * 24 * 60 * 60,
-    };
+    let window_age = forge_types::nominal_window_secs(window).unwrap_or(30 * 24 * 60 * 60);
     let freshness = if matches!(
         provider,
         "codex-oauth" | "codex-cli" | "opencode_go" | "kimi"
@@ -4934,6 +4930,76 @@ mod tests {
         assert!(!windows
             .iter()
             .any(|window| window.window_kind == "secondary"));
+    }
+
+    #[test]
+    fn display_windows_keep_a_stale_codex_reading_but_drop_a_passed_reset() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let hint = |provider: &str, window: &str, resets_at, fraction| forge_types::QuotaHint {
+            provider: provider.into(),
+            window: window.into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at,
+            fraction_used: Some(fraction),
+        };
+        // An hour old: past Codex's five-minute routing gate, still inside its week.
+        store
+            .record_quota_at(
+                &hint("codex-oauth", "weekly", Some(now + 86_400), 0.1),
+                now - 3_600,
+            )
+            .unwrap();
+        store
+            .record_quota_at(
+                &hint("codex-oauth", "five_hour", Some(now - 60), 0.5),
+                now - 3_600,
+            )
+            .unwrap();
+        assert!(store.subscription_windows().unwrap().is_empty());
+        let shown = store.subscription_windows_for_display(now).unwrap();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].window_kind, "weekly");
+        assert_eq!(shown[0].updated_at, now - 3_600);
+    }
+
+    #[test]
+    fn a_full_fable_meter_is_shown_but_never_gates_the_provider() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let hint = |window: &str, status, fraction| forge_types::QuotaHint {
+            provider: "claude-cli".into(),
+            window: window.into(),
+            status,
+            resets_at: Some(now + 86_400),
+            fraction_used: Some(fraction),
+        };
+        store
+            .record_quota_at(&hint("weekly", forge_types::QuotaStatus::Ok, 0.2), now)
+            .unwrap();
+        store
+            .record_quota_at(
+                &hint(
+                    forge_types::subscription_pacing::FABLE_WEEKLY_WINDOW,
+                    forge_types::QuotaStatus::Exhausted,
+                    1.0,
+                ),
+                now,
+            )
+            .unwrap();
+        let quota = store.quota_at(now).unwrap();
+        assert_eq!(quota.status_for("claude-cli"), forge_types::QuotaStatus::Ok);
+        assert_eq!(quota.fraction_for("claude-cli"), 0.2);
+        assert!(!store.bridge_fractions().unwrap()["claude-cli"]
+            .contains_key(forge_types::subscription_pacing::FABLE_WEEKLY_WINDOW));
+        let pacing = store.subscription_pacing_at(now).unwrap();
+        assert_eq!(pacing["claude-cli"].window, "weekly");
+        assert!(store
+            .subscription_windows_for_display(now)
+            .unwrap()
+            .iter()
+            .any(|window| window.window_kind
+                == forge_types::subscription_pacing::FABLE_WEEKLY_WINDOW));
     }
 
     #[test]

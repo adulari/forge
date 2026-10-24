@@ -5455,9 +5455,39 @@ mod tests {
                     Some(1788595200),
                     QuotaStatus::Ok
                 ),
+                (
+                    "weekly_fable".into(),
+                    Some(0.39),
+                    Some(1788595200),
+                    QuotaStatus::Ok
+                ),
             ],
-            "both real windows, and the overage-included meter never overwrites weekly"
+            "every real window, the overage-included (Fable) meter in its own window"
         );
+    }
+
+    #[test]
+    fn claude_per_model_weekly_meters_never_collapse_into_the_all_models_weekly() {
+        for (raw, expected) in [
+            ("seven_day", "weekly"),
+            ("seven_day_overage_included", "weekly_fable"),
+            ("7d_oi", "weekly_fable"),
+            ("seven_day_opus", "weekly_opus"),
+            ("seven_day_sonnet", "weekly_sonnet"),
+            ("five_hour", "five_hour"),
+        ] {
+            assert_eq!(super::quota::normalize_window(raw), expected, "{raw}");
+        }
+        // A window's own status wins over the top-level one, which describes the window that fired.
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.1,"resetsAt":1788360600},"seven_day_overage_included":{"utilization":1.0,"resetsAt":1788595200,"status":"rejected"}}}}"#;
+        let fable = parse_claude_line(line)
+            .into_iter()
+            .find_map(|p| match p {
+                Parsed::Quota { window, status, .. } if window == "weekly_fable" => Some(status),
+                _ => None,
+            })
+            .expect("fable window parsed");
+        assert_eq!(fable, forge_types::QuotaStatus::Exhausted);
     }
 
     #[test]
