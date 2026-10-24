@@ -9,6 +9,7 @@ import { StyleSheet, View } from "react-native";
 import Svg, { Circle } from "react-native-svg";
 
 import { useSessions, useUsage } from "../../lib/queries";
+import { isModelScopedWindow, quotaAccount } from "../../lib/usageWindows";
 import { useTheme } from "../../theme/ThemeProvider";
 import type { ColorTokens } from "../../theme/tokens";
 
@@ -36,9 +37,10 @@ export function useProviderPace(): ProviderPaceInfo {
   const rings = useMemo<ProviderPace[]>(() => {
     const byProvider = new Map<string, number>();
     for (const q of quotaRows ?? []) {
-      if (q.kind === "api" || q.fraction == null) continue;
+      if (q.kind === "api" || q.fraction == null || isModelScopedWindow(q.windowKind)) continue;
       const pct = Math.max(0, Math.min(100, Math.round(q.fraction * 100)));
-      byProvider.set(q.provider, Math.max(byProvider.get(q.provider) ?? 0, pct));
+      const account = quotaAccount(q.provider);
+      byProvider.set(account, Math.max(byProvider.get(account) ?? 0, pct));
     }
     return [...byProvider.entries()].map(([provider, pct]) => ({ provider, pct }));
   }, [quotaRows]);

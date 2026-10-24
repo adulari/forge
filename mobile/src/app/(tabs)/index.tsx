@@ -26,7 +26,7 @@ import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { unrepresentedAnywhereHosts } from "../../lib/serverTargets";
-import { useServerFleets, useSessions } from "../../lib/queries";
+import { useServerFleets, useSessions, useUsage } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
 import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
@@ -67,7 +67,10 @@ function FleetTitle() {
 // replaces the old boxed 3-up stat row (HANDOFF Fleet screen).
 function FleetSummary({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: SessionRow[]; needsYouOnly: boolean; onToggleNeedsYou: () => void }) {
   const tokens = useTokens();
-  const totalCost = useMemo(() => sessions.reduce((sum, s) => sum + s.cost_usd, 0), [sessions]);
+  // The daemon's own since-midnight spend: summing the listed sessions' lifetime cost labelled a
+  // multi-day total "today" and counted plan usage as dollars. An older daemon without `today`
+  // gets no figure rather than a wrong one.
+  const todayCost = useUsage().data?.today?.combined.costUsd;
   const waitingCount = useMemo(() => sessions.filter((s) => s.waiting).length, [sessions]);
   const busyCount = useMemo(() => sessions.filter((s) => s.busy).length, [sessions]);
 
@@ -80,9 +83,14 @@ function FleetSummary({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: 
       accessibilityState={{ selected: needsYouOnly }}
     >
       <Text style={[typeScale.sub, { color: waitingCount > 0 ? tokens.danger : tokens.ink3 }]}>{waitingCount} needs you</Text>
-      <Text style={[typeScale.sub, { color: tokens.ink3 }]}> · {busyCount} forging · </Text>
-      <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{formatCostSummary(totalCost)}</Text>
-      <Text style={[typeScale.sub, { color: tokens.ink3 }]}> today</Text>
+      <Text style={[typeScale.sub, { color: tokens.ink3 }]}> · {busyCount} forging</Text>
+      {todayCost != null ? (
+        <>
+          <Text style={[typeScale.sub, { color: tokens.ink3 }]}> · </Text>
+          <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{formatCostSummary(todayCost)}</Text>
+          <Text style={[typeScale.sub, { color: tokens.ink3 }]}> API today</Text>
+        </>
+      ) : null}
     </Pressable>
   );
 }

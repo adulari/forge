@@ -285,6 +285,8 @@ export interface ChangelogRelease { version: string; date: string | null; entrie
 
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
+  /** Since the daemon host's local midnight. Absent on daemons that predate it. */
+  today?: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
   quota: UsageQuota[];
 }
