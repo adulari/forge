@@ -81,9 +81,16 @@ pub(crate) fn bridge_plans(
 }
 
 /// Whether the user looks un-onboarded: no provider key, no installed bridge, and no saved
-/// config. Pure so it's testable; the caller adds the tty check before auto-launching `init`.
-pub(crate) fn needs_onboarding(has_any_key: bool, any_bridge: bool, config_exists: bool) -> bool {
-    !has_any_key && !any_bridge && !config_exists
+/// config. The two expensive answers are computed only when they can still matter: a saved config
+/// settles it, and the key scan (a Secret Service round trip per provider on a machine with no
+/// key in the environment, about 200 ms) never runs for it. The caller adds the tty check before
+/// auto-launching `init`.
+pub(crate) fn needs_onboarding_with(
+    config_exists: bool,
+    has_any_key: impl FnOnce() -> bool,
+    any_bridge: impl FnOnce() -> bool,
+) -> bool {
+    !config_exists && !has_any_key() && !any_bridge()
 }
 
 /// Read one trimmed line from stdin with a prompt (no echo suppression — same as `auth`).

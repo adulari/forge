@@ -313,11 +313,15 @@ pub(crate) fn maybe_first_run_setup(mock: bool) -> Result<()> {
     if mock || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Ok(());
     }
-    let has_any_key = forge_config::known_key_providers().any(forge_config::has_api_key);
+    let any_bridge = || forge_provider::CliKind::all().iter().any(|k| k.routable());
     // An installed-but-logged-out bridge is not a configured provider — offering setup is exactly
     // the right thing for that machine.
-    let any_bridge = forge_provider::CliKind::all().iter().any(|k| k.routable());
-    if !needs_onboarding(has_any_key, any_bridge, forge_config::user_config_exists()) {
+    let needs_setup = needs_onboarding_with(
+        forge_config::user_config_exists(),
+        || forge_config::known_key_providers().any(forge_config::has_api_key),
+        any_bridge,
+    );
+    if !needs_setup {
         return Ok(());
     }
     println!("⚒ Welcome to Forge — no providers are configured yet.");
@@ -386,11 +390,15 @@ pub(crate) async fn run_chat_tui(
     };
     use std::time::{Duration, Instant};
 
+    // The vocabulary is built at the first input event, not at start-up (see `tokens`): an idle
+    // session never holds its ~45 MB.
+    forge_core::tokens::defer_warm_until_input();
     let (tx, rx) = std::sync::mpsc::channel::<UiMsg>();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
 
     // Load config once — shared between update check, session build, and TUI config below.
     let tui_config = super::load_config()?;
+    crate::startup_trace::mark("chat config loaded");
     // Fire the update check in the background so it never blocks TUI startup.
     // The notification arrives as a Warning in the TUI instead of blocking on a 3s HTTP call.
     update_check::maybe_notify_background(&tui_config, tx.clone());
@@ -424,6 +432,7 @@ pub(crate) async fn run_chat_tui(
             .then(|| crate::open_store().ok().map(Arc::new))
             .flatten(),
     );
+    crate::startup_trace::mark("presence guard");
     let prior_unclean_exit = resume_id
         .as_deref()
         .is_some_and(|id| local_presence.retarget(id));
@@ -444,6 +453,7 @@ pub(crate) async fn run_chat_tui(
     forge_tui::theme::init(&tui_config.tui);
     let mut tui = Tui::new(fullscreen, mouse_capture, tui_config.keybinds.clone())
         .context("initializing TUI")?;
+    crate::startup_trace::mark("terminal initialised");
     let mut app = App::default();
     app.fullscreen = fullscreen;
     app.queue_visible = true;
@@ -467,6 +477,7 @@ pub(crate) async fn run_chat_tui(
     let session = {
         app.loading = Some("starting session…");
         tui.draw(&app);
+        crate::startup_trace::mark("first frame drawn");
         let pin_for_status = pin.clone();
         let build = build_session_with(
             Box::new(ChannelPresenter::new(tx)),
@@ -499,6 +510,7 @@ pub(crate) async fn run_chat_tui(
             }
         };
         app.loading = None;
+        crate::startup_trace::mark("session built");
         if let Some(pinned) = pin_for_status.filter(|p| p.contains("::") && !p.contains(',')) {
             app.apply(forge_tui::PresenterEvent::Routing {
                 tier: "pinned".to_string(),
@@ -506,14 +518,6 @@ pub(crate) async fn run_chat_tui(
                 rationale: "pinned by --model".to_string(),
                 effort: None,
             });
-        }
-        let mut session = session;
-        // A terminal session can list and message its peers through a running daemon; only offer
-        // the tools when one answers, so the model is never handed a tool that cannot work.
-        if !mock && crate::fleet_peers::HttpFleet::reachable().await {
-            session.set_fleet_messaging(Some(std::sync::Arc::new(
-                crate::fleet_peers::HttpFleet::local(),
-            )));
         }
         session
     };
@@ -526,6 +530,23 @@ pub(crate) async fn run_chat_tui(
     let steer = session.steer_handle();
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
     if !mock {
+        // A terminal session can list and message its peers through a running daemon; the tools
+        // are only offered when one answers, so the model is never handed a tool that cannot
+        // work. The probe builds an HTTP client and talks to the daemon, which held the first
+        // frame of the composer back by tens of milliseconds, so it settles beside it: the
+        // tools join the session as soon as the answer is in, well before anyone has typed a
+        // first prompt.
+        let probe_session = session.clone();
+        tokio::spawn(async move {
+            if crate::fleet_peers::HttpFleet::reachable().await {
+                probe_session
+                    .lock()
+                    .await
+                    .set_fleet_messaging(Some(std::sync::Arc::new(
+                        crate::fleet_peers::HttpFleet::local(),
+                    )));
+            }
+        });
         crate::cli::commands::models::follow_catalog(&session);
     }
     if let Some(mut rx) = mcp_done_rx {
@@ -586,6 +607,7 @@ pub(crate) async fn run_chat_tui(
         }
     }
 
+    crate::startup_trace::mark("background startup tasks spawned");
     let session_workspace = session.lock().await.workspace_root().to_path_buf();
     // Statusline metadata must describe the resumed session workspace, not the
     // directory from which the launcher happened to start.
@@ -643,6 +665,7 @@ pub(crate) async fn run_chat_tui(
     // SessionStart (`startup`, or `resume` for a reopened conversation); never holds the lock
     // while the hooks run.
     forge_core::hooks_session::fire_session_start_shared(&session, None).await;
+    crate::startup_trace::mark("session-start hooks fired");
     let sid = session.lock().await.session_id().to_string();
     // A fresh session is claimed here; a resumed one already was, and this is then a no-op.
     local_presence.retarget(&sid);
@@ -755,6 +778,7 @@ pub(crate) async fn run_chat_tui(
     // Fixed epoch for idle animations (effort slider rainbow, etc.): unlike busy_since this
     // never resets, so idle animations always have a monotonically increasing tick.
     let anim_epoch = Instant::now();
+    crate::startup_trace::mark("entering the input loop");
     // Receivers for overlay background loads (mesh/usage open instantly; data fills in async).
     let mut mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>> =
         None;
@@ -1122,6 +1146,7 @@ pub(crate) async fn run_chat_tui(
             // Any input counts as activity: hold the cursor solid and restart the idle timer, so
             // the blink only resumes once typing pauses.
             last_input_at = std::time::Instant::now();
+            forge_core::tokens::warm_now();
             app.cursor_hidden = false;
             if matches!(ev, forge_tui::InputEvent::Key(KeyKind::Redraw)) {
                 tui.redraw();

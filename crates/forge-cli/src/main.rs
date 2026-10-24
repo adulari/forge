@@ -24,8 +24,8 @@ pub(crate) use cli::commands::git::{git_cmd, maybe_install_git_hook};
 pub(crate) use cli::commands::import::import_cmd;
 pub(crate) use cli::commands::lattice::lattice_cmd;
 pub(crate) use cli::commands::local::{
-    auth, auth_codex_oauth, auth_xai_oauth, local_cmd, maybe_autostart_local, needs_onboarding,
-    prompt_line, provider_label, setup,
+    auth, auth_codex_oauth, auth_xai_oauth, local_cmd, maybe_autostart_local,
+    needs_onboarding_with, prompt_line, provider_label, setup,
 };
 pub(crate) use cli::commands::mcp::{mcp_cmd, plugin_cmd};
 pub(crate) use cli::commands::memory::memory_cmd;
@@ -98,6 +98,7 @@ mod serve_git;
 mod serve_schedules;
 mod serve_terminal;
 mod serve_workspace;
+mod startup_trace;
 mod telemetry;
 mod terminal_owner;
 mod update;
@@ -170,6 +171,7 @@ fn init_tracing() {
 }
 
 fn main() {
+    startup_trace::begin();
     // Before the runtime (and so before any second thread): `set_var` is only sound while this is
     // the sole thread. Logged later, once tracing exists.
     let login_path_added = login_path::hydrate_for_daemon();
@@ -242,11 +244,14 @@ fn exit_quietly_on_broken_pipe() {
 
 async fn run_cli(login_path_added: Vec<String>) {
     init_tracing();
+    startup_trace::mark("runtime + tracing up");
+    startup_trace::sample_memory_at_start();
     if !login_path_added.is_empty() {
         tracing::info!(added = ?login_path_added, "PATH extended from the login shell");
     }
 
     let cli = Cli::parse();
+    startup_trace::mark("args parsed");
     let Some(command) = cli.command.or_else(first_run::bare_command) else {
         return;
     };
@@ -260,9 +265,12 @@ async fn run_cli(login_path_added: Vec<String>) {
         }
         open_pr_hooks::install(config.as_ref());
     }
+    startup_trace::mark("config + theme + hooks");
     cli::commands::trust::startup_trust_gate(&command);
+    startup_trace::mark("trust gate");
     push_tool::install_local_sink();
     let telemetry_run = telemetry::start(&command);
+    startup_trace::mark("telemetry start");
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
         println!(
             "note: Forge sends anonymous usage counts (never code, prompts, paths, or device IDs).\n\

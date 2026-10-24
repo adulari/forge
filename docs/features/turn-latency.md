@@ -8,7 +8,7 @@ user again.
 
 | Step | Where | Rule |
 |---|---|---|
-| Tokenizer vocabulary (`o200k_base`, ~150 ms of CPU) | `forge_core::tokens::warm_in_background`, started at session build | Built on a background thread while startup continues; the first count waits for it instead of building a second copy. |
+| Tokenizer vocabulary (`o200k_base`, ~150 ms of CPU, about 45 MB) | `forge_core::tokens::warm_in_background` at session build for headless runs; `warm_now` at the first input event of the TUI | Built on a background thread; the first count waits for it instead of building a second copy. The TUI does not build it at launch: a session that is opened and left idle never holds the 45 MB, and typing a prompt takes longer than the build. `--continue`, `--resume <id>` and a prompt on the command line start it at dispatch instead, because a resumed session counts its transcript for the gauge while it is built. |
 | Codex plan detection (OS keyring read) | `forge_provider::detect_subscription_plans`, prefetched at session build | Same: started at session build, cached 60 s. |
 | OpenCode Go / Kimi usage polls | `refresh_polled_quotas`, spawned at session build | Never awaited before routing. The route reads the last stored reading (at most one freshness window old); the poll's result lands for later routes. Awaiting it held every unpinned first token for ~0.9 s (up to its 5 s timeout). |
 | LLM tier classification | `LlmRouter::route_with_context` | Skipped when the deterministic floor is already Complex (the floor is a maximum, so no verdict can change the decision). Asked at low reasoning effort. Only the deterministic tier is computed before the call; the model is selected once, for the winning tier. |
@@ -19,6 +19,43 @@ user again.
 | Pinned model's context window (a network sweep when the store has never learned it, 0.6-1.1 s) | `pin_window::start_pinned_window_lookup`, `Session::settle_window_lookup` | Starts at session build and holds neither the TUI's first frame nor the first request. The session reads windows from the store each time it sizes a request, so a lookup that lands later applies by itself. What must not happen is a request the 32k floor sizes differently from the real window (a compaction at 25.6k tokens, a trimmed history), so the session waits for the lookup only when the context is past a quarter of the floor's compaction trigger or the request would not fit the floor's trim budget. A first request (system prompt, tools, one prompt) is under both and goes out at once. |
 | Model discovery on a machine's first launch (no cached catalog, bounded at 12 s) | `run/session.rs` | Skipped for a pinned, attended session: a pin routes nothing through the catalog and the TUI outlives the detached refresh that fills it in. Unpinned or unattended sessions still wait once, because their first route reads the catalog. |
 | Claude rate-limit probe (a real `claude` start plus a model turn) | `run_chat_tui` | Skipped when the session is pinned: a pin bypasses mesh selection, so the reading cannot change what the session does. Otherwise it runs in the background with `--tools "" --setting-sources ""`, so it no longer loads the user's hooks, CLAUDE.md and every tool definition (about 116 KB of request) to ask for one period. |
+
+## Before the first frame and the first prompt
+
+`forge chat` has to open the store, read the keyring, build the provider and router and start the
+session before the composer accepts text. On a clean profile with the keyring unlocked (the
+benchmark's fresh store, 32 cores, load average 12-20) that took 270-385 ms in the process; most of
+it was the same work done more than once. Each row is one step and the rule it follows.
+
+| Step | Where | Rule |
+|---|---|---|
+| First-run check (`known_key_providers().any(has_api_key)`) | `maybe_first_run_setup`, `needs_onboarding_with` | A saved config settles it with one `stat`. The key scan is a Secret Service round trip per provider on a machine with no key in the environment, about 205-235 ms, and it ran on every `forge chat` start; it now runs only for a machine with no config. |
+| Provider secrets (a D-Bus round trip, with a Diffie-Hellman handshake, per provider) | `forge_config::warm_provider_secrets`, started at `forge chat` dispatch; `inject_provider_keys` | Read on a detached thread beside the terminal setup and the store, so the injection that follows finds them cached. The injectors join the warm-up before they touch the environment: setting a variable must not overlap another thread's secret-service call. |
+| The store (open, schema batch, migrations, a pool of connections) | `Store::open_shared`, `open_store` after `share_store_handles()` | One file, one pool per chat process. The resume lookup, the presence guard, the session and the pricing table each opened, migrated and pooled the file again (five opens, 15-60 ms and 7-10 MB each). A handle opened while another is alive reuses its connections; the pool closes with the last handle, so the WAL is checkpointed as before. The daemon keeps independent handles. |
+| Connections per pool | `Store::build` | Two are opened up front, the rest when a second reader needs one (the pool keeps eight, sixteen when shared). Eight eager connections cost every open their setup and each keeps its own parsed schema and page cache. |
+| Daemon reachability probe (builds an HTTP client, asks the daemon) | `run_chat_tui` | Runs beside the first frame instead of in front of the composer; the fleet-messaging tools join the session when the answer is in. |
+| Model listings sweep (several MB of JSON parsed into trees, about 100 MB allocated) | `context_windows::fetch_and_persist` | Frees the pages when it returns (`malloc_trim`). Everything was dropped already, but the allocator kept about 65 MB for the life of the session. It runs on a fresh store, for a pinned model nothing knows yet and on a catalog refresh. |
+
+`RUST_LOG=forge::startup=debug` shows each step with its offset from `main` and the resident set
+(`first-run check (main+34 ms, rss 28 MB)`, `open_store took 3 ms`), and `memory: 126 -> 60 MB`
+lines whenever the resident set changes in the first ten seconds, so a step in memory can be lined
+up with the line before it.
+
+### Memory at idle
+
+The Claude bridge runs three processes: the Forge terminal, the bridged `claude` and the `forge
+mcp-serve` tool server it starts. `/proc/<pid>/smaps_rollup` fifteen seconds after launch, three
+runs per arm (MB):
+
+| Process | Resident before | Resident after | What it held |
+|---|---|---|---|
+| Forge terminal (`forge chat`) | 176-180 (anonymous 121-125) | 61-63 (anonymous 10-12) | before: the tokenizer vocabulary (45), a store pool per `open_store` call, the leftover pages of the model-listing sweep (65). The shared binary pages (about 48) stay. |
+| `claude` | 231-232 | 232-233 | Not Forge's. |
+| `forge mcp-serve` | 41-42 (anonymous 6) | 38-39 (anonymous 5) | One store pool and the tool registry. No Lattice, no grammars, no catalog: the tool server is small already. |
+| Sum | 450-454 | 333-335 | Claude Code alone reads 280 in one process. |
+
+The sum counts the shared pages of the Forge binary once per Forge process; the proportional set
+(`Pss`) sums to 298-302 before and 181-183 after.
 
 ## After the answer
 

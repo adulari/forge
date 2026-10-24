@@ -14,25 +14,91 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use tiktoken_rs::{o200k_base, CoreBPE};
 
 fn bpe() -> &'static CoreBPE {
     static BPE: OnceLock<CoreBPE> = OnceLock::new();
-    BPE.get_or_init(|| o200k_base().expect("bundled o200k_base vocabulary always loads"))
+    BPE.get_or_init(|| {
+        let started = std::time::Instant::now();
+        let bpe = o200k_base().expect("bundled o200k_base vocabulary always loads");
+        tracing::debug!(
+            target: "forge::startup",
+            "tokenizer vocabulary built on thread {:?} in {} ms",
+            std::thread::current().name().unwrap_or("?"),
+            started.elapsed().as_millis()
+        );
+        bpe
+    })
 }
 
-/// Build the vocabulary on a background thread. Loading `o200k_base` takes ~150 ms of CPU, and the
-/// first count happens while the first turn routes, so a surface that is about to run a turn calls
-/// this at startup to take that load off the first token. A count that arrives while the thread is
-/// still building waits for it instead of building a second copy.
+/// Build the vocabulary on a background thread. Loading `o200k_base` takes ~150 ms of CPU and about
+/// 45 MB, and the first count happens while the first turn routes, so a surface that is about to
+/// run a turn calls this at startup to take that load off the first token. A count that arrives
+/// while the thread is still building waits for it instead of building a second copy.
+///
+/// A surface where a person types the first prompt calls [`defer_warm_until_input`] first and
+/// [`warm_now`] at the first input event instead: a session that is opened and left idle then never
+/// holds the vocabulary, and typing a prompt takes longer than building it.
 pub fn warm_in_background() {
+    if WARM.background() {
+        spawn_warm();
+    }
+}
+
+/// From here on [`warm_in_background`] does nothing; [`warm_now`] starts the build.
+pub fn defer_warm_until_input() {
+    WARM.defer();
+}
+
+/// Start building the vocabulary on a background thread, once per process. A single atomic load
+/// after the first call, so it is cheap enough for an input loop.
+pub fn warm_now() {
+    if WARM.now() {
+        spawn_warm();
+    }
+}
+
+fn spawn_warm() {
     let _ = std::thread::Builder::new()
         .name("forge-tokenizer-warm".into())
         .spawn(|| {
             bpe();
         });
+}
+
+static WARM: WarmGate = WarmGate::new();
+
+/// Decides when the vocabulary build may start; pure over its own flags so the rule is testable
+/// without touching the process-wide gate.
+struct WarmGate {
+    deferred: AtomicBool,
+    started: AtomicBool,
+}
+
+impl WarmGate {
+    const fn new() -> Self {
+        Self {
+            deferred: AtomicBool::new(false),
+            started: AtomicBool::new(false),
+        }
+    }
+
+    fn defer(&self) {
+        self.deferred.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether a startup-time warm-up should spawn the build now.
+    fn background(&self) -> bool {
+        !self.deferred.load(Ordering::Relaxed) && self.now()
+    }
+
+    /// Whether this call is the one that should spawn the build (true once).
+    fn now(&self) -> bool {
+        !self.started.swap(true, Ordering::Relaxed)
+    }
 }
 
 fn cache() -> &'static Mutex<HashMap<u64, usize>> {
@@ -116,6 +182,21 @@ mod tests {
             long > short * 50,
             "100x the text is ~100x the tokens: {short} vs {long}"
         );
+    }
+
+    #[test]
+    fn a_deferred_warm_up_waits_for_the_first_input_and_then_runs_once() {
+        let gate = WarmGate::new();
+        gate.defer();
+        assert!(!gate.background(), "the startup warm-up is skipped");
+        assert!(!gate.background(), "and stays skipped");
+        assert!(gate.now(), "the first input starts the build");
+        assert!(!gate.now(), "once");
+
+        let eager = WarmGate::new();
+        assert!(eager.background(), "without a deferral startup builds it");
+        assert!(!eager.background());
+        assert!(!eager.now(), "an input after that finds it started");
     }
 
     #[test]
