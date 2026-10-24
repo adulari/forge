@@ -40,16 +40,42 @@ allowed_ids=(
   GHSA-86w9-cpqp-85rv
 )
 
+# Advisories fixed only in a newer MAJOR that a dependency's pin keeps out of the tree. The range
+# is bounded, so the `*` rule above would reject them, yet there is nothing we can upgrade to.
+# Format: ID=package@fixed-major. The waiver lapses as soon as any installed copy of the package
+# reaches that major: the pin moved, so upgrade to the fix.
+major_locked=(
+  # zod: memory exhaustion validating oversized constrained collections. Fixed only in 4.6.6;
+  # no 3.x patch exists, and @expo/cli pins zod ^3.25.76. Reached via @expo/cli (validates its own
+  # build config), babel-plugin-react-compiler and eslint-plugin-react-hooks; the app bundle never
+  # imports zod. Recheck when Expo moves to zod 4.
+  GHSA-mrhx-c7xc-m3w5=zod@4
+)
+
 audit_json=$(npm audit --omit=dev --json 2>/dev/null || true)
 if [ -z "$audit_json" ]; then
   echo "npm-audit-gate: npm audit produced no output" >&2
   exit 1
 fi
 
-printf '%s' "$audit_json" | ALLOWED="${allowed_ids[*]}" python3 -c '
+printf '%s' "$audit_json" | ALLOWED="${allowed_ids[*]}" MAJOR_LOCKED="${major_locked[*]}" python3 -c '
 import json, os, sys
 
 allowed = set(os.environ["ALLOWED"].split())
+major_locked = {}
+for entry in os.environ.get("MAJOR_LOCKED", "").split():
+    advisory, _, target = entry.partition("=")
+    package, _, major = target.rpartition("@")
+    major_locked[advisory] = (package, int(major))
+
+def installed_majors(package):
+    with open("package-lock.json") as handle:
+        packages = json.load(handle).get("packages", {})
+    return {
+        int(meta["version"].split(".")[0])
+        for path, meta in packages.items()
+        if path.split("node_modules/")[-1] == package and "version" in meta
+    }
 try:
     report = json.load(sys.stdin)
 except json.JSONDecodeError as error:
@@ -69,6 +95,18 @@ for name, vuln in sorted(report.get("vulnerabilities", {}).items()):
     ids.discard("")
     # A package with no advisory ids of its own is vulnerable only because a dependency is;
     # it clears as soon as that root advisory does, so judge it by its roots.
+    if not ids:
+        continue
+    locked = set()
+    for advisory in ids & set(major_locked):
+        package, fixed_major = major_locked[advisory]
+        majors = installed_majors(package)
+        if majors and max(majors) < fixed_major:
+            locked.add(advisory)
+            print(f"npm-audit-gate: waived {name} [{advisory!r}] (fix needs {package} {fixed_major}.x; tree is pinned to {sorted(majors)})")
+        else:
+            print(f"npm-audit-gate: {advisory} no longer major-locked: {package} {sorted(majors)} installed; upgrade to the fix and drop the entry", file=sys.stderr)
+    ids = ids - locked
     if not ids:
         continue
     unwaived = ids - allowed
