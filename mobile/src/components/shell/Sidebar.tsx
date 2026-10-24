@@ -241,7 +241,13 @@ export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarP
             <Text style={[typeScale.section, styles.usageLabel, { color: tokens.ink3 }]}>Usage</Text>
             <View style={styles.ringRow}>
               {rings.map((ring) => (
-                <UsageRing key={ring.provider} pct={ring.pct} accessibilityLabel={`${ring.provider} usage ${ring.pct}%`} />
+                // A bare ring at a low percent reads as a loading spinner, so it carries its number.
+                <View key={ring.provider} style={styles.ringItem}>
+                  <UsageRing pct={ring.pct} accessibilityLabel={`${ring.provider} usage ${ring.pct}%`} />
+                  <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]}>
+                    {planName(ring.provider)} {ring.pct}%
+                  </Text>
+                </View>
               ))}
             </View>
           </Pressable>
@@ -356,8 +362,15 @@ const styles = StyleSheet.create({
   usageBlock: { paddingHorizontal: space.space4, marginBottom: space.space8 },
   usageLabel: { fontFamily: monoFamily.regular, marginBottom: space.space8 },
   ringRow: { flexDirection: "row", gap: space.space12, alignItems: "center" },
+  ringItem: { flexDirection: "row", gap: space.space4, alignItems: "center" },
   footerIcons: { flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space2 },
   footerIconButton: { width: 30, height: 30, alignItems: "center", justifyContent: "center", borderRadius: radii.radius8 },
   footerBadge: { position: "absolute", top: 4, right: 4, width: 6, height: 6, borderRadius: 3, borderWidth: 1 },
   footerSpacer: { flex: 1 },
 });
+
+function planName(provider: string): string {
+  if (provider.startsWith("claude")) return "Claude";
+  if (provider.startsWith("codex")) return "Codex";
+  return provider;
+}
