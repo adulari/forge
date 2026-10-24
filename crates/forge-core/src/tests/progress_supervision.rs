@@ -84,6 +84,12 @@ impl Harness {
         config.mesh.verify_completeness = false;
         config.mesh.nudge_empty_diff = false;
         config.shell.explain_errors = false;
+        // These tests count model calls; a compaction summary is one more. 300 steps under the
+        // unknown model's 32k floor crossed the trigger once the base prompt grew.
+        config
+            .mesh
+            .context_windows
+            .insert("direct::scripted".into(), 1_000_000);
         tune(&mut config);
         let session = Session::start(
             Arc::new(Store::open_in_memory().unwrap()),
