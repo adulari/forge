@@ -393,6 +393,22 @@ impl Store {
     }
 
     /// A session's stored title, if any.
+    /// When a session was created and when it last had a message, for a driver restored after a
+    /// daemon restart (otherwise every restored session would look created and active "now").
+    pub fn session_times(&self, session_id: &str) -> Result<Option<(i64, i64)>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT s.created_at,
+                        COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
+                                 s.created_at)
+                 FROM session s WHERE s.id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
     pub fn session_title(&self, session_id: &str) -> Result<Option<String>> {
         Ok(self
             .lock()?
@@ -576,6 +592,24 @@ mod tests {
         let id = store.create_session(cwd, "default").unwrap();
         store.add_message(&id, 0, Role::User, "hi", None).unwrap();
         id
+    }
+
+    #[test]
+    fn session_times_report_creation_and_the_last_message_not_now() {
+        let store = Store::open_in_memory().unwrap();
+        let id = used_session(&store, "/work/here");
+        {
+            let conn = store.lock().unwrap();
+            conn.execute("UPDATE session SET created_at = 1000 WHERE id = ?1", [&id])
+                .unwrap();
+            conn.execute(
+                "UPDATE message SET created_at = 2000 WHERE session_id = ?1",
+                [&id],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.session_times(&id).unwrap(), Some((1000, 2000)));
+        assert_eq!(store.session_times("missing").unwrap(), None);
     }
 
     #[test]
