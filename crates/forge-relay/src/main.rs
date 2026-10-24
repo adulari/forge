@@ -1011,12 +1011,23 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_upstream_response_is_reported_as_a_gateway_failure() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            // Answer only after the request headers: a response that arrives before the request
+            // is a protocol error to hyper, reported as a failed call, not as an unreadable body.
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\nconnection: close\r\n\r\npartial",
