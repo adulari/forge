@@ -211,7 +211,8 @@ fn the_row_shows_the_duration_and_flips_its_triangle_when_open() {
             ..RowState::default()
         },
     ));
-    assert!(open.contains("▾ Ran ls"), "{open}");
+    // Open, the call is listed under the header, so the header counts rather than repeat it.
+    assert!(open.contains("▾ Ran 1 shell command"), "{open}");
 }
 
 #[test]

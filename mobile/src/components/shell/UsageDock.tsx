@@ -8,35 +8,20 @@ import { Cpu } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { type UsageProvider, type UsageQuota } from "../../lib/api";
 import { useSessions, useUsage } from "../../lib/queries";
+import { buildProviderBlocks, isSubscription, kindLabel, priceLabel, quotaSummary, quotaTiming, windowLabel, type ProviderBlock } from "../../lib/usageWindows";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
-import { formatCost, formatRelativeTime, tabularNums, type as typeScale } from "../../theme/typography";
+import { formatRelativeTime, tabularNums, type as typeScale } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
 import { usagePaceColor } from "./UsageRing";
 
 const compact = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
-const WINDOW_LABEL: Record<string, string> = { five_hour: "Session (5h)", weekly: "Weekly", monthly: "Monthly", secondary: "Secondary" };
 
-interface ProviderBlock {
-  provider: string;
-  kind: string;
-  usage: UsageProvider | null;
-  quotas: UsageQuota[];
-}
-
-function paceCaption(quota: UsageQuota): { text: string; color: "ink3" | "warn" | "danger" } | null {
-  if (quota.fraction == null) return null;
-  const pct = Math.round(quota.fraction * 100);
-  if (quota.status === "exhausted" || pct >= 90) return { text: `● ≈${pct}% — near the limit`, color: "danger" };
-  if (pct >= 70) return { text: `● ≈${pct}% by reset`, color: "warn" };
-  return { text: `● ≈${pct}% by reset`, color: "ink3" };
-}
-
-function ProviderCard({ block }: { block: ProviderBlock }) {
+function ProviderCard({ block, nowSec }: { block: ProviderBlock; nowSec: number }) {
   const tokens = useTokens();
-  const costUsd = block.usage?.costUsd ?? 0;
+  const price = priceLabel(block);
+  const billed = !isSubscription(block.kind) && (block.usage?.costUsd ?? 0) > 0;
 
   return (
     <View style={[styles.card, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
@@ -44,25 +29,29 @@ function ProviderCard({ block }: { block: ProviderBlock }) {
         <Text style={[typeScale.bodyBold, styles.cardTitle, { color: tokens.ink }]} numberOfLines={1}>
           {block.provider}
         </Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{block.kind}</Text>
+        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{kindLabel(block.kind)}</Text>
       </View>
-      {costUsd > 0 ? (
-        <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]}>{formatCost(costUsd)} (7d)</Text>
-      ) : null}
+      <Text style={[typeScale.monoMeta, tabularNums, { color: billed ? tokens.success : tokens.ink3 }]}>
+        {billed ? `${price} (7d)` : price === "Included" ? "Included with plan" : price}
+      </Text>
       {block.quotas.map((quota) => {
         const pct = quota.fraction == null ? 0 : Math.max(0, Math.min(100, quota.fraction * 100));
-        const pace = paceCaption(quota);
-        const barColor = usagePaceColor(pct, tokens);
+        const barColor = quota.status === "exhausted" ? tokens.danger : usagePaceColor(pct, tokens);
+        const detail = quotaSummary(quota, nowSec);
         return (
-          <View key={quota.windowKind} style={styles.quotaBlock}>
+          <View key={quota.windowKind} style={styles.quotaBlock} accessibilityLabel={`${windowLabel(quota.windowKind)} ${detail}`}>
             <View style={styles.quotaHeadRow}>
-              <Text style={[typeScale.sub, { color: tokens.ink2 }]}>{WINDOW_LABEL[quota.windowKind] ?? quota.windowKind}</Text>
-              <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]}>{quota.fraction == null ? "—" : `${Math.round(pct)}%`}</Text>
+              <Text style={[typeScale.sub, { color: tokens.ink2 }]} numberOfLines={1}>{windowLabel(quota.windowKind)}</Text>
+              <Text style={[typeScale.monoMeta, tabularNums, { color: quota.seen ? tokens.ink2 : tokens.ink4 }]}>
+                {quota.fraction == null ? "unknown" : `${Math.round(pct)}%`}
+              </Text>
             </View>
             <View style={[styles.track, { backgroundColor: tokens.border }]}>
               <View style={[styles.fill, { width: `${pct}%`, backgroundColor: barColor }]} />
             </View>
-            {pace ? <Text style={[typeScale.monoMeta, { color: tokens[pace.color] }]}>{pace.text}</Text> : null}
+            <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>
+              {quota.seen ? quotaTiming(quota, nowSec) || "no reset time reported" : "not seen yet"}
+            </Text>
           </View>
         );
       })}
@@ -83,20 +72,8 @@ export function UsageDock() {
   const week = query.data?.week;
   const quotaRows = query.data?.quota;
 
-  const blocks = useMemo<ProviderBlock[]>(() => {
-    const map = new Map<string, ProviderBlock>();
-    const keyOf = (provider: string, kind: string) => `${kind}:${provider}`;
-    for (const usage of week?.providers ?? []) {
-      map.set(keyOf(usage.provider, usage.kind), { provider: usage.provider, kind: usage.kind, usage, quotas: [] });
-    }
-    for (const quota of quotaRows ?? []) {
-      const key = keyOf(quota.provider, quota.kind);
-      const existing = map.get(key) ?? { provider: quota.provider, kind: quota.kind, usage: null, quotas: [] };
-      existing.quotas.push(quota);
-      map.set(key, existing);
-    }
-    return [...map.values()].sort((a, b) => (b.usage?.costUsd ?? 0) - (a.usage?.costUsd ?? 0) || a.provider.localeCompare(b.provider));
-  }, [week, quotaRows]);
+  const blocks = useMemo(() => buildProviderBlocks(week?.providers, quotaRows), [week, quotaRows]);
+  const nowSec = query.dataUpdatedAt / 1000;
 
   return (
     <View style={styles.dock}>
@@ -106,7 +83,7 @@ export function UsageDock() {
         ) : blocks.length === 0 ? (
           <EmptyState icon={Cpu} message="No usage yet — your provider activity will appear here after the first turn." />
         ) : (
-          blocks.map((block) => <ProviderCard key={`${block.kind}:${block.provider}`} block={block} />)
+          blocks.map((block) => <ProviderCard key={`${block.kind}:${block.provider}`} block={block} nowSec={nowSec} />)
         )}
         <Pressable
           onPress={() => router.push("/settings")}

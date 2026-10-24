@@ -79,6 +79,18 @@ impl SubscriptionPacing {
     }
 }
 
+/// Claude's per-model weekly meter (`seven_day_overage_included` in the stream and
+/// `anthropic-ratelimit-unified-7d_oi-*` in the headers). Claude Code labels it with the models on
+/// its overage-included allowlist, which defaults to Fable.
+pub const FABLE_WEEKLY_WINDOW: &str = "weekly_fable";
+
+/// A weekly window that meters one model family only (`weekly_fable`, `weekly_opus`,
+/// `weekly_sonnet`). Filling it blocks that family, not the provider, so routing must not treat it
+/// as the provider's binding window; the usage surfaces still show it.
+pub fn is_model_scoped_window(window: &str) -> bool {
+    window.starts_with("weekly_")
+}
+
 /// Nominal duration for quota windows with a defined subscription pacing policy.
 ///
 /// `monthly` is a calendar window, so 30 days is only a nominal length: providers that report it
@@ -86,6 +98,9 @@ impl SubscriptionPacing {
 /// prefers. The nominal value is the fallback that keeps the window paceable rather than silently
 /// ignored when a reset instant is missing.
 pub fn nominal_window_secs(window: &str) -> Option<i64> {
+    if is_model_scoped_window(window) {
+        return Some(7 * 24 * 60 * 60);
+    }
     match window {
         "monthly" => Some(30 * 24 * 60 * 60),
         "weekly" => Some(7 * 24 * 60 * 60),

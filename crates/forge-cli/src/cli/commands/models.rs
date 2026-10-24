@@ -670,25 +670,7 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
     // `/mesh` must score exactly like a real session: static benchmark data remains dominant,
     // while sufficiently broad local outcome evidence provides a small quality/latency tie-break.
     let cat = apply_outcome_calibration(cat, &store);
-    if store
-        .subscription_age_secs("claude-cli")
-        .is_none_or(|a| a > 300)
-    {
-        let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
-            .await
-            .unwrap_or_default();
-        for (window, frac, resets_at) in limits {
-            // Live probe — its observation time genuinely is now.
-            seed_store_quota_with_reset(
-                &store,
-                "claude-cli",
-                &window,
-                Some(frac * 100.0),
-                None,
-                resets_at,
-            );
-        }
-    }
+    refresh_claude_quota_if_stale(&store, 300).await;
     let readiness = forge_core::readiness::ProviderReadiness::snapshot(&config, &store);
     let quota = readiness.quota;
     let health = readiness.health;
@@ -807,6 +789,33 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
 /// `resets_at` is the window's reset instant when the source reports one (Claude's
 /// `anthropic-ratelimit-unified-*-reset` headers). Without it the row can never be displayed or
 /// paced against.
+/// Probe Claude's subscription windows (5h, weekly, weekly Fable) when the stored reading is older
+/// than `max_age` seconds. The probe is one tiny Haiku turn on the user's plan, so callers pick a
+/// gate that matches how often they are asked. Skipped when the `claude` bridge is not routable.
+pub(crate) async fn refresh_claude_quota_if_stale(store: &Store, max_age: i64) {
+    if store
+        .subscription_age_secs("claude-cli")
+        .is_some_and(|age| age <= max_age)
+        || !forge_provider::CliKind::ClaudeCode.routable()
+    {
+        return;
+    }
+    let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
+        .await
+        .unwrap_or_default();
+    for (window, frac, resets_at) in limits {
+        // Live probe — its observation time genuinely is now.
+        seed_store_quota_with_reset(
+            store,
+            "claude-cli",
+            &window,
+            Some(frac * 100.0),
+            None,
+            resets_at,
+        );
+    }
+}
+
 pub(crate) fn seed_store_quota_with_reset(
     store: &Store,
     provider: &str,

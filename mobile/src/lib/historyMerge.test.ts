@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { HistoryRow } from "./api";
-import { historyHasRealContentSince, mergeNewestHistoryPage, shouldRetryEmptyHistory } from "./historyMerge";
+import { answerAlreadyShown, historyHasRealContentSince, mergeNewestHistoryPage, shouldRetryEmptyHistory } from "./historyMerge";
 
 const row = (seq: number, content = `r${seq}`): HistoryRow => ({
   seq,
@@ -87,5 +87,35 @@ describe("shouldRetryEmptyHistory", () => {
     expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 4 })).toBe(false);
     expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 4 }, 2)).toBe(false);
     expect(shouldRetryEmptyHistory({ ...base, blindAttempts: 1 }, 2)).toBe(true);
+  });
+});
+
+describe("answerAlreadyShown", () => {
+  const msg = (seq: number, role: HistoryRow["role"], content: string) => ({ kind: "message", row: { ...row(seq, content), role } });
+  const tool = { kind: "toolGroup" };
+
+  it("finds a segment that already landed as a row of the running turn", () => {
+    const entries = [tool, msg(3, "assistant", "I'll read the file first."), msg(2, "user", "fix it")];
+    expect(answerAlreadyShown(entries, "I'll read the file first.\n")).toBe(true);
+  });
+
+  it("accepts a stream tail of a longer row, and a row without the stream's reasoning", () => {
+    expect(answerAlreadyShown([msg(3, "assistant", "a long answer ending here")], "ending here")).toBe(true);
+    expect(answerAlreadyShown([msg(3, "assistant", "answer")], "<think>hm</think>answer")).toBe(true);
+  });
+
+  it("looks past a follow-up the running turn picked up", () => {
+    const entries = [tool, msg(4, "user", "also this"), tool, msg(3, "assistant", "Test file plus run."), msg(2, "user", "go")];
+    expect(answerAlreadyShown(entries, "Test file plus run.")).toBe(true);
+  });
+
+  it("compares only the newest assistant row", () => {
+    const entries = [msg(4, "user", "again"), msg(3, "assistant", "Done."), msg(1, "assistant", "Earlier text.")];
+    expect(answerAlreadyShown(entries, "Earlier text.")).toBe(false);
+  });
+
+  it("is false for text that has not landed or is blank", () => {
+    expect(answerAlreadyShown([msg(3, "assistant", "other")], "new text")).toBe(false);
+    expect(answerAlreadyShown([msg(3, "assistant", "other")], "  ")).toBe(false);
   });
 });

@@ -6,7 +6,6 @@
 // long-press / trailing `…` all open the SAME archive/merge/discard actions — merge 409s
 // and discard warnings never render as a generic toast (FEATURES.md §1.1), they get their
 // own result sheet.
-import { router } from "expo-router";
 import { Archive, GitMerge, MoreHorizontal, Settings2, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
@@ -23,6 +22,7 @@ import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession, usePrefetchSessionHistory } from "../../lib/queries";
 import { transportForBaseUrl } from "../../lib/serverTargets";
+import { useOpenSession } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
 import { cardPadding, space, type StatusDotState } from "../../theme/tokens";
@@ -189,9 +189,8 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const prefetchSessionHistory = usePrefetchSessionHistory();
   const prefetchHistory = useCallback(() => prefetchSessionHistory(row.id), [prefetchSessionHistory, row.id]);
 
-  const goToSession = useCallback(() => {
-    router.push(`/session/${row.id}`);
-  }, [row.id]);
+  const openSession = useOpenSession();
+  const goToSession = useCallback(() => openSession(row.id), [openSession, row.id]);
 
   // The row's trailing `…` IconButton is a real nested <button>, so on react-native-web the
   // row itself can't also be an actual <button> (accessibilityRole="button" would render one) —

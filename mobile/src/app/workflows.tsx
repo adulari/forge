@@ -1,6 +1,6 @@
 // Machined Workflows library ("D Workflow Library" L649-666 / "M Workflows" L228-253): definition
 // cards (name, description, phase chips, typed argument fields, Run button, run-history strip) for
-// every workflow `.forge/workflows/` exposes. Reachable from Settings, not scoped to a live
+// every workflow `.forge/workflows/` exposes. Reachable from Settings (Forge list + rail), not scoped to a live
 // session, so there is no active-run pill here.
 //
 // Running a workflow hands its `/workflow run <name> [args]` command to a brand-new session via
@@ -26,6 +26,7 @@ import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
 import type { WorkflowArg, WorkflowRow, WorkflowRun } from "../lib/api";
 import { useWorkflows } from "../lib/queries";
+import { SettingsShell } from "./(tabs)/settings";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { formatCost, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
@@ -289,7 +290,9 @@ function WorkflowsScreenBody() {
 export default function WorkflowsScreen() {
   return (
     <DesktopDrillDown>
-      <WorkflowsScreenBody />
+      <SettingsShell active="workflows">
+        <WorkflowsScreenBody />
+      </SettingsShell>
     </DesktopDrillDown>
   );
 }

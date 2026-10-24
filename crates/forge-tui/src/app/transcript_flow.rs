@@ -174,6 +174,24 @@ impl App {
 
     /// Show one notice. Inside an open turn it rides the rail; a notice whose text repeats with
     /// only its digits changed folds into one `×N` row.
+    /// The silence guard's `12 steps since the last update: …` note. With tool groups folding,
+    /// the group's summary already says what those steps did, and the note landing in the log
+    /// would end the group and sit in it like a call; the phone, which has no groups, still gets
+    /// it. True when the note was taken here.
+    pub(super) fn absorb_silence_note(&mut self, text: &str) -> bool {
+        let is_note = text
+            .split_once(" steps since the last update")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if !is_note || !self.fold_enabled() {
+            return false;
+        }
+        let in_turn = self.transcript_ui.turn_open;
+        for line in notice::notice_lines(NoticeKind::Info, in_turn, text) {
+            self.remote_only.push((line, LineOrigin::default()));
+        }
+        true
+    }
+
     pub(super) fn push_notice(&mut self, kind: NoticeKind, text: &str) {
         if self.streaming_active && !self.streaming.is_empty() {
             // The answer streamed so far is a segment of its own; what follows is new.

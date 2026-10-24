@@ -12,7 +12,7 @@ import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import * as Updates from "expo-updates";
 
-import { useAppVersion } from "../lib/appVersion";
+import { useSettledAppVersion } from "../lib/appVersion";
 import { useAuth } from "../lib/auth";
 import { releaseForApp, releaseNotesUrl, splitEntry } from "../lib/changelogEntry";
 import { useChangelog } from "../lib/queries";
@@ -32,12 +32,13 @@ import { Sheet } from "./ds/Sheet";
 
 export function UpdateNotice() {
   const tokens = useTokens();
-  const appVersion = useAppVersion();
+  const appVersion = useSettledAppVersion();
   const { isPaired } = useAuth();
   const [notice, setNotice] = React.useState<Notice | null>(null);
   const changelog = useChangelog(isTauri ? 20 : 1);
 
   React.useEffect(() => {
+    if (appVersion == null) return;
     let cancelled = false;
     void (async () => {
       let seedUpdateSeen = false;

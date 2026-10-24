@@ -330,6 +330,13 @@ export function formatShortcut(value: ShortcutBinding, mac = isMacPlatform()): s
   return mac ? parts.join("") : parts.join("+");
 }
 
+/** The user's current binding for `action`, formatted for a keycap hint or an a11y hint. Hints
+ * read the resolved binding rather than a hard-coded key so a rebinding (and the Ctrl-vs-⌘
+ * platform difference) shows up everywhere the shortcut is advertised. */
+export function useShortcutLabel(action: AppShortcutAction): string {
+  return formatShortcut(useShortcutBinding(action));
+}
+
 interface ReservedShortcut {
   id: string;
   label: string;

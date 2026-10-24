@@ -471,6 +471,7 @@ impl Store {
             })?
             .filter_map(std::result::Result::ok)
             .filter(|row| quota_observation_is_current(&row.0, &row.1, row.3, now))
+            .filter(|row| !forge_types::subscription_pacing::is_model_scoped_window(&row.1))
             .collect();
 
         let mut output_providers: std::collections::BTreeSet<&str> =
@@ -551,6 +552,10 @@ impl Store {
                 .filter_map(std::result::Result::ok)
                 .filter(|row| {
                     quota_observation_is_current(&row.provider, &row.window, row.updated_at, now)
+                })
+                // A full Fable-only meter blocks one model family, not the provider.
+                .filter(|row| {
+                    !forge_types::subscription_pacing::is_model_scoped_window(&row.window)
                 })
                 .collect();
             rows
@@ -665,6 +670,9 @@ impl Store {
             Vec<forge_types::SubscriptionWindow>,
         > = std::collections::HashMap::new();
         for window in self.subscription_windows()? {
+            if forge_types::subscription_pacing::is_model_scoped_window(&window.window_kind) {
+                continue;
+            }
             let Some(fraction_used) = window.fraction else {
                 continue;
             };

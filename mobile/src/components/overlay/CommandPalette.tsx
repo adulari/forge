@@ -22,6 +22,7 @@ import {
   Clock,
   Eye,
   Flame,
+  Gauge,
   History,
   MoonStar,
   Plus,
@@ -69,8 +70,8 @@ import { ApiError } from "../../lib/api";
 import { entitlementBadge, hostStateText } from "../../lib/anywhere/format";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
+import { runDesktopMenuAction } from "../../lib/desktopMenu";
 import { haptics } from "../../lib/haptics";
-import { modKey } from "../../lib/platform";
 import {
   useArchiveSession,
   useCreateSession,
@@ -78,7 +79,7 @@ import {
   useSessions,
   useSessionSearch,
 } from "../../lib/queries";
-import { usePaletteHotkey, useThreadSearchHotkey } from "../../lib/shortcuts";
+import { usePaletteHotkey, useShortcutLabel, useThreadSearchHotkey } from "../../lib/shortcuts";
 import { useSessionSocket } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
@@ -219,6 +220,12 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
   const tokens = useTokens();
   const { scheme, setScheme } = useTheme();
   const { isCompact } = useBreakpoint();
+  const newSessionHint = useShortcutLabel("session.new");
+  const fleetHint = useShortcutLabel("nav.fleet");
+  const inboxHint = useShortcutLabel("nav.inbox");
+  const historyHint = useShortcutLabel("nav.history");
+  const usageHint = useShortcutLabel("shell.usage");
+  const settingsHint = useShortcutLabel("nav.settings");
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const toast = useToast();
   const pathname = usePathname();
@@ -361,7 +368,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         title: "Forge a session",
         keywords: "new session create start forge task",
         leading: <Plus size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        trailing: !isCompact ? <KeyHint label={`${modKey}N`} /> : undefined,
+        trailing: !isCompact ? <KeyHint label={newSessionHint} /> : undefined,
         onSelect: () => {
           close();
           router.push("/new-session");
@@ -389,6 +396,23 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
               toast.show(err instanceof ApiError ? err.message : "archive failed", { tone: "danger" });
             },
           });
+        },
+      });
+    }
+
+    // The usage dock lives in the wide desktop shell only; Linux and Windows have no menu bar, so
+    // this is their menu-equivalent route to it alongside ⌘U and the sidebar button.
+    if (!isCompact) {
+      items.push({
+        id: "action:usage-dock",
+        group: "actions",
+        title: "Toggle usage panel",
+        keywords: "usage dock panel limits quota subscription spend right sidebar",
+        leading: <Gauge size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        trailing: <KeyHint label={usageHint} />,
+        onSelect: () => {
+          close();
+          runDesktopMenuAction("view:usage");
         },
       });
     }
@@ -449,7 +473,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
     }
 
     return items;
-  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact]);
+  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact, newSessionHint, usageHint]);
 
   const navigationItems = useMemo<PaletteItem[]>(
     () => [
@@ -457,6 +481,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         id: "nav:fleet",
         group: "navigation",
         title: "Fleet",
+        trailing: !isCompact ? <KeyHint label={fleetHint} /> : undefined,
         keywords: "fleet home sessions live",
         leading: <Flame size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
         onSelect: () => {
@@ -468,6 +493,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         id: "nav:inbox",
         group: "navigation",
         title: "Inbox",
+        trailing: !isCompact ? <KeyHint label={inboxHint} /> : undefined,
         keywords: "inbox waiting decisions needs you",
         leading: <BellDot size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
         onSelect: () => {
@@ -479,6 +505,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         id: "nav:history",
         group: "navigation",
         title: "History",
+        trailing: !isCompact ? <KeyHint label={historyHint} /> : undefined,
         keywords: "history past archived",
         leading: <History size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
         onSelect: () => {
@@ -490,6 +517,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         id: "nav:settings",
         group: "navigation",
         title: "Settings",
+        trailing: !isCompact ? <KeyHint label={settingsHint} /> : undefined,
         keywords: "settings preferences servers",
         leading: <Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
         onSelect: () => {
@@ -498,7 +526,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         },
       },
     ],
-    [tokens, close],
+    [tokens, close, isCompact, fleetHint, inboxHint, historyHint, settingsHint],
   );
 
   // Forge Anywhere: gated entirely on `signedIn` — a signed-out user sees no "Anywhere"

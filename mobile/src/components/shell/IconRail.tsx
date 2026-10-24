@@ -3,11 +3,15 @@
 // session with a status-dot badge, a usage-pace ring column, settings, and the
 // expand affordance. `Sidebar`'s dense-row twin — same session data, icon density.
 import { router, usePathname } from "expo-router";
-import { Flame, Search, Settings2, SquareChevronRight } from "lucide-react-native";
+import { Bell, BellDot, Flame, Gauge, History, Plus, Search, Settings2, SquareChevronRight } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
+import { useAuth } from "../../lib/auth";
+import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { useSessions } from "../../lib/queries";
+import { useScopedFleet } from "../../lib/useScopedFleet";
+import { useShortcutLabel } from "../../lib/shortcuts";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, statusDotColor, type StatusDotState } from "../../theme/tokens";
 import { usePalette } from "../overlay/CommandPalette";
@@ -21,12 +25,14 @@ function RailIconButton({
   accessibilityLabel,
   accessibilityHint,
   active,
+  badgeColor,
 }: {
   icon: React.ReactNode;
   onPress: () => void;
   accessibilityLabel: string;
   accessibilityHint?: string;
   active?: boolean;
+  badgeColor?: string;
 }) {
   const tokens = useTokens();
   return (
@@ -38,6 +44,7 @@ function RailIconButton({
       style={[styles.iconButton, active && { backgroundColor: tokens.bg3 }]}
     >
       {icon}
+      {badgeColor ? <View style={[styles.badge, { backgroundColor: badgeColor, borderColor: tokens.bg1 }]} /> : null}
     </Pressable>
   );
 }
@@ -76,14 +83,21 @@ export interface IconRailProps {
   onExpand: () => void;
   /** See Sidebar's identical prop — the ring column doubles as the ⌘U dock toggle. */
   onToggleDock?: () => void;
+  dockOpen?: boolean;
 }
 
-export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
+export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailProps) {
   const tokens = useTokens();
+  const usageHint = useShortcutLabel("shell.usage");
+  const sidebarHint = useShortcutLabel("shell.sidebar");
+  const newSessionHint = useShortcutLabel("session.new");
   const pathname = usePathname();
   const palette = usePalette();
-  const sessionsQuery = useSessions();
-  const rows = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const { setActive } = useAuth();
+  const { rows } = useScopedFleet();
+  const { data: activeRows } = useSessions();
+  const waitingCount = useMemo(() => (activeRows ?? []).filter((row) => row.waiting).length, [activeRows]);
+  const noticesUnseen = totalUnseen(useNoticesStore().hosts);
   const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
   const { rings } = useProviderPace();
 
@@ -100,10 +114,16 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
         onPress={() => palette.open("default")}
         accessibilityLabel="Search or command"
       />
+      <RailIconButton
+        icon={<Plus size={14} strokeWidth={2} color={tokens.ink2} />}
+        onPress={() => router.push("/new-session")}
+        accessibilityLabel="Forge a new session"
+        accessibilityHint={newSessionHint}
+      />
       <View style={[styles.divider, { backgroundColor: tokens.border }]} />
 
       <ScrollView style={styles.sessionList} contentContainerStyle={styles.sessionListContent} showsVerticalScrollIndicator={false}>
-        {rows.map((row) => {
+        {rows.map(({ row, serverId }) => {
           const title = row.title || `session ${row.id.slice(0, 8)}`;
           const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
           return (
@@ -113,7 +133,10 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
               state={state}
               worktree={!!row.worktree}
               selected={row.id === selectedSessionId}
-              onPress={() => router.push(`/session/${row.id}`)}
+              onPress={() => {
+                if (serverId) setActive(serverId);
+                router.push(`/session/${row.id}`);
+              }}
             />
           );
         })}
@@ -128,7 +151,7 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
               disabled={!onToggleDock}
               accessibilityRole={onToggleDock ? "button" : undefined}
               accessibilityLabel="Toggle usage dock"
-              accessibilityHint="Command U"
+              accessibilityHint={usageHint}
               style={styles.ringColumn}
             >
               {rings.map((ring) => (
@@ -138,6 +161,36 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
           </>
         ) : null}
         <View style={[styles.divider, { backgroundColor: tokens.border }]} />
+        {/* The sidebar footer's Inbox/Notices/History, so collapsing the sidebar does not hide them. */}
+        <RailIconButton
+          icon={<BellDot size={14} strokeWidth={1.75} color={tokens.ink2} />}
+          onPress={() => router.push("/inbox")}
+          accessibilityLabel={waitingCount > 0 ? `Inbox, ${waitingCount} needs you` : "Inbox"}
+          active={pathname === "/inbox"}
+          badgeColor={waitingCount > 0 ? tokens.danger : undefined}
+        />
+        <RailIconButton
+          icon={<Bell size={14} strokeWidth={1.75} color={tokens.ink2} />}
+          onPress={() => router.push("/notices")}
+          accessibilityLabel={noticesUnseen > 0 ? `Notices, ${noticesUnseen} new` : "Notices"}
+          active={pathname === "/notices"}
+          badgeColor={noticesUnseen > 0 ? tokens.accent : undefined}
+        />
+        <RailIconButton
+          icon={<History size={14} strokeWidth={1.75} color={tokens.ink2} />}
+          onPress={() => router.push("/history")}
+          accessibilityLabel="History"
+          active={pathname === "/history"}
+        />
+        {onToggleDock ? (
+          <RailIconButton
+            icon={<Gauge size={14} strokeWidth={1.75} color={dockOpen ? tokens.ink : tokens.ink2} />}
+            onPress={onToggleDock}
+            accessibilityLabel={dockOpen ? "Hide usage panel" : "Show usage panel"}
+            accessibilityHint={usageHint}
+            active={dockOpen}
+          />
+        ) : null}
         <RailIconButton
           icon={<Settings2 size={14} strokeWidth={1.75} color={tokens.ink2} />}
           onPress={() => router.push("/settings")}
@@ -148,7 +201,7 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
           icon={<SquareChevronRight size={14} strokeWidth={1.75} color={tokens.ink3} />}
           onPress={onExpand}
           accessibilityLabel="Expand sidebar"
-          accessibilityHint="Command Backslash"
+          accessibilityHint={sidebarHint}
         />
       </View>
     </View>

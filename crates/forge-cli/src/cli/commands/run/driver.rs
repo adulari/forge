@@ -191,6 +191,12 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     )
     .await?;
     let session_id = session.session_id().to_string();
+    let (created_at, last_active_at) = session
+        .store
+        .session_times(&session_id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| (now_secs(), now_secs()));
 
     // Persist identity: title + worktree land on the session row (schema v8) so they survive
     // daemon restarts and show up in `forge sessions`.
@@ -261,7 +267,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let draining = std::sync::Arc::new(AtomicBool::new(false));
     let daemon_shutdown = std::sync::Arc::new(AtomicBool::new(false));
-    let last_activity = std::sync::Arc::new(AtomicI64::new(now_secs()));
+    let last_activity = std::sync::Arc::new(AtomicI64::new(last_active_at));
     let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let title = std::sync::Arc::new(std::sync::RwLock::new(spec.title));
 
@@ -290,7 +296,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         title,
         cwd: spec.cwd,
         worktree: spec.worktree,
-        created_at: now_secs(),
+        created_at,
         snapshot_rx,
         events,
         input_tx,
@@ -538,15 +544,20 @@ async fn drive_session(
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        // Only real session events count as activity. A snapshot can also change because of
+        // fields every session shares, and stamping on that moved all idle sessions together.
+        let mut active = false;
         if last_snap
             .as_ref()
             .is_some_and(|snapshot| snapshot.title != current_title)
         {
             dirty = true;
+            active = true;
         }
         // 1. Presenter events from the (possibly running) turn task.
         while let Ok(msg) = ui_rx.try_recv() {
             dirty = true;
+            active = true;
             match msg {
                 UiMsg::Event(e) => {
                     st.steer_tracker
@@ -568,7 +579,10 @@ async fn drive_session(
                     side_effect,
                     reply,
                 } => {
-                    st.app.prompt = Some(format!("allow {tool} ({side_effect:?}) [y/n]"));
+                    st.app.prompt = Some(
+                        st.app
+                            .wire_permission_prompt(&tool, &format!("{side_effect:?}")),
+                    );
                     st.pending = Some((tool, reply));
                     // New prompt, new identity: stale remote answers must never resolve it.
                     st.prompt_seq += 1;
@@ -583,6 +597,7 @@ async fn drive_session(
         // 2. Remote inputs (prompts / answers / keys / overlay verbs).
         while let Ok(input) = input_rx.try_recv() {
             dirty = true;
+            active = true;
             if let Err(e) = st.handle_input(input).await {
                 st.app.note(&format!("⚠ {e}"));
             }
@@ -591,12 +606,14 @@ async fn drive_session(
             let label = st.session.lock().await.set_temper(change.mode).label();
             st.app.set_temper(label);
             dirty = true;
+            active = true;
             let _ = change.reply.send(());
         }
         // 3. Keys queued by the drain (named keys + synthesized overlay commits) through the
         //    headless modal router — same precedence as the TUI key loop.
         while let Some(key) = st.remote_keys.pop_front() {
             dirty = true;
+            active = true;
             if let Err(e) = st.process_key(key).await {
                 st.app.note(&format!("⚠ {e}"));
             }
@@ -604,6 +621,7 @@ async fn drive_session(
         // 4. Turn-complete signals: queued prompts, /loop continuation, /duel picker, auto-compact.
         while let Ok(g) = done_rx.try_recv() {
             dirty = true;
+            active = true;
             st.on_turn_done(g).await;
         }
         // 5. Background overlay loads (/mesh, /usage) and slash-command results (/doctor, /diff).
@@ -620,7 +638,11 @@ async fn drive_session(
             st.last_heartbeat_check = Instant::now();
             if st.try_deliver_due_heartbeats() {
                 dirty = true;
+                active = true;
             }
+        }
+        if active {
+            last_activity.store(now_secs(), Ordering::Relaxed);
         }
         // 6. Fold finalized lines into the transcript ring (there is no terminal to print to)
         //    and broadcast a snapshot when anything changed. Change-only, like the TUI loop.
@@ -720,7 +742,6 @@ async fn drive_session(
                     log.push(revision, frame.clone());
                 }
                 let _ = snapshot_tx.send(frame);
-                last_activity.store(now_secs(), Ordering::Relaxed);
             }
             dirty = false;
         }

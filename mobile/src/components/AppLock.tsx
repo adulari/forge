@@ -46,9 +46,19 @@ function authErrorCopy(error: LocalAuthenticationError, label: string): string {
 
 type LockPhase = "checking" | "locked" | "unlocked";
 
+// Read by surfaces outside this tree that can act on the app's behalf (the tray's Allow/Deny):
+// they must not act while the gate is up. "checking" counts as locked.
+let gateEngaged = false;
+export function isAppLockEngaged(): boolean {
+  return gateEngaged;
+}
+
 export function AppLock({ children }: { children: React.ReactNode }) {
   const tokens = useTokens();
   const [phase, setPhase] = useState<LockPhase>("checking");
+  useEffect(() => {
+    gateEngaged = phase !== "unlocked";
+  }, [phase]);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authenticating, setAuthenticating] = useState(false);
   const [label, setLabel] = useState(biometricLabelDefault);

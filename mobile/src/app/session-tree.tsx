@@ -33,6 +33,7 @@ import { radii, space, type ColorTokens } from "../theme/tokens";
 import { formatCost, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 import { usePullRefresh } from "../lib/usePullRefresh";
+import { SettingsShell } from "./(tabs)/settings";
 
 interface TreeRow {
   node: SessionTreeRow;
@@ -115,6 +116,14 @@ function livePath(nodes: SessionTreeRow[], live: Map<string, LiveState>): Set<st
 }
 
 export default function SessionTreeScreen() {
+  return (
+    <SettingsShell active="session-tree">
+      <SessionTreeScreenBody />
+    </SettingsShell>
+  );
+}
+
+function SessionTreeScreenBody() {
   const tokens = useTokens();
   const toast = useToast();
   const { baseUrl } = useAuth();

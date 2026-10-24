@@ -98,6 +98,8 @@ struct SessionUsage {
 #[derive(serde::Serialize)]
 struct UsageResponse {
     week: UsageWindow,
+    /// Since local midnight on the daemon host, so "today" on the fleet is a real day's spend.
+    today: UsageWindow,
     session: Option<SessionUsage>,
     quota: Vec<UsageQuota>,
 }
@@ -109,6 +111,56 @@ fn provider_kind(provider: &str) -> &'static str {
         "oauth"
     } else {
         "api"
+    }
+}
+
+/// Claude and Codex subscription windows are learned by probes that cost a tiny turn on the plan, so
+/// the page never waits on them: the refresh runs in the background (at most one at a time) and the
+/// next poll shows its result. The gate is wider than routing's five minutes because every open app
+/// polls this page continuously; a running session still refreshes on routing's cadence.
+const SUBSCRIPTION_PROBE_MAX_AGE_SECS: i64 = 15 * 60;
+
+fn spawn_subscription_refresh(store: Arc<forge_store::Store>) {
+    static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    tokio::spawn(async move {
+        let codex_age = ["codex-oauth", "codex-cli"]
+            .into_iter()
+            .filter_map(|provider| store.subscription_age_secs(provider))
+            .min();
+        if codex_age.is_none_or(|age| age > SUBSCRIPTION_PROBE_MAX_AGE_SECS) {
+            crate::cli::commands::models::refresh_codex_quota(&store).await;
+        }
+        crate::cli::commands::models::refresh_claude_quota_if_stale(
+            &store,
+            SUBSCRIPTION_PROBE_MAX_AGE_SECS,
+        )
+        .await;
+        IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+    });
+}
+
+fn local_midnight(now: i64) -> i64 {
+    use chrono::TimeZone;
+    let day = chrono::Local
+        .timestamp_opt(now, 0)
+        .single()
+        .map(|time| time.date_naive())
+        .unwrap_or_default();
+    day.and_hms_opt(0, 0, 0)
+        .and_then(|midnight| chrono::Local.from_local_datetime(&midnight).earliest())
+        .map_or(now - 86_400, |midnight| midnight.timestamp())
+}
+
+/// A subscription bills nothing per call. Rows recorded before Codex calls were priced at $0 still
+/// carry a notional dollar figure; showing it would present plan usage as API spend.
+fn billed_cost(kind: &str, cost_usd: f64) -> f64 {
+    if kind == "api" {
+        cost_usd
+    } else {
+        0.0
     }
 }
 
@@ -128,19 +180,19 @@ fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<U
                 total.cached_input_tokens = Some(total.cached_input_tokens.unwrap_or(0) + cached);
             }
             total.output_tokens += row.output_tokens;
-            total.cost_usd += row.cost_usd;
+            total.cost_usd += billed_cost(provider_kind(&row.provider), row.cost_usd);
             total
         },
     );
     let providers = rows
         .into_iter()
         .map(|row| UsageProvider {
+            cost_usd: billed_cost(provider_kind(&row.provider), row.cost_usd),
             kind: provider_kind(&row.provider).into(),
             provider: row.provider,
             input_tokens: row.input_tokens,
             cached_input_tokens: row.cached_input_tokens,
             output_tokens: row.output_tokens,
-            cost_usd: row.cost_usd,
         })
         .collect();
     (total, providers)
@@ -155,10 +207,14 @@ pub(super) async fn usage_page(
     // them here before reading. Each refresher's freshness gate collapses repeated page loads into
     // at most one request every few minutes, which is also the cadence routing needs.
     crate::cli::commands::models::refresh_polled_quotas(&store).await;
+    spawn_subscription_refresh(store.clone());
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<UsageResponse> {
         let now = chrono::Utc::now().timestamp();
         let week_rows = store.usage_by_provider_since(now - 604800)?;
         let (combined, providers) = usage_providers(week_rows);
+        let midnight = local_midnight(now);
+        let (today_combined, today_providers) =
+            usage_providers(store.usage_by_provider_since(midnight)?);
         let session = match params.session.filter(|session| !session.is_empty()) {
             Some(id) => {
                 let (combined, providers) =
@@ -173,7 +229,7 @@ pub(super) async fn usage_page(
         };
         let pacing = store.subscription_pacing().unwrap_or_default();
         let quota = store
-            .subscription_windows()?
+            .subscription_windows_for_display(now)?
             .into_iter()
             .map(|quota| UsageQuota {
                 kind: provider_kind(&quota.provider).into(),
@@ -191,6 +247,11 @@ pub(super) async fn usage_page(
                 since_epoch: now - 604800,
                 combined,
                 providers,
+            },
+            today: UsageWindow {
+                since_epoch: midnight,
+                combined: today_combined,
+                providers: today_providers,
             },
             session,
             quota,
@@ -212,7 +273,7 @@ pub(super) async fn usage_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_kind, usage_pacing, usage_providers, UsageTotals};
+    use super::{local_midnight, provider_kind, usage_pacing, usage_providers, UsageTotals};
 
     fn pacing(window: &str, resets_at: Option<i64>) -> forge_types::SubscriptionPacing {
         forge_types::SubscriptionPacing {
@@ -251,6 +312,17 @@ mod tests {
     }
 
     #[test]
+    fn today_starts_at_the_most_recent_local_midnight() {
+        let now = chrono::Utc::now().timestamp();
+        let midnight = local_midnight(now);
+        assert!(
+            midnight <= now && now - midnight <= 25 * 3600,
+            "{midnight} vs {now}"
+        );
+        assert_eq!(local_midnight(midnight), midnight);
+    }
+
+    #[test]
     fn provider_kinds_preserve_client_grouping_contract() {
         assert_eq!(provider_kind("claude-cli"), "bridge");
         assert_eq!(provider_kind("codex-oauth"), "oauth");
@@ -261,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_rows_sum_without_losing_cached_tokens_or_cost() {
+    fn provider_rows_sum_without_losing_cached_tokens_or_metered_cost() {
         let rows = vec![
             forge_store::ProviderUsage {
                 provider: "openai".into(),
@@ -285,8 +357,12 @@ mod tests {
                 input_tokens: 30,
                 cached_input_tokens: Some(10),
                 output_tokens: 14,
-                cost_usd: 0.75,
+                cost_usd: 0.25,
             }
+        );
+        assert_eq!(
+            providers[1].cost_usd, 0.0,
+            "a subscription row never reads as spend"
         );
         assert_eq!(providers[0].kind, "api");
         assert_eq!(providers[1].kind, "bridge");

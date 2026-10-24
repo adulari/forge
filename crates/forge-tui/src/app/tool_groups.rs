@@ -191,14 +191,21 @@ thread_local! {
 
 /// Fold the cards of a group into a summary. Running calls are counted but not tallied: the
 /// summary speaks in the past tense, and the running call has a row of its own. File stats come
-/// from each card's cached counts; nothing here diffs a file.
+/// from each card's cached counts; nothing here diffs a file. A script that made calls is
+/// counted by those calls, not as a script as well ("ran 3 scripts, ran 8 shell commands" for 8
+/// commands); one that failed still counts, so its failure shows.
 pub(crate) fn summarize<'a>(cards: impl IntoIterator<Item = &'a ToolCard>) -> Summary {
     #[cfg(test)]
     SUMMARIZED.with(|n| n.set(n.get() + 1));
+    let cards: Vec<&ToolCard> = cards.into_iter().collect();
     let mut out = Summary::default();
-    for card in cards {
+    for &card in &cards {
         if card.status == CardStatus::Running {
             out.running += 1;
+            continue;
+        }
+        let made_calls = cards.iter().any(|c| c.parent == Some(card.id));
+        if card.status == CardStatus::Ok && made_calls {
             continue;
         }
         out.finished += 1;
@@ -271,7 +278,11 @@ enum Tense {
 /// transcript keeps of what the user just approved; more are counted.
 fn changed_files(t: &Tally) -> String {
     if t.unnamed == 0 && (1..=2).contains(&t.subjects.len()) {
-        t.subjects.join(", ")
+        t.subjects
+            .iter()
+            .map(|s| tool_cards::display_path(s, None))
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         plural(t.count(), "file", "files")
     }
@@ -386,10 +397,17 @@ fn spoken(s: &Summary) -> (&[Tally], Tense) {
 /// capitalised: `Read 3 files, searched for 2 patterns, ran 4 shell commands`. Failed calls are
 /// left out (the row counts them in red); a group where nothing succeeded says what it tried.
 pub(crate) fn summary_text(s: &Summary) -> String {
+    sentence(s, true)
+}
+
+/// The sentence; `name` lets a tally of one name what it touched. An open group's header
+/// counts instead, because the call itself is listed right under it.
+fn sentence(s: &Summary, name: bool) -> String {
     let (tallies, tense) = spoken(s);
     let text = match tallies {
         [] => String::new(),
-        [only] => single(only, tense).unwrap_or_else(|| counted(only, tense)),
+        [only] if name => single(only, tense).unwrap_or_else(|| counted(only, tense)),
+        [only] => counted(only, tense),
         many => many
             .iter()
             .map(|t| counted(t, tense))
@@ -518,7 +536,7 @@ pub(crate) fn summary_row(s: &Summary, state: RowState) -> TextLine<'static> {
         0 => usize::MAX,
         w => w.saturating_sub(spans_width(&spans) + 2 + spans_width(&right)),
     };
-    let mut text = summary_text(s);
+    let mut text = sentence(s, !state.expanded);
     if text.is_empty() {
         text = "Working".to_string();
     }
@@ -555,41 +573,6 @@ pub(crate) fn indented(mut row: TextLine<'static>) -> TextLine<'static> {
     let at = row.spans.len().min(3);
     row.spans
         .insert(at, Span::styled("  ", copy_mark::decor(Default::default())));
-    row
-}
-
-/// [`indented`] for a row already fitted to the width: the right-alignment padding gives up the
-/// two cells, so the right-hand status stays on screen.
-pub(crate) fn indented_fitted(row: TextLine<'static>) -> TextLine<'static> {
-    let mut row = indented(row);
-    let pad = (4..row.spans.len()).rev().find(|&i| {
-        let s = &row.spans[i];
-        s.content.chars().count() >= 3
-            && s.content.chars().all(|c| c == ' ')
-            && copy_mark::is_decor(s.style.add_modifier)
-    });
-    if let Some(i) = pad {
-        let n = row.spans[i].content.chars().count() - 2;
-        row.spans[i].content = " ".repeat(n).into();
-    }
-    row
-}
-
-/// Whether a row was indented by [`indented`] (a card shown inside an open group).
-pub(crate) fn is_indented(row: &TextLine<'_>) -> bool {
-    row.spans
-        .get(3)
-        .is_some_and(|s| s.content.as_ref() == "  " && copy_mark::is_decor(s.style.add_modifier))
-        && row.spans.first().is_some_and(copy_mark::is_rail)
-}
-
-/// A card header without its trailing disclosure triangle.
-pub(crate) fn without_disclosure(mut row: TextLine<'static>) -> TextLine<'static> {
-    let glyphs = g();
-    let last = row.spans.last().map(|s| s.content.trim().to_string());
-    if last.is_some_and(|t| t == glyphs.disclose_closed || t == glyphs.disclose_open) {
-        row.spans.pop();
-    }
     row
 }
 

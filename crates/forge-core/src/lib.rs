@@ -1731,6 +1731,8 @@ pub struct Session {
     /// Count of successful writes made by `invoke_tool` in the current turn. Reset at the start
     /// of each turn; used to gate the autofix stage (skip it when nothing was edited).
     edits_this_turn: u32,
+    /// The model asked the user a question this turn; their answer decides, so no empty-diff nudge.
+    asked_user_this_turn: bool,
     /// Successful state-changing tool calls (side effect Write or Shell on the direct path, a
     /// mutating tool name on the CLI-bridge stream) summed across EVERY model loop this turn.
     /// Broader than `edits_this_turn`, which only counts in-process file writes: a turn whose only
@@ -3060,6 +3062,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Reset the per-turn edit counter so the autofix stage only fires when THIS turn wrote
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
+        self.asked_user_this_turn = false;
         self.repetition_pressure = 0;
         self.ledger.begin_turn();
         self.mutations_this_turn = 0;
@@ -3503,6 +3506,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && self.edits_this_turn == 0
             && !halted_by_loop_guard
             && !pure_answer_turn
+            && !self.asked_user_this_turn
         {
             let mut continuation_count = 0usize;
             loop {
@@ -4948,6 +4952,8 @@ mod tests {
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
 
+    #[path = "ask_user_no_nudge.rs"]
+    mod ask_user_no_nudge_tests;
     #[path = "mid_intent.rs"]
     mod mid_intent_tests;
 

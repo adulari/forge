@@ -36,3 +36,21 @@ export function reconcilePendingMessages<T extends PendingMessage>(
       ),
   );
 }
+
+/** The optimistic messages to paint as sent. A prompt sent while a turn runs waits in the
+ * daemon's queue (`Snapshot.queued`), which the chat already shows as a queued chip; painting it
+ * as a sent bubble too showed it twice, above the reply still streaming for the previous prompt.
+ * It becomes a bubble once the daemon takes it off the queue. Each queued entry hides one
+ * message, so a prompt sent twice with one copy picked up still shows that copy. */
+export function unqueuedPendingMessages<T extends PendingMessage>(pending: readonly T[], queued: readonly string[]): T[] {
+  const waiting = queued.map((text) => text.trim());
+  const hidden = new Set<T>();
+  // Newest first: the queue drains oldest first, so a still-queued copy is the later send.
+  for (let i = pending.length - 1; i >= 0; i--) {
+    const at = waiting.indexOf(pending[i].text.trim());
+    if (at < 0) continue;
+    waiting.splice(at, 1);
+    hidden.add(pending[i]);
+  }
+  return pending.filter((message) => !hidden.has(message));
+}

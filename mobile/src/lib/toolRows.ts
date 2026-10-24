@@ -90,13 +90,19 @@ export function summarizeToolLine(rawLine: string | undefined): string {
   return target ? `${name} ${target}` : name;
 }
 
-/** A tool result whose text reads as a failure. Heuristic — a PERSISTED result row carries no
- * outcome flag (remote.rs `tool_phase` doc), so text is the only signal available. */
+/** A tool result that reports a failure. A PERSISTED result row carries no outcome flag
+ * (remote.rs `tool_phase` doc), so this reads the shapes the daemon itself writes: a failed call
+ * is stored as `error: …` (tool_dispatch.rs), a live summary line opens with `✗`, a policy denial as `permission denied …`, and a
+ * shell call opens with `shell: exit <code>` (or `shell: timed out` / `could not start`). Only
+ * the opening is read: a file or command output that merely contains "error" or "0 failed" (a
+ * `run_code` trailer, a test summary) is not a failed call. */
 export function resultFailed(result: string | null): boolean {
   if (!result) return false;
-  const head = result.slice(0, 400);
-  if (/\bpermission denied\b/i.test(head)) return true;
-  return /\b(failed|error)\b/i.test(head) && !/\bpassed\b/i.test(head);
+  const head = result.trimStart().slice(0, 200);
+  // `✗` is the live transcript's failure mark ("✗ shell permission denied by policy").
+  if (/^(✗|error\b|permission denied\b)/i.test(head)) return true;
+  const shell = /^shell: (?:exit (-?\d+)|timed out|could not start)/.exec(head);
+  return shell !== null && shell[1] !== "0";
 }
 
 export interface ToolInvocation {

@@ -16,7 +16,8 @@ fix.
 - After the `shell` tool returns a **failure** — non-zero exit, signal, timeout, or spawn
   error — Forge explains the likely cause and a concrete fix in one or two lines and emits
   `PresenterEvent::ShellDiagnosis` (rendered as `⚠ shell failed <cmd>` + the dimmed explanation
-  in both the TUI and headless output).
+  in headless output and inline mode; the full-screen TUI puts the explanation and `fix` dim under
+  the failed call's card instead, so the command is not shown twice, see tui-tool-cards.md).
 - **Common failures are answered from a table** (`pattern_diagnose`): command not found, a
   missing path, permission denied, a port in use, a refused connection, a full disk, out of
   memory. No model call; the answer is ready with the tool result.

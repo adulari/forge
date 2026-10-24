@@ -281,6 +281,7 @@ impl Session {
             pending_images: Vec::new(),
             vision: Default::default(),
             edits_this_turn: 0,
+            asked_user_this_turn: false,
             mutations_this_turn: 0,
             turn_start_baseline: Default::default(),
             turn_input_tokens: 0,

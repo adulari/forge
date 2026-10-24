@@ -285,11 +285,14 @@ impl ClaudeStreamState {
                     // Current live shape (2026-09): per-window utilisation lives under
                     // `unifiedWindows` and the top level carries only the window that fired.
                     // One Quota per known window; the top-level fallback below covers the older
-                    // flat shape. `seven_day_overage_included` is deliberately NOT folded into
-                    // `weekly` — it is a different meter and would overwrite the real weekly.
+                    // flat shape. `seven_day_overage_included` is the per-model (Fable) weekly
+                    // meter: it gets its own window and never overwrites the all-models weekly.
                     if let Some(windows) = info.get("unifiedWindows").and_then(Value::as_object) {
-                        for key in ["five_hour", "seven_day"] {
+                        for key in ["five_hour", "seven_day", "seven_day_overage_included"] {
                             let Some(w) = windows.get(key) else { continue };
+                            // Each window carries its own status when present; the top-level one
+                            // describes only the window that fired the event.
+                            let status = w.get("status").and_then(Value::as_str).unwrap_or(status);
                             let fraction = w.get("utilization").and_then(Value::as_f64);
                             let resets_at = w.get("resetsAt").and_then(Value::as_i64).map(|t| {
                                 if t > 100_000_000_000 {

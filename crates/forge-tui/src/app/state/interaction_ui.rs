@@ -220,6 +220,25 @@ impl App {
         crate::app::render::permission::pending_args(self, tool)
     }
 
+    /// The permission line a headless session puts on the wire (the remote snapshot, a push
+    /// body): `allow <tool> (<SideEffect>): <what> [y/n]`, where `<what>` is the call's subject on
+    /// one line (the command, the file). Without it a phone was asked "Allow shell?" with no way
+    /// to see the command. The call's `ToolStart` precedes its prompt, so its card holds the
+    /// arguments; a call with nothing to name keeps the bare line.
+    pub fn wire_permission_prompt(&self, tool: &str, side_effect: &str) -> String {
+        const MAX_CHARS: usize = 200;
+        let what = crate::app::tool_cards::headline(tool, &self.pending_call_args(tool));
+        let what = what.split_whitespace().collect::<Vec<_>>().join(" ");
+        if what.is_empty() {
+            return format!("allow {tool} ({side_effect}) [y/n]");
+        }
+        let what = match what.char_indices().nth(MAX_CHARS) {
+            Some((at, _)) => format!("{}…", &what[..at]),
+            None => what,
+        };
+        format!("allow {tool} ({side_effect}): {what} [y/n]")
+    }
+
     /// Tell the open prompt that trusting the project would let this call run unasked: `what` is
     /// `git` or `commands`. The prompt then says so in one line. `None` clears it.
     pub fn set_permission_trust_hint(&mut self, what: Option<&str>) {
@@ -294,6 +313,34 @@ mod tests {
 
     fn outcome(app: &mut App, key: KeyKind) -> Option<ConfirmOutcome> {
         app.permission_key(key).map(|reply| reply.outcome)
+    }
+
+    #[test]
+    fn the_wire_prompt_names_what_the_call_does() {
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::ToolStart {
+            name: "shell".into(),
+            args: r#"{"command":"python3 -m pytest   -q"}"#.into(),
+        });
+        assert_eq!(
+            app.wire_permission_prompt("shell", "Shell"),
+            "allow shell (Shell): python3 -m pytest -q [y/n]"
+        );
+        assert_eq!(
+            App::default().wire_permission_prompt("shell", "Shell"),
+            "allow shell (Shell) [y/n]"
+        );
+        let long = "x".repeat(300);
+        app.apply(crate::PresenterEvent::ToolStart {
+            name: "shell".into(),
+            args: format!(r#"{{"command":"{long}"}}"#),
+        });
+        let line = app.wire_permission_prompt("shell", "Shell");
+        assert!(line.ends_with("… [y/n]"), "{line}");
+        assert_eq!(
+            line.chars().count(),
+            "allow shell (Shell): ".len() + 200 + "… [y/n]".chars().count()
+        );
     }
 
     #[test]

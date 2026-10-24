@@ -92,7 +92,7 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
 // persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
 // full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|perf-fixture|legal|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
+const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|perf-fixture|legal|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|workflows|gallery|connect|anywhere|shares)(\/|$)/;
 
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
 // (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
@@ -150,6 +150,7 @@ function RootNavigator() {
   const rightSurface = activeWorkbenchSurface(workbench.state, "right");
   const bottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
   const dockOpen = rightSurface != null;
+  const usageDockOpen = rightSurface?.kind === "usage";
 
   const activeSessionId = useActiveSessionId();
   // Desktop-only: on compact/medium the split reports inactive and nothing extra renders.
@@ -253,9 +254,9 @@ function RootNavigator() {
   );
 
   const rail = railless ? null : sidebarCollapsed ? (
-    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
+    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} dockOpen={usageDockOpen} />
   ) : (
-    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} />
+    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} dockOpen={usageDockOpen} />
   );
 
   // The split wraps the live route stack rather than replacing it (see SplitPanes.tsx), and the
@@ -293,7 +294,7 @@ function RootNavigator() {
           {isWeb && !isTauri ? (
             <WebTopBar
               onToggleDock={toggleUsageDock}
-              dockOpen={rightSurface?.kind === "usage"}
+              dockOpen={usageDockOpen}
             />
           ) : null}
           <View style={styles.shellRow}>

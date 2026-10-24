@@ -25,7 +25,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space } from "../../theme/tokens";
 import { formatRelativeTime, type as typeScale } from "../../theme/typography";
 import { DiffCard } from "../review/DiffCard";
-import { displayPermissionPrompt } from "../../lib/permissionPrompt";
+import { permissionPromptParts } from "../../lib/permissionPrompt";
 
 export interface PermissionCardProps {
   prompt: string;
@@ -37,8 +37,10 @@ export interface PermissionCardProps {
 
 // A large embedded diff must never push Allow/Deny off-screen (this card sits in a
 // non-scrolling slot above the composer) — cap it at a fraction of the window height with its
-// own internal scroll instead.
-const DIFF_MAX_HEIGHT_RATIO = 0.4;
+// own internal scroll instead. A quarter, not more: the session header, the queued-prompt chips,
+// the slash-command strip and the composer share the same column, and at 0.4 an 800px-tall
+// desktop window pushed the composer below the window edge while a permission was pending.
+const DIFF_MAX_HEIGHT_RATIO = 0.25;
 
 // How long Allow/Deny stay locked waiting for the real unlock (a new `prompt_seq`) before giving
 // up and re-enabling them.
@@ -99,6 +101,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
   }));
 
   const locked = lockedSeq === promptSeq;
+  const parts = permissionPromptParts(prompt);
 
   const respond = (yes: boolean) => {
     if (locked) return;
@@ -146,10 +149,20 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
       <Card variant="feature" style={{ borderColor: hexToRgba(tokens.danger, 0.35) }}>
         <Animated.View style={dim}>
           <Text style={[typeScale.section, styles.header, { color: tokens.danger }]}>
-            {`permission · ${formatRelativeTime(waitingSince, now)}`}
+            {"permission · "}
+            <Text style={styles.elapsed}>{formatRelativeTime(waitingSince, now)}</Text>
           </Text>
 
-          <Text style={[typeScale.body, { color: tokens.ink }, styles.prompt]}>{displayPermissionPrompt(prompt)}</Text>
+          <Text style={[typeScale.body, { color: tokens.ink }, styles.prompt]}>{parts.question}</Text>
+          {parts.subject ? (
+            <Text
+              selectable
+              numberOfLines={4}
+              style={[typeScale.code, styles.subject, { color: tokens.ink, backgroundColor: tokens.bg2, borderColor: tokens.border }]}
+            >
+              {parts.subject}
+            </Text>
+          ) : null}
 
           {diff?.pending ? (
             <View style={styles.diffSlot}>
@@ -189,7 +202,16 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
 
 const styles = StyleSheet.create({
   header: { letterSpacing: 0.6, marginBottom: space.space8 },
+  // The waiting time stays lower-case ("13s", not "13S") inside the upper-case section label.
+  elapsed: { textTransform: "none" },
   prompt: { marginBottom: space.space12 },
+  subject: {
+    marginTop: -space.space4,
+    marginBottom: space.space12,
+    paddingHorizontal: space.space12,
+    paddingVertical: space.space8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   diffSlot: { marginBottom: space.space12 },
   actionsRow: { flexDirection: "row", alignItems: "center", gap: space.space12 },
   actions: { flex: 1, flexDirection: "row", gap: space.space8 },

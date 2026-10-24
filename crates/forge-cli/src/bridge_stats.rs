@@ -182,6 +182,12 @@ pub fn probe_claude_limits() -> Vec<(String, f64, Option<i64>)> {
             "anthropic-ratelimit-unified-7d-reset",
             "weekly",
         ),
+        // The per-model (Fable) weekly meter; only accounts that have it get these headers.
+        (
+            "anthropic-ratelimit-unified-7d_oi-utilization",
+            "anthropic-ratelimit-unified-7d_oi-reset",
+            forge_types::subscription_pacing::FABLE_WEEKLY_WINDOW,
+        ),
     ] {
         if let Some(frac) = first_float_after(&text, utilization_header) {
             res.push((

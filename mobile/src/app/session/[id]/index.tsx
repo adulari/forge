@@ -54,9 +54,9 @@ import { EmptyState } from "../../../components/ds/EmptyState";
 import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
 import { type HistoryRow } from "../../../lib/api";
-import { historyHasRealContentSince, shouldRetryEmptyHistory } from "../../../lib/historyMerge";
+import { answerAlreadyShown, historyHasRealContentSince, shouldRetryEmptyHistory } from "../../../lib/historyMerge";
 import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
-import { reconcilePendingMessages } from "../../../lib/sessionReconciler";
+import { reconcilePendingMessages, unqueuedPendingMessages } from "../../../lib/sessionReconciler";
 import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessions } from "../../../lib/queries";
@@ -462,16 +462,18 @@ export default function SessionChat() {
   // its timer here too (the effect above already removed it from `pendingSent`, which reruns
   // this effect and cancels the stale timer before it can fire) — so the toast only ever fires
   // for the genuine stuck case, not on every ordinary turn.
+  const queuedKey = (snapshot?.queued ?? []).join("\u0000");
+  const shownPending = useMemo(() => unqueuedPendingMessages(pendingSent, queuedKey ? queuedKey.split("\u0000") : []), [pendingSent, queuedKey]);
   useEffect(() => {
-    if (pendingSent.length === 0) return;
-    const timers = pendingSent.map((p) =>
+    if (shownPending.length === 0) return;
+    const timers = shownPending.map((p) =>
       setTimeout(() => {
         setPendingSent((prev) => prev.filter((x) => x.id !== p.id));
         toast.show("message didn't confirm — check connection", { tone: "danger" });
       }, PENDING_SENT_TIMEOUT_MS),
     );
     return () => timers.forEach(clearTimeout);
-  }, [pendingSent, toast]);
+  }, [shownPending, toast]);
 
   // REST history is authoritative once populated. A successful-but-empty page is not evidence
   // that the daemon transcript is empty, so retain the snapshot tail until history has rows.
@@ -625,9 +627,7 @@ export default function SessionChat() {
   // (verified live — `streaming` goes "" while still busy). Falling back to `track.retainedText`
   // while busy keeps the just-streamed answer on screen through those frames instead of blanking
   // it back to the "thinking…" indicator, then `finalizing` carries it across the busy->false
-  // edge until the history row lands. No frame ever renders the answer absent.
-  const displayText =
-    streamingText || (busy ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
+  // edge until the history row lands. No frame ever renders the answer absent (`displayText`, below the folds).
 
   const toolLedger = useMemo(
     () => (snapshot?.transcript ?? []).map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => line.startsWith("↳ ")).slice(-3),
@@ -683,6 +683,8 @@ export default function SessionChat() {
     () => (foldEnabled ? foldToolGroups(fillerTranscript, busy, fillerGroupMemo) : fillerTranscript),
     [foldEnabled, fillerTranscript, busy, fillerGroupMemo],
   );
+  const retained = busy && !answerAlreadyShown(useTranscriptFiller ? foldedFiller : foldedHistory, track.retainedText);
+  const displayText = streamingText || (retained ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
   // Open groups by id (the id of the group's first call), so they stay open while the list
   // re-renders, virtualises cells away and grows.
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
@@ -715,10 +717,7 @@ export default function SessionChat() {
     // Newest-first (inverted list): the user's own just-sent message is more recent than any
     // settled history row but older than the in-progress reply above, and later sends are newer
     // than earlier ones — walk pendingSent back-to-front.
-    for (let i = pendingSent.length - 1; i >= 0; i--) {
-      const p = pendingSent[i];
-      list.push({ kind: "pendingSent", id: p.id, text: p.text, attachments: p.attachments });
-    }
+    for (const p of [...shownPending].reverse()) list.push({ kind: "pendingSent", id: p.id, text: p.text, attachments: p.attachments });
     if (!useTranscriptFiller) {
       // Collapse the call/result row PAIR the daemon serves into one ToolCallRow entry, and keep
       // ordinary turns as message rows. `historyRows` is already newest-first, which is what
@@ -756,7 +755,7 @@ export default function SessionChat() {
       // (pendingSent bubble + streaming reply + LiveToolActivity) already render — keeping
       // them here painted the same exchange twice, once as plain lines. Cut the filler at
       // the current turn's start (the last "you" marker) while a turn is in flight.
-      if (busy || streamingText || pendingSent.length > 0) {
+      if (busy || streamingText || shownPending.length > 0) {
         const lastYou = filler.map((l) => l.trim()).lastIndexOf("you");
         if (lastYou >= 0) filler = filler.slice(0, lastYou);
       }
@@ -765,7 +764,7 @@ export default function SessionChat() {
       }
     }
     return list;
-  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, foldedHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
+  }, [displayText, streamingText, busy, shownPending, useTranscriptFiller, historyRows, foldedHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
@@ -976,7 +975,7 @@ export default function SessionChat() {
             </Pressable>
           </View>
         ) : null}
-        {showJump && !responseNavigatorVisible ? (
+        {showJump ? (
           <Pressable
             onPress={jumpToLatest}
             accessibilityRole="button"

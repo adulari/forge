@@ -5,7 +5,7 @@
 // group, and a footer (usage-pace rings + Inbox/History/Settings + the collapse
 // control). Replaces `ExpandedFleetRail` (components/fleet/DesktopDrillDown.tsx).
 import { router, usePathname } from "expo-router";
-import { Bell, BellDot, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
+import { Bell, BellDot, Gauge, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
@@ -13,14 +13,18 @@ import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import type { AnywhereHost } from "../../lib/anywhere/types";
 import { hostStateText } from "../../lib/anywhere/format";
 import type { SessionRow } from "../../lib/api";
-import { modKey } from "../../lib/platform";
+import { useShortcutLabel } from "../../lib/shortcuts";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
+import { useAuth } from "../../lib/auth";
 import { useSessions } from "../../lib/queries";
+import { useScopedFleet, type ScopedSessionRow } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../theme/tokens";
 import { formatCost, formatCwd, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { HostDot } from "../anywhere/HostDot";
+import { useRelativeClock } from "../ds/relativeClock";
 import { StatusDot } from "../ds/StatusDot";
+import { ServerScopePills } from "../fleet/ServerScopePills";
 import { usePalette } from "../overlay/CommandPalette";
 import { useProviderPace, UsageRing } from "./UsageRing";
 
@@ -35,18 +39,27 @@ function projectNameFromCwd(cwd: string): string {
   return (wtIndex >= 0 ? label.slice(0, wtIndex) : label).toUpperCase();
 }
 
-function groupSessionsByProject(rows: SessionRow[]): { project: string; rows: SessionRow[] }[] {
-  const order: string[] = [];
-  const map = new Map<string, SessionRow[]>();
-  for (const row of rows) {
-    const project = projectNameFromCwd(row.cwd);
-    if (!map.has(project)) {
-      map.set(project, []);
-      order.push(project);
+interface ProjectGroup {
+  key: string;
+  project: string;
+  serverId: string;
+  rows: ScopedSessionRow[];
+}
+
+/** Same-named projects on two servers are two checkouts, so the group key includes the server. */
+function groupSessionsByProject(rows: ScopedSessionRow[]): ProjectGroup[] {
+  const groups = new Map<string, ProjectGroup>();
+  for (const item of rows) {
+    const project = projectNameFromCwd(item.row.cwd);
+    const key = `${item.serverId}\u0000${project}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { key, project, serverId: item.serverId, rows: [] };
+      groups.set(key, group);
     }
-    map.get(project)!.push(row);
+    group.rows.push(item);
   }
-  return order.map((project) => ({ project, rows: map.get(project)! }));
+  return [...groups.values()];
 }
 
 function hostShortMeta(host: AnywhereHost): string {
@@ -56,14 +69,21 @@ function hostShortMeta(host: AnywhereHost): string {
   return hostStateText(host);
 }
 
-function DenseSessionRow({ row, selected }: { row: SessionRow; selected: boolean }) {
+function DenseSessionRow({ row, serverId, selected }: { row: SessionRow; serverId: string; selected: boolean }) {
   const tokens = useTokens();
+  const { setActive } = useAuth();
+  // Re-render on the shared clock: the list only re-renders when the fleet changes, so a
+  // computed "4m" otherwise froze at whatever it read when the row last changed.
+  useRelativeClock();
   const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
   const title = row.title || `session ${row.id.slice(0, 8)}`;
 
   return (
     <Pressable
-      onPress={() => router.push(`/session/${row.id}`)}
+      onPress={() => {
+        if (serverId) setActive(serverId);
+        router.push(`/session/${row.id}`);
+      }}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${state}${row.waiting ? ", needs a decision" : ""}`}
       style={[styles.denseRow, (row.waiting || selected) && { backgroundColor: tokens.selection }]}
@@ -109,12 +129,13 @@ function HostRow({ host }: { host: AnywhereHost }) {
   );
 }
 
-function GroupLabel({ label, count }: { label: string; count: number }) {
+function GroupLabel({ label, server, count }: { label: string; server?: string; count: number }) {
   const tokens = useTokens();
   return (
     <View style={styles.groupLabelRow}>
       <Text style={[typeScale.section, styles.groupLabelText, { color: tokens.ink3 }]} numberOfLines={1}>
         {label}
+        {server ? <Text style={{ color: tokens.ink4 }}>{` · ${server}`}</Text> : null}
       </Text>
       <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{count}</Text>
     </View>
@@ -127,17 +148,27 @@ export interface SidebarProps {
    * usage-ring row double as the ⌘U dock-toggle affordance (design calls for
    * "⌘U + a top-bar/icon-rail affordance", this rail's half of that). */
   onToggleDock?: () => void;
+  dockOpen?: boolean;
 }
 
-export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
+export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarProps) {
   const tokens = useTokens();
+  const searchHint = useShortcutLabel("session.search");
+  const newSessionHint = useShortcutLabel("session.new");
+  const usageHint = useShortcutLabel("shell.usage");
+  const sidebarHint = useShortcutLabel("shell.sidebar");
   const pathname = usePathname();
   const palette = usePalette();
-  const sessionsQuery = useSessions();
-  const rows = useMemo(() => sessionsQuery.data ?? [], [sessionsQuery.data]);
+  const { servers } = useAuth();
+  const fleet = useScopedFleet();
+  const rows = fleet.rows;
   const groups = useMemo(() => groupSessionsByProject(rows), [rows]);
+  const labelServers = fleet.showAll && new Set(groups.map((group) => group.serverId)).size > 1;
+  const serverName = (id: string) => servers.find((server) => server.id === id)?.name;
   const noticesUnseen = totalUnseen(useNoticesStore().hosts);
-  const waitingCount = useMemo(() => rows.filter((r) => r.waiting).length, [rows]);
+  // The Inbox lists the active server's waiting sessions, so its badge counts the same set.
+  const { data: activeRows } = useSessions();
+  const waitingCount = useMemo(() => (activeRows ?? []).filter((r) => r.waiting).length, [activeRows]);
   const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
 
   const { signedIn: anywhereSignedIn } = useAnywhere();
@@ -155,7 +186,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
       >
         <Search size={12} strokeWidth={1.75} color={tokens.ink3} />
         <Text style={[typeScale.sub, styles.searchHint, { color: tokens.ink3 }]}>Search sessions…</Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{modKey}P</Text>
+        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{searchHint}</Text>
       </Pressable>
 
       <Pressable
@@ -166,20 +197,22 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
       >
         <Plus size={13} strokeWidth={2} color={tokens.ink} />
         <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>New session</Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{modKey}N</Text>
+        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{newSessionHint}</Text>
       </Pressable>
 
+      <ServerScopePills layout="wrap" />
+
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
-        {sessionsQuery.isLoading && rows.length === 0 ? (
+        {fleet.isLoading && rows.length === 0 ? (
           <Text style={[typeScale.sub, styles.emptyText, { color: tokens.ink3 }]}>Connecting…</Text>
         ) : rows.length === 0 ? (
           <Text style={[typeScale.sub, styles.emptyText, { color: tokens.ink3 }]}>No sessions — forge one above.</Text>
         ) : (
-          groups.map(({ project, rows: groupRows }) => (
-            <View key={project}>
-              <GroupLabel label={project} count={groupRows.length} />
-              {groupRows.map((row) => (
-                <DenseSessionRow key={row.id} row={row} selected={row.id === selectedSessionId} />
+          groups.map((group) => (
+            <View key={group.key}>
+              <GroupLabel label={group.project} server={labelServers ? serverName(group.serverId) : undefined} count={group.rows.length} />
+              {group.rows.map(({ row, serverId }) => (
+                <DenseSessionRow key={row.id} row={row} serverId={serverId} selected={row.id === selectedSessionId} />
               ))}
             </View>
           ))
@@ -202,13 +235,19 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
             disabled={!onToggleDock}
             accessibilityRole={onToggleDock ? "button" : undefined}
             accessibilityLabel="Toggle usage dock"
-            accessibilityHint="Command U"
+            accessibilityHint={usageHint}
             style={styles.usageBlock}
           >
             <Text style={[typeScale.section, styles.usageLabel, { color: tokens.ink3 }]}>Usage</Text>
             <View style={styles.ringRow}>
               {rings.map((ring) => (
-                <UsageRing key={ring.provider} pct={ring.pct} accessibilityLabel={`${ring.provider} usage ${ring.pct}%`} />
+                // A bare ring at a low percent reads as a loading spinner, so it carries its number.
+                <View key={ring.provider} style={styles.ringItem}>
+                  <UsageRing pct={ring.pct} accessibilityLabel={`${ring.provider} usage ${ring.pct}%`} />
+                  <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]}>
+                    {planName(ring.provider)} {ring.pct}%
+                  </Text>
+                </View>
               ))}
             </View>
           </Pressable>
@@ -218,8 +257,9 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           <Pressable
             onPress={() => router.push("/inbox")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/inbox" }}
             accessibilityLabel={waitingCount > 0 ? `Inbox, ${waitingCount} needs you` : "Inbox"}
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/inbox" && { backgroundColor: tokens.selection }]}
           >
             <BellDot size={15} strokeWidth={1.75} color={tokens.ink2} />
             {waitingCount > 0 ? <View style={[styles.footerBadge, { backgroundColor: tokens.danger, borderColor: tokens.bg1 }]} /> : null}
@@ -227,8 +267,9 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           <Pressable
             onPress={() => router.push("/notices")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/notices" }}
             accessibilityLabel={noticesUnseen > 0 ? `Notices, ${noticesUnseen} new` : "Notices"}
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/notices" && { backgroundColor: tokens.selection }]}
           >
             <Bell size={15} strokeWidth={1.75} color={tokens.ink2} />
             {noticesUnseen > 0 ? <View style={[styles.footerBadge, { backgroundColor: tokens.accent, borderColor: tokens.bg1 }]} /> : null}
@@ -236,17 +277,33 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
           <Pressable
             onPress={() => router.push("/history")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/history" }}
             accessibilityLabel="History"
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/history" && { backgroundColor: tokens.selection }]}
           >
             <History size={15} strokeWidth={1.75} color={tokens.ink2} />
           </Pressable>
           <View style={styles.footerSpacer} />
+          {/* Always present: the ring row above only renders once a subscription window has
+              been observed, and without this the dock had no visible way to open. */}
+          {onToggleDock ? (
+            <Pressable
+              onPress={onToggleDock}
+              accessibilityRole="button"
+              accessibilityLabel={dockOpen ? "Hide usage panel" : "Show usage panel"}
+              accessibilityHint={usageHint}
+              accessibilityState={{ selected: dockOpen }}
+              style={[styles.footerIconButton, dockOpen && { backgroundColor: tokens.bg3 }]}
+            >
+              <Gauge size={15} strokeWidth={1.75} color={dockOpen ? tokens.ink : tokens.ink2} />
+            </Pressable>
+          ) : null}
           <Pressable
             onPress={() => router.push("/settings")}
             accessibilityRole="button"
+            accessibilityState={{ selected: pathname === "/settings" }}
             accessibilityLabel="Settings"
-            style={styles.footerIconButton}
+            style={[styles.footerIconButton, pathname === "/settings" && { backgroundColor: tokens.selection }]}
           >
             <Settings2 size={15} strokeWidth={1.75} color={tokens.ink2} />
           </Pressable>
@@ -254,7 +311,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
             onPress={onCollapse}
             accessibilityRole="button"
             accessibilityLabel="Collapse sidebar"
-            accessibilityHint="Command Backslash"
+            accessibilityHint={sidebarHint}
             style={styles.footerIconButton}
           >
             <PanelLeftClose size={15} strokeWidth={1.75} color={tokens.ink2} />
@@ -305,8 +362,15 @@ const styles = StyleSheet.create({
   usageBlock: { paddingHorizontal: space.space4, marginBottom: space.space8 },
   usageLabel: { fontFamily: monoFamily.regular, marginBottom: space.space8 },
   ringRow: { flexDirection: "row", gap: space.space12, alignItems: "center" },
+  ringItem: { flexDirection: "row", gap: space.space4, alignItems: "center" },
   footerIcons: { flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space2 },
   footerIconButton: { width: 30, height: 30, alignItems: "center", justifyContent: "center", borderRadius: radii.radius8 },
   footerBadge: { position: "absolute", top: 4, right: 4, width: 6, height: 6, borderRadius: 3, borderWidth: 1 },
   footerSpacer: { flex: 1 },
 });
+
+function planName(provider: string): string {
+  if (provider.startsWith("claude")) return "Claude";
+  if (provider.startsWith("codex")) return "Codex";
+  return provider;
+}
