@@ -56,6 +56,13 @@ single-tenant hosting are future products rather than hidden V1 requirements.
 4. Sign in from the mobile or web app and approve the short-lived pairing QR challenge from an
    authorized device. Verify the displayed account and device fingerprints before approval.
 
+Forge Desktop skips step 4 when the Forge CLI on the same computer is already signed in. At
+launch, a signed-out desktop app creates its own device keys and pairing request, then runs
+`forge anywhere approve <challenge> --expect-signing-key <key>`. The CLI approves without a
+prompt only when the relay returns the exact signing key the app generated, so a relay that swaps
+the key gets nothing. The app becomes a separate device of the same account; no keys or tokens are
+copied between them. Signing the desktop app out turns this off until you sign in again.
+
 `forge anywhere enable` starts or attaches the managed connector to local `forge serve`; it does
 not expose the daemon token. An optional configuration block controls the connector:
 
