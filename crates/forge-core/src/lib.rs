@@ -85,6 +85,7 @@ mod compaction_shape;
 mod compaction_summary;
 mod completeness;
 pub(crate) mod completion;
+mod completion_verdict;
 mod context_floor;
 pub mod context_pack;
 pub(crate) mod context_pipeline;

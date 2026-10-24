@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A passing test run piped through `tail` or `grep` counts as a check, and a failing one as a failed check.** `python3 -m pytest -q 2>&1 | tail -30` exits with `tail`'s status, so the completion ledger classified it as ignorable and a green run never satisfied the review gate (more completeness reviews, no green run for the post-verification logic) although models pipe test output very often. A single-line command whose first pipeline stage runs tests is now judged by its output: pytest/jest/vitest `N passed` or `N failed`, cargo `test result: ok` or `FAILED`, unittest `OK` or `FAILED (...)`, node `# fail 0` or `# fail N`, go `ok pkg` / `PASS` or `FAIL`. A failure marker beats a pass marker, output with neither stays ignored as before, and `;`, `||`, `&`, multi-line scripts and non-test stages are unchanged (`crates/forge-core/src/completion.rs`, `completion_verdict.rs`). Not yet validated by a benchmark A/B.
+
 ## [2.23.0] - 2026-10-24
 
 ### Security

@@ -28,6 +28,9 @@ impl VerificationFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VerificationObservation {
     Ignore,
+    /// A test run whose exit status a pipe masks (`pytest | tail`): a check only if its output
+    /// carries a verdict ([`VerificationLedger::observe_result`]), otherwise as good as `Ignore`.
+    PipedTest,
     Mutation,
     Generic,
     Check(VerificationFamily),
@@ -78,7 +81,7 @@ impl VerificationLedger {
     /// the progress ledger counts that as real progress.
     pub(crate) fn observe(&mut self, observation: VerificationObservation, ok: bool) -> bool {
         match observation {
-            VerificationObservation::Ignore => {}
+            VerificationObservation::Ignore | VerificationObservation::PipedTest => {}
             VerificationObservation::Mutation => {
                 if ok {
                     self.last_mutation_checkpoint = self.successful_observations;
@@ -120,6 +123,16 @@ impl VerificationLedger {
         ok: bool,
         result: &str,
     ) -> bool {
+        if observation == VerificationObservation::PipedTest {
+            let test = VerificationObservation::Check(VerificationFamily::Test);
+            return match crate::completion_verdict::output_verdict(result) {
+                Some(false) => self.observe(test, false),
+                // `ok` still has to hold: a pass line in the output of a call that itself failed
+                // (killed, timed out) is not a pass.
+                Some(true) if ok => self.observe(test, true),
+                _ => false,
+            };
+        }
         let VerificationObservation::BatchCheck { family, at } = observation else {
             return self.observe(observation, ok);
         };
@@ -275,7 +288,9 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
         for (index, entry) in entries.into_iter().enumerate() {
             match classify_command(entry) {
                 VerificationObservation::Check(family) => check = Some((family, index + 1)),
-                VerificationObservation::Ignore => masked = true,
+                VerificationObservation::Ignore | VerificationObservation::PipedTest => {
+                    masked = true
+                }
                 _ => {}
             }
         }
@@ -357,7 +372,11 @@ fn classify_command(command: &str) -> VerificationObservation {
         // POSIX pipelines report the final stage's status, and `;` / `||` chains can overwrite a
         // failed check with a later successful command. Never accept masked status as proof.
         Some(_) if has_untrustworthy_control_flow(&command.to_ascii_lowercase()) => {
-            VerificationObservation::Ignore
+            if crate::completion_verdict::only_a_pipe_masks_status(command) {
+                VerificationObservation::PipedTest
+            } else {
+                VerificationObservation::Ignore
+            }
         }
         Some(family) => VerificationObservation::Check(family),
         None => VerificationObservation::Generic,
@@ -427,7 +446,7 @@ fn has_untrustworthy_control_flow(command: &str) -> bool {
 /// Remove heredoc payloads before evaluating shell control flow. Python/Ruby/SQL embedded in a
 /// fail-fast shell command can legitimately contain `if`, `while`, pipes, and semicolons; those
 /// tokens are data consumed by the heredoc command and cannot mask the shell command's exit code.
-fn strip_heredoc_bodies(command: &str) -> String {
+pub(super) fn strip_heredoc_bodies(command: &str) -> String {
     let mut output = String::with_capacity(command.len());
     let mut delimiter: Option<String> = None;
     for line in command.lines() {
@@ -506,7 +525,7 @@ fn heredoc_delimiter(line: &str) -> Option<String> {
 /// Double-quoted text is deliberately preserved: command substitutions (`$(...)` and backticks)
 /// execute inside double quotes and can mask a failing verification. Treating an inert semicolon
 /// in a double-quoted label as suspicious is a safe false negative; accepting a masked check is not.
-fn strip_quoted_literals(command: &str) -> String {
+pub(super) fn strip_quoted_literals(command: &str) -> String {
     let first_line_words = command
         .lines()
         .find(|line| !line.trim().is_empty())
@@ -639,7 +658,7 @@ fn enables_pipefail(command: &str) -> bool {
     enabled
 }
 
-fn has_standalone_background_operator(command: &str) -> bool {
+pub(super) fn has_standalone_background_operator(command: &str) -> bool {
     let bytes = command.as_bytes();
     bytes.iter().enumerate().any(|(index, byte)| {
         if *byte != b'&' {
@@ -1057,12 +1076,7 @@ mod tests {
 
     #[test]
     fn piped_checks_are_not_trusted_without_failure_propagation() {
-        for command in [
-            "cargo test 2>&1 | tail -50",
-            "npm test | tee test.log",
-            "cargo clippy | head -40",
-            "tsc --noEmit | sed -n '1,80p'",
-        ] {
+        for command in ["cargo clippy | head -40", "tsc --noEmit | sed -n '1,80p'"] {
             assert_eq!(
                 classify_tool(
                     "shell",
@@ -1095,6 +1109,102 @@ mod tests {
             VerificationObservation::Check(VerificationFamily::Lint),
             "a fail-fast AND chain preserves failure"
         );
+    }
+
+    fn piped_test(command: &str) -> VerificationObservation {
+        classify_tool(
+            "shell",
+            &serde_json::json!({ "command": command }).to_string(),
+        )
+    }
+
+    #[test]
+    fn a_pipe_that_masks_a_test_run_is_judged_by_its_output() {
+        for command in [
+            "python3 -m pytest -q 2>&1 | tail -30",
+            "cargo test 2>&1 | grep -E 'test result'",
+            "npm test | tee test.log",
+            "cd app && go test ./... 2>&1 | head -40",
+            "cargo test 2>&1 | grep x | tail -3",
+        ] {
+            assert_eq!(
+                piped_test(command),
+                VerificationObservation::PipedTest,
+                "{command}"
+            );
+        }
+        for command in [
+            "cargo test | tail; true",
+            "cargo test || true | tail",
+            "cargo test &\ntrue | tail",
+            "set -e\ncargo test | tail -20",
+            "cat tests/out.log | tail",
+            "echo test | tee log",
+            "cargo build 2>&1 | tail",
+            "cargo clippy 2>&1 | tail",
+            "git log | grep test",
+        ] {
+            assert_ne!(
+                piped_test(command),
+                VerificationObservation::PipedTest,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_masked_pipe_counts_as_a_check_only_when_the_output_has_a_verdict() {
+        let piped = VerificationObservation::PipedTest;
+        let mut ledger = VerificationLedger::default();
+        ledger.observe(VerificationObservation::Mutation, true);
+
+        ledger.observe_result(piped, true, "shell: exit 0 in 9ms\nCompiling forge-core");
+        assert!(!ledger.checked_since_edit() && !ledger.has_failing_check());
+
+        ledger.observe_result(
+            piped,
+            true,
+            "shell: exit 0 in 9ms\n1 failed, 3 passed in 0.1s",
+        );
+        assert!(ledger.has_failing_check());
+        assert_eq!(ledger.unresolved_summary().as_deref(), Some("test"));
+
+        let flipped = ledger.observe_result(piped, true, "shell: exit 0 in 9ms\n4 passed in 0.1s");
+        assert!(flipped && ledger.checked_since_edit() && !ledger.has_failing_check());
+    }
+
+    #[test]
+    fn a_pass_line_from_a_call_that_failed_is_not_a_pass() {
+        let mut ledger = VerificationLedger::default();
+        ledger.observe(VerificationObservation::Mutation, true);
+        ledger.observe_result(
+            VerificationObservation::PipedTest,
+            false,
+            "4 passed in 0.1s",
+        );
+        assert!(!ledger.checked_since_edit());
+    }
+
+    #[test]
+    fn each_runner_piped_through_a_filter_is_read_both_ways() {
+        for (output, passes) in [
+            ("12 passed in 0.31s", true),
+            ("2 failed, 10 passed in 0.31s", false),
+            ("test result: ok. 9 passed; 0 failed", true),
+            ("test result: FAILED. 8 passed; 1 failed", false),
+            ("Ran 4 tests in 0.002s\n\nOK", true),
+            ("Ran 4 tests in 0.002s\n\nFAILED (errors=1)", false),
+            ("# pass 5\n# fail 0", true),
+            ("# pass 4\n# fail 1", false),
+            ("ok  \texample.com/pkg\t0.012s", true),
+            ("FAIL\texample.com/pkg\t0.012s", false),
+        ] {
+            let mut ledger = VerificationLedger::default();
+            ledger.observe(VerificationObservation::Mutation, true);
+            ledger.observe_result(VerificationObservation::PipedTest, true, output);
+            assert_eq!(ledger.checked_since_edit(), passes, "{output}");
+            assert_eq!(ledger.has_failing_check(), !passes, "{output}");
+        }
     }
 
     #[test]
