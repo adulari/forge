@@ -40,8 +40,11 @@ import { MessageActionsSheet } from "../../../components/chat/MessageActionsShee
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
 import { ToolCallRow } from "../../../components/chat/ToolCallRow";
+import { ToolGroupRow } from "../../../components/chat/ToolGroupRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { buildTranscript, summarizeToolLine, type ToolInvocation } from "../../../lib/toolRows";
+import { foldToolGroups, GroupMemo, type FoldedEntry, type ToolGroupEntry } from "../../../lib/toolGroups";
+import { useAppearancePreferences } from "../../../lib/appearancePreferences";
 import { fillerHistoryRows } from "../../../lib/transcriptFiller";
 import { SubagentStrip } from "../../../components/session/SubagentStrip";
 import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
@@ -77,6 +80,7 @@ type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
   | { kind: "tool"; id: string; invocation: ToolInvocation }
+  | { kind: "toolGroup"; id: string; group: ToolGroupEntry }
   | { kind: "filler"; id: string; text: string }
   | { kind: "note"; id: string; text: string }
   | { kind: "pendingSent"; id: string; text: string; attachments: SentAttachment[] };
@@ -664,6 +668,31 @@ export default function SessionChat() {
     const rows = fillerHistoryRows(transcriptRows, inFlight) ?? [];
     return buildTranscript(rows);
   }, [transcriptRows, inFlight]);
+  // Runs of tool calls fold into one summary row (lib/toolGroups.ts). Folded here, off the
+  // transcripts, not inside `items`: `items` rebuilds on every streamed token, the transcripts
+  // only when history changes, and each memo keeps a group's object while its calls are
+  // unchanged, so a refetch re-summarises only the group that moved.
+  const { foldToolGroups: foldEnabled } = useAppearancePreferences();
+  const [historyGroupMemo] = useState(() => new GroupMemo());
+  const [fillerGroupMemo] = useState(() => new GroupMemo());
+  const foldedHistory = useMemo<FoldedEntry[]>(
+    () => (foldEnabled ? foldToolGroups(historyTranscript, busy, historyGroupMemo) : historyTranscript),
+    [foldEnabled, historyTranscript, busy, historyGroupMemo],
+  );
+  const foldedFiller = useMemo<FoldedEntry[]>(
+    () => (foldEnabled ? foldToolGroups(fillerTranscript, busy, fillerGroupMemo) : fillerTranscript),
+    [foldEnabled, fillerTranscript, busy, fillerGroupMemo],
+  );
+  // Open groups by id (the id of the group's first call), so they stay open while the list
+  // re-renders, virtualises cells away and grows.
+  const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleGroup = useCallback((id: string) => {
+    setOpenGroups((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  }, []);
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
     // `busy` alone (before any tokens arrive) still gets a "streaming" slot — rendered with
@@ -694,8 +723,10 @@ export default function SessionChat() {
       // Collapse the call/result row PAIR the daemon serves into one ToolCallRow entry, and keep
       // ordinary turns as message rows. `historyRows` is already newest-first, which is what
       // buildTranscript takes and returns.
-      for (const entry of historyTranscript) {
-        if (entry.kind === "tool") {
+      for (const entry of foldedHistory) {
+        if (entry.kind === "toolGroup") {
+          list.push({ kind: "toolGroup", id: entry.key, group: entry });
+        } else if (entry.kind === "tool") {
           list.push({ kind: "tool", id: entry.key, invocation: entry.invocation });
         } else {
           list.push({ kind: "history", id: `h${entry.row.seq}`, row: entry.row });
@@ -706,8 +737,10 @@ export default function SessionChat() {
       // rows history uses, so a late/failed history fetch is invisible instead of flipping the
       // whole conversation to plain grey lines (the reported "suddenly all grey" state). Seqs are
       // synthetic; ids are namespaced so they never collide with real history items.
-      for (const entry of fillerTranscript) {
-        if (entry.kind === "tool") {
+      for (const entry of foldedFiller) {
+        if (entry.kind === "toolGroup") {
+          list.push({ kind: "toolGroup", id: `f${entry.key}`, group: entry });
+        } else if (entry.kind === "tool") {
           list.push({ kind: "tool", id: `f${entry.key}`, invocation: entry.invocation });
         } else {
           list.push({ kind: "history", id: `fh${entry.row.seq}`, row: entry.row });
@@ -732,7 +765,7 @@ export default function SessionChat() {
       }
     }
     return list;
-  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, historyTranscript, fillerTranscript, snapshot?.transcript, transcriptRows, snapshot?.notes]);
+  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, foldedHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
@@ -773,6 +806,8 @@ export default function SessionChat() {
           return <MessageRow row={item.row} onLongPress={onMessageLongPress} />;
         case "tool":
           return <ToolCallRow invocation={item.invocation} />;
+        case "toolGroup":
+          return <ToolGroupRow group={item.group} expanded={openGroups.has(item.group.key)} onToggle={toggleGroup} />;
         case "pendingSent":
           // Renders through the same MessageRow the real (server-truth) row will use once
           // history lands, so there's no visual "jump" when this optimistic bubble is replaced.
@@ -844,7 +879,7 @@ export default function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, toolActivity, toolLedgerLines, onMessageLongPress],
+    [tokens.ink2, tokens.ink3, toolActivity, toolLedgerLines, onMessageLongPress, openGroups, toggleGroup],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);

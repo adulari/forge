@@ -3,17 +3,22 @@ import { useSyncExternalStore } from "react";
 
 const STORAGE_KEY = "forge.appearance.v1";
 
-export interface AppearancePreferences {
-  loaded: boolean;
+export interface StoredAppearance {
   wrapCodeBlocks: boolean;
+  /** Fold each run of tool calls into one summary row (the TUI's `[tui] fold_tool_groups`). */
+  foldToolGroups: boolean;
 }
 
-const DEFAULTS: AppearancePreferences = {
-  loaded: false,
+export interface AppearancePreferences extends StoredAppearance {
+  loaded: boolean;
+}
+
+const STORED_DEFAULTS: StoredAppearance = {
   wrapCodeBlocks: false,
+  foldToolGroups: true,
 };
 
-let state = DEFAULTS;
+let state: AppearancePreferences = { loaded: false, ...STORED_DEFAULTS };
 let hydration: Promise<void> | null = null;
 const listeners = new Set<() => void>();
 
@@ -26,13 +31,16 @@ function replaceState(next: AppearancePreferences): void {
   emit();
 }
 
-export function parseAppearancePreferences(raw: string | null): Pick<AppearancePreferences, "wrapCodeBlocks"> {
-  if (!raw) return { wrapCodeBlocks: false };
+export function parseAppearancePreferences(raw: string | null): StoredAppearance {
+  if (!raw) return { ...STORED_DEFAULTS };
   try {
-    const parsed = JSON.parse(raw) as { wrapCodeBlocks?: unknown };
-    return { wrapCodeBlocks: parsed?.wrapCodeBlocks === true };
+    const parsed = JSON.parse(raw) as { wrapCodeBlocks?: unknown; foldToolGroups?: unknown };
+    return {
+      wrapCodeBlocks: parsed?.wrapCodeBlocks === true,
+      foldToolGroups: parsed?.foldToolGroups !== false,
+    };
   } catch {
-    return { wrapCodeBlocks: false };
+    return { ...STORED_DEFAULTS };
   }
 }
 
@@ -41,7 +49,7 @@ async function ensureLoaded(): Promise<void> {
   if (hydration) return hydration;
   hydration = AsyncStorage.getItem(STORAGE_KEY)
     .then((raw) => replaceState({ loaded: true, ...parseAppearancePreferences(raw) }))
-    .catch(() => replaceState({ loaded: true, wrapCodeBlocks: false }));
+    .catch(() => replaceState({ loaded: true, ...STORED_DEFAULTS }));
   return hydration;
 }
 
@@ -59,14 +67,24 @@ export function useAppearancePreferences(): AppearancePreferences {
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
-export async function setWrapCodeBlocks(wrapCodeBlocks: boolean): Promise<void> {
+async function update<K extends keyof StoredAppearance>(key: K, value: StoredAppearance[K]): Promise<void> {
   await ensureLoaded();
   const previous = state;
-  replaceState({ loaded: true, wrapCodeBlocks });
+  const next: AppearancePreferences = { ...state, loaded: true, [key]: value };
+  replaceState(next);
+  const stored: StoredAppearance = { wrapCodeBlocks: next.wrapCodeBlocks, foldToolGroups: next.foldToolGroups };
   try {
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ wrapCodeBlocks }));
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
   } catch (error) {
-    if (state.wrapCodeBlocks === wrapCodeBlocks) replaceState(previous);
+    if (state[key] === value) replaceState(previous);
     throw error;
   }
+}
+
+export function setWrapCodeBlocks(wrapCodeBlocks: boolean): Promise<void> {
+  return update("wrapCodeBlocks", wrapCodeBlocks);
+}
+
+export function setFoldToolGroups(foldToolGroups: boolean): Promise<void> {
+  return update("foldToolGroups", foldToolGroups);
 }
