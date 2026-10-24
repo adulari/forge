@@ -62,6 +62,19 @@ describe("resultFailed", () => {
   it("flags error/failed text but not a passing result", () => {
     expect(resultFailed("Error: boom")).toBe(true);
     expect(resultFailed("42 passed; 0 failed")).toBe(false);
+    expect(resultFailed("permission denied by policy")).toBe(true);
+  });
+
+  it("reads the shell exit code, not words in the output", () => {
+    expect(resultFailed("shell: exit 0 in 12ms\n\nerror: none, test result: 1 failed")).toBe(false);
+    expect(resultFailed("shell: exit 101 in 3ms\n\nok")).toBe(true);
+    expect(resultFailed("shell: exit 0 in 5ms (2/3 ok)")).toBe(false);
+    expect(resultFailed("shell: timed out after 30s (killed) in 30000ms")).toBe(true);
+  });
+
+  it("does not flag a successful result that mentions errors", () => {
+    expect(resultFailed("shell: exit 0 in 241ms\n\n5\n\n[run_code: 3 tool calls, 3 ok, 0 failed, 97.4s]")).toBe(false);
+    expect(resultFailed("fn handle_error() -> Result<(), Error> {}")).toBe(false);
     expect(resultFailed("all good")).toBe(false);
     expect(resultFailed(null)).toBe(false);
   });
