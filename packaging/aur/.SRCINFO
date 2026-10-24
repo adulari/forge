@@ -1,6 +1,6 @@
 pkgbase = forge-bin
 	pkgdesc = Fast, model-agnostic AI coding harness and CLI in Rust (prebuilt binary)
-	pkgver = 2.23.0
+	pkgver = 2.23.1
 	pkgrel = 1
 	url = https://github.com/florisvoskamp/forge
 	arch = x86_64
@@ -10,9 +10,9 @@ pkgbase = forge-bin
 	conflicts = forge
 	options = !strip
 	options = !debug
-	source_x86_64 = forge-2.23.0-x86_64.tar.gz::https://github.com/florisvoskamp/forge/releases/download/v2.23.0/forge-x86_64-unknown-linux-gnu.tar.gz
-	sha256sums_x86_64 = 1251fd2ef148733d29d843e434eb6a90b7f99168b8d7f34de2111ffa0390fd70
-	source_aarch64 = forge-2.23.0-aarch64.tar.gz::https://github.com/florisvoskamp/forge/releases/download/v2.23.0/forge-aarch64-unknown-linux-gnu.tar.gz
-	sha256sums_aarch64 = 9b1b15ba77d3eaae469a743c7a44f4eae33870326fb68253ac01e8b31f874fd8
+	source_x86_64 = forge-2.23.1-x86_64.tar.gz::https://github.com/florisvoskamp/forge/releases/download/v2.23.1/forge-x86_64-unknown-linux-gnu.tar.gz
+	sha256sums_x86_64 = 4a080ed2bbba1e8792ed8c5ad19df55405aff25a99e8ceae2a5bae11cb585ad2
+	source_aarch64 = forge-2.23.1-aarch64.tar.gz::https://github.com/florisvoskamp/forge/releases/download/v2.23.1/forge-aarch64-unknown-linux-gnu.tar.gz
+	sha256sums_aarch64 = 1e58cc124b3ac8717ea13154ed06469c4e948a1da83bceb6f4d76ec846d7fe82
 
 pkgname = forge-bin
