@@ -1337,3 +1337,28 @@ fn welcome_try_focus_yields_to_typing_and_esc() {
     assert!(app.welcome_key(&KeyKind::Esc));
     assert!(app.panels_ui.try_focus.is_none());
 }
+
+#[test]
+fn the_welcome_keys_row_does_not_repeat_the_composer_hint() {
+    let app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    let rows = screen_rows(&app, 120, 40);
+    let keys = rows
+        .iter()
+        .find(|r| r.contains("Keys"))
+        .expect("a keys row");
+    let border = rows
+        .iter()
+        .find(|r| r.contains("? keys"))
+        .expect("the hint");
+    for chord in ["Ctrl+K", "Shift+Tab", "commands", "files"] {
+        assert!(border.contains(chord), "{border}");
+        assert!(!keys.contains(chord), "{chord} printed twice: {keys}");
+    }
+    assert!(
+        keys.contains("Ctrl+J") && keys.contains("newline"),
+        "{keys}"
+    );
+}

@@ -18,10 +18,11 @@ scrollback, so it vanishes on the first message and is never in history):
   `App::set_project_initialized(false)`, and the welcome re-checks `.forge/` guidance every two
   seconds, so the line clears as soon as `/init` writes it. Fullscreen pushes no scrollback warning;
   inline prints the same one-line warning once;
-- three things to try, the key row (`/ commands`, `@ files`, `Ctrl+K actions`, `Shift+Tab mode`,
-  `? all keys`; narrow terminals drop `Shift+Tab` first), a `More` row (`forge doctor`, `/mesh`) when
-  there is room, and recent sessions when a launcher supplies them with
-  `App::set_recent_sessions`.
+- three things to try, a key row, a `More` row (`forge doctor`, `/mesh`) when there is room, and
+  recent sessions when a launcher supplies them with `App::set_recent_sessions`. The key row lists
+  what the composer's border hint (`/ commands · @ files · Ctrl+K actions · Shift+Tab mode · ? keys`,
+  on screen at the same time) does not: `Ctrl+J newline` and the model picker chord. Listing the
+  five again would print them twice.
 
 At most 13 rows at 80x24. Inline prints a compact identity row (`✦ forge v2.x · repo ⑂ branch ·
 tagline`) and a keys row once, before the live region (`banner_lines`, `print_banner_direct`, which

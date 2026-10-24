@@ -146,7 +146,9 @@ One takeover with Commands, Keys and Mouse sections (Tab cycles them) and a sear
 filters. One row per command; the usage of the selected row is on the detail line; Enter on a
 command inserts it into the composer. The Keys table is generated from the same registry the
 keybinding editor edits plus the fixed keys, in one spelling (`Ctrl+K`, `Alt+M`, `Shift+Tab`,
-`Ctrl+Shift+C`, `PgUp`). At 120 columns and wider, commands and keys sit side by side.
+`Ctrl+Shift+C`, `PgUp`). At 180 columns and wider, commands and keys sit side by side; below that
+Help is one list that Tab switches between sections, because two half-width panes clipped most
+command descriptions with an ellipsis.
 
 ## Tool groups and the navigation pills
 

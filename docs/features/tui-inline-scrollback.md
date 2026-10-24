@@ -19,7 +19,9 @@
 >   an open turn a notice sits on the rail. forge-cli keeps its call sites: a leading legacy glyph
 >   (`⚠ ✖ ✕ ⏹ ⚙ ◈ ※ →`) is classified into the four kinds. Status text that arrives as a warning
 >   (nothing to compact, the completeness review, the CLI-bridge notice) is information, and the
->   bridge notice prints once per session. Notices that repeat with only digits changed fold into
+>   bridge notice prints once per installation and once per process, as one row
+>   (`CLI bridge: uses your local login; provider terms may limit third-party use (/help)`; `/help`
+>   keeps the full text under Notes). Notices that repeat with only digits changed fold into
 >   one `×N` row: full-screen rewrites the row, inline prints the first and, when the run ends, the
 >   final one. An error with a known fix gets a `Next:` line.
 > - Inline mode prints a finished tool card once, when its result lands (see

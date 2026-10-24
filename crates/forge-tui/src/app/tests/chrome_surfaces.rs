@@ -91,7 +91,9 @@ fn inline_has_no_header_and_the_region_stays_fourteen_rows() {
 
 #[test]
 fn fullscreen_chrome_is_five_rows_at_80_by_24() {
-    let rows = screen_rows(&located(), 80, 24);
+    let mut app = located();
+    app.context_limit = Some(32_000);
+    let rows = screen_rows(&app, 80, 24);
     assert!(rows[0].contains("✦ forge"));
     // Composer (3 rows) and status line (1 row) are the last four rows.
     assert!(rows[20].starts_with('╭'), "{}", rows[20]);
@@ -218,10 +220,9 @@ fn a_turn_that_failed_on_a_missing_model_points_at_model_not_at_resending() {
     );
     let top = rows.iter().find(|r| r.starts_with('╭')).unwrap();
     assert!(
-        top.contains("✗ Model unavailable · Run /model to pick another"),
-        "{top}"
+        !top.contains("Model unavailable") && !top.contains("send the message again"),
+        "the turn error is the one statement; the border only points at /model: {top}"
     );
-    assert!(!top.contains("send the message again"), "{top}");
     let bottom = rows.iter().find(|r| r.starts_with('╰')).unwrap();
     assert!(bottom.contains("/model pick another"), "{bottom}");
     assert!(!bottom.contains("continue resume"), "{bottom}");
@@ -284,7 +285,7 @@ fn hints_drop_from_the_second_to_last_backwards_and_keep_keys_last() {
 }
 
 #[test]
-fn the_status_line_is_one_row_with_the_model_cost_tokens_and_gauge() {
+fn the_status_line_is_one_row_with_the_model_cost_and_gauge_and_says_nothing_twice() {
     let mut app = routed(located());
     app.cost_usd = 0.0;
     app.turn_ran = true;
@@ -295,19 +296,47 @@ fn the_status_line_is_one_row_with_the_model_cost_tokens_and_gauge() {
     assert_eq!(crate::app::render::statusline_height(&app), 1);
     let rows = screen_rows(&app, 100, 24);
     let status = rows.last().unwrap();
-    assert!(status.contains("llama3.2 · simple"), "{status}");
-    assert!(!status.contains("trivial"), "{status}");
-    assert!(status.contains("↑72 ↓30"), "{status}");
+    assert!(status.contains("llama3.2"), "{status}");
+    assert!(
+        !status.contains("simple") && !status.contains("trivial"),
+        "the tier is router vocabulary: {status}"
+    );
+    assert!(
+        !status.contains("↑72"),
+        "the finished turn's tokens are in its footer: {status}"
+    );
     assert!(status.contains("ctx ▱▱▱▱▱▱▱▱ 0% of 32k"), "{status}");
-    assert!(status.contains("mesh auto"), "{status}");
+    assert!(
+        !status.contains("mesh auto") && !status.contains("⟨auto⟩"),
+        "a default is not a chip: {status}"
+    );
+    app.busy = true;
+    let busy = screen_rows(&app, 100, 24).pop().unwrap();
+    assert!(busy.contains("↑72 ↓30"), "the live counter: {busy}");
+    app.busy = false;
+    app.effort = Some(forge_types::EffortLevel::High);
+    let pinned = screen_rows(&app, 100, 24).pop().unwrap();
+    assert!(pinned.contains("mesh high"), "a choice is shown: {pinned}");
+}
+
+#[test]
+fn a_status_line_with_nothing_to_report_draws_no_placeholders() {
+    let app = routed(located());
+    let status = screen_rows(&app, 100, 24).pop().unwrap();
+    assert!(
+        !status.contains("ctx") && !status.contains("untracked"),
+        "no gauge before a number, no cost cell for an unpriced model: {status}"
+    );
 }
 
 #[test]
 fn status_widgets_drop_in_priority_order_and_a_marker_counts_them() {
     let mut app = routed(located());
+    app.busy = true;
     app.turn_ran = true;
     app.turn_in = 72;
     app.turn_out = 30;
+    app.effort = Some(forge_types::EffortLevel::High);
     app.context_tokens = 1_000;
     app.context_limit = Some(32_000);
     app.mcp_count = 3;
@@ -316,18 +345,18 @@ fn status_widgets_drop_in_priority_order_and_a_marker_counts_them() {
         .push(forge_config::StatuslineWidget::McpStatus);
     let wide = screen_rows(&app, 140, 24).pop().unwrap();
     assert!(
-        wide.contains("3 mcp") && wide.contains("↑72 ↓30") && wide.contains("mesh auto"),
+        wide.contains("3 mcp") && wide.contains("↑72 ↓30") && wide.contains("mesh high"),
         "{wide}"
     );
     assert_eq!(dropped_widgets(&app, 140), 0);
     // Extras (mcp) go before tokens, tokens before mesh; the gauge and model stay.
-    let mid = screen_rows(&app, 74, 24).pop().unwrap();
+    let mid = screen_rows(&app, 65, 24).pop().unwrap();
     assert!(!mid.contains("3 mcp"), "{mid}");
     assert!(mid.contains("↑72 ↓30"), "{mid}");
-    assert_eq!(dropped_widgets(&app, 74), 1);
+    assert_eq!(dropped_widgets(&app, 65), 1);
     let tight = screen_rows(&app, 40, 24).pop().unwrap();
     assert!(!tight.contains("↑72"), "{tight}");
-    assert!(!tight.contains("mesh auto"), "{tight}");
+    assert!(!tight.contains("mesh high"), "{tight}");
     assert!(
         tight.contains("llama3.2"),
         "the model is the last widget standing: {tight}"
@@ -736,6 +765,7 @@ fn status_fits_the_inline_region_and_wraps_long_rows_instead_of_clipping() {
         Some("/home/someone/a/very/long/path/to/a/project/checkout/worktree".into());
     app.remote_active = true;
     app.status_open = true;
+    app.context_limit = Some(32_000);
     let rows = screen_rows(&app, 80, LIVE_H);
     assert_eq!(rows.len(), 14);
     let all = rows.join("\n");

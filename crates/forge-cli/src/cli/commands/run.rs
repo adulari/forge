@@ -3671,6 +3671,15 @@ pub(crate) async fn run_chat_tui(
                                     }
                                 }
                             }
+                        } else if pin_check::hold_prompt_for_unavailable_model(
+                            &session, &mut app, &line,
+                        )
+                        .await
+                        {
+                            for img in std::mem::take(&mut submit_images) {
+                                app.attach_image(img, "image");
+                            }
+                            dirty = true;
                         } else {
                             let (hooks, hook_workspace, hook_runner, hook_sid) = {
                                 let mut s = session.lock().await;

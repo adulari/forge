@@ -19,6 +19,7 @@ nothing lists:
 ```
 unknown model 'groq::llama-3.3-70b-versatil' — did you mean groq::llama-3.3-70b-versatile? Run /model to pick another.
 unknown model 'nonexistent-model-xyz' — no model like it in the catalog. Run /model to pick another.
+unknown model 'nonexistent-model-xyz' — no provider knows it. Run /model to pick another.
 unknown model 'nonexistent-model-xyz' — no provider knows it, and Ollama isn't running. Run /model to pick another.
 ```
 
@@ -29,10 +30,17 @@ unknown model 'nonexistent-model-xyz' — no provider knows it, and Ollama isn't
 - With no catalog yet (a first launch) a bare id the provider layer cannot place is dispatched to the
   local Ollama server (`forge_provider::falls_back_to_local_ollama`). A refused connection to it
   answers instantly, so when nothing is listening the warning is printed at launch
-  (`no provider knows it, and Ollama isn't running`). When Ollama is running the id
-  may be a pulled model and nothing is claimed.
+  (`no provider knows it`). Ollama is named (`..., and Ollama isn't running`) only when the user
+  has set it up: `[local] model`, `[local] autostart` or `OLLAMA_HOST`. When Ollama is running the
+  id may be a pulled model and nothing is claimed.
 - The ids flagged here are the session's `unverified_models`. `/model <id>` marks an id the catalog
   does not list the same way.
+- A bare id that only the absent Ollama would have taken is also the session's
+  `unavailable_models` (`pin_check::PinCheck`). While the whole pin is in that list the composer
+  does not send: Enter keeps the text in the composer and prints one line,
+  `not sent: model 'x' isn't available. Run /model to pick another.` Pinning another model with
+  `/model` lifts it. An id that is merely missing from the catalog still sends (a brand-new model
+  may not be discovered yet).
 
 **When the turn fails** the answer is immediate and one line:
 
@@ -43,9 +51,9 @@ unknown model 'nonexistent-model-xyz' — no provider knows it, and Ollama isn't
 The classification, not a timeout, is what removed the wait: a provider's "no such model" answer is
 `ProviderError::NoModelAccess` (permanent), a bare id whose request found no Ollama is classed the
 same way, and a pinned permanent error is `FailTurn` on the first call (see mesh-routing.md, "A pin
-nothing serves"). The provider's own text goes to `.forge/forge.log`. The composer border reads
-`✗ Model unavailable · Run /model to pick another` and the hints lead with `/model pick another`;
-no `Next:` line repeats it, and the "context window is unknown" note is not stacked on a pin
+nothing serves"). The provider's own text goes to `.forge/forge.log`. The composer border no longer
+states it a third time: its hints lead with `/model pick another` and nothing else; no `Next:` line
+repeats it, and the "context window is unknown" note is not stacked on a pin
 startup already flagged.
 
 ## Esc

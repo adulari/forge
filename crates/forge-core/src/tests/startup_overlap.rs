@@ -234,3 +234,23 @@ async fn nothing_is_warmed_when_the_first_turn_would_not_use_it() {
         "unpinned, non-bridge, set-pinned and resumed conversations are not warmed"
     );
 }
+
+#[tokio::test]
+async fn a_prompt_is_held_back_only_while_the_whole_pin_is_known_uncallable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _capture) = session(dir.path(), Arc::default());
+    session.pin_model(Some("nonexistent-model-xyz".to_string()));
+    assert_eq!(session.unavailable_pin(), None, "nothing is known yet");
+    session.set_unavailable_models(vec!["nonexistent-model-xyz".to_string()]);
+    assert_eq!(session.unavailable_pin(), Some("nonexistent-model-xyz"));
+    session.pin_model(Some("nonexistent-model-xyz, groq::llama".to_string()));
+    assert_eq!(
+        session.unavailable_pin(),
+        None,
+        "a set with a callable member still sends"
+    );
+    session.pin_model(Some("groq::llama".to_string()));
+    assert_eq!(session.unavailable_pin(), None, "picking another lifts it");
+    session.pin_model(None);
+    assert_eq!(session.unavailable_pin(), None, "no pin, nothing to refuse");
+}

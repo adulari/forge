@@ -64,7 +64,7 @@ card that is newer always wins.
  ▏ ▸ Listed 1 directory, searched for 2 patterns, read 1 file, ran 2 shell commands  1 failed · 3.3s
  ▏   ✗ Run    echo 'probe: missing fixture' >&2; exit 3                               exit 3 · 18ms
  ▏ The checks pass apart from one probe. Writing the summary now.
- ▏ ⠧ Created 1 file (+13), edited 1 file (+1 −1)
+ ▏ ⠧ Created 3 files (+13), edited calc.py (+1 −1)
  ▏   ⠧ Run    wc -l mock-summary.md                                                         running
  ▏ Done.
  ▏ ▸ Read src/big.rs, ran cargo check  click or Alt+O to expand                             1.2s
@@ -101,6 +101,10 @@ words.
   asking (the agent may have moved on without fixing it), and its header costs one row. A
   destructive call is not hidden either: a deletion is its own category, and the permission
   prompt, which is where a destructive shell command is decided, is never folded.
+- **A change names its files.** A tally of file changes names the file when one or two were
+  touched (`edited calc.py (+1 −1)`, `created a.rs, b.rs (+30)`) and counts from three
+  (`edited 3 files`). After the user approves an edit the group folds to this row, so it is what
+  the transcript keeps of the change; the diff itself is one `Alt+O` away.
 - **Bridged tools are plain tools.** A claude-cli turn names Forge's own tools `mcp__forge__<tool>`.
   The TUI drops that namespace when the call arrives, so a bridged edit is an `edit_file` card like a
   native one: it groups as `Edited calc.py`, not `Called forge 2 times`, and its permission prompt

@@ -43,6 +43,9 @@ impl HelpTab {
     }
 }
 
+/// Columns from which Help draws commands and keys side by side.
+const WIDE_HELP_COLUMNS: u16 = 180;
+
 const SECTIONS: [&str; 3] = ["Commands", "Keys", "Mouse"];
 
 const GROUP_ORDER: [&str; 5] = [
@@ -71,8 +74,7 @@ fn command_group(name: &str) -> &'static str {
 /// installation, and stay here for anyone who wants them again.
 const BRIDGE_NOTE: (&str, &str) = (
     "CLI bridges",
-    "claude-cli and codex-cli run your own local login; provider terms may limit use through \
-     third-party tools (docs/features/provider-integrations.md)",
+    "run your own local login; provider terms may limit third-party use",
 );
 
 /// Keys that are not rebindable, in canonical spelling.
@@ -389,7 +391,9 @@ impl HelpState {
             query: self.query.clone(),
             placeholder: "type to filter",
         };
-        let wide = width >= 120 && self.tab != HelpTab::Mouse;
+        // Two panes of half the width clip the descriptions the single list shows whole; side by
+        // side only where each pane can still hold the longest of them.
+        let wide = width >= WIDE_HELP_COLUMNS && self.tab != HelpTab::Mouse;
         let base = |title: &str, items: Vec<Item>, selected: usize| View {
             title: title.to_string(),
             items,
@@ -607,9 +611,21 @@ mod tests {
         s.key(KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(s.tab, HelpTab::Commands);
         assert_eq!(s.views(80).len(), 1);
-        assert_eq!(s.views(160).len(), 2);
-        let wide = screen(&s, 160, 36);
+        assert_eq!(s.views(120).len(), 1, "half a screen clips descriptions");
+        assert_eq!(s.views(200).len(), 2);
+        let wide = screen(&s, 200, 36);
         assert!(wide.contains("/help") && wide.contains("Ctrl+K"), "{wide}");
+    }
+
+    #[test]
+    fn at_120_columns_no_command_description_is_clipped() {
+        let s = state(HelpTab::Commands);
+        let out = screen(&s, 120, 120);
+        let clipped: Vec<&str> = out
+            .lines()
+            .filter(|row| row.contains('…') && !row.contains(" more"))
+            .collect();
+        assert!(clipped.is_empty(), "clipped rows:\n{}", clipped.join("\n"));
     }
 
     #[test]

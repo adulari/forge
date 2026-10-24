@@ -267,6 +267,16 @@ enum Tense {
     Tried,
 }
 
+/// The files a change tally touched: one or two are named, because a collapsed group is all the
+/// transcript keeps of what the user just approved; more are counted.
+fn changed_files(t: &Tally) -> String {
+    if t.unnamed == 0 && (1..=2).contains(&t.subjects.len()) {
+        t.subjects.join(", ")
+    } else {
+        plural(t.count(), "file", "files")
+    }
+}
+
 /// One category in words, counted: `ran 4 shell commands`, or `run 4 shell commands` after
 /// "Tried to".
 fn counted(t: &Tally, tense: Tense) -> String {
@@ -299,19 +309,14 @@ fn counted(t: &Tally, tense: Tense) -> String {
         Category::Created => format!(
             "{} {}{}",
             verb("created", "create"),
-            plural(n, "file", "files"),
+            changed_files(t),
             stat(t)
         ),
-        Category::Edited => format!(
-            "{} {}{}",
-            verb("edited", "edit"),
-            plural(n, "file", "files"),
-            stat(t)
-        ),
+        Category::Edited => format!("{} {}{}", verb("edited", "edit"), changed_files(t), stat(t)),
         Category::Deleted => format!(
             "{} {}{}",
             verb("deleted", "delete"),
-            plural(n, "file", "files"),
+            changed_files(t),
             stat(t)
         ),
         Category::Fetch => format!(

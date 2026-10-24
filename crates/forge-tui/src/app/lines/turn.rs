@@ -51,7 +51,12 @@ pub(crate) fn plain_tier(tier: &str) -> &str {
 /// The assistant's label: identity on the left, the routed model and tier right-aligned.
 pub(crate) fn assistant_label(model: Option<&str>, tier: &str) -> TextLine<'static> {
     let g = crate::theme::glyphs::g();
-    let tier = plain_tier(tier);
+    // A pinned model is the user's own choice: its name says everything the tier would.
+    let tier = if tier == "pinned" {
+        ""
+    } else {
+        plain_tier(tier)
+    };
     let label = vec![
         Span::styled(g.brand, styles::brand()),
         Span::styled(" forge", styles::fg().bold()),

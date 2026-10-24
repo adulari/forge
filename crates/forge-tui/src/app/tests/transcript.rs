@@ -1134,6 +1134,28 @@ fn the_bridge_notice_prints_once_per_session() {
 }
 
 #[test]
+fn the_bridge_notice_is_a_single_row_where_a_real_terminal_is_wide() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    app.apply(PresenterEvent::Warning(
+        "CLI-bridge runs your locally-installed claude/codex; Forge never sees your login.".into(),
+    ));
+    let lines = app.drain_flush();
+    assert_eq!(lines.len(), 1, "one line, not a line and a path: {lines:?}");
+    let width: usize = lines[0]
+        .spans
+        .iter()
+        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    assert!(
+        width <= 100,
+        "fits one row of a 100-column terminal: {width}"
+    );
+}
+
+#[test]
 fn repeated_notices_fullscreen_rewrite_one_row_with_a_count() {
     let mut app = App {
         fullscreen: true,
@@ -1532,4 +1554,22 @@ fn a_call_still_running_when_the_turn_ends_stops_spinning() {
     });
     done(&mut app);
     assert!(app.tool_cards.is_empty());
+}
+
+#[test]
+fn a_pinned_models_answer_label_names_the_model_and_no_tier() {
+    let text = |tier: &str| -> String {
+        crate::app::lines::turn::assistant_label(Some("claude-cli::haiku"), tier)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    assert!(
+        text("pinned").contains("claude-cli::haiku"),
+        "{}",
+        text("pinned")
+    );
+    assert!(!text("pinned").contains("your pick"), "{}", text("pinned"));
+    assert!(text("trivial").contains("simple"), "{}", text("trivial"));
 }

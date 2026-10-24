@@ -164,36 +164,71 @@ pub(super) fn unknown_pin_warning(
     }
 }
 
+/// What the launch check found: ids no catalog lists, and the subset known to be uncallable.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct PinCheck {
+    /// Ids nothing lists; one fast refusal of one ends a turn at once.
+    pub(super) unverified: Vec<String>,
+    /// Ids no provider can serve right now (a bare id only the absent local Ollama would take).
+    /// The composer refuses to send while the whole pin is in this list.
+    pub(super) unavailable: Vec<String>,
+}
+
 /// Launch-time check of every pinned id against what is known about the machine. Emits one plain
 /// warning per id nothing lists and returns those ids, so a refusal of one ends the turn at once.
 /// Soft by design: a brand-new model may simply not be discovered yet.
 ///
 /// With a catalog, an id is judged against it. Without one (a first launch with nothing cached) a
 /// bare id the provider layer cannot place still has a known destination, the local Ollama server,
-/// so one that is not running is reported here instead of after the first message.
+/// so one that is not running is reported here instead of after the first message. Ollama is only
+/// named when the user has set it up (`ollama_configured`); to anyone else it is not a thing.
 pub(super) async fn check_pins(
     pin: Option<&str>,
     catalog: Option<&[String]>,
+    ollama_configured: bool,
     presenter: &mut dyn forge_tui::Presenter,
-) -> Vec<String> {
-    check_pins_with(pin, catalog, presenter, local_ollama_answers).await
+) -> PinCheck {
+    check_pins_with(
+        pin,
+        catalog,
+        ollama_configured,
+        presenter,
+        local_ollama_answers,
+    )
+    .await
+}
+
+/// Whether the user has set Ollama up: a configured local model, autostart, or an `OLLAMA_HOST`.
+pub(super) fn ollama_configured(config: &forge_config::Config) -> bool {
+    config.local.model.is_some()
+        || config.local.autostart
+        || std::env::var("OLLAMA_HOST").is_ok_and(|host| !host.trim().is_empty())
 }
 
 /// [`check_pins`] with the local-Ollama probe supplied, so the no-catalog path is testable.
 async fn check_pins_with<Probe, Answers>(
     pin: Option<&str>,
     catalog: Option<&[String]>,
+    ollama_configured: bool,
     presenter: &mut dyn forge_tui::Presenter,
     ollama_answers: Probe,
-) -> Vec<String>
+) -> PinCheck
 where
     Probe: Fn() -> Answers,
     Answers: std::future::Future<Output = bool>,
 {
     let attended = presenter.is_attended();
-    let mut unverified = Vec::new();
+    let mut found = PinCheck::default();
     for id in pin.map(super::session::pin_members).unwrap_or_default() {
         let prefix = forge_config::provider_of(&id);
+        let only_ollama_would_take_it =
+            prefix.is_empty() && forge_provider::falls_back_to_local_ollama(&id);
+        let why_unplaceable = if ollama_configured {
+            "no provider knows it, and Ollama isn't running"
+        } else {
+            "no provider knows it"
+        };
+        let mut unavailable = false;
         let warning = match catalog {
             Some(models) => {
                 let listed = if prefix.is_empty() {
@@ -204,6 +239,9 @@ where
                 let unknown = !listed
                     && (prefix.is_empty()
                         || judge_pin(&id, prefix, false, |k| k.routable()) == PinVerdict::Unknown);
+                if unknown && only_ollama_would_take_it {
+                    unavailable = !ollama_answers().await;
+                }
                 unknown.then(|| {
                     unknown_pin_warning(
                         &id,
@@ -213,25 +251,39 @@ where
                     )
                 })
             }
-            None if prefix.is_empty()
-                && forge_provider::falls_back_to_local_ollama(&id)
-                && !ollama_answers().await =>
-            {
-                Some(unknown_pin_warning(
-                    &id,
-                    "no provider knows it, and Ollama isn't running",
-                    &[],
-                    attended,
-                ))
+            None if only_ollama_would_take_it && !ollama_answers().await => {
+                unavailable = true;
+                Some(unknown_pin_warning(&id, why_unplaceable, &[], attended))
             }
             None => None,
         };
         if let Some(warning) = warning {
             presenter.emit(forge_tui::PresenterEvent::Warning(warning));
-            unverified.push(id);
+            found.unverified.push(id.clone());
+            if unavailable {
+                found.unavailable.push(id);
+            }
         }
     }
-    unverified
+    found
+}
+
+/// A prompt typed while the session's whole pin is known to be uncallable is not sent: the turn
+/// would only fail, and the text is worth keeping. It goes back into the composer, with one line
+/// that says what to do. `true` when the prompt was held back.
+pub(super) async fn hold_prompt_for_unavailable_model(
+    session: &std::sync::Arc<tokio::sync::Mutex<forge_core::Session>>,
+    app: &mut forge_tui::App,
+    line: &str,
+) -> bool {
+    let Some(model) = session.lock().await.unavailable_pin().map(str::to_string) else {
+        return false;
+    };
+    app.replace_input(line.to_string());
+    app.apply(forge_tui::PresenterEvent::Error(format!(
+        "not sent: model '{model}' isn't available. Run /model to pick another."
+    )));
+    true
 }
 
 /// `host:port` of the local Ollama server a bare, unrecognised model id is sent to, from an
@@ -499,10 +551,12 @@ mod tests {
         let unverified = check_pins_with(
             Some("groq::llama-3.3-70b-versatil"),
             Some(&models),
+            false,
             &mut p,
             never,
         )
-        .await;
+        .await
+        .unverified;
         assert_eq!(unverified, vec!["groq::llama-3.3-70b-versatil"]);
         assert_eq!(
             warnings(&rx),
@@ -514,8 +568,15 @@ mod tests {
     async fn an_id_nothing_resembles_gets_no_borrowed_suggestions() {
         let (mut p, rx) = presenter();
         let models = catalog();
-        let unverified =
-            check_pins_with(Some("nonexistent-model-xyz"), Some(&models), &mut p, never).await;
+        let unverified = check_pins_with(
+            Some("nonexistent-model-xyz"),
+            Some(&models),
+            false,
+            &mut p,
+            never,
+        )
+        .await
+        .unverified;
         assert_eq!(unverified, vec!["nonexistent-model-xyz"]);
         let warnings = warnings(&rx);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -540,10 +601,12 @@ mod tests {
         let unverified = check_pins_with(
             Some("groq::llama-3.1-8b-instant, openai::gpt-5.6"),
             Some(&models),
+            false,
             &mut p,
             never,
         )
-        .await;
+        .await
+        .unverified;
         assert!(unverified.is_empty());
         assert!(warnings(&rx).is_empty());
     }
@@ -553,8 +616,21 @@ mod tests {
     #[tokio::test]
     async fn without_a_catalog_an_unplaceable_bare_id_is_flagged_when_no_ollama_answers() {
         let (mut p, rx) = presenter();
-        let unverified = check_pins_with(Some("nonexistent-model-xyz"), None, &mut p, never).await;
-        assert_eq!(unverified, vec!["nonexistent-model-xyz"]);
+        let found =
+            check_pins_with(Some("nonexistent-model-xyz"), None, false, &mut p, never).await;
+        assert_eq!(found.unverified, vec!["nonexistent-model-xyz"]);
+        assert_eq!(found.unavailable, vec!["nonexistent-model-xyz"]);
+        assert_eq!(
+            warnings(&rx),
+            vec!["unknown model 'nonexistent-model-xyz' — no provider knows it. Run /model to pick another."],
+            "Ollama is not named to someone who never set it up"
+        );
+    }
+
+    #[tokio::test]
+    async fn ollama_is_named_only_when_the_user_configured_it() {
+        let (mut p, rx) = presenter();
+        check_pins_with(Some("nonexistent-model-xyz"), None, true, &mut p, never).await;
         assert_eq!(
             warnings(&rx),
             vec!["unknown model 'nonexistent-model-xyz' — no provider knows it, and Ollama isn't running. Run /model to pick another."]
@@ -562,14 +638,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_an_id_nothing_can_serve_is_unavailable() {
+        let (mut p, _rx) = presenter();
+        let models = catalog();
+        // Unlisted but a provider might still serve it (a new model on a known provider).
+        let typo = check_pins_with(
+            Some("groq::llama-3.3-70b-versatil"),
+            Some(&models),
+            false,
+            &mut p,
+            never,
+        )
+        .await;
+        assert_eq!(typo.unverified.len(), 1);
+        assert!(typo.unavailable.is_empty(), "{typo:?}");
+        // A bare unknown id with a catalog and no Ollama listening.
+        let bare = check_pins_with(
+            Some("nonexistent-model-xyz"),
+            Some(&models),
+            false,
+            &mut p,
+            never,
+        )
+        .await;
+        assert_eq!(bare.unavailable, vec!["nonexistent-model-xyz"]);
+        // The same id when something listens where it would be sent.
+        let up = check_pins_with(
+            Some("nonexistent-model-xyz"),
+            Some(&models),
+            false,
+            &mut p,
+            || async { true },
+        )
+        .await;
+        assert!(up.unavailable.is_empty(), "{up:?}");
+    }
+
+    #[tokio::test]
     async fn without_a_catalog_nothing_is_claimed_that_cannot_be_known() {
         let (mut p, rx) = presenter();
         // Ollama is up: the id may be a pulled model.
-        let up = check_pins_with(Some("qwen3:8b"), None, &mut p, || async { true }).await;
+        let up = check_pins_with(Some("qwen3:8b"), None, false, &mut p, || async { true }).await;
         // A qualified or recognised id needs a catalog to be judged.
-        let qualified = check_pins_with(Some("groq::whatever"), None, &mut p, never).await;
-        let recognised = check_pins_with(Some("gpt-5.6-luna"), None, &mut p, never).await;
-        assert!(up.is_empty() && qualified.is_empty() && recognised.is_empty());
+        let qualified = check_pins_with(Some("groq::whatever"), None, false, &mut p, never).await;
+        let recognised = check_pins_with(Some("gpt-5.6-luna"), None, false, &mut p, never).await;
+        assert!(
+            up.unverified.is_empty()
+                && qualified.unverified.is_empty()
+                && recognised.unverified.is_empty()
+        );
         assert!(warnings(&rx).is_empty());
     }
 }

@@ -321,6 +321,7 @@ impl Session {
             one_shot: false,
             default_commit_policy: forge_config::CommitPolicy::Unit,
             unverified_models: Vec::new(),
+            unavailable_models: Vec::new(),
             idle_nudge_carry: (0, 0),
             host_guard: Default::default(),
             compact_directive: None,

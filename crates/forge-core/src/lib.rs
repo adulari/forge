@@ -162,6 +162,7 @@ mod run_overrides;
 mod shell_diagnosis;
 pub use run_budget::RunBudget;
 pub use session_restore::RestoredTurnState;
+mod pin_availability;
 mod session_controls;
 mod session_history;
 mod session_lifecycle;
@@ -1848,6 +1849,9 @@ pub struct Session {
     /// Pinned ids no discovered catalog lists (startup warned "unknown model"). One fast provider
     /// rejection of such an id ends the turn instead of waiting out an outage backoff.
     pub(crate) unverified_models: Vec<String>,
+    /// The subset of those no provider can serve at all; a surface refuses to send while the whole
+    /// pin is in it (`Session::unavailable_pin`).
+    unavailable_models: Vec<String>,
     /// `(unanswered continue-nudges, tasks done)` carried across turns; see `model_loop`.
     idle_nudge_carry: (usize, usize),
     /// Stale-path guard armed when the session moved hosts (host_move.rs).

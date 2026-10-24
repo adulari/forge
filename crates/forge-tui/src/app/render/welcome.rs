@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::list_view::fit;
 use super::*;
-use crate::app::lines::banner::{TAGLINE, WELCOME_KEYS};
+use crate::app::lines::banner::TAGLINE;
 use crate::theme::glyphs::g;
 use crate::theme::styles;
 
@@ -156,30 +156,18 @@ fn labelled(label: &str, runs: Vec<Span<'static>>) -> TextLine<'static> {
     TextLine::from(spans)
 }
 
-/// The key hints, dropping the least useful from the end until the row fits.
-fn keys_row(width: usize, actions_chord: &str) -> TextLine<'static> {
-    let mut keys: Vec<(&str, &str)> = WELCOME_KEYS
-        .iter()
-        .map(|&(k, l)| {
-            if l == "actions" {
-                (actions_chord, l)
-            } else {
-                (k, l)
-            }
-        })
-        .collect();
-    keys.insert(3, ("Shift+Tab", "mode"));
+/// The keys the composer's own border hint does not list (`/`, `@`, the command center, the mode
+/// and `?` live there, on screen at the same time): the newline key and the model picker. A
+/// second copy of those five would only repeat them; the model picker goes first when narrow.
+fn keys_row(width: usize, model_chord: &str) -> TextLine<'static> {
+    let mut keys: Vec<(&str, &str)> = vec![("Ctrl+J", "newline"), (model_chord, "model")];
     let cost = |keys: &[(&str, &str)]| -> usize {
         keys.iter()
             .map(|(k, l)| k.width() + 2 + l.width() + 4)
             .sum()
     };
     while keys.len() > 1 && 10 + cost(&keys) > width {
-        // Shift+Tab goes first, then the tail.
-        match keys.iter().position(|(k, _)| *k == "Shift+Tab") {
-            Some(i) => keys.remove(i),
-            None => keys.pop().expect("non-empty"),
-        };
+        keys.pop();
     }
     let mut runs = Vec::new();
     for (key, label) in keys {
@@ -346,7 +334,7 @@ pub(crate) fn welcome_lines(app: &App, width: u16, height: u16) -> Vec<TextLine<
         lines.extend(try_rows(i == 0, example, focused, width));
     }
     lines.push(TextLine::default());
-    lines.push(keys_row(width, &app.action_chord("command_center")));
+    lines.push(keys_row(width, &app.action_chord("model_picker")));
     if let Some(recent) = recent_row(app, width) {
         lines.push(TextLine::default());
         lines.push(recent);

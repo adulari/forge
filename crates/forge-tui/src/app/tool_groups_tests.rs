@@ -90,12 +90,12 @@ fn file_changes_carry_their_combined_stat() {
         ),
     ];
     let s = text(&cards);
-    assert!(s.starts_with("Edited 2 files (+"), "{s}");
+    assert!(s.starts_with("Edited a.rs, b.rs (+"), "{s}");
     let (a1, d1) = crate::render::diff_stat(cards[0].diff.as_ref().unwrap());
     let (a2, d2) = crate::render::diff_stat(cards[1].diff.as_ref().unwrap());
     assert_eq!(
         s,
-        format!("Edited 2 files (+{} −{})", a1 + a2, d1 + d2),
+        format!("Edited a.rs, b.rs (+{} −{})", a1 + a2, d1 + d2),
         "{s}"
     );
 }
@@ -109,8 +109,18 @@ fn a_deletion_is_never_folded_into_edited() {
     ];
     assert_eq!(
         text(&cards),
-        "Edited 1 file (+1 −1), created 1 file (+1), deleted 1 file"
+        "Edited a.rs (+1 −1), created new.rs (+1), deleted old.rs"
     );
+}
+
+#[test]
+fn a_change_names_up_to_two_files_and_counts_beyond() {
+    let three: Vec<_> = ["a.rs", "b.rs", "c.rs"]
+        .into_iter()
+        .map(|f| change("edit_file", f, DiffKind::Modified, Some("a\n"), "b\n"))
+        .collect();
+    assert_eq!(text(&three), "Edited 3 files (+3 −3)");
+    assert_eq!(text(&three[..2]), "Edited a.rs, b.rs (+2 −2)");
 }
 
 #[test]
@@ -292,7 +302,7 @@ fn chunked_reads_and_repeated_edits_of_one_file_count_it_once() {
     ];
     assert_eq!(
         text(&cards),
-        "Read 1 file, ran 1 shell command, edited 1 file (+4 −3)"
+        "Read 1 file, ran 1 shell command, edited src/big.rs (+4 −3)"
     );
     let reads = [read("src/big.rs", 0), read("src/big.rs", 200)];
     assert_eq!(
