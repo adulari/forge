@@ -14,6 +14,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **Settings on a wide desktop window has a way back.** Settings and its sub-pages hide the sidebar and, at desktop width, there is no tab bar, so nothing led back to the session you came from. The Settings rail now starts with a Back link that returns to the last screen outside Settings (the session or the fleet), from any settings page (`mobile/src/app/(tabs)/settings.tsx`, `mobile/src/lib/nav.ts`).
 - **Forge Desktop signs in to Forge Anywhere with the account the Forge CLI on the same computer already uses.** A signed-out desktop app used to ask for a new GitHub sign-in even when `forge anywhere` was set up in the terminal. At launch it now creates its own device request and has the local CLI approve it (`forge anywhere approve --expect-signing-key`), which succeeds only when the relay returns the key the app generated. Each stays a separate device, with its own keys. Signing the desktop app out stops this until the next manual sign-in. The CLI must be 2.23.3 or newer; with an older CLI the app shows the normal sign-in.
 
 ## [2.23.2] - 2026-10-24

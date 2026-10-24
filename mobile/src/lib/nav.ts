@@ -11,3 +11,15 @@ export function goBackOr(fallback: Parameters<typeof router.replace>[0]) {
     router.replace(fallback);
   }
 }
+
+// Settings hides the sidebar on a wide window, so its rail needs its own way out. The shell
+// records the last route outside Settings and the rail's back link returns there.
+let lastShellRoute: string | null = null;
+
+export function rememberShellRoute(pathname: string): void {
+  lastShellRoute = pathname;
+}
+
+export function leaveSettings(): void {
+  router.replace((lastShellRoute ?? "/") as Parameters<typeof router.replace>[0]);
+}
