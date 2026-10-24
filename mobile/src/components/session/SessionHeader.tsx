@@ -28,6 +28,7 @@ import {
 import React, { useCallback, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 
+import { useShortcutLabel } from "../../lib/shortcuts";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
@@ -85,6 +86,8 @@ export interface SessionHeaderProps {
 
 function SessionHeaderImpl(props: SessionHeaderProps) {
   const tokens = useTokens();
+  const gitReviewHint = useShortcutLabel("workbench.gitReview");
+  const terminalHint = useShortcutLabel("workbench.terminal");
   const { isExpanded } = useBreakpoint();
   const [actionsVisible, setActionsVisible] = useState(false);
   const isPublic = props.exposure.startsWith("public");
@@ -143,7 +146,7 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
             }
             onPress={props.onToggleGitReview}
             accessibilityLabel={`${props.gitReviewActive ? "Hide" : "Show"} git review`}
-            accessibilityHint="Command G"
+            accessibilityHint={gitReviewHint}
             style={props.gitReviewActive ? { backgroundColor: tokens.selection } : undefined}
           />
         ) : null}
@@ -158,7 +161,7 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
             }
             onPress={props.onToggleTerminal}
             accessibilityLabel={`${props.terminalActive ? "Hide" : "Show"} terminal`}
-            accessibilityHint="Command J"
+            accessibilityHint={terminalHint}
             style={props.terminalActive ? { backgroundColor: tokens.selection } : undefined}
           />
         ) : null}

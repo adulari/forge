@@ -8,6 +8,7 @@ import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
 import { useSessions } from "../../lib/queries";
+import { useShortcutLabel } from "../../lib/shortcuts";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, statusDotColor, type StatusDotState } from "../../theme/tokens";
 import { usePalette } from "../overlay/CommandPalette";
@@ -80,6 +81,8 @@ export interface IconRailProps {
 
 export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
   const tokens = useTokens();
+  const usageHint = useShortcutLabel("shell.usage");
+  const sidebarHint = useShortcutLabel("shell.sidebar");
   const pathname = usePathname();
   const palette = usePalette();
   const sessionsQuery = useSessions();
@@ -128,7 +131,7 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
               disabled={!onToggleDock}
               accessibilityRole={onToggleDock ? "button" : undefined}
               accessibilityLabel="Toggle usage dock"
-              accessibilityHint="Command U"
+              accessibilityHint={usageHint}
               style={styles.ringColumn}
             >
               {rings.map((ring) => (
@@ -148,7 +151,7 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
           icon={<SquareChevronRight size={14} strokeWidth={1.75} color={tokens.ink3} />}
           onPress={onExpand}
           accessibilityLabel="Expand sidebar"
-          accessibilityHint="Command Backslash"
+          accessibilityHint={sidebarHint}
         />
       </View>
     </View>

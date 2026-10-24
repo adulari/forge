@@ -13,7 +13,7 @@ import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import type { AnywhereHost } from "../../lib/anywhere/types";
 import { hostStateText } from "../../lib/anywhere/format";
 import type { SessionRow } from "../../lib/api";
-import { modKey } from "../../lib/platform";
+import { useShortcutLabel } from "../../lib/shortcuts";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -131,6 +131,10 @@ export interface SidebarProps {
 
 export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
   const tokens = useTokens();
+  const searchHint = useShortcutLabel("session.search");
+  const newSessionHint = useShortcutLabel("session.new");
+  const usageHint = useShortcutLabel("shell.usage");
+  const sidebarHint = useShortcutLabel("shell.sidebar");
   const pathname = usePathname();
   const palette = usePalette();
   const sessionsQuery = useSessions();
@@ -155,7 +159,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
       >
         <Search size={12} strokeWidth={1.75} color={tokens.ink3} />
         <Text style={[typeScale.sub, styles.searchHint, { color: tokens.ink3 }]}>Search sessions…</Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{modKey}P</Text>
+        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{searchHint}</Text>
       </Pressable>
 
       <Pressable
@@ -166,7 +170,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
       >
         <Plus size={13} strokeWidth={2} color={tokens.ink} />
         <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>New session</Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{modKey}N</Text>
+        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{newSessionHint}</Text>
       </Pressable>
 
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
@@ -202,7 +206,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
             disabled={!onToggleDock}
             accessibilityRole={onToggleDock ? "button" : undefined}
             accessibilityLabel="Toggle usage dock"
-            accessibilityHint="Command U"
+            accessibilityHint={usageHint}
             style={styles.usageBlock}
           >
             <Text style={[typeScale.section, styles.usageLabel, { color: tokens.ink3 }]}>Usage</Text>
@@ -254,7 +258,7 @@ export function Sidebar({ onCollapse, onToggleDock }: SidebarProps) {
             onPress={onCollapse}
             accessibilityRole="button"
             accessibilityLabel="Collapse sidebar"
-            accessibilityHint="Command Backslash"
+            accessibilityHint={sidebarHint}
             style={styles.footerIconButton}
           >
             <PanelLeftClose size={15} strokeWidth={1.75} color={tokens.ink2} />

@@ -31,6 +31,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
 import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
 import { radii, space } from "../../theme/tokens";
+import { useShortcutLabel } from "../../lib/shortcuts";
 import { formatCostSummary, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
@@ -210,6 +211,7 @@ export function FleetScreen() {
   const [hostFilter, setHostFilter] = useState<string | null>(null);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
   const [composerText, setComposerText] = useState("");
+  const newSessionHint = useShortcutLabel("session.new");
   // The composer is `position: absolute`, so it never participates in layout resize — neither
   // iOS (which never resizes the window for the keyboard) nor Android (Android 15+ enforces
   // edge-to-edge, so `adjustResize` no longer shrinks the window either) lifts it for free, so
@@ -335,7 +337,7 @@ export function FleetScreen() {
               testID="fleet-empty-composer"
             />
             <View style={styles.expandedComposerHintWrap} pointerEvents="none">
-              <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>⌘N</Text>
+              <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>{newSessionHint}</Text>
             </View>
           </View>
         </View>
