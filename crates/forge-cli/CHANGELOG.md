@@ -6,6 +6,29 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.23.4] - 2026-10-25
+
+### Added
+
+- **The tray menu answers permission prompts.** When a session waits on a permission, the tray shows Allow and Deny for it, plus Review Decision… (questions and plan approvals get only Review Decision…). A click carries the server, session and prompt it was built for: a prompt that was already answered or replaced is never answered by an old click, the daemon re-checks the same prompt number, and a locked app opens instead of answering (`mobile/src-tauri/src/tray.rs`, `mobile/src/lib/trayDecisionCore.ts`).
+- **The usage screen and usage panel show Claude and Codex plan limits.** Claude's 5-hour session, weekly all-models and weekly Fable-only limits, and Codex's 5-hour and weekly limits, each with percent used, reset time and how long ago it was seen; a limit not seen yet says so. The Fable-only weekly limit was parsed and then thrown away (`cli_stream.rs`), and the fallback mapping turned per-model limits into the all-models one. Per-model limits stay out of routing, so a full Fable limit does not block Haiku or Sonnet. `/api/usage` returns the last reading of every limit that has not reset and refreshes Claude and Codex limits in the background at most every 15 minutes.
+
+### Changed
+
+- **One server control on the fleet, switchable on the desktop.** The fleet showed two rows of server pills, and the filter row only ever matched the active server. Now there is one row: All (every server's sessions together, a daemon paired twice listed once) plus one pill per server with its status and waiting count; picking a server shows its sessions and makes it the target for new sessions. On the wide desktop layout the sidebar has the same pills and the title-bar server chip is a menu (All servers, each server, Manage servers…) that shows the real connection type and whether the server is reachable.
+- **The full-screen TUI transcript is calmer to read, collapsed and opened (Alt+O).** A failed command appears once with its diagnosis and fix dimmed under it, instead of a second `shell failed <command>` row; scripts are counted by the calls they made (`Ran 8 shell commands`, not `Ran 3 scripts, ran 8 shell commands`); silence-guard `N steps since the last update` lines no longer split groups; `$HOME` shows as `~`; tool groups get a blank row from the prose around them; the composer border says `Running a command` instead of repeating it. Opened groups wrap long commands under the text column (at most 4 rows per call), keep the exit status right-aligned and never cut it (`runnin`), and show a `run_code` script as a parent with its calls nested under it instead of its raw JavaScript (`crates/forge-tui/src/app/group_rows.rs`, `group_body.rs`, `card_text.rs`).
+- **Shortcut hints follow the platform and your bindings.** Linux and Windows hints said `⌘N`, `CtrlN` or "Command U"; every hint now formats the current binding (`Ctrl+N`, `Ctrl+K`).
+
+### Fixed
+
+- **Codex OAuth usage is subscription usage, not API spend.** Subagent and assay calls priced codex-oauth calls at Codex's API rates, so they showed as dollars; they now bill a subscription at $0, and older stored rows show as Included. Codex limit readings no longer vanish from the screen five minutes after they were taken.
+- **The right sidebar (usage panel) can be opened.** Its only visible opener appeared after a plan limit had been seen, so most setups had no button at all; the sidebar footer and the collapsed rail now always have one, and the command palette has Toggle usage panel. The fleet's `$X today` added up the lifetime cost of the listed sessions; it now shows API spend since local midnight.
+- **The "Installed Forge app" sheet no longer opens on every launch.** It compared versions before the desktop version had loaded, saw the client version first and reported an update.
+- **Session ages survive a daemon restart.** Restored sessions took the restart time as their creation and last-activity time, and any snapshot change re-stamped activity, so every session showed the same age and they aged together. Both times now come from the store and only real session events count as activity.
+- **Answering No to a question no longer forces an implementation pass.** After an `ask_user` answer the empty-diff nudge re-drove the turn with "You have not modified any files. Implement the fix now"; a turn that asked the user now ends on the answer.
+- **Chat fixes found driving a live session:** a successful tool call whose output mentioned "error" or "failed" showed as failed; a streamed sentence and a follow-up queued mid-turn were each painted twice; the jump-to-latest button was hidden once a session had more than one response; Markdown tables rendered as raw pipes; ordered lists past 9 pushed the dot onto its own line; diff tints stopped at the end of the text; git review showed one clipped file row; the permission card pushed the composer off a short window, read "13S", and a shell permission never named the command (the daemon now sends it).
+- **Desktop shell fixes:** the desktop Inbox listed nothing; Notices said "back to Inbox" from the sidebar; sidebar times froze; footer buttons did not show the current screen; the collapsed rail lacked New session, Inbox, Notices and History; the title-bar host name overlapped the server chip on narrow windows; the sidebar usage rings carry their percent instead of looking like spinners; Workflows was unreachable; Session tree and the Anywhere hub lacked the Settings rail; biometric unlock and haptics toggles that do nothing on desktop are hidden; a provider's status dot contradicted its expired badge; the Connect screen showed two Anywhere prompts; tray "Check for Updates…" opened a page without an updater; the About panel never showed the daemon version.
+
 ## [2.23.3] - 2026-10-24
 
 ### Added
@@ -5193,7 +5216,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.23.3...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.23.4...HEAD
+[2.23.4]: https://github.com/Adulari/forge/compare/v2.23.3...v2.23.4
 [2.23.3]: https://github.com/Adulari/forge/compare/v2.23.2...v2.23.3
 [2.23.2]: https://github.com/Adulari/forge/compare/v2.23.1...v2.23.2
 [2.23.1]: https://github.com/Adulari/forge/compare/v2.23.0...v2.23.1
