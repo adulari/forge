@@ -24,6 +24,7 @@ impl Session {
                 return Ok(result);
             }
         };
+        self.asked_user_this_turn = true;
         let answers = self.presenter.ask_form(&questions);
         let result = render_answers(&questions, &answers);
         self.store
