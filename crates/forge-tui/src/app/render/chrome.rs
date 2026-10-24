@@ -84,6 +84,12 @@ fn verb_and_detail(app: &App) -> (String, Option<String>) {
         }
         TurnPhase::Reasoning => ("Thinking".into(), None),
         TurnPhase::Responding => ("Writing".into(), None),
+        // Full-screen shows the running call in the transcript, target and all; the border only
+        // says what kind of work it is, so the command is not printed twice.
+        TurnPhase::RunningTool if app.fullscreen => (
+            running_phrase(tool_target(&activity.detail).as_deref()),
+            None,
+        ),
         TurnPhase::RunningTool => (
             match tool_target(&activity.detail) {
                 Some(name) => format!("Running {name}"),
@@ -101,6 +107,28 @@ fn verb_and_detail(app: &App) -> (String, Option<String>) {
         TurnPhase::Compacting => ("Compacting".into(), None),
         TurnPhase::Finalizing => ("Finishing".into(), None),
     }
+}
+
+/// `Running a command` for `Run cargo test`: the work, from the verb alone.
+fn running_phrase(target: Option<&str>) -> String {
+    let verb = target
+        .and_then(|t| t.split_whitespace().next())
+        .unwrap_or("");
+    match verb {
+        "Run" => "Running a command",
+        "Read" => "Reading",
+        "Write" => "Writing a file",
+        "Edit" | "Patch" => "Editing",
+        "Search" | "Find" => "Searching",
+        "List" => "Listing",
+        "Fetch" => "Fetching",
+        "Web" => "Searching the web",
+        "Agents" => "Running agents",
+        "Script" => "Running a script",
+        "" => "Running tool",
+        other => return format!("Running {other}"),
+    }
+    .to_string()
 }
 
 fn busy_line(app: &App) -> Vec<Span<'static>> {

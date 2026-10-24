@@ -10,6 +10,7 @@ use ratatui::text::{Line as TextLine, Span};
 
 use forge_types::{JobExitNotice, JobNotice};
 
+use super::card_text::shorten_in;
 use super::lines::notice;
 use super::{truncate, width_cap, App, LineOrigin};
 
@@ -46,7 +47,7 @@ impl App {
                         .tail
                         .iter()
                         .skip(skipped)
-                        .map(|l| truncate(l, width_cap(width, 8, 40)))
+                        .map(|l| truncate(&shorten_in(l), width_cap(width, 8, 40)))
                         .collect();
                     let mut rows = notice::notice_with(
                         if exit.ok() {
@@ -62,6 +63,14 @@ impl App {
                     if let Some(head) = rows.next() {
                         self.flush.push(head);
                     }
+                    // The log tail is the job's, not the conversation's: it reads a step quieter
+                    // than the notice so it is not taken for the assistant's text.
+                    let rows = rows.map(|mut row| {
+                        if let Some(last) = row.spans.last_mut() {
+                            last.style = styles::faint();
+                        }
+                        row
+                    });
                     self.seal_flush_origins(&LineOrigin::job(Some(if exit.ok() {
                         "ok"
                     } else {
@@ -94,9 +103,20 @@ fn job_header(exit: &JobExitNotice, width: u16) -> Vec<Span<'static>> {
         Span::styled(
             format!(
                 " · {}",
-                truncate(&exit.command, width_cap(width, reserve, 30))
+                truncate(&job_command(&exit.command), width_cap(width, reserve, 30))
             ),
             styles::muted(),
         ),
     ]
+}
+
+/// The command a job ran, as a person reads it: no leading `exec`, the home folded to `~`.
+fn job_command(command: &str) -> String {
+    let command = command.trim();
+    shorten_in(
+        command
+            .strip_prefix("exec ")
+            .unwrap_or(command)
+            .trim_start(),
+    )
 }

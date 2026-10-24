@@ -45,9 +45,10 @@ impl App {
     }
 
     /// A finished read the next read can fold into: the newest row of the log, collapsed.
-    fn foldable_read(&self) -> Option<u64> {
+    fn foldable_read(&self, parent: Option<u64>) -> Option<u64> {
         let card = self.tool_cards.last()?;
         (card.fold.is_none()
+            && card.parent == parent
             && card.name == "read_file"
             && card.status == CardStatus::Ok
             && !card.expanded
@@ -62,8 +63,9 @@ impl App {
     /// card back: the running call shows in the composer border, and the finished row is
     /// printed once when the result lands.
     pub(super) fn open_tool_card(&mut self, origin: LineOrigin, name: String, args: String) {
+        let parent = self.running_script();
         if self.fullscreen && name == "read_file" {
-            if let Some(id) = self.foldable_read() {
+            if let Some(id) = self.foldable_read(parent) {
                 if let Some(card) = self.tool_cards.iter_mut().find(|c| c.id == id) {
                     card.fold_in(name, args);
                 }
@@ -80,12 +82,67 @@ impl App {
             return;
         }
         card.batch = Some(self.group_for_new_card(id));
+        card.parent = parent;
         let lines = tool_cards::card_lines(&card, self.card_width());
         let len = lines.len();
         self.tool_cards.push(card);
         self.seal_flush_origins(&LineOrigin::default());
         self.pending_card_marks.push((self.flush.len(), id, len));
         self.tag_flush(origin, |s| s.flush.extend(lines));
+    }
+
+    /// The `run_code` call still running, which a call starting now was made by (a script's
+    /// calls run one at a time, inside it). Full-screen only.
+    fn running_script(&self) -> Option<u64> {
+        if !self.fullscreen {
+            return None;
+        }
+        self.tool_cards
+            .iter()
+            .rev()
+            .find(|c| c.fold.is_none() && c.name == "run_code" && c.status == CardStatus::Running)
+            .map(|c| c.id)
+    }
+
+    /// Put a shell diagnosis under the failed call it explains, instead of a notice that repeats
+    /// the command. False when no failed card ran that command (inline mode prints its cards
+    /// once, so it never finds one), and the caller prints the notice.
+    pub(super) fn attach_diagnosis(
+        &mut self,
+        command: &str,
+        diagnosis: &str,
+        fix: Option<&str>,
+    ) -> bool {
+        if !self.fullscreen {
+            return false;
+        }
+        let command = command.trim();
+        let ran = |args: &str| {
+            let v: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+            v.get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                == Some(command)
+                || v.get("commands")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|l| l.iter().any(|c| c.as_str().map(str::trim) == Some(command)))
+        };
+        let Some(card) = self.tool_cards.iter_mut().rev().find(|c| {
+            c.fold.is_none()
+                && c.interactive
+                && c.status == CardStatus::Failed
+                && c.note.is_none()
+                && ran(&c.args)
+        }) else {
+            return false;
+        };
+        card.note = Some(tool_cards::CardNote {
+            diagnosis: sanitize_terminal_text(diagnosis),
+            fix: fix.map(sanitize_terminal_text),
+        });
+        let id = card.id;
+        self.redraw_tool_card(id);
+        true
     }
 
     /// Give the newest running call the file change it is about to make. False when no call is
@@ -335,6 +392,11 @@ impl App {
         self.ensure_wrapped_main(width);
         let source = {
             let cache = self.wrap_cache.borrow();
+            let spacer = App::fold_row_at(&cache, wrapped_row)
+                .is_some_and(|f| f.kind == super::group_flow::FoldRowKind::Spacer);
+            if spacer {
+                return false;
+            }
             match cache.origins.get(wrapped_row) {
                 Some(line) => *line,
                 None => return false, // the streaming edge, below the committed log

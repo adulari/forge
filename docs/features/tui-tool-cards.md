@@ -90,13 +90,21 @@ words.
   Categories: read, listed, searched for (grep, glob, search), ran shell commands, ran scripts
   (`run_code`), created / edited / deleted files, fetched pages, ran web searches, ran agents
   (`spawn_agents` counts its agents), updated the task list, and `called <server|tool> N times` for
-  MCP and anything else.
+  MCP and anything else. A script (`run_code`) that made calls is counted by those calls, not as a
+  script as well: three scripts running eight commands read `Ran 8 shell commands`, where they used
+  to read `Ran 3 scripts, ran 8 shell commands`. A script that made no calls, or that failed, still
+  counts as a script. Named files and commands show the home directory as `~`.
 - **Failures stay visible, and are never counted as done.** A failed call is left out of the
   sentence and adds nothing to the `(+a −d)`: a failed `edit_file` next to a no-op write reads
   `Edited notes.md` with `1 failed` beside it, not `Edited 2 files`. The row says `N failed` in the
   error colour on the right, which is the part a narrow terminal never cuts (a focused row keeps it
   too), and each failed call (the newest three) stays listed under the summary as its one-line card
-  header. A group where nothing succeeded says what it tried: `Tried to edit sample.rs`,
+  header, wrapped rather than cut (see **Open**). A group of one call shows no such row, since the
+  summary already names it. A failed shell command's diagnosis (the shell-error interceptor's cause
+  and `fix`) sits dim under the failed call, in a folded group, an open one and on the card itself,
+  instead of arriving as a separate `shell failed <command>` notice that repeated the command and
+  ended the group. Inline mode, whose cards are printed once before the diagnosis arrives, keeps
+  the notice, and the phone gets the notice either way. A group where nothing succeeded says what it tried: `Tried to edit sample.rs`,
   `Tried to run 2 shell commands`. Why: a failed call is the one thing a reader needs without
   asking (the agent may have moved on without fixing it), and its header costs one row. A
   destructive call is not hidden either: a deletion is its own category, and the permission
@@ -117,17 +125,35 @@ words.
   dropped rather than cut when the row has no room for it.
 - **Narrow terminals.** A summary that does not fit its row switches to counts before anything is
   cut: `1 dir, 2 searches, 1 file read, 2 commands` instead of the sentence, and below 80 columns the
-  duration gives up its cells. Card headers inside an open group keep their tool and target: a
-  right-hand preview too long for the row is cut before the left side drops below half the row
-  (`copy_mark::fit_right`).
+  duration gives up its cells. In an open group a call's outcome keeps its place on the first row:
+  a tight row drops the duration first, and only a long free-text outcome (an error message) is
+  cut, to no fewer than twelve cells.
 - **Running.** While any call in the group runs, the summary row shows the spinner instead of the
   `▸` and lists what has finished; the call in flight hangs under it with its own spinner (the
   first call of a group shows alone until it finishes). A call waiting for permission also shows
   its diff preview under it, because that is what the decision is about. When the last call ends,
   the group folds to its single row.
 - **Open.** A click anywhere on a collapsed group, or on an open group's `▾` header, toggles it.
-  The cards of an open group hang two cells under the header and are today's cards: clicking one
-  still opens its arguments and output. The toggled row stays on the same screen row, so the
+  The header counts rather than names (`Ran 1 shell command`), because the call is listed right
+  under it. The calls hang two cells under the header (`app/group_rows.rs`):
+
+  ```
+   ▏ ▾ Read 1 file, ran 3 shell commands                                                   1.2s
+   ▏   ✓ Read   ~/wt/vm-solver/rust/crates/app/exam  //! Test bot password login … · 0ms ▸
+   ▏            ples/android_login_test.rs
+   ▏   ✓ Script 2 calls: run                                                  done · 280ms ▸
+   ▏     ✓ Run    cd ~/wt/vm-solver && rg -n 'fn chromium_challenge_with_key'  exit 0 · 99ms ▸
+   ▏              -A 30 rust/crates/spotify/src/captcha.rs | head -80
+  ```
+
+  A call's text (command, path, script, the files a folded read read) wraps onto rows that hang
+  under the text column instead of being cut, at most four rows, the last saying `… N more lines`
+  when there is more (the card's drawer has all of it). A multi-line command gets a row per line.
+  The calls a script made hang one more level under the script, whose row says what it called
+  (`2 calls: run, read`) and `done` instead of its source and the first line it returned (often an
+  inner call's `shell: exit 0`); a script that made no calls shows its first lines, without comments
+  or fences. Each card's body (diff preview, failure tail, diagnosis, open drawer) follows its header,
+  and clicking a call still opens its arguments and output. The toggled row stays on the same screen row, so the
   content under the pointer does not jump; following resumes only if that leaves the view at the
   bottom.
 - **Keys.** `Alt+↑` / `Alt+↓` (`prev_tool_group` / `next_tool_group`) put the keyboard focus on a
@@ -138,6 +164,13 @@ words.
   group, including groups that arrive later, or folds them all; the row at the top of the view
   stays put. `Ctrl+T` on a folded group opens it, then opens its newest call, then folds the group
   again.
+- **Breathing room.** A group, open or folded, has a bare rail row above and below it when prose of
+  the turn sits next to it, so the tool activity reads as a quiet block between the paragraphs. The
+  silence guard's `12 steps since the last update: …` note is not put in a folding transcript: the
+  group's summary says what those steps did, and the note used to end the group and sit in it like a
+  call (the phone, which has no groups, still gets it). The composer border says what kind of work
+  runs (`Running a command`), not the command, which the transcript already shows; inline mode keeps
+  `Running Run <command>`, because there the call is not on screen until it finishes.
 - **State.** Which groups are open is kept by group id (the id of the group's first card), so it
   survives scrolling, resizing and the log growing. `/clear` and a session switch forget it.
 - **Off switch.** `[tui] fold_tool_groups = false` (also in `/config`, applied immediately) shows

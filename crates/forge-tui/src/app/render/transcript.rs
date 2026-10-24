@@ -90,11 +90,7 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
                 i == 0 || cache.origins[i - 1] != src || App::fold_row_at(&cache, i - 1).is_some();
             if let Some((_, header)) = live.iter().find(|(start, _)| *start == src) {
                 if first_of_line {
-                    let in_open_group = crate::app::tool_groups::is_indented(&row);
                     row = header.clone();
-                    if in_open_group {
-                        row = crate::app::tool_groups::indented_fitted(row);
-                    }
                 }
             }
         }
