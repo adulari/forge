@@ -19,7 +19,8 @@ import { useEffect, useRef } from "react";
 import { useAuth } from "./auth";
 import { decisionCopy, isContentLocked, redactTrayTitle } from "./desktopNotifyCore";
 import { isTauri } from "./platform";
-import { useSessions } from "./queries";
+import { useDiagnostics, useSessions } from "./queries";
+import { checkDesktopUpdate } from "./updater";
 import { PROTOCOL_VERSION } from "./remoteProtocol";
 import { useTheme } from "../theme/ThemeProvider";
 import { formatRelativeTime } from "../theme/typography";
@@ -72,8 +73,7 @@ export type DesktopMenuId =
   | "help:acknowledgements"
   | "tray:open"
   | "tray:quick-composer"
-  | "tray:decision:allow"
-  | "tray:decision:deny";
+  | "tray:decision:review";
 
 export type DesktopMenuHandler = () => void;
 
@@ -137,19 +137,23 @@ async function persistAppearance(preference: "light" | "dark" | "system"): Promi
 function runDefault(id: string): void {
   switch (id) {
     case "app:settings":
-    // Settings owns the desktop updater UI (checks on mount, renders the update card), so
-    // "Check for Updates…" is a navigation, not a second check.
-    case "app:check-updates":
       router.push("/settings");
+      return;
+    // Diagnostics & updates owns the desktop updater UI. It only checks on mount while the
+    // updater is idle, so a second "Check for Updates…" has to ask for the check itself.
+    case "app:check-updates":
+      router.push("/diagnostics");
+      void checkDesktopUpdate().catch(() => undefined);
       return;
     case "session:new":
       router.push("/new-session");
       return;
     // The waiting decisions the design's "Approve" item acts on are exactly Inbox's contents;
-    // an open session claims this id itself and answers in place.
+    // an open session claims this id itself and answers in place. The tray's review row is
+    // claimed by `useDesktopNativeSync` with the waiting session it summarised; Inbox is only the
+    // fallback before that has mounted.
     case "session:approve":
-    case "tray:decision:allow":
-    case "tray:decision:deny":
+    case "tray:decision:review":
       router.push("/inbox");
       return;
     case "session:handoff":
@@ -317,21 +321,28 @@ export function useDesktopNativeSync(): void {
   const { servers, activeServerId } = useAuth();
   const { setScheme } = useTheme();
   const { data: sessions } = useSessions();
+  const { data: diagnostics } = useDiagnostics();
   const lastPushed = useRef<string | null>(null);
 
   useDesktopMenuAction("view:appearance:light", () => setScheme("light"));
   useDesktopMenuAction("view:appearance:dark", () => setScheme("dark"));
   useDesktopMenuAction("view:appearance:system", () => setScheme("system"));
+  useDesktopMenuAction("tray:decision:review", () => {
+    const waiting = (sessions ?? []).find((row) => row.waiting);
+    router.push(waiting ? `/session/${waiting.id}` : "/inbox");
+  });
 
   const activeServer = servers.find((server) => server.id === activeServerId);
   const host = activeServer?.name;
+  // The About panel's "daemon x.y.z · host" line; without the version it showed only the host.
+  const daemonVersion = diagnostics?.host.version;
   // Anywhere-routed sessions are end-to-end encrypted; their titles must not reach the menu bar.
   const locked = isContentLocked(activeServer?.transport);
 
   useEffect(() => {
     if (!isTauri) return;
-    void pushAboutInfo({ host });
-  }, [host]);
+    void pushAboutInfo({ host, daemonVersion });
+  }, [host, daemonVersion]);
 
   useEffect(() => {
     if (!isTauri) return;

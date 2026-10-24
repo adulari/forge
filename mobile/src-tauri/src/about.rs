@@ -122,7 +122,7 @@ pub fn open<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 _ => None,
             };
             if let Some(action) = action {
-                // Both actions land somewhere in the main window (Settings' updater card, the
+                // Both actions land somewhere in the main window (Diagnostics & updates, the
                 // browser). Raise it, or the result of the click happens behind this panel.
                 if let Some(main) = handle.get_webview_window("main") {
                     let _ = main.show();
