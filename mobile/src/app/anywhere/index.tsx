@@ -28,12 +28,14 @@ import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere, type AnywherePendingApproval } from "../../lib/AnywhereProvider";
 import { formatBytes, formatStorageUsage } from "../../lib/anywhere/format";
 import { hostFleetSummary, hostStatusText } from "../../lib/anywhereHostPresence";
+import { useAuth } from "../../lib/auth";
 import { goBackOr } from "../../lib/nav";
 import { isTauri } from "../../lib/platform";
 import { MAX_ACTIVE_HOSTS } from "../../lib/anywhere/types";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+import { SettingsShell } from "../(tabs)/settings";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 
 const LOCAL_NOTE = "Direct and LAN connections keep working if Forge Anywhere is unavailable.";
@@ -58,8 +60,9 @@ function pushStatusLabel(status: string): string {
 export default function AnywhereScreen() {
   const anywhere = useAnywhere();
   const tokens = useTokens();
+  const { isPaired } = useAuth();
 
-  return (
+  const screen = (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.screen}>
       <View style={styles.shell}>
         <BackLink label="Settings" onPress={() => goBackOr("/settings")} />
@@ -68,6 +71,9 @@ export default function AnywhereScreen() {
       </View>
     </Screen>
   );
+  // Listed in the Settings rail, so it keeps the rail like every other entry there; before
+  // pairing (Connect deep-links here) there is no Settings to return to, same as Legal.
+  return isPaired ? <SettingsShell active="anywhere">{screen}</SettingsShell> : screen;
 }
 
 function SetupFlow() {

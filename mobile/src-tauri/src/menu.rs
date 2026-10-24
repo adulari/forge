@@ -65,6 +65,7 @@ pub const HELP_ISSUE: &str = "help:issue";
 pub const HELP_ACKNOWLEDGEMENTS: &str = "help:acknowledgements";
 
 /// Debug-only webview reload (pre-existing behaviour, kept).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub const DEV_RELOAD: &str = "dev:reload";
 
 #[derive(serde::Deserialize)]

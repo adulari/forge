@@ -28,8 +28,10 @@ pub fn is_installed() -> bool {
 
 pub const TRAY_OPEN: &str = "tray:open";
 pub const TRAY_QUICK_COMPOSER: &str = "tray:quick-composer";
-pub const TRAY_DECISION_ALLOW: &str = "tray:decision:allow";
-pub const TRAY_DECISION_DENY: &str = "tray:decision:deny";
+/// Opens the waiting session so the user answers it there. The design drew Allow / Deny rows
+/// here, but the shell has no daemon connection and the summary carries no request id, so those
+/// rows could only ever navigate — a "Deny" that opens the Inbox instead of denying.
+pub const TRAY_DECISION_REVIEW: &str = "tray:decision:review";
 /// Session rows use `tray:session:<id>`; `desktopMenu.ts` splits the id back off the prefix.
 pub const TRAY_SESSION_PREFIX: &str = "tray:session:";
 
@@ -117,8 +119,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, summary: &TraySummary) -> tauri::Result
                     .enabled(false)
                     .build(app)?,
             )
-            .item(&MenuItemBuilder::with_id(TRAY_DECISION_ALLOW, "Allow").build(app)?)
-            .item(&MenuItemBuilder::with_id(TRAY_DECISION_DENY, "Deny").build(app)?);
+            .item(&MenuItemBuilder::with_id(TRAY_DECISION_REVIEW, "Review Decision…").build(app)?);
     }
 
     if !summary.sessions.is_empty() {

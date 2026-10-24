@@ -9,7 +9,7 @@ import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useAuth } from "../lib/auth";
-import { modKey } from "../lib/platform";
+import { useShortcutLabel } from "../lib/shortcuts";
 import { useSessions } from "../lib/queries";
 import { usePalette } from "./overlay/CommandPalette";
 import { useProviderPace, UsageRing } from "./shell/UsageRing";
@@ -36,6 +36,8 @@ export interface WebTopBarProps {
 
 export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
   const tokens = useTokens();
+  const paletteHint = useShortcutLabel("command.palette");
+  const usageHint = useShortcutLabel("shell.usage");
   const router = useRouter();
   const pathname = usePathname();
   const palette = usePalette();
@@ -88,7 +90,7 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
           disabled={!onToggleDock}
           accessibilityRole={onToggleDock ? "button" : undefined}
           accessibilityLabel={`Combined usage ${combinedPct}%${dockOpen ? ", close usage dock" : ", open usage dock"}`}
-          accessibilityHint="Command U"
+          accessibilityHint={usageHint}
           style={[styles.ringButton, dockOpen && { backgroundColor: tokens.bg3 }]}
         >
           <UsageRing pct={combinedPct} size={15} />
@@ -101,7 +103,7 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
         style={[styles.kbdChip, { borderColor: tokens.border }]}
       >
         <Search size={11} color={tokens.ink4} strokeWidth={2} />
-        <Text style={[styles.kbd, { color: tokens.ink4 }]}>{modKey}K</Text>
+        <Text style={[styles.kbd, { color: tokens.ink4 }]}>{paletteHint}</Text>
       </Pressable>
     </View>
   );

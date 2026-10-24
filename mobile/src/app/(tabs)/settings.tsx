@@ -27,7 +27,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
 import { Bell, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View, type PressableStateCallbackType } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { EntitlementBadge } from "../../components/anywhere/EntitlementBadge";
@@ -122,7 +122,7 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
+type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
@@ -140,7 +140,11 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "skills", label: "Skills", href: "/skills" },
   { key: "hooks", label: "Hooks", href: "/hooks" },
   { key: "session-tree", label: "Session tree", href: "/session-tree" },
+  { key: "workflows", label: "Workflows", href: "/workflows" },
 ];
+
+// react-native-web adds `hovered`/`focused` to Pressable's state; RN's type only has `pressed`.
+type RailPressState = PressableStateCallbackType & { hovered?: boolean; focused?: boolean };
 
 // Machined D/W Settings General (L791-827 / L153-186): 196px nav rail on desktop,
 // 186px on web; dense 27px rows; the active row gets a neutral ink-alpha fill (never
@@ -151,6 +155,7 @@ export function SettingsNavRail({ active }: { active: string }) {
   const { account } = useAnywhere();
   const versionMeta = useVersionMeta(PROTOCOL_VERSION);
   const railActiveFill = hexToRgba(tokens.ink, 0.07);
+  const railHoverFill = hexToRgba(tokens.ink, 0.04);
   return (
     <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border }]}>
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
@@ -166,7 +171,11 @@ export function SettingsNavRail({ active }: { active: string }) {
             accessibilityRole="button"
             accessibilityLabel={item.label}
             accessibilityState={{ selected }}
-            style={[railStyles.item, selected ? { backgroundColor: railActiveFill } : null]}
+            style={({ hovered, focused }: RailPressState) => [
+              railStyles.item,
+              selected ? { backgroundColor: railActiveFill } : hovered ? { backgroundColor: railHoverFill } : null,
+              focused ? { outlineColor: tokens.accent, outlineWidth: 2, outlineStyle: "solid" } : null,
+            ]}
           >
             <View style={railStyles.itemRow}>
               <Text style={[type.bodyBold, railStyles.itemLabel, { color: selected ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
@@ -178,7 +187,10 @@ export function SettingsNavRail({ active }: { active: string }) {
         );
       })}
       <View style={railStyles.flexFill} />
-      <Text style={[type.monoMeta, tabularNums, railStyles.version, { color: tokens.ink4 }]}>{versionMeta}</Text>
+      {/* One segment per line: the 196px rail broke the joined string mid-segment. */}
+      {versionMeta.split(" · ").map((segment) => (
+        <Text key={segment} style={[type.monoMeta, tabularNums, railStyles.version, { color: tokens.ink4 }]}>{segment}</Text>
+      ))}
     </View>
   );
 }
@@ -613,7 +625,8 @@ export function SettingsScreen() {
           <NavListRow label="Configuration" onPress={() => router.push("/configuration")} />
           <NavListRow label="Skills" meta={skillsCountLabel} onPress={() => router.push("/skills")} />
           <NavListRow label="Hooks" meta={hooksCountLabel} onPress={() => router.push("/hooks")} />
-          <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} showSeparator={false} />
+          <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} />
+          <NavListRow label="Workflows" onPress={() => router.push("/workflows")} showSeparator={false} />
         </View>
 
         <View>
@@ -626,41 +639,44 @@ export function SettingsScreen() {
           ) : null}
         </View>
 
-        <View>
-          <SectionHeader>Security &amp; device</SectionHeader>
-          {isIOS && NOTIFICATIONS_SUPPORTED ? (
+        {/* AppLock.tsx never locks on web or desktop, so the toggle did nothing there. */}
+        {Platform.OS !== "web" ? (
+          <View>
+            <SectionHeader>Security &amp; device</SectionHeader>
+            {isIOS && NOTIFICATIONS_SUPPORTED ? (
+              <DenseRow
+                accessibilityLabel="Push notifications"
+                trailing={
+                  pushSupported && pushLoaded ? (
+                    <Switch
+                      value={pushStatus === "subscribed"}
+                      onValueChange={onPushChange}
+                      disabled={pushBusy || !baseUrl}
+                      accessibilityLabel="Push notifications"
+                    />
+                  ) : undefined
+                }
+              >
+                <Text style={[type.body, { color: tokens.ink }]}>Push notifications</Text>
+              </DenseRow>
+            ) : null}
             <DenseRow
-              accessibilityLabel="Push notifications"
+              showSeparator={false}
+              accessibilityLabel={`Require ${appLockLabel}`}
               trailing={
-                pushSupported && pushLoaded ? (
+                appLockLoaded ? (
                   <Switch
-                    value={pushStatus === "subscribed"}
-                    onValueChange={onPushChange}
-                    disabled={pushBusy || !baseUrl}
-                    accessibilityLabel="Push notifications"
+                    value={appLock}
+                    onValueChange={onAppLockChange}
+                    accessibilityLabel={`Require ${appLockLabel}`}
                   />
                 ) : undefined
               }
             >
-              <Text style={[type.body, { color: tokens.ink }]}>Push notifications</Text>
+              <Text style={[type.body, { color: tokens.ink }]}>Require {appLockLabel}</Text>
             </DenseRow>
-          ) : null}
-          <DenseRow
-            showSeparator={false}
-            accessibilityLabel={`Require ${appLockLabel}`}
-            trailing={
-              appLockLoaded ? (
-                <Switch
-                  value={appLock}
-                  onValueChange={onAppLockChange}
-                  accessibilityLabel={`Require ${appLockLabel}`}
-                />
-              ) : undefined
-            }
-          >
-            <Text style={[type.body, { color: tokens.ink }]}>Require {appLockLabel}</Text>
-          </DenseRow>
-        </View>
+          </View>
+        ) : null}
 
         {/* W Settings BEHAVIOR (L180-183): browser notifications + tab badge. Browser
             notifications reuses the same web-push subscription this build already has
@@ -695,16 +711,6 @@ export function SettingsScreen() {
           </View>
         ) : null}
 
-        <View style={styles.footerRow}>
-          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{versionMeta}</Text>
-          <View style={styles.footerFill} />
-          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 1 }]} numberOfLines={1}>
-            {host
-              ? `${host} · ${servers[activeServerIndex]?.transport === "anywhere" ? "anywhere" : maskToken(activeToken)}`
-              : "not connected"}
-          </Text>
-        </View>
-
         <View>
           <SectionHeader>Connection</SectionHeader>
           <ListRow
@@ -733,15 +739,17 @@ export function SettingsScreen() {
           />
         </View>
 
-        <View>
-          <SectionHeader>Feedback</SectionHeader>
-          <ListRow
-            title="Haptics"
-            subtitle="Use tactile feedback for actions and status changes."
-            showSeparator={false}
-            trailing={<Switch value={hapticsEnabled} onValueChange={onHapticsChange} accessibilityLabel="Haptics" />}
-          />
-        </View>
+        {Platform.OS !== "web" ? (
+          <View>
+            <SectionHeader>Feedback</SectionHeader>
+            <ListRow
+              title="Haptics"
+              subtitle="Use tactile feedback for actions and status changes."
+              showSeparator={false}
+              trailing={<Switch value={hapticsEnabled} onValueChange={onHapticsChange} accessibilityLabel="Haptics" />}
+            />
+          </View>
+        ) : null}
 
         {isTauri ? (
           <View>
@@ -782,6 +790,16 @@ export function SettingsScreen() {
             onPress={() => router.push("/legal")}
             showSeparator={false}
           />
+        </View>
+
+        <View style={styles.footerRow}>
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{versionMeta}</Text>
+          <View style={styles.footerFill} />
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 1 }]} numberOfLines={1}>
+            {host
+              ? `${host} · ${servers[activeServerIndex]?.transport === "anywhere" ? "anywhere" : maskToken(activeToken)}`
+              : "not connected"}
+          </Text>
         </View>
 
         <ConfirmDialog

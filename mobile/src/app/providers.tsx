@@ -54,7 +54,7 @@ import {
 import { providerReadiness } from "../lib/modelCatalog";
 import { supportsDirectDaemonEndpoints } from "../lib/transport";
 import { useTokens } from "../theme/ThemeProvider";
-import { radii, space } from "../theme/tokens";
+import { radii, space, type ColorTokens } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
 import { usePullRefresh } from "../lib/usePullRefresh";
@@ -77,6 +77,13 @@ function statusTone(provider: ProviderRow): BadgeTone {
   if (provider.auth_status === "expired" || provider.auth_status === "missing") return "danger";
   if (provider.auth_status === "stopped" || provider.auth_status === "unverified") return "warn";
   return "neutral";
+}
+
+function toneColor(tone: BadgeTone, tokens: ColorTokens): string {
+  if (tone === "success") return tokens.success;
+  if (tone === "danger") return tokens.danger;
+  if (tone === "warn") return tokens.warn;
+  return tokens.ink4;
 }
 
 function statusLabel(provider: ProviderRow): string {
@@ -158,20 +165,9 @@ function ProviderItem({
   return (
     <View style={[styles.provider, { borderBottomColor: tokens.hairline }]}>
       <View style={styles.providerHeader}>
-        <View
-          style={[
-            styles.statusDot,
-            {
-              backgroundColor: !provider.enabled
-                ? tokens.ink4
-                : provider.configured
-                  ? tokens.success
-                  : provider.auth_status === "unverified" || provider.auth_status === "stopped"
-                    ? tokens.warn
-                    : tokens.danger,
-            },
-          ]}
-        />
+        {/* Same tone as the badge beside it: keying the dot off `configured` painted an expired
+            or unverified login green next to a red EXPIRED / amber VERIFY LOGIN badge. */}
+        <View style={[styles.statusDot, { backgroundColor: toneColor(statusTone(provider), tokens) }]} />
         <View style={styles.providerTitle}>
           <Text style={[styles.providerName, { color: provider.enabled ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
             {provider.label}
@@ -205,7 +201,7 @@ function ProviderItem({
         </Text>
       ) : null}
       {provider.login_command ? (
-        <Text style={[type.monoMeta, styles.command, { color: tokens.ink3 }]}>
+        <Text style={[type.monoMeta, styles.command, { color: tokens.ink3, backgroundColor: tokens.bg2 }]}>
           setup: {provider.login_command}
         </Text>
       ) : null}
@@ -687,7 +683,9 @@ function ProvidersScreenBody() {
               accessibilityRole="button"
               accessibilityLabel="Add or edit Azure OpenAI"
             >
-              <Text style={[styles.add, { color: tokens.accent }]}>Azure</Text>
+              <Text style={[styles.add, { color: tokens.accent }]}>
+                {providers.some((provider) => provider.kind === "azure") ? "Azure" : "+ Azure"}
+              </Text>
             </Pressable>
             <Pressable
               onPress={() => setCustomSheet({ visible: true, provider: null })}
@@ -848,6 +846,7 @@ const styles = StyleSheet.create({
   providerTitle: { flex: 1, minWidth: 0, gap: 2 },
   providerName: { fontSize: 14, fontFamily: monoFamily.bold },
   command: {
+    alignSelf: "flex-start",
     borderRadius: radii.radius4,
     paddingHorizontal: space.space8,
     paddingVertical: space.space4,

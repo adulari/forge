@@ -8,10 +8,10 @@ import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
 import { useAuth } from "../../lib/auth";
-import { modKey } from "../../lib/platform";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { useSessions } from "../../lib/queries";
 import { useScopedFleet } from "../../lib/useScopedFleet";
+import { useShortcutLabel } from "../../lib/shortcuts";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, statusDotColor, type StatusDotState } from "../../theme/tokens";
 import { usePalette } from "../overlay/CommandPalette";
@@ -87,6 +87,9 @@ export interface IconRailProps {
 
 export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
   const tokens = useTokens();
+  const usageHint = useShortcutLabel("shell.usage");
+  const sidebarHint = useShortcutLabel("shell.sidebar");
+  const newSessionHint = useShortcutLabel("session.new");
   const pathname = usePathname();
   const palette = usePalette();
   const { setActive } = useAuth();
@@ -114,7 +117,7 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
         icon={<Plus size={14} strokeWidth={2} color={tokens.ink2} />}
         onPress={() => router.push("/new-session")}
         accessibilityLabel="Forge a new session"
-        accessibilityHint={`${modKey} N`}
+        accessibilityHint={newSessionHint}
       />
       <View style={[styles.divider, { backgroundColor: tokens.border }]} />
 
@@ -147,7 +150,7 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
               disabled={!onToggleDock}
               accessibilityRole={onToggleDock ? "button" : undefined}
               accessibilityLabel="Toggle usage dock"
-              accessibilityHint={`${modKey} U`}
+              accessibilityHint={usageHint}
               style={styles.ringColumn}
             >
               {rings.map((ring) => (
@@ -188,7 +191,7 @@ export function IconRail({ onExpand, onToggleDock }: IconRailProps) {
           icon={<SquareChevronRight size={14} strokeWidth={1.75} color={tokens.ink3} />}
           onPress={onExpand}
           accessibilityLabel="Expand sidebar"
-          accessibilityHint={`${modKey} Backslash`}
+          accessibilityHint={sidebarHint}
         />
       </View>
     </View>
