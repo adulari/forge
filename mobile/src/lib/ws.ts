@@ -7,6 +7,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, type AppStateStatus, Platform } from "react-native";
 
+import { createFrameCoalescer } from "./frameCoalescer";
+import { accumulateStreaming, EMPTY_STREAMING, streamingDisplayText, type StreamingAccumulator } from "./streamingText";
 import { TWebSocket } from "./transport";
 import { decideSnapshotRevision } from "./sessionReconciler";
 import { isValidSnapshotFrame as isValidSnapshotIdentity } from "./remoteProtocol";
@@ -173,7 +175,15 @@ export interface Snapshot {
   cost_usd: number;
   context_tokens: number;
   context_limit: number | null;
+  /** The in-flight reply. The wire carries only its last 2 KiB; `useSessionSocket` rebuilds the
+   * whole reply from `streaming_offset`, so consumers always see the full text so far. */
   streaming: string;
+  /** Additive: UTF-16 units of the reply before the wire's `streaming` tail (0/absent: none). */
+  streaming_offset?: number;
+  /** Additive: what the running turn is doing ("model reasoning", "running tool"); "" idle. */
+  activity?: string;
+  /** Additive: when the running turn started, Unix ms; 0/absent when idle or unknown. */
+  turn_started_at?: number;
   transcript: string[];
   /** v9 additive: `transcript` with per-line provenance. Absent/empty from a pre-v9 host —
    * fall back to `transcript` rather than rendering nothing. */
@@ -276,6 +286,10 @@ export function useSessionSocket(
 ): UseSessionSocketResult {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
+  // One committed snapshot per paint (lib/frameCoalescer.ts); the streamed reply is rebuilt from
+  // every frame first, so coalescing never loses text.
+  const [frames] = useState(() => createFrameCoalescer<Snapshot>(setSnapshot));
+  const streamingRef = useRef<StreamingAccumulator>(EMPTY_STREAMING);
 
   const wsRef = useRef<WebSocket | null>(null);
   const revRef = useRef(0);
@@ -405,8 +419,11 @@ export function useSessionSocket(
         if (revisionDecision === "duplicate") return;
         revRef.current = data.revision;
       }
-      setSnapshot(data);
+      streamingRef.current = accumulateStreaming(streamingRef.current, data.streaming ?? "", data.streaming_offset);
+      const fullStreaming = streamingDisplayText(streamingRef.current);
+      frames.push(fullStreaming === data.streaming ? data : { ...data, streaming: fullStreaming });
       if (data.closed) {
+        frames.flush();
         closedRef.current = true;
         setConnectionState("closed");
         teardown();
@@ -438,18 +455,21 @@ export function useSessionSocket(
       clearReconnectTimer();
       reconnectTimerRef.current = setTimeout(connect, delay);
     };
-  }, [baseUrl, sessionId, teardown, clearReconnectTimer, clearLivenessTimer]);
+  }, [baseUrl, sessionId, teardown, clearReconnectTimer, clearLivenessTimer, frames]);
 
   useEffect(() => {
     closedRef.current = false;
     revRef.current = 0;
     attemptRef.current = 0;
     shouldRunRef.current = true;
+    frames.cancel();
+    streamingRef.current = EMPTY_STREAMING;
     setSnapshot(null);
     setConnectionState("idle");
     connect();
     return () => {
       shouldRunRef.current = false;
+      frames.cancel();
       teardown();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

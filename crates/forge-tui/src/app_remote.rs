@@ -34,6 +34,17 @@ impl App {
             context_tokens: self.context_tokens,
             context_limit: self.context_limit,
             streaming: streaming_tail(&self.streaming).to_string(),
+            streaming_offset: streaming_offset(&self.streaming),
+            activity: if self.busy {
+                self.turn_phase_label().to_string()
+            } else {
+                String::new()
+            },
+            turn_started_at: if self.busy {
+                self.turn_started_unix_ms
+            } else {
+                0
+            },
             transcript: self
                 .recent_transcript
                 .iter()
@@ -677,6 +688,14 @@ pub struct DiffSnapshot {
 /// unbounded newline-free reply would make wire cost per token grow with the reply's length.
 const REMOTE_STREAMING_TAIL_BYTES: usize = 2048;
 
+/// Where [`streaming_tail`] starts in the whole reply, in UTF-16 code units (what a JavaScript
+/// client indexes strings by), so a client can keep the text before the window and append the
+/// tail instead of watching the start of a long reply slide away.
+fn streaming_offset(text: &str) -> u64 {
+    let tail = streaming_tail(text);
+    text[..text.len() - tail.len()].encode_utf16().count() as u64
+}
+
 fn streaming_tail(text: &str) -> &str {
     if text.len() <= REMOTE_STREAMING_TAIL_BYTES {
         return text;
@@ -707,6 +726,10 @@ pub struct RemoteSnapshot {
     pub context_tokens: u64,
     pub context_limit: Option<u32>,
     pub streaming: String,
+    /// UTF-16 units before `streaming`; the turn's phase label ("" idle); its start (Unix ms).
+    pub streaming_offset: u64,
+    pub activity: String,
+    pub turn_started_at: u64,
     pub transcript: Vec<String>,
     /// The same lines as `transcript`, each carrying the provenance its emitter recorded (v9) —
     /// see [`TranscriptRow`]. Same length and order.
@@ -785,5 +808,10 @@ mod streaming_tail_tests {
         assert!(tail.len() <= REMOTE_STREAMING_TAIL_BYTES);
         assert!(tail.chars().all(|c| c == 'é'));
         assert_eq!(streaming_tail("short"), "short");
+        assert_eq!(streaming_offset("short"), 0);
+        let wide = format!("é{}", "x".repeat(REMOTE_STREAMING_TAIL_BYTES));
+        // "é" is two bytes but one UTF-16 unit; the tail starts right after it.
+        assert_eq!(streaming_tail(&wide).len(), REMOTE_STREAMING_TAIL_BYTES);
+        assert_eq!(streaming_offset(&wide), 1);
     }
 }

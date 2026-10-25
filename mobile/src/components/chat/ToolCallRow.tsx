@@ -1,18 +1,19 @@
 // One tool invocation in the chat timeline — the call and the result the daemon serves as two
 // separate rows, paired by `buildTranscript` and rendered as a single expandable card.
 //
-// Collapsed it is one quiet mono line: a disclosure chevron, the tool NAME, and the call's
-// primary target ("shell scripts/ci/rust-checks.sh"), never the raw argument blob. The chevron is
-// the point — a bare "shell" with no affordance gave no hint that the arguments and the output
-// were one tap away. Expanded it shows the full arguments and the full output, each copyable,
-// with the long-output "show N more lines" expander SystemOutput uses.
+// Collapsed it is one quiet line with no box: a disclosure chevron, a short verb ("Run",
+// "Read", "Script") and what the call was about (the command, the path, what a script ran),
+// never the raw argument blob or a bare tool name. A failure says "failed" once, in danger ink;
+// success needs no mark. Expanded it shows the full arguments and output, each copyable, with
+// the long-output "show N more lines" expander SystemOutput uses.
 import * as Clipboard from "expo-clipboard";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react-native";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { haptics } from "../../lib/haptics";
-import { formatArgs, resultFailed, summarizeToolArgs, type ToolInvocation } from "../../lib/toolRows";
+import { callHeadline, callVerb, readableArgs } from "../../lib/toolLabels";
+import { formatArgs, resultFailed, type ToolInvocation } from "../../lib/toolRows";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
@@ -101,61 +102,71 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
   const [open, setOpen] = useState(false);
   const { tool, args, result } = invocation;
   const name = tool ?? "tool";
-  const target = useMemo(() => summarizeToolArgs(args, 52), [args]);
+  const verb = useMemo(() => callVerb(tool), [tool]);
+  const target = useMemo(() => callHeadline(tool, args, result), [tool, args, result]);
   const failed = resultFailed(result);
   // A call still awaiting its result has nothing to show but its own arguments; that is still
-  // worth a card (it is what the model asked for), so `pending` only changes the status glyph.
+  // worth a row (it is what the model asked for), so `pending` only changes the status mark.
   const pending = result === null;
   const argsBody = useMemo(() => (args.trim() ? formatArgs(args) : ""), [args]);
+  const argSections = useMemo(() => readableArgs(tool, args), [tool, args]);
+  const [raw, setRaw] = useState(false);
   const resultBody = (result ?? "").trim();
   const hasDetail = argsBody.length > 0 || resultBody.length > 0;
-  const statusColor = pending ? tokens.ink4 : failed ? tokens.danger : tokens.success;
 
   return (
     <View style={styles.row}>
-      <View style={[styles.card, { borderColor: tokens.border, backgroundColor: tokens.bg1 }]}>
+      <View style={[styles.card, open ? { borderColor: tokens.border, backgroundColor: tokens.bg1 } : styles.flat]}>
         <Pressable
           onPress={hasDetail ? () => { haptics.select(); setOpen((v) => !v); } : undefined}
           disabled={!hasDetail}
           accessibilityRole={hasDetail ? "button" : undefined}
-          accessibilityLabel={
-            hasDetail ? `${open ? "hide" : "show"} details for ${name}` : `${name} tool call`
-          }
+          accessibilityLabel={`${verb} ${target || name}${failed ? ", failed" : ""}${hasDetail ? `, ${open ? "hide" : "show"} details` : ""}`}
           accessibilityState={hasDetail ? { expanded: open } : undefined}
-          style={styles.summary}
+          style={({ pressed }) => [styles.summary, pressed ? { backgroundColor: tokens.bg2 } : null]}
           hitSlop={4}
         >
           {hasDetail ? (
             open ? (
-              <ChevronDown size={14} strokeWidth={2} color={tokens.ink3} />
+              <ChevronDown size={13} strokeWidth={2} color={tokens.ink4} />
             ) : (
-              <ChevronRight size={14} strokeWidth={2} color={tokens.ink3} />
+              <ChevronRight size={13} strokeWidth={2} color={tokens.ink4} />
             )
           ) : (
             <View style={styles.chevronSlot} />
           )}
+          <Text style={[type.meta, styles.name, { color: failed ? tokens.danger : tokens.ink3 }]} numberOfLines={1}>
+            {verb}
+          </Text>
           <Text
-            style={[type.codeSmall, styles.name, { color: tokens.accent, fontFamily: monoFamily.regular }]}
+            style={[type.codeSmall, styles.target, { color: tokens.ink2, fontFamily: monoFamily.regular }]}
             numberOfLines={1}
           >
-            {name}
+            {target}
           </Text>
-          {target ? (
-            <Text
-              style={[type.codeSmall, styles.target, { color: tokens.ink2, fontFamily: monoFamily.regular }]}
-              numberOfLines={1}
-            >
-              {target}
-            </Text>
-          ) : (
-            <View style={styles.target} />
-          )}
-          <View style={[styles.status, { backgroundColor: statusColor }]} />
+          {pending ? (
+            <ActivityIndicator size="small" color={tokens.ink4} style={styles.spinner} />
+          ) : failed ? (
+            <Text style={[type.meta, { color: tokens.danger }]}>failed</Text>
+          ) : null}
         </Pressable>
         {open && hasDetail ? (
           <View>
-            {argsBody ? <DetailBlock label="arguments" text={argsBody} /> : null}
+            {raw
+              ? (argsBody ? <DetailBlock label={`${name} arguments`} text={argsBody} /> : null)
+              : argSections.map((section) => <DetailBlock key={section.label} label={section.label} text={section.text} />)}
             {resultBody ? <DetailBlock label="output" text={resultBody} /> : null}
+            {argsBody ? (
+              <Pressable
+                onPress={() => setRaw((v) => !v)}
+                accessibilityRole="button"
+                accessibilityLabel={raw ? "show readable arguments" : "show raw arguments"}
+                style={[styles.rawToggle, { borderTopColor: tokens.border }]}
+                hitSlop={8}
+              >
+                <Text style={[type.meta, { color: tokens.ink3 }]}>{raw ? "readable" : `raw ${name} arguments`}</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
       </View>
@@ -168,22 +179,25 @@ export const ToolCallRow = React.memo(ToolCallRowImpl);
 const styles = StyleSheet.create({
   // Indented one gutter step past a message row so tool activity reads as subordinate to the
   // turn that produced it, not as another speaker.
-  row: { paddingLeft: space.space24, paddingRight: space.space16, paddingVertical: space.space2 },
+  row: { paddingLeft: space.space16, paddingRight: space.space16, paddingVertical: 1 },
+  // Collapsed, a call is one quiet line with no box; opened, it gets the card its details need.
   card: { borderRadius: radii.radius8, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
+  flat: { borderColor: "transparent" },
   summary: {
     flexDirection: "row",
     alignItems: "center",
     gap: space.space8,
     paddingHorizontal: space.space8,
-    paddingVertical: space.space8,
-    minHeight: 32,
+    paddingVertical: space.space4,
+    minHeight: 30,
   },
-  chevronSlot: { width: 14, height: 14 },
-  name: { flexShrink: 0 },
+  chevronSlot: { width: 13, height: 13 },
+  name: { flexShrink: 0, minWidth: 40 },
   target: { flex: 1, minWidth: 0 },
-  status: { width: 5, height: 5, borderRadius: radii.radiusPill },
+  spinner: { transform: [{ scale: 0.6 }], width: 16, height: 16 },
   block: { borderTopWidth: StyleSheet.hairlineWidth, padding: space.space8, gap: space.space4 },
   blockHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   blockHeadRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  rawToggle: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: space.space8, minHeight: 32, justifyContent: "center" },
   expander: { flexDirection: "row", alignItems: "center", gap: space.space4, paddingTop: space.space4, minHeight: 32 },
 });

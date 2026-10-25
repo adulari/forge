@@ -60,6 +60,7 @@ import {
   useUsageDockHotkey,
 } from "../lib/shortcuts";
 import { useTabBadgeTitle } from "../lib/tabBadge";
+import { serializePersistedClient } from "../lib/persistedCache";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 import { monoFamily } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
@@ -87,6 +88,9 @@ const queryClient = new QueryClient({
 const asyncStoragePersister = createAsyncStoragePersister({
   storage: AsyncStorage,
   key: "forge.queryCache",
+  // Trimmed to what a cold open needs (lib/persistedCache.ts), written at most every 3s.
+  serialize: serializePersistedClient,
+  throttleTime: 3000,
 });
 
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the

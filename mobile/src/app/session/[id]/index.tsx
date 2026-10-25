@@ -10,7 +10,7 @@
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router, useIsFocused, useNavigation } from "expo-router";
-import { ChevronDown, ChevronUp, Clock, Hammer, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
+import { ChevronDown, ChevronUp, Clock, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -23,31 +23,23 @@ import {
   Text,
   View,
 } from "react-native";
-import Animated, {
-  useAnimatedStyle,
-  useReducedMotion,
-  useSharedValue,
-  withRepeat,
-  withSequence,
-  withTiming,
-} from "react-native-reanimated";
 
 import type { SentAttachment } from "../../../components/chat/attach";
 import CardSlot from "../../../components/chat/CardSlot";
 import { Composer } from "../../../components/chat/Composer";
 import { MessageActionsMenu } from "../../../components/chat/MessageActionsMenu";
 import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
-import { Markdown } from "../../../components/chat/Markdown";
+import { StreamingAnswer, TurnActivity } from "../../../components/chat/LiveTurn";
 import { MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
 import { ToolCallRow } from "../../../components/chat/ToolCallRow";
 import { ToolGroupRow } from "../../../components/chat/ToolGroupRow";
+import { useHistoryAutofill } from "../../../components/chat/useHistoryAutofill";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
-import { buildTranscript, summarizeToolLine, type ToolInvocation } from "../../../lib/toolRows";
+import { buildTranscript, type ToolInvocation } from "../../../lib/toolRows";
 import { foldToolGroups, GroupMemo, type FoldedEntry, type ToolGroupEntry } from "../../../lib/toolGroups";
 import { useAppearancePreferences } from "../../../lib/appearancePreferences";
 import { fillerHistoryRows } from "../../../lib/transcriptFiller";
 import { SubagentStrip } from "../../../components/session/SubagentStrip";
-import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
 import { EmptyState } from "../../../components/ds/EmptyState";
@@ -62,10 +54,10 @@ import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessions } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
 import { useSessionCtx } from "../../../lib/sessionContext";
-import { easings, useEmberdot, useForgeline } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
-import { radii, space } from "../../../theme/tokens";
-import { tabularNums, type as typeScale } from "../../../theme/typography";
+import { space } from "../../../theme/tokens";
+import { type as typeScale } from "../../../theme/typography";
+import { useBreakpoint } from "../../../theme/useBreakpoint";
 
 // T3.3's CardSlot.tsx landed during this task (was a HANDOFF stub) — wired in directly above.
 
@@ -100,123 +92,6 @@ interface PendingSent {
   /** Attachments that rode this prompt (already uploaded — Composer only ever hands over
    * `state === "done"` ones), rendered on the bubble since the daemon never persists them. */
   attachments: SentAttachment[];
-}
-
-// Kindle streaming (DESIGN_SYSTEM.md §5.2), rendered through Markdown instead of a plain <Text>
-// so finalize (swap to MessageRow, which also goes through Markdown) is a visual no-op instead
-// of a "pop" from raw markdown to formatted. A local equivalent of StreamingText.tsx's
-// coalescing+caret shell rather than an edit to that shared component. Markdown.tsx's block/
-// inline parsers already degrade safely on partial input (verified by inspection): an unclosed
-// ``` fence collects lines to EOF and still renders as an in-progress code block, an unmatched
-// ** or _ just falls through to literal text — nothing here needs extra guarding against a
-// mid-token markdown string.
-const CARET_SIZE = 7;
-const CARET_PULSE_MS = 1000;
-const CARET_MIN_OPACITY = 0.4;
-
-function formatElapsed(elapsedMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}m ${seconds.toString().padStart(2, "0")}s` : `${seconds}s`;
-}
-
-function LiveToolActivity({ entries, startedAt }: { entries: string[]; startedAt: number }) {
-  const tokens = useTokens();
-  const { dotStyle } = useEmberdot("busy");
-  const entrance = useForgeline(0);
-  const [elapsedMs, setElapsedMs] = useState(() => Date.now() - startedAt);
-
-  useEffect(() => {
-    setElapsedMs(Date.now() - startedAt);
-    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
-    return () => clearInterval(timer);
-  }, [startedAt]);
-
-  return (
-    <Animated.View style={[styles.activityLedger, entrance]}>
-      <View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
-        <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
-        <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
-        <Text style={[typeScale.monoMeta, tabularNums, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
-          {summarizeToolLine(entries[entries.length - 1] ?? "")}
-        </Text>
-        <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
-      </View>
-      {entries.slice(0, -1).map((line, index) => (
-        <Text key={`${index}:${line}`} style={[typeScale.monoMeta, tabularNums, styles.activitySettled, { color: tokens.ink3 }]} numberOfLines={1}>
-          {summarizeToolLine(line)}
-        </Text>
-      ))}
-    </Animated.View>
-  );
-}
-
-function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean }) {
-  const tokens = useTokens();
-  const { dotStyle: railStyle } = useEmberdot(streaming ? "busy" : "idle");
-  const reduced = useReducedMotion();
-
-  // Same rAF coalescing as StreamingText.tsx: at most one committed render per frame while
-  // streaming; reduce-motion commits every update instantly instead.
-  const [displayText, setDisplayText] = useState(text);
-  const latestRef = useRef(text);
-  const rafRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    latestRef.current = text;
-    if (reduced) {
-      setDisplayText(text);
-      return;
-    }
-    if (rafRef.current == null) {
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
-        setDisplayText(latestRef.current);
-      });
-    }
-  }, [text, reduced]);
-
-  useEffect(
-    () => () => {
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-    },
-    [],
-  );
-
-  // Caret pulse while streaming — same timing as StreamingText.tsx's Kindle caret.
-  const caretOpacity = useSharedValue(1);
-  useEffect(() => {
-    if (reduced || !streaming) {
-      caretOpacity.value = 1;
-      return;
-    }
-    caretOpacity.value = withRepeat(
-      withSequence(
-        withTiming(CARET_MIN_OPACITY, { duration: CARET_PULSE_MS / 2, easing: easings.standard }),
-        withTiming(1, { duration: CARET_PULSE_MS / 2, easing: easings.standard }),
-      ),
-      -1,
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [streaming, reduced]);
-  const caretStyle = useAnimatedStyle(() => ({ opacity: caretOpacity.value }));
-
-  return (
-    <View style={styles.streamingAnswerRow}>
-      {streaming ? <Animated.View style={[styles.streamingRail, { backgroundColor: tokens.accent }, railStyle]} /> : null}
-      <View style={styles.streamingAnswerText}>
-        <Markdown content={displayText} />
-      </View>
-      {streaming ? (
-        <Animated.View
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-          style={[styles.caret, { backgroundColor: tokens.accent }, caretStyle]}
-        />
-      ) : null}
-    </View>
-  );
 }
 
 export default function SessionChat() {
@@ -629,33 +504,21 @@ export default function SessionChat() {
   // it back to the "thinking…" indicator, then `finalizing` carries it across the busy->false
   // edge until the history row lands. No frame ever renders the answer absent (`displayText`, below the folds).
 
-  const toolLedger = useMemo(
-    () => (snapshot?.transcript ?? []).map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => line.startsWith("↳ ")).slice(-3),
-    [snapshot?.transcript],
-  );
-  const latestToolLine = toolLedger.at(-1) ?? null;
-  // `snapshot.transcript` is a fresh array every WS frame, so `toolLedger` above gets a new
-  // identity every ~30ms while streaming even when the ledger's actual content hasn't changed —
-  // that identity change was propagating into `renderItem`'s deps and re-rendering every visible
-  // FlatList cell each frame. Key off the content instead so `toolLedgerLines` (and therefore
-  // `renderItem`) only changes identity when a ledger line is actually added/changed.
-  const toolLedgerKey = toolLedger.map((e) => `${e.index}:${e.line}`).join("\n");
-  const toolLedgerLines = useMemo(
-    () => toolLedger.map(({ line }) => line),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toolLedgerKey],
-  );
-  const [toolActivity, setToolActivity] = useState<{ line: string; startedAt: number } | null>(null);
-  useEffect(() => {
-    if (!busy || !latestToolLine) {
-      setToolActivity(null);
-      return;
+  // The newest live tool line (`↳ shell {...}`), by value, so a fresh transcript array per frame
+  // does not change `renderItem`'s identity and re-render every visible cell.
+  const transcriptTail = snapshot?.transcript;
+  const liveToolLine = useMemo(() => {
+    const lines = transcriptTail ?? [];
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (line.startsWith("↳ ")) return line;
     }
-    const key = `${latestToolLine.index}:${latestToolLine.line}`;
-    setToolActivity((current) =>
-      current?.line === key ? current : { line: key, startedAt: Date.now() },
-    );
-  }, [busy, latestToolLine]);
+    return null;
+  }, [transcriptTail]);
+  // An older host sends no `activity`; a tool line is then the only sign of what the turn does.
+  const activity = snapshot?.activity || undefined;
+  const turnStartedAt = snapshot?.turn_started_at ?? 0;
+  const activityToolLine = !activity || activity === "running tool" ? liveToolLine : null;
 
   const transcriptRows = snapshot?.transcript_rows;
   // `historyRows` come from react-query and are referentially stable between refetches, so this
@@ -752,7 +615,7 @@ export default function SessionChat() {
       // empty.
       let filler = snapshot?.transcript ?? [];
       // The tail's newest lines describe the CURRENT turn, which the styled rows above
-      // (pendingSent bubble + streaming reply + LiveToolActivity) already render — keeping
+      // (pendingSent bubble + streaming reply + TurnActivity) already render — keeping
       // them here painted the same exchange twice, once as plain lines. Cut the filler at
       // the current turn's start (the last "you" marker) while a turn is in flight.
       if (busy || streamingText || shownPending.length > 0) {
@@ -782,7 +645,19 @@ export default function SessionChat() {
     }
   }, [items]);
 
+  const autofill = useHistoryAutofill(
+    {
+      hasNextPage: historyQuery.hasNextPage,
+      isFetchingNextPage: historyQuery.isFetchingNextPage,
+      isError: historyQuery.isError,
+      fetchNextPage: historyQuery.fetchNextPage,
+    },
+    transcriptReady && !useTranscriptFiller,
+    historyRows.length,
+  );
+  const { onScrollNearEnd } = autofill;
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    onScrollNearEnd(e.nativeEvent);
     const awayFromLatest = e.nativeEvent.contentOffset.y > JUMP_THRESHOLD_PX;
     setShowJump(awayFromLatest);
     if (!awayFromLatest) {
@@ -790,7 +665,7 @@ export default function SessionChat() {
       return;
     }
     setShowResponseNav(true);
-  }, []);
+  }, [onScrollNearEnd]);
 
   const jumpToLatest = useCallback(() => {
     setShowJump(false);
@@ -831,23 +706,10 @@ export default function SessionChat() {
           // disclosure, only the answer streams in the main slot (never the raw thinking log).
           const parsed = parseReasoning(item.text);
           const hasReasoning = parsed.reasoning.length > 0 || parsed.thinking;
-          if (!hasReasoning && !parsed.answer) {
-            // Queued/busy but no answer/reasoning yet — an explicit "thinking" affordance (same
-            // ActivityIndicator+accent pairing BoundedList's loadingMore footer uses) so this
-            // phase never reads as stuck.
-            return item.streaming ? (
-              toolActivity ? (
-                <View style={styles.streamingRow}>
-                  <LiveToolActivity entries={toolLedgerLines} startedAt={toolActivity.startedAt} />
-                </View>
-              ) : (
-                <View style={[styles.streamingRow, styles.thinkingRow]}>
-                  <BellowsSpinner active />
-                  <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
-                </View>
-              )
-            ) : null;
-          }
+          // What the turn is doing, while no answer text is arriving: before the first token,
+          // and between steps (a tool running after some prose). Never a bare spinner.
+          const showActivity = item.streaming && busy && (!parsed.answer || (activity != null && activity !== "streaming response"));
+          if (!hasReasoning && !parsed.answer && !showActivity) return null;
           return (
             <View style={styles.streamingRow}>
               {parsed.answer ? <SpeakerTag speaker="forge" /> : null}
@@ -858,8 +720,9 @@ export default function SessionChat() {
                 />
               ) : null}
               {parsed.answer ? (
-                <StreamingAnswer text={parsed.answer} streaming={item.streaming} />
+                <StreamingAnswer text={parsed.answer} streaming={item.streaming && !showActivity} />
               ) : null}
+              {showActivity ? <TurnActivity activity={activity} toolLine={activityToolLine} startedAt={turnStartedAt} /> : null}
             </View>
           );
         }
@@ -878,7 +741,7 @@ export default function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, toolActivity, toolLedgerLines, onMessageLongPress, openGroups, toggleGroup],
+    [tokens.ink2, tokens.ink3, busy, activity, activityToolLine, turnStartedAt, onMessageLongPress, openGroups, toggleGroup],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);
@@ -907,7 +770,10 @@ export default function SessionChat() {
     setResponsePosition(next);
     listRef.current?.scrollToIndex({ index: assistantResponseIndices[next], animated: true, viewPosition: 0.5 });
   }, [assistantResponseIndices, responsePosition]);
-  const responseNavigatorVisible = showResponseNav && assistantResponseIndices.length > 1;
+  // On a phone the response stepper and the jump pill stacked two floating controls over the
+  // reading area; the jump button alone stays there.
+  const { isCompact } = useBreakpoint();
+  const responseNavigatorVisible = !isCompact && showResponseNav && assistantResponseIndices.length > 1;
 
   return (
     // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
@@ -924,6 +790,8 @@ export default function SessionChat() {
           renderItem={renderItem}
           keyExtractor={keyExtractor}
           onScroll={onScroll}
+          onLayout={autofill.onLayout}
+          onContentSizeChange={autofill.onContentSizeChange}
           scrollEventThrottle={32}
           onEndReached={onEndReached}
           loadingMore={transcriptReady && historyQuery.isFetchingNextPage}
@@ -983,7 +851,7 @@ export default function SessionChat() {
             style={[styles.jumpPill, { backgroundColor: busy ? tokens.selection : tokens.bg3, borderColor: busy ? tokens.accent : tokens.border }]}
           >
             <ChevronDown size={16} strokeWidth={1.75} color={tokens.ink2} />
-            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{busy ? (newWhileAway > 0 ? `${newWhileAway} new ↓` : "live") : "latest"}</Text>
+            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{newWhileAway > 0 ? `${newWhileAway} new` : busy ? "Back to live" : "Latest"}</Text>
           </Pressable>
         ) : null}
       </View>
@@ -1076,7 +944,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.space16,
   },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
-  thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   connectingRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1084,29 +951,7 @@ const styles = StyleSheet.create({
     gap: space.space8,
     paddingVertical: space.space24,
   },
-  activityRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.space8,
-    paddingHorizontal: space.space12,
-    borderRadius: radii.radius8,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  activityLedger: { gap: space.space4 },
-  activitySettled: { opacity: 0.6, paddingLeft: space.space24 },
-  activityDot: { width: 8, height: 8, borderRadius: 4 },
-  activityLine: { flex: 1 },
   noteRow: { paddingHorizontal: space.space16, paddingVertical: space.space4 },
-  streamingAnswerRow: { flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap", position: "relative", paddingLeft: space.space8 },
-  streamingRail: { position: "absolute", left: 0, top: 0, bottom: 0, width: 2 },
-  streamingAnswerText: { flexShrink: 1 },
-  caret: {
-    width: CARET_SIZE,
-    height: CARET_SIZE,
-    borderRadius: CARET_SIZE / 2,
-    marginLeft: 4,
-    marginBottom: 4,
-  },
   jumpPill: {
     position: "absolute",
     bottom: space.space16,

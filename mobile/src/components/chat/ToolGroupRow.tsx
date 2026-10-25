@@ -1,6 +1,7 @@
 // A run of tool calls folded into one dim row (lib/toolGroups.ts, after the TUI's tool groups):
-// "Read 3 files, ran 2 shell commands", with "1 failed" on the right where it is never cut. Tap
-// or click (Enter/Space on desktop and web) opens it in place to the per-call cards, unchanged.
+// "Read 3 files, ran 2 shell commands", with "1 failed" on the right where it is never cut, unless
+// that call is listed under the row and says so itself. Tap or click (Enter/Space on desktop and
+// web) opens it in place to the per-call rows.
 // Collapsed, a failed call and the call in flight stay listed under the row: a failure is the
 // one thing a reader needs without asking. Permission prompts live in CardSlot above the
 // composer, so folding never hides a decision.
@@ -40,6 +41,9 @@ function ToolGroupRowImpl({ group, expanded, onToggle }: ToolGroupRowProps) {
   const hasSummary = summary.finished > 0;
   const running = summary.running > 0;
   const calls = !hasSummary || expanded ? group.calls : collapsedCalls(group);
+  // A failure is marked once: on the call's own row when it is listed below, else on the summary.
+  const failedBelow = calls.filter((c) => c.status === "failed").length;
+  const failedUnlisted = summary.failed - failedBelow;
 
   return (
     <View>
@@ -63,11 +67,11 @@ function ToolGroupRowImpl({ group, expanded, onToggle }: ToolGroupRowProps) {
               <ChevronRight size={14} strokeWidth={2} color={tokens.ink3} />
             )}
           </View>
-          <Text style={[type.meta, styles.text, { color: tokens.ink3 }]} numberOfLines={2}>
+          <Text style={[type.sub, styles.text, { color: tokens.ink3 }]} numberOfLines={2}>
             {group.text || "Working"}
           </Text>
-          {summary.failed > 0 ? (
-            <Text style={[type.meta, styles.failed, { color: tokens.danger }]}>{summary.failed} failed</Text>
+          {failedUnlisted > 0 ? (
+            <Text style={[type.meta, styles.failed, { color: tokens.danger }]}>{failedUnlisted} failed</Text>
           ) : null}
         </Pressable>
       ) : null}
@@ -90,7 +94,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: space.space8,
-    marginLeft: space.space24,
+    marginLeft: space.space16,
     marginRight: space.space16,
     paddingHorizontal: space.space8,
     paddingVertical: space.space4,

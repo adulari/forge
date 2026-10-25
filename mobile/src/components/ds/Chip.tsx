@@ -19,9 +19,13 @@ export interface ChipProps {
   icon?: React.ReactNode;
   testID?: string;
   style?: StyleProp<ViewStyle>;
+  /** `compact`: a 30px pill with a hairline border for dense rows (the composer's command
+   * chips); the hit area keeps its tap target through hitSlop. */
+  size?: "regular" | "compact";
 }
 
-export function Chip({ label, selected = false, onPress, disabled = false, icon, testID, style }: ChipProps) {
+export function Chip({ label, selected = false, onPress, disabled = false, icon, testID, style, size = "regular" }: ChipProps) {
+  const compact = size === "compact";
   const tokens = useTokens();
   const strike = useStrike();
   const [hovered, setHovered] = useState(false);
@@ -42,14 +46,15 @@ export function Chip({ label, selected = false, onPress, disabled = false, icon,
         accessibilityRole="button"
         accessibilityState={{ disabled, selected }}
         accessibilityLabel={label}
-        hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+        hitSlop={compact ? { top: 8, bottom: 8, left: 2, right: 2 } : { top: 6, bottom: 6, left: 4, right: 4 }}
         style={[
           styles.base,
+          compact ? styles.compact : null,
           {
             backgroundColor: selected ? tokens.selection : tokens.bg2,
             borderRadius: radii.radiusPill,
             opacity: disabled ? 0.4 : 1,
-            borderWidth: 2,
+            borderWidth: compact ? StyleSheet.hairlineWidth * 2 : 2,
             borderColor: focused
               ? tokens.accent
               : selected
@@ -80,6 +85,7 @@ const styles = StyleSheet.create({
     maxWidth: "100%",
     flexShrink: 1,
   },
+  compact: { minHeight: 30, paddingHorizontal: space.space8 + 2 },
   label: { flexShrink: 1 },
   icon: {
     marginRight: space.space4,

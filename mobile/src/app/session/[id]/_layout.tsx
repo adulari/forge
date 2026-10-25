@@ -62,6 +62,7 @@ import { useAppShortcut } from "../../../lib/shortcuts";
 import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { useReviewComments } from "../../../lib/reviewComments";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
+import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
@@ -148,6 +149,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const latestAssistantModel = useMemo(
     () => (sessionHistory?.pages ?? []).flat().find((row) => row.role === "assistant" && row.model)?.model ?? null,
     [sessionHistory],
+  );
+  const snapshotTitle = snapshot?.title;
+  const title = useMemo(
+    () => sessionDisplayTitle(snapshotTitle, (sessionHistory?.pages ?? []).flat(), sessionId),
+    [snapshotTitle, sessionHistory, sessionId],
   );
   const { open: openPalette } = usePalette();
   const sendWithFeedback = useCallback((input: Parameters<typeof send>[0]) => {
@@ -393,7 +399,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         <View style={{ backgroundColor: tokens.bg2 }}>
           <View style={gutter}>
           <SessionHeader
-            title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
+            title={title}
             state={statusState}
             exposure={snapshot?.exposure ?? "loopback"}
             onBack={onBack}
@@ -492,7 +498,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         <SessionLifecycleSheet
           target={{
             id: sessionId,
-            title: snapshot?.title || `session ${sessionId.slice(0, 8)}`,
+            title,
             cwd: snapshot?.cwd ?? "",
             archived: false,
             running: !(closed || sessionEnded),
@@ -530,6 +536,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
               value={activeSegment}
               onChange={onSegmentChange}
               testID="session-segmented"
+              background={tokens.bg2}
             />
           </View>
           {projectNeedsInitialization ? (
