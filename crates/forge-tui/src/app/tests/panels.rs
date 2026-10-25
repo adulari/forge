@@ -1362,3 +1362,89 @@ fn the_welcome_keys_row_does_not_repeat_the_composer_hint() {
         "{keys}"
     );
 }
+
+/// A detached (background) agent admitted in one turn keeps its row after that turn ends: the
+/// band and the rail list it while it runs, its later result settles it, and the repeat its
+/// delivery at the next turn boundary sends is dropped instead of printed twice.
+#[test]
+fn a_detached_agent_is_listed_until_it_settles_and_its_delivery_is_not_repeated() {
+    let mut app = App {
+        fullscreen: true,
+        ..Default::default()
+    };
+    app.submit_user("look into it in the background");
+    app.drain_flush();
+    app.apply(PresenterEvent::SubagentStart {
+        id: "6ddf5b5c-plan".into(),
+        agent: "plan".into(),
+        task: "draft the plan".into(),
+        model: Some("inferhub::cb/deepseek-v4.1-flash".into()),
+        phase: None,
+    });
+    let _ = flush_text(&mut app);
+
+    // The admitting turn has ended; the child is still running in the background.
+    let band = screen_rows(&app, 100, 24).join("\n");
+    assert!(
+        band.contains("Agents"),
+        "band lists the running agent: {band}"
+    );
+    app.activity_focused = true;
+    let rail = screen_rows(&app, 160, 40).join("\n");
+    assert!(
+        rail.contains("AGENTS") && rail.contains("plan"),
+        "rail lists the detached agent: {rail}"
+    );
+    assert_eq!(app.remote_snapshot().subagents.len(), 1);
+    assert!(!app.remote_snapshot().subagents[0].done);
+
+    app.apply(PresenterEvent::SubagentProgress {
+        id: "6ddf5b5c-plan".into(),
+        snippet: "reading the router".into(),
+    });
+    app.apply(PresenterEvent::SubagentResult {
+        id: "6ddf5b5c-plan".into(),
+        agent: "plan".into(),
+        ok: true,
+        summary: "three steps".into(),
+        cost_usd: 0.02,
+    });
+    let first = flush_text(&mut app);
+    assert!(first.contains("three steps"), "{first}");
+    let snap = app.remote_snapshot();
+    assert!(snap.subagents[0].done && snap.subagents[0].ok);
+    assert!((snap.subagents[0].cost - 0.02).abs() < 1e-9);
+
+    // Next turn: the settled row folds away, then delivery repeats the result.
+    app.on_turn_start();
+    app.apply(PresenterEvent::SubagentResult {
+        id: "6ddf5b5c-plan".into(),
+        agent: "plan".into(),
+        ok: true,
+        summary: "three steps".into(),
+        cost_usd: 0.02,
+    });
+    let repeat = flush_text(&mut app);
+    assert!(
+        !repeat.contains("three steps"),
+        "a settled agent's repeated result is not printed again: {repeat}"
+    );
+
+    // `send_to_agent` reruns a child under its old id; that run's result counts.
+    app.apply(PresenterEvent::SubagentStart {
+        id: "6ddf5b5c-plan".into(),
+        agent: "plan".into(),
+        task: "refine".into(),
+        model: None,
+        phase: None,
+    });
+    app.apply(PresenterEvent::SubagentResult {
+        id: "6ddf5b5c-plan".into(),
+        agent: "plan".into(),
+        ok: true,
+        summary: "refined".into(),
+        cost_usd: 0.01,
+    });
+    assert!(flush_text(&mut app).contains("refined"));
+    assert!(app.subagents.iter().all(|r| r.done));
+}

@@ -945,9 +945,14 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
     if http {
         return serve_http(server, &bind).await;
     }
+    let exit = server.subagents.as_ref().map(LazySubagents::exit_handle);
     let service = server.serve(stdio()).await?;
     clock.mark("mcp-serve: handshake");
-    service.waiting().await?;
+    let served = service.waiting().await;
+    if let Some(exit) = exit {
+        subagents::interrupt_running(exit);
+    }
+    served?;
     Ok(())
 }
 

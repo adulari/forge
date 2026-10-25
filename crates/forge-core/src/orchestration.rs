@@ -3,6 +3,7 @@
 //! This owner preserves parent-child persistence and presenter ordering across delegated work.
 
 use super::*;
+use crate::detached_subagents::lifecycle_event;
 
 impl Session {
     /// The subagent types this session's `spawn_agents` can use: Forge's built-ins overlaid by the
@@ -88,6 +89,7 @@ impl Session {
                 &parent_id,
                 requests,
                 budget,
+                self.detached_sink(),
             )
             .await
             {
@@ -109,39 +111,7 @@ impl Session {
         // Drive the shared orchestrator, turning each child lifecycle into a presenter event
         // (running children animate live; completed ones fold into the scrollback box).
         let presenter = &mut self.presenter;
-        let mut on_event = |ev: subagent::Lifecycle| match ev {
-            subagent::Lifecycle::Start {
-                id,
-                agent,
-                task,
-                model,
-            } => presenter.emit(PresenterEvent::SubagentStart {
-                id: id.to_string(),
-                agent: agent.to_string(),
-                task: task.to_string(),
-                model: Some(model.to_string()),
-                phase: None,
-            }),
-            subagent::Lifecycle::Progress { id, snippet } => {
-                presenter.emit(PresenterEvent::SubagentProgress {
-                    id: id.to_string(),
-                    snippet: snippet.to_string(),
-                })
-            }
-            subagent::Lifecycle::Done {
-                id,
-                agent,
-                ok,
-                summary,
-                cost_usd,
-            } => presenter.emit(PresenterEvent::SubagentResult {
-                id: id.to_string(),
-                agent: agent.to_string(),
-                ok,
-                summary: summary.to_string(),
-                cost_usd,
-            }),
-        };
+        let mut on_event = |ev: subagent::Lifecycle| presenter.emit(lifecycle_event(ev));
         let (combined, all_ok) = subagent::orchestrate(
             &ctx,
             &parent_id,

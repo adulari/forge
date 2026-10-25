@@ -41,6 +41,11 @@ const SUBAGENT_SYSTEM: &str = "You are a focused Forge subagent working on ONE d
     subtask. Investigate with the tools you have and return a concise, self-contained answer \
     to the task — just the result the parent agent needs, no preamble.";
 
+mod detached;
+pub use detached::{
+    format_admission, format_subagent_list, resolve_detached_address, spawn_detached,
+    DetachedRegistry, DetachedSink,
+};
 mod execution;
 pub use execution::sum_usage;
 use execution::{execute_tool, tool_result_failed};
@@ -542,194 +547,6 @@ fn run_nested_spawn(
             Err(e) => format!("error: nested subagents failed: {e}"),
         }
     })
-}
-
-/// In-memory handles for currently-running detached children, so `cancel_subagent` can actually
-/// abort a live task in THIS process (the durable half — the `detached_child` store row — is
-/// what makes cancellation/status correct even when the task is NOT in this process, e.g. after
-/// a daemon restart; see [`forge_store::Store::reconcile_running_detached_children`]). Cheaply
-/// cloneable so both the direct path (held on `Session`) and the CLI-bridge path (held on
-/// `SubagentSupport`) can share one registry across every `spawn_agents`/`cancel_subagent` call
-/// in the same process.
-#[derive(Clone, Default)]
-pub struct DetachedRegistry(Arc<std::sync::Mutex<HashMap<String, tokio::task::AbortHandle>>>);
-
-impl DetachedRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn insert(&self, child_id: String, handle: tokio::task::AbortHandle) {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(child_id, handle);
-    }
-
-    /// Best-effort abort of the in-memory task for `child_id`, if this process holds it. Returns
-    /// whether a handle was found — NOT whether the task was still running (aborting an
-    /// already-completed task is a harmless no-op on tokio's side). The caller still consults the
-    /// store row for the authoritative status.
-    pub fn abort(&self, child_id: &str) -> bool {
-        match self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(child_id)
-        {
-            Some(handle) => {
-                handle.abort();
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-/// Admit `requests` as DETACHED children under `parent_id`: create + register each one
-/// immediately (persisted `running` row + a live tokio task), then return their admission
-/// handles WITHOUT waiting for any of them to finish (RFC retained-async-subagents).
-///
-/// Deliberately does NOT hold the spawned tasks' `JoinHandle`s the way [`orchestrate`]'s
-/// `AbortChildrenOnDrop` guard does — that guard exists so a CANCELLED TURN cancels its blocking
-/// fan-out; a detached child's entire purpose is to outlive the turn (and the future) that
-/// admitted it. Its `AbortHandle` still goes into `registry` so an explicit `cancel_subagent`
-/// can stop it.
-///
-/// Structural depth guard: detached spawning is refused below the top level (`ctx.depth > 0`).
-/// In practice a child never reaches here today — recursive `spawn_agents` calls route through
-/// [`run_nested_spawn`], which always runs blocking `orchestrate` and never parses `detached` —
-/// but this makes the "children cannot spawn detached grandchildren" rule explicit and testable
-/// independent of that call-site wiring.
-pub async fn spawn_detached(
-    ctx: &AgentCtx,
-    registry: &DetachedRegistry,
-    parent_id: &str,
-    requests: Vec<AgentRequest>,
-    budget: BudgetState,
-) -> Result<Vec<AdmissionHandle>, CoreError> {
-    if ctx.depth > 0 {
-        return Err(CoreError::Internal(
-            "detached subagents cannot themselves spawn detached grandchildren (depth guard)"
-                .to_string(),
-        ));
-    }
-    let mode_label = format!("{:?}", ctx.mode);
-    let mut handles = Vec::with_capacity(requests.len());
-    for req in requests {
-        let mut resolved = resolve(&req, &ctx.agents);
-        let name = resolved.name.clone();
-        let child_cwd = ctx.repo_root.to_string_lossy();
-        let child_id = ctx
-            .store
-            .create_child_session(&child_cwd, &mode_label, parent_id)?;
-        let _ = ctx.store.set_session_title(&child_id, &name);
-        resolved.task = crate::hooks_subagent::subagent_start_task(
-            &ctx.config.hooks,
-            parent_id,
-            &child_id,
-            &name,
-            &ctx.repo_root,
-            std::mem::take(&mut resolved.task),
-        )
-        .await;
-        // Routed up front, same as the blocking path: deterministic, no API call, and the
-        // admission handle can report the model immediately.
-        let decision = route_child(ctx, &resolved, budget).await;
-        let model = decision.model.clone();
-        ctx.store
-            .create_detached_child(&child_id, parent_id, &name, &model)?;
-
-        let child_ctx = ctx.clone();
-        let run_child_id = child_id.clone();
-        let task = tokio::spawn(async move {
-            let mut on_delta = |_: StreamEvent| {};
-            let outcome = run_subagent(
-                &child_ctx,
-                &run_child_id,
-                &resolved,
-                decision,
-                budget,
-                &mut on_delta,
-            )
-            .await;
-            let (text, ok) = match outcome {
-                Ok(out) => (out.final_text, out.ok),
-                Err(e) => (format!("error: subagent failed: {e}"), false),
-            };
-            let _ = child_ctx
-                .store
-                .finish_detached_child(&run_child_id, ok, &text);
-        });
-        registry.insert(child_id.clone(), task.abort_handle());
-        handles.push(AdmissionHandle {
-            child_id,
-            name,
-            model,
-        });
-    }
-    Ok(handles)
-}
-
-/// Resolve a `cancel_subagent`/status-lookup address against a parent's detached children: exact
-/// name match wins (most-recent-first tiebreak), then an id-prefix match — the same resolution
-/// order [`resolve_child_address`] uses for `send_to_agent`, for a consistent addressing scheme
-/// across both subagent families.
-pub fn resolve_detached_address<'a>(
-    children: &'a [forge_store::DetachedChild],
-    address: &str,
-) -> Option<&'a forge_store::DetachedChild> {
-    if let Some(found) = children.iter().rev().find(|c| c.name == address) {
-        return Some(found);
-    }
-    let mut prefix_matches = children.iter().filter(|c| c.child_id.starts_with(address));
-    match (prefix_matches.next(), prefix_matches.next()) {
-        (Some(found), None) => Some(found),
-        _ => None,
-    }
-}
-
-/// Render the admission handles from a detached `spawn_agents` call as the tool result text the
-/// parent model reads.
-pub fn format_admission(handles: &[AdmissionHandle]) -> String {
-    let mut out = format!(
-        "admitted {} detached agent(s) — running in the background:\n",
-        handles.len()
-    );
-    for h in handles {
-        let short = &h.child_id[..h.child_id.len().min(8)];
-        out.push_str(&format!("- {} ({short}) on {}\n", h.name, h.model));
-    }
-    out.push_str(
-        "Results are delivered automatically as a labeled message once ready. Use \
-         list_subagents to check status meanwhile, or cancel_subagent to stop one early.",
-    );
-    out
-}
-
-/// Render a parent's detached children (from [`forge_store::Store::list_detached_children`]) as
-/// `list_subagents`' tool result text.
-pub fn format_subagent_list(children: &[forge_store::DetachedChild]) -> String {
-    if children.is_empty() {
-        return "no detached agents spawned this session".to_string();
-    }
-    let mut out = String::new();
-    for c in children {
-        let short = &c.child_id[..c.child_id.len().min(8)];
-        out.push_str(&format!(
-            "- {} ({short}) [{}] model={}",
-            c.name,
-            c.status.as_str(),
-            c.model
-        ));
-        if c.status.is_finished() {
-            if let Some(result) = &c.result_ref {
-                out.push_str(&format!(" — {}", summary(result)));
-            }
-        }
-        out.push('\n');
-    }
-    out.trim_end().to_string()
 }
 
 /// A message from a child task to the orchestrator's drain loop: a live activity delta, or the
@@ -2457,9 +2274,16 @@ mod tests {
             task: "investigate something".into(),
         }];
 
-        let handles = spawn_detached(&ctx, &registry, &parent, requests, BudgetState::default())
-            .await
-            .expect("detached admission must not wait for the child to finish");
+        let handles = spawn_detached(
+            &ctx,
+            &registry,
+            &parent,
+            requests,
+            BudgetState::default(),
+            None,
+        )
+        .await
+        .expect("detached admission must not wait for the child to finish");
 
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0].model, "openai::gpt-test");
@@ -2489,6 +2313,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_detached_reports_its_lifecycle_to_the_sink_after_the_call_returns() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let parent = store.create_session(".", "default").unwrap();
+        let provider = Arc::new(FlakyProvider {
+            bad: std::collections::HashSet::new(),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "openai::gpt-test".into(),
+            fallbacks: vec![],
+        });
+        let mut ctx = ctx_with(provider, router, Arc::clone(&store));
+        ctx.depth = 0;
+        let registry = DetachedRegistry::new();
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let sink_seen = Arc::clone(&seen);
+        let sink_store = Arc::clone(&store);
+        let sink_parent = parent.clone();
+        let sink: DetachedSink = Arc::new(move |ev: Lifecycle| {
+            let line = match ev {
+                Lifecycle::Start {
+                    id, agent, model, ..
+                } => format!("start {agent} {model} {}", id.len()),
+                Lifecycle::Progress { .. } => return,
+                Lifecycle::Done {
+                    agent, ok, summary, ..
+                } => {
+                    // The store already holds the result when the panel hears about it, so
+                    // `list_subagents` never lags the UI.
+                    let row = &sink_store.list_detached_children(&sink_parent).unwrap()[0];
+                    format!("done {agent} {ok} {summary} {}", row.status.as_str())
+                }
+            };
+            sink_seen.lock().unwrap().push(line);
+        });
+        let requests = vec![AgentRequest {
+            agent: "general".into(),
+            task: "investigate something".into(),
+        }];
+
+        let handles = spawn_detached(
+            &ctx,
+            &registry,
+            &parent,
+            requests,
+            BudgetState::default(),
+            Some(sink),
+        )
+        .await
+        .unwrap();
+        let id_len = handles[0].child_id.len();
+        assert_eq!(
+            seen.lock().unwrap().first().cloned(),
+            Some(format!("start general openai::gpt-test {id_len}")),
+            "Start is reported at admission"
+        );
+
+        for _ in 0..200 {
+            if seen.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            seen.lock().unwrap().get(1).cloned(),
+            Some("done general true child done done".to_string())
+        );
+        assert!(
+            !registry.is_running(&handles[0].child_id),
+            "a finished child leaves the in-process registry"
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_detached_rejects_detached_grandchildren() {
         // Structural depth guard: a context already one level deep (as a spawned child's own
         // AgentCtx would be) must not be able to admit ITS OWN detached children.
@@ -2509,9 +2406,16 @@ mod tests {
             task: "t".into(),
         }];
 
-        let err = spawn_detached(&ctx, &registry, &parent, requests, BudgetState::default())
-            .await
-            .expect_err("depth > 0 must refuse detached admission");
+        let err = spawn_detached(
+            &ctx,
+            &registry,
+            &parent,
+            requests,
+            BudgetState::default(),
+            None,
+        )
+        .await
+        .expect_err("depth > 0 must refuse detached admission");
         assert!(
             err.to_string().contains("depth guard") || err.to_string().contains("grandchildren"),
             "error should explain the depth guard: {err}"

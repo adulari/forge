@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Background (detached) subagents show in the agents panel.** `spawn_agents` with `detached: true` admitted its children and returned, but nothing reported them, so the TUI band and right rail and the app's Agents tab stayed empty while they ran. Each detached child now reports start (role, model), live progress and its outcome and cost through the session's background presenter sink, so it shows in the TUI and in the remote snapshot (desktop and mobile Agents tab) like a blocking spawn and stays listed after its turn ends. The store row is written before the panel hears the outcome, so `list_subagents` and the panel agree. `cancel_subagent` settles the row as failed, and the labeled result at the next turn boundary settles any row nothing else did without printing it twice (`crates/forge-core/src/subagent/detached.rs`, `detached_subagents.rs`). On CLI-bridge sessions `forge mcp-serve` writes detached children to the bridge sink too, files them under the bridged session so it delivers their results, and marks children still running when the bridge process exits as interrupted instead of leaving them `running`.
+
 ## [2.23.4] - 2026-10-25
 
 ### Added
