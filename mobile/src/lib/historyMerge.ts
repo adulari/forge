@@ -28,6 +28,30 @@ export function mergeNewestHistoryPage(
   };
 }
 
+/** Pages back from `fresh` (newest-first) until it reaches `newestKnown`, the newest row the app
+ * already shows, so a live refresh that fell behind joins the loaded pages instead of replacing
+ * them. A long tool-heavy turn writes more than one 15-row page between two refreshes (or while
+ * the phone was away); the merge then found a gap and dropped every loaded page, leaving only the
+ * running turn's tool rows ("Ran 15 scripts") on an otherwise empty screen. Bounded: a gap wider
+ * than `maxPages` still restarts from the newest rows, and scrolling pages the rest back in. */
+export async function fillHistoryGap(
+  fresh: HistoryRow[],
+  newestKnown: number | undefined,
+  fetchBefore: (before: number) => Promise<HistoryRow[]>,
+  maxPages = 8,
+): Promise<HistoryRow[]> {
+  if (newestKnown === undefined) return fresh;
+  let rows = fresh;
+  for (let i = 0; i < maxPages; i++) {
+    const oldest = rows[rows.length - 1]?.seq;
+    if (oldest === undefined || oldest <= newestKnown) break;
+    const older = await fetchBefore(oldest);
+    if (older.length === 0) break;
+    rows = [...rows, ...older];
+  }
+  return rows;
+}
+
 /**
  * Whether REAL (non-blank) content has landed in `rows` (newest-first) at a seq newer than
  * `baselineSeq` — used to decide when it's safe to stop showing the chat screen's retained/

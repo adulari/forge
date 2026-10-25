@@ -17,7 +17,7 @@
 //            call TelemetrySheet's "Model" row already makes.
 //   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
 //            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
-import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Image as ImageIcon, MessageSquare, Mic, MousePointer2, RotateCcw, Sparkles, Square, Zap } from "lucide-react-native";
+import { ArrowUp, ChevronDown, Clock, FileCode2, Gauge, FileText, Image as ImageIcon, MessageSquare, Mic, MousePointer2, RotateCcw, Sparkles, Square, Zap } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
@@ -49,6 +49,7 @@ import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
 import { useTheme } from "../../theme/ThemeProvider";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 import { depthDark, depthLight, radii, shadowStyle, space, tapTarget } from "../../theme/tokens";
 import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
@@ -161,6 +162,23 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   const [height, setHeight] = useState(MIN_HEIGHT);
   const [nativeText, setNativeText] = useState(text);
   const [focused, setFocused] = useState(false);
+  // The command chips show while the composer is in use, not as a permanent row of big pills
+  // taking a phone's screen. A blur hides them a beat later, so a tap on a chip (which blurs
+  // the input first on web) still lands.
+  const [chipsOpen, setChipsOpen] = useState(false);
+  const { isCompact } = useBreakpoint();
+  const chipsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (chipsTimer.current) clearTimeout(chipsTimer.current); }, []);
+  const onInputFocus = useCallback(() => {
+    if (chipsTimer.current) clearTimeout(chipsTimer.current);
+    setFocused(true);
+    setChipsOpen(true);
+  }, []);
+  const onInputBlur = useCallback(() => {
+    setFocused(false);
+    if (chipsTimer.current) clearTimeout(chipsTimer.current);
+    chipsTimer.current = setTimeout(() => setChipsOpen(false), 300);
+  }, []);
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
   const textRef = useRef(text);
@@ -722,14 +740,15 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
         </View>
       ) : null}
 
-      {!recording ? (
+      {!recording && (chipsOpen || text.startsWith("/") || (showSuggestionChip && activeSuggestion)) ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.commandScroll} contentContainerStyle={styles.chipsRow} keyboardShouldPersistTaps="handled">
-          {text.length === 0 ? <Chip label="goal" icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.ink3} />} onPress={() => setGoalVisible(true)} testID="chip-goal" /> : null}
+          {text.length === 0 ? <Chip size="compact" label="goal" icon={<Sparkles size={13} strokeWidth={1.75} color={tokens.ink3} />} onPress={() => setGoalVisible(true)} testID="chip-goal" /> : null}
           {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
-            <Chip key={cmd} label={cmd} onPress={() => insertCommand(cmd)} testID={`chip-${cmd}`} />
+            <Chip size="compact" key={cmd} label={cmd} onPress={() => insertCommand(cmd)} testID={`chip-${cmd}`} />
           )) : null}
           {lastPrompt ? (
             <Chip
+              size="compact"
               label="resend last"
               icon={<RotateCcw size={14} strokeWidth={1.75} color={tokens.ink3} />}
               onPress={() => commit(lastPrompt)}
@@ -739,6 +758,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
           {showSuggestionChip && activeSuggestion ? (
             <Animated.View style={suggestionChipStyle}>
               <Chip
+                size="compact"
                 label={activeSuggestion}
                 icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.accent} />}
                 onPress={() => insertSuggestion(activeSuggestion)}
@@ -768,14 +788,13 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
             shadowStyle(depth.sheet),
           ]}
         >
-          {model || effort ? (
-            <View style={styles.metaRow}>
+          <View style={styles.metaRow}>
               {model ? (
                 <MetaChip
                   // The daemon sends the literal sentinel "—" for an Automatic session (no
                   // model pinned yet) — same value StatusStrip already special-cases. A raw
                   // dash on the chip reads as broken/missing data, not as "automatic".
-                  label={modelChipLabel(model, modelPinned)}
+                  label={modelChipLabel(model, modelPinned, isCompact)}
                   color={tokens.ink2}
                   accessibilityLabel={`model: ${modelChipLabel(model, modelPinned)} — change model`}
                   testID="composer-model-chip"
@@ -786,7 +805,9 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                   EffortPicker calls the default detent), so the chip stays reachable either
                   way rather than hiding the only way to open the picker. */}
               <MetaChip
-                label={`effort · ${effort ?? "auto"}`}
+                // A phone needs the width for the model's name; the gauge glyph says "effort".
+                label={isCompact ? effort ?? "auto" : `effort · ${effort ?? "auto"}`}
+                icon={isCompact ? <Gauge size={11} strokeWidth={1.75} color={tokens.ink4} /> : undefined}
                 color={tokens.ink3}
                 accessibilityLabel={`reasoning effort: ${effort ?? "auto"} — change effort`}
                 testID="composer-effort-chip"
@@ -795,22 +816,22 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                 fixed
                 onPress={() => setEffortVisible(true)}
               />
-            </View>
-          ) : null}
-          {/* Attach buttons get their own row above the input: with image+file+mic+send all
-              competing for one row's width, the message input was squeezed to roughly a third
-              of the card's width — short replies wrapped onto 2-3 lines instead of one. */}
-          <View style={styles.attachRow}>
-            <IconButton
-              icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
-              onPress={onAttachImage}
-              accessibilityLabel="attach photo"
-            />
-            <IconButton
-              icon={<FileText size={20} strokeWidth={1.75} color={tokens.ink2} />}
-              onPress={onAttachDocument}
-              accessibilityLabel="attach file"
-            />
+              {/* Attach sits in this row's free space: a row of its own made the composer a
+                  quarter of a phone screen, and squeezing it beside the input made short
+                  replies wrap. */}
+              <View style={styles.metaSpacer} />
+              <IconButton
+                icon={<ImageIcon size={18} strokeWidth={1.75} color={tokens.ink3} />}
+                onPress={onAttachImage}
+                accessibilityLabel="attach photo"
+                style={styles.metaIcon}
+              />
+              <IconButton
+                icon={<FileText size={18} strokeWidth={1.75} color={tokens.ink3} />}
+                onPress={onAttachDocument}
+                accessibilityLabel="attach file"
+                style={styles.metaIcon}
+              />
           </View>
           <View
             style={[
@@ -846,8 +867,8 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                 setText(next);
               }}
               {...imeProps}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
+              onFocus={onInputFocus}
+              onBlur={onInputBlur}
               returnKeyType="default"
               autoCapitalize={text.startsWith("/") ? "none" : "sentences"}
               autoCorrect={!text.startsWith("/")}
@@ -962,12 +983,14 @@ function MetaChip({
   testID,
   onPress,
   fixed = false,
+  icon,
 }: {
   label: string;
   color: string;
   accessibilityLabel: string;
   testID: string;
   onPress: () => void;
+  icon?: React.ReactNode;
   /** Keep the full label; the other chip in the row gives up the width instead. */
   fixed?: boolean;
 }) {
@@ -981,6 +1004,7 @@ function MetaChip({
       testID={testID}
       style={[styles.metaChip, fixed && styles.metaChipFixed, { borderColor: tokens.border }]}
     >
+      {icon}
       <Text style={[type.monoMeta, styles.metaChipLabel, { color }]} numberOfLines={1}>{label}</Text>
       <ChevronDown size={11} strokeWidth={1.75} color={tokens.ink4} />
     </Pressable>
@@ -1025,9 +1049,10 @@ const styles = StyleSheet.create({
   metaRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: space.space8,
-    paddingHorizontal: space.space8,
-    paddingTop: space.space8,
+    gap: 6,
+    paddingLeft: space.space8,
+    paddingRight: space.space4,
+    paddingTop: space.space4,
   },
   metaChip: {
     flexDirection: "row",
@@ -1042,11 +1067,8 @@ const styles = StyleSheet.create({
   },
   metaChipFixed: { flexShrink: 0 },
   metaChipLabel: { flexShrink: 1, minWidth: 0 },
-  attachRow: {
-    flexDirection: "row",
-    paddingLeft: space.space4,
-    paddingTop: space.space4,
-  },
+  metaSpacer: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
+  metaIcon: { width: 32, height: 32 },
   row: {
     position: "relative",
     flexDirection: "row",

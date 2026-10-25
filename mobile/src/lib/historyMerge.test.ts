@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { HistoryRow } from "./api";
-import { answerAlreadyShown, historyHasRealContentSince, mergeNewestHistoryPage, shouldRetryEmptyHistory } from "./historyMerge";
+import { answerAlreadyShown, fillHistoryGap, historyHasRealContentSince, mergeNewestHistoryPage, shouldRetryEmptyHistory } from "./historyMerge";
 
 const row = (seq: number, content = `r${seq}`): HistoryRow => ({
   seq,
@@ -34,6 +34,28 @@ describe("mergeNewestHistoryPage", () => {
     expect(mergeNewestHistoryPage(undefined, page(1))).toBeUndefined();
     const data = { pages: [page(3)], pageParams: [undefined] };
     expect(mergeNewestHistoryPage(data, [])).toBe(data);
+  });
+});
+
+describe("fillHistoryGap", () => {
+  const store = Array.from({ length: 40 }, (_, i) => row(40 - i)); // 40..1, newest first
+  const before = async (seq: number) => store.filter((r) => r.seq < seq).slice(0, 5);
+
+  it("pages back until the live page joins the loaded history, so nothing is dropped", async () => {
+    const fresh = store.slice(0, 5); // 40..36
+    const rows = await fillHistoryGap(fresh, 22, before);
+    expect(rows.at(-1)!.seq).toBeLessThanOrEqual(22);
+    const data = { pages: [page(22, 21, 20), page(19, 18)], pageParams: [undefined, 20] };
+    const merged = mergeNewestHistoryPage(data, rows)!;
+    expect(merged.pages).toHaveLength(2);
+    expect(merged.pages[0][0].seq).toBe(40);
+    expect(merged.pages[1]).toBe(data.pages[1]);
+  });
+
+  it("stops after its page budget and when nothing is loaded yet", async () => {
+    const fresh = store.slice(0, 5);
+    expect((await fillHistoryGap(fresh, 1, before, 2)).length).toBe(15);
+    expect(await fillHistoryGap(fresh, undefined, before)).toBe(fresh);
   });
 });
 

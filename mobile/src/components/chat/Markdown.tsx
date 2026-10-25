@@ -230,91 +230,123 @@ export interface MarkdownProps {
   style?: StyleProp<TextStyle>;
 }
 
-export function Markdown({ content, style }: MarkdownProps) {
-  const { tokens } = useTheme();
-  const blocks = React.useMemo(() => parseBlocks(content), [content]);
+/** What a block renders from. A streamed reply re-parses on every frame; blocks whose text did
+ * not change keep their element (a finished code block is not re-highlighted per token), so only
+ * the block being written re-renders. */
+function blockSignature(block: Block): string {
+  switch (block.kind) {
+    case "heading":
+      return `h${block.level}:${block.text}`;
+    case "paragraph":
+      return `p:${block.text}`;
+    case "list":
+      return `l${block.ordered ? "o" : "u"}${block.start}:${block.items.join("\n")}`;
+    case "code":
+      return `c${block.language}:${block.code}`;
+    case "table":
+      return `t:${JSON.stringify([block.header, block.rows])}`;
+  }
+}
 
+interface MarkdownBlockProps {
+  block: Block;
+  signature: string;
+  blockKey: string;
+  style?: StyleProp<TextStyle>;
+}
+
+function MarkdownBlockImpl({ block, blockKey: key, style }: MarkdownBlockProps) {
+  const { tokens } = useTheme();
+  switch (block.kind) {
+    case "heading":
+      return (
+        <Text
+          key={key}
+          accessibilityRole="header"
+          selectable
+          style={[type.heading, styles.heading, { color: tokens.ink }]}
+        >
+          {renderInline(block.inline, key, tokens)}
+        </Text>
+      );
+    case "code":
+      return (
+        <View key={key} style={styles.block}>
+          <CodeBlock code={block.code} language={block.language} />
+        </View>
+      );
+    case "list":
+      return (
+        <View key={key} style={styles.block}>
+          {block.items.map((item, itemIdx) => (
+            <View key={itemIdx} style={styles.listRow}>
+              <Text
+                numberOfLines={1}
+                style={[type.body, styles.listMarker, block.ordered ? { width: orderedMarkerWidth(block.start + block.items.length - 1) } : null, { color: tokens.ink3 }]}
+              >
+                {block.ordered ? `${block.start + itemIdx}.` : "•"}
+              </Text>
+              <Text selectable style={[type.body, styles.listText, { color: tokens.ink }, style]}>
+                {renderInline(block.inlineItems[itemIdx], `${key}-${itemIdx}`, tokens)}
+              </Text>
+            </View>
+          ))}
+        </View>
+      );
+    case "table":
+      return (
+        <View key={key} style={[styles.block, styles.table, { borderColor: tokens.border }]}>
+          {[block.header, ...block.rows].map((row, rowIdx) => (
+            <View
+              key={rowIdx}
+              style={[
+                styles.tableRow,
+                rowIdx > 0 ? { borderTopColor: tokens.border, borderTopWidth: StyleSheet.hairlineWidth } : null,
+                rowIdx === 0 ? { backgroundColor: tokens.bg2 } : null,
+              ]}
+            >
+              {row.map((cell, cellIdx) => (
+                <Text
+                  key={cellIdx}
+                  selectable
+                  style={[
+                    type.body,
+                    styles.tableCell,
+                    rowIdx === 0 ? styles.bold : null,
+                    cellIdx > 0 ? { borderLeftColor: tokens.border, borderLeftWidth: StyleSheet.hairlineWidth } : null,
+                    { color: tokens.ink },
+                    style,
+                  ]}
+                >
+                  {renderInline(cell, `${key}-${rowIdx}-${cellIdx}`, tokens)}
+                </Text>
+              ))}
+            </View>
+          ))}
+        </View>
+      );
+    case "paragraph":
+    default:
+      return (
+        <Text key={key} selectable style={[type.body, styles.paragraph, { color: tokens.ink }, style]}>
+          {renderInline(block.inline, key, tokens)}
+        </Text>
+      );
+  }
+}
+
+const MarkdownBlock = React.memo(
+  MarkdownBlockImpl,
+  (prev, next) => prev.signature === next.signature && prev.style === next.style && prev.blockKey === next.blockKey,
+);
+
+export function Markdown({ content, style }: MarkdownProps) {
+  const blocks = React.useMemo(() => parseBlocks(content), [content]);
   return (
     <View>
-      {blocks.map((block, idx) => {
-        const key = `b${idx}`;
-        switch (block.kind) {
-          case "heading":
-            return (
-              <Text
-                key={key}
-                accessibilityRole="header"
-                selectable
-                style={[type.heading, styles.heading, { color: tokens.ink }]}
-              >
-                {renderInline(block.inline, key, tokens)}
-              </Text>
-            );
-          case "code":
-            return (
-              <View key={key} style={styles.block}>
-                <CodeBlock code={block.code} language={block.language} />
-              </View>
-            );
-          case "list":
-            return (
-              <View key={key} style={styles.block}>
-                {block.items.map((item, itemIdx) => (
-                  <View key={itemIdx} style={styles.listRow}>
-                    <Text
-                      numberOfLines={1}
-                      style={[type.body, styles.listMarker, block.ordered ? { width: orderedMarkerWidth(block.start + block.items.length - 1) } : null, { color: tokens.ink3 }]}
-                    >
-                      {block.ordered ? `${block.start + itemIdx}.` : "•"}
-                    </Text>
-                    <Text selectable style={[type.body, styles.listText, { color: tokens.ink }, style]}>
-                      {renderInline(block.inlineItems[itemIdx], `${key}-${itemIdx}`, tokens)}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            );
-          case "table":
-            return (
-              <View key={key} style={[styles.block, styles.table, { borderColor: tokens.border }]}>
-                {[block.header, ...block.rows].map((row, rowIdx) => (
-                  <View
-                    key={rowIdx}
-                    style={[
-                      styles.tableRow,
-                      rowIdx > 0 ? { borderTopColor: tokens.border, borderTopWidth: StyleSheet.hairlineWidth } : null,
-                      rowIdx === 0 ? { backgroundColor: tokens.bg2 } : null,
-                    ]}
-                  >
-                    {row.map((cell, cellIdx) => (
-                      <Text
-                        key={cellIdx}
-                        selectable
-                        style={[
-                          type.body,
-                          styles.tableCell,
-                          rowIdx === 0 ? styles.bold : null,
-                          cellIdx > 0 ? { borderLeftColor: tokens.border, borderLeftWidth: StyleSheet.hairlineWidth } : null,
-                          { color: tokens.ink },
-                          style,
-                        ]}
-                      >
-                        {renderInline(cell, `${key}-${rowIdx}-${cellIdx}`, tokens)}
-                      </Text>
-                    ))}
-                  </View>
-                ))}
-              </View>
-            );
-          case "paragraph":
-          default:
-            return (
-              <Text key={key} selectable style={[type.body, styles.paragraph, { color: tokens.ink }, style]}>
-                {renderInline(block.inline, key, tokens)}
-              </Text>
-            );
-        }
-      })}
+      {blocks.map((block, idx) => (
+        <MarkdownBlock key={`b${idx}`} blockKey={`b${idx}`} block={block} signature={blockSignature(block)} style={style} />
+      ))}
     </View>
   );
 }

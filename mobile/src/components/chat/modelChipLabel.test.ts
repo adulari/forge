@@ -15,4 +15,8 @@ describe("modelChipLabel", () => {
     expect(modelChipLabel("kimi::k3-256k", undefined)).toBe("kimi::k3-256k");
     expect(modelChipLabel("—", undefined)).toBe("auto");
   });
+
+  it("drops the provider prefix of a pin on a phone", () => {
+    expect(modelChipLabel("inferhub::cb/deepseek-v4.1-flash", true, true)).toBe("deepseek-v4.1-flash");
+  });
 });

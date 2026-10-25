@@ -17,6 +17,13 @@ use super::{bridge_error, safe_path_segment};
 /// dropped, so a slow relay still pushes back on it).
 const MAX_QUEUED_FRAMES: usize = 256;
 
+/// Least time between two frames sent on a session snapshot stream. The daemon publishes up to
+/// ~33 full snapshots a second while a reply streams; a phone verifies and decrypts every relayed
+/// envelope in JavaScript, one at a time, and fell behind, so text arrived in bursts seconds
+/// late. At this pace the queue below drops the snapshots a newer one already supersedes, and
+/// the phone still gets 20 updates a second. Terminal streams are never paced.
+const SESSION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub(super) struct StreamHandle {
     pub(super) owner_device_id: [u8; 16],
     pub(super) commands: mpsc::Sender<LocalSocketCommand>,
@@ -94,6 +101,7 @@ async fn open_stream_inner(
         .map_err(|_| anyhow::anyhow!("set local WebSocket scheme"))?;
     let base_path = url.path().trim_end_matches('/').to_owned();
     url.set_query(None);
+    let paced = request.route == forge_anywhere_protocol::bridge::RouteId::WebSocket;
     match request.route {
         forge_anywhere_protocol::bridge::RouteId::WebSocket => {
             if request.parameters.len() != 2 {
@@ -153,14 +161,18 @@ async fn open_stream_inner(
         // Frames wait here, not in the shared channel, while the relay is slower than the daemon,
         // so a newer full snapshot can replace the ones the phone has not been sent yet.
         let mut queue = FrameQueue::default();
+        let mut next_send = tokio::time::Instant::now();
         loop {
+            let ready = !paced || tokio::time::Instant::now() >= next_send;
             tokio::select! {
-                permit = events.reserve(), if !queue.is_empty() => {
+                permit = events.reserve(), if !queue.is_empty() && ready => {
                     let Ok(permit) = permit else { break };
                     if let Some((bytes, text)) = queue.pop() {
                         permit.send(LocalSocketEvent::Data { stream_id, owner_device_id, bytes, text });
+                        next_send = tokio::time::Instant::now() + SESSION_FRAME_INTERVAL;
                     }
                 }
+                () = tokio::time::sleep_until(next_send), if !queue.is_empty() && !ready => {}
                 command = commands_rx.recv() => match command {
                     Some(LocalSocketCommand::Data { bytes, text }) => {
                         let message = if text {

@@ -435,6 +435,8 @@ pub struct App {
     /// few, so this is what lets a remote client tell which of them it has already seen in the
     /// persisted history it paged in.
     pub transcript_total: u64,
+    /// Wall-clock start of the running turn (Unix ms), for remote clients' elapsed timer.
+    pub turn_started_unix_ms: u64,
     /// When true, model reasoning/thinking blocks are shown in scrollback. Default false (hidden).
     /// Toggled by `/thinking`.
     pub show_thinking: bool,
@@ -1188,6 +1190,11 @@ impl App {
     /// The chord bound to a configurable `action`, spelled for hints (`Ctrl+K`, `F2`).
     pub(crate) fn action_chord(&self, action: &str) -> String {
         crate::keybinds::action_label(&self.keybinds, action)
+    }
+
+    /// The running turn's phase in words, for remote clients ("model reasoning").
+    pub(crate) fn turn_phase_label(&self) -> &'static str {
+        self.turn_activity.phase.label()
     }
 
     fn set_turn_activity(&mut self, phase: TurnPhase, detail: impl Into<String>) {
@@ -1997,6 +2004,9 @@ impl App {
         // Reset the per-turn timer + token counters and snapshot the session-token baseline so this
         // turn's in/out are measured as a delta from here.
         self.turn_elapsed_secs = 0;
+        self.turn_started_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
         self.turn_in = 0;
         self.turn_cached_in = None;
         self.turn_out = 0;

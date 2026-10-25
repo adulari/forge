@@ -64,10 +64,11 @@ describe("ToolGroupRow", () => {
     tool("mcp__forge__shell", '{"command":"ls"}', "a.rs"),
   ];
 
-  it("collapses to the summary with the failure kept on the right and listed beneath", () => {
+  it("collapses to the summary with the failure listed beneath, marked once", () => {
     const html = render(group(calls), false);
     expect(html).toContain("Read 1 file, ran 1 shell command");
-    expect(html).toContain("1 failed");
+    // The failed call's own row says so; the summary does not repeat it.
+    expect(html).not.toContain("1 failed");
     expect(html).toContain("closed");
     expect(html.match(/<card>/g)).toHaveLength(1);
     expect(html).toContain("exit 3");

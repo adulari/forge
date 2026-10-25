@@ -585,6 +585,18 @@ pub struct Snapshot {
     pub context_limit: Option<u32>,
     /// The trailing edge of the in-flight streaming reply (plain text; re-sent each frame).
     pub streaming: String,
+    /// UTF-16 code units of the reply that precede `streaming` (additive). `streaming` is only
+    /// the reply's last 2 KiB, so a client keeps what it already has up to this offset and
+    /// appends the tail; 0 while the whole reply fits, and from an older host.
+    #[serde(default)]
+    pub streaming_offset: u64,
+    /// What the running turn is doing, in words ("model reasoning", "running tool"); "" when
+    /// idle (additive). Changes only at phase boundaries, so it costs no extra frames.
+    #[serde(default)]
+    pub activity: String,
+    /// When the running turn started, Unix milliseconds; 0 when idle (additive).
+    #[serde(default)]
+    pub turn_started_at: u64,
     /// Recent finalized scrollback lines (plain text, newest last; bounded).
     pub transcript: Vec<String>,
     /// The same lines, each tagged with its provenance (v9) — see [`SnapTranscriptRow`]. Rides
@@ -686,6 +698,9 @@ impl Default for Snapshot {
             context_tokens: 0,
             context_limit: None,
             streaming: String::new(),
+            streaming_offset: 0,
+            activity: String::new(),
+            turn_started_at: 0,
             transcript: Vec::new(),
             transcript_rows: Vec::new(),
             transcript_total: 0,

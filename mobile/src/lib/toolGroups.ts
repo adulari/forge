@@ -5,6 +5,7 @@
 //
 // Pure: `summarize`/`summaryText` turn calls into the sentence, `foldToolGroups` turns a
 // newest-first transcript into entries + groups. Rendering lives in components/chat/ToolGroupRow.
+import { scriptCalls, scriptHeadline } from "./scriptCalls";
 import { parseArgs, resultFailed, type ToolInvocation, type TranscriptEntry } from "./toolRows";
 
 export type CallStatus = "ok" | "failed" | "running";
@@ -23,6 +24,8 @@ export interface GroupCall {
   args: string;
   status: CallStatus;
   diff?: CallDiff | null;
+  /** The call's stored result, which for `run_code` carries the count of calls it made. */
+  result?: string | null;
 }
 
 type Category =
@@ -38,6 +41,10 @@ export interface Tally {
   adds: number;
   dels: number;
   target: string;
+  /** Script tallies: tool calls made by scripts whose result footer was stored. */
+  scriptCalls: number;
+  /** Script tallies: scripts with no stored footer, counted as scripts. */
+  scriptsUncounted: number;
 }
 
 export interface Summary {
@@ -197,7 +204,7 @@ export function headline(name: string, args: string): string {
       first = field(args, ["query"]);
       break;
     case "run_code":
-      return "";
+      return scriptHeadline(args, null);
   }
   if (first === null) {
     const parsed = parseArgs(args);
@@ -235,11 +242,47 @@ function touch(t: Tally, s: string | null) {
   else if (!t.subjects.includes(s)) t.subjects.push(s);
 }
 
+function newTally(category: Category, target: string): Tally {
+  return { category, calls: 0, subjects: [], unnamed: 0, adds: 0, dels: 0, target, scriptCalls: 0, scriptsUncounted: 0 };
+}
+
+/** A finished, successful `run_code` call whose source calls exactly one tool, as the calls it
+ * made (count from the stored result footer). Null for anything else, which tallies as a script. */
+function expandScript(call: GroupCall): GroupCall[] | null {
+  if (bareToolName(call.name) !== "run_code" || call.status !== "ok") return null;
+  const s = scriptCalls(call.args, call.result ?? null);
+  if (s.tools.length !== 1 || s.total == null || s.total < 1 || s.failed > 0) return null;
+  const tool = s.tools[0];
+  if (categoryOf({ name: tool, args: "", status: "ok" }).kind === "script") return null;
+  return Array.from({ length: s.total }, (_, i) => ({
+    name: tool,
+    args: tool === "shell" && s.commands[i] ? JSON.stringify({ command: s.commands[i] }) : "",
+    status: "ok" as const,
+  }));
+}
+
 /** Running calls are counted, not tallied: the sentence is in the past tense. Failed calls go to
  * their own tallies and never count as done. */
 export function summarize(calls: readonly GroupCall[]): Summary {
   const out: Summary = { tallies: [], failedTallies: [], finished: 0, failed: 0, running: 0 };
-  for (const call of calls) {
+  for (const original of calls) {
+    const expanded = expandScript(original);
+    if (expanded) {
+      // A script that only called one tool reads as those calls: "Ran 8 shell commands".
+      out.finished += 1;
+      const category = categoryOf(expanded[0]);
+      let tally = out.tallies.find((t) => sameCategory(t.category, category));
+      if (!tally) {
+        tally = newTally(category, expanded.length === 1 ? headline(expanded[0].name, expanded[0].args) : "");
+        out.tallies.push(tally);
+      }
+      for (const call of expanded) {
+        tally.calls += 1;
+        if (bySubject(category)) touch(tally, subject(category, call.args));
+      }
+      continue;
+    }
+    const call = original;
     if (call.status === "running") {
       out.running += 1;
       continue;
@@ -251,7 +294,7 @@ export function summarize(calls: readonly GroupCall[]): Summary {
     const category = categoryOf(call);
     let tally = tallies.find((t) => sameCategory(t.category, category));
     if (!tally) {
-      tally = { category, calls: 0, subjects: [], unnamed: 0, adds: 0, dels: 0, target: headline(call.name, call.args) };
+      tally = newTally(category, headline(call.name, call.args));
       tallies.push(tally);
     }
     if (category.kind === "agents") {
@@ -262,6 +305,11 @@ export function summarize(calls: readonly GroupCall[]): Summary {
       touch(tally, subject(category, call.args) ?? fromDiff);
     } else {
       tally.calls += 1;
+      if (category.kind === "script") {
+        const total = scriptCalls(call.args, call.result ?? null).total;
+        if (total != null && total > 0) tally.scriptCalls += total;
+        else tally.scriptsUncounted += 1;
+      }
     }
     if (!failed && call.diff) {
       tally.adds += call.diff.adds;
@@ -304,6 +352,9 @@ function counted(t: Tally, tense: Tense): string {
     case "shell":
       return `${v("ran", "run")} ${plural(n, "shell command", "shell commands")}`;
     case "script":
+      if (t.scriptCalls > 0 && t.scriptsUncounted === 0) {
+        return `${v("ran", "run")} ${plural(t.scriptCalls, "tool call", "tool calls")} in ${plural(n, "script", "scripts")}`;
+      }
       return `${v("ran", "run")} ${plural(n, "script", "scripts")}`;
     case "created":
       return `${v("created", "create")} ${changedFiles(t)}${stat(t)}`;
@@ -404,7 +455,7 @@ export class GroupMemo {
     if (prev && sameCalls(prev.calls, calls)) return prev;
     this.builds += 1;
     const summary = summarize(
-      calls.map((c) => ({ name: c.invocation.tool ?? "tool", args: c.invocation.args, status: c.status })),
+      calls.map((c) => ({ name: c.invocation.tool ?? "tool", args: c.invocation.args, status: c.status, result: c.invocation.result })),
     );
     const group: ToolGroupEntry = { kind: "toolGroup", key, calls, summary, text: summaryText(summary) };
     this.groups.set(key, group);

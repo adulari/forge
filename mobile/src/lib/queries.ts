@@ -10,7 +10,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { markFirstDataResolve } from "./performance";
-import { mergeNewestHistoryPage } from "./historyMerge";
+import { fillHistoryGap, mergeNewestHistoryPage } from "./historyMerge";
 import { catalogHasModel } from "./modelCatalog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
@@ -422,17 +422,22 @@ export function useLiveHistoryRefresh(
     const wait = Math.max(0, LIVE_HISTORY_MIN_INTERVAL_MS - (Date.now() - lastRun.current));
     const timer = setTimeout(() => {
       lastRun.current = Date.now();
-      getHistory(baseUrl, {
-        session: sessionId,
-        limit: historyPageSize(includeTools),
-        include_tools: includeTools || undefined,
-      })
+      const key = keys(baseUrl).history(sessionId, includeTools);
+      const page = (before?: number) =>
+        getHistory(baseUrl, {
+          session: sessionId,
+          limit: historyPageSize(includeTools),
+          before,
+          include_tools: includeTools || undefined,
+        });
+      page()
+        .then((first) => {
+          const loaded = queryClient.getQueryData<InfiniteData<HistoryRow[], unknown>>(key);
+          return fillHistoryGap(first, loaded?.pages[0]?.[0]?.seq, page);
+        })
         .then((fresh) => {
           if (cancelled) return;
-          queryClient.setQueryData<InfiniteData<HistoryRow[], unknown>>(
-            keys(baseUrl).history(sessionId, includeTools),
-            (data) => mergeNewestHistoryPage(data, fresh),
-          );
+          queryClient.setQueryData<InfiniteData<HistoryRow[], unknown>>(key, (data) => mergeNewestHistoryPage(data, fresh));
         })
         // A missed refresh is recovered by the next change or by the turn-end refetch.
         .catch(() => {});

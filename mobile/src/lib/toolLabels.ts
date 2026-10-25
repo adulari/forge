@@ -1,0 +1,85 @@
+// The words one tool call's row shows: a short verb ("Run", "Read", "Script") and what the call
+// was about (the command, the path), after the TUI's tool cards (crates/forge-tui/src/app/
+// tool_cards.rs `verb`/`headline`). The raw tool name and argument blob stay in the expanded
+// details; a row that says only "run_code" tells the reader nothing.
+import { scriptCalls, scriptHeadline, scriptSource } from "./scriptCalls";
+import { bareToolName, headline } from "./toolGroups";
+import { parseArgs, summarizeToolArgs } from "./toolRows";
+
+const VERBS: Record<string, string> = {
+  read_file: "Read",
+  write_file: "Write",
+  edit_file: "Edit",
+  multi_edit: "Edit",
+  append_file: "Append",
+  delete_file: "Delete",
+  apply_patch: "Patch",
+  notebook_edit: "Edit",
+  shell: "Run",
+  shell_job: "Run",
+  grep: "Search",
+  search: "Search",
+  glob: "Find",
+  list_dir: "List",
+  web_fetch: "Fetch",
+  web_search: "Web",
+  spawn_agents: "Agents",
+  dispatch_sessions: "Agents",
+  update_tasks: "Tasks",
+  run_code: "Script",
+};
+
+export function callVerb(name: string | null): string {
+  const tool = bareToolName(name ?? "tool");
+  if (VERBS[tool]) return VERBS[tool];
+  if (tool.startsWith("mcp__")) {
+    const rest = tool.slice("mcp__".length);
+    const at = rest.indexOf("__");
+    return at >= 0 ? rest.slice(at + 2) : rest;
+  }
+  return tool;
+}
+
+export function callHeadline(name: string | null, args: string, result: string | null): string {
+  const tool = bareToolName(name ?? "tool");
+  if (tool === "run_code") return scriptHeadline(args, result);
+  return headline(tool, args) || summarizeToolArgs(args, 80);
+}
+
+const LEAD_KEYS = ["command", "commands", "path", "file_path", "pattern", "query", "url", "code", "script"];
+
+export interface ArgSection {
+  label: string;
+  text: string;
+}
+
+/** The expanded row's argument sections, decoded for reading: a script's commands and its source
+ * (never the JSON-escaped `{"code": "const r = await tools.shell(...)"}`), and for other tools one
+ * `key: value` line per argument with the identifying one first. The raw blob stays one tap away. */
+export function readableArgs(name: string | null, args: string): ArgSection[] {
+  const tool = bareToolName(name ?? "tool");
+  if (tool === "run_code") {
+    const s = scriptCalls(args, null);
+    const source = scriptSource(args)
+      .split("\n")
+      .filter((line) => line.trim() && !line.trim().startsWith("```"))
+      .join("\n");
+    const sections: ArgSection[] = [];
+    if (s.commands.length > 0) sections.push({ label: "commands", text: s.commands.map((c) => `$ ${c}`).join("\n") });
+    if (source) sections.push({ label: "script", text: source });
+    return sections;
+  }
+  const parsed = parseArgs(args);
+  if (!parsed) return args.trim() ? [{ label: "arguments", text: args.trim() }] : [];
+  const keys = Object.keys(parsed).sort((a, b) => {
+    const ia = LEAD_KEYS.indexOf(a);
+    const ib = LEAD_KEYS.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+  const lines = keys.map((key) => {
+    const value = parsed[key];
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    return text.includes("\n") ? `${key}:\n${text}` : `${key}: ${text}`;
+  });
+  return lines.length ? [{ label: "arguments", text: lines.join("\n") }] : [];
+}

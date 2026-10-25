@@ -14,10 +14,11 @@ import { useSessionStable } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { monoFamily, type as typeScale } from "../../theme/typography";
-import { hexToRgba, radii, space } from "../../theme/tokens";
+import { radii, space } from "../../theme/tokens";
 import { AttachmentRow } from "./Attachments";
 import type { SentAttachment } from "./attach";
 import { Markdown } from "./Markdown";
+import { useChatProseStyle } from "./proseStyle";
 import { ReasoningDisclosure } from "./ReasoningDisclosure";
 import { SystemOutput } from "./SystemOutput";
 import { uploadDisplayName } from "./uploadName";
@@ -139,6 +140,7 @@ export function SpeakerTag({ speaker, model }: { speaker: "you" | "forge" | "nud
 
 function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const tokens = useTokens();
+  const prose = useChatProseStyle();
   // Entrance only for rows that just arrived — virtualization remounts rows while
   // scrolling, and replaying the fade there made settled messages flicker transparent.
   // Lazy useState: evaluated once at mount (the sanctioned home for an impure read).
@@ -226,16 +228,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         tabIndex={IS_WEB ? -1 : undefined}
         style={[
           styles.bubble,
-          isUser
-            ? [
-                styles.userBubble,
-                {
-                  backgroundColor: tokens.bg2,
-                  borderColor: tokens.border,
-                  borderLeftColor: hexToRgba(tokens.accent, 0.45),
-                },
-              ]
-            : { backgroundColor: "transparent" },
+          isUser ? [styles.userBubble, { backgroundColor: tokens.bg2 }] : styles.plain,
           IS_WEB && (webTextCursor as object),
         ]}
       >
@@ -243,16 +236,18 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         {historyFileAttachments.length > 0 ? (
           <AttachmentRow attachments={historyFileAttachments} />
         ) : null}
-        {isSystem ? null : <SpeakerTag speaker={isNudge ? "nudge" : isUser ? "you" : "forge"} model={row.model} />}
+        {/* The user's turn is told apart by its filled block; only Forge's turns (and a nudge,
+            which must never read as the person's words) carry a speaker line. */}
+        {isSystem || isUser ? null : <SpeakerTag speaker={isNudge ? "nudge" : "forge"} model={row.model} />}
         {isSystem ? (
           <SystemOutput content={jobNotice ? formatAnyHarnessNotice(row.kind, row.content) : row.content} />
         ) : parsed ? (
           <>
             {parsed.reasoning ? <ReasoningDisclosure reasoning={parsed.reasoning} /> : null}
-            <Markdown content={parsed.answer} />
+            <Markdown content={parsed.answer} style={prose} />
           </>
         ) : (
-          <Markdown content={userText} />
+          <Markdown content={userText} style={prose} />
         )}
       </Pressable>
       </View>
@@ -268,13 +263,13 @@ const webTextCursor = { cursor: "text" };
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
-  // Machined: no card chrome / left rail on assistant rows — plain full-width prose, same
-  // gutter as everything else in the transcript. Only the user turn gets a quiet bordered box.
-  bubble: { borderRadius: radii.radius8, paddingHorizontal: space.space12, paddingVertical: space.space8 },
-  // Full-width bordered quiet box (bg2, hairline, radius4) — not a right-aligned chat bubble.
-  // The accent left edge is the second half of the speaker cue: the eyebrow names the speaker,
-  // the edge makes the block scannable without reading it.
-  userBubble: { width: "100%", borderWidth: StyleSheet.hairlineWidth, borderLeftWidth: 2 },
+  // Machined: no card chrome on assistant rows — plain full-width prose, same gutter as
+  // everything else in the transcript.
+  bubble: { borderRadius: radii.radius8, paddingVertical: space.space4 },
+  plain: { backgroundColor: "transparent" },
+  // The user's turn: a quiet filled block, no border, rule or "YOU" eyebrow. On a phone the
+  // bordered card with an accent rail and a label read as heavier than the answers it asked for.
+  userBubble: { width: "100%", paddingHorizontal: space.space12, paddingVertical: space.space8, borderRadius: radii.radius8 },
   speaker: { flexDirection: "row", alignItems: "center", gap: space.space4, paddingBottom: space.space4 },
   speakerDot: { width: 4, height: 4, borderRadius: radii.radiusPill },
   speakerModel: { flexShrink: 1, fontFamily: monoFamily.regular },

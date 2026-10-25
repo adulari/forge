@@ -15,6 +15,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { space, type ColorTokens, type StatusDotState } from "../../theme/tokens";
 import { formatCost, formatCwd, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+import { shortModel } from "../chat/MessageRow";
 import { ContextGauge } from "../ds/ContextGauge";
 import { TelemetrySheet } from "./TelemetrySheet";
 
@@ -54,9 +55,12 @@ function StatusStripImpl(props: StatusStripProps) {
   const strike = useStrike();
   const { isCompact } = useBreakpoint();
   const [visible, setVisible] = useState(false);
-  const leftPrefix = props.transport
+  // A phone has one line for this: the host and transport words and the provider prefix of the
+  // model ("inferhub::cb/…") pushed the model off the edge. The telemetry sheet has them all.
+  const leftPrefix = props.transport && !isCompact
     ? `${props.transport.hostName} · ${props.transport.transport} · ${formatCwd(props.cwd)}`
     : formatCwd(props.cwd);
+  const model = isCompact ? shortModel(props.model) || props.model : props.model;
   const ctxPct =
     props.contextLimit != null && props.contextLimit > 0
       ? Math.min(100, Math.round((props.contextTokens / props.contextLimit) * 100))
@@ -79,7 +83,7 @@ function StatusStripImpl(props: StatusStripProps) {
             {props.worktree ? (
               <Text style={{ color: tokens.accent }}>{` · ⑂ ${props.worktree}`}</Text>
             ) : null}
-            {` · ${props.model}`}
+            {` · ${model}`}
           </Text>
           <View style={styles.right}>
             {props.reconnecting ? <Text style={[typeScale.monoMeta, { color: tokens.warn }]} numberOfLines={1}>{"reconnecting… · "}</Text> : null}
