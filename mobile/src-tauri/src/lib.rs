@@ -24,6 +24,8 @@ mod preview;
 mod security_config;
 mod serve_discovery;
 mod tray;
+#[cfg(target_os = "linux")]
+mod vblank;
 
 #[derive(Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,6 +181,7 @@ pub fn run(process_start: Instant) {
     builder
         .register_uri_scheme_protocol(about::URI_SCHEME, about::serve)
         .invoke_handler(tauri::generate_handler![
+            auto_update::desktop_update_installable,
             serve_discovery::detect_forge_serve,
             serve_discovery::forge_binary_available,
             serve_discovery::start_forge_serve,

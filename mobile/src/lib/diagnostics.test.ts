@@ -89,6 +89,8 @@ describe("buildSupportSummary", () => {
         availableVersion: "1.6.0",
         body: "release secret",
         message: "connection token",
+        selfInstall: true,
+        releaseUrl: null,
       },
       "runtime-fingerprint",
     );

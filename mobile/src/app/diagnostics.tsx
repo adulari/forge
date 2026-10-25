@@ -23,8 +23,10 @@ import { useDiagnostics } from "../lib/queries";
 import { PROTOCOL_VERSION } from "../lib/remoteProtocol";
 import {
   checkDesktopUpdate,
+  desktopUpdateAction,
   getDesktopUpdateState,
   installDesktopUpdate,
+  openDesktopReleasePage,
   useDesktopUpdateState,
 } from "../lib/updater";
 import { useTokens } from "../theme/ThemeProvider";
@@ -129,6 +131,14 @@ export default function DiagnosticsScreen() {
       toast.show("couldn't install the desktop update.", { tone: "danger" });
     });
   }, [toast]);
+
+  const updateAction = desktopUpdateAction(update);
+
+  const openReleasePage = useCallback(() => {
+    void openDesktopReleasePage(update.releaseUrl).catch(() => {
+      toast.show("couldn't open the release page.", { tone: "danger" });
+    });
+  }, [toast, update.releaseUrl]);
 
   const checkUpdate = useCallback(() => {
     void checkDesktopUpdate()
@@ -346,15 +356,28 @@ export default function DiagnosticsScreen() {
                       {update.body}
                     </Text>
                   ) : null}
+                  {updateAction === "release-page" ? (
+                    <Text style={[type.sub, styles.releaseBody, { color: tokens.ink3 }]}>
+                      This install does not update itself. Download Forge {update.availableVersion} from the
+                      release page with the same package type you installed.
+                    </Text>
+                  ) : null}
                   <Button
                     label={
-                      update.phase === "available"
-                        ? "Install and relaunch"
-                        : update.phase === "installing"
-                          ? "Installing…"
-                          : "Check for update"
+                      {
+                        install: "Install and relaunch",
+                        "release-page": "Open release page",
+                        installing: "Installing…",
+                        check: "Check for update",
+                      }[updateAction]
                     }
-                    onPress={update.phase === "available" ? install : checkUpdate}
+                    onPress={
+                      updateAction === "install"
+                        ? install
+                        : updateAction === "release-page"
+                          ? openReleasePage
+                          : checkUpdate
+                    }
                     loading={update.phase === "checking" || update.phase === "installing"}
                     disabled={update.phase === "checking" || update.phase === "installing"}
                     variant={update.phase === "available" ? "primary" : "secondary"}
