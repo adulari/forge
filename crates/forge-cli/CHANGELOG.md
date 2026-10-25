@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.23.6] - 2026-10-25
+
 ### Changed
 
 - **The mobile session screen is calmer and fits a phone.** Untitled sessions are named after their first prompt instead of `session db89c45e`; the meta line drops the host/transport words and the model's provider prefix on phones; the tab row fades at its cut edge and keeps the active tab in view. Chat prose is larger on phones (15/23); your own messages are a quiet filled block instead of a bordered card with an accent rail and a `YOU` label. Tool calls are one quiet line naming what they did (`Run cargo test`, `Read src/app.rs`, `Script make`), with `failed` marked once; a script's details show its commands and decoded source instead of escaped JSON, with the raw arguments one tap away. Scripts are counted by the calls they made (`Ran 9 shell commands`, `Ran 10 tool calls in 2 scripts`), as in the TUI. The composer is about half as tall: attach buttons share the model/effort row and the command chips appear only while you type. The response stepper no longer floats over the chat on phones.
