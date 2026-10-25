@@ -6,6 +6,11 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Forge Desktop on Linux animates at the monitor's refresh rate on NVIDIA.** WebKitGTK paces `requestAnimationFrame` with `drmWaitVBlank`; NVIDIA's proprietary driver answers it with `EOPNOTSUPP`, so WebKit fell back to a fixed 60 fps timer and every frame took 16.0 ms, even on a 144 Hz monitor. The desktop executable now defines and exports its own `drmWaitVBlank`, which libwebkit's calls resolve to ahead of libdrm's. It passes calls the driver supports straight through (Mesa, AMD, Intel are unchanged) and only on `EOPNOTSUPP` waits for the next vblank itself, timed from the CRTC's mode (`mobile/src-tauri/src/vblank.rs`). On an RTX 4090 with a 144 Hz monitor under Hyprland this took animation from 60 to 143 fps, one frame per vblank (7.0 ms). `FORGE_VBLANK_DEBUG=1` prints the first calls to stderr.
+- **The desktop updater no longer writes an AppImage over a non-AppImage install.** The updater plugin replaces `$APPIMAGE`, or the running executable when that is unset, so an AppImage extracted to a directory and started through its `AppRun` had its `usr/bin/forge-desktop` overwritten by the v2.23.3 AppImage. On Linux an update is now downloaded and installed only when Forge runs from a mounted AppImage file (`APPIMAGE` is an existing file and the executable lives under the mount point in `APPDIR`), both for the automatic update at launch and for Install and relaunch. .deb, rpm, AUR and unpacked installs say a new version is available and link to its release page instead (`mobile/src-tauri/src/auto_update.rs`, `mobile/src/lib/updater.ts`).
+
 ## [2.23.5] - 2026-10-25
 
 ### Fixed

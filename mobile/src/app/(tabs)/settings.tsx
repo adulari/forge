@@ -777,13 +777,15 @@ export function SettingsScreen() {
           <ListRow
             title="Diagnostics & updates"
             subtitle={
-              desktopUpdate.phase === "available"
-                ? `Desktop ${desktopUpdate.availableVersion} is ready to install`
-                : desktopUpdate.phase === "error"
-                  ? "Update check needs attention"
-                  : isTauri
-                    ? "Compatibility, host health, resources, and desktop updates"
-                    : "Compatibility, host health, resources, and support details"
+              desktopUpdate.phase === "available" && !desktopUpdate.selfInstall
+                ? `Desktop ${desktopUpdate.availableVersion} is available on the release page`
+                : desktopUpdate.phase === "available"
+                  ? `Desktop ${desktopUpdate.availableVersion} is ready to install`
+                  : desktopUpdate.phase === "error"
+                    ? "Update check needs attention"
+                    : isTauri
+                      ? "Compatibility, host health, resources, and desktop updates"
+                      : "Compatibility, host health, resources, and support details"
             }
             onPress={() => router.push("/diagnostics")}
           />

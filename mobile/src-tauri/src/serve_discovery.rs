@@ -549,7 +549,10 @@ mod tests {
         );
         let signed_out = r#"{"account_id":"0123456789abcdef0123456789abcdef","refresh_token":""}"#;
         assert_eq!(cli_anywhere_account_from(signed_out), None);
-        assert_eq!(cli_anywhere_account_from(r#"{"account_id":"x","refresh_token":"r"}"#), None);
+        assert_eq!(
+            cli_anywhere_account_from(r#"{"account_id":"x","refresh_token":"r"}"#),
+            None
+        );
         assert_eq!(cli_anywhere_account_from("not json"), None);
     }
 
