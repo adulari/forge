@@ -726,11 +726,9 @@ pub struct RemoteSnapshot {
     pub context_tokens: u64,
     pub context_limit: Option<u32>,
     pub streaming: String,
-    /// UTF-16 code units of the reply before `streaming` (0 while the whole reply fits).
+    /// UTF-16 units before `streaming`; the turn's phase label ("" idle); its start (Unix ms).
     pub streaming_offset: u64,
-    /// What the turn is doing right now ("model reasoning", "running tool"), "" when idle.
     pub activity: String,
-    /// When the running turn started, Unix milliseconds; 0 when idle.
     pub turn_started_at: u64,
     pub transcript: Vec<String>,
     /// The same lines as `transcript`, each carrying the provenance its emitter recorded (v9) —
