@@ -33,6 +33,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::ListSessions
         | CommandAction::Board
         | CommandAction::Config
+        | CommandAction::Bug(_)
         | CommandAction::ClearScreen
         | CommandAction::Btw(_)
         | CommandAction::Remote { .. }

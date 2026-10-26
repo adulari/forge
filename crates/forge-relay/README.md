@@ -40,6 +40,35 @@ if manual deploys become frequent enough to be annoying.
 | `FORGE_RELAY_RATE_WINDOW_SECS` | no | Window length in seconds. Default `60` |
 | `FORGE_RELAY_DAILY_SEND_CAP` | no | Global circuit breaker — total accepted sends/24h before the relay starts rejecting. Default `50000` |
 
+## Issue reports
+
+`POST /v1/reports` (nginx path `/relay/v1/reports`) receives scrubbed, content-free problem reports
+from Forge clients and turns them into GitHub issues. Wire format: closed JSON schema v1, at most
+32 KiB (see `docs/features/issue-reporting.md`). The relay re-scrubs every text field, rate-limits
+per install id (hashed), per IP and globally, keeps counts per version/OS in SQLite, and keeps ONE
+issue per fingerprint (label `auto-report`; manual reports get their own issue, label
+`user-report`). Counts are stored before the 202, GitHub is updated by a background worker with
+backoff, so a GitHub outage loses nothing. A closed issue is reopened only when the problem recurs
+on a newer version than the one it was closed in.
+
+| Env var | Required | Notes |
+|---|---|---|
+| `FORGE_RELAY_GITHUB_TOKEN` | yes, for reports | Bot token with issue write access. Absent => reports answer 503 |
+| `FORGE_RELAY_GITHUB_REPO` | no | Default `Adulari/forge` |
+| `FORGE_RELAY_GITHUB_API` | no | Default `https://api.github.com` (override for tests/GHES) |
+| `FORGE_RELAY_REPORTS_DB` | no | SQLite path, default `./reports.sqlite` (systemd: `/var/lib/forge-relay/reports.sqlite`) |
+| `FORGE_RELAY_REPORTS_DISABLED` | no | `1` = kill switch, 503 + Retry-After |
+| `FORGE_RELAY_REPORTS_PER_INSTALL_PER_HOUR` | no | Default `30` |
+| `FORGE_RELAY_REPORTS_PER_IP_PER_HOUR` | no | Default `120` |
+| `FORGE_RELAY_REPORTS_GLOBAL_PER_HOUR` | no | Default `600` |
+| `FORGE_RELAY_REPORTS_MIN_UPDATE_SECS` | no | Default `60` |
+
+The APNs variables are optional when you only want reports: with neither `FORGE_APNS_TEAM_ID` nor
+`FORGE_APNS_KEY_ID` set the relay runs reports-only and the push routes answer 503 (setting just
+one of them is still a startup error). Create the `auto-report` and `user-report` labels in the
+repo once; GitHub also creates missing labels on first use when the token may push. Install
+`deploy/nginx-reports-zone.conf` (http context) before enabling the `/relay/v1/reports` location.
+
 ## Deploy (Fly.io)
 
 Run from the **workspace root** (the Dockerfile needs the whole workspace as build context):

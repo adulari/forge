@@ -202,6 +202,8 @@ pub enum CommandAction {
     Doctor,
     /// Name this session (`/rename <title>`); empty shows the current name.
     Rename(String),
+    /// Report a problem to the maintainers (`/bug <what went wrong>`), after a preview.
+    Bug(String),
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
 }
@@ -379,6 +381,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "add-dir" => CommandAction::AddDir(arg),
         "doctor" => CommandAction::Doctor,
         "rename" => CommandAction::Rename(arg),
+        "bug" | "report" => CommandAction::Bug(arg),
         "rewind" | "undo" | "u" => CommandAction::Undo,
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,

@@ -40,6 +40,9 @@ pub enum PickerKind {
     /// `action@seq`. The list is short, so typing never filters it: the text is the optional focus
     /// for a summary, and a digit on an empty query picks that row.
     RewindAction,
+    /// An error report waiting for a decision (ask mode, or a `/bug` preview). Each row's `id` is
+    /// `send@<id>`, `skip@<id>` or `always@<id>`.
+    ErrorReport,
 }
 
 /// One row in an interactive picker: an opaque `id` the loop acts on, plus two display strings.

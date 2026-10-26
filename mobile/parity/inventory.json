@@ -504,6 +504,18 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/lib/reporting.test.ts",
+    "platform": "desktop",
+    "reason": "declared platform behavior boundary; shared product rules must remain aligned",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/reporting.ts",
+    "platform": "desktop",
+    "reason": "declared platform behavior boundary; shared product rules must remain aligned",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/lib/secureStore.web.ts",
     "platform": "web",
     "reason": "platform-specific implementation required by Expo resolution",

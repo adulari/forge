@@ -36,14 +36,25 @@ impl Session {
         for text in crate::hooks_async::take(&self.id) {
             self.inject_hook_context(&text);
         }
+        forge_reporting::event("turn_start", None);
+        let started = std::time::Instant::now();
         let result = IN_TURN
             .scope(
                 (),
                 Box::pin(self.run_turn_body(prompt, guidance, tier_override)),
             )
             .await;
+        forge_reporting::event(
+            if result.is_ok() {
+                "turn_end"
+            } else {
+                "turn_error"
+            },
+            Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        );
         self.close_shell_diagnoses();
         if let Err(error) = &result {
+            crate::error_report::report_turn_error(error);
             self.fire_stop_failure(error).await;
         }
         result

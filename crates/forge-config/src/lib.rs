@@ -46,6 +46,7 @@ mod project_dirs;
 pub mod project_trust;
 pub mod provider_oauth;
 pub mod quota_status;
+pub mod reporting;
 pub mod secret_health;
 pub mod secret_store;
 mod vision_fallback;
@@ -175,6 +176,10 @@ pub struct Config {
     /// content is ever sent. Disable here, with `FORGE_TELEMETRY=0`, or with `DO_NOT_TRACK=1`.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Automatic issue reports for Forge's own bugs: scrubbed, content-free, on by default.
+    /// `FORGE_NO_REPORTS=1` forces it off. See `docs/features/issue-reporting.md`.
+    #[serde(default)]
+    pub reporting: reporting::ReportingConfig,
     /// When true, Forge starts a sub-Forge session as an MCP server so the agent can use
     /// forge_chat / forge_assay as native tools (self-driving mode). Toggle with
     /// `forge self enable` / `forge self disable`. Off by default.
@@ -2914,6 +2919,7 @@ impl Default for Config {
             local: LocalConfig::default(),
             update: UpdateConfig::default(),
             telemetry: TelemetryConfig::default(),
+            reporting: reporting::ReportingConfig::default(),
             self_mcp: false,
             statusline: StatuslineConfig::default(),
             notifications: notifications::NotificationsConfig::default(),
@@ -3293,7 +3299,11 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
         fig = fig.merge(Toml::string(&text));
     }
     // `FORGE_TELEMETRY=0` is the telemetry opt-out flag (read in forge-cli), not a `[telemetry]` table.
-    fig = fig.merge(Env::prefixed("FORGE_").ignore(&["telemetry"]).split("__"));
+    fig = fig.merge(
+        Env::prefixed("FORGE_")
+            .ignore(&["telemetry", "no_reports", "reporting_url", "reporting_dir"])
+            .split("__"),
+    );
 
     let mut config: Config = fig.extract().map_err(|error| {
         let mut files: Vec<&Path> = Vec::new();

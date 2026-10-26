@@ -9,10 +9,15 @@ use std::{fmt::Display, str::FromStr};
 /// `APNS_BUNDLE_ID` + `dispatch_live_activity`'s `{bundle}.push-type.liveactivity` topic).
 const DEFAULT_ALLOWED_TOPICS: &str = "dev.adulari.forge,dev.adulari.forge.push-type.liveactivity";
 
-pub(crate) struct RelayConfig {
+pub(crate) struct ApnsCreds {
     pub(crate) team_id: String,
     pub(crate) key_id: String,
     pub(crate) key_pem: String,
+}
+
+pub(crate) struct RelayConfig {
+    /// `None` runs a reports-only relay: the APNs routes answer 503 and everything else works.
+    pub(crate) apns: Option<ApnsCreds>,
     pub(crate) allowed_topics: Vec<String>,
     pub(crate) relay_token: Option<String>,
     /// Replace every alert body with Forge's static privacy-preserving notification before it is
@@ -39,22 +44,7 @@ impl RelayConfig {
     /// degrade-to-`None`, this binary's entire purpose is being an APNs sender, so a missing
     /// credential is a hard startup error, not a graceful no-op.
     pub(crate) fn from_env() -> anyhow::Result<Self> {
-        let team_id = std::env::var("FORGE_APNS_TEAM_ID")
-            .map_err(|_| anyhow::anyhow!("FORGE_APNS_TEAM_ID is required"))?;
-        let key_id = std::env::var("FORGE_APNS_KEY_ID")
-            .map_err(|_| anyhow::anyhow!("FORGE_APNS_KEY_ID is required"))?;
-        // Either the raw PEM (Fly secret set directly as an env var, no file on disk at all —
-        // preferred: the .p8 never touches the container filesystem) or a path to it.
-        let key_pem = match std::env::var("FORGE_APNS_KEY_PEM") {
-            Ok(pem) => pem,
-            Err(_) => {
-                let path = std::env::var("FORGE_APNS_KEY_PATH").map_err(|_| {
-                    anyhow::anyhow!("FORGE_APNS_KEY_PEM or FORGE_APNS_KEY_PATH is required")
-                })?;
-                std::fs::read_to_string(&path)
-                    .map_err(|e| anyhow::anyhow!("reading FORGE_APNS_KEY_PATH ({path}): {e}"))?
-            }
-        };
+        let apns = Self::apns_from_env()?;
         let allowed_topics = std::env::var("FORGE_RELAY_ALLOWED_TOPICS")
             .unwrap_or_else(|_| DEFAULT_ALLOWED_TOPICS.to_string())
             .split(',')
@@ -93,9 +83,7 @@ impl RelayConfig {
         )?;
 
         Ok(Self {
-            team_id,
-            key_id,
-            key_pem,
+            apns,
             allowed_topics,
             relay_token,
             generic_alerts,
@@ -106,6 +94,35 @@ impl RelayConfig {
             rate_window_secs,
             daily_send_cap,
         })
+    }
+    /// APNs credentials are all-or-nothing: with neither team nor key id set the relay runs
+    /// reports-only; with either set, every piece is required so a typo cannot silently disable
+    /// push.
+    fn apns_from_env() -> anyhow::Result<Option<ApnsCreds>> {
+        let team = std::env::var("FORGE_APNS_TEAM_ID").ok();
+        let key = std::env::var("FORGE_APNS_KEY_ID").ok();
+        if team.is_none() && key.is_none() {
+            return Ok(None);
+        }
+        let team_id = team.ok_or_else(|| anyhow::anyhow!("FORGE_APNS_TEAM_ID is required"))?;
+        let key_id = key.ok_or_else(|| anyhow::anyhow!("FORGE_APNS_KEY_ID is required"))?;
+        // Either the raw PEM (Fly secret set directly as an env var, no file on disk at all —
+        // preferred: the .p8 never touches the container filesystem) or a path to it.
+        let key_pem = match std::env::var("FORGE_APNS_KEY_PEM") {
+            Ok(pem) => pem,
+            Err(_) => {
+                let path = std::env::var("FORGE_APNS_KEY_PATH").map_err(|_| {
+                    anyhow::anyhow!("FORGE_APNS_KEY_PEM or FORGE_APNS_KEY_PATH is required")
+                })?;
+                std::fs::read_to_string(&path)
+                    .map_err(|e| anyhow::anyhow!("reading FORGE_APNS_KEY_PATH ({path}): {e}"))?
+            }
+        };
+        Ok(Some(ApnsCreds {
+            team_id,
+            key_id,
+            key_pem,
+        }))
     }
 }
 

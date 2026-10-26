@@ -192,6 +192,12 @@ pub(super) async fn request_provider_response(
                 forge_config::provider_of(active_model)
             )))
         } else {
+            forge_reporting::set_session_context(
+                Some(forge_config::provider_of(active_model)),
+                Some(active_model.as_str()),
+                Some(session.temper().label()),
+            );
+            forge_reporting::event("model_request", None);
             session.presenter.emit(PresenterEvent::ProviderRequest {
                 model: active_model.clone(),
                 step,

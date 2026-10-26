@@ -8,6 +8,8 @@ vi.mock("../lib/anonymousTelemetry", () => ({
   markAnonymousTelemetryAppError: markAppError,
 }));
 
+vi.mock("../lib/reporting", () => ({ reportBoundaryError: vi.fn() }));
+
 vi.mock("expo-splash-screen", () => ({
   hideAsync: vi.fn(async () => undefined),
 }));

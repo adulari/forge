@@ -26,6 +26,7 @@ forge-proxy = { package = "forge-agent-proxy", path = "crates/forge-proxy", vers
 forge-browser = { package = "forge-agent-browser", path = "crates/forge-browser", version = "2.13.6" }
 forge-device = { package = "forge-agent-device", path = "crates/forge-device", version = "2.13.6" }
 forge-config = { package = "forge-agent-config", path = "crates/forge-config", version = "2.13.6" }
+forge-reporting = { package = "forge-agent-reporting", path = "crates/forge-reporting", version = "2.13.6" }
 forge-core = { package = "forge-agent-core", path = "crates/forge-core", version = "2.13.6" }
 forge-index = { package = "forge-agent-index", path = "crates/forge-index", version = "2.13.6" }
 forge-lsp = { package = "forge-agent-lsp", path = "crates/forge-lsp", version = "2.13.6" }

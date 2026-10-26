@@ -350,6 +350,34 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             }
             Ok(())
         }
+        Command::Report {
+            show_last,
+            sent,
+            pending,
+            send_pending,
+            mode,
+            message,
+            yes,
+            selftest,
+        } => {
+            if let Some(kind) = selftest {
+                crate::reporting::selftest(&kind, message.as_deref().unwrap_or("selftest"))
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    crate::reporting::run(
+                        show_last,
+                        sent,
+                        pending,
+                        send_pending,
+                        mode,
+                        message,
+                        yes,
+                    )
+                })
+                .await
+                .context("report task")?
+            }
+        }
         Command::Update { check } => tokio::task::spawn_blocking(move || update::run(check))
             .await
             .context("update task")?,

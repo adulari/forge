@@ -13,6 +13,7 @@ name = "forge_core"
 [dependencies]
 forge-types.workspace = true
 forge-config.workspace = true
+forge-reporting.workspace = true
 forge-index.workspace = true
 forge-lsp.workspace = true
 forge-mcp.workspace = true

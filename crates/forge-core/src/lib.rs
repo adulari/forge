@@ -93,6 +93,7 @@ mod detached_subagents;
 pub mod dispatch;
 pub mod duel;
 mod empty_reply;
+mod error_report;
 pub mod evidence_capture;
 mod exact_effort;
 mod failure_verdict;

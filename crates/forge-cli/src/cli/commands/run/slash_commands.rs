@@ -39,6 +39,7 @@ pub(super) async fn dispatch(action: CommandAction, session: &SharedSession, app
         CommandAction::McpReconnect(server) => reconnect_mcp(session, app, server).await,
         CommandAction::AddDir(path) => add_dir(session, app, &path).await,
         CommandAction::Doctor => doctor::start(app),
+        CommandAction::Bug(text) => crate::reporting::bug_card(app, &text),
         CommandAction::Rename(title) => rename(session, app, &title).await,
         // `dispatch_command` routes only the actions above here.
         _ => {}

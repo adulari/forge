@@ -21,6 +21,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { FleetWatcher } from "../components/fleet/FleetWatcher";
 import { AppLock } from "../components/AppLock";
 import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
+import { ReportingHost } from "../components/ReportingUi";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { DesktopOtaHost } from "../components/DesktopOtaHost";
@@ -354,6 +355,7 @@ export default function RootLayout() {
                     <ToastHost>
                       <IncomingShareProvider>
                         <AnonymousTelemetry />
+                        <ReportingHost />
                         <FleetWatcher />
                         <NoticesWatcher />
                         {/* Inside the query provider because it reads the daemon's changelog, and above

@@ -711,6 +711,7 @@ pub(crate) async fn picker_accept(
         // /duel resolves in the render loop (it needs to merge a worktree branch + drop guards
         // that live only there), never here.
         forge_tui::PickerKind::Duel => {}
+        forge_tui::PickerKind::ErrorReport => crate::reporting::resolve_card(app, &row.id),
         forge_tui::PickerKind::ResumeMode => {
             if row.id == "full" {
                 let n = {

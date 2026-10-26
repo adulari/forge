@@ -145,6 +145,24 @@ impl Session {
         auto: bool,
         model: Option<&str>,
     ) -> Result<(usize, usize), CoreError> {
+        let started = std::time::Instant::now();
+        let result = self.compact_for_inner(auto, model).await;
+        match &result {
+            Ok((before, after)) if before != after => forge_reporting::event(
+                "compaction",
+                Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+            ),
+            Ok(_) => {}
+            Err(error) => crate::error_report::report_compaction_error(error),
+        }
+        result
+    }
+
+    async fn compact_for_inner(
+        &mut self,
+        auto: bool,
+        model: Option<&str>,
+    ) -> Result<(usize, usize), CoreError> {
         // Taken first so a no-op compaction cannot leave it armed for an unrelated later one.
         let directive = self.compact_directive.take();
         let before = self.transcript.len();

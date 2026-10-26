@@ -1,0 +1,27 @@
+[package]
+name = "forge-agent-reporting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Automatic, scrubbed, content-free issue reports for Forge's own bugs: capture, classify, queue and send."
+repository.workspace = true
+
+[lib]
+name = "forge_reporting"
+
+[dependencies]
+forge-config.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
