@@ -67,6 +67,7 @@ pub use usage_source::{ModelUsage, UsageSlot, UsageSource};
 mod surface;
 mod transcript;
 mod tui;
+pub mod update_card;
 mod voice;
 mod workflow_view;
 pub use app::{

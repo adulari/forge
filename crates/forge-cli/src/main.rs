@@ -97,12 +97,15 @@ mod serve_dispatch;
 mod serve_git;
 mod serve_schedules;
 mod serve_terminal;
+mod serve_update;
 mod serve_workspace;
 mod startup_trace;
 mod telemetry;
 mod terminal_owner;
 mod update;
 mod update_check;
+mod update_feed;
+mod update_state;
 mod voice;
 
 /// Env var carrying the current subagent nesting depth across the process boundary (forge →

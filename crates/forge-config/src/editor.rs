@@ -475,7 +475,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "tui.fold_tool_groups" => "Fold each run of tool calls into one summary row in the full-screen transcript (Read 3 files, ran 2 shell commands). Click it, or Alt+↑/↓ then Enter, to open it; Alt+O opens every group. Off shows every call as its own card.",
         "project.auto_initialize" => "Run a model-backed, tailored Forge setup once when opening an uninitialized project.",
         "recap.enabled" => "Show a one-line AI recap after each completed turn.",
-        "update.check" => "Check GitHub for a newer Forge release on startup (throttled to once a day).",
+        "update.check" => "Check GitHub for a newer Forge release on startup (checked at most every 6 hours).",
         "shell.explain_errors" => "When a shell command fails, the AI explains the likely cause + a fix.",
         "lattice.enabled" => "Build/maintain the code-intelligence graph (`forge lattice`).",
         "lattice.inject" => "Auto-inject relevant code into each turn before the model call.",

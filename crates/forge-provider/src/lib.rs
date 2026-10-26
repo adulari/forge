@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 
 mod bridge_answer;
 mod cache_hints;
+mod claude_bridge_auth;
 mod claude_bridge_home;
+pub use claude_bridge_auth::{
+    bridge_auth_present, claude_bridge_env, BridgeAuth, BRIDGE_SETUP_HINT,
+};
 pub use claude_bridge_home::real_claude_config_dir;
 mod cli_provider;
 mod codex_oauth;
@@ -42,10 +46,9 @@ pub mod wire_params;
 mod xai_oauth;
 
 pub use cli_provider::{
-    claude_bridge_env, codex_cli_detected_plan, codex_harness_preamble,
-    codex_rollout_is_account_wide, BridgeModelSource, BridgeModels, ClaudeInitialization,
-    ClaudeModelCapability, CliKind, CliProvider, BRIDGE_CLASSIFIER_MODEL_ENV,
-    BRIDGE_PROVIDER_KEYS_ENV, SUBAGENT_SINK_ENV,
+    codex_cli_detected_plan, codex_harness_preamble, codex_rollout_is_account_wide,
+    BridgeModelSource, BridgeModels, ClaudeInitialization, ClaudeModelCapability, CliKind,
+    CliProvider, BRIDGE_CLASSIFIER_MODEL_ENV, BRIDGE_PROVIDER_KEYS_ENV, SUBAGENT_SINK_ENV,
 };
 
 mod bridge_login;

@@ -12,10 +12,22 @@
 //!
 //! Instead: point the bridged process at an isolated `CLAUDE_CONFIG_DIR` ([`prepare_claude_bridge_home`])
 //! that mirrors the real one via symlinks for every entry EXCEPT the hook-bearing settings files,
-//! which get a hooks-stripped JSON copy instead. `CLAUDE_CONFIG_DIR` controls where claude reads
-//! BOTH its settings/hooks AND its auth/session state from, so symlinking everything else through
-//! (`.credentials.json`, `projects/`, `sessions/`, `history.jsonl`, `plugins/`, `cache/`, …) keeps
-//! auth, session resume, and prompt-cache continuity fully intact.
+//! which get a hooks-stripped JSON copy instead. Everything else is symlinked through
+//! (`projects/`, `sessions/`, `history.jsonl`, `plugins/`, `cache/`, …) so session resume and
+//! prompt-cache continuity stay intact.
+//!
+//! Three entries are deliberately NOT mirrored:
+//! - `.credentials.json`: the user's interactive OAuth login. The bridge's config dir differs from
+//!   the user's, so Claude Code's refresh lock does not cover it; a bridged claude that refreshed
+//!   through the link rotated the single-use refresh token and invalidated the user's own login
+//!   (and replaced the link with a file the next rebuild discarded). The bridge authenticates with
+//!   an explicit `CLAUDE_CODE_OAUTH_TOKEN` instead (`claude_bridge_auth`). A leftover copy or link
+//!   from an older Forge is removed on the next build.
+//! - `backups/`: claude writes a `.claude.json` backup there on every config write; through a link
+//!   those landed in the user's own `~/.claude/backups`.
+//! - `.claude.json`: claude's own mutable state for this dir. It is seeded by copy when the user's
+//!   config dir has one, then owned by the bridge home and carried across rebuilds, never rewritten
+//!   by Forge.
 
 use std::path::Path;
 
@@ -27,6 +39,21 @@ const FILTERED_SETTINGS_FILES: &[&str] = &["settings.json", "settings.local.json
 /// unrelated application state and must fail closed rather than being copied by default.
 #[cfg(any(windows, test))]
 const WINDOWS_COPY_ALLOWLIST: &[&str] = &["projects", "history.jsonl"];
+
+/// Never copied or linked into the bridge home, and removed from it if an older Forge put it there.
+const NEVER_MIRRORED: &[&str] = &[".credentials.json"];
+
+/// Bridge-local state claude writes itself. Not linked; preserved across rebuilds.
+const LOCAL_STATE: &[&str] = &[".claude.json", "backups"];
+
+fn is_unmirrored(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| NEVER_MIRRORED.contains(&n) || LOCAL_STATE.contains(&n))
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
 
 /// Top-level JSON keys stripped from a filtered settings file. `hooks` is the primary target;
 /// `enabledPlugins`/`extraKnownMarketplaces` are defense-in-depth against a plugin registering its
@@ -154,6 +181,9 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
         let name = entry.file_name();
         let real_path = entry.path();
         let dest_path = tmp_dir.join(&name);
+        if is_unmirrored(&name) {
+            continue;
+        }
         let is_filtered_settings = name
             .to_str()
             .is_some_and(|n| FILTERED_SETTINGS_FILES.contains(&n));
@@ -177,6 +207,8 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
         symlink_through(&real_path, &dest_path)?;
     }
 
+    carry_local_state(real_home, isolated_dir, &tmp_dir);
+
     let retired = isolated_dir.exists().then(|| {
         parent.join(format!(
             ".{}.retired-{}",
@@ -196,6 +228,9 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
         if let Some(retired) = &retired {
             let _ = std::fs::rename(retired, isolated_dir);
         }
+        for name in LOCAL_STATE {
+            let _ = std::fs::rename(tmp_dir.join(name), isolated_dir.join(name));
+        }
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(error.into());
     }
@@ -203,6 +238,22 @@ pub fn prepare_claude_bridge_home(real_home: &Path, isolated_dir: &Path) -> anyh
         let _ = std::fs::remove_dir_all(retired);
     }
     Ok(())
+}
+
+/// Move the bridge's own claude-written state from the live dir into the new build, or seed
+/// `.claude.json` from the user's config dir when the bridge has none yet.
+fn carry_local_state(real_home: &Path, isolated_dir: &Path, tmp_dir: &Path) {
+    for name in LOCAL_STATE {
+        let live = isolated_dir.join(name);
+        if live.exists() && !is_symlink(&live) {
+            let _ = std::fs::rename(&live, tmp_dir.join(name));
+        } else if *name == ".claude.json" {
+            let real = real_home.join(name);
+            if real.is_file() {
+                let _ = std::fs::copy(&real, tmp_dir.join(name));
+            }
+        }
+    }
 }
 
 /// Serializes mirror builds within this process. Concurrent bridge spawns are the norm under
@@ -233,6 +284,13 @@ fn mirror_is_current(real_home: &Path, isolated_dir: &Path) -> bool {
         let Ok(entry) = entry else { return false };
         let name = entry.file_name();
         let dest = isolated_dir.join(&name);
+        if is_unmirrored(&name) {
+            // The only one that needs action: a bridge with no `.claude.json` yet is seeded.
+            if name == ".claude.json" && entry.path().is_file() && !dest.exists() {
+                return false;
+            }
+            continue;
+        }
         let is_filtered_settings = name
             .to_str()
             .is_some_and(|n| FILTERED_SETTINGS_FILES.contains(&n));
@@ -252,19 +310,31 @@ fn mirror_is_current(real_home: &Path, isolated_dir: &Path) -> bool {
         }
         expected.insert(name);
     }
-    // A leftover entry for a file the user has since deleted means the mirror is stale.
     let Ok(mirrored) = std::fs::read_dir(isolated_dir) else {
         return false;
     };
-    let mut seen = 0usize;
     for entry in mirrored {
         let Ok(entry) = entry else { return false };
-        if !expected.contains(&entry.file_name()) {
+        let name = entry.file_name();
+        if expected.contains(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let local_state = name.to_str().is_some_and(|n| LOCAL_STATE.contains(&n));
+        // Stale: a credentials copy or link from an older Forge, a link left for a file the user
+        // has since deleted (including the old `backups` link), or a settings copy with no source.
+        // Real files and dirs claude wrote itself (`.claude.json`, `backups/`) are the bridge's own.
+        let stale = NEVER_MIRRORED.contains(&name.to_str().unwrap_or(""))
+            || (!local_state && is_symlink(&path))
+            || (local_state && is_symlink(&path))
+            || name
+                .to_str()
+                .is_some_and(|n| FILTERED_SETTINGS_FILES.contains(&n));
+        if stale {
             return false;
         }
-        seen += 1;
     }
-    seen == expected.len()
+    true
 }
 
 /// Parse `path` as JSON and strip [`STRIPPED_KEYS`]. Missing files are a race-safe no-op; read,
@@ -436,7 +506,6 @@ mod tests {
     #[test]
     fn non_settings_entries_are_symlinked_through_unchanged() {
         let real = tempfile::tempdir().unwrap();
-        std::fs::write(real.path().join(".credentials.json"), r#"{"token":"abc"}"#).unwrap();
         std::fs::create_dir_all(real.path().join("projects")).unwrap();
         std::fs::write(real.path().join("projects/session.jsonl"), "line1\n").unwrap();
 
@@ -444,23 +513,122 @@ mod tests {
         prepare_claude_bridge_home(real.path(), &isolated).unwrap();
 
         assert_eq!(
-            std::fs::read_to_string(isolated.join(".credentials.json")).unwrap(),
-            r#"{"token":"abc"}"#
-        );
-        assert_eq!(
             std::fs::read_to_string(isolated.join("projects/session.jsonl")).unwrap(),
             "line1\n"
         );
         #[cfg(unix)]
-        {
-            let meta = std::fs::symlink_metadata(isolated.join(".credentials.json")).unwrap();
-            assert!(
-                meta.file_type().is_symlink(),
-                "non-settings entries are symlinked, not copied"
-            );
-        }
+        assert!(is_symlink(&isolated.join("projects")));
 
         let _ = std::fs::remove_dir_all(&isolated);
+    }
+
+    #[test]
+    fn credentials_and_backups_are_never_linked_into_the_bridge_home() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join("backups")).unwrap();
+        std::fs::write(real.join(".credentials.json"), "{}").unwrap();
+        std::fs::write(real.join("backups/b"), "x").unwrap();
+        std::fs::write(real.join("history.jsonl"), "h").unwrap();
+        let isolated = root.path().join("bridge");
+        prepare_claude_bridge_home(&real, &isolated).unwrap();
+        assert!(std::fs::symlink_metadata(isolated.join(".credentials.json")).is_err());
+        assert!(std::fs::symlink_metadata(isolated.join("backups")).is_err());
+        assert!(is_symlink(&isolated.join("history.jsonl")));
+        assert!(real.join(".credentials.json").exists());
+    }
+
+    #[test]
+    fn stale_credentials_and_backups_links_are_removed_without_touching_the_real_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(real.join("backups")).unwrap();
+        std::fs::write(real.join(".credentials.json"), "real-creds").unwrap();
+        std::fs::write(real.join("history.jsonl"), "h").unwrap();
+        let isolated = root.path().join("bridge");
+        std::fs::create_dir_all(&isolated).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(real.join("history.jsonl"), isolated.join("history.jsonl"))
+                .unwrap();
+            std::os::unix::fs::symlink(real.join("backups"), isolated.join("backups")).unwrap();
+            std::os::unix::fs::symlink(
+                real.join(".credentials.json"),
+                isolated.join(".credentials.json"),
+            )
+            .unwrap();
+        }
+        prepare_claude_bridge_home(&real, &isolated).unwrap();
+        assert!(std::fs::symlink_metadata(isolated.join(".credentials.json")).is_err());
+        assert!(!is_symlink(&isolated.join("backups")));
+        assert_eq!(
+            std::fs::read_to_string(real.join(".credentials.json")).unwrap(),
+            "real-creds"
+        );
+
+        // A plain refreshed-credentials file left by a bridged claude goes too.
+        std::fs::write(isolated.join(".credentials.json"), "rotated").unwrap();
+        prepare_claude_bridge_home(&real, &isolated).unwrap();
+        assert!(std::fs::symlink_metadata(isolated.join(".credentials.json")).is_err());
+        assert!(real.join("backups").is_dir());
+    }
+
+    #[test]
+    fn claude_json_is_not_rewritten_when_nothing_changed_and_survives_rebuilds() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        write_json(
+            &real.join("settings.json"),
+            &serde_json::json!({"theme": "dark"}),
+        );
+        let isolated = root.path().join("bridge");
+        prepare_claude_bridge_home(&real, &isolated).unwrap();
+        // claude creates its own state in the bridge home.
+        std::fs::write(isolated.join(".claude.json"), "{\"own\":1}").unwrap();
+        std::fs::create_dir_all(isolated.join("backups")).unwrap();
+        std::fs::write(isolated.join("backups/b"), "b").unwrap();
+        let before = std::fs::metadata(isolated.join(".claude.json")).unwrap();
+
+        prepare_claude_bridge_home(&real, &isolated).unwrap();
+        let after = std::fs::metadata(isolated.join(".claude.json")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(before.ino(), after.ino(), "steady state does not rebuild");
+        }
+        assert_eq!(before.len(), after.len());
+
+        // A real settings change forces a rebuild; the bridge's own state is carried over.
+        write_json(
+            &real.join("settings.json"),
+            &serde_json::json!({"theme": "light"}),
+        );
+        prepare_claude_bridge_home(&real, &isolated).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(isolated.join(".claude.json")).unwrap(),
+            "{\"own\":1}"
+        );
+        assert!(isolated.join("backups/b").exists());
+        assert!(
+            !real.join("backups").exists(),
+            "nothing written into the user's dir"
+        );
+    }
+
+    #[test]
+    fn claude_json_is_seeded_by_copy_when_the_user_dir_has_one() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join(".claude.json"), "{\"seed\":1}").unwrap();
+        let isolated = root.path().join("bridge");
+        prepare_claude_bridge_home(&real, &isolated).unwrap();
+        assert!(!is_symlink(&isolated.join(".claude.json")));
+        assert_eq!(
+            std::fs::read_to_string(isolated.join(".claude.json")).unwrap(),
+            "{\"seed\":1}"
+        );
     }
 
     /// Concurrent bridge spawns must never expose a `CLAUDE_CONFIG_DIR` without credentials in it.
@@ -471,7 +639,6 @@ mod tests {
     #[test]
     fn concurrent_builds_never_expose_a_credential_less_config_dir() {
         let real = tempfile::tempdir().unwrap();
-        std::fs::write(real.path().join(".credentials.json"), r#"{"token":"abc"}"#).unwrap();
         write_json(
             &real.path().join("settings.json"),
             &serde_json::json!({"theme": "dark"}),
@@ -494,7 +661,7 @@ mod tests {
             let missing = missing.clone();
             std::thread::spawn(move || {
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    if !isolated.join(".credentials.json").exists() {
+                    if !isolated.join("settings.json").exists() {
                         missing.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }

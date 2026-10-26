@@ -335,6 +335,17 @@ pub(crate) async fn build_session_with_self_mcp(
             &store, &config, excluded,
         );
     }
+    // An installed claude with no bridge token is a configuration gap, not an outage: routing
+    // skips it quietly, so say why once per session (never per retry) and how to fix it.
+    if !mock
+        && presenter.is_attended()
+        && forge_provider::CliKind::ClaudeCode.available()
+        && !forge_provider::bridge_auth_present()
+    {
+        presenter.emit(forge_tui::PresenterEvent::Warning(
+            forge_provider::BRIDGE_SETUP_HINT.to_string(),
+        ));
+    }
 
     // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
     // (docs/features/mesh-routing.md). Skipped for the offline mock and when disabled.

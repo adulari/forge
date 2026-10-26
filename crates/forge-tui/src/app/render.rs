@@ -18,6 +18,7 @@ pub(crate) mod status_line;
 pub(crate) mod status_panel;
 mod status_widgets;
 mod transcript;
+mod update_band;
 mod voice;
 pub(crate) mod welcome;
 pub(crate) use input::render_input;

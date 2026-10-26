@@ -63,8 +63,12 @@ Forge works with many providers. The easiest way to get started for free:
 
 ### Option B: Already have Claude Code or Codex CLI installed?
 
-Run Forge on top of your existing subscription — no new key needed:
+Run Forge on top of your existing subscription — no new provider key needed. The claude bridge
+authenticates with a long-lived token, not your interactive `claude` login (see
+[the claude bridge's authentication](features/persistent-bridge-transport.md#claude-bridge-authentication)):
 ```bash
+claude setup-token                   # once; prints a long-lived token
+forge auth claude_oauth_token        # paste it (or export CLAUDE_CODE_OAUTH_TOKEN)
 forge run --model claude-cli::sonnet "hello"   # uses your Claude subscription
 forge run --model codex-cli::gpt-5.6-luna "hello"   # uses your Codex subscription
 ```

@@ -168,7 +168,7 @@ pub struct Config {
     /// Local-LLM runtime (Ollama): which model to auto-start and whether to start it with Forge.
     #[serde(default)]
     pub local: LocalConfig,
-    /// Startup update check (GitHub releases). On by default; throttled to once a day.
+    /// Startup update check (GitHub releases). On by default; checked at most every 6 hours.
     #[serde(default)]
     pub update: UpdateConfig,
     /// Anonymous product-count telemetry. Enabled by default; no stable identifier or user
@@ -1164,7 +1164,7 @@ fn default_local_endpoint() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateConfig {
     /// Check GitHub releases on startup and notify when a newer version exists. Default: true.
-    /// Throttled to once per day; the env var `FORGE_NO_UPDATE_CHECK=1` also disables it.
+    /// Checked at most every 6 hours, and offered as an in-app card (or a prompt in plain chat); the env var `FORGE_NO_UPDATE_CHECK=1` also disables it.
     #[serde(default = "default_update_check")]
     pub check: bool,
 }
@@ -2358,6 +2358,25 @@ pub fn benchmark_api_key() -> Option<String> {
         }
     }
     secret_store::get("artificialanalysis").filter(|k| !k.is_empty())
+}
+
+/// Secret-store slot holding the long-lived token from `claude setup-token`, for the claude-cli
+/// bridge. Set with `forge auth claude_oauth_token`.
+pub const CLAUDE_OAUTH_TOKEN_SLOT: &str = "claude_oauth_token";
+
+/// The long-lived Claude Code OAuth token the claude bridge authenticates with:
+/// `CLAUDE_CODE_OAUTH_TOKEN` from the environment first, then the [`CLAUDE_OAUTH_TOKEN_SLOT`]
+/// secret. Unlike the interactive login in `~/.claude/.credentials.json` it never refreshes, so
+/// the bridge can use it without rotating anything the user's own `claude` depends on.
+pub fn claude_oauth_token() -> Option<String> {
+    let env = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
+    env.map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            secret_store::get(CLAUDE_OAUTH_TOKEN_SLOT)
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+        })
 }
 
 fn default_failover() -> bool {

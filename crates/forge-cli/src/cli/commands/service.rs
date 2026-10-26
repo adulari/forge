@@ -328,6 +328,16 @@ pub(crate) fn query_service_status() -> Result<ServiceStatus> {
     }
 }
 
+/// Whether a background service is installed and currently running.
+pub(crate) fn service_is_running() -> bool {
+    query_service_status().is_ok_and(|s| s.installed && s.running)
+}
+
+/// Restart the background service (an update only reaches a daemon that restarts).
+pub(crate) fn restart_service() -> Result<()> {
+    control_service(ServiceControl::Restart)
+}
+
 fn control_service(action: ServiceControl) -> Result<()> {
     if cfg!(target_os = "linux") {
         control_systemd(action)

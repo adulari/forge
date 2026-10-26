@@ -3,13 +3,13 @@
 // Dependency-light: a small block+inline parser rather than a full markdown library — chat
 // content is controlled (assistant/tool output), not arbitrary user markdown.
 import React from "react";
-import { Linking, Platform, StyleSheet, Text, View, type StyleProp, type TextStyle } from "react-native";
+import { Linking, Platform, ScrollView, StyleSheet, Text, View, type StyleProp, type TextStyle } from "react-native";
 
 import type { ColorTokens } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { useTheme } from "../../theme/ThemeProvider";
 import { safeExternalHref } from "../../lib/linkSafety";
-import { fitRow, opensTable, tableCells } from "../../lib/markdownTable";
+import { columnWidths, fitRow, opensTable, tableAlignments, tableCells, type TableAlign } from "../../lib/markdownTable";
 import { CodeBlock } from "./CodeBlock";
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,13 @@ type Block =
   | { kind: "paragraph"; text: string; inline: InlineNode[] }
   | { kind: "list"; ordered: boolean; start: number; items: string[]; inlineItems: InlineNode[][] }
   | { kind: "code"; language: string; code: string }
-  | { kind: "table"; header: InlineNode[][]; rows: InlineNode[][][] };
+  | { kind: "table"; header: InlineNode[][]; rows: InlineNode[][][]; aligns: (TableAlign | null)[]; widths: number[] };
+
+function fitAligns(aligns: (TableAlign | null)[], columns: number): (TableAlign | null)[] {
+  const out = aligns.slice(0, columns);
+  while (out.length < columns) out.push(null);
+  return out;
+}
 
 function parseBlocks(content: string): Block[] {
   const lines = content.replace(/\r\n/g, "\n").split("\n");
@@ -81,13 +87,20 @@ function parseBlocks(content: string): Block[] {
       flushParagraph();
       flushList();
       const header = tableCells(line);
-      const rows: InlineNode[][][] = [];
+      const aligns = fitAligns(tableAlignments(lines[i + 1]), header.length);
+      const rawRows: string[][] = [];
       i += 2;
       while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
-        rows.push(fitRow(tableCells(lines[i]), header.length).map(parseInline));
+        rawRows.push(fitRow(tableCells(lines[i]), header.length));
         i++;
       }
-      blocks.push({ kind: "table", header: header.map(parseInline), rows });
+      blocks.push({
+        kind: "table",
+        header: header.map(parseInline),
+        rows: rawRows.map((row) => row.map(parseInline)),
+        aligns,
+        widths: columnWidths([header, ...rawRows]),
+      });
       continue;
     }
 
@@ -244,7 +257,7 @@ function blockSignature(block: Block): string {
     case "code":
       return `c${block.language}:${block.code}`;
     case "table":
-      return `t:${JSON.stringify([block.header, block.rows])}`;
+      return `t:${JSON.stringify([block.header, block.rows, block.aligns])}`;
   }
 }
 
@@ -295,35 +308,45 @@ function MarkdownBlockImpl({ block, blockKey: key, style }: MarkdownBlockProps) 
       );
     case "table":
       return (
-        <View key={key} style={[styles.block, styles.table, { borderColor: tokens.border }]}>
-          {[block.header, ...block.rows].map((row, rowIdx) => (
-            <View
-              key={rowIdx}
-              style={[
-                styles.tableRow,
-                rowIdx > 0 ? { borderTopColor: tokens.border, borderTopWidth: StyleSheet.hairlineWidth } : null,
-                rowIdx === 0 ? { backgroundColor: tokens.bg2 } : null,
-              ]}
-            >
-              {row.map((cell, cellIdx) => (
-                <Text
-                  key={cellIdx}
-                  selectable
-                  style={[
-                    type.body,
-                    styles.tableCell,
-                    rowIdx === 0 ? styles.bold : null,
-                    cellIdx > 0 ? { borderLeftColor: tokens.border, borderLeftWidth: StyleSheet.hairlineWidth } : null,
-                    { color: tokens.ink },
-                    style,
-                  ]}
-                >
-                  {renderInline(cell, `${key}-${rowIdx}-${cellIdx}`, tokens)}
-                </Text>
-              ))}
-            </View>
-          ))}
-        </View>
+        <ScrollView
+          key={key}
+          horizontal
+          showsHorizontalScrollIndicator
+          style={styles.block}
+          contentContainerStyle={styles.tableScroll}
+          accessibilityRole="none"
+        >
+          <View style={[styles.table, { borderColor: tokens.border }]}>
+            {[block.header, ...block.rows].map((row, rowIdx) => (
+              <View
+                key={rowIdx}
+                style={[
+                  styles.tableRow,
+                  rowIdx > 0 ? { borderTopColor: tokens.border, borderTopWidth: StyleSheet.hairlineWidth } : null,
+                  rowIdx === 0 ? { backgroundColor: tokens.bg2 } : null,
+                ]}
+              >
+                {row.map((cell, cellIdx) => (
+                  <Text
+                    key={cellIdx}
+                    selectable
+                    style={[
+                      type.body,
+                      styles.tableCell,
+                      { flexBasis: block.widths[cellIdx], textAlign: block.aligns[cellIdx] ?? "left" },
+                      rowIdx === 0 ? styles.bold : null,
+                      cellIdx > 0 ? { borderLeftColor: tokens.border, borderLeftWidth: StyleSheet.hairlineWidth } : null,
+                      { color: tokens.ink },
+                      style,
+                    ]}
+                  >
+                    {renderInline(cell, `${key}-${rowIdx}-${cellIdx}`, tokens)}
+                  </Text>
+                ))}
+              </View>
+            ))}
+          </View>
+        </ScrollView>
       );
     case "paragraph":
     default:
@@ -362,16 +385,21 @@ const styles = StyleSheet.create({
   paragraph: {
     marginVertical: 4,
   },
+  // Columns keep a width that fits their text and grow to fill a wide pane; a table wider than the
+  // pane scrolls sideways instead of crushing its columns.
+  tableScroll: {
+    flexGrow: 1,
+  },
   table: {
     borderWidth: StyleSheet.hairlineWidth,
-    alignSelf: "stretch",
+    flexGrow: 1,
   },
   tableRow: {
     flexDirection: "row",
   },
   tableCell: {
-    flex: 1,
-    minWidth: 0,
+    flexGrow: 1,
+    flexShrink: 0,
     paddingHorizontal: 8,
     paddingVertical: 4,
   },
