@@ -9,7 +9,8 @@ import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
 import { useAuth } from "../../lib/auth";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
-import { useSessions } from "../../lib/queries";
+import { openSession } from "../../lib/nav";
+import { usePrefetchSessionHistory, useSessions } from "../../lib/queries";
 import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useShortcutLabel } from "../../lib/shortcuts";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -55,18 +56,21 @@ function SessionIconButton({
   worktree,
   selected,
   onPress,
+  onPressIn,
 }: {
   title: string;
   state: StatusDotState;
   worktree: boolean;
   selected: boolean;
   onPress: () => void;
+  onPressIn?: () => void;
 }) {
   const tokens = useTokens();
   const glyphColor = state === "idle" ? tokens.ink4 : selected ? tokens.ink : tokens.ink2;
   return (
     <Pressable
       onPress={onPress}
+      onPressIn={onPressIn}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${state}${worktree ? ", worktree" : ""}`}
       style={[styles.sessionButton, selected && { backgroundColor: tokens.bg3 }]}
@@ -94,6 +98,7 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
   const pathname = usePathname();
   const palette = usePalette();
   const { setActive } = useAuth();
+  const prefetchHistory = usePrefetchSessionHistory();
   const { rows } = useScopedFleet();
   const { data: activeRows } = useSessions();
   const waitingCount = useMemo(() => (activeRows ?? []).filter((row) => row.waiting).length, [activeRows]);
@@ -135,8 +140,9 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
               selected={row.id === selectedSessionId}
               onPress={() => {
                 if (serverId) setActive(serverId);
-                router.push(`/session/${row.id}`);
+                openSession(row.id);
               }}
+              onPressIn={() => prefetchHistory(row.id)}
             />
           );
         })}

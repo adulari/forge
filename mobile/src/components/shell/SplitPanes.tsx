@@ -16,7 +16,7 @@ import { ArrowLeftRight, Check, SquareSplitHorizontal, X } from "lucide-react-na
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View, type GestureResponderEvent, type LayoutChangeEvent } from "react-native";
 
-import SessionChat from "../../app/session/[id]/index";
+import { SessionChat } from "../../app/session/[id]/index";
 import { useSessions } from "../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../lib/sessionContext";
 import { useTokens } from "../../theme/ThemeProvider";

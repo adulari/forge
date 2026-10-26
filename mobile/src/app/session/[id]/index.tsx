@@ -58,6 +58,7 @@ import { useTokens } from "../../../theme/ThemeProvider";
 import { space } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
 // T3.3's CardSlot.tsx landed during this task (was a HANDOFF stub) — wired in directly above.
 
@@ -94,10 +95,10 @@ interface PendingSent {
   attachments: SentAttachment[];
 }
 
-export default function SessionChat() {
+export function SessionChat() {
   const tokens = useTokens();
   const toast = useToast();
-  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, draftText, setDraftText, focusComposer } = useSessionCtx();
+  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, getDraftText, setDraftText, focusComposer } = useSessionCtx();
 
   // The chat opts into tool rows so a turn's tool activity renders inline (ToolCallRow),
   // instead of the tool-less stream the fork picker and turn watcher still use.
@@ -134,9 +135,10 @@ export default function SessionChat() {
 
   const onQuote = useCallback((text: string) => {
     const quote = text.split("\n").map((line) => `> ${line}`).join("\n");
+    const draftText = getDraftText();
     setDraftText(draftText ? `${draftText}\n${quote}` : quote);
     focusComposer();
-  }, [draftText, focusComposer, setDraftText]);
+  }, [focusComposer, getDraftText, setDraftText]);
 
   // Edit & resend: the message text REPLACES the draft (unlike quote, which appends).
   const onEditMessage = useCallback((text: string) => {
@@ -977,3 +979,9 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
   },
 });
+
+// Desktop/web: the session layout keeps this segment mounted itself (SegmentKeepAlive), so the
+// route renders nothing there; phones render the screen as the route.
+export default function SessionChatRoute() {
+  return useSegmentsHosted() ? null : <SessionChat />;
+}

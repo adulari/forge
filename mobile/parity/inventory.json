@@ -282,6 +282,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/components/session/SegmentKeepAlive.tsx",
+    "platform": "web",
+    "reason": "desktop/web keep visited session segments mounted behind <Activity>; phones keep one mounted route so the OS can reclaim hidden screens",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/components/shell/QuickComposer.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
@@ -411,6 +417,12 @@
     "file": "mobile/src/lib/incomingShare.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/nav.ts",
+    "platform": "web",
+    "reason": "a wide desktop window replaces the open session instead of stacking it (no Back button there); phones and narrow windows still push",
     "category": "capability"
   },
   {

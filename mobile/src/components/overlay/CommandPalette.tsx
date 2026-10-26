@@ -15,6 +15,7 @@
 // FEATURES.md/T4.3's DecisionPeek uses — sends the one prompt once it's open, then tears the
 // connection down. A 5s timeout guards against a session that never opens.
 import { router, usePathname } from "expo-router";
+import { openSession } from "../../lib/nav";
 import {
   Archive,
   BellDot,
@@ -156,6 +157,8 @@ const GROUP_LABELS: Record<PaletteGroupKey, string> = {
   anywhere: "Anywhere",
   navigation: "Go to",
 };
+// Rows rendered in the commit that opens the palette (the panel shows ~10 at desktop height).
+const FIRST_PAINT_ROWS = 12;
 const GROUP_ORDER: PaletteGroupKey[] = ["sessions", "actions", "anywhere", "navigation"];
 
 // ---------------------------------------------------------------------------
@@ -266,11 +269,19 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
 
   const activeSessionId = useMemo(() => activeSessionIdFromPathname(pathname), [pathname]);
 
+  // First paint renders only what fits on screen; the rest follows on the next tick. Mounting
+  // every row (each a Pressable + ListRow + icons) in the open-keystroke's own commit was
+  // two thirds of the time to a visible palette.
+  const [rowLimit, setRowLimit] = useState(FIRST_PAINT_ROWS);
+
   // Reset search + keyboard selection on every fresh open.
   useEffect(() => {
     if (visible) {
       setQuery("");
       setSelectedIndex(0);
+      setRowLimit(FIRST_PAINT_ROWS);
+      const timer = setTimeout(() => setRowLimit(Number.POSITIVE_INFINITY), 80);
+      return () => clearTimeout(timer);
     }
   }, [visible]);
 
@@ -353,7 +364,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
           trailingInteractive: s.waiting,
           onSelect: () => {
             close();
-            router.push(`/session/${s.id}`);
+            openSession(s.id);
           },
         };
       }),
@@ -617,12 +628,12 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
           onSelect: () => {
             close();
             if (match.running) {
-              router.push(`/session/${match.id}`);
+              openSession(match.id);
               return;
             }
             createSession.mutate(
               { resume: match.id },
-              { onSuccess: (res) => router.push(`/session/${res.id}`) },
+              { onSuccess: (res) => openSession(res.id) },
             );
           },
         };
@@ -641,7 +652,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
         leading: <StatusDot state={state} />,
         onSelect: () => {
           close();
-          router.push(`/session/${s.id}`);
+          openSession(s.id);
         },
       };
     });
@@ -659,7 +670,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
           close();
           createSession.mutate(
             { resume: p.id },
-            { onSuccess: (res) => router.push(`/session/${res.id}`) },
+            { onSuccess: (res) => openSession(res.id) },
           );
         },
       };
@@ -817,6 +828,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
   const searchFailed = isSearchMode && q.length >= 2 && globalSearch.isError;
   const waitingBadge = (sessions ?? []).some((s) => s.waiting);
 
+  let rowBudget = rowLimit;
   const body = (
     <View style={[styles.body, { paddingTop: Math.max(12, insets.top) }]}>
       <View style={styles.searchWrap}>
@@ -844,20 +856,22 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
       >
         {hasResults ? (
           isSearchMode ? (
-            filteredItems.map((item) => (
+            filteredItems.slice(0, rowLimit).map((item) => (
               <ThreadRow key={item.id} item={item} query={q} selected={item.id === selectedId} />
             ))
           ) : (
-            groupedItems.map(({ group, items }) =>
-              items.length > 0 ? (
+            groupedItems.map(({ group, items }) => {
+              const shown = items.slice(0, Math.max(0, rowBudget));
+              rowBudget -= shown.length;
+              return shown.length > 0 ? (
                 <View key={group}>
                   <SectionHeader>{GROUP_LABELS[group]}</SectionHeader>
-                  {items.map((item) => (
+                  {shown.map((item) => (
                     <PaletteRow key={item.id} item={item} selected={item.id === selectedId} />
                   ))}
                 </View>
-              ) : null,
-            )
+              ) : null;
+            })
           )
         ) : isSearching ? (
           <View style={styles.searching}>

@@ -25,6 +25,13 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
+import {
+  KEEP_SEGMENTS_ALIVE,
+  SegmentKeepAlive,
+  SegmentsHostedContext,
+  type KeptSegment,
+  type SegmentScreen,
+} from "../../../components/session/SegmentKeepAlive";
 import { SessionLifecycleSheet } from "../../../components/session/SessionLifecycleSheet";
 import { useWorkbench } from "../../../components/workbench/WorkbenchProvider";
 import { activeWorkbenchSurface } from "../../../components/workbench/model";
@@ -62,6 +69,7 @@ import { useAppShortcut } from "../../../lib/shortcuts";
 import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { useReviewComments } from "../../../lib/reviewComments";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
+import { isSegmentPath, segmentFromPathname, type SegmentValue } from "../../../lib/sessionSegments";
 import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
@@ -69,8 +77,12 @@ import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
-
-type SegmentValue = "chat" | "tasks" | "agents" | "review" | "files" | "terminal" | "replay";
+import { SessionAgents } from "./agents";
+import { SessionFiles } from "./files";
+import { SessionChat } from "./index";
+import { SessionReplayScreen } from "./replay";
+import { Review as SessionReview } from "./review";
+import { SessionTasks } from "./tasks";
 
 // Path suffix appended to `/session/{id}` for each segment ("" = the index/Chat route).
 const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
@@ -83,17 +95,24 @@ const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
   replay: "replay",
 };
 
-function segmentFromPathname(pathname: string): SegmentValue {
-  const last = pathname.split("/").filter(Boolean).pop();
-  if (
-    last === "tasks"
-    || last === "agents"
-    || last === "review"
-    || last === "files"
-    || last === "terminal"
-    || last === "replay"
-  ) return last;
-  return "chat";
+// Module-level so the memoised host below never re-renders with the layout's per-frame churn.
+const SEGMENT_SCREENS: readonly SegmentScreen[] = [
+  { segment: "chat", Component: SessionChat },
+  { segment: "tasks", Component: SessionTasks },
+  { segment: "agents", Component: SessionAgents },
+  { segment: "review", Component: SessionReview },
+  { segment: "files", Component: SessionFiles },
+  { segment: "replay", Component: SessionReplayScreen },
+];
+
+// Sheets mount the first time they open and stay mounted afterwards (so their close animation
+// still plays). A closed Sheet still runs window-dimension, safe-area, reanimated and gesture
+// hooks on every render of the shell, and the shell renders on every WS frame and keystroke:
+// twelve of them cost more than the rest of the header put together.
+function OnFirstOpen({ visible, children }: { visible: boolean; children: React.ReactNode }) {
+  const [opened, setOpened] = useState(visible);
+  if (visible && !opened) setOpened(true);
+  return opened ? <>{children}</> : null;
 }
 
 function SessionShell({ sessionId }: { sessionId: string }) {
@@ -215,6 +234,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   const activeSegment = segmentFromPathname(pathname);
+  // The terminal segment is deliberately not kept alive: hiding it would pause its PTY socket.
+  const keptSegment: KeptSegment | null =
+    isSegmentPath(pathname) && activeSegment !== "terminal" ? activeSegment : null;
 
   const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
@@ -242,7 +264,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const segmentOpacity = useSharedValue(1);
   const segmentY = useSharedValue(0);
   useEffect(() => {
-    if (reduced) { segmentOpacity.value = 1; segmentY.value = 0; return; }
+    if (reduced || KEEP_SEGMENTS_ALIVE) { segmentOpacity.value = 1; segmentY.value = 0; return; }
     segmentOpacity.value = 0;
     segmentY.value = 6;
     segmentOpacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
@@ -468,34 +490,34 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           ) : null}
           </View>
 
-        <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={sendWithFeedback} />
-        <PlanSheet
+        <OnFirstOpen visible={duelVisible}><DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
+        <OnFirstOpen visible={planVisible}><PlanSheet
           visible={planVisible}
           onClose={() => setPlanVisible(false)}
           send={sendWithFeedback}
           plan={snapshot?.plan}
-        />
+        /></OnFirstOpen>
 
-        <ForkSheet visible={forkVisible} onClose={() => setForkVisible(false)} sessionId={sessionId} />
+        <OnFirstOpen visible={forkVisible}><ForkSheet visible={forkVisible} onClose={() => setForkVisible(false)} sessionId={sessionId} /></OnFirstOpen>
 
-        <InitProjectSheet visible={initVisible} onClose={() => setInitVisible(false)} send={sendWithFeedback} />
+        <OnFirstOpen visible={initVisible}><InitProjectSheet visible={initVisible} onClose={() => setInitVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
 
-        <AssaySheet visible={assayVisible} onClose={() => setAssayVisible(false)} send={sendWithFeedback} />
+        <OnFirstOpen visible={assayVisible}><AssaySheet visible={assayVisible} onClose={() => setAssayVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
 
-        <SelfMcpSheet visible={selfMcpVisible} onClose={() => setSelfMcpVisible(false)} send={sendWithFeedback} />
-
-
-        <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={sendWithFeedback} />
+        <OnFirstOpen visible={selfMcpVisible}><SelfMcpSheet visible={selfMcpVisible} onClose={() => setSelfMcpVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
 
 
-        <PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={sendWithFeedback} />
+        <OnFirstOpen visible={checkpointVisible}><CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
 
 
-        <MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={sendWithFeedback} />
+        <OnFirstOpen visible={pullRequestVisible}><PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
 
 
-        <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} />
-        <SessionLifecycleSheet
+        <OnFirstOpen visible={memoryVisible}><MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
+
+
+        <OnFirstOpen visible={latticeVisible}><LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
+        <OnFirstOpen visible={lifecycleVisible}><SessionLifecycleSheet
           target={{
             id: sessionId,
             title,
@@ -505,7 +527,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           }}
           visible={lifecycleVisible}
           onClose={() => setLifecycleVisible(false)}
-        />
+        /></OnFirstOpen>
 
 
         {protocolWarning ? (
@@ -557,9 +579,18 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         <GoalBanner snapshot={snapshot} send={sendWithFeedback} />
       </View>
 
-      <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
-        <Slot />
-      </Animated.View>
+      {KEEP_SEGMENTS_ALIVE ? (
+        <SegmentsHostedContext.Provider value>
+          <SegmentKeepAlive active={keptSegment} screens={SEGMENT_SCREENS} />
+          <View style={keptSegment ? styles.none : styles.flex}>
+            <Slot />
+          </View>
+        </SegmentsHostedContext.Provider>
+      ) : (
+        <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
+          <Slot />
+        </Animated.View>
+      )}
       {/* HANDOFF(T4.1): overlay mirror — reads snapshot.overlay itself, no props. */}
       <OverlayHost />
     </View>
@@ -592,5 +623,6 @@ export default function SessionLayout() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  none: { display: "none" },
   segmentedWrap: { paddingBottom: space.space8 },
 });
