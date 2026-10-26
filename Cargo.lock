@@ -2038,6 +2038,7 @@ dependencies = [
  "forge-agent-lsp",
  "forge-agent-mcp",
  "forge-agent-mesh",
+ "forge-agent-onboarding",
  "forge-agent-provider",
  "forge-agent-skills",
  "forge-agent-store",
@@ -2297,6 +2298,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-agent-onboarding"
+version = "2.23.6"
+dependencies = [
+ "forge-agent-config",
+ "forge-agent-provider",
+ "forge-agent-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
 name = "forge-agent-provider"
 version = "2.23.6"
 dependencies = [
@@ -2397,6 +2412,7 @@ dependencies = [
  "crossterm",
  "forge-agent-config",
  "forge-agent-mesh",
+ "forge-agent-onboarding",
  "forge-agent-types",
  "pulldown-cmark",
  "ratatui",

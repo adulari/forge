@@ -1,0 +1,24 @@
+[package]
+name = "forge-agent-onboarding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Surface-independent first-run onboarding engine for Forge: state, detection, step catalog and action jobs."
+repository.workspace = true
+
+[lib]
+name = "forge_onboarding"
+
+[dependencies]
+forge-config.workspace = true
+forge-provider.workspace = true
+forge-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml = "1.1"
+
+[dev-dependencies]
+forge-config = { workspace = true, features = ["test-secrets"] }
+tempfile = "3"

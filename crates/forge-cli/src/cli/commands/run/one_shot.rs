@@ -78,7 +78,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     }
     // A first-time user's `forge run "hi"` would otherwise dead-end with no provider; offer the
     // guided wizard (no-ops on non-tty / once configured), same as `chat()`.
-    maybe_first_run_setup(mock)?;
+    crate::onboarding::maybe_open(mock)?;
 
     // One-shot slash support: `forge run "/rust <task>"` expands a catalog command/skill exactly
     // like the interactive dispatcher — without this the literal `/rust` reaches the model as

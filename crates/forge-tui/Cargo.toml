@@ -14,6 +14,7 @@ name = "forge_tui"
 forge-config.workspace = true
 forge-types.workspace = true
 forge-mesh.workspace = true
+forge-onboarding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ratatui.workspace = true

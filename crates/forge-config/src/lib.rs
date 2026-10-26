@@ -3187,7 +3187,7 @@ fn accumulate_permission_rules(
 
 /// Replace `path` with `contents` via a synced temp file and rename, so a crash, a full disk or
 /// an interrupt leaves the previous file intact instead of a truncated, unparsable config.
-pub(crate) fn write_atomic(
+pub fn write_atomic(
     path: impl AsRef<std::path::Path>,
     contents: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {

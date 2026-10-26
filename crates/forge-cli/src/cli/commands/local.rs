@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 
 mod auth;
 pub(crate) use auth::{auth, auth_codex_oauth, auth_xai_oauth, clear_auth_exclusion_in};
-mod keybind_preset;
 
 /// Render a whole number of seconds as the coarsest useful unit (`"54m"`, `"3h"`, `"2d"`).
 fn human_secs(secs: i64) -> String {
@@ -19,78 +18,10 @@ fn human_secs(secs: i64) -> String {
     }
 }
 
-/// A human label + free/paid hint for a key-based provider, shown in `forge init`.
+/// A human label + free/paid hint for a key-based provider (the table lives with the onboarding
+/// copy so the setup screens and `forge auth` never disagree).
 pub(crate) fn provider_label(provider: &str) -> &'static str {
-    match provider {
-        "anthropic" => "Anthropic (Claude API) — paid",
-        "openai" => "OpenAI (GPT API) — paid",
-        "gemini" => "Google Gemini — free tier + paid",
-        "xai" => "xAI (Grok) — paid",
-        "xai-oauth" => "xAI (Grok) — SuperGrok/X Premium subscription (OAuth, no API key)",
-        "codex-oauth" => "OpenAI ChatGPT — Plus/Pro subscription (OAuth, no API key)",
-        "deepseek" => "DeepSeek — paid",
-        "openrouter" => "OpenRouter (gateway, many models) — paid + some :free",
-        "groq" => "Groq — free tier (fast)",
-        "opencode_go" => "OpenCode Go — subscription (curated coding models)",
-        "kimi" => "Kimi Code — subscription (K3, Kimi for Coding)",
-        "opencode" => "OpenCode Zen — API credits + free tier",
-        "github_copilot" => "GitHub Models — free inference",
-        "mimo" => "Xiaomi MiMo — free",
-        "minimax" => "MiniMax — free tier",
-        "cohere" => "Cohere — Command A (218B), free trial tier",
-        "bedrock" => "AWS Bedrock — enterprise (Bedrock API key; pin model ids)",
-        "vertex" => "Google Vertex AI — enterprise (needs VERTEX_PROJECT_ID; pin model ids)",
-        "together" => "Together AI — gateway (OSS frontier, metered)",
-        "fireworks" => "Fireworks AI — gateway (fast OSS, metered)",
-        "perplexity" => "Perplexity — Sonar (online + reasoning, metered)",
-        // Custom OpenAI-compatible providers carry their label in the registry.
-        other => forge_config::custom_provider(other)
-            .map(|p| p.label)
-            .unwrap_or("provider"),
-    }
-}
-
-/// The subscription plans a CLI bridge can be backed by: `(human label, stored slug)`. Captured
-/// by `forge init` so the mesh knows the usage headroom (quota-aware routing, L3). The exact
-/// quota numbers aren't asserted here — only which plan the user holds.
-pub(crate) fn bridge_plans(
-    kind: forge_provider::CliKind,
-) -> &'static [(&'static str, &'static str)] {
-    match kind {
-        forge_provider::CliKind::ClaudeCode => &[
-            ("Free", "free"),
-            ("Pro", "pro"),
-            ("Max 5×", "max-5x"),
-            ("Max 20×", "max-20x"),
-            ("API credits / unsure", "unknown"),
-        ],
-        forge_provider::CliKind::Codex => &[
-            ("Plus", "plus"),
-            ("Pro", "pro"),
-            ("Team", "team"),
-            ("Enterprise", "enterprise"),
-            ("API credits / unsure", "unknown"),
-        ],
-        forge_provider::CliKind::Antigravity => &[
-            ("Free", "free"),
-            ("Pro", "pro"),
-            ("Ultra", "ultra"),
-            ("API credits / unsure", "unknown"),
-        ],
-    }
-}
-
-/// Whether the user looks un-onboarded: no provider key, no installed bridge, and no saved
-/// config. The two expensive answers are computed only when they can still matter: a saved config
-/// settles it, and the key scan (a Secret Service round trip per provider on a machine with no
-/// key in the environment, about 200 ms) never runs for it. The caller adds the tty check before
-/// auto-launching `init`.
-pub(crate) fn needs_onboarding_with(
-    config_exists: bool,
-    has_any_key: impl FnOnce() -> bool,
-    any_bridge: impl FnOnce() -> bool,
-) -> bool {
-    !config_exists && !has_any_key() && !any_bridge()
+    forge_onboarding::providers::provider_label(provider)
 }
 
 /// Read one trimmed line from stdin with a prompt (no echo suppression — same as `auth`).
@@ -484,155 +415,6 @@ pub(crate) fn non_interactive_message(invoked_as: &str) -> String {
         "`{invoked_as}` is interactive — run it in a terminal, or run `forge auth <provider>` \
          for unattended setup"
     )
-}
-
-/// `forge init`: interactive first-run setup. Walks the key-based providers (offering to store a
-/// key for each), then each installed CLI bridge (asking which subscription plan backs it), and
-/// writes the plans to the user config. Keys go to the OS keyring, never the config (ADR-0007).
-pub(crate) fn init(invoked_as: &str) -> Result<bool> {
-    use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        anyhow::bail!(non_interactive_message(invoked_as));
-    }
-    let cfg = super::load_config()?;
-    let outcome =
-        forge_tui::init_wizard::run(wizard_input(cfg.permission_mode, cfg.mesh.credit_mode))
-            .context("running the setup wizard")?;
-    if outcome.cancelled {
-        println!("Setup cancelled — run `{invoked_as}` anytime.");
-        return Ok(false);
-    }
-    let path = apply_wizard_outcome(&outcome)?;
-    println!("✓ Setup saved to {}", path.display());
-    println!(
-        "  {} key(s) stored · {} bridge plan(s) recorded.",
-        outcome.keys.len(),
-        outcome.plans.len()
-    );
-    println!("  The mesh routes across these by task tier + cost. Try `forge models`.");
-    Ok(true)
-}
-
-/// `forge setup`: the full guided flow — the provider/plan wizard ([`init`]), the keybinding
-/// preset question, then an optional local-LLM step. Used by `forge setup`, `forge init`, and the first-run prompt.
-pub(crate) fn setup(invoked_as: &str) -> Result<()> {
-    if init(invoked_as)? {
-        keybind_preset::offer_claude_code_keybinds();
-        offer_local_setup();
-    }
-    Ok(())
-}
-
-/// Interactive local-LLM step of `forge setup`: detect the machine, recommend a Gemma model that
-/// fits, and offer to install it (and auto-start it). Best-effort — any failure prints and the
-/// flow continues. Skipped on a machine too small for the smallest model.
-pub(crate) fn offer_local_setup() {
-    let specs = local::detect_specs();
-    let picks = local::recommend(&specs);
-    let Some(&rec) = picks.first() else {
-        return; // nothing fits — don't pester the user
-    };
-    println!("\n⚒ Local LLM (optional)");
-    println!(
-        "  This machine (~{:.0} GB usable) can run {} [{}].",
-        specs.model_memory_gb(),
-        rec.label,
-        rec.ollama_tag
-    );
-    let ans = match prompt_line("  Install it now via Ollama? [Y/n]: ") {
-        Ok(a) => a,
-        Err(_) => return,
-    };
-    if !(ans.is_empty() || ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes")) {
-        println!("  Skipped. Run `forge local install` anytime.");
-        return;
-    }
-    if let Err(e) = local_install(Some(rec.key)) {
-        println!("  ⚠ {e}");
-        return;
-    }
-    // Offer auto-start so the model is ready whenever Forge runs.
-    if let Ok(a) = prompt_line("  Auto-start this model when Forge runs? [y/N]: ") {
-        if a.eq_ignore_ascii_case("y") || a.eq_ignore_ascii_case("yes") {
-            let _ = forge_config::set_config_value(
-                forge_config::ConfigScope::User,
-                "local.autostart",
-                "true",
-            );
-            let _ = forge_config::set_config_value(
-                forge_config::ConfigScope::User,
-                "local.model",
-                rec.ollama_tag,
-            );
-            println!("  ✓ Auto-start enabled ({}).", rec.ollama_tag);
-        }
-    }
-}
-
-/// Build the config-wizard inputs from what Forge knows: key-based model providers, search-API
-/// providers (for `web_search`), and every INSTALLED CLI bridge (with its subscription plans).
-/// Shared by `forge init` and the in-chat `/config` command.
-pub(crate) fn wizard_input(
-    current_permission: forge_types::PermissionMode,
-    current_credit_mode: forge_types::CreditMode,
-) -> forge_tui::WizardInput {
-    let providers = forge_config::known_key_providers()
-        .map(|p| forge_tui::ProviderItem {
-            id: p.to_string(),
-            label: provider_label(p).to_string(),
-            had_key: forge_config::has_api_key(p),
-        })
-        .collect();
-    let search = forge_config::known_search_providers()
-        .map(|p| forge_tui::ProviderItem {
-            id: p.to_string(),
-            label: forge_config::search_provider_label(p).to_string(),
-            had_key: forge_config::has_search_key(p),
-        })
-        .collect();
-    let bridges = forge_provider::CliKind::all()
-        .into_iter()
-        .filter(|k| k.available())
-        .map(|k| forge_tui::BridgeItem {
-            prefix: k.prefix().to_string(),
-            plans: bridge_plans(k)
-                .iter()
-                .map(|(l, s)| (l.to_string(), s.to_string()))
-                .collect(),
-        })
-        .collect();
-    forge_tui::WizardInput {
-        providers,
-        search,
-        bridges,
-        current_permission,
-        current_credit_mode,
-    }
-}
-
-/// Persist a wizard outcome: keys → OS keyring (ADR-0007), plans + settings → user config; then
-/// inject keys into this process's env so a running session picks them up immediately.
-/// Returns the config path. Shared by `forge init` and `/config`.
-pub(crate) fn apply_wizard_outcome(
-    outcome: &forge_tui::WizardOutcome,
-) -> Result<std::path::PathBuf> {
-    for (provider, key) in &outcome.keys {
-        forge_config::store_api_key(provider, key)
-            .with_context(|| format!("storing {provider} key"))?;
-    }
-    // Wizard-supplied keys are credential repairs like any other — un-exclude their providers so
-    // `/config` isn't a second way to fix a key and still be routed around for 24h.
-    if let Ok(store) = open_store() {
-        for (provider, _) in &outcome.keys {
-            clear_auth_exclusion_in(&store, provider);
-        }
-    }
-    let path = forge_config::write_subscriptions(&outcome.plans).context("writing config")?;
-    forge_config::write_settings(outcome.permission, outcome.credit_mode)
-        .context("writing settings")?;
-    forge_config::inject_provider_keys();
-    forge_config::inject_search_keys();
-    Ok(path)
 }
 
 #[cfg(test)]
