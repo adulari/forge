@@ -10,6 +10,7 @@
 
 import { parseNoticesResponse, type NoticesResponse } from "./notices/core";
 import { tFetch, TWebSocket } from "./transport";
+import type { DaemonUpdateInfo } from "./updateBanner";
 
 export class ApiError extends Error {
   status: number;
@@ -30,8 +31,6 @@ export class ApiError extends Error {
 export interface ConfigResponse {
   fields: ConfigField[];
 }
-
-import type { DaemonUpdateInfo } from "./updateBanner";
 
 export interface HostIdentity {
   hostname: string;
