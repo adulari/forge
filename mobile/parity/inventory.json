@@ -120,6 +120,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/UpdateBannerHost.tsx",
+    "platform": "desktop",
+    "reason": "desktop installs or restarts into app and CLI updates in place; web and phones only get a read-only notice that the host CLI is outdated, because nothing can be installed from there",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/cards/PermissionCard.tsx",
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",

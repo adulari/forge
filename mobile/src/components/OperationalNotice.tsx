@@ -7,7 +7,7 @@ import { useAppVersion } from "../lib/appVersion";
 import { assessCompatibility } from "../lib/diagnostics";
 import { useDiagnostics } from "../lib/queries";
 import { PROTOCOL_VERSION } from "../lib/remoteProtocol";
-import { useDesktopUpdateState } from "../lib/updater";
+import { UpdateBannerHost } from "./UpdateBannerHost";
 import { Banner } from "./ds/Banner";
 
 function OperationalBanner(props: React.ComponentProps<typeof Banner>) {
@@ -21,7 +21,6 @@ function OperationalBanner(props: React.ComponentProps<typeof Banner>) {
 export function OperationalNotice() {
   const pathname = usePathname();
   const diagnostics = useDiagnostics();
-  const update = useDesktopUpdateState();
   const appVersion = useAppVersion();
   const compatibility = useMemo(
     () => assessCompatibility(
@@ -68,16 +67,5 @@ export function OperationalNotice() {
       />
     );
   }
-  if (update.phase === "available") {
-    return (
-      <OperationalBanner
-        compact
-        tone="neutral"
-        message={`Available desktop update: Forge ${update.availableVersion} · Installed app: ${appVersion}`}
-        actionLabel="View"
-        onAction={() => router.push("/diagnostics")}
-      />
-    );
-  }
-  return null;
+  return <UpdateBannerHost appVersion={appVersion} />;
 }

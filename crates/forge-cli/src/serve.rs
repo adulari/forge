@@ -943,6 +943,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .merge(crate::serve_dispatch::routes(&base))
         .merge(crate::push_tool::routes(&base))
+        .merge(crate::serve_update::routes(&base))
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/changelog"), get(changelog_page))
         // Git review dock (serve_git.rs) — every route is session-addressed and runs git only in
@@ -1114,6 +1115,8 @@ struct HostIdentity {
     hostname: String,
     version: &'static str,
     protocol: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_available: Option<String>,
 }
 
 async fn identity() -> axum::Json<HostIdentity> {
@@ -1121,6 +1124,7 @@ async fn identity() -> axum::Json<HostIdentity> {
         hostname: crate::anywhere::default_host_name(),
         version: env!("CARGO_PKG_VERSION"),
         protocol: crate::remote::PROTOCOL_VERSION,
+        update_available: crate::update_state::cached_offer(),
     })
 }
 

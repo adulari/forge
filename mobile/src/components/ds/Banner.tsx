@@ -18,6 +18,8 @@ export interface BannerProps {
   actionLabel?: string;
   onAction?: () => void;
   onDismiss?: () => void;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
   /** The "reconnecting" strip: 12pt meta text, no animation. Default false. */
   compact?: boolean;
   visible?: boolean;
@@ -26,7 +28,7 @@ export interface BannerProps {
 
 const SLIDE_PX = 8;
 
-export function Banner({ tone, message, actionLabel, onAction, onDismiss, compact = false, visible = true, style }: BannerProps) {
+export function Banner({ tone, message, actionLabel, onAction, onDismiss, secondaryLabel, onSecondary, compact = false, visible = true, style }: BannerProps) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const translateY = useSharedValue(compact || reduced ? 0 : visible ? 0 : -SLIDE_PX);
@@ -65,8 +67,13 @@ export function Banner({ tone, message, actionLabel, onAction, onDismiss, compac
           <Text style={[type.bodyBold, styles.action, { color: ink }]}>{actionLabel}</Text>
         </Pressable>
       ) : null}
+      {secondaryLabel && onSecondary ? (
+        <Pressable onPress={onSecondary} accessibilityRole="button" accessibilityLabel={secondaryLabel}>
+          <Text style={[type.meta, styles.secondary, { color: ink }]}>{secondaryLabel}</Text>
+        </Pressable>
+      ) : null}
       {onDismiss ? (
-        <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel="Dismiss warning" hitSlop={8}>
+        <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel="Remind me later" hitSlop={8}>
           <Text style={[type.bodyBold, styles.dismiss, { color: ink }]}>×</Text>
         </Pressable>
       ) : null}
@@ -89,5 +96,6 @@ const styles = StyleSheet.create({
   compact: { paddingHorizontal: space.space12, paddingVertical: space.space4 },
   message: { flex: 1 },
   action: { textDecorationLine: "underline" },
+  secondary: { opacity: 0.8 },
   dismiss: { lineHeight: 20 },
 });

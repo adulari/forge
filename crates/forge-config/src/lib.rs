@@ -168,7 +168,7 @@ pub struct Config {
     /// Local-LLM runtime (Ollama): which model to auto-start and whether to start it with Forge.
     #[serde(default)]
     pub local: LocalConfig,
-    /// Startup update check (GitHub releases). On by default; throttled to once a day.
+    /// Startup update check (GitHub releases). On by default; checked at most every 6 hours.
     #[serde(default)]
     pub update: UpdateConfig,
     /// Anonymous product-count telemetry. Enabled by default; no stable identifier or user
@@ -1164,7 +1164,7 @@ fn default_local_endpoint() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateConfig {
     /// Check GitHub releases on startup and notify when a newer version exists. Default: true.
-    /// Throttled to once per day; the env var `FORGE_NO_UPDATE_CHECK=1` also disables it.
+    /// Checked at most every 6 hours, and offered as an in-app card (or a prompt in plain chat); the env var `FORGE_NO_UPDATE_CHECK=1` also disables it.
     #[serde(default = "default_update_check")]
     pub check: bool,
 }

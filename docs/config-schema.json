@@ -222,7 +222,7 @@
     },
     "UpdateConfig": {
       "type": "object",
-      "description": "Startup update check against GitHub releases (throttled to once a day).",
+      "description": "Startup update check against GitHub releases (checked at most every 6 hours).",
       "additionalProperties": true,
       "properties": {
         "enabled": { "type": "boolean", "default": true }

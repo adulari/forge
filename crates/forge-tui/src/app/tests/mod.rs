@@ -23,6 +23,7 @@ mod remote;
 mod state;
 mod transcript;
 mod trust_hint;
+mod update_band;
 mod welcome_narrow;
 
 /// Render the pinned live region at its natural (dynamic) live height — so the sticky task +

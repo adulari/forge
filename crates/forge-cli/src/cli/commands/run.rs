@@ -25,6 +25,7 @@ mod commit_prompt;
 mod dispatch_checks;
 mod exit_hint;
 mod ui_events;
+mod update_flow;
 pub(crate) use autonomous::*;
 pub(crate) use ui_events::INTERRUPTED_NOTE;
 
@@ -401,7 +402,8 @@ pub(crate) async fn run_chat_tui(
     crate::startup_trace::mark("chat config loaded");
     // Fire the update check in the background so it never blocks TUI startup.
     // The notification arrives as a Warning in the TUI instead of blocking on a 3s HTTP call.
-    update_check::maybe_notify_background(&tui_config, tx.clone());
+    let (upd_tx, upd_rx) = std::sync::mpsc::channel::<update_check::UpdateEvent>();
+    update_check::spawn_checker(&tui_config, upd_tx.clone());
 
     // For Picker mode we start a fresh session; the picker fires on the first frame.
     let open_picker_on_start = matches!(resume_mode, ResumeMode::Picker);
@@ -867,6 +869,7 @@ pub(crate) async fn run_chat_tui(
     // conversation isn't rebuilt 16×/sec for no reason.
     let mut dirty = true;
     let mut quit = false;
+    let mut restart_after_exit = false;
     // Drives the input-cursor blink. The cursor stays solid while the user is actively typing and
     // only begins a calm blink after a short idle gap (like Claude Code) — measured from the last
     // input event, so it never flickers mid-keystroke.
@@ -1564,6 +1567,26 @@ pub(crate) async fn run_chat_tui(
                 }
                 dirty = true;
                 continue;
+            }
+
+            // A newer Forge: u/l/s/r go to the update card while it is on screen and the composer
+            // is empty; otherwise they stay ordinary typing.
+            if update_flow::key_goes_to_card(
+                &app,
+                busy,
+                pending.is_none() && pending_question.is_none(),
+            ) {
+                match update_flow::on_key(&mut app, &mut tui, &upd_tx, &mut clipboard, key) {
+                    update_flow::Next::Continue => {
+                        dirty = true;
+                        continue;
+                    }
+                    update_flow::Next::Restart => {
+                        restart_after_exit = true;
+                        quit = true;
+                        break;
+                    }
+                }
             }
 
             // Effort slider is modal while open: ←/→ adjust level, Esc/Enter/Ctrl+R close.
@@ -3809,6 +3832,9 @@ pub(crate) async fn run_chat_tui(
         }
         // Results of background slash commands (`/doctor`, `/diff`, `/mcp reconnect`).
         dirty |= app.drain_deferred();
+        let (update_changed, update_installed) = update_flow::drain(&mut app, &upd_rx);
+        dirty |= update_changed | update_flow::animate(&mut app);
+        upgrade_noted |= update_installed;
 
         // Drain remote-control inputs (a browser sent a prompt / answer / interrupt) and inject
         // them exactly like local keystrokes. We process the whole queue each iteration so a
@@ -5174,7 +5200,7 @@ pub(crate) async fn run_chat_tui(
         }
     }
     forge_tui::perf::flush();
-    let resume_hint = {
+    let (resume_hint, final_session_id) = {
         let (hooks, sid, workspace, hint) = {
             let s = session.lock().await;
             // Save the final view on clean exit so resuming this session restores the screen.
@@ -5196,11 +5222,17 @@ pub(crate) async fn run_chat_tui(
             "prompt_input_exit",
         )
         .await;
-        hint
+        (hint, sid)
     };
     // The terminal is restored when the TUI drops; the hint goes after that so it lands in the
     // scrollback the person is left with, not on the alternate screen that vanishes.
     drop(tui);
+    if restart_after_exit {
+        let resume = resume_hint.is_some().then_some(final_session_id.as_str());
+        if let Err(e) = update_flow::exec_new_build(resume) {
+            eprintln!("could not restart Forge: {e} — start it again by hand");
+        }
+    }
     if let Some(line) = resume_hint {
         println!("{line}");
     }
