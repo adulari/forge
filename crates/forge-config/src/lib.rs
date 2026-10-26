@@ -2013,6 +2013,12 @@ pub struct MeshConfig {
     /// no-op without a cached dataset / API key (falls back to the heuristic).
     #[serde(default = "default_benchmark_ranking")]
     pub benchmark_ranking: bool,
+    /// Fetch the published benchmark mirror (forge.adulari.dev, then GitHub) when no
+    /// Artificial Analysis key is set. Default true. Set false to keep Forge off the network for
+    /// benchmarks: ranking then uses the snapshot bundled with the binary (or your own key). The
+    /// `FORGE_BENCHMARK_MIRROR=0` environment variable does the same without editing config.
+    #[serde(default = "default_benchmark_mirror")]
+    pub benchmark_mirror: bool,
     /// "Max-resolve" mode: run a bounded, evidence-grounded completeness pass before a code-change
     /// turn finishes. CLI bridges re-check every stated requirement. Direct providers run the
     /// additional final-diff and related-production-sibling search only for prompts that explicitly
@@ -2293,6 +2299,10 @@ fn default_benchmark_ranking() -> bool {
     true
 }
 
+fn default_benchmark_mirror() -> bool {
+    true
+}
+
 fn default_verify_completeness() -> bool {
     true
 }
@@ -2339,7 +2349,8 @@ fn default_bridge_turn_token_cap() -> u64 {
 
 /// The Artificial Analysis Data API key (ADR-0011), for benchmark-driven ranking. Read from
 /// `ARTIFICIALANALYSIS_API_KEY` first, then the `artificialanalysis` keyring/file entry. `None`
-/// disables the live fetch (ranking falls back to a cached dataset, then the heuristic).
+/// skips the direct fetch (ranking uses the Forge mirror, then the bundled snapshot, then the
+/// heuristic).
 pub fn benchmark_api_key() -> Option<String> {
     if let Ok(k) = std::env::var("ARTIFICIALANALYSIS_API_KEY") {
         if !k.is_empty() {
@@ -2842,6 +2853,7 @@ impl Default for Config {
                 max_turn_input_tokens: default_max_turn_input_tokens(),
                 subscription_conserve: default_subscription_conserve(),
                 benchmark_ranking: default_benchmark_ranking(),
+                benchmark_mirror: default_benchmark_mirror(),
                 verify_completeness: default_verify_completeness(),
                 nudge_empty_diff: default_nudge_empty_diff(),
                 guard_test_edits: default_guard_test_edits(),

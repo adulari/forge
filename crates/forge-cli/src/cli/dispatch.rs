@@ -337,7 +337,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             json,
             smoke,
         } => mesh_explain(prompt.join(" "), json, smoke).await,
-        Command::Benchmarks { refresh } => benchmarks_cmd(refresh).await,
+        Command::Benchmarks {
+            refresh,
+            export_mirror,
+            previous,
+        } => benchmarks_cmd(refresh, export_mirror, previous).await,
         Command::Local { sub } => local_cmd(sub).await,
         Command::Doctor => {
             let fails = doctor::run().await?;

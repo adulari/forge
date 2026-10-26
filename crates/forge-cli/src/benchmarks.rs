@@ -1,12 +1,20 @@
-//! Fetch + cache measured model performance from the Artificial Analysis Data API (ADR-0011) and
-//! build a [`forge_mesh::BenchmarkScores`] for the mesh to rank on. Network + disk live here (the
-//! binary); `forge-mesh` stays pure. Best-effort throughout: any failure yields `None` and the
-//! mesh falls back to its family-name heuristic.
+//! Measured model performance from Artificial Analysis (ADR-0011), as a
+//! [`forge_mesh::BenchmarkScores`] for the mesh to rank on. Network + disk live here (the binary);
+//! `forge-mesh` stays pure. Sources, in precedence order: the user's own Artificial Analysis key,
+//! the keyless Forge mirror, the snapshot bundled into the binary. Best-effort throughout: when
+//! none yields data the mesh falls back to its family-name heuristic.
 
+mod mirror;
+mod store;
+
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use forge_mesh::BenchmarkScores;
-use serde_json::{json, Value};
+use serde_json::Value;
+
+pub(crate) use mirror::{export as export_mirror, ATTRIBUTION_LINE};
+use store::{load_cache, save_cache, touch, Cache, Entry, Source};
 
 /// Legacy project-local cache path (pre-1.2). Still READ as a fallback so an existing project's
 /// scores aren't lost on upgrade; new writes go to the global path.
@@ -15,10 +23,10 @@ const LEGACY_CACHE_PATH: &str = ".forge/benchmarks.json";
 /// The benchmark cache lives in the GLOBAL data dir (`~/.local/share/forge/benchmarks.json`), not
 /// per-project — AA scores are model-wide, so every project should share one cache and one refresh
 /// (a project-local file re-fetched on every new repo and could go stale independently).
-fn cache_path() -> std::path::PathBuf {
+fn cache_path() -> PathBuf {
     forge_config::data_dir()
         .map(|d| d.join("benchmarks.json"))
-        .unwrap_or_else(|| std::path::PathBuf::from(LEGACY_CACHE_PATH))
+        .unwrap_or_else(|| PathBuf::from(LEGACY_CACHE_PATH))
 }
 /// Safety backstop only: scores move slowly, so we normally DON'T re-fetch — the trigger is a new
 /// catalog model with no rating yet. This long TTL just guarantees the dataset can't go infinitely
@@ -27,9 +35,10 @@ const SAFETY_TTL_SECS: i64 = 30 * 24 * 3600;
 /// A cache holding rows whose coding index AA has not published yet is re-fetched daily, so a
 /// model's real coding score replaces the estimate soon after it lands.
 const PARTIAL_TTL_SECS: i64 = 24 * 3600;
-/// Bumped when the on-disk shape changes meaning. Version 1 wrote the intelligence index into
-/// `coding` for rows without a coding index, so its coding values cannot be trusted.
-const CACHE_SCHEMA: i64 = 2;
+/// The mirror is republished every three hours; clients ask at most this often (a 304 is cheap).
+const MIRROR_TTL_SECS: i64 = 6 * 3600;
+/// A model the cache cannot score, or a failed attempt, is retried at most this often.
+const RETRY_SECS: i64 = 3600;
 const API_URL: &str = "https://artificialanalysis.ai/api/v2/data/llms/models";
 
 fn now() -> i64 {
@@ -146,86 +155,31 @@ fn estimate_coding(intel: f64, rated: &[(f64, f64)]) -> f64 {
     (intel * median).min(ceiling)
 }
 
-fn rows_to_scores(rows: &[Row]) -> BenchmarkScores {
+/// Every row with a coding index: `(name, intelligence, coding, coding_was_estimated)`.
+fn resolve_coding(rows: &[Row]) -> Vec<(String, f64, f64, bool)> {
     let rated: Vec<(f64, f64)> = rows
         .iter()
         .filter_map(|(_, i, c)| c.filter(|_| *i > 0.0).map(|c| (*i, c)))
         .collect();
+    rows.iter()
+        .map(|(name, intel, coding)| match coding {
+            Some(c) => (name.clone(), *intel, *c, false),
+            None => (name.clone(), *intel, estimate_coding(*intel, &rated), true),
+        })
+        .collect()
+}
+
+fn rows_to_scores(rows: &[Row]) -> BenchmarkScores {
     let mut b = BenchmarkScores::new();
-    for (name, intel, coding) in rows {
-        let coding = coding.unwrap_or_else(|| estimate_coding(*intel, &rated));
-        b.insert(name, *intel, coding);
+    for (name, intel, coding, _) in resolve_coding(rows) {
+        b.insert(&name, intel, coding);
     }
     b
 }
 
-/// The persisted cache: scored rows, a negative cache of catalog ids the API had NO rating for
-/// (so an unlisted model — e.g. a local ollama one — doesn't trigger a fetch on every run), and
-/// the fetch age in seconds.
-struct Cache {
-    rows: Vec<Row>,
-    unrated: Vec<String>,
-    age: i64,
-}
-
-fn load_cache() -> Option<Cache> {
-    let body = std::fs::read_to_string(cache_path())
-        .or_else(|_| std::fs::read_to_string(LEGACY_CACHE_PATH))
-        .ok()?;
-    let v: Value = serde_json::from_str(&body).ok()?;
-    let fetched = v.get("fetched_at").and_then(Value::as_i64)?;
-    let current = v.get("schema").and_then(Value::as_i64) == Some(CACHE_SCHEMA);
-    let rows = v
-        .get("models")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|m| {
-            let name = m.get("name")?.as_str()?.to_string();
-            let intel = m.get("intelligence")?.as_f64()?;
-            let coding = m.get("coding").and_then(Value::as_f64);
-            Some((name, intel, coding))
-        })
-        .collect();
-    let unrated = v
-        .get("unrated")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(Cache {
-        rows,
-        unrated,
-        // An old-schema cache is served until the refetch replaces it, but always refetched.
-        age: if current { now() - fetched } else { i64::MAX },
-    })
-}
-
-fn save_cache(rows: &[Row], unrated: &[String]) {
-    let models: Vec<Value> = rows
-        .iter()
-        .map(|(n, i, c)| json!({ "name": n, "intelligence": i, "coding": c }))
-        .collect();
-    let doc = json!({
-        "schema": CACHE_SCHEMA,
-        "fetched_at": now(),
-        "models": models,
-        "unrated": unrated,
-    });
-    let path = cache_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(bytes) = serde_json::to_vec_pretty(&doc) {
-        let _ = std::fs::write(&path, bytes);
-    }
-}
-
-async fn fetch_api(key: &str) -> Option<Vec<Row>> {
+async fn fetch_api(url: &str, key: &str) -> Option<Vec<Row>> {
     let resp = forge_provider::bundled_http_client()
-        .get(API_URL)
+        .get(url)
         .header("x-api-key", key)
         .timeout(Duration::from_secs(15))
         .send()
@@ -240,11 +194,56 @@ async fn fetch_api(key: &str) -> Option<Vec<Row>> {
     (!rows.is_empty()).then_some(rows)
 }
 
+/// Where each source lives. Production values come from [`Endpoints::live`]; tests point them at
+/// a local server and a temp dir.
+struct Endpoints {
+    cache: PathBuf,
+    api_url: String,
+    mirror_urls: Vec<String>,
+    key: Option<String>,
+    mirror_enabled: bool,
+}
+
+impl Endpoints {
+    fn live(mirror_enabled: bool) -> Self {
+        Self {
+            cache: cache_path(),
+            api_url: API_URL.to_string(),
+            mirror_urls: vec![
+                mirror::SITE_URL.to_string(),
+                mirror::RELEASE_URL.to_string(),
+            ],
+            key: forge_config::benchmark_api_key(),
+            mirror_enabled,
+        }
+    }
+}
+
+/// `FORGE_BENCHMARK_MIRROR=0` (or `false`/`off`/`no`) turns the mirror off without editing config.
+fn mirror_env_allows() -> bool {
+    !std::env::var("FORGE_BENCHMARK_MIRROR").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    })
+}
+
+/// Catalog models still unmatched by `scores`, remembered so they don't re-trigger fetches.
+fn unmatched(model_ids: &[String], scores: &BenchmarkScores) -> Vec<String> {
+    model_ids
+        .iter()
+        .filter(|m| scores.source_score_for(m).is_none())
+        .cloned()
+        .collect()
+}
+
 /// Benchmark scores for ranking the given catalog `model_ids`. Incremental + cache-first: cached
-/// scores are kept and reused; the API is hit ONLY when a catalog model has no rating yet (a new
-/// model) — not on every run — plus a 30-day safety refresh and `force`. Models the API doesn't
-/// list are remembered (negative cache) so they don't re-trigger fetches. Disabled when
-/// `mesh.benchmark_ranking` is false; `None` when there's neither cache nor a usable fetch.
+/// scores are reused, and the network is touched only when something needs it (a new catalog
+/// model, an expired TTL, `force`). Source precedence: the user's own key, then the keyless Forge
+/// mirror, then the snapshot bundled into this build. `mesh.benchmark_ranking = false` disables
+/// the whole layer; `mesh.benchmark_mirror = false` (or `FORGE_BENCHMARK_MIRROR=0`) keeps Forge
+/// off the network for benchmarks unless the user supplied their own key.
 pub async fn ensure(
     config: &forge_config::Config,
     model_ids: &[String],
@@ -253,43 +252,141 @@ pub async fn ensure(
     if !config.mesh.benchmark_ranking {
         return None;
     }
-    let cached = load_cache();
+    let endpoints = Endpoints::live(config.mesh.benchmark_mirror && mirror_env_allows());
+    resolve(&endpoints, model_ids, force).await
+}
+
+async fn resolve(ep: &Endpoints, model_ids: &[String], force: bool) -> Option<BenchmarkScores> {
+    let cached = load_cache(&ep.cache);
     let cached_scores = cached.as_ref().map(|c| rows_to_scores(&c.rows));
+    let has_new_model = |c: &Cache| {
+        model_ids.iter().any(|m| {
+            !c.unrated.contains(m)
+                && cached_scores
+                    .as_ref()
+                    .is_none_or(|s| s.source_score_for(m).is_none())
+        })
+    };
+    let may_retry = |c: &Cache| now() - c.checked_at >= RETRY_SECS;
 
-    // Fetch only when something actually needs it: forced, no cache, a stale-beyond-safety cache,
-    // or a catalog model we've neither scored nor already recorded as unrated (i.e. a NEW model).
-    let needs_fetch = force
-        || match &cached {
-            None => true,
-            Some(c) => {
-                c.age > SAFETY_TTL_SECS
-                    || (c.age > PARTIAL_TTL_SECS && c.rows.iter().any(|(_, _, c)| c.is_none()))
-                    || model_ids.iter().any(|m| {
-                        !c.unrated.contains(m)
-                            && cached_scores
-                                .as_ref()
-                                .is_none_or(|s| s.source_score_for(m).is_none())
-                    })
-            }
-        };
-
-    if needs_fetch {
-        if let Some(key) = forge_config::benchmark_api_key() {
-            if let Some(rows) = fetch_api(&key).await {
+    if let Some(key) = ep.key.as_deref() {
+        // Own key: a cache from another source is upgraded once, then the rules are the original
+        // ones (new catalog model, 30-day backstop, daily refresh while coding indices are missing).
+        let needs = force
+            || match &cached {
+                None => true,
+                Some(c) if c.source != Source::OwnKey => may_retry(c),
+                Some(c) => {
+                    c.age > SAFETY_TTL_SECS
+                        || (c.age > PARTIAL_TTL_SECS && c.rows.iter().any(|(_, _, c)| c.is_none()))
+                        || has_new_model(c)
+                }
+            };
+        if needs {
+            if let Some(rows) = fetch_api(&ep.api_url, key).await {
                 let scores = rows_to_scores(&rows);
-                // Record catalog models still unmatched after this fetch, so they don't re-trigger.
-                let unrated: Vec<String> = model_ids
-                    .iter()
-                    .filter(|m| scores.source_score_for(m).is_none())
-                    .cloned()
-                    .collect();
-                save_cache(&rows, &unrated);
+                save_cache(
+                    &ep.cache,
+                    &Entry {
+                        rows: &rows,
+                        unrated: &unmatched(model_ids, &scores),
+                        source: Source::OwnKey,
+                        etag: None,
+                        data_as_of: None,
+                    },
+                );
                 return Some(scores);
+            }
+            if cached.is_some() {
+                touch(&ep.cache, None);
+            }
+        }
+        if cached_scores.is_some() {
+            return cached_scores;
+        }
+    }
+
+    let needs_mirror = ep.mirror_enabled
+        && (force
+            || match &cached {
+                None => true,
+                Some(c) => may_retry(c) && (c.age > MIRROR_TTL_SECS || has_new_model(c)),
+            });
+    if needs_mirror {
+        let etag = cached
+            .as_ref()
+            .filter(|c| c.source == Source::Mirror && !force)
+            .and_then(|c| c.etag.as_ref());
+        match mirror::fetch_mirror(&ep.mirror_urls, etag).await {
+            Some(mirror::Fetched::Fresh { mirror, url, etag }) => {
+                let scores = rows_to_scores(&mirror.rows);
+                save_cache(
+                    &ep.cache,
+                    &Entry {
+                        rows: &mirror.rows,
+                        unrated: &unmatched(model_ids, &scores),
+                        source: Source::Mirror,
+                        etag: etag.as_deref().map(|t| (url.as_str(), t)),
+                        data_as_of: Some(mirror.source_fetched_at),
+                    },
+                );
+                return Some(scores);
+            }
+            Some(mirror::Fetched::NotModified) => {
+                if let Some(scores) = &cached_scores {
+                    touch(&ep.cache, Some(&unmatched(model_ids, scores)));
+                    return cached_scores;
+                }
+            }
+            None => {
+                if cached.is_some() {
+                    touch(&ep.cache, None);
+                }
             }
         }
     }
-    cached_scores
+    if cached_scores.is_some() {
+        return cached_scores;
+    }
+
+    // Nothing cached and nothing reachable: seed the cache from the bundled snapshot so the next
+    // run does not wait on the network again before the retry interval has passed.
+    let snap = mirror::snapshot()?;
+    let scores = rows_to_scores(&snap.rows);
+    save_cache(
+        &ep.cache,
+        &Entry {
+            rows: &snap.rows,
+            unrated: &unmatched(model_ids, &scores),
+            source: Source::Snapshot,
+            etag: None,
+            data_as_of: Some(snap.source_fetched_at),
+        },
+    );
+    Some(scores)
 }
+
+fn fmt_age(secs: i64) -> String {
+    match secs.max(0) {
+        s if s < 90 => "moments".to_string(),
+        s if s < 3600 * 2 => format!("{} min", s / 60),
+        s if s < 3600 * 48 => format!("{} h", s / 3600),
+        s => format!("{} days", s / 86400),
+    }
+}
+
+/// One line for `forge benchmarks`: which source the scores in use came from and how old they are.
+pub(crate) fn provenance_line() -> Option<String> {
+    let c = load_cache(&cache_path())?;
+    Some(format!(
+        "source: {} · data from {} ago",
+        c.source.label(),
+        fmt_age(now() - c.data_as_of)
+    ))
+}
+
+#[cfg(test)]
+mod ensure_tests;
 
 #[cfg(test)]
 mod tests {

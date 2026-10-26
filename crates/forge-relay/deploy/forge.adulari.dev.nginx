@@ -38,6 +38,40 @@ server {
         client_max_body_size 4k;
     }
 
+    # Keyless benchmark scores (ADR-0011). The benchmarks-mirror workflow publishes the document as
+    # an asset of the rolling `benchmarks-data` GitHub release; this location serves it from the
+    # site so clients have a first-party URL. GitHub answers the asset URL with a redirect, which
+    # the named location follows server-side (clients see a plain 200 with an ETag-less or
+    # GitHub-issued body; both work with their conditional requests). Nothing is stored on the
+    # box. If this block is not deployed, clients fall back to the GitHub URL directly.
+    location = /data/benchmarks.json {
+        limit_except GET HEAD { deny all; }
+        resolver 1.1.1.1 9.9.9.9 valid=300s ipv6=off;
+        resolver_timeout 5s;
+        set $benchmarks_origin https://github.com;
+        proxy_pass $benchmarks_origin/adulari/forge/releases/download/benchmarks-data/benchmarks.json;
+        proxy_ssl_server_name on;
+        proxy_set_header Host github.com;
+        proxy_set_header Cookie "";
+        proxy_intercept_errors on;
+        error_page 301 302 303 307 308 = @benchmarks_asset;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
+        expires 15m;
+    }
+
+    location @benchmarks_asset {
+        resolver 1.1.1.1 9.9.9.9 valid=300s ipv6=off;
+        resolver_timeout 5s;
+        set $benchmarks_asset_url $upstream_http_location;
+        proxy_pass $benchmarks_asset_url;
+        proxy_ssl_server_name on;
+        proxy_set_header Cookie "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
+        expires 15m;
+    }
+
     location / {
         try_files $uri $uri/ =404;
     }

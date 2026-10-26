@@ -31,6 +31,10 @@ fn mesh_truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// The data behind every score in the table. Artificial Analysis asks for this credit wherever
+/// its indices surface; the CLI prints the same line (`forge benchmarks`).
+const BENCHMARK_ATTRIBUTION: &str = "Benchmark data: Artificial Analysis (artificialanalysis.ai)";
+
 /// Render `/mesh` as a centered routing inspector. The decision and fallback path lead; the full
 /// ranked candidate list remains below for users who need to inspect the routing mechanics.
 pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
@@ -283,6 +287,13 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             styles::muted(),
         )));
     }
+    rows.push(Line::from(Span::styled(
+        mesh_truncate(
+            &format!("data  {BENCHMARK_ATTRIBUTION}"),
+            inner.width as usize,
+        ),
+        styles::faint(),
+    )));
     // Auto-scroll to keep the cursor row on-screen: stay at the top until the cursor scrolls past
     // the last visible row, then follow it exactly to the bottom edge. Purely a function of
     // `cursor_line` + the viewport height — no state to persist across frames.

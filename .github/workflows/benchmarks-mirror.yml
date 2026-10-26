@@ -1,0 +1,119 @@
+name: benchmarks-mirror
+
+# Keyless benchmark scores for every Forge user (ADR-0011). Clients without their own Artificial
+# Analysis key read the document this workflow publishes; the attribution travels inside it.
+#
+# The transform lives in Rust (`forge benchmarks --export-mirror`, crates/forge-cli/src/benchmarks/
+# mirror.rs, unit-tested) so the published document and the client's parser cannot drift apart.
+#
+# Publishing target: the rolling GitHub release `benchmarks-data`, asset `benchmarks.json`. It is a
+# PRERELEASE and never "latest": the desktop updater, install scripts and `forge update` all read
+# releases/latest, which must keep pointing at the newest real version. The last step fails the
+# run if that ever stops being true.
+#
+# forge.adulari.dev/data/benchmarks.json is served by nginx proxying that asset
+# (crates/forge-relay/deploy/forge.adulari.dev.nginx), so nothing here deploys to the site.
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: benchmarks-mirror
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: benchmarks-data
+  ASSET: benchmarks.json
+
+jobs:
+  publish:
+    name: refresh the published benchmark data
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARTIFICIALANALYSIS_API_KEY: ${{ secrets.ARTIFICIALANALYSIS_API_KEY }}
+    steps:
+      - name: Check the API key secret
+        id: gate
+        run: |
+          if [ -z "$ARTIFICIALANALYSIS_API_KEY" ]; then
+            echo "::notice title=benchmarks-mirror skipped::Repository secret ARTIFICIALANALYSIS_API_KEY is not set. Add it under Settings > Secrets and variables > Actions to start publishing."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: steps.gate.outputs.run == 'true'
+
+      - name: Resolve the pinned toolchain
+        if: steps.gate.outputs.run == 'true'
+        id: toolchain
+        run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        if: steps.gate.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Cache the build
+        if: steps.gate.outputs.run == 'true'
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        with:
+          key: benchmarks-mirror-${{ steps.toolchain.outputs.channel }}
+          add-job-id-key: false
+
+      # A debug build without debuginfo: this binary only runs one subcommand, and a warm cache
+      # makes the 3-hourly run cost about a minute.
+      - name: Build the forge binary
+        if: steps.gate.outputs.run == 'true'
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo build --locked -p forge-agent --bin forge
+
+      - name: Fetch the previously published document
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          mkdir -p previous out
+          gh release download "$RELEASE_TAG" --pattern "$ASSET" --dir previous --clobber \
+            || echo "No previous publish; the shrink check is skipped."
+
+      - name: Fetch, transform and validate
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          args=(--export-mirror "out/$ASSET")
+          if [ -f "previous/$ASSET" ]; then args+=(--previous "previous/$ASSET"); fi
+          target/debug/forge benchmarks "${args[@]}"
+
+      - name: Publish to the rolling release
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --prerelease --latest=false \
+              --title "Benchmark data (rolling)" \
+              --notes "Rolling data release, rewritten every three hours by the benchmarks-mirror workflow. Not a Forge version: do not download this for the app. Benchmark data: Artificial Analysis (https://artificialanalysis.ai)."
+          fi
+          gh release edit "$RELEASE_TAG" --prerelease --latest=false
+          gh release upload "$RELEASE_TAG" "out/$ASSET" --clobber
+
+      - name: Confirm the latest release is still a real version
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          echo "releases/latest is $latest"
+          if [ "$latest" = "$RELEASE_TAG" ]; then
+            echo "::error::$RELEASE_TAG became the latest release; the updater would read it. Fix the release flags now."
+            exit 1
+          fi
+          case "$latest" in
+            v[0-9]*) ;;
+            *) echo "::error::releases/latest is not a version tag"; exit 1 ;;
+          esac

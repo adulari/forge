@@ -433,7 +433,14 @@ pub(crate) async fn models(
 }
 
 /// `forge benchmarks [--refresh]` — show measured model scores + catalog coverage (ADR-0011).
-pub(crate) async fn benchmarks_cmd(refresh: bool) -> Result<()> {
+pub(crate) async fn benchmarks_cmd(
+    refresh: bool,
+    export_mirror: Option<std::path::PathBuf>,
+    previous: Option<std::path::PathBuf>,
+) -> Result<()> {
+    if let Some(path) = export_mirror {
+        return benchmarks::export_mirror(&path, previous.as_deref()).await;
+    }
     forge_config::inject_provider_keys();
     let config = super::load_config()?;
     if !config.mesh.benchmark_ranking {
@@ -449,17 +456,23 @@ pub(crate) async fn benchmarks_cmd(refresh: bool) -> Result<()> {
     let scores = benchmarks::ensure(&config, &models, refresh).await;
     let Some(scores) = scores.filter(|s| !s.is_empty()) else {
         println!(
-            "no benchmark data yet. Set a free Artificial Analysis key to enable real-performance \
-             ranking:\n  export ARTIFICIALANALYSIS_API_KEY=…   (or `forge auth artificialanalysis`)\n\
+            "no benchmark data available (the mirror was unreachable and no snapshot loaded). \
+             Set a free Artificial Analysis key to rank on real performance directly:\n  \
+             export ARTIFICIALANALYSIS_API_KEY=…   (or `forge auth artificialanalysis`)\n\
              then `forge benchmarks --refresh`. Until then the mesh ranks on the family heuristic."
         );
         return Ok(());
     };
     let (covered, total) = cat.benchmark_coverage();
     println!(
-        "{} models scored · {covered}/{total} catalog models matched\n",
+        "{} models scored · {covered}/{total} catalog models matched",
         scores.len()
     );
+    println!("{}", benchmarks::ATTRIBUTION_LINE);
+    if let Some(line) = benchmarks::provenance_line() {
+        println!("{line}");
+    }
+    println!();
     let mut rows: Vec<(String, Option<forge_mesh::BenchScore>)> = cat
         .models()
         .iter()
