@@ -17,6 +17,14 @@ export type AppShortcutAction =
   | "workbench.split"
   | "workbench.terminal"
   | "workbench.gitReview"
+  | "workbench.closePane"
+  | "workbench.maximize"
+  | "workbench.paneNext"
+  | "workbench.panePrev"
+  | "workbench.tasks"
+  | "workbench.agents"
+  | "workbench.plan"
+  | "workbench.files"
   | "session.chat"
   | "session.tasks"
   | "session.agents"
@@ -62,9 +70,17 @@ export const APP_SHORTCUTS: readonly AppShortcutDescriptor[] = [
   { action: "shell.sidebar", label: "Toggle sidebar", description: "Collapse or expand the desktop sidebar.", group: "Workbench", defaultBinding: binding("\\", { mod: true }) },
   { action: "shell.usage", label: "Toggle usage panel", description: "Show or hide the usage dock.", group: "Workbench", defaultBinding: binding("u", { mod: true }) },
   { action: "shell.quickComposer", label: "Quick composer", description: "Open the in-window quick composer.", group: "Workbench", defaultBinding: binding("space", { alt: true }) },
-  { action: "workbench.split", label: "Toggle split pane", description: "Open or close the secondary pane.", group: "Workbench", defaultBinding: binding("d", { mod: true }) },
+  { action: "workbench.split", label: "Split pane", description: "Open another session in a new pane beside this one.", group: "Workbench", defaultBinding: binding("d", { mod: true }) },
   { action: "workbench.terminal", label: "Toggle terminal", description: "Open or close the terminal dock.", group: "Workbench", defaultBinding: binding("j", { mod: true }) },
   { action: "workbench.gitReview", label: "Toggle Git review", description: "Open or close working-tree review.", group: "Workbench", defaultBinding: binding("g", { mod: true }) },
+  { action: "workbench.closePane", label: "Close pane", description: "Close the focused pane, or the last one when only one is split off.", group: "Workbench", defaultBinding: binding("d", { mod: true, shift: true }) },
+  { action: "workbench.maximize", label: "Maximize pane", description: "Show the focused pane alone, or restore the grid.", group: "Workbench", defaultBinding: binding("m", { mod: true, shift: true }) },
+  { action: "workbench.paneNext", label: "Next pane", description: "Move focus to the next pane.", group: "Workbench", defaultBinding: binding("]", { mod: true }) },
+  { action: "workbench.panePrev", label: "Previous pane", description: "Move focus to the previous pane.", group: "Workbench", defaultBinding: binding("[", { mod: true }) },
+  { action: "workbench.tasks", label: "Toggle Tasks", description: "Show or hide the task list of the focused session.", group: "Workbench", defaultBinding: binding("t", { mod: true, shift: true }) },
+  { action: "workbench.agents", label: "Toggle Agents", description: "Show or hide the subagents of the focused session.", group: "Workbench", defaultBinding: binding("a", { mod: true, shift: true }) },
+  { action: "workbench.plan", label: "Toggle Plan", description: "Show or hide the plan of the focused session.", group: "Workbench", defaultBinding: binding("l", { mod: true, shift: true }) },
+  { action: "workbench.files", label: "Toggle Files", description: "Show or hide the workspace file browser.", group: "Workbench", defaultBinding: binding("f", { mod: true, shift: true }) },
   { action: "session.chat", label: "Session: Chat", description: "Switch the current session to Chat.", group: "Session", defaultBinding: binding("c", { alt: true }) },
   { action: "session.tasks", label: "Session: Tasks", description: "Switch the current session to Tasks.", group: "Session", defaultBinding: binding("t", { alt: true }) },
   { action: "session.agents", label: "Session: Agents", description: "Switch the current session to Agents.", group: "Session", defaultBinding: binding("a", { alt: true }) },
@@ -387,6 +403,14 @@ const NATIVE_MENU_ACTIONS: Partial<Record<AppShortcutAction, string>> = {
   "workbench.split": "view:split-pane",
   "workbench.terminal": "view:terminal",
   "workbench.gitReview": "view:git-review",
+  "workbench.closePane": "view:pane-close",
+  "workbench.maximize": "view:pane-maximize",
+  "workbench.paneNext": "view:pane-next",
+  "workbench.panePrev": "view:pane-prev",
+  "workbench.tasks": "view:tasks",
+  "workbench.agents": "view:agents",
+  "workbench.plan": "view:plan",
+  "workbench.files": "view:files",
   "session.interrupt": "session:interrupt",
 };
 

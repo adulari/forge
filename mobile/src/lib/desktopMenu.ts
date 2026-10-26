@@ -72,7 +72,19 @@ export type DesktopMenuId =
   | "view:split-pane"
   | "view:terminal"
   | "view:usage"
-  | "view:notes"
+  | "view:tasks"
+  | "view:agents"
+  | "view:plan"
+  | "view:files"
+  | "view:pane-close"
+  | "view:pane-maximize"
+  | "view:pane-next"
+  | "view:pane-prev"
+  | "view:layout-focus"
+  | "view:layout-side-by-side"
+  | "view:layout-grid"
+  | "view:layout-review"
+  | "view:layout-reset"
   | "view:git-review"
   | "view:browser-preview"
   | "view:appearance:light"
@@ -218,15 +230,26 @@ function runDefault(id: string): void {
     case "session:share-replay":
       unwired(id, "the replay-share builder (ShareSheet)");
       return;
-    // Docked panels being built in parallel (DockHost's registry is `DockKind`-typed and
-    // currently only has "usage"). Each becomes one `useDesktopMenuAction` call in the
-    // component that owns the dock.
+    // Workbench panes, docks and layouts — claimed by `useWorkbenchCommands` inside
+    // RootNavigator, which holds the live workbench. Reaching here means that shell is not
+    // mounted (unpaired, or a compact window), where there is no workbench to act on.
     case "view:split-pane":
     case "view:terminal":
-    case "view:notes":
     case "view:git-review":
     case "view:browser-preview":
-      unwired(id, "the split-pane/dock builder (components/shell/DockHost.tsx)");
+    case "view:tasks":
+    case "view:agents":
+    case "view:plan":
+    case "view:files":
+    case "view:pane-close":
+    case "view:pane-maximize":
+    case "view:pane-next":
+    case "view:pane-prev":
+    case "view:layout-focus":
+    case "view:layout-side-by-side":
+    case "view:layout-grid":
+    case "view:layout-review":
+    case "view:layout-reset":
       return;
     default:
       unwired(id, "nobody");

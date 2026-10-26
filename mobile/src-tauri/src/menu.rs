@@ -57,7 +57,19 @@ pub const VIEW_SIDEBAR: &str = "view:sidebar";
 pub const VIEW_SPLIT_PANE: &str = "view:split-pane";
 pub const VIEW_TERMINAL: &str = "view:terminal";
 pub const VIEW_USAGE: &str = "view:usage";
-pub const VIEW_NOTES: &str = "view:notes";
+pub const VIEW_TASKS: &str = "view:tasks";
+pub const VIEW_AGENTS: &str = "view:agents";
+pub const VIEW_PLAN: &str = "view:plan";
+pub const VIEW_FILES: &str = "view:files";
+pub const VIEW_PANE_CLOSE: &str = "view:pane-close";
+pub const VIEW_PANE_MAXIMIZE: &str = "view:pane-maximize";
+pub const VIEW_PANE_NEXT: &str = "view:pane-next";
+pub const VIEW_PANE_PREV: &str = "view:pane-prev";
+pub const VIEW_LAYOUT_FOCUS: &str = "view:layout-focus";
+pub const VIEW_LAYOUT_SIDE_BY_SIDE: &str = "view:layout-side-by-side";
+pub const VIEW_LAYOUT_GRID: &str = "view:layout-grid";
+pub const VIEW_LAYOUT_REVIEW: &str = "view:layout-review";
+pub const VIEW_LAYOUT_RESET: &str = "view:layout-reset";
 pub const VIEW_GIT_REVIEW: &str = "view:git-review";
 pub const VIEW_BROWSER_PREVIEW: &str = "view:browser-preview";
 pub const VIEW_APPEARANCE_LIGHT: &str = "view:appearance:light";
@@ -93,6 +105,14 @@ fn mutable_accelerator(id: &str) -> bool {
             | VIEW_TERMINAL
             | VIEW_USAGE
             | VIEW_GIT_REVIEW
+            | VIEW_PANE_CLOSE
+            | VIEW_PANE_MAXIMIZE
+            | VIEW_PANE_NEXT
+            | VIEW_PANE_PREV
+            | VIEW_TASKS
+            | VIEW_AGENTS
+            | VIEW_PLAN
+            | VIEW_FILES
     )
 }
 
@@ -282,23 +302,56 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .item(&item(VIEW_APPEARANCE_SYSTEM, "System", None)?)
         .build()?;
 
+    // Layout presets are plain items for the same reason Appearance is: the live layout belongs
+    // to the webview, so a checkmark here could only ever be a guess.
+    let layouts = SubmenuBuilder::new(app, "Layout")
+        .item(&item(VIEW_LAYOUT_FOCUS, "Focus", None)?)
+        .item(&item(VIEW_LAYOUT_SIDE_BY_SIDE, "Side by Side", None)?)
+        .item(&item(VIEW_LAYOUT_GRID, "Grid 2 x 2", None)?)
+        .item(&item(VIEW_LAYOUT_REVIEW, "Review", None)?)
+        .separator()
+        .item(&item(VIEW_LAYOUT_RESET, "Reset Layout", None)?)
+        .build()?;
+
     let view = SubmenuBuilder::new(app, "View")
         .item(&item(
             VIEW_SIDEBAR,
             "Toggle Sidebar",
             Some("CmdOrCtrl+Backslash"),
         )?)
+        .separator()
+        .item(&item(VIEW_SPLIT_PANE, "Split Pane", Some("CmdOrCtrl+D"))?)
         .item(&item(
-            VIEW_SPLIT_PANE,
-            "Split Pane Right",
-            Some("CmdOrCtrl+D"),
+            VIEW_PANE_CLOSE,
+            "Close Pane",
+            Some("CmdOrCtrl+Shift+D"),
         )?)
+        .item(&item(
+            VIEW_PANE_MAXIMIZE,
+            "Maximize Pane",
+            Some("CmdOrCtrl+Shift+M"),
+        )?)
+        .item(&item(
+            VIEW_PANE_NEXT,
+            "Next Pane",
+            Some("CmdOrCtrl+BracketRight"),
+        )?)
+        .item(&item(
+            VIEW_PANE_PREV,
+            "Previous Pane",
+            Some("CmdOrCtrl+BracketLeft"),
+        )?)
+        .separator()
         .item(&item(VIEW_TERMINAL, "Terminal Dock", Some("CmdOrCtrl+J"))?)
         .item(&item(VIEW_USAGE, "Usage Panel", Some("CmdOrCtrl+U"))?)
-        .item(&item(VIEW_NOTES, "Notes", None)?)
+        .item(&item(VIEW_TASKS, "Tasks", Some("CmdOrCtrl+Shift+T"))?)
+        .item(&item(VIEW_AGENTS, "Agents", Some("CmdOrCtrl+Shift+A"))?)
+        .item(&item(VIEW_PLAN, "Plan", Some("CmdOrCtrl+Shift+L"))?)
+        .item(&item(VIEW_FILES, "Files", Some("CmdOrCtrl+Shift+F"))?)
         .item(&item(VIEW_GIT_REVIEW, "Git Review", Some("CmdOrCtrl+G"))?)
         .item(&item(VIEW_BROWSER_PREVIEW, "Browser Preview", None)?)
         .separator()
+        .item(&layouts)
         .item(&appearance)
         .build()?;
 

@@ -294,10 +294,16 @@
     "category": "capability"
   },
   {
-    "file": "mobile/src/components/shell/SplitPanes.tsx",
+    "file": "mobile/src/components/shell/ResizeHandle.tsx",
     "platform": "web/native",
-    "reason": "shared surface contains platform-specific handling",
-    "category": "capability"
+    "reason": "web-only cursor, hover/focus highlight and arrow-key nudging on the desktop drag seams; touch platforms never render this chrome",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/shell/Sidebar.tsx",
+    "platform": "web/native",
+    "reason": "the sidebar's right-click session menu is web/desktop-only (contextmenu has no touch equivalent); the rail itself only renders on the expanded desktop shell",
+    "category": "behavior"
   },
   {
     "file": "mobile/src/components/shell/TerminalDock.tsx",
