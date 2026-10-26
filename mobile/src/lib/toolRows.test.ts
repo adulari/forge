@@ -98,6 +98,26 @@ describe("buildTranscript", () => {
     expect(tool.invocation.result).toBe("hello\n");
   });
 
+  it("pairs parallel calls to one tool with their results in call order, one row per call", () => {
+    // newest-first: three run_code calls were served first, then their three results
+    const rows = [
+      row({ seq: 7, role: "tool", kind: "tool", tool: "run_code", tool_phase: "result", content: "error: third" }),
+      row({ seq: 6, role: "tool", kind: "tool", tool: "run_code", tool_phase: "result", content: "error: second" }),
+      row({ seq: 5, role: "tool", kind: "tool", tool: "run_code", tool_phase: "result", content: "ok first" }),
+      row({ seq: 4, role: "tool", kind: "tool", tool: "run_code", tool_phase: "call", content: '{"code":"c"}' }),
+      row({ seq: 3, role: "tool", kind: "tool", tool: "run_code", tool_phase: "call", content: '{"code":"b"}' }),
+      row({ seq: 2, role: "tool", kind: "tool", tool: "run_code", tool_phase: "call", content: '{"code":"a"}' }),
+      row({ seq: 1, role: "user", kind: "user", content: "go" }),
+    ];
+    const tools = buildTranscript(rows).filter((e) => e.kind === "tool");
+    expect(tools).toHaveLength(3);
+    expect(tools.map((e) => (e.kind === "tool" ? [e.invocation.args, e.invocation.result] : null))).toEqual([
+      ['{"code":"c"}', "error: third"],
+      ['{"code":"b"}', "error: second"],
+      ['{"code":"a"}', "ok first"],
+    ]);
+  });
+
   it("keeps a call whose result never arrived (result null)", () => {
     const rows = [
       row({ seq: 2, role: "tool", kind: "tool", tool: "shell", tool_phase: "call", content: "{}" }),
