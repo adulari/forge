@@ -5,6 +5,10 @@ product surfaces are healthy. It uses no analytics SDK, cookie, advertising iden
 installation identifier, device fingerprint, or person profile. All events use the same constant
 `distinct_id` (`forge-anonymous`), disable GeoIP enrichment, and are stored in PostHog's EU region.
 
+Separately from these counters, Forge can send a scrubbed error report when it crashes or hits an
+internal bug. That is a different mechanism with its own setting (`[reporting] mode`) and contract:
+[docs/features/issue-reporting.md](features/issue-reporting.md).
+
 Disable reporting at any time:
 
 ```toml

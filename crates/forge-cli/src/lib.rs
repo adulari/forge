@@ -29,6 +29,9 @@ mod bench {
 #[path = "cli/browser_args.rs"]
 mod browser_args;
 
+#[path = "cli/report_args.rs"]
+mod report_args;
+
 #[path = "cli/args.rs"]
 mod args;
 

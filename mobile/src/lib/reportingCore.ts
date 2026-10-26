@@ -128,6 +128,24 @@ export function scrubText(input: string, max = MAX_MESSAGE): string {
   return out.length > max ? `${out.slice(0, max - 1)}…` : out;
 }
 
+/**
+ * Drop quoted strings, backtick spans and {...} blobs from an error message: the places where a
+ * prompt, a reply, tool arguments or file contents hide inside error text. Messages only; text a
+ * user typed on purpose keeps its quotes.
+ */
+export function stripContent(input: string): string {
+  let out = String(input ?? "");
+  out = out.replace(/"(?:[^"\\]|\\.)*"/g, "<str>");
+  out = out.replace(/(^|[\s(\[:=,])'[^'\n]*'/g, "$1<str>");
+  out = out.replace(/`[^`]*`/g, "<code>");
+  for (let i = 0; i < 4; i += 1) {
+    const next = out.replace(/\{[^{}]*\}/g, "{..}");
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 /** Free text a user typed on purpose: same scrubbing, longer limit, newlines preserved. */
 export function scrubUserText(input: string, max: number): string {
   return String(input ?? "")
@@ -185,7 +203,9 @@ export function frameNames(stack: string | undefined): string[] {
 export function topLocation(stack: string | undefined): string {
   const [top] = parseStack(stack);
   if (!top) return "";
-  const file = basename(top.file.split("?")[0]);
+  // Bundles are content-hashed (entry-3f9a8b7c6d5e.js): drop the hash so it neither reads as a token
+  // to the scrubber nor changes the problem identity between releases.
+  const file = basename(top.file.split("?")[0]).replace(/[-_.][0-9A-Za-z]{8,}(?=\.m?c?js$)/, "");
   return scrubText(top.line ? `${file}:${top.line}` : file, 160);
 }
 
@@ -278,7 +298,7 @@ export function buildReport(input: BuildInput): Report {
     error_kind: input.kind,
     site,
     location: topLocation(stack),
-    message: scrubText(message, MAX_MESSAGE),
+    message: scrubText(stripContent(message), MAX_MESSAGE),
     frames,
     context: input.context,
     events: input.events.slice(-MAX_EVENTS).map((e) => ({

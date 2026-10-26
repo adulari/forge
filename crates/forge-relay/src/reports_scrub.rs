@@ -129,6 +129,28 @@ pub(crate) fn scrub(text: &str) -> String {
     out
 }
 
+static QUOTED: LazyLock<Regex> = LazyLock::new(|| re(r#""(?:[^"\\]|\\.)*""#));
+static SINGLE_QUOTED: LazyLock<Regex> = LazyLock::new(|| re(r"(^|[\s(\[:=,])'[^'\n]*'"));
+static BACKTICKED: LazyLock<Regex> = LazyLock::new(|| re(r"`[^`]*`"));
+static BLOB: LazyLock<Regex> = LazyLock::new(|| re(r"\{[^{}]*\}"));
+
+/// Drop quoted strings, backtick spans and `{...}` blobs from an error message: the places where a
+/// prompt, a reply, tool arguments or file contents would hide inside error text. Applied to the
+/// `message` field only; text a user typed on purpose keeps its quotes.
+pub(crate) fn strip_content(text: &str) -> String {
+    let mut out = QUOTED.replace_all(text, "<str>").into_owned();
+    out = SINGLE_QUOTED.replace_all(&out, "${1}<str>").into_owned();
+    out = BACKTICKED.replace_all(&out, "<code>").into_owned();
+    for _ in 0..4 {
+        let next = BLOB.replace_all(&out, "{..}").into_owned();
+        if next == out {
+            break;
+        }
+        out = next;
+    }
+    out
+}
+
 /// Scrub and truncate to at most `max` characters.
 pub(crate) fn scrub_to(text: &str, max: usize) -> String {
     let cleaned = scrub(text);
@@ -212,6 +234,15 @@ mod tests {
         let once = scrub("/home/a/b/c.rs token=abcdef123456 https://h.io/p");
         assert_eq!(scrub(&once), once);
         assert_eq!(scrub_to(&"x".repeat(50), 10).chars().count(), 10);
+    }
+
+    #[test]
+    fn messages_lose_quoted_content_and_blobs() {
+        let out = strip_content(
+            r#"Err(Parse("my prompt about the merger")) with `secret_fn()` and {"cmd": "rm -rf /"} but can't stop"#,
+        );
+        assert!(!out.contains("merger") && !out.contains("secret_fn") && !out.contains("rm -rf"));
+        assert!(out.contains("can't stop"), "{out}");
     }
 
     #[test]

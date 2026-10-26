@@ -91,6 +91,8 @@ mod push;
 mod push_tool;
 mod remote;
 mod replay;
+#[path = "cli/report_args.rs"]
+mod report_args;
 mod reporting;
 mod serve;
 mod serve_diagnostics;

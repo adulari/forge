@@ -61,6 +61,16 @@ fn store_incident(error: &StoreError) -> Option<Incident> {
     }
 }
 
+/// Record what the next report should say the session was running on, and that a request began.
+pub(crate) fn note_request(model: &str, temper: &str) {
+    forge_reporting::set_session_context(
+        Some(forge_config::provider_of(model)),
+        Some(model),
+        Some(temper),
+    );
+    forge_reporting::event("model_request", None);
+}
+
 /// Report a turn-ending error if it is a bug. Cheap when reporting is off.
 pub(crate) fn report_turn_error(error: &CoreError) {
     if let Some(incident) = incident_for_turn(error) {

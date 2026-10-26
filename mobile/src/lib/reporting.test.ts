@@ -6,6 +6,8 @@ import {
   classifyError,
   fingerprintOf,
   scrubText,
+  stripContent,
+  topLocation,
   type ReportContext,
 } from "./reportingCore";
 
@@ -197,5 +199,19 @@ describe("sending", () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
     for (let i = 0; i < 5; i += 1) await mod.reportError("react_boundary", new Error(`bug ${i}`), `site${i}`);
     expect(JSON.parse(storage.get("forge.reporting.queue") ?? "[]").length).toBeLessThanOrEqual(20);
+  });
+});
+
+describe("topLocation", () => {
+  it("drops the content hash from a bundle name", () => {
+    expect(topLocation("Error: x\n    at boom (tauri://localhost/assets/entry-3f9a8b7c6d5e.js:1754:9)")).toBe("entry.js:1754");
+  });
+});
+
+describe("stripContent", () => {
+  it("removes quoted strings, code spans and blobs but not apostrophes in prose", () => {
+    const out = stripContent('Parse("my prompt about the merger") in `deploy()` {"cmd": "rm -rf /"} but can\'t stop');
+    expect(out).not.toMatch(/merger|deploy|rm -rf/);
+    expect(out).toContain("can't stop");
   });
 });

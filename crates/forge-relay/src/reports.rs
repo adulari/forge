@@ -5,7 +5,7 @@
 
 use crate::github::{GitHub, Secret};
 use crate::reports_db::{NewReport, ReportsDb};
-use crate::reports_scrub::scrub_to;
+use crate::reports_scrub::{scrub_to, strip_content};
 use crate::AppState;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -385,7 +385,7 @@ fn validate(mut r: Report) -> Result<Report, String> {
 
     r.site = scrub_to(&r.site, 120);
     r.location = scrub_to(&r.location, 160);
-    r.message = scrub_to(&r.message, 300);
+    r.message = scrub_to(&strip_content(&r.message), 300);
     r.frames = r.frames.iter().map(|f| scrub_to(f, 120)).collect();
     r.user_note = opt(&r.user_note, 2000);
     r.last_error = opt(&r.last_error, 1000);

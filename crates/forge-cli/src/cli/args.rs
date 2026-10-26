@@ -662,33 +662,7 @@ pub(crate) enum Command {
     Doctor,
     /// Automatic error reports: see exactly what would be sent, what was sent, switch the mode,
     /// or report a problem yourself. Reports never contain prompts, replies, code, paths or keys.
-    Report {
-        /// Print the most recent report exactly as it would be sent.
-        #[arg(long)]
-        show_last: bool,
-        /// List what has been sent from this machine.
-        #[arg(long)]
-        sent: bool,
-        /// List reports waiting for a decision (ask mode).
-        #[arg(long)]
-        pending: bool,
-        /// Send every report waiting for a decision.
-        #[arg(long)]
-        send_pending: bool,
-        /// Set the mode: auto, ask or off.
-        #[arg(long)]
-        mode: Option<String>,
-        /// Report a problem yourself; a preview is shown before anything is sent.
-        #[arg(long, short = 'm')]
-        message: Option<String>,
-        /// Send a --message report without asking for confirmation.
-        #[arg(long, short = 'y')]
-        yes: bool,
-        /// Raise a deliberate `panic` or `internal` error to verify the reporting pipeline
-        /// end to end (the text comes from --message).
-        #[arg(long, hide = true)]
-        selftest: Option<String>,
-    },
+    Report(crate::report_args::ReportArgs),
     /// Update Forge to the latest release. A standalone binary install (curl/zip) is replaced in
     /// place; Homebrew/cargo installs print the right upgrade command. `--check` only reports.
     Update {

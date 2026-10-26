@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{bail, Context, Result};
 use forge_reporting::{ErrorKind, HostInfo, Incident, ReportingMode, Surface};
 
+use crate::report_args::ReportArgs;
 use crate::update::{detect_install_method, InstallMethod};
 use crate::Command;
 
@@ -211,15 +212,17 @@ pub(crate) fn selftest(kind: &str, text: &str) -> Result<()> {
 }
 
 /// `forge report`.
-pub(crate) fn run(
-    show_last: bool,
-    sent: bool,
-    pending: bool,
-    send_pending: bool,
-    mode: Option<String>,
-    message: Option<String>,
-    yes: bool,
-) -> Result<()> {
+pub(crate) fn run(args: ReportArgs) -> Result<()> {
+    let ReportArgs {
+        show_last,
+        sent,
+        pending,
+        send_pending,
+        mode,
+        message,
+        yes,
+        selftest: _,
+    } = args;
     if let Some(raw) = mode {
         let mode = ReportingMode::parse(&raw)
             .with_context(|| format!("unknown mode `{raw}` (use auto, ask or off)"))?;
