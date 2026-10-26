@@ -32,6 +32,16 @@ grep -n "X.Y.Z" Cargo.toml
 grep -n "<old version>" Cargo.toml # empty
 ```
 
+Refresh the benchmark snapshot that ships inside the binary (it ranks models for a user who is
+offline on first run) from the published mirror, and commit the result with the bump:
+
+```bash
+scripts/refresh-benchmarks-snapshot.sh   # rewrites crates/forge-cli/data/benchmarks-snapshot.json
+```
+
+If the mirror has never been published (the `ARTIFICIALANALYSIS_API_KEY` secret is unset), skip this
+step; the checked-in snapshot is still valid.
+
 ## 3. Changelog
 
 Bump `mobile/src-tauri/tauri.conf.json`'s `version` to `X.Y.Z` in the SAME commit as the workspace

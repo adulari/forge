@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Benchmark-driven ranking now works without an Artificial Analysis key.** Forge reads a published copy of the scores (`https://forge.adulari.dev/data/benchmarks.json`, then the rolling `benchmarks-data` GitHub release), refreshed every three hours by the new `benchmarks-mirror` workflow, which transforms the feed in Rust (`forge benchmarks --export-mirror`), validates it and publishes it. Precedence is your own key, then the mirror (ETag, 6 h TTL, an unrated catalog model re-checks at most hourly), then a snapshot compiled into the binary, then the name heuristic; the cache records which source it came from. Set `mesh.benchmark_mirror = false` or `FORGE_BENCHMARK_MIRROR=0` to keep Forge off the network for this. `forge benchmarks`, the `/mesh` overlay, the Models screen and the README now credit "Benchmark data: Artificial Analysis" (`crates/forge-cli/src/benchmarks.rs`, `crates/forge-cli/src/benchmarks/`, `.github/workflows/benchmarks-mirror.yml`, `scripts/refresh-benchmarks-snapshot.sh`, ADR-0011).
+
 ### Fixed
 
 - **An interrupted compaction no longer leaves "auto-compacting" on screen for good.** Interrupting a turn (Esc, or a queued prompt taking over) while it compacted aborted the task before `CompactionFinished` was sent, and nothing else cleared the band, so it stayed at 95% through every later turn, its timer restarting with each one, while the session went on running tools. Any turn end now clears it (`crates/forge-tui/src/app.rs`).

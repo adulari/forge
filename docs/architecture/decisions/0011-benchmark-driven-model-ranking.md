@@ -1,6 +1,6 @@
 # ADR-0011: Benchmark-driven model ranking
 
-**Date:** 2026-06-18
+**Date:** 2026-06-18 (amended 2026-10-26: keyless mirror and bundled snapshot)
 **Status:** Accepted
 
 ## Context
@@ -26,11 +26,28 @@ Add an optional **benchmark score layer** sourced from the **Artificial Analysis
 HLE, … — a widely-cited 0–100 index) and `artificial_analysis_coding_index`. It covers both
 closed frontier and open models and is refreshed continuously.
 
-- **Fetch + cache:** `forge-cli` fetches once and caches to `.forge/benchmarks.json` with a
-  `fetched_at` stamp; refreshed when older than 7 days (scores move slowly) or via
-  `forge benchmarks --refresh`. Best-effort + background at startup — never blocks a turn.
-  Auth: free key from `ARTIFICIALANALYSIS_API_KEY` env or the `artificialanalysis` keyring entry
-  (`forge auth artificialanalysis`).
+- **Sources, in precedence order** (`crates/forge-cli/src/benchmarks.rs`):
+  1. **Your own key** — `ARTIFICIALANALYSIS_API_KEY` or the `artificialanalysis` keyring entry
+     (`forge auth artificialanalysis`). Fetched directly; cached with `source: own_key`.
+  2. **The Forge mirror** (no key needed) — `https://forge.adulari.dev/data/benchmarks.json`, then
+     `https://github.com/adulari/forge/releases/download/benchmarks-data/benchmarks.json`. A
+     scheduled workflow (`.github/workflows/benchmarks-mirror.yml`, every 3 hours) fetches the feed
+     with a repository secret, transforms it to Forge's own schema (`forge benchmarks
+     --export-mirror`: coding indices Artificial Analysis has not published yet are estimated and
+     flagged `coding_estimated`), validates it (non-empty, 0–100, not shrunk by more than half), and
+     publishes it as an asset of the rolling `benchmarks-data` prerelease. The document carries the
+     attribution block. Requests send `If-None-Match`; the TTL is 6 hours, and a catalog model with
+     no rating triggers a refetch sooner, but never more than once an hour. 10 s timeout.
+  3. **The bundled snapshot** — `crates/forge-cli/data/benchmarks-snapshot.json`, same schema,
+     compiled in with `include_bytes!` and refreshed by the release checklist
+     (`scripts/refresh-benchmarks-snapshot.sh`). Used offline or when the mirror is down; seeded
+     into the cache so a failed fetch is not retried on every run.
+  4. **The family-name heuristic**, when none of the above yields data.
+
+  One cache file, `~/.local/share/forge/benchmarks.json` (schema 2), records the `source`, the
+  mirror ETag, when the data was read from Artificial Analysis (`data_as_of`) and when we last asked
+  (`checked_at`). Adding a key later replaces a mirror or snapshot cache on the next run. Best-effort
+  and never blocks a turn on failure; `forge benchmarks --refresh` forces a fetch.
 - **Mapping:** Artificial Analysis slugs (e.g. `gpt-5-2`, `claude-4-5-sonnet`) → Forge
   `provider::model` ids via a normalizer (lowercase, drop provider prefix, collapse separators,
   extract family + version) plus a small alias map for the CLI bridges
@@ -44,7 +61,13 @@ closed frontier and open models and is refreshed continuously.
   so behaviour degrades gracefully and existing tests (no benchmark data) are unchanged.
 - **Carrier:** `ModelCatalog` holds an optional `BenchmarkScores` (attached at discovery like the
   model list), so `route_score`/`ranked_rows` read it with no new threading through call sites.
-- **Config:** `mesh.benchmark_ranking` (default `true`). With no key/data it's a no-op (heuristic).
+- **Config:** `mesh.benchmark_ranking` (default `true`; `false` disables the layer and makes no
+  request). `mesh.benchmark_mirror` (default `true`; or `FORGE_BENCHMARK_MIRROR=0`) stops the mirror
+  fetch for privacy-minded users: ranking then uses your own key if set, else the bundled snapshot.
+  With no data from any source it's a no-op (heuristic).
+- **Attribution:** every surface that shows the scores (`forge benchmarks`, the `/mesh` overlay, the
+  Models screen, the README, the published document itself) credits "Benchmark data: Artificial
+  Analysis (artificialanalysis.ai)".
 
 ## Rationale
 
@@ -71,8 +94,9 @@ closed frontier and open models and is refreshed continuously.
 
 **Positive:** rankings reflect measured performance; new models are ranked the moment AA lists them
 (no code edit); coding tasks rank on coding ability.
-**Negative:** best results need a (free) API key; an external dependency (mitigated by caching +
-heuristic fallback); slug→id mapping needs maintenance for odd names (mitigated by `forge benchmarks`
+**Negative:** the mirror is a service the maintainers run (mitigated by the bundled snapshot and
+the heuristic); the published copy can be up to ~9 hours behind Artificial Analysis (3 h publish +
+6 h client TTL); an external dependency (mitigated by caching + heuristic fallback); slug→id mapping needs maintenance for odd names (mitigated by `forge benchmarks`
 to inspect coverage).
 **Neutral:** the heuristic `quality_class` stays as the fallback, not removed.
 </content>

@@ -117,6 +117,11 @@ default — that you watch and merge back from the same board. See
 This is the wedge no other terminal agent has. You don't pick a model; you connect providers and let
 Forge pick. Every task is classified into a tier, then routed to the **cheapest model that meets the
 bar** — benchmark-ranked against real Artificial Analysis intelligence + coding scores.
+No key needed: Forge reads a published copy of the scores (refreshed every few hours), falls back to
+a snapshot bundled in the binary when offline, and uses your own free key from
+[artificialanalysis.ai](https://artificialanalysis.ai) instead if you set one. Set
+`mesh.benchmark_mirror = false` (or `FORGE_BENCHMARK_MIRROR=0`) to keep Forge off the network for
+this. Benchmark data: [Artificial Analysis](https://artificialanalysis.ai).
 
 | Tier | Examples | Goes to |
 |------|----------|---------|
