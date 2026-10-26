@@ -30,6 +30,7 @@ pub(crate) fn drain(app: &mut App, rx: &Receiver<UpdateEvent>) -> (bool, bool) {
                 app.update_card.finished(result);
             }
             UpdateEvent::Service(note) => app.update_card.set_service(note),
+            UpdateEvent::Notice(text) => app.note(&text),
         }
     }
     (dirty, installed)
@@ -190,26 +191,7 @@ fn run_in_suspended_terminal(tui: &mut Tui, command: &str) -> Result<(), String>
 /// Replace this process with the new build, resuming `session` when it has history. Only returns
 /// on failure: the caller then just exits and the person starts Forge by hand.
 pub(crate) fn exec_new_build(resume: Option<&str>) -> std::io::Result<()> {
-    let exe = forge_types::self_exe::installed_path();
-    let mut cmd = std::process::Command::new(exe);
-    match resume {
-        Some(id) => {
-            cmd.args(["chat", "--resume", id]);
-        }
-        None => {
-            cmd.args(std::env::args_os().skip(1));
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        Err(cmd.exec())
-    }
-    #[cfg(not(unix))]
-    {
-        let status = cmd.status()?;
-        std::process::exit(status.code().unwrap_or(0));
-    }
+    crate::update_auto::exec_new_build(&crate::update_auto::swap_target(), resume)
 }
 
 #[cfg(test)]

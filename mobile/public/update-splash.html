@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Updating Forge</title>
+<body style="margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#09090B;color:#E7E5E4;font:15px system-ui,sans-serif">
+<div style="font-size:18px;font-weight:600">Updating Forge&hellip;</div>
+<div id="v" style="margin-top:8px;color:#A8A29E">Forge opens when it is done.</div>
+<script>
+  var m = /[?&]v=([0-9A-Za-z.+-]+)/.exec(location.search);
+  if (m) document.getElementById("v").textContent = "Installing " + m[1] + ". Forge opens when it is done.";
+</script>

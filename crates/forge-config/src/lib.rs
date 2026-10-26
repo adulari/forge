@@ -1167,6 +1167,12 @@ pub struct UpdateConfig {
     /// Checked at most every 6 hours, and offered as an in-app card (or a prompt in plain chat); the env var `FORGE_NO_UPDATE_CHECK=1` also disables it.
     #[serde(default = "default_update_check")]
     pub check: bool,
+    /// Install a newer release automatically on an interactive launch: a standalone install
+    /// swaps itself before the TUI opens, Homebrew/Scoop installs upgrade in the background, and
+    /// the `forge serve` daemon updates itself when idle. Default: true. `FORGE_NO_AUTO_UPDATE=1`
+    /// also disables it; `check = false` / `FORGE_NO_UPDATE_CHECK` disable everything.
+    #[serde(default = "default_update_check")]
+    pub auto: bool,
 }
 
 /// `[telemetry]` config block. Forge reports only fixed, anonymous counters; see
@@ -1195,6 +1201,7 @@ impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             check: default_update_check(),
+            auto: default_update_check(),
         }
     }
 }

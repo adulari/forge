@@ -23,6 +23,8 @@ pub enum UpdateEvent {
     Progress(String),
     Finished(Result<String, String>),
     Service(ServiceNote),
+    /// A line for the transcript (an automatic update happened or finished).
+    Notice(String),
 }
 
 /// The card's view of `release` for an install managed by `method`.
@@ -109,10 +111,18 @@ pub async fn maybe_notify(config: &forge_config::Config) {
 /// "remind me later" is honoured at the next launch without waiting on the network), then asks the
 /// network on startup and every interval while the TUI runs. It never blocks startup, never prints
 /// (which would corrupt the TUI), and stops when the TUI's channel is gone.
+///
+/// With automatic updates on, a newer release is installed quietly instead of offered: a
+/// standalone build is staged for the next launch's swap, a Homebrew/Scoop install is upgraded in
+/// the background. Only when that does not apply (or fails) does the card appear.
 pub fn spawn_checker(config: &forge_config::Config, tx: Sender<UpdateEvent>) {
+    if let Some(notice) = crate::update_auto::take_updated_notice() {
+        let _ = tx.send(UpdateEvent::Notice(notice));
+    }
     if disabled(config) {
         return;
     }
+    let auto = crate::update_auto::auto_enabled(config) && crate::update_auto::at_a_terminal();
     tokio::spawn(async move {
         let method = crate::update::detect_install_method();
         let mut announced: Option<String> = None;
@@ -121,8 +131,16 @@ pub fn spawn_checker(config: &forge_config::Config, tx: Sender<UpdateEvent>) {
             if let Some(release) = state.offer(CURRENT) {
                 if announced.as_deref() != Some(release.version.as_str()) {
                     announced = Some(release.version.clone());
-                    let offer = offer_for(release, CURRENT, method);
-                    if tx.send(UpdateEvent::Offer(offer)).is_err() {
+                    let installed = if auto {
+                        install_quietly(method, &release.version).await
+                    } else {
+                        None
+                    };
+                    let event = match installed {
+                        Some(notice) => UpdateEvent::Notice(notice),
+                        None => UpdateEvent::Offer(offer_for(release, CURRENT, method)),
+                    };
+                    if tx.send(event).is_err() {
                         return;
                     }
                 }
@@ -130,6 +148,60 @@ pub fn spawn_checker(config: &forge_config::Config, tx: Sender<UpdateEvent>) {
             tokio::time::sleep(Duration::from_secs(check_interval().max(30))).await;
         }
     });
+}
+
+/// Install `version` without asking, when this install allows it. The notice says it takes over
+/// next launch; `None` means nothing was installed and the card should offer it instead.
+async fn install_quietly(method: InstallMethod, version: &str) -> Option<String> {
+    use crate::update_auto::{plan_launch, LaunchAction, LaunchFacts};
+    let action = plan_launch(&LaunchFacts {
+        interactive: true,
+        auto: true,
+        method,
+        cached_newer: true,
+        staged_newer: false,
+    });
+    match action {
+        LaunchAction::UpdateNow | LaunchAction::StageInBackground | LaunchAction::SwapStaged => {
+            let staged = tokio::task::spawn_blocking(crate::update_auto::stage_latest)
+                .await
+                .ok()?
+                .ok()??;
+            Some(format!(
+                "⚒ Forge {staged} is downloaded — it takes over the next time you start Forge."
+            ))
+        }
+        LaunchAction::UpgradeInBackground(command) => {
+            let ok = tokio::task::spawn_blocking(move || run_quietly(&command))
+                .await
+                .ok()?;
+            ok.then(|| {
+                format!(
+                    "⚒ Forge {version} was installed in the background ({}) — it takes over the next time you start Forge.",
+                    method.wire_name()
+                )
+            })
+        }
+        LaunchAction::Nothing => None,
+    }
+}
+
+/// Run a package manager's upgrade with no terminal attached; true when it exited cleanly.
+fn run_quietly(command: &str) -> bool {
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", command]);
+        c
+    } else {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", command]);
+        c
+    };
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Whether `tag` (e.g. "v0.4.0") is a newer SemVer than `current` ("0.3.0"). Lenient: a malformed

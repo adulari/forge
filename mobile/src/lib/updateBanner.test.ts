@@ -3,7 +3,10 @@ import {
   EMPTY_PREFS,
   REMIND_LATER_MS,
   bannerActionLabel,
+  bannerMessage,
   chooseUpdateBanner,
+  daemonAutoTarget,
+  isLoopbackBase,
   parsePrefs,
   skip,
   snooze,
@@ -76,5 +79,63 @@ describe("chooseUpdateBanner", () => {
       skipped: ["a"],
       snoozedUntil: { a: 5 },
     });
+  });
+});
+
+describe("daemon auto-update", () => {
+  const facts = {
+    isDesktop: true,
+    policy: { check: true, auto: true },
+    baseUrl: "http://127.0.0.1:7420/tok",
+    daemon: { ...daemon, busy_sessions: 0 },
+    attempted: new Set<string>(),
+  };
+
+  it("targets the daemon's latest version when everything lines up", () => {
+    expect(daemonAutoTarget(facts)).toBe("2.1.0");
+  });
+
+  it("waits while any session is busy and never for a daemon that cannot replace itself", () => {
+    expect(daemonAutoTarget({ ...facts, daemon: { ...facts.daemon, busy_sessions: 1 } })).toBeNull();
+    expect(daemonAutoTarget({ ...facts, daemon: { ...facts.daemon, can_self_update: false } })).toBeNull();
+    expect(daemonAutoTarget({ ...facts, daemon: { ...facts.daemon, update_available: false } })).toBeNull();
+  });
+
+  it("leaves a daemon that updates itself alone", () => {
+    const self = { ...facts, daemon: { ...facts.daemon, auto_update: true } };
+    expect(daemonAutoTarget(self)).toBeNull();
+    const banner = chooseUpdateBanner({ ...base, daemon: self.daemon });
+    expect(banner?.kind).toBe("daemon-self-updating");
+    expect(bannerActionLabel(banner!)).toBeUndefined();
+  });
+
+  it("is off when policy forbids it, off the desktop shell, or for a non-loopback daemon", () => {
+    expect(daemonAutoTarget({ ...facts, policy: { check: true, auto: false } })).toBeNull();
+    expect(daemonAutoTarget({ ...facts, policy: { check: false, auto: true } })).toBeNull();
+    expect(daemonAutoTarget({ ...facts, isDesktop: false })).toBeNull();
+    expect(daemonAutoTarget({ ...facts, baseUrl: "https://192.168.1.5:7420/tok" })).toBeNull();
+    expect(daemonAutoTarget({ ...facts, baseUrl: null })).toBeNull();
+  });
+
+  it("tries each version once per app run", () => {
+    expect(daemonAutoTarget({ ...facts, attempted: new Set(["2.1.0"]) })).toBeNull();
+    expect(daemonAutoTarget({ ...facts, daemon: { ...facts.daemon, latest: "v2.2.0" }, attempted: new Set(["2.1.0"]) })).toBe("2.2.0");
+  });
+
+  it("recognises loopback hosts only", () => {
+    expect(isLoopbackBase("http://localhost:7420/t")).toBe(true);
+    expect(isLoopbackBase("http://[::1]:7420/t")).toBe(true);
+    expect(isLoopbackBase("http://example.com/t")).toBe(false);
+    expect(isLoopbackBase("not a url")).toBe(false);
+  });
+
+  it("shows progress and the result as a banner with no required action", () => {
+    const running = chooseUpdateBanner({ ...base, daemonAuto: { phase: "running", version: "2.1.0" } })!;
+    expect(bannerMessage(running, "1")).toBe("Updating Forge (CLI) to 2.1.0...");
+    expect(bannerActionLabel(running)).toBeUndefined();
+    const done = chooseUpdateBanner({ ...base, daemonAuto: { phase: "done", version: "2.1.0", restart: "scheduled" } })!;
+    expect(bannerMessage(done, "1")).toContain("restarts when no session is busy");
+    const failed = chooseUpdateBanner({ ...base, daemonAuto: { phase: "failed", version: "2.1.0" } })!;
+    expect(bannerMessage(failed, "1")).toContain("forge update");
   });
 });

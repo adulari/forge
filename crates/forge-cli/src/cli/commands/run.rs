@@ -402,6 +402,8 @@ pub(crate) async fn run_chat_tui(
     crate::startup_trace::mark("chat config loaded");
     // Fire the update check in the background so it never blocks TUI startup.
     // The notification arrives as a Warning in the TUI instead of blocking on a 3s HTTP call.
+    // A newer standalone build swaps in (and re-executes) before the terminal is taken over.
+    crate::update_auto::on_launch(&tui_config).await;
     let (upd_tx, upd_rx) = std::sync::mpsc::channel::<update_check::UpdateEvent>();
     update_check::spawn_checker(&tui_config, upd_tx.clone());
 

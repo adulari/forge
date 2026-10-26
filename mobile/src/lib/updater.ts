@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import { isTauri } from "./platform";
+import { DEFAULT_POLICY, type DesktopUpdatePolicy } from "./updateBanner";
 
 export type DesktopUpdatePhase =
   | "idle"
@@ -69,6 +70,18 @@ async function canSelfInstall(): Promise<boolean> {
   }
 }
 
+/** What the native shell allows: lookups at all, and installing without asking. */
+export async function getDesktopUpdatePolicy(): Promise<DesktopUpdatePolicy> {
+  if (!isTauri) return DEFAULT_POLICY;
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const policy = await invoke<Partial<DesktopUpdatePolicy>>("desktop_update_policy");
+    return { check: policy.check !== false, auto: policy.auto === true };
+  } catch {
+    return DEFAULT_POLICY;
+  }
+}
+
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
@@ -94,6 +107,10 @@ export function checkDesktopUpdate(): Promise<void> {
   });
   checking = (async () => {
     try {
+      if (!(await getDesktopUpdatePolicy()).check) {
+        publish({ ...snapshot, phase: "idle", message: null });
+        return;
+      }
       const { check } = await import("@tauri-apps/plugin-updater");
       const update = await check();
       const checkedAt = Date.now();
