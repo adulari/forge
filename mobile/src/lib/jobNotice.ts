@@ -72,10 +72,9 @@ export function jobLabel(command: string): string {
   return commandProgram(command) || "job";
 }
 
-/** The command as the expanded row shows it. The daemon cuts a long command short and some wrappers
- * glue `--` to the path before it; both read better with the gap restored. */
+/** The command as the expanded row shows it: exactly as run, one line, home folded to `~`. */
 export function jobCommandText(command: string): string {
-  return friendlyCommand(command).replace(/(\.(?:log|out|txt|sh))--(?=\s)/, "$1 --");
+  return friendlyCommand(command);
 }
 
 const LOG_PATH = /(?:^|[\s>=])(~?\/[^\s'"`>]+?\.(?:log|out))(?![A-Za-z0-9_.])/;

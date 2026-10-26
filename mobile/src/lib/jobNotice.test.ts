@@ -52,9 +52,9 @@ describe("job notice rows", () => {
     expect(jobLabel("")).toBe("job");
   });
 
-  it("shows the command with the home folded and the gap before -- restored", () => {
+  it("shows the command as run, with only the home folded", () => {
     expect(jobCommandText(exec)).toBe(
-      "~/bin/agentlive-exec /mnt/work/agentlive/logs/2026-10-26/f3790cb8eb364e3e.log -- 'cargo test -p forge-core …",
+      "~/bin/agentlive-exec /mnt/work/agentlive/logs/2026-10-26/f3790cb8eb364e3e.log-- 'cargo test -p forge-core …",
     );
   });
 
