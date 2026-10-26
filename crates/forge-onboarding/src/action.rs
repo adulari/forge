@@ -64,7 +64,7 @@ pub enum SecretSlot {
 impl SecretSlot {
     pub fn name(self) -> &'static str {
         match self {
-            SecretSlot::ClaudeOauthToken => crate::detect::CLAUDE_TOKEN_SLOT,
+            SecretSlot::ClaudeOauthToken => forge_config::CLAUDE_OAUTH_TOKEN_SLOT,
             SecretSlot::Brave => "brave",
             SecretSlot::ArtificialAnalysis => "artificialanalysis",
         }
@@ -125,11 +125,12 @@ pub enum Action {
     SetReporting {
         mode: String,
     },
-    /// Run Claude Code's own token flow (terminal).
-    ClaudeSetupToken,
-    /// Sign in to ChatGPT with Forge's own OAuth flow (terminal: opens the browser).
+    /// Connect Claude Code in one action: run `claude setup-token` in a pseudo-terminal, surface
+    /// the sign-in URL, capture the issued token (never shown), store it and check it.
+    ConnectClaude,
+    /// Sign in to ChatGPT with Forge's own OAuth flow, run in a pseudo-terminal.
     CodexOauth,
-    /// Sign in to xAI with Forge's own OAuth flow (terminal).
+    /// Sign in to xAI with Forge's own OAuth flow, run in a pseudo-terminal.
     XaiOauth,
     OllamaInstall,
     OllamaPull {
@@ -188,6 +189,9 @@ impl Cmd {
 pub enum Exec {
     /// Inside the engine.
     InProcess,
+    /// A child run in a pseudo-terminal: its sign-in URL, device code and prompts become job
+    /// events, and a code can be typed back with [`Jobs::send_input`].
+    Pty(Cmd),
     /// A child process whose output streams into the job.
     Child(Cmd),
     /// A child that needs the real terminal (browser hand-off, interactive login, a picker).
@@ -209,7 +213,7 @@ impl Action {
             Action::SetTheme { .. } => "Saving the theme".into(),
             Action::SetLocalModel { .. } => "Saving the local model".into(),
             Action::SetReporting { .. } => "Saving the error report setting".into(),
-            Action::ClaudeSetupToken => "Creating a Claude token".into(),
+            Action::ConnectClaude => "Connecting Claude Code".into(),
             Action::CodexOauth => "Signing in to ChatGPT".into(),
             Action::XaiOauth => "Signing in to xAI".into(),
             Action::OllamaInstall => "Installing Ollama".into(),
@@ -234,9 +238,8 @@ impl Action {
 
     pub fn exec(&self, host: &dyn Host) -> Exec {
         match self {
-            Action::ClaudeSetupToken => Exec::Terminal(Cmd::named("claude", &["setup-token"])),
-            Action::CodexOauth => Exec::Terminal(Cmd::forge(&["auth", "codex-oauth"])),
-            Action::XaiOauth => Exec::Terminal(Cmd::forge(&["auth", "xai-oauth"])),
+            Action::CodexOauth => Exec::Pty(Cmd::forge(&["auth", "codex-oauth"])),
+            Action::XaiOauth => Exec::Pty(Cmd::forge(&["auth", "xai-oauth"])),
             Action::AnywhereSetup => Exec::Terminal(Cmd::forge(&["anywhere", "setup"])),
             Action::ImportMcp => Exec::Terminal(Cmd::forge(&["mcp", "import"])),
             Action::OllamaInstall => match host.ollama_install_argv() {
@@ -305,6 +308,15 @@ impl Jobs {
                 )),
             ),
             Exec::Unavailable(reason) => self.finished(label, Err(reason)),
+            Exec::Pty(cmd) => {
+                let source = match action {
+                    Action::CodexOauth => "codex-oauth",
+                    _ => "xai-oauth",
+                };
+                self.start(label, Vec::new(), move |job| {
+                    crate::flows::oauth_sign_in(job, &host, &cmd, source)
+                })
+            }
             Exec::Child(cmd) => {
                 let program = cmd
                     .program
@@ -376,6 +388,7 @@ fn run_in_process(
         Action::SetReporting { mode } => crate::reporting::set_mode(mode)
             .map(|()| Success::with(format!("Error reports: {mode}."), ActionResult::Changed)),
         Action::StartSearxng => local_actions::start_searxng(job),
+        Action::ConnectClaude => crate::flows::connect_claude(job, host),
         // Every other action is a child process and never reaches here.
         other => Err(format!("{} is not an in-process step.", other.label())),
     }
@@ -440,18 +453,19 @@ mod tests {
 
     #[test]
     fn interactive_actions_hand_the_terminal_over_and_the_rest_run_in_the_engine() {
-        for action in [
-            Action::ClaudeSetupToken,
-            Action::CodexOauth,
-            Action::XaiOauth,
-            Action::AnywhereSetup,
-            Action::ImportMcp,
-        ] {
+        for action in [Action::AnywhereSetup, Action::ImportMcp] {
             assert!(
                 matches!(action.exec(&NoHost), Exec::Terminal(_)),
                 "{action:?}"
             );
         }
+        for action in [Action::CodexOauth, Action::XaiOauth] {
+            assert!(matches!(action.exec(&NoHost), Exec::Pty(_)), "{action:?}");
+        }
+        assert!(matches!(
+            Action::ConnectClaude.exec(&NoHost),
+            Exec::InProcess
+        ));
         assert!(matches!(
             Action::Verify {
                 source: "groq".into()
@@ -516,14 +530,14 @@ mod tests {
     #[test]
     fn a_terminal_action_run_as_a_job_fails_with_the_command_to_run() {
         let jobs = Jobs::new();
-        let id = jobs.run(Action::CodexOauth, Arc::new(NoHost));
+        let id = jobs.run(Action::AnywhereSetup, Arc::new(NoHost));
         wait(&jobs, id);
         let poll = jobs.poll(id, 0).unwrap();
         assert_eq!(poll.state, JobState::Failed);
         let Some(JobEvent::Failed { error, .. }) = poll.events.last() else {
             panic!()
         };
-        assert!(error.contains("forge auth codex-oauth"), "{error}");
+        assert!(error.contains("forge anywhere setup"), "{error}");
     }
 
     #[cfg(unix)]

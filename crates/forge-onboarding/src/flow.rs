@@ -279,11 +279,11 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_machine_opens_onboarding_on_the_model_step() {
+    fn a_fresh_machine_opens_onboarding_on_the_welcome() {
         let _e = env();
         let session = run(open(Surface::Tui, false));
         assert_eq!(session.mode, PlanMode::Resume);
-        assert_eq!(session.plan[session.start_index()].id, StepId::Models);
+        assert_eq!(session.plan[session.start_index()].id, StepId::Welcome);
         assert!(
             state::load().is_some(),
             "the first run writes the state file"

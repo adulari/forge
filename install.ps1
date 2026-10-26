@@ -103,9 +103,17 @@ try {
         $env:Path = "$env:Path;$InstallDir"  # current session, so `forge` works immediately
         Write-Host "install: added $InstallDir to your user PATH (restart other shells to pick it up)"
     }
-    Write-Host 'install: done. Run `forge setup` to get started.'
+    Write-Host 'install: done.'
     $desktop = $env:FORGE_DESKTOP
     if ($desktop -eq '1') { irm "https://raw.githubusercontent.com/$Repo/main/install-desktop.ps1" | iex }
+    # Guided setup (it offers the desktop app itself). FORGE_NO_SETUP=1 skips it.
+    $setupRan = $false
+    if (-not $env:FORGE_NO_SETUP -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+        Write-Host 'install: starting setup (set FORGE_NO_SETUP=1 to skip it)'
+        & $dest setup
+        if ($LASTEXITCODE -eq 0) { $setupRan = $true } else { Write-Host 'install: setup did not finish; run `forge setup` any time' }
+    } else { Write-Host 'install: run `forge setup` to get started.' }
+    if ($setupRan -or $desktop -eq '1' -or $desktop -eq '0') { }
     elseif ($desktop -ne '0' -and [Environment]::UserInteractive) {
         $answer = Read-Host 'Also install the Forge desktop app? [Y/n]'
         if ($answer -notmatch '^(n|no)$') { irm "https://raw.githubusercontent.com/$Repo/main/install-desktop.ps1" | iex }

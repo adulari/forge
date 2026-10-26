@@ -20,28 +20,33 @@
 pub mod action;
 pub mod detect;
 pub mod flow;
+mod flows;
 pub mod host;
 pub mod job;
 mod local_actions;
 pub mod machine;
 mod proc;
 pub mod providers;
+mod pty;
+pub mod recommend;
 mod reporting;
 pub mod state;
 pub mod step;
 pub mod verify;
 
 pub use action::{Action, Cmd, Exec, Exposure, Secret, SecretSlot};
-pub use detect::{detect, detect_with, CLAUDE_TOKEN_SLOT};
+pub use detect::{claude_reconnect_needed, detect, detect_with};
 pub use flow::{
     apply_result, interactive_terminal, start, start_with, Session, Start, DEFERRED_HINT,
     MAX_DEFERRALS, OPT_OUT_ENV,
 };
+pub use forge_config::CLAUDE_OAUTH_TOKEN_SLOT;
 pub use host::{Host, NoHost};
 pub use job::{
     ActionResult, JobEvent, JobHandle, JobId, JobPoll, JobState, Jobs, PromptKind, Success,
 };
 pub use machine::{Login, Machine, ModelSource, SourceKind, SourceState};
+pub use recommend::{recommended, Recommended, DEFAULT_ONLY_STEPS};
 pub use state::{
     gate, load, save, source_counts, state_path, Gate, OnboardingState, StepStatus, Verification,
     VerifyStatus,

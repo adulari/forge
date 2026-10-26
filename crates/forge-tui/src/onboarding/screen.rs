@@ -15,9 +15,11 @@ use forge_onboarding::{
 pub enum Purpose {
     Verify(String),
     StoreKey(String),
-    /// `claude setup-token` ran in the terminal; the token is pasted next.
-    ClaudeTokenFlow,
+    /// The one-action Claude connection (`claude setup-token` in a pseudo-terminal).
+    ConnectClaude,
     StoreClaudeToken,
+    /// Item `n` of the "set up everything recommended" run.
+    Batch(usize),
     OauthSignIn(String),
     LocalInstall(String),
     LocalPull(String),
@@ -42,6 +44,10 @@ pub enum Effect {
     Redetect,
     /// Open a page in the browser.
     OpenUrl(String),
+    /// Type text into a running job that asked for it (a code from the browser).
+    Input { job: JobId, text: String },
+    /// Stop a running job.
+    Cancel(JobId),
     /// Write the onboarding state to disk.
     Persist,
 }
@@ -57,8 +63,13 @@ pub enum Exit {
 /// What a masked entry field is collecting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretTarget {
-    ApiKey { provider: String, replace: bool },
+    ApiKey {
+        provider: String,
+        replace: bool,
+    },
     ClaudeToken,
+    /// A code a running sign-in job is waiting for.
+    JobCode(JobId),
     SearchKey,
     BenchmarkKey,
 }
@@ -112,6 +123,14 @@ pub struct Ui {
     pub import_checked: Vec<bool>,
 }
 
+/// A browser sign-in in progress: what the person has to open, and whether the QR is showing.
+#[derive(Debug, Clone)]
+pub struct SignIn {
+    pub job: JobId,
+    pub url: Option<String>,
+    pub qr: bool,
+}
+
 pub struct Screen {
     pub session: Session,
     pub page: usize,
@@ -126,7 +145,14 @@ pub struct Screen {
     pub ui: Ui,
     /// The host starts a session when the run ends, so the last page says so.
     pub launches_session: bool,
+    pub sign_in: Option<SignIn>,
+    /// The small "Connect Claude Code" card shown at session start instead of the full flow.
+    pub reconnect_card: bool,
+    /// The person asked not to be asked about the card again.
+    pub card_dismissed: bool,
+    pub batch: Option<super::batch::Batch>,
     pub(crate) requested: HashSet<String>,
+    pub(crate) focus_id: Option<String>,
     pub(crate) import_queue: VecDeque<Action>,
 }
 
@@ -147,7 +173,12 @@ impl Screen {
             exit: None,
             ui: Ui::default(),
             launches_session: false,
+            sign_in: None,
+            reconnect_card: false,
+            card_dismissed: false,
+            batch: None,
             requested: HashSet::new(),
+            focus_id: None,
             import_queue: VecDeque::new(),
         };
         screen.init_ui();
@@ -210,6 +241,13 @@ impl Screen {
 
     pub fn machine_updated(&mut self, machine: Machine) -> Vec<Effect> {
         self.session.machine = machine;
+        if self.step() == StepId::Models {
+            if let Some(id) = self.focus_id.clone() {
+                if let Some(index) = self.cards().iter().position(|c| c.id == id) {
+                    self.cursor = index;
+                }
+            }
+        }
         self.session
             .state
             .refresh_required(&self.session.machine, self.session.surface);
@@ -239,7 +277,12 @@ impl Screen {
             match event {
                 JobEvent::Output { line, .. } => self.push_log(line.clone()),
                 JobEvent::Progress { label, .. } => self.push_log(label.clone()),
-                JobEvent::Prompt { message, .. } => self.push_log(message.clone()),
+                JobEvent::Prompt {
+                    prompt, message, ..
+                } => {
+                    self.push_log(message.clone());
+                    self.prompt_arrived(poll.job, prompt);
+                }
                 JobEvent::Done { result: r, .. } => result = Some(r.clone()),
                 JobEvent::Failed { error, .. } => failure = Some(error.clone()),
                 JobEvent::Started { .. } => {}
@@ -249,11 +292,52 @@ impl Screen {
             return Vec::new();
         }
         self.jobs[index].state = poll.state;
+        if self.sign_in.as_ref().is_some_and(|s| s.job == poll.job) {
+            self.sign_in = None;
+            if matches!(
+                self.entry.as_ref().map(|e| &e.target),
+                Some(SecretTarget::JobCode(_))
+            ) {
+                self.entry = None;
+            }
+        }
         let purpose = self.jobs[index].purpose.clone();
         match (result, failure) {
             (Some(result), _) => self.job_succeeded(&purpose, result),
             (None, Some(error)) => self.job_failed(&purpose, &error),
             (None, None) => Vec::new(),
+        }
+    }
+
+    /// A running job needs the person: show the sign-in page, or ask for the code it shows.
+    fn prompt_arrived(&mut self, job: JobId, prompt: &forge_onboarding::PromptKind) {
+        use forge_onboarding::PromptKind;
+        match prompt {
+            PromptKind::OpenUrl { url } | PromptKind::DeviceCode { url, .. } => {
+                let qr = self.sign_in.as_ref().is_some_and(|s| s.qr);
+                self.sign_in = Some(SignIn {
+                    job,
+                    url: Some(url.clone()),
+                    qr,
+                });
+            }
+            PromptKind::Code { label } => {
+                if self.sign_in.is_none() {
+                    self.sign_in = Some(SignIn {
+                        job,
+                        url: None,
+                        qr: false,
+                    });
+                }
+                self.entry = Some(Entry {
+                    target: SecretTarget::JobCode(job),
+                    label: label.clone(),
+                    hint: Some("Paste it here and press Enter. It is not saved or shown.".into()),
+                    url: None,
+                    buf: String::new(),
+                });
+            }
+            PromptKind::Terminal => {}
         }
     }
 
@@ -311,6 +395,28 @@ impl Screen {
             return self.entry_key(key);
         }
         self.notice = None;
+        if let Some(sign_in) = self.sign_in.clone() {
+            match key.code {
+                KeyCode::Char('o') => {
+                    if let Some(url) = sign_in.url {
+                        return vec![Effect::OpenUrl(url)];
+                    }
+                    return Vec::new();
+                }
+                KeyCode::Char('v') => {
+                    if let Some(s) = self.sign_in.as_mut() {
+                        s.qr = !s.qr;
+                    }
+                    return Vec::new();
+                }
+                KeyCode::Esc | KeyCode::Char('c') => return vec![Effect::Cancel(sign_in.job)],
+                KeyCode::Char('q') => return self.leave(),
+                _ => return Vec::new(),
+            }
+        }
+        if self.reconnect_card {
+            return self.card_key(key);
+        }
         match key.code {
             KeyCode::Char('q') => return self.leave(),
             KeyCode::Esc | KeyCode::Char('b') => {
@@ -339,6 +445,31 @@ impl Screen {
         }
     }
 
+    /// Keys of the session-start card: connect now, later, or never ask again.
+    fn card_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        match key.code {
+            KeyCode::Enter => {
+                if self.running(&Purpose::ConnectClaude) {
+                    return Vec::new();
+                }
+                vec![Effect::Run {
+                    action: Action::ConnectClaude,
+                    purpose: Purpose::ConnectClaude,
+                }]
+            }
+            KeyCode::Char('n') => {
+                self.card_dismissed = true;
+                self.exit = Some(Exit::Left);
+                Vec::new()
+            }
+            KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('q') => {
+                self.exit = Some(Exit::Left);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn simple_page_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         match key.code {
             KeyCode::Enter => self.advance(),
@@ -348,7 +479,8 @@ impl Screen {
 
     fn welcome_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         match key.code {
-            KeyCode::Enter => self.advance(),
+            KeyCode::Enter => self.start_batch(),
+            KeyCode::Char('n') | KeyCode::Right => self.advance(),
             KeyCode::Char('f') if self.session.gate().complete => self.finish(),
             _ => Vec::new(),
         }
@@ -366,7 +498,7 @@ impl Screen {
             return "Save".into();
         }
         match self.step() {
-            StepId::Welcome => "Let's go".into(),
+            StepId::Welcome => "Set up everything recommended".into(),
             StepId::Models => self.models_enter_label(),
             StepId::WebSearch => self.search_enter_label(),
             StepId::Import => self.import_enter_label(),

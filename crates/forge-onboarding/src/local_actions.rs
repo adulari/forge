@@ -44,10 +44,7 @@ pub(crate) fn store_key(provider: &str, key: &Secret, replace: bool) -> Result<(
 pub(crate) fn store_secret(slot: SecretSlot, value: &Secret) -> Result<(), String> {
     check_secret(value)?;
     let stored = match slot {
-        SecretSlot::ClaudeOauthToken => {
-            forge_config::secret_store::set(slot.name(), value.expose())
-        }
-        SecretSlot::Brave | SecretSlot::ArtificialAnalysis => {
+        SecretSlot::ClaudeOauthToken | SecretSlot::Brave | SecretSlot::ArtificialAnalysis => {
             forge_config::store_api_key(slot.name(), value.expose())
         }
     };
@@ -294,7 +291,7 @@ mod tests {
         )
         .unwrap();
         assert!(crate::detect::claude_token_stored());
-        forge_config::secret_store::delete(crate::detect::CLAUDE_TOKEN_SLOT).unwrap();
+        forge_config::secret_store::delete(forge_config::CLAUDE_OAUTH_TOKEN_SLOT).unwrap();
         assert!(!crate::detect::claude_token_stored());
 
         store_secret(SecretSlot::Brave, &Secret::new("BSA-test-key")).unwrap();

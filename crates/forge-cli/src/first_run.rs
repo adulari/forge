@@ -36,8 +36,11 @@ pub(crate) fn bare_command() -> Option<Command> {
         if let Ok(config) = forge_config::load() {
             forge_tui::theme::init(&config.tui);
         }
-        if let Err(error) = crate::onboarding::maybe_open(false) {
-            eprintln!("setup could not open: {error:#}");
+        match crate::onboarding::maybe_open(false) {
+            // Onboarding just ran and said where things stand; the static panel would repeat it.
+            Ok(true) if !provider_configured() => return None,
+            Ok(_) => {}
+            Err(error) => eprintln!("setup could not open: {error:#}"),
         }
     }
     let configured = provider_configured();

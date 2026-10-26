@@ -108,6 +108,14 @@ impl Screen {
     }
 
     pub(crate) fn models_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let effects = self.models_key_inner(key);
+        // The list reorders as sources become ready; remember which card the person is on so
+        // the cursor follows it.
+        self.focus_id = self.focused_card().map(|c| c.id);
+        effects
+    }
+
+    fn models_key_inner(&mut self, key: KeyEvent) -> Vec<Effect> {
         let count = self.cards().len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -173,9 +181,12 @@ impl Screen {
     }
 
     fn claude_token_flow(&mut self) -> Vec<Effect> {
-        vec![Effect::Terminal {
-            action: Action::ClaudeSetupToken,
-            purpose: Purpose::ClaudeTokenFlow,
+        if self.running(&Purpose::ConnectClaude) {
+            return Vec::new();
+        }
+        vec![Effect::Run {
+            action: Action::ConnectClaude,
+            purpose: Purpose::ConnectClaude,
         }]
     }
 
@@ -244,7 +255,7 @@ impl Screen {
                 } else {
                     Action::XaiOauth
                 };
-                vec![Effect::Terminal {
+                vec![Effect::Run {
                     action,
                     purpose: Purpose::OauthSignIn(card.id.clone()),
                 }]
@@ -308,6 +319,10 @@ impl Screen {
                     replace,
                 },
                 purpose: Purpose::StoreKey(provider),
+            }],
+            SecretTarget::JobCode(job) => vec![Effect::Input {
+                job,
+                text: secret.expose().to_string(),
             }],
             SecretTarget::ClaudeToken => vec![Effect::Run {
                 action: Action::StoreSecret {

@@ -1,0 +1,8 @@
+post_install() {
+    echo "forge: run 'forge' to finish setup. The first launch opens a short guided onboarding;"
+    echo "forge: 'forge setup' reopens it any time."
+}
+
+post_upgrade() {
+    :
+}

@@ -39,7 +39,11 @@ pub(crate) const TEMPERS: [Temper; 4] = [
     },
 ];
 
-pub(crate) const RECOMMENDED_TEMPER: usize = 1;
+/// The temper Forge starts with when nothing is configured, marked "recommended" in the picker.
+pub(crate) fn recommended_temper() -> usize {
+    let default = forge_config::Config::default().permission_mode.key();
+    TEMPERS.iter().position(|t| t.key == default).unwrap_or(1)
+}
 
 pub(crate) struct Credit {
     pub key: &'static str,

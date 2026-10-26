@@ -3,10 +3,13 @@
 //! same events over HTTP; the engine does not care which.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use crate::action::SecretSlot;
 use crate::state::VerifyStatus;
 
 pub type JobId = u64;
@@ -24,6 +27,9 @@ pub enum PromptKind {
     DeviceCode { url: String, code: String },
     /// The step needs a real terminal; the host suspends its screen and hands it over.
     Terminal,
+    /// The flow is waiting for text the person has (a code shown in the browser). Answer with
+    /// [`Jobs::send_input`]; the text is treated as a secret and never logged.
+    Code { label: String },
 }
 
 /// What a finished job tells the front end beyond its text, so it can update its state without
@@ -39,6 +45,8 @@ pub enum ActionResult {
     },
     /// Something was saved; the machine facts should be read again.
     Changed,
+    /// The flow could not capture a credential by itself; ask the person to paste it.
+    PasteNeeded { slot: SecretSlot },
 }
 
 /// The successful end of a job.
@@ -135,6 +143,9 @@ struct Record {
     events: Vec<JobEvent>,
     /// Events dropped from the front, so cursors stay valid as absolute positions.
     dropped: usize,
+    /// Text for the running job (a pasted code).
+    input: Option<Sender<String>>,
+    cancel: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -154,7 +165,9 @@ pub struct Jobs {
 pub struct JobHandle {
     id: JobId,
     jobs: Jobs,
-    secrets: Arc<Vec<String>>,
+    secrets: Arc<Mutex<Vec<String>>>,
+    input: Arc<Mutex<Receiver<String>>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl JobHandle {
@@ -162,9 +175,33 @@ impl JobHandle {
         self.id
     }
 
+    /// Register a value found while running (a token the child printed) so it is scrubbed from
+    /// every later line, summary and error. Call it before the line that contains the value.
+    pub fn add_secret(&self, secret: impl Into<String>) {
+        self.secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(secret.into());
+    }
+
+    /// Text the front end sent with [`Jobs::send_input`], if any.
+    pub fn try_input(&self) -> Option<String> {
+        self.input.lock().ok()?.try_recv().ok()
+    }
+
+    /// Whether the person asked to stop.
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    fn scrubbed(&self, text: &str) -> String {
+        let secrets = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
+        scrub(text, &secrets)
+    }
+
     /// One line of output. Every secret the action carries is replaced before it is stored.
     pub fn output(&self, line: impl AsRef<str>) {
-        let line = scrub(line.as_ref(), &self.secrets);
+        let line = self.scrubbed(line.as_ref());
         self.jobs
             .push(self.id, JobEvent::Output { job: self.id, line });
     }
@@ -174,7 +211,7 @@ impl JobHandle {
             self.id,
             JobEvent::Progress {
                 job: self.id,
-                label: scrub(&label.into(), &self.secrets),
+                label: self.scrubbed(&label.into()),
                 fraction,
             },
         );
@@ -186,7 +223,7 @@ impl JobHandle {
             JobEvent::Prompt {
                 job: self.id,
                 prompt,
-                message: scrub(&message.into(), &self.secrets),
+                message: self.scrubbed(&message.into()),
             },
         );
     }
@@ -212,6 +249,8 @@ impl Jobs {
         F: FnOnce(&JobHandle) -> Result<Success, String> + Send + 'static,
     {
         let action = action.into();
+        let (tx, rx) = mpsc::channel::<String>();
+        let cancel = Arc::new(AtomicBool::new(false));
         let id = {
             let mut inner = self.lock();
             inner.next_id += 1;
@@ -223,6 +262,8 @@ impl Jobs {
                     state: JobState::Running,
                     events: Vec::new(),
                     dropped: 0,
+                    input: Some(tx),
+                    cancel: cancel.clone(),
                 },
             );
             id
@@ -231,19 +272,21 @@ impl Jobs {
         let handle = JobHandle {
             id,
             jobs: self.clone(),
-            secrets: Arc::new(secrets),
+            secrets: Arc::new(Mutex::new(secrets)),
+            input: Arc::new(Mutex::new(rx)),
+            cancel,
         };
         std::thread::spawn(move || {
             let result = work(&handle);
             let event = match result {
                 Ok(success) => JobEvent::Done {
                     job: handle.id,
-                    summary: scrub(&success.summary, &handle.secrets),
+                    summary: handle.scrubbed(&success.summary),
                     result: success.result,
                 },
                 Err(error) => JobEvent::Failed {
                     job: handle.id,
-                    error: scrub(&error, &handle.secrets),
+                    error: handle.scrubbed(&error),
                 },
             };
             handle.jobs.push(handle.id, event);
@@ -265,6 +308,8 @@ impl Jobs {
                     state: JobState::Running,
                     events: Vec::new(),
                     dropped: 0,
+                    input: None,
+                    cancel: Arc::new(AtomicBool::new(false)),
                 },
             );
             id
@@ -299,6 +344,23 @@ impl Jobs {
             events: record.events[from..].to_vec(),
             next: total,
         })
+    }
+
+    /// Hand text to a running job that asked for it ([`PromptKind::Code`]).
+    pub fn send_input(&self, id: JobId, text: impl Into<String>) -> bool {
+        let inner = self.lock();
+        inner
+            .jobs
+            .get(&id)
+            .and_then(|r| r.input.as_ref())
+            .is_some_and(|tx| tx.send(text.into()).is_ok())
+    }
+
+    /// Ask a running job to stop. Jobs check at their next wait.
+    pub fn cancel(&self, id: JobId) {
+        if let Some(record) = self.lock().jobs.get(&id) {
+            record.cancel.store(true, Ordering::SeqCst);
+        }
     }
 
     pub fn state(&self, id: JobId) -> Option<JobState> {

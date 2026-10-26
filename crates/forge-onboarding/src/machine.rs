@@ -70,6 +70,9 @@ pub struct BridgeFacts {
     pub login: Login,
     /// A dedicated Forge token is stored for this bridge (Claude only).
     pub token_stored: bool,
+    /// The CLI has its own interactive login on this machine (Claude only). The bridge no
+    /// longer shares it, so such a machine needs a one-click reconnect.
+    pub main_login: bool,
 }
 
 /// A subscription Forge signs in to itself, without a CLI.
@@ -276,7 +279,14 @@ impl Machine {
                 match b.login {
                     Login::SignedOut => {
                         card.state = SourceState::NeedsLogin;
-                        card.detail = format!("{}{version} · installed, not signed in", b.name);
+                        card.detail = if b.id == "claude-cli" && b.main_login {
+                            format!(
+                                "Reconnect {} · one click, keeps your main Claude login safe",
+                                b.name
+                            )
+                        } else {
+                            format!("{}{version} · installed, not signed in", b.name)
+                        };
                         login.push(card);
                     }
                     Login::SignedIn | Login::Unknown => {
@@ -401,6 +411,18 @@ impl Machine {
         out
     }
 
+    /// Claude Code is installed and signed in on its own, but Forge has no token of its own for
+    /// it: the "reconnect" case for anyone updating from before the bridge needed one.
+    pub fn claude_needs_reconnect(&self) -> bool {
+        self.bridges.iter().any(|b| {
+            b.id == "claude-cli"
+                && b.installed
+                && b.main_login
+                && !b.token_stored
+                && b.login != Login::SignedIn
+        })
+    }
+
     /// Cards that are usable right now.
     pub fn ready_sources(&self) -> Vec<ModelSource> {
         self.model_sources()
@@ -428,6 +450,7 @@ mod tests {
             version: installed.then(|| "2.1.4".to_string()),
             login,
             token_stored: false,
+            main_login: false,
         }
     }
 

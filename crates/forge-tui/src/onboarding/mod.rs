@@ -4,19 +4,26 @@
 //! everything that does (jobs, browser, terminal hand-off, re-detection) is an [`Effect`] the
 //! host carries out. The host also owns the terminal; [`terminal`] has the pieces it needs.
 
+mod batch;
 mod models;
 mod pages;
 mod plumbing;
+mod qr;
 mod screen;
 mod text;
 mod view;
+mod view_flows;
+mod view_models;
 mod view_pages;
 
 #[cfg(test)]
 mod tests;
 
+pub use batch::{Batch, BatchItem, BatchStatus};
 pub use models::CardStatus;
-pub use screen::{Effect, Entry, Exit, Notice, NoticeKind, Purpose, Screen, SecretTarget, Tracked};
+pub use screen::{
+    Effect, Entry, Exit, Notice, NoticeKind, Purpose, Screen, SecretTarget, SignIn, Tracked,
+};
 pub use view::{render, RAIL_MIN_WIDTH};
 
 /// Terminal lifecycle for a full-screen onboarding run.

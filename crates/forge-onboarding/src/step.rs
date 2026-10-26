@@ -284,10 +284,13 @@ pub fn satisfied(id: StepId, machine: &Machine, state: &OnboardingState, surface
     match id {
         StepId::InstallCli => machine.forge.installed,
         StepId::Welcome | StepId::Done => false,
-        StepId::Models => crate::state::gate(state, machine, surface)
-            .missing
-            .iter()
-            .all(|m| *m != StepId::Models),
+        StepId::Models => {
+            !machine.claude_needs_reconnect()
+                && crate::state::gate(state, machine, surface)
+                    .missing
+                    .iter()
+                    .all(|m| *m != StepId::Models)
+        }
         StepId::Behavior => false,
         StepId::WebSearch => machine.search.brave_key || machine.search.searxng_running,
         StepId::Benchmarks => false,
@@ -334,6 +337,14 @@ pub fn plan(
 /// the first step still pending, else the last (the summary). A full run always starts at 0.
 pub fn start_index(plan: &[PlanStep], mode: PlanMode) -> usize {
     if mode == PlanMode::Full {
+        return 0;
+    }
+    // A first run opens on the welcome: what was found, and the one-key setup. A run picked back
+    // up after leaving (the welcome was passed) goes to the first step still open.
+    if plan
+        .first()
+        .is_some_and(|s| s.id == StepId::Welcome && s.status == StepStatus::Pending)
+    {
         return 0;
     }
     plan.iter()
@@ -409,10 +420,13 @@ mod tests {
     }
 
     #[test]
-    fn a_resume_run_opens_on_the_first_open_required_step_and_a_full_run_on_the_welcome() {
+    fn a_first_run_opens_on_the_welcome_and_a_resumed_one_on_the_first_open_required_step() {
         let mut machine = Machine::default();
         machine.forge.installed = true;
-        let state = OnboardingState::new();
+        let mut state = OnboardingState::new();
+        let p = plan(&state, &machine, Surface::Tui, PlanMode::Resume);
+        assert_eq!(p[start_index(&p, PlanMode::Resume)].id, StepId::Welcome);
+        state.mark_done(StepId::Welcome);
         let p = plan(&state, &machine, Surface::Tui, PlanMode::Resume);
         assert_eq!(p[start_index(&p, PlanMode::Resume)].id, StepId::Models);
         let full = plan(&state, &machine, Surface::Tui, PlanMode::Full);

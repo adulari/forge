@@ -31,7 +31,7 @@ pub(crate) fn setup(invoked_as: &str) -> Result<()> {
     let host: Arc<dyn Host> = Arc::new(CliHost);
     match start(host, Surface::Tui, true) {
         Start::Run(session) => {
-            let outcome = runner::run(*session, false)?;
+            let outcome = runner::run(*session, false, false)?;
             print_closing(&outcome, true);
         }
         Start::Quiet | Start::Hint(_) => {}
@@ -42,18 +42,70 @@ pub(crate) fn setup(invoked_as: &str) -> Result<()> {
 /// The automatic trigger, for every entry point that is about to start a session. A no-op off a
 /// terminal, under `--mock`, with `FORGE_NO_SETUP`, once it ran in this process, and whenever
 /// the state file says everything is current.
-pub(crate) fn maybe_open(mock: bool) -> Result<()> {
+pub(crate) fn maybe_open(mock: bool) -> Result<bool> {
     if mock || AUTO_ATTEMPTED.swap(true, Ordering::SeqCst) {
-        return Ok(());
+        return Ok(false);
     }
     let host: Arc<dyn Host> = Arc::new(CliHost);
     match start(host, Surface::Tui, false) {
         Start::Run(session) => {
-            let outcome = runner::run(*session, true)?;
+            let outcome = runner::run(*session, true, false)?;
             print_closing(&outcome, false);
+            return Ok(true);
         }
-        Start::Hint(text) => eprintln!("{text}"),
-        Start::Quiet => {}
+        Start::Hint(text) => {
+            eprintln!("{text}");
+            reconnect_card()?;
+        }
+        Start::Quiet => reconnect_card()?,
+    }
+    Ok(false)
+}
+
+/// The notice marker that records "don't ask again" for the session-start card.
+const CARD_DISMISSED: &str = "claude-reconnect-card-dismissed";
+
+/// Whether the session-start "Connect Claude Code" card is due. Pure so the rule is testable:
+/// a person is at the terminal, nothing opted out, they did not dismiss it, and Claude Code is
+/// installed with its own login but no token for Forge.
+pub(crate) fn card_due(interactive: bool, opted_out: bool, dismissed: bool, needed: bool) -> bool {
+    interactive && !opted_out && !dismissed && needed
+}
+
+/// Existing users whose Claude bridge now needs a token get an actionable card the next time a
+/// session starts, outside the once-per-release onboarding run: Enter runs the whole connection.
+fn reconnect_card() -> Result<()> {
+    let opted_out = std::env::var_os(forge_onboarding::OPT_OUT_ENV).is_some_and(|v| !v.is_empty());
+    if !card_due(
+        forge_onboarding::interactive_terminal(),
+        opted_out,
+        forge_config::install_notice_seen(CARD_DISMISSED),
+        forge_onboarding::claude_reconnect_needed(),
+    ) {
+        return Ok(());
+    }
+    let host: Arc<dyn Host> = Arc::new(CliHost);
+    let machine = forge_onboarding::detect(host);
+    let state = forge_onboarding::load().unwrap_or_default();
+    let def = forge_onboarding::StepId::Models.def();
+    let session = forge_onboarding::Session {
+        surface: Surface::Tui,
+        mode: forge_onboarding::PlanMode::Resume,
+        plan: vec![forge_onboarding::PlanStep {
+            id: def.id,
+            title: def.title.to_string(),
+            summary: def.summary.to_string(),
+            required: false,
+            status: forge_onboarding::StepStatus::Pending,
+            new: false,
+            satisfied: false,
+        }],
+        state,
+        machine,
+    };
+    let outcome = runner::run(session, true, true)?;
+    if outcome.card_dismissed {
+        forge_config::mark_install_notice_seen(CARD_DISMISSED);
     }
     Ok(())
 }

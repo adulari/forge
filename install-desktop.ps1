@@ -32,4 +32,8 @@ try {
   $p = Start-Process $installer -ArgumentList '/S' -Wait -PassThru
   if ($p.ExitCode -ne 0) { Die "desktop installer exited with $($p.ExitCode)" }
   Write-Host 'install-desktop: Forge desktop installed.'
+  if (-not $env:FORGE_NO_LAUNCH) {
+    $app = Join-Path $env:LOCALAPPDATA 'Programs\Forge\Forge.exe'
+    if (Test-Path $app) { Start-Process $app; Write-Host 'install-desktop: opened Forge' }
+  }
 } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }

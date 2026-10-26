@@ -41,6 +41,7 @@ fn machine(claude: Option<Login>, groq_key: bool) -> Machine {
             version: claude.map(|_| "2.1.4".to_string()),
             login: claude.unwrap_or(Login::Unknown),
             token_stored: false,
+            main_login: false,
         },
         BridgeFacts {
             id: "codex-cli".into(),
@@ -92,8 +93,16 @@ fn machine(claude: Option<Login>, groq_key: bool) -> Machine {
     m
 }
 
+/// A run in progress: a resumed run has already passed the welcome, a full run starts on it.
 fn screen_with(machine: Machine, mode: PlanMode) -> Screen {
-    let state = OnboardingState::new();
+    let mut state = OnboardingState::new();
+    if mode == PlanMode::Resume {
+        state.mark_done(StepId::Welcome);
+    }
+    screen_for(machine, mode, state)
+}
+
+fn screen_for(machine: Machine, mode: PlanMode, state: OnboardingState) -> Screen {
     let steps = plan(&state, &machine, Surface::Tui, mode);
     let session = Session {
         surface: Surface::Tui,
@@ -327,20 +336,167 @@ fn a_failed_job_shows_its_last_line_and_streams_output_into_the_log() {
     assert_eq!(s.notice.as_ref().unwrap().text, "systemctl failed");
 }
 
+fn finish(s: &mut Screen, job: u64, events: Vec<JobEvent>, state: JobState) -> Vec<Effect> {
+    s.apply_poll(&poll(job, state, events))
+}
+
+fn done(job: u64, result: Option<ActionResult>) -> JobEvent {
+    JobEvent::Done {
+        job,
+        summary: "ok".into(),
+        result,
+    }
+}
+
+const SIGN_IN_URL: &str = "https://claude.ai/oauth/authorize?code=true&client_id=abc&state=xyz";
+
 #[test]
-fn the_claude_token_flow_hands_over_the_terminal_then_asks_for_the_paste() {
+fn connecting_claude_is_one_action_with_the_url_shown_and_a_code_typed_back_masked() {
     let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Resume);
     go_to_step(&mut s, StepId::Models);
     let effects = press(&mut s, KeyCode::Char('t'));
     assert_eq!(
         effects,
-        [Effect::Terminal {
-            action: Action::ClaudeSetupToken,
-            purpose: Purpose::ClaudeTokenFlow
+        [Effect::Run {
+            action: Action::ConnectClaude,
+            purpose: Purpose::ConnectClaude
         }]
     );
-    let effects = s.terminal_finished(&Purpose::ClaudeTokenFlow, true);
+    s.job_started(5, Purpose::ConnectClaude, "Connecting Claude Code".into());
+    finish(
+        &mut s,
+        5,
+        vec![JobEvent::Prompt {
+            job: 5,
+            prompt: forge_onboarding::PromptKind::OpenUrl {
+                url: SIGN_IN_URL.into(),
+            },
+            message: "Open this page to sign in.".into(),
+        }],
+        JobState::Running,
+    );
+    let shown = text(&s, 100, 40);
+    assert!(shown.contains("Sign in"), "{shown}");
+    assert!(
+        shown.contains("https://claude.ai/oauth/authorize"),
+        "{shown}"
+    );
+    assert!(shown.contains('█'), "a QR code fits at 100x40:\n{shown}");
+    assert_eq!(
+        press(&mut s, KeyCode::Char('o')),
+        [Effect::OpenUrl(SIGN_IN_URL.into())]
+    );
+
+    finish(
+        &mut s,
+        5,
+        vec![JobEvent::Prompt {
+            job: 5,
+            prompt: forge_onboarding::PromptKind::Code {
+                label: "Paste the code from your browser".into(),
+            },
+            message: "Paste code here if prompted >".into(),
+        }],
+        JobState::Running,
+    );
+    assert_eq!(s.entry.as_ref().unwrap().target, SecretTarget::JobCode(5));
+    type_text(&mut s, "CODE-FROM-BROWSER");
+    assert!(
+        !text(&s, 100, 40).contains("CODE-FROM-BROWSER"),
+        "the code is masked"
+    );
+    let effects = press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        effects,
+        [Effect::Input {
+            job: 5,
+            text: "CODE-FROM-BROWSER".into()
+        }]
+    );
+
+    let effects = finish(
+        &mut s,
+        5,
+        vec![done(
+            5,
+            Some(ActionResult::Verified {
+                source: "claude-cli".into(),
+                status: VerifyStatus::Verified,
+                detail: None,
+            }),
+        )],
+        JobState::Succeeded,
+    );
     assert!(effects.contains(&Effect::Redetect));
+    assert!(
+        s.sign_in.is_none(),
+        "the sign-in page goes away when the job ends"
+    );
+    assert_eq!(s.notice.as_ref().unwrap().kind, NoticeKind::Ok);
+}
+
+#[test]
+fn the_sign_in_page_fits_80x24_and_offers_the_qr_on_demand() {
+    let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Resume);
+    go_to_step(&mut s, StepId::Models);
+    s.job_started(5, Purpose::ConnectClaude, "Connecting Claude Code".into());
+    finish(
+        &mut s,
+        5,
+        vec![JobEvent::Prompt {
+            job: 5,
+            prompt: forge_onboarding::PromptKind::OpenUrl {
+                url: SIGN_IN_URL.into(),
+            },
+            message: "x".into(),
+        }],
+        JobState::Running,
+    );
+    let small = draw(&s, 80, 24);
+    let joined = small.join("\n");
+    assert!(joined.contains("Press v for a QR code"), "{joined}");
+    assert!(small[22].contains("Open the page"), "{}", small[22]);
+    press(&mut s, KeyCode::Char('v'));
+    assert!(s.sign_in.as_ref().unwrap().qr);
+    assert!(text(&s, 80, 24).contains('█'));
+}
+
+#[test]
+fn escape_cancels_a_sign_in_in_progress() {
+    let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Resume);
+    go_to_step(&mut s, StepId::Models);
+    s.job_started(9, Purpose::ConnectClaude, "Connecting Claude Code".into());
+    finish(
+        &mut s,
+        9,
+        vec![JobEvent::Prompt {
+            job: 9,
+            prompt: forge_onboarding::PromptKind::OpenUrl {
+                url: SIGN_IN_URL.into(),
+            },
+            message: "x".into(),
+        }],
+        JobState::Running,
+    );
+    assert_eq!(press(&mut s, KeyCode::Esc), [Effect::Cancel(9)]);
+}
+
+#[test]
+fn when_the_token_cannot_be_captured_the_paste_field_opens() {
+    let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Resume);
+    go_to_step(&mut s, StepId::Models);
+    s.job_started(2, Purpose::ConnectClaude, "Connecting Claude Code".into());
+    finish(
+        &mut s,
+        2,
+        vec![done(
+            2,
+            Some(ActionResult::PasteNeeded {
+                slot: forge_onboarding::SecretSlot::ClaudeOauthToken,
+            }),
+        )],
+        JobState::Succeeded,
+    );
     assert_eq!(s.entry.as_ref().unwrap().target, SecretTarget::ClaudeToken);
     type_text(&mut s, "sk-ant-oat01-TOKEN");
     let effects = press(&mut s, KeyCode::Enter);
@@ -354,6 +510,187 @@ fn the_claude_token_flow_hands_over_the_terminal_then_asks_for_the_paste() {
     assert_eq!(*slot, forge_onboarding::SecretSlot::ClaudeOauthToken);
     assert_eq!(value.expose(), "sk-ant-oat01-TOKEN");
     assert_eq!(purpose, &Purpose::StoreClaudeToken);
+}
+
+fn reconnect_machine() -> Machine {
+    let mut m = machine(Some(Login::SignedOut), true);
+    m.bridges[0].main_login = true;
+    m
+}
+
+#[test]
+fn an_existing_user_with_claude_but_no_token_is_sent_to_a_one_click_reconnect_first() {
+    let mut s = screen_with(reconnect_machine(), PlanMode::Resume);
+    assert_eq!(
+        s.step(),
+        StepId::Models,
+        "the reconnect leads even though another model works"
+    );
+    let card = s
+        .cards()
+        .into_iter()
+        .find(|c| c.id == "claude-cli")
+        .unwrap();
+    assert!(
+        card.detail.contains("Reconnect Claude Code"),
+        "{}",
+        card.detail
+    );
+    assert!(card.detail.contains("keeps your main Claude login safe"));
+    s.cursor = s.cards().iter().position(|c| c.id == "claude-cli").unwrap();
+    assert_eq!(s.enter_label(), "Sign in");
+    let effects = press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        effects,
+        [Effect::Run {
+            action: Action::ConnectClaude,
+            purpose: Purpose::ConnectClaude
+        }],
+        "Enter runs the whole flow, no hint to read first"
+    );
+}
+
+#[test]
+fn recommended_setup_runs_each_item_in_turn_and_lands_on_the_summary() {
+    let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Full);
+    assert_eq!(s.enter_label(), "Set up everything recommended");
+    let mut effects = press(&mut s, KeyCode::Enter);
+    let mut ran = Vec::new();
+    for _ in 0..12 {
+        let Some(Effect::Run {
+            action,
+            purpose: Purpose::Batch(i),
+        }) = effects
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    Effect::Run {
+                        purpose: Purpose::Batch(_),
+                        ..
+                    }
+                )
+            })
+            .cloned()
+        else {
+            break;
+        };
+        ran.push(action);
+        assert!(text(&s, 100, 30).contains("Setting everything up"));
+        finish(&mut s, 100 + i as u64, vec![], JobState::Running);
+        s.job_started(100 + i as u64, Purpose::Batch(i), "x".into());
+        effects = finish(
+            &mut s,
+            100 + i as u64,
+            vec![done(100 + i as u64, Some(ActionResult::Changed))],
+            JobState::Succeeded,
+        );
+    }
+    assert!(ran.iter().any(|a| matches!(a, Action::SetBehavior { .. })));
+    assert!(ran
+        .iter()
+        .any(|a| matches!(a, Action::ImportConfig { tool } if tool == "claude")));
+    assert!(ran
+        .iter()
+        .any(|a| matches!(a, Action::SetReporting { mode } if mode == "auto")));
+    assert!(
+        !ran.iter().any(|a| matches!(a, Action::ImportMcp)),
+        "choices are left to their steps"
+    );
+    assert_eq!(s.step(), StepId::Done);
+    assert_eq!(s.notice.as_ref().unwrap().kind, NoticeKind::Ok);
+    assert!(s.batch.is_none());
+}
+
+#[test]
+fn recommended_setup_with_no_model_does_the_rest_then_stops_at_the_model_choice() {
+    let mut s = screen_with(machine(None, false), PlanMode::Full);
+    let mut effects = press(&mut s, KeyCode::Enter);
+    for _ in 0..12 {
+        let Some(Effect::Run {
+            purpose: Purpose::Batch(i),
+            ..
+        }) = effects
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    Effect::Run {
+                        purpose: Purpose::Batch(_),
+                        ..
+                    }
+                )
+            })
+            .cloned()
+        else {
+            break;
+        };
+        s.job_started(200 + i as u64, Purpose::Batch(i), "x".into());
+        effects = finish(
+            &mut s,
+            200 + i as u64,
+            vec![done(200 + i as u64, Some(ActionResult::Changed))],
+            JobState::Succeeded,
+        );
+    }
+    assert_eq!(s.step(), StepId::Models, "a real choice stops the run");
+    assert_eq!(s.notice.as_ref().unwrap().kind, NoticeKind::Info);
+}
+
+#[test]
+fn a_failed_recommended_item_does_not_stop_the_others_and_is_reported() {
+    let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Full);
+    let mut effects = press(&mut s, KeyCode::Enter);
+    let mut first = true;
+    for _ in 0..12 {
+        let Some(Effect::Run {
+            purpose: Purpose::Batch(i),
+            ..
+        }) = effects
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    Effect::Run {
+                        purpose: Purpose::Batch(_),
+                        ..
+                    }
+                )
+            })
+            .cloned()
+        else {
+            break;
+        };
+        s.job_started(300 + i as u64, Purpose::Batch(i), "x".into());
+        effects = if first {
+            first = false;
+            finish(
+                &mut s,
+                300 + i as u64,
+                vec![JobEvent::Failed {
+                    job: 300 + i as u64,
+                    error: "disk full".into(),
+                }],
+                JobState::Failed,
+            )
+        } else {
+            finish(
+                &mut s,
+                300 + i as u64,
+                vec![done(300 + i as u64, Some(ActionResult::Changed))],
+                JobState::Succeeded,
+            )
+        };
+    }
+    assert_eq!(s.notice.as_ref().unwrap().kind, NoticeKind::Warn);
+    assert!(s.notice.as_ref().unwrap().text.contains("disk full"));
+}
+
+#[test]
+fn stepping_through_by_hand_is_still_one_key_away_from_the_welcome() {
+    let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Full);
+    press(&mut s, KeyCode::Char('n'));
+    assert_eq!(s.step(), StepId::Models);
 }
 
 #[test]
@@ -636,4 +973,134 @@ fn reduced_motion_replaces_the_spinner_with_a_still_mark() {
         assert_eq!(g().spin(0), g().spin(5));
         assert_eq!(g().spin(0), g().spinner_still);
     });
+}
+
+#[test]
+fn the_session_start_card_connects_with_enter_defers_with_l_and_remembers_n() {
+    let mut s = screen_with(reconnect_machine(), PlanMode::Resume);
+    s.reconnect_card = true;
+    let shown = text(&s, 80, 24);
+    assert!(shown.contains("Connect Claude Code"), "{shown}");
+    assert!(shown.contains("token of its own"), "{shown}");
+    assert!(
+        !shown.contains("step 2 of"),
+        "the card is not a numbered flow:\n{shown}"
+    );
+    let chips = draw(&s, 80, 24)[22].clone();
+    assert!(
+        chips.contains("Connect now")
+            && chips.contains("Later")
+            && chips.contains("Don't ask again"),
+        "{chips}"
+    );
+
+    let effects = press(&mut s, KeyCode::Enter);
+    assert_eq!(
+        effects,
+        [Effect::Run {
+            action: Action::ConnectClaude,
+            purpose: Purpose::ConnectClaude
+        }]
+    );
+    s.job_started(1, Purpose::ConnectClaude, "Connecting Claude Code".into());
+    assert!(
+        press(&mut s, KeyCode::Enter).is_empty(),
+        "no second flow while one runs"
+    );
+    finish(
+        &mut s,
+        1,
+        vec![done(1, Some(ActionResult::Changed))],
+        JobState::Succeeded,
+    );
+    assert_eq!(
+        s.exit,
+        Some(Exit::Finished),
+        "a connected card closes itself"
+    );
+
+    let mut later = screen_with(reconnect_machine(), PlanMode::Resume);
+    later.reconnect_card = true;
+    press(&mut later, KeyCode::Char('l'));
+    assert_eq!(later.exit, Some(Exit::Left));
+    assert!(!later.card_dismissed);
+
+    let mut never = screen_with(reconnect_machine(), PlanMode::Resume);
+    never.reconnect_card = true;
+    press(&mut never, KeyCode::Char('n'));
+    assert_eq!(never.exit, Some(Exit::Left));
+    assert!(never.card_dismissed);
+}
+
+#[test]
+fn a_first_run_opens_on_the_welcome_with_the_one_key_setup_for_everyone() {
+    let fresh = screen_for(
+        machine(None, false),
+        PlanMode::Resume,
+        OnboardingState::new(),
+    );
+    assert_eq!(fresh.step(), StepId::Welcome);
+    assert_eq!(fresh.enter_label(), "Set up everything recommended");
+    let shown = text(&fresh, 100, 30);
+    assert!(shown.contains("No model is connected yet"), "{shown}");
+
+    let existing = screen_for(
+        machine(Some(Login::SignedIn), true),
+        PlanMode::Resume,
+        OnboardingState::new(),
+    );
+    assert_eq!(existing.step(), StepId::Welcome);
+    let shown = text(&existing, 100, 30);
+    assert!(
+        shown.contains("Press f to finish now"),
+        "a returning user can finish in two keys:\n{shown}"
+    );
+}
+
+#[test]
+fn a_failure_shows_the_line_that_names_the_problem_not_the_closing_hint() {
+    use super::plumbing::best_error_line;
+    let output =
+        "installed unit\nError: systemctl not found\nNext: run `forge doctor` for a health check";
+    assert_eq!(best_error_line(output), "Error: systemctl not found");
+    assert_eq!(best_error_line("one\ntwo"), "two");
+    assert_eq!(best_error_line(""), "It did not finish.");
+}
+
+#[test]
+fn the_cursor_follows_a_card_that_moves_up_the_list_when_it_becomes_ready() {
+    let mut s = screen_with(machine(None, false), PlanMode::Resume);
+    let index = s.cards().iter().position(|c| c.id == "cerebras").unwrap();
+    s.cursor = index;
+    press(&mut s, KeyCode::Char('k'));
+    press(&mut s, KeyCode::Char('j'));
+    assert_eq!(s.cards()[s.cursor].id, "cerebras");
+
+    let mut after = machine(None, false);
+    after
+        .keys
+        .iter_mut()
+        .find(|k| k.id == "cerebras")
+        .unwrap()
+        .configured = true;
+    s.machine_updated(after);
+    assert_eq!(
+        s.cards()[s.cursor].id,
+        "cerebras",
+        "Enter now continues instead of opening another card"
+    );
+    assert_eq!(s.cursor, 0, "the ready card leads the list");
+}
+
+#[test]
+fn a_long_notice_is_cut_to_the_width_not_wrapped_into_the_chips() {
+    let mut s = screen_with(machine(None, false), PlanMode::Resume);
+    s.notify(NoticeKind::Err, "x".repeat(300));
+    let rows = draw(&s, 80, 24);
+    assert!(
+        rows[22].contains("Enter"),
+        "chips stay on the last row: {}",
+        rows[22]
+    );
+    assert!(rows[21].contains('…'), "{}", rows[21]);
 }

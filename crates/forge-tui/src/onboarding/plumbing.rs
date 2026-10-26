@@ -7,13 +7,36 @@ use forge_onboarding::{Action, ActionResult, StepId, VerifyStatus};
 use super::pages::{import_items, CREDITS, REPORTING, TEMPERS, THEMES};
 use super::screen::{Effect, Entry, NoticeKind, Purpose, Screen, SecretTarget};
 
+/// The line of a failure worth showing: the first that names the problem, else the last one.
+pub(crate) fn best_error_line(error: &str) -> &str {
+    const HINTS: [&str; 7] = [
+        "error",
+        "failed",
+        "could not",
+        "cannot",
+        "not found",
+        "denied",
+        "no such",
+    ];
+    let lines: Vec<&str> = error.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines
+        .iter()
+        .find(|l| {
+            let lower = l.to_lowercase();
+            HINTS.iter().any(|h| lower.contains(h))
+        })
+        .or(lines.last())
+        .copied()
+        .unwrap_or("It did not finish.")
+}
+
 impl Screen {
     pub(crate) fn init_ui(&mut self) {
         let settings = self.session.machine.settings.clone();
         self.ui.temper = TEMPERS
             .iter()
             .position(|t| t.key == settings.permission)
-            .unwrap_or(1);
+            .unwrap_or_else(super::pages::recommended_temper);
         self.ui.credit = CREDITS
             .iter()
             .position(|c| c.key == settings.credit_mode)
@@ -87,7 +110,38 @@ impl Screen {
             Purpose::StoreKey(_) | Purpose::StoreBenchKey => {
                 effects.push(Effect::Redetect);
             }
-            Purpose::ClaudeTokenFlow | Purpose::OauthSignIn(_) | Purpose::Anywhere => {}
+            Purpose::OauthSignIn(_) => {
+                self.notify(NoticeKind::Ok, "Signed in.");
+                effects.push(Effect::Redetect);
+            }
+            Purpose::Anywhere => {}
+            Purpose::ConnectClaude => {
+                if let Some(ActionResult::PasteNeeded { .. }) = &result {
+                    self.ask_for_claude_token();
+                } else {
+                    self.notify(NoticeKind::Ok, "Claude Code is connected.");
+                    effects.push(Effect::Redetect);
+                    if self.reconnect_card {
+                        self.exit = Some(super::screen::Exit::Finished);
+                    }
+                }
+            }
+            Purpose::Batch(index) => {
+                if matches!(&result, Some(ActionResult::PasteNeeded { .. })) {
+                    self.batch = None;
+                    effects.extend(self.go_to_step(StepId::Models));
+                    self.ask_for_claude_token();
+                } else {
+                    let rejected = matches!(
+                        &result,
+                        Some(ActionResult::Verified {
+                            status: VerifyStatus::Rejected,
+                            ..
+                        })
+                    );
+                    effects.extend(self.batch_job_done(*index, !rejected, None));
+                }
+            }
             Purpose::StoreClaudeToken => {
                 self.notify(NoticeKind::Ok, "Token saved. Checking Claude Code now.");
                 self.requested.remove("claude-cli");
@@ -141,14 +195,33 @@ impl Screen {
         effects
     }
 
+    pub(crate) fn ask_for_claude_token(&mut self) {
+        self.entry = Some(Entry {
+            target: SecretTarget::ClaudeToken,
+            label: "Paste the token Claude printed".into(),
+            hint: Some(
+                "Forge could not read it by itself. It starts with sk-ant-. Kept in your keyring."
+                    .into(),
+            ),
+            url: None,
+            buf: String::new(),
+        });
+    }
+
+    pub(crate) fn go_to_step(&mut self, step: StepId) -> Vec<Effect> {
+        match self.session.plan.iter().position(|s| s.id == step) {
+            Some(page) => self.go_to(page),
+            None => Vec::new(),
+        }
+    }
+
     pub(crate) fn job_failed(&mut self, purpose: &Purpose, error: &str) -> Vec<Effect> {
-        let first = error
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("It did not finish.");
+        let first = best_error_line(error);
         self.notify(NoticeKind::Err, first.trim().to_string());
         match purpose {
+            Purpose::Batch(index) => {
+                self.batch_job_done(*index, false, Some(first.trim().to_string()))
+            }
             Purpose::Import => self.import_next(),
             Purpose::LocalPull(_) => {
                 self.notify(
@@ -165,33 +238,6 @@ impl Screen {
     pub fn terminal_finished(&mut self, purpose: &Purpose, ok: bool) -> Vec<Effect> {
         let mut effects = vec![Effect::Redetect];
         match purpose {
-            Purpose::ClaudeTokenFlow => {
-                self.entry = Some(Entry {
-                    target: SecretTarget::ClaudeToken,
-                    label: "Paste the token Claude printed".into(),
-                    hint: Some(
-                        "It starts with sk-ant-. Forge keeps it in your keyring, never in a file."
-                            .into(),
-                    ),
-                    url: None,
-                    buf: String::new(),
-                });
-            }
-            Purpose::OauthSignIn(id) => {
-                self.requested.remove(id);
-                self.session.state.verified.remove(id);
-                if ok {
-                    effects.push(Effect::Run {
-                        action: Action::Verify { source: id.clone() },
-                        purpose: Purpose::Verify(id.clone()),
-                    });
-                } else {
-                    self.notify(
-                        NoticeKind::Warn,
-                        "The sign-in did not finish. You can try again.",
-                    );
-                }
-            }
             Purpose::LocalInstall(tag) => {
                 if ok {
                     effects.push(Effect::Run {

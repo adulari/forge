@@ -11,6 +11,7 @@
         }
     },
     "bin": "forge.exe",
+    "notes": "Run `forge` to finish setup: the first launch opens a short guided onboarding. `forge setup` reopens it any time.",
     "checkver": {
         "github": "https://github.com/Adulari/forge"
     },

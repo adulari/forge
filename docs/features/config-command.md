@@ -16,7 +16,7 @@ plans mid-session.
 ## What it does
 
 - New slash command **`/config`** (aliases `/cfg`, `/settings`) in the chat TUI.
-- Launches the existing animated `init_wizard` **full-screen** (alt-screen takeover), then
+- Opens the settings editor **full-screen** (alt-screen takeover), then
   returns to the inline chat — scrollback preserved. The inline viewport is rebuilt on return
   (`Tui::run_fullscreen`), so the chat loop resumes cleanly (raw mode re-enabled, cursor sane).
 - The wizard now has a dedicated **Search** section alongside Providers and Subscription

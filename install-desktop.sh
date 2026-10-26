@@ -110,5 +110,18 @@ Terminal=false
 Type=Application
 Categories=Development;
 EOF
-    printf 'install-desktop: desktop entry installed\n' >&2 ;;
+    printf 'install-desktop: desktop entry installed\n' >&2
+    launch_cmd="$exec_line" ;;
 esac
+
+# Open the app so its onboarding starts. Skipped without a display, or with FORGE_NO_LAUNCH=1.
+if [ -z "${FORGE_NO_LAUNCH:-}" ]; then
+  case "$kind" in
+    mac-dmg) open -a "$dest/Forge.app" >/dev/null 2>&1 || true ;;
+    appimage)
+      if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && [ -n "${launch_cmd:-}" ]; then
+        nohup "$launch_cmd" >/dev/null 2>&1 &
+        printf 'install-desktop: opened Forge\n' >&2
+      fi ;;
+  esac
+fi

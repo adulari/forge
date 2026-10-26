@@ -25,11 +25,20 @@ pub fn render(f: &mut Frame, s: &Screen) {
     let inner = surface::render_panel_with_context(
         f,
         area,
-        surface::title("Forge setup", SurfaceTone::Accent),
-        Some(Span::styled(
-            format!(" step {} of {} ", s.page + 1, s.session.plan.len()),
-            styles::faint(),
-        )),
+        surface::title(
+            if s.reconnect_card {
+                "Forge"
+            } else {
+                "Forge setup"
+            },
+            SurfaceTone::Accent,
+        ),
+        (!s.reconnect_card).then(|| {
+            Span::styled(
+                format!(" step {} of {} ", s.page + 1, s.session.plan.len()),
+                styles::faint(),
+            )
+        }),
         None,
         SurfaceTone::Accent,
     );
@@ -46,9 +55,9 @@ pub fn render(f: &mut Frame, s: &Screen) {
     };
 
     let job = job_lines(s);
-    let notice = notice_line(s);
-    let wide = inner.width >= RAIL_MIN_WIDTH;
-    let dots_h = u16::from(!wide);
+    let notice = notice_line(s, body.width as usize);
+    let wide = inner.width >= RAIL_MIN_WIDTH && !s.reconnect_card;
+    let dots_h = u16::from(!wide && !s.reconnect_card);
     let parts = Layout::vertical([
         Constraint::Length(dots_h),
         Constraint::Min(3),
@@ -58,7 +67,7 @@ pub fn render(f: &mut Frame, s: &Screen) {
     ])
     .split(body);
 
-    if !wide {
+    if !wide && !s.reconnect_card {
         f.render_widget(Paragraph::new(dots_line(s, body.width as usize)), parts[0]);
     }
     let page_area = if wide {
@@ -198,7 +207,7 @@ fn job_lines(s: &Screen) -> Vec<Line<'static>> {
     lines
 }
 
-fn notice_line(s: &Screen) -> Option<Line<'static>> {
+fn notice_line(s: &Screen, width: usize) -> Option<Line<'static>> {
     let notice = s.notice.as_ref()?;
     let (glyph, style) = match notice.kind {
         NoticeKind::Ok => (g().ok, styles::ok()),
@@ -208,7 +217,7 @@ fn notice_line(s: &Screen) -> Option<Line<'static>> {
     };
     Some(Line::from(vec![
         Span::styled(format!("{glyph} "), style),
-        Span::styled(notice.text.clone(), style),
+        Span::styled(truncate(&notice.text, width.saturating_sub(3)), style),
     ]))
 }
 
@@ -218,7 +227,7 @@ fn chip_line(s: &Screen, width: usize) -> Line<'static> {
     let (enter, mut specific) = view_pages::chips_for(s);
     let mut tail: Vec<(String, String)> = Vec::new();
     if s.entry.is_none() {
-        if s.page > 0 {
+        if s.page > 0 && s.sign_in.is_none() && !s.reconnect_card {
             tail.push(("b".into(), "Back".into()));
         }
         tail.push(("q".into(), "Not now".into()));

@@ -22,6 +22,8 @@ crossterm.workspace = true
 # Cell width of glyphs (CJK/emoji = 2 cells) so mouse-selection maps screen columns → chars correctly.
 unicode-width = "0.2"
 unicode-segmentation = "1"
+# The sign-in page renders a scannable code so a flow can be finished on another device.
+qrcode = { workspace = true }
 tokio.workspace = true
 pulldown-cmark.workspace = true
 syntect.workspace = true

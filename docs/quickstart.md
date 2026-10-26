@@ -42,8 +42,11 @@ After install, verify it works:
 forge --version
 ```
 
-Running `forge` with no arguments prints a short orientation panel — the commands to set up a
-provider if you have none yet, and the handful you need day to day. `forge --help` lists everything.
+Running `forge` in a terminal for the first time opens the guided setup
+([onboarding](features/onboarding.md)): it shows what it found on your machine, connects a model
+(free tiers first, subscriptions with one sign-in), and sets the rest to sensible defaults. Press
+Enter on "Set up everything recommended" and you are done in a few keys. The steps below are the
+same things by hand. `forge setup` reopens it any time; `forge --help` lists everything.
 
 ---
 
@@ -67,8 +70,8 @@ Run Forge on top of your existing subscription — no new provider key needed. T
 authenticates with a long-lived token, not your interactive `claude` login (see
 [the claude bridge's authentication](features/persistent-bridge-transport.md#claude-bridge-authentication)):
 ```bash
-claude setup-token                   # once; prints a long-lived token
-forge auth claude_oauth_token        # paste it (or export CLAUDE_CODE_OAUTH_TOKEN)
+forge setup                          # one sign-in: Forge runs `claude setup-token` and keeps the token
+# by hand: claude setup-token, then forge auth claude_oauth_token (or export CLAUDE_CODE_OAUTH_TOKEN)
 forge run --model claude-cli::sonnet "hello"   # uses your Claude subscription
 forge run --model codex-cli::gpt-5.6-luna "hello"   # uses your Codex subscription
 ```

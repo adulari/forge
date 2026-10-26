@@ -19,9 +19,6 @@ use crate::providers;
 /// How long detection waits for slow probes.
 pub const DEFAULT_BUDGET: Duration = Duration::from_millis(1500);
 
-/// The secret slot holding a dedicated Claude token for the bridge.
-pub const CLAUDE_TOKEN_SLOT: &str = "claude_oauth_token";
-
 type Patch = Box<dyn FnOnce(&mut Machine) + Send>;
 
 pub fn detect(host: Arc<dyn Host>) -> Machine {
@@ -179,6 +176,7 @@ fn bridge_facts() -> Vec<BridgeFacts> {
                 version: None,
                 login,
                 token_stored: false,
+                main_login: kind == CliKind::ClaudeCode && claude_main_login(),
             }
         })
         .collect()
@@ -186,7 +184,15 @@ fn bridge_facts() -> Vec<BridgeFacts> {
 
 /// Every key provider Forge knows, all marked unconfigured until the keyring probe answers.
 fn key_facts_unchecked() -> Vec<KeyFacts> {
-    forge_config::known_key_providers()
+    // The featured providers lead, in the order the model step shows them.
+    let mut ids: Vec<&'static str> = forge_config::known_key_providers().collect();
+    ids.sort_by_key(|id| {
+        providers::FEATURED
+            .iter()
+            .position(|f| f.id == *id)
+            .unwrap_or(usize::MAX)
+    });
+    ids.into_iter()
         .map(|id| {
             let feat = providers::featured(id);
             KeyFacts {
@@ -208,7 +214,10 @@ fn keys_probe() -> Patch {
             (
                 id.to_string(),
                 forge_config::has_api_key(id),
-                forge_config::provider_environment_key_present(id),
+                // An environment variable counts only when the secret store does not also hold
+                // the key: storing a key exports it into this process for the session to use.
+                forge_config::provider_environment_key_present(id)
+                    && forge_config::secret_store::get(id).is_none(),
             )
         })
         .collect();
@@ -232,12 +241,34 @@ fn keys_probe() -> Patch {
     })
 }
 
-/// Whether a dedicated Forge token for the Claude bridge is stored. Adapter: the slot name is
-/// the one the bridge credential change introduces; swap this body for
-/// `forge_config::claude_oauth_token()` once that lands.
+/// Whether a dedicated Forge token for the Claude bridge is stored (or set in the environment).
 pub fn claude_token_stored() -> bool {
-    std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok_and(|v| !v.trim().is_empty())
-        || forge_config::secret_store::get(CLAUDE_TOKEN_SLOT).is_some_and(|v| !v.is_empty())
+    forge_config::claude_oauth_token().is_some()
+}
+
+/// Whether Claude Code has its own interactive login here (`.credentials.json` in its config
+/// directory). Read only for existence; never opened.
+fn claude_main_login() -> bool {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(forge_config::claude_dir);
+    dir.is_some_and(|d| d.join(".credentials.json").exists())
+}
+
+/// Claude Code is installed and has its own login here, but Forge has no token of its own for it.
+/// Cheap (filesystem and environment only), so a session start can ask it every time.
+pub fn claude_reconnect_needed() -> bool {
+    CliKind::ClaudeCode.available()
+        && claude_main_login()
+        && forge_provider::bridge_credentials(CliKind::ClaudeCode)
+            != forge_provider::CliCredentials::Present
+}
+
+/// Where `binary` is installed, by PATH then the usual per-user install directories.
+pub(crate) fn find_binary(binary: &str) -> Option<String> {
+    which(binary)
+        .or_else(|| well_known(binary))
+        .map(|p| p.display().to_string())
 }
 
 fn oauth_probe() -> Patch {
@@ -247,12 +278,12 @@ fn oauth_probe() -> Patch {
         m.oauth = vec![
             OauthFacts {
                 id: "codex-oauth".into(),
-                name: "ChatGPT subscription".into(),
+                name: "ChatGPT plan".into(),
                 signed_in: codex,
             },
             OauthFacts {
                 id: "xai-oauth".into(),
-                name: "SuperGrok subscription".into(),
+                name: "SuperGrok plan".into(),
                 signed_in: xai,
             },
         ];
@@ -491,8 +522,10 @@ mod tests {
     fn a_signed_in_claude_reports_its_version_and_login() {
         let f = fixture();
         fake_cli(&f, "claude", "2.1.4 (Claude Code)");
-        std::fs::create_dir_all(f.home.path().join(".claude")).unwrap();
-        std::fs::write(f.home.path().join(".claude/.credentials.json"), "{}").unwrap();
+        std::env::set_var(
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "sk-ant-oat01-test-token-0123456789abcdef",
+        );
         let machine = detect_fast();
         let claude = machine
             .bridges
@@ -503,7 +536,10 @@ mod tests {
         assert_eq!(claude.login, Login::SignedIn);
         assert_eq!(claude.version.as_deref(), Some("2.1.4"));
         let card = machine.model_sources().remove(0);
-        assert_eq!(card.detail, "Claude Code 2.1.4 · signed in");
+        assert_eq!(
+            card.detail,
+            "Claude Code 2.1.4 · signed in · Forge token set"
+        );
     }
 
     #[test]
@@ -582,7 +618,11 @@ mod tests {
     fn the_claude_token_slot_is_reported_without_its_value() {
         let f = fixture();
         fake_cli(&f, "claude", "2.1.4");
-        forge_config::secret_store::set(CLAUDE_TOKEN_SLOT, "sk-ant-oat01-secret").unwrap();
+        forge_config::secret_store::set(
+            forge_config::CLAUDE_OAUTH_TOKEN_SLOT,
+            "sk-ant-oat01-secret",
+        )
+        .unwrap();
         let machine = detect_fast();
         let json = serde_json::to_string(&machine).unwrap();
         assert!(!json.contains("sk-ant-oat01-secret"));
@@ -592,7 +632,7 @@ mod tests {
             .find(|b| b.id == "claude-cli")
             .unwrap();
         assert!(claude.token_stored);
-        forge_config::secret_store::delete(CLAUDE_TOKEN_SLOT).unwrap();
+        forge_config::secret_store::delete(forge_config::CLAUDE_OAUTH_TOKEN_SLOT).unwrap();
     }
 
     #[test]
@@ -679,5 +719,70 @@ mod tests {
         assert!(machine.terminal.truecolor && machine.terminal.unicode && machine.terminal.color);
         std::env::set_var("NO_COLOR", "1");
         assert!(!detect_fast().terminal.color);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reconnect_tests {
+    use super::*;
+    use crate::host::NoHost;
+    use crate::test_support::{env_lock, ScopedEnv};
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn an_installed_claude_with_its_own_login_but_no_token_needs_a_reconnect() {
+        let _guard = env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude = bin.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\necho 2.1.4\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(home.path().join(".claude/.credentials.json"), "{}").unwrap();
+        let config = home.path().join("config");
+        let data = home.path().join("data");
+        let _env = ScopedEnv::set(&[
+            ("HOME", Some(home.path().as_os_str())),
+            ("XDG_CONFIG_HOME", Some(config.as_os_str())),
+            ("XDG_DATA_HOME", Some(data.as_os_str())),
+            ("PATH", Some(bin.as_os_str())),
+            ("CLAUDE_CONFIG_DIR", None),
+            ("CLAUDE_CODE_OAUTH_TOKEN", None),
+            ("ANTHROPIC_API_KEY", None),
+            ("FORGE_DB", None),
+            ("LANG", Some(OsStr::new("en_US.UTF-8"))),
+        ]);
+        let machine = detect_with(std::sync::Arc::new(NoHost), Duration::from_secs(5));
+        assert!(machine.claude_needs_reconnect());
+        assert!(
+            claude_reconnect_needed(),
+            "the cheap session-start check agrees"
+        );
+        let card = machine.model_sources().remove(0);
+        assert_eq!(card.state, SourceState::NeedsLogin);
+        assert!(
+            card.detail.contains("Reconnect Claude Code"),
+            "{}",
+            card.detail
+        );
+        assert!(card.detail.contains("keeps your main Claude login safe"));
+
+        forge_config::store_api_key(
+            forge_config::CLAUDE_OAUTH_TOKEN_SLOT,
+            "sk-ant-oat01-stored-0123456789abcdef",
+        )
+        .unwrap();
+        let machine = detect_with(std::sync::Arc::new(NoHost), Duration::from_secs(5));
+        assert!(
+            !machine.claude_needs_reconnect(),
+            "a stored token ends the reconnect"
+        );
+        assert!(
+            !claude_reconnect_needed(),
+            "and so does the cheap session-start check"
+        );
+        forge_config::remove_api_key(forge_config::CLAUDE_OAUTH_TOKEN_SLOT).unwrap();
     }
 }
