@@ -26,7 +26,7 @@ export interface ToolCallRowProps {
   invocation: ToolInvocation;
 }
 
-function CopyButton({ text }: { text: string }) {
+export function CopyButton({ text }: { text: string }) {
   const tokens = useTokens();
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -53,7 +53,7 @@ function CopyButton({ text }: { text: string }) {
 
 /** A titled mono block inside the expanded card: header (label + line count + copy), body, and
  * a "show N more lines" expander once the body is longer than `COLLAPSE_LINES`. */
-function DetailBlock({ label, text }: { label: string; text: string }) {
+export function DetailBlock({ label, text }: { label: string; text: string }) {
   const tokens = useTokens();
   const lines = useMemo(() => text.split("\n"), [text]);
   const collapsible = lines.length > COLLAPSE_LINES;
@@ -102,7 +102,7 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
   const [open, setOpen] = useState(false);
   const { tool, args, result } = invocation;
   const name = tool ?? "tool";
-  const verb = useMemo(() => callVerb(tool), [tool]);
+  const verb = useMemo(() => callVerb(tool, args), [tool, args]);
   const target = useMemo(() => callHeadline(tool, args, result), [tool, args, result]);
   const failed = resultFailed(result);
   // A call still awaiting its result has nothing to show but its own arguments; that is still

@@ -2,7 +2,8 @@
 // was about (the command, the path), after the TUI's tool cards (crates/forge-tui/src/app/
 // tool_cards.rs `verb`/`headline`). The raw tool name and argument blob stay in the expanded
 // details; a row that says only "run_code" tells the reader nothing.
-import { scriptCalls, scriptHeadline, scriptSource } from "./scriptCalls";
+import { tildify } from "./pathDisplay";
+import { scriptCalls, scriptHeadline, scriptSource, scriptVerb } from "./scriptCalls";
 import { bareToolName, headline } from "./toolGroups";
 import { parseArgs, summarizeToolArgs } from "./toolRows";
 
@@ -29,8 +30,21 @@ const VERBS: Record<string, string> = {
   run_code: "Script",
 };
 
-export function callVerb(name: string | null): string {
+/** The inner tool a `tool_call{name, arguments}` wrapper reached; the wrapper's own name is
+ * internal and never shown. */
+function wrappedName(args: string): string | null {
+  const parsed = parseArgs(args);
+  const name = parsed?.name ?? parsed?.tool;
+  return typeof name === "string" && name.trim() ? bareToolName(name.trim()) : null;
+}
+
+export function callVerb(name: string | null, args?: string): string {
   const tool = bareToolName(name ?? "tool");
+  if (tool === "run_code" && args) return scriptVerb(args);
+  if (tool === "tool_call") {
+    const inner = args ? wrappedName(args) : null;
+    return inner ? callVerb(inner) : "Call";
+  }
   if (VERBS[tool]) return VERBS[tool];
   if (tool.startsWith("mcp__")) {
     const rest = tool.slice("mcp__".length);
@@ -43,6 +57,13 @@ export function callVerb(name: string | null): string {
 export function callHeadline(name: string | null, args: string, result: string | null): string {
   const tool = bareToolName(name ?? "tool");
   if (tool === "run_code") return scriptHeadline(args, result);
+  if (tool === "tool_call") {
+    const inner = wrappedName(args);
+    if (!inner) return "a tool";
+    const innerArgs = parseArgs(args)?.arguments;
+    const text = typeof innerArgs === "string" ? innerArgs : JSON.stringify(innerArgs ?? {});
+    return VERBS[inner] ? callHeadline(inner, text, result) : "";
+  }
   return headline(tool, args) || summarizeToolArgs(args, 80);
 }
 
@@ -65,7 +86,7 @@ export function readableArgs(name: string | null, args: string): ArgSection[] {
       .filter((line) => line.trim() && !line.trim().startsWith("```"))
       .join("\n");
     const sections: ArgSection[] = [];
-    if (s.commands.length > 0) sections.push({ label: "commands", text: s.commands.map((c) => `$ ${c}`).join("\n") });
+    if (s.commands.length > 0) sections.push({ label: "commands", text: s.commands.map((c) => `$ ${tildify(c)}`).join("\n") });
     if (source) sections.push({ label: "script", text: source });
     return sections;
   }
@@ -78,7 +99,7 @@ export function readableArgs(name: string | null, args: string): ArgSection[] {
   });
   const lines = keys.map((key) => {
     const value = parsed[key];
-    const text = typeof value === "string" ? value : JSON.stringify(value);
+    const text = tildify(typeof value === "string" ? value : JSON.stringify(value));
     return text.includes("\n") ? `${key}:\n${text}` : `${key}: ${text}`;
   });
   return lines.length ? [{ label: "arguments", text: lines.join("\n") }] : [];

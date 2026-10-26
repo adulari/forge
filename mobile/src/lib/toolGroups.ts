@@ -5,7 +5,8 @@
 //
 // Pure: `summarize`/`summaryText` turn calls into the sentence, `foldToolGroups` turns a
 // newest-first transcript into entries + groups. Rendering lives in components/chat/ToolGroupRow.
-import { scriptCalls, scriptHeadline } from "./scriptCalls";
+import { friendlyCommand, shortenPath } from "./pathDisplay";
+import { scriptCalls, scriptHeadline, WRAPPER_TOOL } from "./scriptCalls";
 import { parseArgs, resultFailed, type ToolInvocation, type TranscriptEntry } from "./toolRows";
 
 export type CallStatus = "ok" | "failed" | "running";
@@ -64,7 +65,13 @@ export function bareToolName(name: string): string {
 }
 
 function categoryOf(call: GroupCall): Category {
-  const name = bareToolName(call.name);
+  let name = bareToolName(call.name);
+  if (name === WRAPPER_TOOL) {
+    const inner = field(call.args, ["name", "tool"]);
+    if (!inner) return { kind: "other", name: "" };
+    name = bareToolName(inner);
+    call = { ...call, name };
+  }
   if (name.startsWith("mcp__")) {
     const rest = name.slice("mcp__".length);
     const at = rest.indexOf("__");
@@ -176,18 +183,18 @@ export function headline(name: string, args: string): string {
           first = list.length === 1 ? list[0] : `${list[0]} (+${list.length - 1} more)`;
         }
       }
-      break;
+      return first ? friendlyCommand(first) : "";
     case "read_file":
     case "write_file":
     case "edit_file":
     case "list_dir": {
       const p = field(args, ["path"]);
-      first = p ? displayPath(p, cwd) : null;
+      first = p ? shortenPath(displayPath(p, cwd)) : null;
       break;
     }
     case "apply_patch": {
       const p = field(args, ["path"]);
-      first = p ? displayPath(p, cwd) : cwd;
+      first = p ? shortenPath(displayPath(p, cwd)) : cwd ? shortenPath(cwd) : null;
       break;
     }
     case "search":
@@ -373,6 +380,7 @@ function counted(t: Tally, tense: Tense): string {
       return n === 1 ? "updated the task list" : `updated the task list ${n} times`;
     case "mcp":
     case "other":
+      if (!c.name) return `${v("called", "call")} ${plural(n, "tool", "tools")}`;
       return `${v("called", "call")} ${c.name} ${plural(n, "time", "times")}`;
   }
 }
