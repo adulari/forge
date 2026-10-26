@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **An interrupted compaction no longer leaves "auto-compacting" on screen for good.** Interrupting a turn (Esc, or a queued prompt taking over) while it compacted aborted the task before `CompactionFinished` was sent, and nothing else cleared the band, so it stayed at 95% through every later turn, its timer restarting with each one, while the session went on running tools. Any turn end now clears it (`crates/forge-tui/src/app.rs`).
+
 ## [2.23.6] - 2026-10-25
 
 ### Changed
