@@ -198,6 +198,27 @@ with a local fake Anthropic API (debug build):
 - Bridged write prompts carry the call's arguments and diff, so the prompt names the file and shows
   the change, as a native write does.
 
+## claude bridge authentication
+
+The bridged `claude` runs with its own `CLAUDE_CONFIG_DIR` (`~/.config/forge/claude-bridge-home`, a
+hook-free mirror of your claude config; see `crates/forge-provider/src/claude_bridge_home.rs`).
+Because that dir differs from yours, Claude Code's refresh lock for your interactive login does not
+cover it. Sharing `.credentials.json` with the bridge therefore let the bridged claude refresh and
+rotate the single-use refresh token on its own, which invalidated your main `~/.claude` login about
+once a day. So the bridge never sees `.credentials.json`:
+
+- It authenticates with `CLAUDE_CODE_OAUTH_TOKEN`, from the environment or from the Forge secret
+  `claude_oauth_token` (`forge auth claude_oauth_token`, token from `claude setup-token`). An
+  `ANTHROPIC_API_KEY` in the environment also works (no refresh involved).
+- Without either, the bridge is a configuration gap, not an outage: routing and failover skip
+  `claude-cli` quietly (nothing is benched), a pinned `claude-cli` model fails with the setup hint,
+  and an attended session prints the hint once at startup.
+- The bridge home no longer links `.credentials.json` or `backups/`, and claude's own `.claude.json`
+  there is preserved across rebuilds instead of being recreated on every spawn. An older Forge's
+  credentials link or copy is removed on the next start (your real file is never touched).
+- Using your main config dir when no token is set was rejected: it would let your personal hooks fire
+  in bridged turns, and no CLI flag isolates them without also dropping Forge's MCP server.
+
 ## codex — blocked upstream (investigated 2026-06-27, codex 0.141)
 
 codex has **no usable persistent transport** today:

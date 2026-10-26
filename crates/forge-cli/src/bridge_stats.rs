@@ -136,7 +136,11 @@ pub fn probe_claude_limits() -> Vec<(String, f64, Option<i64>)> {
         let mut cmd = probe_command();
         // The bridge's hook-free claude config dir (and its other bridge settings), so the
         // user's SessionStart/UserPromptSubmit hooks do not run for a quota read.
-        for (key, value) in forge_provider::claude_bridge_env() {
+        let Ok(env) = forge_provider::claude_bridge_env() else {
+            let _ = tx.send(Err(std::io::Error::other("claude bridge not configured")));
+            return;
+        };
+        for (key, value) in env {
             cmd.env(key, value);
         }
         // `--debug` makes the real `claude` CLI write verbose diagnostic output straight to the

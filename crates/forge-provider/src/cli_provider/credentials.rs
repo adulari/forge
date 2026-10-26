@@ -86,16 +86,6 @@ fn home_dir() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// The claude config dir the CLI itself reads (`$CLAUDE_CONFIG_DIR`, else `~/.claude`). Mirrors
-/// `claude_bridge_home::real_claude_config_dir`, which resolves the same pair for the isolated
-/// bridge home.
-fn claude_config_dir() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Some(std::path::PathBuf::from(dir));
-    }
-    Some(home_dir()?.join(".claude"))
-}
-
 /// `${CODEX_HOME:-~/.codex}/auth.json` — the same resolution `quota::codex_cli_detected_plan`
 /// uses to read the CLI's ChatGPT plan.
 fn codex_auth_path() -> Option<std::path::PathBuf> {
@@ -108,20 +98,12 @@ fn codex_auth_path() -> Option<std::path::PathBuf> {
 /// Static, file/env-only credential evidence for one bridge. No subprocess, no network.
 fn static_credentials(kind: CliKind) -> CliCredentials {
     match kind {
+        // The bridge never uses the interactive login in `~/.claude/.credentials.json` (sharing it
+        // got the user's own login invalidated); it needs an explicit long-lived token or an API
+        // key. Its absence is a configuration gap, so routing drops the bridge quietly.
         CliKind::ClaudeCode => {
-            if env_set("ANTHROPIC_API_KEY") || env_set("CLAUDE_CODE_OAUTH_TOKEN") {
-                return CliCredentials::Present;
-            }
-            let Some(dir) = claude_config_dir() else {
-                return CliCredentials::Unknown;
-            };
-            if dir.join(".credentials.json").exists() {
-                return CliCredentials::Present;
-            }
-            // macOS Claude Code keeps its OAuth tokens in the login keychain, so a missing file
-            // proves nothing there. Elsewhere the file is the store.
-            if cfg!(target_os = "macos") {
-                CliCredentials::Unknown
+            if crate::bridge_auth_present() {
+                CliCredentials::Present
             } else {
                 CliCredentials::Absent
             }
@@ -191,6 +173,7 @@ mod tests {
     /// file must be knowably credential-less BEFORE anything is spawned.
     #[test]
     fn a_clean_home_is_absent_for_the_file_backed_bridges() {
+        crate::claude_bridge_auth::ASSUME_TOKEN.with(|c| c.set(false));
         let _guard = env_guard();
         let home = tempfile::tempdir().unwrap();
         let _env = ScopedEnv::set(&[
@@ -203,16 +186,11 @@ mod tests {
             ("OPENAI_API_KEY", None),
         ]);
         assert_eq!(static_credentials(CliKind::Codex), CliCredentials::Absent);
-        let claude = static_credentials(CliKind::ClaudeCode);
-        if cfg!(target_os = "macos") {
-            assert_eq!(
-                claude,
-                CliCredentials::Unknown,
-                "the macOS keychain means a missing file proves nothing"
-            );
-        } else {
-            assert_eq!(claude, CliCredentials::Absent);
-        }
+        assert_eq!(
+            static_credentials(CliKind::ClaudeCode),
+            CliCredentials::Absent,
+            "no bridge token and no API key is a configuration gap on every platform"
+        );
         assert_eq!(
             static_credentials(CliKind::Antigravity),
             CliCredentials::Unknown,
@@ -224,6 +202,7 @@ mod tests {
     /// signal must win.
     #[test]
     fn a_token_file_or_an_api_key_is_present() {
+        crate::claude_bridge_auth::ASSUME_TOKEN.with(|c| c.set(false));
         let _guard = env_guard();
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".claude")).unwrap();
@@ -241,9 +220,18 @@ mod tests {
         ]);
         assert_eq!(
             static_credentials(CliKind::ClaudeCode),
-            CliCredentials::Present
+            CliCredentials::Absent,
+            "the interactive login file is deliberately not a bridge credential"
         );
         assert_eq!(static_credentials(CliKind::Codex), CliCredentials::Present);
+
+        let _token = ScopedEnv::set(&[("CLAUDE_CODE_OAUTH_TOKEN", Some("tok"))]);
+        assert_eq!(
+            static_credentials(CliKind::ClaudeCode),
+            CliCredentials::Present,
+            "an explicit bridge token is a credential"
+        );
+        drop(_token);
 
         let empty = tempfile::tempdir().unwrap();
         let _env = ScopedEnv::set(&[

@@ -43,11 +43,14 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
     let known_search = forge_config::known_search_providers().any(|p| p == provider);
     // `artificialanalysis` is the benchmark Data API key (ADR-0011), not a model/search provider,
     // but it stores/resolves via the same keyring entry name.
-    let known_data = provider == "artificialanalysis";
+    // `claude_oauth_token` is the claude bridge's `claude setup-token` credential, same slot shape.
+    let known_data =
+        provider == "artificialanalysis" || provider == forge_config::CLAUDE_OAUTH_TOKEN_SLOT;
     if !known_provider && !known_search && !known_data {
         let mut known: Vec<_> = forge_config::known_key_providers().collect();
         known.extend(forge_config::known_search_providers());
         known.push("artificialanalysis");
+        known.push(forge_config::CLAUDE_OAUTH_TOKEN_SLOT);
         known.push("xai-oauth");
         known.push("codex-oauth");
         anyhow::bail!(

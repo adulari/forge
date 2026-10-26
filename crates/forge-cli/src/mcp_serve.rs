@@ -842,6 +842,9 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         Ok(names) => forge_config::adopt_parent_provider_keys(&names),
         Err(_) => forge_config::inject_provider_keys(),
     }
+    // The bridged claude hands this process its environment, including the bridge's OAuth token;
+    // the shell tool must not pass it on to the commands it runs.
+    forge_types::child_env::scrub("CLAUDE_CODE_OAUTH_TOKEN");
     clock.mark("mcp-serve: provider keys");
     let mut config = forge_config::load().unwrap_or_else(|_| Config::default());
     clock.mark("mcp-serve: config load");
