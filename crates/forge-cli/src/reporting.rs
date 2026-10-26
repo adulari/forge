@@ -34,6 +34,8 @@ pub(crate) fn start(command: &Command) {
                 InstallMethod::Binary => "binary",
                 InstallMethod::Homebrew => "homebrew",
                 InstallMethod::Cargo => "cargo",
+                InstallMethod::Aur => "aur",
+                InstallMethod::Scoop => "scoop",
             }
             .to_string(),
         ),
