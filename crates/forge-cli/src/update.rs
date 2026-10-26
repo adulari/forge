@@ -18,6 +18,37 @@ pub enum InstallMethod {
     Homebrew,
     /// `cargo install`-managed: defer to `cargo install … --force`.
     Cargo,
+    /// Arch `forge-bin` package: defer to the AUR helper.
+    Aur,
+    /// Scoop-managed (Windows): defer to `scoop update`.
+    Scoop,
+}
+
+impl InstallMethod {
+    /// Short name used on the daemon's `/api/update` wire.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Binary => "binary",
+            Self::Homebrew => "homebrew",
+            Self::Cargo => "cargo",
+            Self::Aur => "aur",
+            Self::Scoop => "scoop",
+        }
+    }
+
+    /// The exact command that upgrades a package-manager install; `None` for a standalone
+    /// binary, which replaces itself.
+    pub fn upgrade_command(self) -> Option<String> {
+        match self {
+            Self::Binary => None,
+            Self::Homebrew => Some("brew upgrade forge".to_string()),
+            Self::Cargo => Some(format!(
+                "cargo install --git https://github.com/{REPO_OWNER}/{REPO_NAME} forge-cli --force"
+            )),
+            Self::Aur => Some("yay -Syu forge-bin".to_string()),
+            Self::Scoop => Some("scoop update forge".to_string()),
+        }
+    }
 }
 
 /// Best-effort classification of the running binary's install method from its path.
@@ -26,7 +57,11 @@ pub fn detect_install_method() -> InstallMethod {
     let in_cargo_home = std::env::var_os("CARGO_HOME")
         .map(|c| exe.starts_with(std::path::Path::new(&c).join("bin")))
         .unwrap_or(false);
-    classify_path(&exe.to_string_lossy(), in_cargo_home)
+    let raw = exe.to_string_lossy();
+    if raw == "/usr/bin/forge" && std::path::Path::new("/etc/arch-release").exists() {
+        return InstallMethod::Aur;
+    }
+    classify_path(&raw, in_cargo_home)
 }
 
 /// Pure path classifier (separated for testing). `in_cargo_home` is a caller-resolved hint that the
@@ -35,6 +70,9 @@ fn classify_path(raw_path: &str, in_cargo_home: bool) -> InstallMethod {
     let path = raw_path.replace('\\', "/").to_lowercase();
     if path.contains("/cellar/") || path.contains("/homebrew/") {
         return InstallMethod::Homebrew;
+    }
+    if path.contains("/scoop/apps/") || path.contains("/scoop/shims/") {
+        return InstallMethod::Scoop;
     }
     if path.contains("/.cargo/bin/") || in_cargo_home {
         return InstallMethod::Cargo;
@@ -60,26 +98,22 @@ pub fn run(check_only: bool) -> Result<()> {
             }
         };
     }
-    match detect_install_method() {
-        InstallMethod::Homebrew => {
-            println!("forge was installed via Homebrew — update with:\n  brew upgrade forge");
-            Ok(())
-        }
-        InstallMethod::Cargo => {
+    let method = detect_install_method();
+    match method.upgrade_command() {
+        Some(cmd) => {
             println!(
-                "forge was installed via cargo — update with:\n  cargo install --git https://github.com/{REPO_OWNER}/{REPO_NAME} forge-cli --force"
+                "forge was installed via {} — update with:\n  {cmd}",
+                method.wire_name()
             );
             Ok(())
         }
-        InstallMethod::Binary => self_replace(),
+        None => self_replace(),
     }
 }
 
 /// The latest release tag (e.g. `v0.3.0`), or `None` if the lookup fails (offline, rate-limited).
 fn latest_release_tag() -> Result<Option<String>> {
-    let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner(REPO_OWNER)
-        .repo_name(REPO_NAME)
+    let releases = release_list_builder()
         .build()
         .context("configuring release lookup")?
         .fetch()
@@ -87,29 +121,55 @@ fn latest_release_tag() -> Result<Option<String>> {
     Ok(releases.latest().map(|r| r.version().to_string()))
 }
 
-/// Download the latest GitHub release asset for this target and replace the running binary. No-op
-/// (and says so) when already current — including a source/dev build whose version is ahead of the
-/// latest release (self_update only applies a strictly-greater version, never a downgrade).
-fn self_replace() -> Result<()> {
+/// The GitHub API base: `FORGE_UPDATE_FEED_URL` when set (tests, mirrors), else github.com.
+fn release_list_builder() -> self_update::backends::github::ReleaseListBuilder {
+    let mut builder = self_update::backends::github::ReleaseList::configure();
+    builder.repo_owner(REPO_OWNER).repo_name(REPO_NAME);
+    if let Some(base) = crate::update_feed::feed_override() {
+        builder.api_base_url(base);
+    }
+    builder
+}
+
+/// Download the latest GitHub release asset for this target and replace the running binary.
+/// Returns the new version, or `None` when already current — including a source/dev build whose
+/// version is ahead of the latest release (self_update only applies a strictly-greater version,
+/// never a downgrade). `FORGE_UPDATE_TARGET` points the swap at another file (tests); progress
+/// is only drawn on request, since a bar would corrupt a full-screen TUI.
+pub fn apply_in_place(show_progress: bool) -> Result<Option<String>> {
     // Our release archives lay the binary out as `forge-<target>/forge[.exe]`.
     let bin_in_archive = format!("forge-{{{{target}}}}/forge{}", std::env::consts::EXE_SUFFIX);
-    let status = self_update::backends::github::Update::configure()
+    let mut builder = self_update::backends::github::Update::configure();
+    builder
         .repo_owner(REPO_OWNER)
         .repo_name(REPO_NAME)
         .bin_name("forge")
         .bin_path_in_archive(&bin_in_archive)
         .current_version(CURRENT)
-        .show_download_progress(true)
-        .no_confirm(true)
+        .show_download_progress(show_progress)
+        .show_output(show_progress)
+        .no_confirm(true);
+    if let Some(base) = crate::update_feed::feed_override() {
+        builder.api_base_url(base);
+    }
+    if let Some(target) = std::env::var_os("FORGE_UPDATE_TARGET") {
+        builder.bin_install_path(std::path::PathBuf::from(target));
+    }
+    let status = builder
         .build()
         .context("configuring the updater")?
         .update()
         .context("downloading/applying the update")?;
-    if status.is_updated() {
-        println!("✔ updated forge {CURRENT} → {}", status.version());
-        println!("  restart forge to use the new version.");
-    } else {
-        println!("forge is already up to date ({CURRENT}).");
+    Ok(status.is_updated().then(|| status.version().to_string()))
+}
+
+fn self_replace() -> Result<()> {
+    match apply_in_place(true)? {
+        Some(version) => {
+            println!("✔ updated forge {CURRENT} → {version}");
+            println!("  restart forge to use the new version.");
+        }
+        None => println!("forge is already up to date ({CURRENT})."),
     }
     Ok(())
 }
@@ -138,6 +198,18 @@ mod tests {
             classify_path("/custom/cargohome/bin/forge", true),
             InstallMethod::Cargo
         );
+        assert_eq!(
+            classify_path(
+                "C:\\Users\\me\\scoop\\apps\\forge\\current\\forge.exe",
+                false
+            ),
+            InstallMethod::Scoop
+        );
+        assert_eq!(
+            InstallMethod::Aur.upgrade_command().as_deref(),
+            Some("yay -Syu forge-bin")
+        );
+        assert_eq!(InstallMethod::Binary.upgrade_command(), None);
         // Standalone binary installs (curl install.sh / manual).
         assert_eq!(
             classify_path("/home/me/.local/bin/forge", false),

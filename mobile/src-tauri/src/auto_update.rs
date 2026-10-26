@@ -4,8 +4,21 @@
 //! (v2.23.0 did), the button can never be pressed and the app cannot repair itself. Running the
 //! update from the native side means the next fixed release always reaches the user.
 
-use tauri::AppHandle;
+use std::sync::Mutex;
+
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
+
+/// Event the web UI listens for once an update is on disk and only a restart is left.
+pub const INSTALLED_EVENT: &str = "forge://desktop-update-installed";
+
+/// The version installed in the background, kept so a UI that mounts after the event still sees it.
+static INSTALLED_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
+#[tauri::command]
+pub fn desktop_update_installed_version() -> Option<String> {
+    INSTALLED_VERSION.lock().ok().and_then(|v| v.clone())
+}
 
 /// Whether this install can replace itself with a downloaded update.
 ///
@@ -184,7 +197,13 @@ async fn run(app: &AppHandle) -> tauri_plugin_updater::Result<()> {
         return Ok(());
     };
     eprintln!("forge: installing update {}", update.version);
-    // Windows exits inside this call and the installer relaunches Forge.
+    // Windows exits inside this call and the installer relaunches Forge. Elsewhere the running
+    // process keeps going on the old build: the UI tells the user and offers the restart, rather
+    // than swapping the app out from under them.
     update.download_and_install(|_, _| {}, || {}).await?;
-    app.restart();
+    if let Ok(mut installed) = INSTALLED_VERSION.lock() {
+        *installed = Some(update.version.clone());
+    }
+    let _ = app.emit(INSTALLED_EVENT, update.version.clone());
+    Ok(())
 }

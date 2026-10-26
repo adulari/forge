@@ -81,7 +81,12 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         full.width,
         avail.saturating_sub(MIN_STREAM + wf_band_h + band_h),
     );
-    let stream_h = avail.saturating_sub(band_h + wf_band_h + queue_h);
+    let update_h = update_band::height(
+        app,
+        full.width,
+        avail.saturating_sub(MIN_STREAM + wf_band_h + band_h + queue_h),
+    );
+    let stream_h = avail.saturating_sub(band_h + wf_band_h + queue_h + update_h);
 
     let areas = Layout::vertical([
         Constraint::Length(header_h),
@@ -89,6 +94,7 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         Constraint::Length(wf_band_h),
         Constraint::Length(band_h),
         Constraint::Length(queue_h),
+        Constraint::Length(update_h),
         Constraint::Length(decision_h),
         Constraint::Length(composer_h),
         Constraint::Length(compact_h),
@@ -101,12 +107,14 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         wf_area,
         band_area,
         queue_area,
+        update_area,
         decision_area,
         composer_area,
         compact_area,
         status_area,
     ) = (
         areas[0], areas[1], areas[2], areas[3], areas[4], areas[5], areas[6], areas[7], areas[8],
+        areas[9],
     );
 
     if header_h > 0 {
@@ -184,6 +192,9 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     }
     if queue_h > 0 {
         queue_band::render(frame, queue_area, app);
+    }
+    if update_h > 0 {
+        update_band::render(frame, update_area, app);
     }
     if decision_h > 0 {
         permission::render_permission(frame, decision_area, app);

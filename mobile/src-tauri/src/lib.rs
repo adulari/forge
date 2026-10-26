@@ -182,6 +182,7 @@ pub fn run(process_start: Instant) {
         .register_uri_scheme_protocol(about::URI_SCHEME, about::serve)
         .invoke_handler(tauri::generate_handler![
             auto_update::desktop_update_installable,
+            auto_update::desktop_update_installed_version,
             serve_discovery::detect_forge_serve,
             serve_discovery::forge_binary_available,
             serve_discovery::start_forge_serve,

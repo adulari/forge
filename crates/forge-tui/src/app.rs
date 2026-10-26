@@ -383,6 +383,8 @@ pub struct App {
     pub viewer: Option<ViewerState>,
     /// The dynamic `/config` settings editor overlay (modal while `open`).
     pub config_editor: crate::config_editor::ConfigEditor,
+    /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
+    pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.
     pub usage_overlay: UsageOverlay,
     /// The `/btw` answer card (`app_btw.rs`); `None` when no side question is on screen.

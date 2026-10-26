@@ -10,6 +10,7 @@
 
 import { parseNoticesResponse, type NoticesResponse } from "./notices/core";
 import { tFetch, TWebSocket } from "./transport";
+import type { DaemonUpdateInfo } from "./updateBanner";
 
 export class ApiError extends Error {
   status: number;
@@ -37,6 +38,8 @@ export interface HostIdentity {
   version?: string;
   /** Remote session protocol spoken by this daemon. */
   protocol?: number;
+  /** Newest release this daemon has seen when it is newer than the daemon itself. */
+  update_available?: string | null;
 }
 
 export interface DiagnosticsResponse {
@@ -1102,6 +1105,23 @@ export function probeConnection(baseUrl: string): Promise<SessionRow[]> {
 
 export function getIdentity(baseUrl: string): Promise<HostIdentity> {
   return request(baseUrl, "/api/identity");
+}
+
+/** The daemon's own update status (`GET /api/update`). Older daemons answer 404. */
+export function getDaemonUpdate(baseUrl: string, refresh = false): Promise<DaemonUpdateInfo> {
+  return request(baseUrl, refresh ? "/api/update?refresh=1" : "/api/update");
+}
+
+export interface DaemonUpdateResult {
+  status: "updated" | "already_current" | "manual";
+  version: string;
+  restart: "scheduled" | "waiting_for_idle" | "manual" | "not_needed";
+  command: string | null;
+}
+
+/** Runs the daemon's self-update. Loopback only: the daemon refuses it from any other address. */
+export function applyDaemonUpdate(baseUrl: string): Promise<DaemonUpdateResult> {
+  return request(baseUrl, "/api/update", { method: "POST" }, 10 * 60_000);
 }
 
 /** Notices the model sent with `push_notification` newer than `after` (a daemon sequence number).

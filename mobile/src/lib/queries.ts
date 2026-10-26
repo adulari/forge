@@ -99,6 +99,9 @@ import {
   getChangelog,
   type DiagnosticsResponse,
   getDiagnostics,
+  getIdentity,
+  getDaemonUpdate,
+  applyDaemonUpdate,
 
   type ForkSessionRequest,
   forkSession,
@@ -198,6 +201,8 @@ function keys(baseUrl: string | null) {
     schedules: ["schedules", baseUrl] as const,
     changelog: (limit?: number) => ["changelog", baseUrl, limit ?? null] as const,
     diagnostics: ["diagnostics", baseUrl] as const,
+    daemonUpdate: ["daemon-update", baseUrl] as const,
+    identity: ["identity", baseUrl] as const,
   };
 }
 
@@ -220,6 +225,43 @@ export function useDiagnostics() {
     staleTime: 60_000,
     retry: (failureCount, error) =>
       !(error instanceof Error && "status" in error && error.status === 404) && failureCount < 1,
+  });
+}
+
+const SIX_HOURS_MS = 6 * 3600 * 1000;
+
+/** The daemon's update status. A daemon without the endpoint (404) simply has none to report. */
+export function useDaemonUpdate(enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery({
+    queryKey: keys(baseUrl).daemonUpdate,
+    queryFn: () => getDaemonUpdate(baseUrl as string),
+    enabled: enabled && baseUrl != null,
+    staleTime: SIX_HOURS_MS,
+    refetchInterval: SIX_HOURS_MS,
+    retry: false,
+  });
+}
+
+/** Cheap update hint from `/api/identity`; the only one a relayed phone can read. */
+export function useIdentityUpdateHint(enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery({
+    queryKey: keys(baseUrl).identity,
+    queryFn: async () => (await getIdentity(baseUrl as string)).update_available ?? null,
+    enabled: enabled && baseUrl != null,
+    staleTime: SIX_HOURS_MS,
+    refetchInterval: SIX_HOURS_MS,
+    retry: false,
+  });
+}
+
+export function useApplyDaemonUpdate() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => applyDaemonUpdate(baseUrl as string),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).daemonUpdate }),
   });
 }
 
