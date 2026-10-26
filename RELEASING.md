@@ -176,6 +176,10 @@ If the desktop matrix needs repair after a tag was created, merge the workflow f
 `gh workflow run app-desktop.yml --ref main -f release_tag=vX.Y.Z`; this checks out and rebuilds the
 exact existing tag, then transactionally republishes the complete platform set.
 
+Desktop UI changes also ship over the air between releases (`desktop-ota.yml`, rolling `desktop-ota`
+prerelease; see `docs/features/desktop-ota.md`). A release never needs to wait for them and never
+touches that prerelease, and `releases/latest` must keep pointing at the newest full release.
+
 ## 7. Verify
 
 - `gh release view vX.Y.Z` shows a published (non-draft) latest release with 5 CLI archives +
