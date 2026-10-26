@@ -106,6 +106,10 @@ impl Ota {
             return;
         };
         *state = State::load(&self.settings.root);
+        state.retarget(
+            &self.settings.runtime_version,
+            self.settings.embedded_created_at,
+        );
         for note in state.begin_boot() {
             match note {
                 BootNote::RolledBack { bad } => {
@@ -613,6 +617,58 @@ mod tests {
         assert!(ota.rollback_if_unhealthy());
         assert_eq!(rig.served(&ota), None);
         assert!(!ota.rollback_if_unhealthy());
+        std::fs::remove_dir_all(&rig.root).unwrap();
+    }
+
+    #[test]
+    fn a_newly_installed_release_does_not_serve_bundles_built_for_the_old_one() {
+        let rig = Rig::new("upgrade");
+        let ota = rig.launch();
+        rig.publish(&ota, RUNTIME, "aaaaaaa1", 200, "old shell bundle")
+            .unwrap();
+        let ota = rig.launch();
+        ota.mark_healthy();
+        assert_eq!(rig.served(&ota).as_deref(), Some("old shell bundle"));
+
+        let other_runtime = Ota::new(
+            Settings {
+                root: rig.root.clone(),
+                runtime_version: "fedcba9876543210".to_string(),
+                app_version: "2.24.0".to_string(),
+                pubkey: rig.key.pubkey_b64.clone(),
+                base_url: String::new(),
+                embedded_id: "embedded".to_string(),
+                embedded_created_at: 100,
+            },
+            None,
+        );
+        assert_eq!(rig.served(&other_runtime), None);
+        assert!(other_runtime.status().active.is_none());
+        assert!(!rig.root.join("bundles/aaaaaaa1").exists());
+        std::fs::remove_dir_all(&rig.root).unwrap();
+    }
+
+    #[test]
+    fn a_release_that_embeds_a_newer_ui_replaces_the_bundle() {
+        let rig = Rig::new("embeds-newer");
+        let ota = rig.launch();
+        rig.publish(&ota, RUNTIME, "aaaaaaa1", 200, "bundle")
+            .unwrap();
+        let ota = rig.launch();
+        ota.mark_healthy();
+        let newer_release = Ota::new(
+            Settings {
+                root: rig.root.clone(),
+                runtime_version: RUNTIME.to_string(),
+                app_version: "2.24.0".to_string(),
+                pubkey: rig.key.pubkey_b64.clone(),
+                base_url: String::new(),
+                embedded_id: "embedded".to_string(),
+                embedded_created_at: 250,
+            },
+            None,
+        );
+        assert_eq!(rig.served(&newer_release), None);
         std::fs::remove_dir_all(&rig.root).unwrap();
     }
 

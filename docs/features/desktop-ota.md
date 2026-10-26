@@ -100,6 +100,11 @@ not cancel in-progress runs, so a publish is never cut half way.
   Abandoning blacklists the bundle id and restores the last healthy bundle, or the embedded UI. A
   30 second in-process watchdog does the same without waiting for a relaunch.
 
+- **After a full release.** State records the runtime version the bundles were published for. A
+  newly installed release with a different runtime version discards every downloaded bundle at
+  launch, and one whose embedded UI is not older than a bundle discards that bundle, so an old
+  bundle is never served on top of a newer shell.
+
 State is `<app data>/ota/state.json`; the app data directory is the platform's (for Linux,
 `~/.local/share/dev.adulari.forge/ota/`).
 

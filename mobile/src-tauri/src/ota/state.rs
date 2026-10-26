@@ -25,6 +25,8 @@ pub struct BundleRef {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
+    /// The runtime version the bundles below were published for.
+    pub runtime_version: String,
     /// The bundle served at this moment; `None` is the UI embedded in the binary.
     pub active: Option<BundleRef>,
     /// The last bundle that proved healthy: where a rollback goes (`None` is the embedded UI).
@@ -66,6 +68,38 @@ impl State {
             serde_json::to_vec_pretty(self).map_err(io::Error::other)?,
         )?;
         fs::rename(temp, root.join("state.json"))
+    }
+
+    /// Drops bundles this binary must not serve: those built for another runtime version (the
+    /// user installed a release with a different native shell), and those no newer than the UI
+    /// embedded in this binary (the release already contains them).
+    pub fn retarget(&mut self, runtime: &str, embedded_created_at: u64) {
+        if self.runtime_version != runtime {
+            self.runtime_version = runtime.to_string();
+            self.active = None;
+            self.pending = None;
+            self.last_healthy = None;
+            self.booting = false;
+            self.failed_boots = 0;
+            self.blacklist.clear();
+            return;
+        }
+        let stale = |bundle: &Option<BundleRef>| {
+            bundle
+                .as_ref()
+                .is_some_and(|bundle| bundle.created_at <= embedded_created_at)
+        };
+        if stale(&self.active) {
+            self.active = None;
+            self.booting = false;
+            self.failed_boots = 0;
+        }
+        if stale(&self.pending) {
+            self.pending = None;
+        }
+        if stale(&self.last_healthy) {
+            self.last_healthy = None;
+        }
     }
 
     /// Runs once per launch, before anything is served. Returns what happened, for logging.
@@ -215,6 +249,42 @@ mod tests {
         state.begin_boot();
         state.mark_healthy();
         state
+    }
+
+    #[test]
+    fn installing_a_release_with_another_runtime_drops_every_downloaded_bundle() {
+        let mut state = healthy_active("good0001", 10);
+        state.runtime_version = "old".to_string();
+        state.stage(bundle("next0001", 20));
+        state.blacklist.push("black001".into());
+        state.retarget("new", 0);
+        assert_eq!(state.runtime_version, "new");
+        assert_eq!(state.active, None);
+        assert_eq!(state.pending, None);
+        assert_eq!(state.last_healthy, None);
+        assert!(!state.booting);
+        assert!(state.blacklist.is_empty());
+    }
+
+    #[test]
+    fn a_release_that_embeds_a_newer_ui_supersedes_older_bundles() {
+        let mut state = healthy_active("good0001", 10);
+        state.runtime_version = "same".to_string();
+        state.stage(bundle("next0001", 15));
+        state.retarget("same", 10);
+        assert_eq!(state.active, None);
+        assert_eq!(state.last_healthy, None);
+        assert_eq!(state.pending, Some(bundle("next0001", 15)));
+        state.retarget("same", 15);
+        assert_eq!(state.pending, None);
+    }
+
+    #[test]
+    fn a_bundle_newer_than_the_embedded_ui_is_kept() {
+        let mut state = healthy_active("good0001", 10);
+        state.runtime_version = "same".to_string();
+        state.retarget("same", 9);
+        assert_eq!(state.active, Some(bundle("good0001", 10)));
     }
 
     #[test]

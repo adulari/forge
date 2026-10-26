@@ -10,6 +10,7 @@ import {
   useDesktopOtaStatus,
 } from "../lib/desktopOta";
 import { isTauri } from "../lib/platform";
+import { useDesktopUpdateState } from "../lib/updater";
 import { Banner } from "./ds/Banner";
 
 /**
@@ -40,7 +41,11 @@ export function DesktopOtaHost() {
 
   const reload = useCallback(() => void applyDesktopOta().catch(() => undefined), []);
 
-  if (!isTauri || !pendingBundleToOffer(status)) return null;
+  // A full release replaces the shell and the UI together, so it takes the banner slot; the
+  // interface bundle is superseded by the one the release embeds.
+  const fullUpdate = useDesktopUpdateState().phase;
+  if (!isTauri || fullUpdate === "available" || fullUpdate === "installing") return null;
+  if (!pendingBundleToOffer(status)) return null;
   return (
     <Banner
       compact
