@@ -3,9 +3,10 @@ import React from "react";
 import { StyleSheet } from "react-native";
 
 import { Screen } from "../../../components/ds/Screen";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 import { TerminalDock } from "../../../components/shell/TerminalDock";
 
-export default function SessionTerminal() {
+export function SessionTerminal() {
   const { id } = useLocalSearchParams<{ id: string }>();
 
   return (
@@ -23,3 +24,7 @@ export default function SessionTerminal() {
 const styles = StyleSheet.create({
   content: { paddingHorizontal: 0 },
 });
+
+export default function SessionTerminalRoute() {
+  return useSegmentsHosted() ? null : <SessionTerminal />;
+}

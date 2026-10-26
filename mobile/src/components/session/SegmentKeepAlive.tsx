@@ -11,7 +11,7 @@
 //
 // Phones keep the old `<Slot/>` behaviour untouched: a mounted-but-hidden native screen would
 // hold memory the OS reclaims today, so `KEEP_SEGMENTS_ALIVE` is web-only.
-import React, { Activity, createContext, useContext, useState } from "react";
+import React, { Activity, createContext, useContext, useEffect, useState } from "react";
 import { Platform, StyleSheet, View } from "react-native";
 
 export type KeptSegment = "chat" | "tasks" | "agents" | "review" | "files" | "replay";
@@ -46,6 +46,26 @@ export const SegmentKeepAlive = React.memo(function SegmentKeepAlive({
   if (active && !visited.has(active)) {
     setVisited(new Set([...visited, active]));
   }
+
+  // Prewarm: once the session has painted, mount the remaining segments one idle slice at a time
+  // (hidden, so their effects and data fetches stay paused) so the FIRST visit to a tab is a
+  // display toggle too, not a mount.
+  const hasActive = active != null;
+  const remaining = screens.find((screen) => !visited.has(screen.segment) && screen.segment !== active);
+  useEffect(() => {
+    if (!hasActive || !remaining) return;
+    const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
+    let idleId: number | undefined;
+    const timer = setTimeout(() => {
+      const warm = () => setVisited((prev) => (prev.has(remaining.segment) ? prev : new Set([...prev, remaining.segment])));
+      if (w.requestIdleCallback) idleId = w.requestIdleCallback(warm, { timeout: 1000 });
+      else warm();
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      if (idleId != null) w.cancelIdleCallback?.(idleId);
+    };
+  }, [hasActive, remaining]);
   return (
     <>
       {screens

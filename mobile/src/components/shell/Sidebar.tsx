@@ -139,6 +139,7 @@ function DenseSessionRow({ row, serverId, selected, paneNumber, paneFocused, pan
         onPress={onPress}
         // Start the transcript fetch while the button is still going down: the click lands ~100 ms
         // later and the session screen then paints from cache instead of a spinner.
+        onHoverIn={() => prefetchHistory(row.id)}
         onPressIn={() => prefetchHistory(row.id)}
         accessibilityRole="button"
         accessibilityLabel={`${title}, ${state}${row.waiting ? ", needs a decision" : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}`}

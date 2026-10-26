@@ -71,6 +71,7 @@ function SessionIconButton({
     <Pressable
       onPress={onPress}
       onPressIn={onPressIn}
+      onHoverIn={onPressIn}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${state}${worktree ? ", worktree" : ""}`}
       style={[styles.sessionButton, selected && { backgroundColor: tokens.bg3 }]}

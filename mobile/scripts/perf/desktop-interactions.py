@@ -46,6 +46,9 @@ def main():
     def want(n):
         return wanted is None or n in wanted
 
+    if want("firstVisits"):
+        time.sleep(3)  # let idle-time prewarming finish, as a user who looks at the chat first would
+        res.update(ins.eval_async("__bench.firstVisits()"))
     for name in ["tabChatToTasks", "tabTasksToChat", "tabChatToAgents", "tabChatToReview", "tabChatToFiles", "tabChatToReplay", "palette", "usageDock", "terminalDock"]:
         if want(name):
             res[name] = ins.eval_async(f"__bench.runScenario('{name}', {a.runs})")

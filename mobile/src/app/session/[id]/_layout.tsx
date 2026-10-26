@@ -66,10 +66,11 @@ import { useDesktopMenuAction } from "../../../lib/desktopMenu";
 import { assessCompatibility } from "../../../lib/diagnostics";
 import { goBackOr } from "../../../lib/nav";
 import { useAppShortcut } from "../../../lib/shortcuts";
-import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
+import { useHistory, usePrefetchSessionPanels, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { useReviewComments } from "../../../lib/reviewComments";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
-import { isSegmentPath, segmentFromPathname, type SegmentValue } from "../../../lib/sessionSegments";
+import { isSegmentPath, type SegmentValue } from "../../../lib/sessionSegments";
+import { useSessionSegment } from "../../../lib/useSessionSegment";
 import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
@@ -83,17 +84,7 @@ import { SessionChat } from "./index";
 import { SessionReplayScreen } from "./replay";
 import { Review as SessionReview } from "./review";
 import { SessionTasks } from "./tasks";
-
-// Path suffix appended to `/session/{id}` for each segment ("" = the index/Chat route).
-const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
-  chat: "",
-  tasks: "tasks",
-  agents: "agents",
-  review: "review",
-  files: "files",
-  terminal: "terminal",
-  replay: "replay",
-};
+import { SessionTerminal } from "./terminal";
 
 // Module-level so the memoised host below never re-renders with the layout's per-frame churn.
 const SEGMENT_SCREENS: readonly SegmentScreen[] = [
@@ -185,6 +176,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   // query so the finalized turn appears from the store. The shell only needs to call the
   // hook to fire that side effect — segments consume useHistory independently.
   useTurnCompleted(snapshot);
+  usePrefetchSessionPanels(sessionId, KEEP_SEGMENTS_ALIVE);
 
   const lastCopyText = useRef<string | null>(null);
 
@@ -233,10 +225,12 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     lastCopyText.current = null;
   }, [sessionId]);
 
-  const activeSegment = segmentFromPathname(pathname);
-  // The terminal segment is deliberately not kept alive: hiding it would pause its PTY socket.
-  const keptSegment: KeptSegment | null =
-    isSegmentPath(pathname) && activeSegment !== "terminal" ? activeSegment : null;
+  const { segment: activeSegment, setSegment: onSegmentChange } = useSessionSegment(pathname, sessionId, KEEP_SEGMENTS_ALIVE);
+  // The terminal segment is deliberately not kept alive (hiding it would pause its PTY socket):
+  // it mounts when active and unmounts when left.
+  const onSegmentPath = isSegmentPath(pathname);
+  const keptSegment: KeptSegment | null = onSegmentPath && activeSegment !== "terminal" ? activeSegment : null;
+  const terminalActive = KEEP_SEGMENTS_ALIVE && onSegmentPath && activeSegment === "terminal";
 
   const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
@@ -271,15 +265,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     segmentY.value = withTiming(0, { duration: durations.base, easing: easings.standard });
   }, [activeSegment, reduced, segmentOpacity, segmentY]);
   const segmentStyle = useAnimatedStyle(() => ({ opacity: segmentOpacity.value, transform: [{ translateY: segmentY.value }] }));
-
-  const onSegmentChange = useCallback(
-    (value: SegmentValue) => {
-      if (value === activeSegment) return;
-      const suffix = SEGMENT_SUFFIX[value];
-      router.replace(`/session/${sessionId}${suffix ? `/${suffix}` : ""}` as never);
-    },
-    [activeSegment, sessionId],
-  );
 
   // Web/desktop in-session keyboard shortcuts (native `useHotkey` is a no-op). Alt+C/T/A/R
   // switch the Chat/Tasks/Agents/Review segment (Alt+1..4 is already tab-level navigation in
@@ -582,7 +567,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
       {KEEP_SEGMENTS_ALIVE ? (
         <SegmentsHostedContext.Provider value>
           <SegmentKeepAlive active={keptSegment} screens={SEGMENT_SCREENS} />
-          <View style={keptSegment ? styles.none : styles.flex}>
+          {terminalActive ? <SessionTerminal /> : null}
+          <View style={keptSegment || terminalActive ? styles.none : styles.flex}>
             <Slot />
           </View>
         </SegmentsHostedContext.Provider>

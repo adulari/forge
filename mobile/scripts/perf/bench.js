@@ -141,6 +141,15 @@
     return stats(rows);
   }
 
+  // One measurement per tab, in a fresh session, before anything has been visited.
+  async function firstVisits() {
+    const out = {};
+    for (const [label, name] of [["Tasks", "tabChatToTasks"], ["Agents", "tabChatToAgents"], ["Review", "tabChatToReview"], ["Files", "tabChatToFiles"], ["Replay", "tabChatToReplay"]]) {
+      out["first_" + label] = await runScenario(name, 1);
+    }
+    return out;
+  }
+
   async function sessionSwitch(runs) {
     const names = ["Perf session 1", "Perf session 2", "Perf session 3", "Perf session 4", "Perf session 5", "Perf session 0"];
     const item = (n) => [...document.querySelectorAll("div,a")].filter((e) => e.children.length === 0 && (e.textContent || "").trim() === n && shown(e))[0];
@@ -173,7 +182,7 @@
 
   async function expandToolGroup(runs) {
     const rows = [];
-    const groups = () => [...document.querySelectorAll("div")].filter((e) => e.children.length === 0 && /^Ran \d+ scripts?/.test(e.textContent || "") && shown(e));
+    const groups = () => [...document.querySelectorAll("div")].filter((e) => e.children.length === 0 && /^Ran \d+ /.test(e.textContent || "") && shown(e));
     for (let i = 0; i < runs; i++) {
       const g = groups();
       if (!g.length) break;
@@ -205,6 +214,6 @@
     return { frames: g.length, avgFrame: +(total / steps).toFixed(1), p95Frame: +g[Math.floor(g.length * 0.95)].toFixed(1), maxFrame: +g[g.length - 1].toFixed(1), scrollHeight: sc.scrollHeight };
   }
 
-  window.__bench = { composer, visible, runScenario, sessionSwitch, typing, expandToolGroup, scroll, scenarios, tab, press, key, text, idle, sleep, measure, stats };
+  window.__bench = { firstVisits, composer, visible, runScenario, sessionSwitch, typing, expandToolGroup, scroll, scenarios, tab, press, key, text, idle, sleep, measure, stats };
   return "installed";
 })();

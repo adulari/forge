@@ -68,6 +68,9 @@ def main():
     print(f"{'scenario':18} | {la+' paint':>14} {lb+' paint':>14} | {la+' commit':>15} {lb+' commit':>15} | worst p95 {la}/{lb}")
     summary = {}
     for k in acc[la]:
+        if k not in acc[lb]:
+            print(f"{k:18} | missing in {lb}")
+            continue
         if "avgFrame" in acc[la][k][0]:
             fa, fb = agg(la, k, "avgFrame"), agg(lb, k, "avgFrame")
             pa, pb = agg(la, k, "p95Frame"), agg(lb, k, "p95Frame")
@@ -80,7 +83,8 @@ def main():
             "p95": [worst(la, k, "p95"), worst(lb, k, "p95")],
         }
         summary[k] = row
-        print(f"{k:18} | {row['paint'][0]:14} {row['paint'][1]:14} | {row['commit'][0]:15} {row['commit'][1]:15} | {row['p95'][0]}/{row['p95'][1]}")
+        f = lambda v: "n/a" if v is None else v  # noqa: E731
+        print(f"{k:18} | {f(row['paint'][0]):>14} {f(row['paint'][1]):>14} | {f(row['commit'][0]):>15} {f(row['commit'][1]):>15} | {f(row['p95'][0])}/{f(row['p95'][1])}")
     if a.json:
         json.dump(summary, open(a.json, "w"), indent=1)
 

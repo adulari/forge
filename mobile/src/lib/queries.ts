@@ -704,6 +704,28 @@ export function useGitStatus(sessionId: string | null) {
   });
 }
 
+/** Warm the Review and Files tabs' first fetch shortly after a session opens, so their first
+ * visit paints from cache instead of waiting on the daemon (their segments are prewarmed hidden,
+ * and hidden screens run no effects). Skipped on native, which mounts one route at a time. */
+export function usePrefetchSessionPanels(sessionId: string | null, enabled: boolean): void {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!enabled || baseUrl == null || sessionId == null) return;
+    const timer = setTimeout(() => {
+      void queryClient.prefetchQuery({
+        queryKey: keys(baseUrl).gitStatus(sessionId),
+        queryFn: () => getGitStatus(baseUrl, sessionId),
+      }).catch(() => undefined);
+      void queryClient.prefetchQuery({
+        queryKey: keys(baseUrl).workspaceEntries(sessionId, ""),
+        queryFn: () => getWorkspaceEntries(baseUrl, sessionId, ""),
+      }).catch(() => undefined);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [enabled, baseUrl, sessionId, queryClient]);
+}
+
 export function useGitDiff(sessionId: string | null, path: string | null, staged = false) {
   const { baseUrl } = useAuth();
   return useQuery<GitDiffResponse>({
