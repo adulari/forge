@@ -138,8 +138,11 @@ export function rowKind(row: HistoryRow): TranscriptKind {
  */
 export function buildTranscript(rowsNewestFirst: HistoryRow[]): TranscriptEntry[] {
   const out: TranscriptEntry[] = [];
-  // Index into `out` of the newest unanswered call per tool name.
-  const awaiting = new Map<string, number>();
+  // Indices into `out` of the unanswered calls per tool name, oldest first. A turn that makes
+  // several calls to one tool (parallel `run_code`s) is served as all the call rows and then all
+  // the result rows, in call order, so results pair first-in first-out. Pairing against only the
+  // newest call left every other call unanswered and every result but one an orphan row.
+  const awaiting = new Map<string, number[]>();
   let n = 0;
   for (let i = rowsNewestFirst.length - 1; i >= 0; i--) {
     const row = rowsNewestFirst[i];
@@ -164,14 +167,16 @@ export function buildTranscript(rowsNewestFirst: HistoryRow[]): TranscriptEntry[
         key: `t${row.seq}-${n++}`,
         invocation: { seq: row.seq, tool: row.tool ?? null, args: row.content, result: null },
       });
-      awaiting.set(name, out.length - 1);
+      const queue = awaiting.get(name) ?? [];
+      queue.push(out.length - 1);
+      awaiting.set(name, queue);
       continue;
     }
-    const at = awaiting.get(name);
+    const queue = awaiting.get(name);
+    const at = queue?.shift();
     const pending = at === undefined ? undefined : out[at];
     if (pending && pending.kind === "tool" && pending.invocation.result === null) {
       pending.invocation.result = row.content;
-      awaiting.delete(name);
       continue;
     }
     out.push({

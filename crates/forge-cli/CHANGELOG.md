@@ -8,6 +8,9 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The desktop chat scrolls with the wheel and trackpad, and its scrollbar points the right way.** On web the transcript was an `inverted` list, which react-native-web draws with `scaleY(-1)` on the scroll container, flipping the scrollbar and fighting wheel and trackpad scrolling. The web transcript is now an upright list pinned to the newest row, with the same contract for the screen above it (offset from the newest end, "near the oldest row" loads the next page, jump to latest, previous/next response); an older page landing at the top no longer moves what you are reading. Native keeps the inverted list.
+- **A turn that made several calls to one tool no longer shows phantom rows.** Parallel `run_code` calls arrive as all the call rows and then all the result rows; results were paired only against the newest call, so three calls rendered as five rows (three with no description, two of them argument-less orphans) under a header counting five. Results now pair first-in first-out, so each call keeps its own result, the header count matches the rows, and every row names what the script did.
+- **Markdown tables in chat honour column alignment and scroll sideways.** `:---`, `:---:` and `---:` align their column; columns size to their text instead of being crushed to equal slivers, and a table wider than the pane scrolls horizontally.
 - **An interrupted compaction no longer leaves "auto-compacting" on screen for good.** Interrupting a turn (Esc, or a queued prompt taking over) while it compacted aborted the task before `CompactionFinished` was sent, and nothing else cleared the band, so it stayed at 95% through every later turn, its timer restarting with each one, while the session went on running tools. Any turn end now clears it (`crates/forge-tui/src/app.rs`).
 
 ## [2.23.6] - 2026-10-25

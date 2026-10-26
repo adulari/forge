@@ -12,11 +12,13 @@
 // accent-tinted spinner (RefreshControl there has no fully-transparent tint, and
 // stacking a second custom spinner on top would read as a glitch, not polish).
 // Settle haptic fires on the refreshing:true -> false edge either way.
-import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef } from "react";
 import {
   ActivityIndicator,
   FlatList,
   type FlatListProps,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   RefreshControl,
   StyleSheet,
@@ -26,11 +28,15 @@ import {
 import { haptics } from "../../lib/haptics";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
+import {
+  grewAtOldestEnd,
+  offsetFromNewest,
+  scrollTopAfterResize,
+  scrollTopFor,
+  timelineShape,
+  type TimelineShape,
+} from "../../lib/newestAnchoredScroll";
 import { BellowsSpinner } from "./BellowsSpinner";
-
-// Approximate CSS pixel height of one "line" for DOM_DELTA_LINE wheel normalization below —
-// matches the common browser default (16px root font-size × ~1 line-height).
-const WHEEL_LINE_HEIGHT_PX = 16;
 
 export interface BoundedListProps<T>
   extends Omit<FlatListProps<T>, "renderItem" | "keyExtractor" | "ListEmptyComponent" | "data"> {
@@ -60,6 +66,8 @@ function BoundedListInner<T>(
     refreshing = false,
     onRefresh,
     contentContainerStyle,
+    onScroll: onScrollProp,
+    onContentSizeChange: onContentSizeChangeProp,
     ...rest
   }: BoundedListProps<T>,
   ref: React.ForwardedRef<FlatList<T>>,
@@ -67,7 +75,6 @@ function BoundedListInner<T>(
   const tokens = useTokens();
   const wasRefreshing = useRef(refreshing);
   const listRef = useRef<FlatList<T>>(null);
-  useImperativeHandle(ref, () => listRef.current as FlatList<T>);
 
   useEffect(() => {
     if (wasRefreshing.current && !refreshing) {
@@ -76,36 +83,88 @@ function BoundedListInner<T>(
     wasRefreshing.current = refreshing;
   }, [refreshing]);
 
-  // react-native-web renders `inverted` with a scaleY(-1) transform but does NOT flip wheel
-  // events to match, so mouse/trackpad scrolling fights the list (the classic glitchy
-  // inverted-chat scroll). Take over the wheel entirely on web while inverted: flip deltaY
-  // into the scroll position ourselves.
+  // react-native-web renders `inverted` with a scaleY(-1) transform on the scroll container, which
+  // flips the scrollbar thumb and fights wheel / trackpad scrolling. On web the list is rendered
+  // upright instead (oldest at the top, newest at the bottom) and keeps the inverted contract the
+  // callers rely on: scroll events report the offset from the NEWEST end, `scrollToOffset(0)` goes
+  // to the newest row, `onEndReached` means "near the oldest row", and an older page landing at
+  // the top does not move what the reader is looking at (lib/newestAnchoredScroll.ts).
   const inverted = Boolean((rest as { inverted?: boolean }).inverted);
-  useEffect(() => {
-    if (Platform.OS !== "web" || !inverted) return;
-    const node = (listRef.current as unknown as { getScrollableNode?: () => unknown })?.getScrollableNode?.() as
-      | (HTMLElement & { scrollTop: number })
-      | null
-      | undefined;
-    if (!node || typeof node.addEventListener !== "function") return;
-    const onWheel = (e: WheelEvent) => {
-      // Horizontal intent (shift+wheel, trackpad pan) must reach the browser's native
-      // handling instead of being swallowed here — otherwise a nested horizontal scroller
-      // (e.g. CodeBlock's code-line ScrollView) can never be shift-wheel scrolled, since this
-      // listener sits on the ancestor the event bubbles through on its way up.
-      if (e.deltaX !== 0) return;
-      e.preventDefault();
-      // `deltaY` is only pixels on Chrome/Safari/WebView2 (DOM_DELTA_PIXEL). Firefox reports a
-      // classic mouse wheel as DOM_DELTA_LINE (~3 "lines" per notch) and a few environments use
-      // DOM_DELTA_PAGE — without normalizing, Firefox scrolls the transcript ~3px per notch.
-      let deltaY = e.deltaY;
-      if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) deltaY *= WHEEL_LINE_HEIGHT_PX;
-      else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) deltaY *= node.clientHeight;
-      node.scrollTop -= deltaY;
-    };
-    node.addEventListener("wheel", onWheel, { passive: false });
-    return () => node.removeEventListener("wheel", onWheel);
-  }, [inverted]);
+  const webNatural = Platform.OS === "web" && inverted;
+  const listData = useMemo(() => (webNatural && data ? [...data].reverse() : data), [webNatural, data]);
+  const fromNewestRef = useRef(0);
+  const topGrowthRef = useRef(false);
+  const shapeRef = useRef<TimelineShape | null>(null);
+  const getNode = useCallback(
+    () =>
+      (listRef.current as unknown as { getScrollableNode?: () => unknown } | null)?.getScrollableNode?.() as
+        | (HTMLElement & { scrollTop: number })
+        | null
+        | undefined,
+    [],
+  );
+  useLayoutEffect(() => {
+    if (!webNatural) return;
+    const next = timelineShape((data ?? []).map((item, index) => keyExtractor(item, index)));
+    topGrowthRef.current = grewAtOldestEnd(shapeRef.current, next);
+    shapeRef.current = next;
+  }, [webNatural, data, keyExtractor]);
+
+  const count = data?.length ?? 0;
+  useImperativeHandle(
+    ref,
+    () => {
+      const list = listRef.current as FlatList<T>;
+      if (!webNatural || !list) return list;
+      return {
+        // Instant, even when asked to animate: a smooth scroll across thousands of px is
+        // interrupted by every older page that lands, and never arrives.
+        scrollToOffset: ({ offset }: { offset: number; animated?: boolean }) => {
+          const node = getNode();
+          if (node) node.scrollTop = scrollTopFor(offset, node.scrollHeight, node.clientHeight);
+        },
+        scrollToIndex: (params: { index: number; animated?: boolean; viewPosition?: number; viewOffset?: number }) =>
+          list.scrollToIndex({
+            ...params,
+            index: count - 1 - params.index,
+            viewPosition: params.viewPosition === undefined ? undefined : 1 - params.viewPosition,
+          }),
+        scrollToEnd: (params?: { animated?: boolean }) => list.scrollToEnd(params),
+        getScrollableNode: () => list.getScrollableNode(),
+      } as unknown as FlatList<T>;
+    },
+    [webNatural, count, getNode],
+  );
+
+  const handleScroll = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const ne = e.nativeEvent;
+      const from = offsetFromNewest({
+        scrollTop: ne.contentOffset.y,
+        contentHeight: ne.contentSize.height,
+        layoutHeight: ne.layoutMeasurement.height,
+      });
+      fromNewestRef.current = from;
+      if (ne.contentOffset.y < ne.layoutMeasurement.height) onEndReached?.();
+      onScrollProp?.({ ...e, nativeEvent: { ...ne, contentOffset: { ...ne.contentOffset, y: from } } });
+    },
+    [onEndReached, onScrollProp],
+  );
+  const handleContentSizeChange = useCallback(
+    (w: number, h: number) => {
+      onContentSizeChangeProp?.(w, h);
+      const node = getNode();
+      if (!node) return;
+      const top = scrollTopAfterResize({
+        fromNewest: fromNewestRef.current,
+        contentHeight: h,
+        layoutHeight: node.clientHeight,
+        topGrowth: topGrowthRef.current,
+      });
+      if (top !== null && Math.abs(node.scrollTop - top) > 0.5) node.scrollTop = top;
+    },
+    [getNode, onContentSizeChangeProp],
+  );
 
   // Stable identity + row purity (row components callers pass in should be
   // React.memo'd) together satisfy "memoized rows" without fighting FlatList's
@@ -125,14 +184,15 @@ function BoundedListInner<T>(
     <View style={styles.fill}>
       <FlatList<T>
         ref={listRef}
-        data={(data as T[]) ?? []}
+        data={(listData as T[]) ?? []}
         renderItem={stableRenderItem}
         keyExtractor={keyExtractor}
         ListEmptyComponent={ListEmptyComponent}
-        ListFooterComponent={footer}
-        onEndReached={onEndReached}
+        ListFooterComponent={webNatural ? undefined : footer}
+        ListHeaderComponent={webNatural ? footer : undefined}
+        onEndReached={webNatural ? undefined : onEndReached}
         onEndReachedThreshold={onEndReachedThreshold}
-        contentContainerStyle={[styles.grow, contentContainerStyle]}
+        contentContainerStyle={[styles.grow, webNatural && styles.newestAtBottom, contentContainerStyle]}
         refreshControl={
           Platform.OS !== "web" && onRefresh ? (
             <RefreshControl
@@ -147,10 +207,15 @@ function BoundedListInner<T>(
         // The default ("never") spends the first tap after typing on dismissing the keyboard: a
         // History search result, say, needed two taps to open. Callers can still override.
         keyboardShouldPersistTaps="handled"
-        maxToRenderPerBatch={12}
-        windowSize={9}
-        initialNumToRender={12}
+        // Upright on web: every loaded row stays mounted so the newest row is measured and
+        // reachable on first paint (a windowed upright list starts at the OLDEST rows).
+        maxToRenderPerBatch={webNatural ? Math.max(12, count) : 12}
+        windowSize={webNatural ? 1000 : 9}
+        initialNumToRender={webNatural ? Math.max(12, count) : 12}
         {...rest}
+        inverted={webNatural ? false : inverted}
+        onScroll={webNatural ? handleScroll : onScrollProp}
+        onContentSizeChange={webNatural ? handleContentSizeChange : onContentSizeChangeProp}
         style={[styles.fill, rest.style, Platform.OS === "web" && (webScrollContain as object)]}
       />
       {Platform.OS === "ios" ? <BellowsSpinner active={refreshing} /> : null}
@@ -170,4 +235,5 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   footer: { paddingVertical: space.space16, alignItems: "center" },
   grow: { flexGrow: 1 },
+  newestAtBottom: { justifyContent: "flex-end" },
 });
