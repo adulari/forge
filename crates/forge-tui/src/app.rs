@@ -1765,6 +1765,9 @@ impl App {
             }
             PresenterEvent::Done { stop_reason, .. } => {
                 self.model_search = None;
+                // An interrupt aborts the turn's task, so a compaction it was running never sends
+                // CompactionFinished; without this the band stayed up, restarting with each turn.
+                self.compaction = None;
                 self.set_turn_activity(TurnPhase::Finalizing, "turn completed");
                 self.throughput.on_turn_end(std::time::Instant::now());
                 if self.streaming_active {

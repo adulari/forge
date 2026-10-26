@@ -45,6 +45,20 @@ fn compact_band_shows_animated_bar_while_compacting() {
 }
 
 #[test]
+fn an_interrupted_compaction_does_not_leave_the_band_up() {
+    let mut app = App::default();
+    app.apply(PresenterEvent::CompactionStarted { auto: true });
+    assert_eq!(compact_band_height(&app), 1);
+    // Interrupting aborts the turn mid-compaction: CompactionFinished never arrives, only Done.
+    app.apply(PresenterEvent::Done {
+        final_text: String::new(),
+        stop_reason: forge_types::StopReason::Interrupted,
+    });
+    assert!(app.compaction.is_none());
+    assert!(!screen_wh(&app, 80, LIVE_H).contains("compacting"));
+}
+
+#[test]
 fn cost_cell_distinguishes_subscription_priced_free_and_untracked() {
     assert_eq!(cost_cell("claude-cli::", 0.0), "subscription");
     assert_eq!(cost_cell("codex-cli::gpt-5.5", 0.0), "subscription");
