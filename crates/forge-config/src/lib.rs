@@ -2349,6 +2349,25 @@ pub fn benchmark_api_key() -> Option<String> {
     secret_store::get("artificialanalysis").filter(|k| !k.is_empty())
 }
 
+/// Secret-store slot holding the long-lived token from `claude setup-token`, for the claude-cli
+/// bridge. Set with `forge auth claude_oauth_token`.
+pub const CLAUDE_OAUTH_TOKEN_SLOT: &str = "claude_oauth_token";
+
+/// The long-lived Claude Code OAuth token the claude bridge authenticates with:
+/// `CLAUDE_CODE_OAUTH_TOKEN` from the environment first, then the [`CLAUDE_OAUTH_TOKEN_SLOT`]
+/// secret. Unlike the interactive login in `~/.claude/.credentials.json` it never refreshes, so
+/// the bridge can use it without rotating anything the user's own `claude` depends on.
+pub fn claude_oauth_token() -> Option<String> {
+    let env = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
+    env.map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            secret_store::get(CLAUDE_OAUTH_TOKEN_SLOT)
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+        })
+}
+
 fn default_failover() -> bool {
     true
 }

@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The claude bridge no longer shares your interactive `claude` login, and needs a token.** The bridged claude ran with its own config dir that symlinked your `~/.claude/.credentials.json`, so Claude's refresh lock did not cover it: when the 8-hour access token expired the bridged claude refreshed and rotated the single-use refresh token on its own (replacing the link with a file the next spawn's rebuild discarded), which invalidated your main login about once a day. The bridge home no longer links `.credentials.json` or `backups/` (an older Forge's link or copy is removed on the next start; your real file is never touched), and claude's own `.claude.json` there is kept across spawns instead of being recreated each time (that is what left an 84-byte backup in `~/.claude/backups` every spawn). The bridge now authenticates with `CLAUDE_CODE_OAUTH_TOKEN`; without a token or an `ANTHROPIC_API_KEY` it is treated as not configured: routing skips `claude-cli` quietly without benching it, a pinned claude model fails with the setup hint, and a session prints the hint once at startup. **To keep using the claude bridge:** run `claude setup-token`, then `forge auth claude_oauth_token` and paste the token (or export `CLAUDE_CODE_OAUTH_TOKEN` for `forge serve`), restart `forge serve`, and run `claude /login` once if your main login was already invalidated (`crates/forge-provider/src/claude_bridge_auth.rs`, `claude_bridge_home.rs`, `docs/features/persistent-bridge-transport.md`).
+
 ### Fixed
 
 - **An interrupted compaction no longer leaves "auto-compacting" on screen for good.** Interrupting a turn (Esc, or a queued prompt taking over) while it compacted aborted the task before `CompactionFinished` was sent, and nothing else cleared the band, so it stayed at 95% through every later turn, its timer restarting with each one, while the session went on running tools. Any turn end now clears it (`crates/forge-tui/src/app.rs`).

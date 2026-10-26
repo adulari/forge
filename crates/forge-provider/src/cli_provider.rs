@@ -566,7 +566,9 @@ async fn probe_claude_initialization_response(binary: &str) -> Option<ClaudeInit
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    apply_claude_bridge_home(CliKind::ClaudeCode, &mut cmd);
+    if apply_claude_bridge_home(CliKind::ClaudeCode, &mut cmd).is_err() {
+        return None;
+    }
     model_probe::quiet_probe(&mut cmd);
     let mut child = cmd.spawn().ok()?;
     let pid = child.id();
@@ -2081,7 +2083,8 @@ impl CliProvider {
             "MCP_TOOL_TIMEOUT",
             (BRIDGE_TOOL_TIMEOUT_SECS * 1000).to_string(),
         );
-        apply_claude_bridge_home(self.kind, &mut cmd);
+        apply_claude_bridge_home(self.kind, &mut cmd)
+            .map_err(|hint| ProviderError::Auth(hint.to_string()))?;
         put_in_own_process_group(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -2817,7 +2820,7 @@ impl CliProvider {
             "MCP_TOOL_TIMEOUT",
             (BRIDGE_TOOL_TIMEOUT_SECS * 1000).to_string(),
         );
-        apply_claude_bridge_home(self.kind, &mut cmd);
+        apply_claude_bridge_home(self.kind, &mut cmd).map_err(std::io::Error::other)?;
         put_in_own_process_group(&mut cmd);
 
         tracing::debug!(target: "forge::turn", "bridge: spawn claude");
@@ -3226,59 +3229,18 @@ fn put_in_own_process_group(cmd: &mut Command) {
     }
 }
 
-/// Point a claude bridge subprocess at an isolated `CLAUDE_CONFIG_DIR` that mirrors the user's real
-/// claude config but with hooks stripped from its settings (see `claude_bridge_home` module docs).
-/// No-op for `Codex`/`Antigravity` — codex already isolates via `--ignore-user-config`, and
-/// antigravity has no hook concept here. Fails open on any error: a turn that runs with the user's
-/// real hooks is worse than desired but strictly better than a turn that fails to run at all.
-fn apply_claude_bridge_home(kind: CliKind, cmd: &mut Command) {
+/// Give a claude bridge subprocess its isolated config dir and explicit token (see
+/// `claude_bridge_auth`). No-op for `Codex`/`Antigravity`. `Err` is the setup hint for a claude
+/// bridge that has no token: the caller must not spawn it.
+fn apply_claude_bridge_home(kind: CliKind, cmd: &mut Command) -> Result<(), &'static str> {
     if kind != CliKind::ClaudeCode {
-        return;
+        return Ok(());
     }
-    for (key, value) in claude_bridge_env() {
+    for (key, value) in crate::claude_bridge_auth::claude_bridge_env()? {
         cmd.env(key, value);
     }
+    Ok(())
 }
-
-/// The environment of every `claude` process Forge drives: bridge turns, model probes and the quota
-/// probe.
-///
-/// - `CLAUDE_CONFIG_DIR`: the hook-free mirror of the user's claude config dir.
-/// - `ANTHROPIC_BASE_URL`: the Headroom proxy when one is configured (docs/features/
-///   token-savings.md); the claude CLI honours it, so the bridge's own API traffic goes through
-///   the same proxy the direct path uses.
-/// - `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, unless the user set it: Forge owns session memory
-///   (`remember`, pinned memories). claude's auto memory added ~2.3k characters of instructions to
-///   every request for a memory directory its disabled Write tool cannot reach, plus the project's
-///   `MEMORY.md` index (up to 25 KB).
-pub fn claude_bridge_env() -> Vec<(&'static str, std::ffi::OsString)> {
-    let mut env = Vec::new();
-    if let Some(proxy) = forge_config::headroom_route() {
-        env.push(("ANTHROPIC_BASE_URL", proxy.into()));
-    }
-    if std::env::var_os(CLAUDE_AUTO_MEMORY_ENV).is_none() {
-        env.push((CLAUDE_AUTO_MEMORY_ENV, "1".into()));
-    }
-    let Some(real_home) = crate::claude_bridge_home::real_claude_config_dir() else {
-        return env;
-    };
-    let Some(base) = forge_config::config_dir() else {
-        return env;
-    };
-    let isolated_dir = base.join(crate::claude_bridge_home::BRIDGE_HOME_DIR_NAME);
-    match crate::claude_bridge_home::prepare_claude_bridge_home(&real_home, &isolated_dir) {
-        Ok(()) => env.push(("CLAUDE_CONFIG_DIR", isolated_dir.into_os_string())),
-        Err(e) => {
-            tracing::warn!(
-                "failed to prepare isolated claude bridge home ({e}); running with the user's own \
-claude config (hooks may fire)"
-            );
-        }
-    }
-    env
-}
-
-const CLAUDE_AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 
 async fn terminate(child: &mut Child, pgid: Option<i32>) {
     #[cfg(unix)]
