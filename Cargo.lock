@@ -2305,6 +2305,7 @@ version = "2.23.6"
 dependencies = [
  "forge-agent-config",
  "forge-agent-provider",
+ "forge-agent-reporting",
  "forge-agent-types",
  "portable-pty",
  "serde",
