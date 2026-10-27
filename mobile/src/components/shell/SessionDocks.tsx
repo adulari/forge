@@ -6,8 +6,8 @@ import { Bot, ClipboardList, ListChecks } from "lucide-react-native";
 import React from "react";
 import { ScrollView, StyleSheet, View } from "react-native";
 
-import SessionAgents from "../../app/session/[id]/agents";
-import SessionTasks from "../../app/session/[id]/tasks";
+import { SessionAgents } from "../../app/session/[id]/agents";
+import { SessionTasks } from "../../app/session/[id]/tasks";
 import { SessionProvider, useSessionCtx } from "../../lib/sessionContext";
 import { space } from "../../theme/tokens";
 import { EmptyState } from "../ds/EmptyState";
