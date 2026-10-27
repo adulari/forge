@@ -496,7 +496,7 @@ mod tests {
     /// Process-wide environment for one test: an empty HOME and data directories, no provider
     /// keys but one planted key, and the lock that keeps tests apart.
     struct Env {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: tokio::sync::MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<OsString>)>,
         _home: tempfile::TempDir,
     }
@@ -512,9 +512,9 @@ mod tests {
         "FORGE_NO_SETUP",
     ];
 
-    fn env() -> Env {
-        static LOCK: Mutex<()> = Mutex::new(());
-        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    /// Serialized with every other test that points `FORGE_DB` or the XDG directories somewhere.
+    async fn env() -> Env {
+        let guard = crate::serve::tests::FORGE_DB_LOCK.lock().await;
         let home = tempfile::tempdir().unwrap();
         let saved = VARS.iter().map(|k| (*k, std::env::var_os(k))).collect();
         std::env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
@@ -598,7 +598,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_route_is_token_scoped_and_refuses_anything_that_is_not_the_local_machine() {
-        let _e = env();
+        let _e = env().await;
         let routes: [(&str, &str, Option<serde_json::Value>); 6] = [
             ("GET", "/api/onboarding", None),
             (
@@ -635,7 +635,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_forwarded_request_is_refused_even_with_a_loopback_host() {
-        let _e = env();
+        let _e = env().await;
         let request = Request::builder()
             .method("GET")
             .uri("/tok/api/onboarding")
@@ -649,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_plan_comes_with_the_machine_and_never_a_credential() {
-        let _e = env();
+        let _e = env().await;
         let (status, text) = local("GET", "/api/onboarding", None).await;
         assert_eq!(status, StatusCode::OK, "{text}");
         assert!(
@@ -687,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_desktop_is_not_ready_until_the_service_runs() {
-        let _e = env();
+        let _e = env().await;
         SERVICE_UP.store(false, std::sync::atomic::Ordering::SeqCst);
         let (_, text) = local("GET", "/api/onboarding", None).await;
         SERVICE_UP.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -705,7 +705,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_brief_skips_detection_output_and_says_whether_to_open() {
-        let _e = env();
+        let _e = env().await;
         let (status, text) = local("GET", "/api/onboarding?brief=1", None).await;
         assert_eq!(status, StatusCode::OK);
         let body = json(&text);
@@ -716,7 +716,7 @@ mod tests {
 
     #[tokio::test]
     async fn steps_are_saved_in_the_file_both_surfaces_share() {
-        let _e = env();
+        let _e = env().await;
         let (status, text) = local(
             "POST",
             "/api/onboarding/steps/behavior",
@@ -760,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn postponing_counts_only_when_everything_required_already_works_and_complete_ends_the_run(
     ) {
-        let _e = env();
+        let _e = env().await;
         local("GET", "/api/onboarding", None).await;
         local(
             "POST",
@@ -785,7 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_recommended_checklist_is_returned_without_starting_anything() {
-        let _e = env();
+        let _e = env().await;
         let (status, text) = local(
             "POST",
             "/api/onboarding/actions",
@@ -809,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pasted_secret_is_stored_and_never_comes_back_in_any_response_or_the_state_file() {
-        let _e = env();
+        let _e = env().await;
         let (status, text) = local(
             "POST",
             "/api/onboarding/actions",
@@ -866,7 +866,7 @@ mod tests {
 
     #[tokio::test]
     async fn jobs_report_unknown_ids_input_refusals_and_cancel() {
-        let _e = env();
+        let _e = env().await;
         let (status, _) = local("GET", "/api/onboarding/jobs/999999", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = local(
@@ -906,7 +906,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pasted_code_reaches_the_waiting_job() {
-        let _e = env();
+        let _e = env().await;
         let id = jobs().start("Waiting for a code", vec![], |job| {
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
