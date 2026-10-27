@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The desktop and web composer grows with your message again.** It measured the right height for wrapped text, but the textarea's `flex: 1` (a 0% basis inside a column) overrode that height, so the box stayed one row tall and older lines scrolled out of view. The web textarea now sizes from its measured height, up to six lines and then scrolling (`mobile/src/components/chat/Composer.tsx`).
+
 ## [2.24.0] - 2026-10-27
 
 ### Added
