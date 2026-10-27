@@ -5,7 +5,7 @@
 //! * bare `forge`, `forge chat`, `forge run`, `forge nl` on a terminal: when the state file says
 //!   it has not run (or a required step is missing) ([`maybe_open`]).
 
-mod host;
+pub(crate) mod host;
 mod runner;
 
 use std::sync::atomic::{AtomicBool, Ordering};

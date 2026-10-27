@@ -504,6 +504,7 @@ fn build_provider_response(notice: Option<String>, restart_required: bool) -> Pr
     ] {
         let id = kind.prefix();
         let installed = kind.available();
+        let login = bridge_login(installed, forge_provider::bridge_credentials(kind));
         let models = config
             .mesh
             .bridge_models
@@ -520,8 +521,8 @@ fn build_provider_response(notice: Option<String>, restart_required: bool) -> Pr
             label: label.to_string(),
             kind: "cli",
             enabled: provider_enabled(id, disabled),
-            configured: installed,
-            auth_status: if installed { "unverified" } else { "missing" },
+            configured: installed && login != "missing",
+            auth_status: login,
             keyless: true,
             env_var: None,
             environment_key_present: false,

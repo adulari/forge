@@ -54,3 +54,38 @@ describe("tool labels", () => {
     expect(readableArgs("read_file", '{"offset":1,"path":"a.rs"}')[0].text).toBe("path: a.rs\noffset: 1");
   });
 });
+
+describe("script rows read as what the script did", () => {
+  const shell = script('await tools.shell({command: "sleep 75; cat /home/floris/.local/share/forge/x.log"});');
+  const write = script('await tools.write_file({path: "/a/b.txt", content: "x"});\nawait tools.write_file({path: "/a/c.txt", content: "y"});');
+
+  it("leads a shell-only script with Run and the command, home folded", () => {
+    expect(callVerb("run_code", shell)).toBe("Run");
+    expect(callHeadline("run_code", shell, footer(1))).toBe("sleep 75; cat ~/.local/share/forge/x.log");
+  });
+
+  it("says Write 2 files, or the path for one", () => {
+    expect(callVerb("run_code", write)).toBe("Write");
+    expect(callHeadline("run_code", write, footer(2))).toBe("2 files");
+    expect(callHeadline("run_code", script('tools.write_file({path: "/home/u/notes/todo.md"})'), footer(1))).toBe("~/notes/todo.md");
+  });
+
+  it("never shows the tool_call wrapper: it resolves to the tool it reached", () => {
+    const wrapped = script('await tools.tool_call({name: "mcp__helm__list_tasks", arguments: {}});');
+    expect(scriptCalls(wrapped, footer(1)).tools).toEqual(["mcp__helm__list_tasks"]);
+    expect(callVerb("run_code", wrapped)).toBe("Call");
+    expect(callHeadline("run_code", wrapped, footer(1))).toBe("list_tasks");
+    const unknown = script("await tools.tool_call(spec);");
+    expect(callHeadline("run_code", unknown, footer(1))).toBe("a tool");
+    expect(callHeadline("run_code", unknown, footer(1))).not.toContain("tool_call");
+    expect(callVerb("tool_call", '{"name":"web_fetch","arguments":{"url":"https://x.dev"}}')).toBe("Fetch");
+    expect(callHeadline("tool_call", '{"name":"web_fetch","arguments":{"url":"https://x.dev"}}', null)).toBe("https://x.dev");
+  });
+
+  it("summarises tool_call by the tool it reached, or as a tool", () => {
+    const direct = { name: "tool_call", args: '{"name":"mcp__helm__list_tasks","arguments":{}}', status: "ok" as const };
+    expect(summaryText(summarize([direct]))).not.toContain("tool_call");
+    const bare = { name: "tool_call", args: "{}", status: "ok" as const };
+    expect(summaryText(summarize([bare]))).toBe("Called 1 tool");
+  });
+});

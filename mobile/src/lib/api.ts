@@ -607,7 +607,7 @@ const LARGE_UPLOAD_TIMEOUT_MS = 120_000;
 // showing "request timed out" for a session that was in fact being created.
 const CREATE_SESSION_TIMEOUT_MS = 90_000;
 
-async function request<T>(
+export async function request<T>(
   baseUrl: string,
   path: string,
   init?: RequestInit,

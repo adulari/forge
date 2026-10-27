@@ -81,3 +81,68 @@ that stream serializable `JobEvent`s: output lines, `Prompt` events (open a URL,
 and a final result. `Jobs::send_input` answers a code prompt and `Jobs::cancel` stops a flow. The
 sign-in flows run inside the process that owns the `Jobs`, so a daemon can run them for the desktop
 app and the token never leaves it.
+
+## The desktop app
+
+The desktop app runs the same flow in `/onboarding`, over the daemon. It opens by itself when the
+app has no server yet (a first launch) and, for an existing install, once on the first launch of
+a version that has it (the daemon's `GET /api/onboarding?brief=1` says whether it should open). The
+required steps on the desktop are a working model and a running background service.
+
+### Phase 0: no Forge yet
+
+With no `forge` command on the computer, the app installs one before anything else, with a progress
+row for each stage:
+
+1. **Install Forge** (`install_forge_cli`, a Tauri command): resolves the latest release
+   (`FORGE_RELEASE_BASE_URL` overrides the base URL for tests), downloads the platform archive,
+   verifies it against the release `checksums.txt` (`SHA256SUMS` is accepted too) and fails closed
+   on a missing manifest or a mismatch, then places the binary atomically in `FORGE_INSTALL_DIR`,
+   else `~/.local/bin` (`%LOCALAPPDATA%\Programs\forge` on Windows).
+2. **Start Forge in the background** (`install_forge_service`): `forge service install --local`,
+   `forge service start`, then waits for the daemon's `serve-state.json`.
+3. **Connect this app** to that daemon, then the rest of the flow runs against it.
+
+A failed row shows the one-line reason and a "Try again"; "Connect to an existing server" opens
+the manual pairing screen.
+
+### The daemon API
+
+All routes sit under the daemon token, answer only requests that reach the daemon from the machine
+it runs on (loopback `Host`, no proxy headers; anything else gets `403`), and are not part of the
+Forge Anywhere allowlist.
+
+| Route | |
+| --- | --- |
+| `GET /api/onboarding` | plan, shared state, detected machine, model sources, the recommended checklist; `?brief=1` is only "should it open" and "does Claude need reconnecting"; `?force=1` is the full flow |
+| `POST /api/onboarding/steps/{id}` | `{"op":"done"\|"skip"\|"reset"}` for a step; `{"op":"postpone"\|"complete"}` on `flow` |
+| `POST /api/onboarding/actions` | `{"action":{...},"step":"models"}` starts a job (`Action` as in `forge-onboarding`); `{"recommended":true}` returns the checklist |
+| `GET /api/onboarding/jobs/{id}?cursor=&wait=` | events since `cursor`, held open up to `wait` ms when there are none |
+| `POST /api/onboarding/jobs/{id}/input` | `{"text":"..."}` a code the page showed |
+| `DELETE /api/onboarding/jobs/{id}` | cancel |
+
+Sign-ins that need a terminal (`claude setup-token`, the Codex and xAI OAuth flows) run in the
+daemon, in a pseudo-terminal, and their tokens are stored by the daemon. A secret the app sends
+(a pasted key) deserializes into a masked type that serializes as `***`, job output is scrubbed
+of every secret the action carries, and no response contains a credential. A finished job is
+folded into `onboarding.json` by the daemon, so the terminal and the desktop never disagree.
+
+### What the screens do
+
+Wide window: a step rail on the left (done, current, skipped; required steps marked), the step in
+a card on the right. Narrow window: a progress bar on top and one column. Each step opens with what
+was found on this computer, then one primary button; alternatives and explanations are under
+"Details". The sign-in panel shows the page to open (the system browser through the opener
+plugin), the device code when there is one, and a QR code to finish on another device. The
+**Reconnect Claude Code** banner appears outside setup when Claude Code is installed and signed in
+but Forge has no token for it, and opens setup on the model step with the connection already
+running.
+
+### Screenshots
+
+Captured off-screen against an isolated daemon, with fake `claude` and release servers (no real
+accounts): [every step, wide, dark](onboarding-desktop/wide-dark.jpg),
+[wide, light](onboarding-desktop/wide-light.jpg),
+[phone width, dark](onboarding-desktop/narrow-dark.jpg),
+[phone width, light](onboarding-desktop/narrow-light.jpg), and
+[phase 0, the failed install, the existing-install welcome and the Reconnect Claude Code banner](onboarding-desktop/flow.jpg).

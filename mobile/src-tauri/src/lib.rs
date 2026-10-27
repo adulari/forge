@@ -19,6 +19,7 @@ use tauri::{RunEvent, WindowEvent};
 mod about;
 mod auto_update;
 mod menu;
+mod onboarding;
 mod ota;
 mod preview;
 mod reporting;
@@ -207,6 +208,9 @@ pub fn run(process_start: Instant) {
             serve_discovery::activate_forge_anywhere_host,
             serve_discovery::forge_anywhere_cli_account,
             serve_discovery::approve_anywhere_pairing_with_cli,
+            onboarding::onboarding_local_status,
+            onboarding::install_forge_cli,
+            onboarding::install_forge_service,
             preview::preview_open,
             preview::preview_set_bounds,
             preview::preview_navigate,

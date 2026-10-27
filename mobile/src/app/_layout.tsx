@@ -27,6 +27,9 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { DesktopOtaHost } from "../components/DesktopOtaHost";
 import { UpdateNotice } from "../components/UpdateNotice";
 import { OperationalNotice } from "../components/OperationalNotice";
+import { useOnboardingBrief } from "../components/onboarding/brief";
+import { ClaudeReconnectBanner } from "../components/onboarding/ClaudeReconnectBanner";
+import { onboardingDismissed } from "../lib/onboarding/flow";
 import { NoticeBannerHost } from "../components/notices/NoticeBannerHost";
 import { NoticesWatcher } from "../components/notices/NoticesWatcher";
 import { Screen } from "../components/ds/Screen";
@@ -99,11 +102,13 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
 // (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
 // before any Direct server exists, and /legal keeps privacy/support available before pairing.
-const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal|connect)(\/|$)/;
+const UNPAIRED_ROUTES = /^\/(shares|anywhere|legal|connect|onboarding)(\/|$)/;
 
+// No server yet. The desktop app sends first-time users to setup (which installs and starts Forge
+// itself, then connects) instead of the manual pairing screen; everyone else pairs.
 function RedirectToConnect({ from }: { from: string }) {
   rememberPendingRoute(from);
-  return <Redirect href="/connect" />;
+  return <Redirect href={isTauri && !onboardingDismissed() ? "/onboarding" : "/connect"} />;
 }
 
 function RootNavigator() {
@@ -131,6 +136,9 @@ function RootNavigator() {
       });
   }, []);
   const pathname = usePathname();
+  const onboardingBrief = useOnboardingBrief();
+  const openOnboarding =
+    onboardingBrief?.open === true && !onboardingDismissed() && !/^\/onboarding(\/|$)/.test(pathname);
   const railless = RAILLESS_ROUTES.test(pathname);
   useEffect(() => {
     if (!railless) rememberShellRoute(pathname);
@@ -207,6 +215,7 @@ function RootNavigator() {
         }}
       >
         <Stack.Screen name="connect" />
+        <Stack.Screen name="onboarding" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="configuration" />
         <Stack.Screen name="skills" />
@@ -292,6 +301,7 @@ function RootNavigator() {
           expo-router resolved on cold start/deep-link, bounce to /connect once we know
           there's no active server. */}
       {perfFixtureEnabled && pathname !== "/perf-fixture" ? <Redirect href="/perf-fixture" /> : null}
+      {isPaired && openOnboarding && !perfFixtureEnabled ? <Redirect href="/onboarding" /> : null}
       {!isPaired && !UNPAIRED_ROUTES.test(pathname) ? <RedirectToConnect from={pathname} /> : null}
     </>
   );
@@ -365,6 +375,7 @@ export default function RootLayout() {
                             `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                         <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
                           <OperationalNotice />
+                          <ClaudeReconnectBanner />
                           <DesktopOtaHost />
                           <PaletteHost>
                             <WorkbenchProvider>

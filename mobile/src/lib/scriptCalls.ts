@@ -4,6 +4,7 @@
 // crates/forge-core/src/codemode/mod.rs `footer`) are the only record. The TUI counts a script
 // by the calls it made ("Ran 8 shell commands", not "Ran 3 scripts"); this lets the app do the
 // same, and lets a script's row say what it ran instead of just "run_code".
+import { friendlyCommand, shortenPath } from "./pathDisplay";
 import { parseArgs } from "./toolRows";
 
 export interface ScriptCalls {
@@ -15,6 +16,10 @@ export interface ScriptCalls {
   /** Literal shell commands in the source, in order. */
   commands: string[];
 }
+
+/** `tool_call` is the deferred-tool wrapper (`tool_call{name, arguments}`), never what the call
+ * was about. */
+export const WRAPPER_TOOL = "tool_call";
 
 const FOOTER = /\[run_code: (\d+) tool calls?, (\d+) ok, (\d+) failed/;
 const TOOL_CALL = /tools\.([A-Za-z_]\w*)\s*\(/g;
@@ -40,11 +45,23 @@ export function scriptSource(args: string): string {
   return parsed ? "" : args;
 }
 
+const WRAPPED_NAME = /tools\.tool_call\s*\(\s*\{[^}]*?\bname\s*:\s*(["'`])((?:\\.|(?!\1)[^\\])*?)\1/g;
+
+/** The tool names a script's `tools.tool_call({name: "x"})` calls reach, in order. */
+export function wrappedToolNames(code: string): string[] {
+  const names: string[] = [];
+  for (const m of code.matchAll(WRAPPED_NAME)) if (!names.includes(m[2])) names.push(m[2]);
+  return names;
+}
+
 export function scriptCalls(args: string, result: string | null): ScriptCalls {
   const code = scriptSource(args);
   const tools: string[] = [];
   for (const m of code.matchAll(TOOL_CALL)) {
-    if (!tools.includes(m[1])) tools.push(m[1]);
+    if (m[1] === WRAPPER_TOOL) {
+      const inner = wrappedToolNames(code);
+      for (const name of inner.length ? inner : [WRAPPER_TOOL]) if (!tools.includes(name)) tools.push(name);
+    } else if (!tools.includes(m[1])) tools.push(m[1]);
   }
   const commands = [...code.matchAll(SHELL_COMMAND)].map((m) => m[2].replace(/\\(.)/g, "$1").trim()).filter(Boolean);
   const footer = result ? FOOTER.exec(result) : null;
@@ -70,22 +87,73 @@ const VERBS: Record<string, string> = {
   web_fetch: "fetch",
   web_search: "web",
   spawn_agents: "agents",
+  [WRAPPER_TOOL]: "tool",
 };
 
-function oneline(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
+/** What a single-tool script's row says with the row verb ("Read", "Write", ...). */
+const ROW_VERBS: Record<string, [string, string, string]> = {
+  read_file: ["Read", "file", "files"],
+  write_file: ["Write", "file", "files"],
+  edit_file: ["Edit", "file", "files"],
+  multi_edit: ["Edit", "file", "files"],
+  append_file: ["Append", "file", "files"],
+  delete_file: ["Delete", "file", "files"],
+  list_dir: ["List", "directory", "directories"],
+  grep: ["Search", "pattern", "patterns"],
+  search: ["Search", "pattern", "patterns"],
+  glob: ["Find", "pattern", "patterns"],
+  web_fetch: ["Fetch", "page", "pages"],
+  web_search: ["Web", "search", "searches"],
+};
+
+const PATH_LITERAL = /tools\.(\w+)\s*\(\s*\{[^}]*?\b(?:path|file_path)\s*:\s*(["'`])((?:\\.|(?!\2)[^\\])*)\2/g;
+
+/** The literal `path` arguments the source passes to `tool`, in order. */
+function scriptPaths(code: string, tool: string): string[] {
+  const out: string[] = [];
+  for (const m of code.matchAll(PATH_LITERAL)) if (m[1] === tool) out.push(m[3].replace(/\\(.)/g, "$1"));
+  return out;
 }
 
-/** The line a script's row shows: its command when it ran literal shell commands, else the
- * verbs of the tools it called with the call count ("edit, run · 8 calls"). */
+/** The tool a script is about when it only ever called one (a `tool_call` wrapper resolved to the
+ * tool it reached), else null. */
+function onlyTool(s: ScriptCalls): string | null {
+  return s.tools.length === 1 ? s.tools[0] : null;
+}
+
+/** The verb a script's row leads with: the tool's own ("Run", "Write") when the script called one
+ * tool, "Script" when it mixed several. */
+export function scriptVerb(args: string): string {
+  const only = onlyTool(scriptCalls(args, null));
+  if (!only) return "Script";
+  if (only === "shell") return "Run";
+  if (only === WRAPPER_TOOL) return "Call";
+  return ROW_VERBS[only]?.[0] ?? (only.startsWith("mcp__") ? "Call" : "Script");
+}
+
+/** The line a script's row shows after its verb. A script of one tool says what that tool did: the
+ * command for a shell script, the path or "2 files" for file tools, the tool's name for a wrapped
+ * call. A mixed script lists the verbs of the tools it called with the call count. */
 export function scriptHeadline(args: string, result: string | null): string {
   const s = scriptCalls(args, result);
   const calls = s.total != null && s.total > 0 ? `${s.total} call${s.total === 1 ? "" : "s"}` : "";
-  if (s.tools.length === 1 && s.tools[0] === "shell" && s.commands.length > 0) {
-    const first = oneline(s.commands[0]);
+  const only = onlyTool(s);
+  if (only === "shell" && s.commands.length > 0) {
+    const first = friendlyCommand(s.commands[0]);
     const more = s.commands.length - 1;
     return more > 0 ? `${first} (+${more} more)` : first;
   }
+  if (only === "shell") return calls ? calls.replace("call", "command") : "";
+  if (only && only !== WRAPPER_TOOL && ROW_VERBS[only]) {
+    const [, one, many] = ROW_VERBS[only];
+    const paths = [...new Set(scriptPaths(scriptSource(args), only))];
+    if (paths.length === 1 && (s.total == null || s.total <= 1)) return shortenPath(paths[0]);
+    const n = s.total != null && s.total > 0 ? s.total : paths.length;
+    if (n > 0) return `${n} ${n === 1 ? one : many}`;
+    return "";
+  }
+  if (only === WRAPPER_TOOL) return "a tool";
+  if (only && only.startsWith("mcp__")) return only.slice(only.indexOf("__", 5) + 2) || only;
   const verbs: string[] = [];
   for (const tool of s.tools) {
     const verb = VERBS[tool] ?? tool;
