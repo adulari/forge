@@ -8,6 +8,7 @@ import Animated from "react-native-reanimated";
 import type { HistoryRow } from "../../lib/api";
 import { isHarnessNudge } from "../../lib/harnessNudge";
 import { formatAnyHarnessNotice, isAnyHarnessNotice } from "../../lib/harnessNotice";
+import { isJobNotice } from "../../lib/jobNotice";
 import { parseReasoning } from "../../lib/reasoning";
 import { haptics } from "../../lib/haptics";
 import { useSessionStable } from "../../lib/sessionContext";
@@ -17,6 +18,7 @@ import { monoFamily, type as typeScale } from "../../theme/typography";
 import { radii, space } from "../../theme/tokens";
 import { AttachmentRow } from "./Attachments";
 import type { SentAttachment } from "./attach";
+import { JobNoticeRows } from "./JobNoticeRow";
 import { Markdown } from "./Markdown";
 import { useChatProseStyle } from "./proseStyle";
 import { ReasoningDisclosure } from "./ReasoningDisclosure";
@@ -255,7 +257,13 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   );
 }
 
-export const MessageRow = React.memo(MessageRowImpl);
+// A background job's exit is one tool-style row per job (JobNoticeRow), not a message bubble.
+function MessageRowSwitch(props: MessageRowProps) {
+  if (isJobNotice(props.row.kind)) return <JobNoticeRows content={props.row.content} />;
+  return <MessageRowImpl {...props} />;
+}
+
+export const MessageRow = React.memo(MessageRowSwitch);
 
 // Web-only: overrides Pressable's built-in `cursor: 'pointer'` (same untyped-CSS passthrough
 // escape hatch as Screen.tsx/BoundedList.tsx) so message text reads as selectable prose.
