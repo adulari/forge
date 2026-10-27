@@ -6,22 +6,12 @@ import { Check, Minus } from "lucide-react-native";
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { stepperStatuses, type StepperStatus, type StepperStep } from "../../lib/stepper";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
-export type StepperStatus = "done" | "current" | "todo" | "skipped";
-
-export interface StepperStep {
-  key: string;
-  label: string;
-  /** Explicit status; when absent it follows `activeIndex`. */
-  status?: StepperStatus;
-  /** Marks a step that still has to pass (rail only). */
-  required?: boolean;
-  /** Marks a step added since the last run (rail only). */
-  isNew?: boolean;
-}
+export type { StepperStatus, StepperStep };
 
 export interface StepperProps {
   steps: StepperStep[];
@@ -29,16 +19,6 @@ export interface StepperProps {
   variant?: "dots" | "rail" | "bar";
   onSelect?: (key: string, index: number) => void;
   testID?: string;
-}
-
-/** The status of every step: explicit where given, else relative to the active one. */
-export function stepperStatuses(steps: StepperStep[], activeIndex: number): StepperStatus[] {
-  return steps.map((step, index) => {
-    if (step.status) return step.status;
-    if (index < activeIndex) return "done";
-    if (index === activeIndex) return "current";
-    return "todo";
-  });
 }
 
 export function Stepper({ steps, activeIndex = 0, variant = "dots", onSelect, testID }: StepperProps) {

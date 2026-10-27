@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { stepperStatuses, type StepperStep } from "./Stepper";
+import { stepperStatuses, type StepperStep } from "./stepper";
 
 const steps = (...statuses: (StepperStep["status"] | undefined)[]): StepperStep[] =>
   statuses.map((status, i) => ({ key: `s${i}`, label: `Step ${i}`, status }));
