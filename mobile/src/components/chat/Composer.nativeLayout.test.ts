@@ -99,8 +99,12 @@ describe("native composer layout contract", () => {
 
   it("keeps the native input overlaid and removes native measurement feedback", () => {
     expectSource(
-      /Platform\.OS === "web" \? \{ height \} : StyleSheet\.absoluteFill/,
+      /Platform\.OS === "web" \? \[styles\.webInputSize, \{ height \}\] : StyleSheet\.absoluteFill/,
       "web must retain explicit height while native TextInput fills the mirror-owned wrapper",
+    );
+    expectSource(
+      /webInputSize: \{ flexGrow: 0, flexShrink: 0, flexBasis: "auto" \}/,
+      "web textarea must not take a 0% flex basis, or flex overrides the measured height",
     );
     expectSource(
       /scrollEnabled=\{composerScrollEnabled\(Platform\.OS, height\)\}/,

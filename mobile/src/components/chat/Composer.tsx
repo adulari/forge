@@ -905,7 +905,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                 styles.inputTextMetrics,
                 webInputTextStyle,
                 { color: tokens.ink },
-                Platform.OS === "web" ? { height } : StyleSheet.absoluteFill,
+                Platform.OS === "web" ? [styles.webInputSize, { height }] : StyleSheet.absoluteFill,
               ]}
               accessibilityLabel="message"
               testID="composer-input"
@@ -1102,6 +1102,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.space8,
     paddingVertical: composerInputVerticalPadding(Platform.OS),
   },
+  // `input`'s flex: 1 has a 0% basis, and inside the column wrapper that basis overrides the
+  // measured height, which pinned the web composer to one row however much text wrapped.
+  webInputSize: { flexGrow: 0, flexShrink: 0, flexBasis: "auto" },
   nativeMirror: {
     width: "100%",
     opacity: 0,

@@ -10,6 +10,10 @@ All notable changes to Forge are documented here. The format follows
 
 - **A subagent opens as its own session in the desktop, web and phone apps.** The Agents tab and the running-agents pills above the composer now open each child as a nested, read-only session that renders with the same chat as any other: messages, tool rows and groups, markdown and scrolling, updating while the child works. The header reads `parent session > explore` and takes you back, the composer is replaced by a note that the child works for its parent, and the child never appears in the session list. It rides the existing `/ws?session=<id>` and `/api/history` routes (so it works over Forge Anywhere unchanged), and a host without the new `session_id` on each agent row keeps the cards as plain, non-clickable rows.
 
+### Fixed
+
+- **The desktop and web composer grows with your message again.** It measured the right height for wrapped text, but the textarea's `flex: 1` (a 0% basis inside a column) overrode that height, so the box stayed one row tall and older lines scrolled out of view. The web textarea now sizes from its measured height, up to six lines and then scrolling (`mobile/src/components/chat/Composer.tsx`).
+
 ## [2.24.0] - 2026-10-27
 
 ### Added
