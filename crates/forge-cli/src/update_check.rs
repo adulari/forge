@@ -123,8 +123,12 @@ pub fn spawn_checker(config: &forge_config::Config, tx: Sender<UpdateEvent>) {
         return;
     }
     let auto = crate::update_auto::auto_enabled(config) && crate::update_auto::at_a_terminal();
+    let method = crate::update::detect_install_method();
+    // A source build is rebuilt by its developer; offering a release would replace their build.
+    if method == InstallMethod::Source {
+        return;
+    }
     tokio::spawn(async move {
-        let method = crate::update::detect_install_method();
         let mut announced: Option<String> = None;
         loop {
             let state = refresh_state(false).await;
