@@ -1,12 +1,12 @@
 // The card every step renders into: what it is for, what was found, the step's own controls,
 // and the way out (back, skip). The step's single primary button lives in `children`.
-import React from "react";
+import React, { useEffect } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import Animated, { FadeIn, useReducedMotion } from "react-native-reanimated";
+import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 
 import { detectedLines, showsNew } from "../../lib/onboarding/flow";
 import type { PlanStep, Snapshot } from "../../lib/onboarding/types";
-import { durations } from "../../theme/motion";
+import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -31,13 +31,19 @@ export function StepFrame({ step, snapshot, position, children, onBack, onSkip, 
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const { isCompact: compact } = useBreakpoint();
+  // Each step is its own component, so this runs once per step: a short fade in, none under
+  // reduced motion. (Reanimated's `entering` presets pull the layout-animation runtime into the
+  // web bundle, which is far heavier than this.)
+  const opacity = useSharedValue(reduced ? 1 : 0);
+  useEffect(() => {
+    if (!reduced) opacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
+  }, [opacity, reduced]);
+  const fade = useAnimatedStyle(() => ({ opacity: opacity.value }));
   const lines = detected ?? detectedLines(step.id, snapshot);
   const blocking = step.required && snapshot.missing.includes(step.id);
   return (
     <Animated.View
-      key={step.id}
-      entering={reduced ? undefined : FadeIn.duration(durations.base)}
-      style={[styles.card, compact && styles.cardCompact, { backgroundColor: tokens.bg1, borderColor: tokens.border }]}
+      style={[styles.card, compact && styles.cardCompact, { backgroundColor: tokens.bg1, borderColor: tokens.border }, fade]}
       testID={`onboarding-step-${step.id}`}
     >
       <View style={styles.head}>
