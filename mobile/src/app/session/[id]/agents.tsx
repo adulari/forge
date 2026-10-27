@@ -5,6 +5,7 @@ import { Bot, WifiOff } from "lucide-react-native";
 import React, { useCallback } from "react";
 import { StyleSheet, View } from "react-native";
 
+import { openSession } from "../../../lib/nav";
 import { AgentRow } from "../../../components/session/AgentRow";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { EmptyState } from "../../../components/ds/EmptyState";
@@ -45,7 +46,14 @@ export function SessionAgents() {
   // Allow/Deny answers through the same `allow` message the session-level card uses if that
   // changes, rather than needing a call-site edit then.
   const renderItem = useCallback(
-    ({ item }: { item: SnapshotSubagent }) => <AgentRow agent={item} send={send} promptSeq={promptSeq} />,
+    ({ item }: { item: SnapshotSubagent }) => (
+      <AgentRow
+        agent={item}
+        send={send}
+        promptSeq={promptSeq}
+        onOpen={item.session_id ? () => openSession(item.session_id as string) : undefined}
+      />
+    ),
     [send, promptSeq],
   );
   // Snapshot.subagents has no stable id — index+agent name is stable enough for this

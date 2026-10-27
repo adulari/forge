@@ -16,7 +16,7 @@
 // and its CardSlot caller) — supplied here as `send` + `promptSeq`. Without either those
 // handlers or an explicit `onAllow`/`onDeny`, the row still SHOWS the pending prompt but draws
 // no buttons: a dead Allow/Deny that silently does nothing is worse than none.
-import { Check } from "lucide-react-native";
+import { Check, ChevronRight } from "lucide-react-native";
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
@@ -35,6 +35,9 @@ export interface AgentRowProps {
   expanded?: boolean;
   /** Makes the row a button that toggles its inline detail. Omit for a static row. */
   onPress?: () => void;
+  /** Opens the child as a nested read-only session. Takes over the row's press from `onPress`;
+   * pass it only for an agent that has its own `session_id`. */
+  onOpen?: () => void;
   /** Overrides `agent.permission_prompt` for a caller that resolves a live prompt to this
    * specific agent itself. Omit to use the wire value (see file header). */
   permissionPrompt?: string;
@@ -59,6 +62,7 @@ function AgentRowBase({
   showSeparator = true,
   expanded = false,
   onPress,
+  onOpen,
   permissionPrompt,
   send,
   promptSeq,
@@ -109,6 +113,7 @@ function AgentRowBase({
             <Text style={[typeScale.monoMeta, tabularNums, { color: failed ? tokens.ink3 : tokens.success }]}>
               {formatCost(agent.cost)}
             </Text>
+            {onOpen ? <ChevronRight size={14} strokeWidth={1.75} color={tokens.ink3} /> : null}
           </>
         )}
       </View>
@@ -153,7 +158,11 @@ function AgentRowBase({
         done ? styles.done : null,
       ]}
     >
-      {onPress ? (
+      {onOpen ? (
+        <Pressable onPress={onOpen} accessibilityRole="button" accessibilityLabel={`Open ${agent.agent} transcript`}>
+          {body}
+        </Pressable>
+      ) : onPress ? (
         <Pressable
           onPress={onPress}
           accessibilityRole="button"

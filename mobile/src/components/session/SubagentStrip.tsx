@@ -15,10 +15,10 @@ import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../th
 
 const MAX_PILLS = 3;
 
-function Pill({ name }: { name: string }) {
+function Pill({ name, onOpen }: { name: string; onOpen?: () => void }) {
   const tokens = useTokens();
   const { dotStyle } = useEmberdot("busy");
-  return (
+  const pill = (
     <View style={[styles.pill, { backgroundColor: tokens.bg3 }]}>
       <View style={styles.pillDotWrap}>
         <Animated.View style={[styles.pillDot, { backgroundColor: tokens.accent }, dotStyle]} />
@@ -28,15 +28,24 @@ function Pill({ name }: { name: string }) {
       </Text>
     </View>
   );
+  if (!onOpen) return pill;
+  return (
+    <Pressable onPress={onOpen} accessibilityRole="button" accessibilityLabel={`Open ${name} transcript`}>
+      {pill}
+    </Pressable>
+  );
 }
 
 export interface SubagentStripProps {
   subagents: SnapshotSubagent[];
   /** Optional — opens the full Subagents panel. */
   onPress?: () => void;
+  /** Opens one running child's own session. Pills are plain labels without it, or for a child
+   * the host reports no `session_id` for. */
+  onOpenAgent?: (sessionId: string) => void;
 }
 
-function SubagentStripBase({ subagents, onPress }: SubagentStripProps) {
+function SubagentStripBase({ subagents, onPress, onOpenAgent }: SubagentStripProps) {
   const tokens = useTokens();
   const rows = subagents.filter((s) => s.phase == null);
   const running = rows.filter((s) => !s.done);
@@ -62,7 +71,11 @@ function SubagentStripBase({ subagents, onPress }: SubagentStripProps) {
       </View>
       <View style={styles.pills}>
         {shown.map((s) => (
-          <Pill key={s.id} name={s.agent} />
+          <Pill
+            key={s.id}
+            name={s.agent}
+            onOpen={onOpenAgent && s.session_id ? () => onOpenAgent(s.session_id as string) : undefined}
+          />
         ))}
         {overflow > 0 ? (
           <View style={[styles.pill, { backgroundColor: tokens.bg3 }]}>

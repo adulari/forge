@@ -126,6 +126,7 @@ pub(crate) fn build_snapshot_frame(
                 // so no child is ever parked on its own prompt — every prompt is session-level
                 // and rides in `permission_prompt` below.
                 permission_prompt: None,
+                session_id: None,
             })
             .collect(),
         queued: view.queued,
@@ -162,6 +163,7 @@ pub(crate) fn build_snapshot_frame(
         revision,
         resync: false,
         closed: false,
+        parent: None,
     }
 }
 

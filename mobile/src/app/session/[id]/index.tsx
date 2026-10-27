@@ -53,6 +53,7 @@ import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInpu
 import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessions } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
+import { openSession } from "../../../lib/nav";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { space } from "../../../theme/tokens";
@@ -110,8 +111,8 @@ export function SessionChat() {
       (snapshot?.transcript_rows ?? [])
         .slice(-2)
         .map((row) => `${row.kind}:${row.tool ?? ""}:${row.text.length}`)
-        .join("|") + `#${snapshot?.transcript.length ?? 0}`,
-    [snapshot?.transcript_rows, snapshot?.transcript.length],
+        .join("|") + `#${snapshot?.transcript.length ?? 0}#${snapshot?.transcript_total ?? 0}`,
+    [snapshot?.transcript_rows, snapshot?.transcript.length, snapshot?.transcript_total],
   );
   useLiveHistoryRefresh(sessionId, snapshot?.busy ?? false, liveRowsSignal, true);
   // `read_only` means there is genuinely no input path: a terminal session whose Forge build
@@ -122,7 +123,8 @@ export function SessionChat() {
   // is the only place that carries the flag, so look this session up there rather than adding it
   // to every other response shape.
   const sessionsQuery = useSessions();
-  const readOnly = sessionsQuery.data?.find((row) => row.id === sessionId)?.read_only ?? false;
+  const parentSession = snapshot?.parent ?? null;
+  const readOnly = parentSession != null || (sessionsQuery.data?.find((row) => row.id === sessionId)?.read_only ?? false);
   const [selectedMessage, setSelectedMessage] = useState<HistoryRow | null>(null);
   // Pointer-driven opens (right-click / hover ⋯) carry an anchor → compact popover menu;
   // long-press carries none → bottom sheet. Web-only distinction, native never sends one.
@@ -883,7 +885,11 @@ export function SessionChat() {
 
       <CardSlot />
 
-      <SubagentStrip subagents={snapshot?.subagents ?? []} onPress={() => router.push(`/session/${sessionId}/agents`)} />
+      <SubagentStrip
+        subagents={snapshot?.subagents ?? []}
+        onPress={() => router.push(`/session/${sessionId}/agents`)}
+        onOpenAgent={openSession}
+      />
 
       {readOnly ? (
         // No input path at all reaches this session — never mount the interactive composer
@@ -892,7 +898,7 @@ export function SessionChat() {
         // command/prompt/interrupt/kill path" contract, not just cosmetic.
         <View style={styles.readOnlyBar} accessibilityRole="text">
           <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>
-            read-only — running in a terminal, view only
+            {parentSession != null ? "subagent — view only, it works for its parent session" : "read-only — running in a terminal, view only"}
           </Text>
         </View>
       ) : (

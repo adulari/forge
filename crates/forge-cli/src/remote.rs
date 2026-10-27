@@ -379,6 +379,18 @@ pub struct SnapSubagent {
     /// interactive prompt is session-level and rides in [`Snapshot::permission_prompt`].
     #[serde(default)]
     pub permission_prompt: Option<String>,
+    /// The child's own session id, present only when this row is a persisted child session the
+    /// daemon can serve as a nested read-only session (`/ws?session=<id>`, `/api/history`).
+    /// Absent for bridged-CLI subagents, which have no session of their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// The parent a subagent child session hangs off; set on a child's snapshot only.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapParent {
+    pub id: String,
+    pub title: String,
 }
 
 /// The live workflow-run projection (v8.1) — phases + narration + finish state. Agent rows ride
@@ -670,6 +682,10 @@ pub struct Snapshot {
     pub resync: bool,
     /// `true` once remote control has been turned off (tells the page to stop reconnecting).
     pub closed: bool,
+    /// Set when this snapshot describes a subagent child session served read-only through its
+    /// parent; absent for every ordinary session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SnapParent>,
 }
 
 impl Default for Snapshot {
@@ -724,6 +740,7 @@ impl Default for Snapshot {
             revision: 0,
             resync: false,
             closed: false,
+            parent: None,
         }
     }
 }
@@ -1767,6 +1784,7 @@ mod tests {
                 ok: true,
                 cost: 0.001,
                 permission_prompt: None,
+                session_id: None,
             }],
             queued: vec!["next thing".into()],
             permission_prompt: Some("allow write_file".into()),

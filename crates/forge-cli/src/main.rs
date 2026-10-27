@@ -95,6 +95,7 @@ mod replay;
 mod report_args;
 mod reporting;
 mod serve;
+mod serve_agents;
 mod serve_diagnostics;
 mod serve_dispatch;
 mod serve_git;

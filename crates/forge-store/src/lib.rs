@@ -14,6 +14,7 @@ mod automation_store;
 mod bench_solve_store;
 mod busy;
 mod checkpoint_store;
+mod child_view_store;
 mod codemode_store;
 mod detached_child_store;
 mod dispatch_store;
@@ -65,6 +66,7 @@ mod usage_store;
 
 pub use bench_solve_store::{BenchSolveRun, BenchSolveTotals};
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
+pub use child_view_store::ChildSessionInfo;
 pub use codemode_store::{CodemodeStats, ToolCallRow};
 pub use compaction_source_store::CompactionSource;
 pub use detached_child_store::{DetachedChild, DetachedChildStatus};

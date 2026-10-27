@@ -28,8 +28,10 @@ vi.mock("react-native", () => {
 vi.mock("lucide-react-native", () => ({
   Bot: () => null,
   Check: () => React.createElement("i", null, "check"),
+  ChevronRight: () => React.createElement("i", null, "chevron"),
   WifiOff: () => null,
 }));
+vi.mock("../../lib/nav", () => ({ openSession: () => undefined }));
 vi.mock("../../theme/ThemeProvider", () => ({ useTokens: () => ({}) }));
 vi.mock("../ds/StatusDot", () => ({
   StatusDot: ({ accessibilityLabel }: { accessibilityLabel: string }) => React.createElement("i", null, accessibilityLabel),
@@ -110,5 +112,15 @@ describe("Session Agents tab", () => {
     expect(html).toContain("$0.02");
     expect(html).not.toContain("explore: running");
     expect(html).toContain("cancelled");
+  });
+
+  // A host that reports the child's own session id lets the row open it as a nested session; an
+  // older host (or a bridged-CLI agent) sends none, so the card stays a plain, non-clickable row.
+  it("makes only the agents that carry a session id openable", () => {
+    const html = render([
+      agent({ session_id: "6ddf5b5c-0000" }),
+      agent({ id: "e5cb1130-0000", agent: "explore" }),
+    ]);
+    expect(html.match(/chevron/g)).toHaveLength(1);
   });
 });

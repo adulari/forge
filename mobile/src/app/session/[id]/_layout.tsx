@@ -24,6 +24,7 @@ import { TabStrip, type TabStripOption } from "../../../components/ds/TabStrip";
 import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
+import { ChildSessionHeader } from "../../../components/session/ChildSessionHeader";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import {
   KEEP_SEGMENTS_ALIVE,
@@ -65,7 +66,7 @@ import { useAnywhere } from "../../../lib/anywhere/store";
 import { useAuth } from "../../../lib/auth";
 import { useDesktopMenuAction } from "../../../lib/desktopMenu";
 import { assessCompatibility } from "../../../lib/diagnostics";
-import { goBackOr } from "../../../lib/nav";
+import { goBackOr, openSession } from "../../../lib/nav";
 import { useAppShortcut } from "../../../lib/shortcuts";
 import { useHistory, usePrefetchSessionPanels, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { useReviewComments } from "../../../lib/reviewComments";
@@ -255,11 +256,19 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const keptSegment: KeptSegment | null = onSegmentPath && activeSegment !== "terminal" ? activeSegment : null;
   const terminalActive = KEEP_SEGMENTS_ALIVE && onSegmentPath && activeSegment === "terminal";
 
+  const parentSession = snapshot?.parent ?? null;
+  const isChild = parentSession != null;
   const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
     const agentCount = snapshot?.subagents.length ?? 0;
     const reviewPending =
       snapshot?.plan != null || snapshot?.diff != null || reviewComments.length > 0;
+    if (isChild) {
+      return [
+        { value: "chat", label: "Chat" },
+        { value: "replay", label: "Replay" },
+      ];
+    }
     return [
       { value: "chat", label: "Chat" },
       { value: "tasks", label: "Tasks", badge: taskCount || undefined },
@@ -270,6 +279,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
       { value: "replay", label: "Replay" },
     ];
   }, [
+    isChild,
     reviewComments.length,
     snapshot?.tasks.length,
     snapshot?.subagents.length,
@@ -328,7 +338,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   // instead of after the full unreachable backoff.
   const { data: fleetRows } = useSessions();
   const wsDown = connectionState === "reconnecting" || connectionState === "unreachable";
-  const sessionEnded = wsDown && fleetRows != null && !fleetRows.some((row) => row.id === sessionId);
+  const sessionEnded = !isChild && wsDown && fleetRows != null && !fleetRows.some((row) => row.id === sessionId);
   const unreachable = connectionState === "unreachable" && !sessionEnded;
   const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
 
@@ -349,6 +359,13 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   // frames — hoisted here instead of the inline arrow functions/object literals JSX had
   // before, none of which changes what any handler does.
   const onBack = useCallback(() => goBackOr("/(tabs)"), []);
+  const parentId = parentSession?.id ?? null;
+  const onBackToParent = useCallback(() => goBackOr(`/session/${parentId}/agents` as never), [parentId]);
+  const onOpenParent = useCallback(() => {
+    if (parentId == null) return;
+    if (isCompact) goBackOr(`/session/${parentId}` as never);
+    else openSession(parentId);
+  }, [parentId, isCompact]);
   const onNewHere = useCallback(() => {
     router.push({ pathname: "/new-session", params: { cwd: snapshot?.cwd ?? "" } });
   }, [snapshot?.cwd]);
@@ -428,6 +445,19 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             physical top inset and reports the complete header height. */}
         <View style={{ backgroundColor: tokens.bg2 }}>
           <View style={gutter}>
+          {parentSession != null ? (
+            <ChildSessionHeader
+              title={title}
+              parentTitle={parentSession.title}
+              state={statusState}
+              model={snapshot?.model && snapshot.model !== "—" ? snapshot.model : latestAssistantModel}
+              costUsd={snapshot?.cost_usd ?? 0}
+              showBack={!isExpanded}
+              onBack={onBackToParent}
+              onOpenParent={onOpenParent}
+            />
+          ) : (
+            <>
           <SessionHeader
             title={title}
             state={statusState}
@@ -484,6 +514,8 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             // A future relay-hosted session sets `transport: "anywhere"` and a real `strip`.
             transport={transportProp}
           />
+            </>
+          )}
           {snapshot?.workflow ? (
             <Pressable
               onPress={() => router.push(`/session/${sessionId}/workflow`)}
