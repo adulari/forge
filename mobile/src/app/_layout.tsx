@@ -23,6 +23,7 @@ import { AppLock } from "../components/AppLock";
 import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
+import { DesktopOtaHost } from "../components/DesktopOtaHost";
 import { UpdateNotice } from "../components/UpdateNotice";
 import { OperationalNotice } from "../components/OperationalNotice";
 import { NoticeBannerHost } from "../components/notices/NoticeBannerHost";
@@ -393,6 +394,7 @@ export default function RootLayout() {
                             `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                         <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
                           <OperationalNotice />
+                          <DesktopOtaHost />
                           <PaletteHost>
                             <WorkbenchProvider>
                               <AppLock>

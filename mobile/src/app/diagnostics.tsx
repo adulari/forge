@@ -16,6 +16,14 @@ import { formatBytes } from "../lib/anywhere/format";
 import { getColdStartTimings, getRelayMetrics, type RelayLatencyStats } from "../lib/anywhere/relayMetrics";
 import { ApiError } from "../lib/api";
 import { useAppVersion } from "../lib/appVersion";
+import {
+  applyDesktopOta,
+  checkDesktopOtaNow,
+  describeDesktopOta,
+  refreshDesktopOtaStatus,
+  resetDesktopOta,
+  useDesktopOtaStatus,
+} from "../lib/desktopOta";
 import { assessCompatibility, buildSupportSummary } from "../lib/diagnostics";
 import { getDesktopPerformanceSnapshot, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { isTauri } from "../lib/platform";
@@ -79,6 +87,8 @@ export default function DiagnosticsScreen() {
   const query = useDiagnostics();
   const appVersion = useAppVersion();
   const update = useDesktopUpdateState();
+  const ota = useDesktopOtaStatus();
+  const [otaBusy, setOtaBusy] = useState(false);
   const nativeRuntimeVersion = Updates.runtimeVersion ?? null;
   const [performanceSnapshot, setPerformanceSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
   const [relayMetrics, setRelayMetrics] = useState(() => getRelayMetrics());
@@ -133,6 +143,23 @@ export default function DiagnosticsScreen() {
   }, [toast]);
 
   const updateAction = desktopUpdateAction(update);
+
+  useEffect(() => {
+    if (isTauri) void refreshDesktopOtaStatus();
+  }, []);
+
+  const runOta = useCallback(
+    (action: () => Promise<unknown>, failure: string) => {
+      setOtaBusy(true);
+      void action()
+        .catch(() => toast.show(failure, { tone: "danger" }))
+        .finally(() => {
+          setOtaBusy(false);
+          void refreshDesktopOtaStatus();
+        });
+    },
+    [toast],
+  );
 
   const openReleasePage = useCallback(() => {
     void openDesktopReleasePage(update.releaseUrl).catch(() => {
@@ -382,6 +409,49 @@ export default function DiagnosticsScreen() {
                     disabled={update.phase === "checking" || update.phase === "installing"}
                     variant={update.phase === "available" ? "primary" : "secondary"}
                   />
+                </View>
+              ) : null}
+
+              {isTauri && ota ? (
+                <View>
+                  <SectionHeader>Desktop interface</SectionHeader>
+                  <ListRow
+                    title={describeDesktopOta(ota).title}
+                    subtitle={describeDesktopOta(ota).subtitle}
+                    trailing={<Badge label={describeDesktopOta(ota).badge.label} tone={describeDesktopOta(ota).badge.tone} />}
+                  />
+                  <ListRow
+                    title={`Runtime ${ota.runtimeVersion}`}
+                    subtitle="Interface updates only reach installs with this native runtime; native changes ship in a full release."
+                    showSeparator={false}
+                  />
+                  <View style={styles.actions}>
+                    {ota.enabled ? (
+                      <Button
+                        label="Check now"
+                        variant="secondary"
+                        loading={otaBusy}
+                        disabled={otaBusy}
+                        onPress={() => runOta(checkDesktopOtaNow, "couldn't check for interface updates.")}
+                      />
+                    ) : null}
+                    {ota.pending ? (
+                      <Button
+                        label="Reload to update"
+                        variant="primary"
+                        disabled={otaBusy}
+                        onPress={() => runOta(applyDesktopOta, "couldn't apply the interface update.")}
+                      />
+                    ) : null}
+                    {ota.active || ota.pending ? (
+                      <Button
+                        label="Reset to built-in"
+                        variant="ghost"
+                        disabled={otaBusy}
+                        onPress={() => runOta(resetDesktopOta, "couldn't reset the interface.")}
+                      />
+                    ) : null}
+                  </View>
                 </View>
               ) : null}
 
