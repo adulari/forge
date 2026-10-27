@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use forge_reporting::{ErrorKind, HostInfo, Incident, ReportingMode, Surface};
 
 use crate::report_args::ReportArgs;
-use crate::update::{detect_install_method, InstallMethod};
+use crate::update::detect_install_method;
 use crate::Command;
 
 fn surface_for(command: &Command) -> Surface {
@@ -29,16 +29,7 @@ pub(crate) fn start(command: &Command) {
         surface: surface_for(command),
         version: env!("CARGO_PKG_VERSION").to_string(),
         git_sha: option_env!("FORGE_GIT_SHA").map(str::to_string),
-        install_method: Some(
-            match detect_install_method() {
-                InstallMethod::Binary => "binary",
-                InstallMethod::Homebrew => "homebrew",
-                InstallMethod::Cargo => "cargo",
-                InstallMethod::Aur => "aur",
-                InstallMethod::Scoop => "scoop",
-            }
-            .to_string(),
-        ),
+        install_method: Some(detect_install_method().wire_name().to_string()),
     });
     if forge_reporting::mode() == ReportingMode::Off {
         return;
