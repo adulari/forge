@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.24.0] - 2026-10-27
+
 ### Added
 
 - **Forge now reports its own bugs, automatically and without your content.** A panic, an internal error that ends a turn, a provider reply Forge cannot parse, a failed compaction, a store error, and in the desktop and phone apps a React error boundary, an unhandled rejection or a desktop panic, is classified (bugs are reported; rate limits, bad keys, network trouble, interrupts and config errors are not), scrubbed (no prompts, replies, code, tool arguments, paths, hostnames, emails or keys; home becomes `~`, other paths keep only the basename, URLs keep only a public host, quoted strings are dropped), fingerprinted by error kind and normalized in-crate frames rather than message text, queued on disk (bounded, offline-safe) and sent in the background with short timeouts to a new `POST /v1/reports` endpoint on `forge-relay`. The relay validates, rate-limits per install, per IP and globally, deduplicates by fingerprint, keeps counts per version and OS in SQLite, and opens or updates one GitHub issue per problem (`auto-report`), commenting only when a new version is first affected and reopening a closed issue that recurs on a newer version. On by default with `[reporting] mode = "auto" | "ask" | "off"` (`ask` shows a card with the exact report: Send, Don't send, Always send), toggles in `/config`, Settings and `forge report --mode`, and `FORGE_NO_REPORTS=1` forcing it off. `forge report --show-last` prints the last report exactly as sent, `--sent` lists what left the machine, `/bug` (TUI), `forge report --message` and "Report a problem" (apps) send your own description with a preview first, and a 429/503 from the relay pauses sending. New crate `forge-reporting` (`mode()`, `set_mode()`, serde `ReportingMode`) is the API the onboarding step uses. See `docs/features/issue-reporting.md` (`crates/forge-reporting`, `crates/forge-core/src/error_report.rs`, `crates/forge-cli/src/reporting.rs`, `crates/forge-relay/src/reports.rs`, `mobile/src/lib/reporting.ts`).
@@ -5273,7 +5275,9 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.23.5...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.24.0...HEAD
+[2.24.0]: https://github.com/Adulari/forge/compare/v2.23.6...v2.24.0
+[2.23.6]: https://github.com/Adulari/forge/compare/v2.23.5...v2.23.6
 [2.23.5]: https://github.com/Adulari/forge/compare/v2.23.4...v2.23.5
 [2.23.4]: https://github.com/Adulari/forge/compare/v2.23.3...v2.23.4
 [2.23.3]: https://github.com/Adulari/forge/compare/v2.23.2...v2.23.3
