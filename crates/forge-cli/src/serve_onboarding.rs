@@ -501,17 +501,13 @@ mod tests {
         _home: tempfile::TempDir,
     }
 
-    const VARS: [&str; 12] = [
-        "HOME",
+    // Only what these tests need. HOME and PATH stay untouched: every other test in the binary
+    // runs in this process at the same time, and some of them spawn `git` or resolve the home
+    // directory.
+    const VARS: [&str; 5] = [
         "XDG_CONFIG_HOME",
         "XDG_DATA_HOME",
-        "PATH",
         "FORGE_DB",
-        "CLAUDE_CONFIG_DIR",
-        "CODEX_HOME",
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "OPENAI_API_KEY",
         "GROQ_API_KEY",
         "FORGE_NO_SETUP",
     ];
@@ -521,15 +517,10 @@ mod tests {
         let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let saved = VARS.iter().map(|k| (*k, std::env::var_os(k))).collect();
-        let bin = home.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::env::set_var("HOME", home.path());
         std::env::set_var("XDG_CONFIG_HOME", home.path().join("config"));
         std::env::set_var("XDG_DATA_HOME", home.path().join("data"));
-        std::env::set_var("PATH", &bin);
-        for k in VARS.iter().skip(4) {
-            std::env::remove_var(k);
-        }
+        std::env::set_var("FORGE_DB", home.path().join("forge.db"));
+        std::env::remove_var("FORGE_NO_SETUP");
         std::env::set_var("GROQ_API_KEY", PLANTED_ENV_KEY);
         Env {
             _guard: guard,
