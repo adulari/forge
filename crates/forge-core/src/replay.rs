@@ -60,6 +60,31 @@ pub(crate) fn messages_to_replay_items(msgs: &[Message]) -> Vec<forge_types::Rep
     out
 }
 
+/// A session's full persisted conversation as replay items, read straight from the store. This is
+/// how any surface shows a session it does not own — a subagent's child session while it runs or
+/// long after — with the same mapping a resumed session uses.
+pub fn stored_replay_items(
+    store: &forge_store::Store,
+    session_id: &str,
+) -> Result<Vec<ReplayItem>, forge_store::StoreError> {
+    let msgs: Vec<Message> = store
+        .load_all_messages(session_id)?
+        .into_iter()
+        .map(|m| Message {
+            reasoning: None,
+            provider_items: None,
+            role: m.role,
+            content: m.content,
+            tool_calls: m.tool_calls,
+            tool_call_id: m.tool_call_id,
+            images: Vec::new(),
+            visibility: m.visibility,
+            kind: m.kind,
+        })
+        .collect();
+    Ok(messages_to_replay_items(&msgs))
+}
+
 #[cfg(test)]
 mod nudge_tests {
     use super::*;
@@ -71,5 +96,24 @@ mod nudge_tests {
         let real = Message::new(Role::User, "hello");
         let items = messages_to_replay_items(&[nudge, real]);
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn a_child_session_replays_from_the_store_and_grows_as_it_runs() {
+        let store = forge_store::Store::open_in_memory().unwrap();
+        let parent = store.create_session(".", "default").unwrap();
+        let child = store.create_child_session(".", "default", &parent).unwrap();
+        store
+            .add_message(&child, 0, Role::User, "scan the repo", None)
+            .unwrap();
+        let items = stored_replay_items(&store, &child).unwrap();
+        assert!(matches!(&items[..], [ReplayItem::User(t)] if t == "scan the repo"));
+
+        store
+            .add_message(&child, 1, Role::Assistant, "found it", None)
+            .unwrap();
+        let items = stored_replay_items(&store, &child).unwrap();
+        assert!(matches!(items.last(), Some(ReplayItem::Assistant(t)) if t == "found it"));
+        assert!(stored_replay_items(&store, &parent).unwrap().is_empty());
     }
 }
