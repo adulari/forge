@@ -4,9 +4,9 @@
 // the shell's header/status-strip/Segmented already consumed the top inset) and renders no
 // header of its own — the shell's SessionHeader back arrow + "Replay" Segmented tab already
 // own that chrome.
+import { useSessionStable } from "../../../lib/sessionContext";
 import React, { useCallback, useMemo } from "react";
 import { StyleSheet } from "react-native";
-import { useLocalSearchParams } from "expo-router";
 
 import { ReplayView } from "../../../components/session/ReplayView";
 import { Screen } from "../../../components/ds/Screen";
@@ -15,7 +15,7 @@ import { usePullRefresh } from "../../../lib/usePullRefresh";
 import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
 export function SessionReplayScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { sessionId: id } = useSessionStable();
   // A replay is the record of what the session DID, so it asks for the tool rows the chat stream
   // leaves out — calls and results both (ReplayView tells them apart by `tool_phase`). Its own
   // cache entry, so the chat tab's plain stream is untouched by this.

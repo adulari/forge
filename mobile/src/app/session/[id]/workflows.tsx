@@ -18,13 +18,14 @@ import { StatusDot } from "../../../components/ds/StatusDot";
 import { useToast } from "../../../components/ds/ToastHost";
 import type { WorkflowRow } from "../../../lib/api";
 import { useWorkflows } from "../../../lib/queries";
+import { useRouteScreensHosted } from "../../../components/session/SegmentKeepAlive";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space } from "../../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
 
-export default function WorkflowLibraryScreen() {
+export function WorkflowLibraryScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const { sessionId, snapshot, send } = useSessionCtx();
@@ -350,3 +351,8 @@ const styles = StyleSheet.create({
   argsInput: { marginTop: space.space8 },
   viewRun: { flexDirection: "row", alignItems: "center", gap: space.space4, minHeight: 44, marginTop: space.space4 },
 });
+
+// The multi-session desktop host renders this screen itself (inside the right session's provider).
+export default function SessionWorkflowsRoute() {
+  return useRouteScreensHosted() ? null : <WorkflowLibraryScreen />;
+}

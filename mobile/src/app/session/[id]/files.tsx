@@ -1,4 +1,4 @@
-import { useLocalSearchParams } from "expo-router";
+import { useSessionStable } from "../../../lib/sessionContext";
 import React from "react";
 import { StyleSheet } from "react-native";
 
@@ -7,7 +7,7 @@ import { WorkspaceDock } from "../../../components/workspace/WorkspaceDock";
 import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
 export function SessionFiles() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { sessionId: id } = useSessionStable();
 
   return (
     <Screen

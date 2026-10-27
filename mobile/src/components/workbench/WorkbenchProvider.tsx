@@ -7,6 +7,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 
 import { routedSessionId } from "../shell/activeSession";
 import { openSession as openRoutedSession } from "../../lib/nav";
+import { useSessionActivationOverride } from "../../lib/sessionPrewarm";
 import { useSessions } from "../../lib/queries";
 import {
   LEGACY_SPLIT_KEY,
@@ -94,7 +95,10 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   const [layout, dispatchLayout] = useReducer(layoutReducer, undefined, initialLayout);
   const [hydrated, setHydrated] = useState(false);
   const pathname = usePathname();
-  const primaryId = routedSessionId(pathname);
+  // A rail click names the open session before the URL does (see activateSession), so pane
+  // layout decisions made in that window already agree with what is on screen.
+  const activationOverride = useSessionActivationOverride();
+  const primaryId = activationOverride ?? routedSessionId(pathname);
   const { data: sessions } = useSessions();
 
   // Handlers read the freshest layout/primary without being re-created on every pane change.

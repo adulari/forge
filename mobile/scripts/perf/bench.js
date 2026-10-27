@@ -42,13 +42,17 @@
 
   // `ready` is re-evaluated after every DOM mutation batch (cheap: no per-frame polling), then
   // the result is stamped two frames later so the committed DOM has actually been presented.
-  async function measure(trigger, ready, timeoutMs) {
+  async function measure(trigger, ready, timeoutMs, early) {
     await idle(6);
     gaps = [];
     recording = true;
     const t0 = performance.now();
     let readyAt = null;
-    const check = () => { if (readyAt === null && ready()) readyAt = performance.now(); };
+    let earlyAt = null;
+    const check = () => {
+      if (early && earlyAt === null && early()) earlyAt = performance.now();
+      if (readyAt === null && ready()) readyAt = performance.now();
+    };
     const mo = new MutationObserver(check);
     mo.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
     trigger();
@@ -61,17 +65,17 @@
       if (readyAt !== null && t > readyAt) {
         const t2 = await frame();
         mo.disconnect(); recording = false;
-        return { ms: t2 - t0, commit: readyAt - t0, sync, maxGap: Math.max.apply(null, gaps), ok: true };
+        return { ms: t2 - t0, commit: readyAt - t0, early: (earlyAt ?? readyAt) - t0, sync, maxGap: Math.max.apply(null, gaps), ok: true };
       }
-      if (t - t0 > limit) { mo.disconnect(); recording = false; return { ms: t - t0, commit: limit, sync, maxGap: Math.max.apply(null, gaps), ok: false }; }
+      if (t - t0 > limit) { mo.disconnect(); recording = false; return { ms: t - t0, commit: limit, early: limit, sync, maxGap: Math.max.apply(null, gaps), ok: false }; }
     }
   }
 
   function stats(rows) {
     const col = (k) => rows.map((r) => r[k]).sort((a, b) => a - b);
     const q = (a, p) => a[Math.min(a.length - 1, Math.floor(p * a.length))];
-    const ms = col("ms"), sync = col("sync"), gap = col("maxGap"), commit = col("commit");
-    return { n: rows.length, ok: rows.filter((r) => r.ok).length, med: +q(ms, 0.5).toFixed(1), p95: +q(ms, 0.95).toFixed(1), max: +ms[ms.length - 1].toFixed(1), commitMed: +q(commit, 0.5).toFixed(1), commitP95: +q(commit, 0.95).toFixed(1), syncMed: +q(sync, 0.5).toFixed(1), gapMax: +gap[gap.length - 1].toFixed(1) };
+    const ms = col("ms"), sync = col("sync"), gap = col("maxGap"), commit = col("commit"), early = col("early");
+    return { n: rows.length, ok: rows.filter((r) => r.ok).length, med: +q(ms, 0.5).toFixed(1), p95: +q(ms, 0.95).toFixed(1), max: +ms[ms.length - 1].toFixed(1), earlyMed: +q(early, 0.5).toFixed(1), commitMed: +q(commit, 0.5).toFixed(1), commitP95: +q(commit, 0.95).toFixed(1), syncMed: +q(sync, 0.5).toFixed(1), gapMax: +gap[gap.length - 1].toFixed(1) };
   }
 
   const scenarios = {
@@ -150,17 +154,54 @@
     return out;
   }
 
-  async function sessionSwitch(runs) {
-    const names = ["Perf session 1", "Perf session 2", "Perf session 3", "Perf session 4", "Perf session 5", "Perf session 0"];
-    const item = (n) => [...document.querySelectorAll("div,a")].filter((e) => e.children.length === 0 && (e.textContent || "").trim() === n && shown(e))[0];
-    const rows = [];
-    for (let i = 0; i < runs; i++) {
-      const n = names[i % names.length];
-      const turns = text();
-      rows.push(await measure(() => press(item(n)), () => location.pathname.endsWith("perf-sess-" + n.slice(-1)) && !!composer() && leaf("Turn ") && document.title !== null));
-      await sleep(250);
+  // Sidebar session switches, in the order a user meets them in a fresh app:
+  //   new       sessions never opened (cold mount), no hover
+  //   newHover  never opened, but the pointer rests on the row 450 ms first (hover prefetch/prewarm)
+  //   recent    flipping between the two most recently opened sessions
+  // `early` = the new session's header is on screen; `commit` = its transcript and composer are too.
+  async function sessions(mode) {
+    const ids = { 0: "perf-sess-0", 1: "perf-sess-1", 2: "perf-sess-2", 3: "perf-sess-3", 4: "perf-sess-4", 5: "perf-sess-5", s: "synthetic-long-history-0001" };
+    const label = (k) => (k === "s" ? "Synthetic long history" : "Perf session " + k);
+    const leaves = (txt) => [...document.querySelectorAll("div,span")].filter((e) => e.children.length === 0 && (e.textContent || "").trim() === txt && shown(e));
+    const item = (k) => leaves(label(k))[0];
+    // RNW's hover is a pointerenter with pointerType "mouse" on the Pressable's host element.
+    const hover = (el) => {
+      let host = el;
+      while (host && host.getAttribute("role") !== "button") host = host.parentElement;
+      (host || el).dispatchEvent(new PointerEvent("pointerenter", { pointerType: "mouse", bubbles: false }));
+    };
+    const go = async (k, withHover) => {
+      const el = item(k);
+      if (withHover) { hover(el); await sleep(450); }
+      return measure(
+        () => press(el),
+        () => leaves(label(k)).length >= 2 && !!composer() && leaf("Turn "),
+        4000,
+        () => leaves(label(k)).length >= 2,
+      );
+    };
+    if (mode === "hoverPrep") { hover(item(3)); await sleep(900); return null; }
+    if (mode === "hoverClick") { const r = []; r.push(await go(3, false)); return { sessionHoverClick: stats(r) }; }
+    if (mode === "warm") {
+      for (const k of [4, 5]) { await go(k, false); await sleep(300); }
+      return null;
     }
-    return stats(rows);
+    if (mode === "recent") {
+      const only = [];
+      for (let i = 0; i < 12; i++) { only.push(await go(i % 2 === 0 ? 4 : 5, false)); await sleep(200); }
+      return { sessionRecent: stats(only) };
+    }
+    const out = {};
+    const fresh = [];
+    for (const k of [1, 2, 3]) { fresh.push(await go(k, false)); await sleep(300); }
+    out.sessionNew = stats(fresh);
+    const hovered = [];
+    for (const k of [4, 5, "s"]) { hovered.push(await go(k, true)); await sleep(300); }
+    out.sessionNewHover = stats(hovered);
+    const recent = [];
+    for (let i = 0; i < 12; i++) { recent.push(await go(i % 2 === 0 ? 5 : "s", false)); await sleep(200); }
+    out.sessionRecent = stats(recent);
+    return out;
   }
 
   const composerMirrorOk = () => true;
@@ -214,6 +255,6 @@
     return { frames: g.length, avgFrame: +(total / steps).toFixed(1), p95Frame: +g[Math.floor(g.length * 0.95)].toFixed(1), maxFrame: +g[g.length - 1].toFixed(1), scrollHeight: sc.scrollHeight };
   }
 
-  window.__bench = { firstVisits, composer, visible, runScenario, sessionSwitch, typing, expandToolGroup, scroll, scenarios, tab, press, key, text, idle, sleep, measure, stats };
+  window.__bench = { sessions, firstVisits, composer, visible, runScenario, typing, expandToolGroup, scroll, scenarios, tab, press, key, text, idle, sleep, measure, stats };
   return "installed";
 })();

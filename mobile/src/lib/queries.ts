@@ -427,12 +427,12 @@ export function useHistory(sessionId: string | null, options: { includeTools?: b
 }
 
 /** Starts the session screen's first history page at press-in, before navigation has finished. */
-export function usePrefetchSessionHistory(): (sessionId: string) => void {
+export function usePrefetchSessionHistory(): (sessionId: string) => Promise<void> {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
   return useCallback((sessionId: string) => {
-    if (baseUrl == null) return;
-    void queryClient.prefetchInfiniteQuery({
+    if (baseUrl == null) return Promise.resolve();
+    return queryClient.prefetchInfiniteQuery({
       ...historyQueryOptions(baseUrl, sessionId, true),
       staleTime: 10_000,
     }).catch(() => undefined);

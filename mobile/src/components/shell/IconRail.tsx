@@ -10,6 +10,7 @@ import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useAuth } from "../../lib/auth";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { openSession } from "../../lib/nav";
+import { requestSessionPrewarm, useSessionActivationOverride } from "../../lib/sessionPrewarm";
 import { usePrefetchSessionHistory, useSessions } from "../../lib/queries";
 import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useShortcutLabel } from "../../lib/shortcuts";
@@ -57,6 +58,7 @@ function SessionIconButton({
   selected,
   onPress,
   onPressIn,
+  onHoverIn,
 }: {
   title: string;
   state: StatusDotState;
@@ -64,6 +66,7 @@ function SessionIconButton({
   selected: boolean;
   onPress: () => void;
   onPressIn?: () => void;
+  onHoverIn?: () => void;
 }) {
   const tokens = useTokens();
   const glyphColor = state === "idle" ? tokens.ink4 : selected ? tokens.ink : tokens.ink2;
@@ -71,7 +74,7 @@ function SessionIconButton({
     <Pressable
       onPress={onPress}
       onPressIn={onPressIn}
-      onHoverIn={onPressIn}
+      onHoverIn={onHoverIn}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${state}${worktree ? ", worktree" : ""}`}
       style={[styles.sessionButton, selected && { backgroundColor: tokens.bg3 }]}
@@ -104,7 +107,8 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
   const { data: activeRows } = useSessions();
   const waitingCount = useMemo(() => (activeRows ?? []).filter((row) => row.waiting).length, [activeRows]);
   const noticesUnseen = totalUnseen(useNoticesStore().hosts);
-  const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
+  const activationOverride = useSessionActivationOverride();
+  const selectedSessionId = activationOverride ?? pathname.match(/^\/session\/([^/]+)/)?.[1];
   const { rings } = useProviderPace();
 
   return (
@@ -143,7 +147,8 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
                 if (serverId) setActive(serverId);
                 openSession(row.id);
               }}
-              onPressIn={() => prefetchHistory(row.id)}
+              onPressIn={() => void prefetchHistory(row.id)}
+              onHoverIn={() => void prefetchHistory(row.id).then(() => requestSessionPrewarm(row.id))}
             />
           );
         })}

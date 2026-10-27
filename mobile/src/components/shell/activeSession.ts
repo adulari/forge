@@ -5,6 +5,7 @@ import { usePathname } from "expo-router";
 
 import { type SessionRow } from "../../lib/api";
 import { useSessions } from "../../lib/queries";
+import { useSessionActivationOverride } from "../../lib/sessionPrewarm";
 
 export function routedSessionId(pathname: string): string | null {
   return pathname.match(/^\/session\/([^/]+)/)?.[1] ?? null;
@@ -13,7 +14,8 @@ export function routedSessionId(pathname: string): string | null {
 export function useActiveSessionId(): string | null {
   const pathname = usePathname();
   const { data } = useSessions();
-  return routedSessionId(pathname) ?? data?.find((row) => row.busy)?.id ?? data?.[0]?.id ?? null;
+  const override = useSessionActivationOverride();
+  return override ?? routedSessionId(pathname) ?? data?.find((row) => row.busy)?.id ?? data?.[0]?.id ?? null;
 }
 
 export function useSessionRow(sessionId: string | null): SessionRow | null {

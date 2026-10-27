@@ -65,7 +65,7 @@ def main():
         return max(vals) if vals else None
 
     la, lb = sides[0][0], sides[1][0]
-    print(f"{'scenario':18} | {la+' paint':>14} {lb+' paint':>14} | {la+' commit':>15} {lb+' commit':>15} | worst p95 {la}/{lb}")
+    print(f"{'scenario':18} | {la+' paint':>14} {lb+' paint':>14} | {la+' commit':>15} {lb+' commit':>15} | first-frame {la}/{lb} | worst p95 {la}/{lb}")
     summary = {}
     for k in acc[la]:
         if k not in acc[lb]:
@@ -80,11 +80,12 @@ def main():
         row = {
             "paint": [agg(la, k, "med"), agg(lb, k, "med")],
             "commit": [agg(la, k, "commitMed"), agg(lb, k, "commitMed")],
+            "first": [agg(la, k, "earlyMed"), agg(lb, k, "earlyMed")],
             "p95": [worst(la, k, "p95"), worst(lb, k, "p95")],
         }
         summary[k] = row
         f = lambda v: "n/a" if v is None else v  # noqa: E731
-        print(f"{k:18} | {f(row['paint'][0]):>14} {f(row['paint'][1]):>14} | {f(row['commit'][0]):>15} {f(row['commit'][1]):>15} | {f(row['p95'][0])}/{f(row['p95'][1])}")
+        print(f"{k:18} | {f(row['paint'][0]):>14} {f(row['paint'][1]):>14} | {f(row['commit'][0]):>15} {f(row['commit'][1]):>15} | {f(row['first'][0])}/{f(row['first'][1])} | {f(row['p95'][0])}/{f(row['p95'][1])}")
     if a.json:
         json.dump(summary, open(a.json, "w"), indent=1)
 
