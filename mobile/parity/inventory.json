@@ -240,6 +240,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/components/onboarding/brief.ts",
+    "platform": "desktop",
+    "reason": "Tauri-only: the desktop shell asks its local daemon whether setup should open and whether Claude Code needs reconnecting; phones and the web build never ask",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/overlay/CommandPalette.tsx",
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -402,6 +408,18 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/lib/desktopOnboarding.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary (tests for the install bridge)",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/desktopOnboarding.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary: installing the forge CLI and the background service has no equivalent on phones or the web",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/lib/desktopOta.test.ts",
     "platform": "desktop",
     "reason": "Tauri desktop capability boundary",
@@ -466,6 +484,12 @@
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
     "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/onboarding/open.ts",
+    "platform": "desktop",
+    "reason": "Tauri opener plugin on desktop, Linking elsewhere; same links on every platform",
+    "category": "capability"
   },
   {
     "file": "mobile/src/lib/performance.test.ts",

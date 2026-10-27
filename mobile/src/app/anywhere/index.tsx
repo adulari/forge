@@ -3,7 +3,6 @@ import * as DocumentPicker from "expo-document-picker";
 import { File as ExpoFile } from "expo-file-system";
 import { router } from "expo-router";
 import {
-  Check,
   ChevronRight,
   Clock3,
   Cloud,
@@ -24,6 +23,7 @@ import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
 import { Input } from "../../components/ds/Input";
 import { Screen } from "../../components/ds/Screen";
+import { Stepper, type StepperStep } from "../../components/ds/Stepper";
 import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere, type AnywherePendingApproval } from "../../lib/AnywhereProvider";
 import { formatBytes, formatStorageUsage } from "../../lib/anywhere/format";
@@ -107,27 +107,13 @@ function SetupFlow() {
   );
 }
 
+const SETUP_STEPS: StepperStep[] = ["GitHub", "Approve", "Recovery", "Connected"].map((label) => ({ key: label, label }));
+
 function SetupProgress({ phase }: { phase: ReturnType<typeof useAnywhere>["phase"] }) {
-  const tokens = useTokens();
   const active = phase === "signed_out" || phase === "reauthentication_required" || phase === "starting" || phase === "authorizing" ? 0
     : phase === "awaiting_approval" || phase === "existing_recovery" || phase === "error" ? 1
       : phase === "new_recovery" ? 2 : 3;
-  const labels = ["GitHub", "Approve", "Recovery", "Connected"];
-  return (
-    <View style={styles.progress} accessibilityRole="progressbar" accessibilityValue={{ min: 1, max: 4, now: active + 1 }}>
-      {labels.map((label, index) => (
-        <View key={label} style={styles.progressItem}>
-          <View style={[styles.progressDot, {
-            backgroundColor: index < active ? tokens.success : index === active ? tokens.accent : tokens.bg3,
-            borderColor: index <= active ? (index < active ? tokens.success : tokens.accent) : tokens.borderStrong,
-          }]}>
-            {index < active ? <Check size={12} strokeWidth={2.5} color={tokens.successBg} /> : <Text style={[typeScale.monoMeta, { color: index === active ? tokens.onAccent : tokens.ink3 }]}>{index + 1}</Text>}
-          </View>
-          <Text style={[typeScale.meta, { color: index === active ? tokens.ink : tokens.ink3 }]}>{label}</Text>
-        </View>
-      ))}
-    </View>
-  );
+  return <Stepper steps={SETUP_STEPS} activeIndex={active} />;
 }
 
 function ReauthenticationStep() {
@@ -623,9 +609,6 @@ const styles = StyleSheet.create({
   brandMark: { width: 44, height: 44, borderRadius: radii.radius12, alignItems: "center", justifyContent: "center" },
   titleCopy: { flex: 1, gap: space.space4 },
   measure: { maxWidth: 620 },
-  progress: { flexDirection: "row", marginTop: space.space24, marginBottom: space.space20, justifyContent: "space-between" },
-  progressItem: { flex: 1, alignItems: "center", gap: space.space4 },
-  progressDot: { width: 26, height: 26, borderRadius: 13, borderWidth: 1, alignItems: "center", justifyContent: "center" },
   step: { gap: space.space12 },
   centerStep: { minHeight: 180, alignItems: "center", justifyContent: "center", gap: space.space12 },
   primaryAction: { marginTop: space.space4 },

@@ -57,6 +57,9 @@ base64 = "0.22"
 semver = "1"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tokio = { version = "1", features = ["time"] }
+# onboarding.rs: unpack the release archive the installer downloads (same layout install.sh reads).
+flate2 = "1"
+tar = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 # detect_forge_serve's pid-liveness check (`kill(pid, 0)`).

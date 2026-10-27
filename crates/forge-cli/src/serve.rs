@@ -945,6 +945,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_dispatch::routes(&base))
         .merge(crate::push_tool::routes(&base))
         .merge(crate::serve_update::routes(&base))
+        .merge(crate::serve_onboarding::routes(&base))
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/changelog"), get(changelog_page))
         // Git review dock (serve_git.rs) — every route is session-addressed and runs git only in

@@ -26,7 +26,7 @@ pub struct ServeState {
 }
 
 /// Per-OS config dir, resolved the same way `forge_config::config_dir()` does.
-fn config_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
     directories::ProjectDirs::from("dev", "forge", "forge").map(|d| d.config_dir().to_path_buf())
 }
 
@@ -58,7 +58,7 @@ fn probe_port(port: u16) -> bool {
 /// Reads and validates `serve-state.json`, returning `None` for anything short of "a live
 /// daemon is definitely listening on this port": missing file, unparseable JSON, dead pid, or a
 /// silent port. Advisory data only — never trust it without this validation.
-fn read_and_validate(dir: &std::path::Path) -> Option<ServeState> {
+pub(crate) fn read_and_validate(dir: &std::path::Path) -> Option<ServeState> {
     let raw = std::fs::read_to_string(dir.join("serve-state.json")).ok()?;
     let state: ServeState = serde_json::from_str(&raw).ok()?;
     if !pid_alive(state.pid) {
@@ -81,7 +81,7 @@ pub fn detect_forge_serve() -> Option<ServeState> {
 }
 
 /// Bare executable name to look for on `PATH` — `forge.exe` on Windows, `forge` elsewhere.
-fn forge_exe_name() -> &'static str {
+pub(crate) fn forge_exe_name() -> &'static str {
     if cfg!(windows) {
         "forge.exe"
     } else {
@@ -137,7 +137,13 @@ fn common_forge_binary_candidates(home: Option<&std::path::Path>) -> Vec<std::pa
 
 /// GUI apps inherit a minimal `PATH` on macOS and Linux, so search both that path and the
 /// standard Cargo, user-local, and Homebrew install locations.
-fn find_forge_binary() -> Option<std::path::PathBuf> {
+pub(crate) fn find_forge_binary() -> Option<std::path::PathBuf> {
+    if let Some(dir) = crate::onboarding::install_dir() {
+        let candidate = dir.join(forge_exe_name());
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
     if let Some(path_var) = std::env::var_os("PATH") {
         if let Some(binary) = find_forge_binary_in(&path_var) {
             return Some(binary);
