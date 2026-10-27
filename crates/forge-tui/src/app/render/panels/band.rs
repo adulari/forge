@@ -265,10 +265,18 @@ pub(crate) fn activity_section_lines(app: &App, height: u16, width: u16) -> Vec<
             Span::styled("Agents", styles::fg().bold()),
             Span::styled(format!(" {n}"), styles::muted()),
         ],
-        vec![
-            Span::styled("Ctrl+O", styles::key_chip()),
-            Span::styled(" hide", styles::faint()),
-        ],
+        {
+            let mut right = Vec::new();
+            if focused {
+                right.push(Span::styled("↑↓", styles::key_chip()));
+                right.push(Span::styled(" select  ", styles::faint()));
+                right.push(Span::styled("Enter", styles::key_chip()));
+                right.push(Span::styled(" open  ", styles::faint()));
+            }
+            right.push(Span::styled("Ctrl+O", styles::key_chip()));
+            right.push(Span::styled(" hide", styles::faint()));
+            right
+        },
         w,
         1,
     )];

@@ -12,6 +12,7 @@ use crate::voice::VOICE_WAVEFORM_BARS;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
+mod child_view;
 mod chrome;
 mod chrome_surfaces;
 mod interaction;
