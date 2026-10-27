@@ -12,6 +12,8 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The hosted benchmark data loads from forge.adulari.dev.** The site's proxy to the `benchmarks-data` release answered 502 because GitHub's redirect headers outgrew nginx's default header buffer; both proxy blocks now use 32k buffers, so clients get the mirror from the site instead of falling back to the GitHub URL (`crates/forge-relay/deploy/forge.adulari.dev.nginx`).
+
 - **The desktop and web composer grows with your message again.** It measured the right height for wrapped text, but the textarea's `flex: 1` (a 0% basis inside a column) overrode that height, so the box stayed one row tall and older lines scrolled out of view. The web textarea now sizes from its measured height, up to six lines and then scrolling (`mobile/src/components/chat/Composer.tsx`).
 
 ## [2.24.0] - 2026-10-27

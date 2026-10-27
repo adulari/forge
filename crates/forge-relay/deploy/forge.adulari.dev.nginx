@@ -75,6 +75,9 @@ server {
         proxy_set_header Host github.com;
         proxy_set_header Cookie "";
         proxy_intercept_errors on;
+        # GitHub's redirect and asset replies carry headers past the 4k default (502 otherwise).
+        proxy_buffer_size 32k;
+        proxy_buffers 8 32k;
         error_page 301 302 303 307 308 = @benchmarks_asset;
         proxy_connect_timeout 5s;
         proxy_read_timeout 10s;
@@ -85,6 +88,8 @@ server {
         resolver 1.1.1.1 9.9.9.9 valid=300s ipv6=off;
         resolver_timeout 5s;
         set $benchmarks_asset_url $upstream_http_location;
+        proxy_buffer_size 32k;
+        proxy_buffers 8 32k;
         proxy_pass $benchmarks_asset_url;
         proxy_ssl_server_name on;
         proxy_set_header Cookie "";
