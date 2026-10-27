@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { formatJobNotice, isJobNotice } from "./jobNotice";
+import {
+  formatJobNotice,
+  isJobNotice,
+  jobCommandText,
+  jobLabel,
+  jobLogPath,
+  jobOutcome,
+  parseJobNotices,
+} from "./jobNotice";
 
 describe("formatJobNotice", () => {
   it("renders a header per job with its tail indented", () => {
@@ -29,8 +37,6 @@ describe("formatJobNotice", () => {
     expect(isJobNotice(undefined)).toBe(false);
   });
 });
-
-import { jobCommandText, jobLabel, jobLogPath, jobOutcome, parseJobNotices } from "./jobNotice";
 
 describe("job notice rows", () => {
   const exec =
