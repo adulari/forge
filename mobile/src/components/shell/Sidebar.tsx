@@ -6,8 +6,8 @@
 // control). Replaces `ExpandedFleetRail` (components/fleet/DesktopDrillDown.tsx).
 import { router, usePathname } from "expo-router";
 import { Bell, BellDot, Gauge, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
-import React, { useMemo } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useMemo, useRef, useState } from "react";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View, type GestureResponderEvent } from "react-native";
 
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import type { AnywhereHost } from "../../lib/anywhere/types";
@@ -16,7 +16,6 @@ import type { SessionRow } from "../../lib/api";
 import { useShortcutLabel } from "../../lib/shortcuts";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { useAuth } from "../../lib/auth";
-import { openSession } from "../../lib/nav";
 import { usePrefetchSessionHistory, useSessions } from "../../lib/queries";
 import { useScopedFleet, type ScopedSessionRow } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -27,6 +26,10 @@ import { useRelativeClock } from "../ds/relativeClock";
 import { StatusDot } from "../ds/StatusDot";
 import { ServerScopePills } from "../fleet/ServerScopePills";
 import { usePalette } from "../overlay/CommandPalette";
+import { MAX_PANES } from "../workbench/layoutModel";
+import { useWorkbench, type OpenMode } from "../workbench/WorkbenchProvider";
+import { PopoverMenu, type MenuAnchor, type MenuEntry } from "./PopoverMenu";
+import { useDragSource } from "./sessionDrag";
 import { useProviderPace, UsageRing } from "./UsageRing";
 
 const ROW_HEIGHT = 28;
@@ -70,7 +73,20 @@ function hostShortMeta(host: AnywhereHost): string {
   return hostStateText(host);
 }
 
-function DenseSessionRow({ row, serverId, selected }: { row: SessionRow; serverId: string; selected: boolean }) {
+interface DenseRowProps {
+  row: SessionRow;
+  serverId: string;
+  selected: boolean;
+  /** 1-based pane number when this session is on screen in a multi-pane layout. */
+  paneNumber: number | null;
+  paneFocused: boolean;
+  /** How many panes are open — decides whether "open in new pane" can add one. */
+  paneTotal: number;
+  onOpen: (id: string, mode: OpenMode) => void;
+  onClosePane: (id: string) => void;
+}
+
+function DenseSessionRow({ row, serverId, selected, paneNumber, paneFocused, paneTotal, onOpen, onClosePane }: DenseRowProps) {
   const tokens = useTokens();
   const { setActive } = useAuth();
   const prefetchHistory = usePrefetchSessionHistory();
@@ -79,40 +95,88 @@ function DenseSessionRow({ row, serverId, selected }: { row: SessionRow; serverI
   useRelativeClock();
   const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
   const title = row.title || `session ${row.id.slice(0, 8)}`;
+  const ref = useRef<View>(null);
+  const [menu, setMenu] = useState<MenuAnchor | null>(null);
+  // Drag the row onto a pane (or the "New pane" zone that appears while dragging).
+  useDragSource(ref, { kind: "session", id: row.id });
+
+  const open = (mode: OpenMode) => {
+    if (serverId) setActive(serverId);
+    onOpen(row.id, mode);
+  };
+  const onPress = (event: GestureResponderEvent) => {
+    // Alt/Shift-click opens beside the current pane instead of replacing the focused one.
+    const modifiers = event.nativeEvent as unknown as { altKey?: boolean; shiftKey?: boolean };
+    open(modifiers.altKey || modifiers.shiftKey ? "new" : "focused");
+  };
+  const webContextMenu =
+    Platform.OS === "web"
+      ? ({
+          onContextMenu: (e: { preventDefault: () => void; clientX: number; clientY: number }) => {
+            e.preventDefault();
+            setMenu({ top: e.clientY, left: e.clientX });
+          },
+        } as Record<string, unknown>)
+      : null;
+  const menuEntries: MenuEntry[] = [
+    { kind: "item", id: "open", label: "Open", onPress: () => open("focused") },
+    {
+      kind: "item",
+      id: "split",
+      label: "Open in split",
+      hint: paneTotal >= MAX_PANES ? "replaces last" : undefined,
+      onPress: () => open("new"),
+    },
+    ...(paneNumber != null && paneTotal > 1
+      ? ([{ kind: "item", id: "close", label: `Close pane ${paneNumber}`, onPress: () => onClosePane(row.id) }] as MenuEntry[])
+      : []),
+  ];
 
   return (
-    <Pressable
-      onPress={() => {
-        if (serverId) setActive(serverId);
-        openSession(row.id);
-      }}
-      // Start the transcript fetch while the button is still going down: the click lands ~100 ms
-      // later and the session screen then paints from cache instead of a spinner.
-      onPressIn={() => prefetchHistory(row.id)}
-      accessibilityRole="button"
-      accessibilityLabel={`${title}, ${state}${row.waiting ? ", needs a decision" : ""}`}
-      style={[styles.denseRow, (row.waiting || selected) && { backgroundColor: tokens.selection }]}
-    >
-      <StatusDot state={state} size={6} />
-      <Text
-        style={[typeScale.body, styles.denseTitle, { color: state === "idle" ? tokens.ink2 : tokens.ink, fontSize: 11.5 }]}
-        numberOfLines={1}
+    <>
+      <Pressable
+        ref={ref}
+        onPress={onPress}
+        // Start the transcript fetch while the button is still going down: the click lands ~100 ms
+        // later and the session screen then paints from cache instead of a spinner.
+        onPressIn={() => prefetchHistory(row.id)}
+        accessibilityRole="button"
+        accessibilityLabel={`${title}, ${state}${row.waiting ? ", needs a decision" : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}`}
+        accessibilityHint="Opens in the focused pane. Right-click for split options, or drag onto a pane."
+        style={[
+          styles.denseRow,
+          (row.waiting || selected || paneNumber != null) && { backgroundColor: tokens.selection },
+          paneNumber != null && paneTotal > 1 && paneFocused && { borderLeftWidth: 2, borderLeftColor: tokens.accent },
+        ]}
+        {...(webContextMenu as object | null)}
       >
-        {title}
-      </Text>
-      {row.worktree ? <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>⑂</Text> : null}
-      {row.waiting ? (
-        <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]}>
-          {formatRelativeTime(row.last_activity * 1000)}
+        <StatusDot state={state} size={6} />
+        <Text
+          style={[typeScale.body, styles.denseTitle, { color: state === "idle" ? tokens.ink2 : tokens.ink, fontSize: 11.5 }]}
+          numberOfLines={1}
+        >
+          {title}
         </Text>
-      ) : row.busy ? (
-        <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink2 }]}>{formatCost(row.cost_usd)}</Text>
-      ) : (
-        <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]}>
-          {formatRelativeTime(row.last_activity * 1000)}
-        </Text>
-      )}
-    </Pressable>
+        {row.worktree ? <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>⑂</Text> : null}
+        {paneNumber != null && paneTotal > 1 ? (
+          <Text style={[typeScale.monoMeta, tabularNums, styles.paneBadge, { color: tokens.accent, borderColor: tokens.accent }]}>
+            {paneNumber}
+          </Text>
+        ) : null}
+        {row.waiting ? (
+          <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]}>
+            {formatRelativeTime(row.last_activity * 1000)}
+          </Text>
+        ) : row.busy ? (
+          <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink2 }]}>{formatCost(row.cost_usd)}</Text>
+        ) : (
+          <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]}>
+            {formatRelativeTime(row.last_activity * 1000)}
+          </Text>
+        )}
+      </Pressable>
+      <PopoverMenu anchor={menu} entries={menuEntries} onClose={() => setMenu(null)} accessibilityLabel={`${title} actions`} width={248} />
+    </>
   );
 }
 
@@ -175,6 +239,15 @@ export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarP
   const { data: activeRows } = useSessions();
   const waitingCount = useMemo(() => (activeRows ?? []).filter((r) => r.waiting).length, [activeRows]);
   const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
+  const workbench = useWorkbench();
+  const paneTotal = workbench.paneIds.length;
+  const paneNumbers = useMemo(() => {
+    const map = new Map<string, number>();
+    workbench.paneIds.forEach((id, index) => {
+      if (id) map.set(id, index + 1);
+    });
+    return map;
+  }, [workbench.paneIds]);
 
   const { signedIn: anywhereSignedIn } = useAnywhere();
   const { hosts: anywhereHosts } = useAnywhereHosts();
@@ -217,7 +290,20 @@ export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarP
             <View key={group.key}>
               <GroupLabel label={group.project} server={labelServers ? serverName(group.serverId) : undefined} count={group.rows.length} />
               {group.rows.map(({ row, serverId }) => (
-                <DenseSessionRow key={row.id} row={row} serverId={serverId} selected={row.id === selectedSessionId} />
+                <DenseSessionRow
+                  key={row.id}
+                  row={row}
+                  serverId={serverId}
+                  selected={row.id === selectedSessionId}
+                  paneNumber={paneNumbers.get(row.id) ?? null}
+                  paneFocused={paneNumbers.get(row.id) === workbench.layout.focus + 1}
+                  paneTotal={paneTotal}
+                  onOpen={workbench.openSession}
+                  onClosePane={(id) => {
+                    const index = workbench.paneIds.indexOf(id);
+                    if (index >= 0) workbench.closePane(index);
+                  }}
+                />
               ))}
             </View>
           ))
@@ -363,6 +449,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.space8,
   },
   denseTitle: { flex: 1 },
+  paneBadge: { borderWidth: 1, borderRadius: 3, paddingHorizontal: 3, minWidth: 14, textAlign: "center" },
   footer: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: space.space8, paddingBottom: space.space4 },
   usageBlock: { paddingHorizontal: space.space4, marginBottom: space.space8 },
   usageLabel: { fontFamily: monoFamily.regular, marginBottom: space.space8 },

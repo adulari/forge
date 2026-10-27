@@ -23,13 +23,13 @@ import {
   Clock,
   Eye,
   Flame,
-  Gauge,
   History,
   MoonStar,
   Plus,
   QrCode,
   Search,
   Settings2,
+  LayoutPanelLeft,
   Sparkles,
   SunMedium,
   Wand2,
@@ -71,7 +71,7 @@ import { ApiError } from "../../lib/api";
 import { entitlementBadge, hostStateText } from "../../lib/anywhere/format";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
-import { runDesktopMenuAction } from "../../lib/desktopMenu";
+import { runDesktopMenuAction, type DesktopMenuId } from "../../lib/desktopMenu";
 import { haptics } from "../../lib/haptics";
 import {
   useArchiveSession,
@@ -80,7 +80,7 @@ import {
   useSessions,
   useSessionSearch,
 } from "../../lib/queries";
-import { usePaletteHotkey, useShortcutLabel, useThreadSearchHotkey } from "../../lib/shortcuts";
+import { formatShortcut, getResolvedShortcut, type AppShortcutAction, usePaletteHotkey, useShortcutLabel, useThreadSearchHotkey } from "../../lib/shortcuts";
 import { useSessionSocket } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
@@ -219,6 +219,35 @@ export interface CommandPaletteProps {
   onClose: () => void;
 }
 
+interface WorkbenchPaletteEntry {
+  menu: DesktopMenuId;
+  title: string;
+  keywords: string;
+  shortcut?: AppShortcutAction;
+}
+
+const WORKBENCH_PALETTE_ENTRIES: readonly WorkbenchPaletteEntry[] = [
+  { menu: "view:split-pane", title: "Split pane", keywords: "split pane panes side by side multiple sessions column", shortcut: "workbench.split" },
+  { menu: "view:pane-close", title: "Close pane", keywords: "close pane unsplit", shortcut: "workbench.closePane" },
+  { menu: "view:pane-maximize", title: "Maximize pane", keywords: "maximize restore zoom pane focus", shortcut: "workbench.maximize" },
+  { menu: "view:pane-next", title: "Focus next pane", keywords: "next pane focus cycle", shortcut: "workbench.paneNext" },
+  { menu: "view:pane-prev", title: "Focus previous pane", keywords: "previous pane focus cycle", shortcut: "workbench.panePrev" },
+  { menu: "view:layout-focus", title: "Layout: Focus", keywords: "layout preset focus single one pane" },
+  { menu: "view:layout-side-by-side", title: "Layout: Side by side", keywords: "layout preset side by side two panes split" },
+  { menu: "view:layout-grid", title: "Layout: Grid 2 x 2", keywords: "layout preset grid four panes" },
+  { menu: "view:layout-review", title: "Layout: Review", keywords: "layout preset review git diff tasks" },
+  { menu: "view:layout-reset", title: "Reset layout", keywords: "reset layout default panes docks sizes" },
+  { menu: "view:sidebar", title: "Toggle sidebar", keywords: "sidebar rail collapse expand", shortcut: "shell.sidebar" },
+  { menu: "view:tasks", title: "Toggle Tasks panel", keywords: "tasks todo list dock panel right", shortcut: "workbench.tasks" },
+  { menu: "view:agents", title: "Toggle Agents panel", keywords: "agents subagents dock panel right", shortcut: "workbench.agents" },
+  { menu: "view:plan", title: "Toggle Plan panel", keywords: "plan steps dock panel right", shortcut: "workbench.plan" },
+  { menu: "view:files", title: "Toggle Files panel", keywords: "files workspace browser dock panel right", shortcut: "workbench.files" },
+  { menu: "view:git-review", title: "Toggle Git review", keywords: "git review diff changes dock panel right", shortcut: "workbench.gitReview" },
+  { menu: "view:terminal", title: "Toggle Terminal", keywords: "terminal shell dock bottom", shortcut: "workbench.terminal" },
+  { menu: "view:browser-preview", title: "Toggle Browser preview", keywords: "browser preview web dock panel right" },
+  { menu: "view:usage", title: "Toggle usage panel", keywords: "usage dock panel limits quota subscription spend right sidebar", shortcut: "shell.usage" },
+];
+
 export function CommandPalette({ visible, mode = "default", onClose }: CommandPaletteProps) {
   const tokens = useTokens();
   const { scheme, setScheme } = useTheme();
@@ -227,7 +256,6 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
   const fleetHint = useShortcutLabel("nav.fleet");
   const inboxHint = useShortcutLabel("nav.inbox");
   const historyHint = useShortcutLabel("nav.history");
-  const usageHint = useShortcutLabel("shell.usage");
   const settingsHint = useShortcutLabel("nav.settings");
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const toast = useToast();
@@ -411,21 +439,25 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
       });
     }
 
-    // The usage dock lives in the wide desktop shell only; Linux and Windows have no menu bar, so
-    // this is their menu-equivalent route to it alongside ⌘U and the sidebar button.
+    // The workbench (panes, docks, layouts) lives in the wide desktop shell only; Linux and
+    // Windows have no menu bar, so this is their menu-equivalent route to every entry, alongside
+    // the keyboard shortcut and the title-bar Layout menu. Each id dispatches the same action
+    // the macOS menu item does.
     if (!isCompact) {
-      items.push({
-        id: "action:usage-dock",
-        group: "actions",
-        title: "Toggle usage panel",
-        keywords: "usage dock panel limits quota subscription spend right sidebar",
-        leading: <Gauge size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        trailing: <KeyHint label={usageHint} />,
-        onSelect: () => {
-          close();
-          runDesktopMenuAction("view:usage");
-        },
-      });
+      for (const entry of WORKBENCH_PALETTE_ENTRIES) {
+        items.push({
+          id: `action:${entry.menu}`,
+          group: "actions",
+          title: entry.title,
+          keywords: entry.keywords,
+          leading: <LayoutPanelLeft size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+          trailing: entry.shortcut ? <KeyHint label={formatShortcut(getResolvedShortcut(entry.shortcut))} /> : undefined,
+          onSelect: () => {
+            close();
+            runDesktopMenuAction(entry.menu);
+          },
+        });
+      }
     }
 
     items.push({
@@ -484,7 +516,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
     }
 
     return items;
-  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact, newSessionHint, usageHint]);
+  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact, newSessionHint]);
 
   const navigationItems = useMemo<PaletteItem[]>(
     () => [

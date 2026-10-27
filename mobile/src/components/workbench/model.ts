@@ -1,7 +1,15 @@
 export const WORKBENCH_PLACEMENTS = ["right", "bottom"] as const;
 
 export type WorkbenchPlacement = (typeof WORKBENCH_PLACEMENTS)[number];
-export type WorkbenchSurfaceKind = "usage" | "git" | "files" | "preview" | "terminal";
+export type WorkbenchSurfaceKind =
+  | "usage"
+  | "git"
+  | "files"
+  | "preview"
+  | "terminal"
+  | "tasks"
+  | "agents"
+  | "plan";
 
 export interface WorkbenchSurfaceDefinition {
   kind: WorkbenchSurfaceKind;
@@ -50,6 +58,27 @@ export const WORKBENCH_SURFACE_DEFINITIONS: Record<
     defaultSize: 190,
     sessionScoped: true,
   },
+  tasks: {
+    kind: "tasks",
+    title: "Tasks",
+    placement: "right",
+    defaultSize: 320,
+    sessionScoped: true,
+  },
+  agents: {
+    kind: "agents",
+    title: "Agents",
+    placement: "right",
+    defaultSize: 340,
+    sessionScoped: true,
+  },
+  plan: {
+    kind: "plan",
+    title: "Plan",
+    placement: "right",
+    defaultSize: 340,
+    sessionScoped: true,
+  },
 };
 
 /**
@@ -94,7 +123,9 @@ export type WorkbenchAction =
   | { type: "toggle"; surface: WorkbenchSurface }
   | { type: "activate"; placement: WorkbenchPlacement; id: string }
   | { type: "close"; placement: WorkbenchPlacement; id: string }
-  | { type: "hide"; placement: WorkbenchPlacement };
+  | { type: "hide"; placement: WorkbenchPlacement }
+  | { type: "reorder"; placement: WorkbenchPlacement; from: number; to: number }
+  | { type: "replace"; state: WorkbenchState };
 
 function idPart(value: string | null | undefined): string {
   return value == null || value === "" ? "_" : encodeURIComponent(value);
@@ -184,5 +215,52 @@ export function workbenchReducer(
         ...state,
         [action.placement]: { ...state[action.placement], visible: false },
       };
+    case "reorder": {
+      const lane = state[action.placement];
+      const { from, to } = action;
+      if (from === to || from < 0 || to < 0 || from >= lane.tabs.length || to >= lane.tabs.length) return state;
+      const tabs = [...lane.tabs];
+      const [moved] = tabs.splice(from, 1);
+      if (!moved) return state;
+      tabs.splice(to, 0, moved);
+      return { ...state, [action.placement]: { ...lane, tabs } };
+    }
+    case "replace":
+      return action.state;
   }
+}
+
+/**
+ * The lanes worth restoring on the next launch. Surfaces pinned to one session (a second
+ * terminal, a preview) are dropped: that session may not exist any more, and a lane that
+ * reopens onto a dead id is worse than one that starts closed.
+ */
+export function restorableWorkbenchState(state: WorkbenchState): WorkbenchState {
+  const lane = (source: WorkbenchLaneState): WorkbenchLaneState => {
+    const tabs = source.tabs.filter((surface) => surface.sessionId == null);
+    const activeId = tabs.some((surface) => surface.id === source.activeId) ? source.activeId : (tabs[0]?.id ?? null);
+    return { tabs, activeId, visible: source.visible && activeId != null };
+  };
+  return { right: lane(state.right), bottom: lane(state.bottom) };
+}
+
+/** Rebuild the lanes from persisted JSON, keeping only entries that name a known surface kind. */
+export function parseWorkbenchState(raw: unknown): WorkbenchState {
+  const parseLane = (value: unknown, placement: WorkbenchPlacement): WorkbenchLaneState => {
+    if (typeof value !== "object" || value === null) return { tabs: [], activeId: null, visible: false };
+    const record = value as { tabs?: unknown; activeId?: unknown; visible?: unknown };
+    const tabs: WorkbenchSurface[] = [];
+    if (Array.isArray(record.tabs)) {
+      for (const entry of record.tabs) {
+        const kind = (entry as { kind?: unknown } | null)?.kind;
+        if (typeof kind !== "string" || !(kind in WORKBENCH_SURFACE_DEFINITIONS)) continue;
+        const surface = createWorkbenchSurface({ kind: kind as WorkbenchSurfaceKind });
+        if (surface.placement === placement && !tabs.some((tab) => tab.id === surface.id)) tabs.push(surface);
+      }
+    }
+    const activeId = tabs.some((tab) => tab.id === record.activeId) ? (record.activeId as string) : (tabs[0]?.id ?? null);
+    return { tabs, activeId, visible: record.visible === true && activeId != null };
+  };
+  const source = (typeof raw === "object" && raw !== null ? raw : {}) as { right?: unknown; bottom?: unknown };
+  return { right: parseLane(source.right, "right"), bottom: parseLane(source.bottom, "bottom") };
 }

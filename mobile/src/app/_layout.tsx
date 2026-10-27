@@ -36,9 +36,12 @@ import { DockHost } from "../components/shell/DockHost";
 import { IconRail } from "../components/shell/IconRail";
 import { QuickComposer } from "../components/shell/QuickComposer";
 import { Sidebar } from "../components/shell/Sidebar";
-import { SplitPanes, useSplitPanes } from "../components/shell/SplitPanes";
+import { LayoutTip } from "../components/shell/LayoutTip";
+import { RAILLESS_ROUTES } from "../components/shell/railless";
+import { PaneGrid } from "../components/shell/SplitPanes";
 import { WorkbenchProvider, useWorkbench } from "../components/workbench/WorkbenchProvider";
 import { activeWorkbenchSurface } from "../components/workbench/model";
+import { useWorkbenchCommands } from "../components/workbench/useWorkbenchCommands";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -50,11 +53,9 @@ import { isTauri, isWeb } from "../lib/platform";
 import { rememberShellRoute } from "../lib/nav";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
-import { useDesktopMenuAction } from "../lib/desktopMenu";
 import { dumpDesktopPerformanceSnapshot, markDesktopInteractive, markFirstPaint, markReactMountEnd, markReactMountStart, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor } from "../lib/performance";
 import { IncomingShareProvider } from "../lib/incomingShare";
 import {
-  useAppShortcut,
   useGlobalShortcuts,
   useQuickComposerHotkey,
   useSidebarCollapseHotkey,
@@ -93,11 +94,6 @@ const asyncStoragePersister = createAsyncStoragePersister({
   serialize: serializePersistedClient,
   throttleTime: 3000,
 });
-
-// Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
-// persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
-// full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|appearance|keybindings|diagnostics|perf-fixture|legal|configuration|skills|hooks|providers|models|plans|mcp|usage|session-tree|workflows|gallery|connect|anywhere|shares)(\/|$)/;
 
 // Reachable without a paired daemon: /shares/[id] is a public read-only replay link
 // (no sign-in, no server), /anywhere/* is the relay onboarding Connect itself deep-links into
@@ -158,8 +154,8 @@ function RootNavigator() {
   const usageDockOpen = rightSurface?.kind === "usage";
 
   const activeSessionId = useActiveSessionId();
-  // Desktop-only: on compact/medium the split reports inactive and nothing extra renders.
-  const split = useSplitPanes(isPaired && isExpanded && !railless);
+  // Docks follow the focused pane's session; off a session route they fall back to the busiest one.
+  const dockSessionId = workbench.focusedSessionId ?? activeSessionId;
 
   useEffect(() => {
     void AsyncStorage.getItem(SIDEBAR_COLLAPSED_KEY).then((raw) => {
@@ -167,43 +163,20 @@ function RootNavigator() {
     });
   }, []);
 
-  const toggleSidebarCollapsed = () => {
-    setSidebarCollapsed((collapsed) => {
-      const next = !collapsed;
-      void AsyncStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next)).catch(() => undefined);
-      return next;
-    });
+  const applySidebarCollapsed = (next: boolean) => {
+    setSidebarCollapsed(next);
+    void AsyncStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next)).catch(() => undefined);
   };
+  const toggleSidebarCollapsed = () => applySidebarCollapsed(!sidebarCollapsed);
   const toggleUsageDock = () => workbench.toggleSurface({ kind: "usage" });
   useSidebarCollapseHotkey(toggleSidebarCollapsed);
   useUsageDockHotkey(toggleUsageDock);
   useQuickComposerHotkey(() => setQuickComposerOpen(true));
 
-  // ⌘D split · ⌘J terminal · ⌘G git review. Each claims the matching Tauri menu item as well
-  // (`useShellHotkeys.ts` explains why: a macOS menu key equivalent never reaches the webview).
+  // Panes, docks and layout presets: shortcuts, menu items and the Layout menu all land here.
   // Guarded on `isExpanded` so the accelerators are inert on a compact window, where none of
   // this chrome renders.
-  const toggleSplit = () => {
-    if (isExpanded) split.toggle();
-  };
-  const toggleTerminal = () => {
-    if (isExpanded) workbench.toggleSurface({ kind: "terminal" });
-  };
-  const openGitReview = () => {
-    if (isExpanded) workbench.toggleSurface({ kind: "git" });
-  };
-  const toggleBrowserPreview = () => {
-    if (isExpanded && activeSessionId) {
-      workbench.toggleSurface({ kind: "preview", sessionId: activeSessionId });
-    }
-  };
-  useAppShortcut("workbench.split", toggleSplit);
-  useDesktopMenuAction("view:split-pane", toggleSplit);
-  useAppShortcut("workbench.terminal", toggleTerminal);
-  useDesktopMenuAction("view:terminal", toggleTerminal);
-  useAppShortcut("workbench.gitReview", openGitReview);
-  useDesktopMenuAction("view:git-review", openGitReview);
-  useDesktopMenuAction("view:browser-preview", toggleBrowserPreview);
+  useWorkbenchCommands({ enabled: isPaired && isExpanded, setSidebarCollapsed: applySidebarCollapsed });
 
   useEffect(() => {
     if (!isLoading) {
@@ -264,29 +237,22 @@ function RootNavigator() {
     <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={toggleUsageDock} dockOpen={usageDockOpen} />
   );
 
-  // The split wraps the live route stack rather than replacing it (see SplitPanes.tsx), and the
-  // terminal dock sits under the content column — beside the rail, per D Rail + Terminal, not
-  // spanning the whole window.
+  // The pane grid wraps the live route stack rather than replacing it (see SplitPanes.tsx), and
+  // the terminal dock sits under the content column — beside the rail, per D Rail + Terminal,
+  // not spanning the whole window.
+  const railWidth = sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH;
   const detail = (
     <View style={styles.detailColumn}>
-      {split.active && split.panes[0] ? (
-        <SplitPanes
-          primaryId={split.panes[0]}
-          secondaryId={split.panes[1]}
-          primary={appStack}
-          onSwap={split.swap}
-          onClosePane={split.closePane}
-        />
-      ) : (
-        appStack
-      )}
+      {!railless ? <LayoutTip /> : null}
+      <PaneGrid primary={appStack} />
       <DockHost
         open={bottomSurface != null && !railless}
         dock="terminal"
         surface={bottomSurface}
         tabs={workbench.state.bottom.tabs}
-        sessionId={activeSessionId}
+        sessionId={dockSessionId}
         onActivateSurface={(id) => workbench.activateSurface("bottom", id)}
+        onCloseSurface={(id) => workbench.closeSurface("bottom", id)}
         onClose={() => workbench.hidePlacement("bottom")}
       />
     </View>
@@ -303,13 +269,16 @@ function RootNavigator() {
             />
           ) : null}
           <View style={styles.shellRow}>
-            <MasterDetail master={rail} detail={detail} railWidth={sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH} />
+            <MasterDetail master={rail} detail={detail} railWidth={railWidth} />
             <DockHost
               open={dockOpen && !railless}
               surface={rightSurface}
               tabs={workbench.state.right.tabs}
-              sessionId={activeSessionId}
+              sessionId={dockSessionId}
+              occupiedWidth={railless ? 0 : railWidth}
               onActivateSurface={(id) => workbench.activateSurface("right", id)}
+              onCloseSurface={(id) => workbench.closeSurface("right", id)}
+              onReorderSurface={(from, to) => workbench.reorderSurface("right", from, to)}
               onClose={() => workbench.hidePlacement("right")}
             />
           </View>
