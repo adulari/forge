@@ -269,3 +269,18 @@ pub(super) fn unix_now() -> i64 {
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
 }
+
+/// The login state a bridge row reports: what Forge can prove about the CLI's credentials, not
+/// just that the binary exists. `Unknown` stays `unverified` (the CLI keeps its login somewhere
+/// Forge cannot read, so a turn is the only judge).
+pub(super) fn bridge_login(
+    installed: bool,
+    credentials: forge_provider::CliCredentials,
+) -> &'static str {
+    use forge_provider::CliCredentials;
+    match (installed, credentials) {
+        (false, _) | (true, CliCredentials::Absent) => "missing",
+        (true, CliCredentials::Present) => "ready",
+        (true, CliCredentials::Unknown) => "unverified",
+    }
+}
