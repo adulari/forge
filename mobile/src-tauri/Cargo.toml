@@ -25,6 +25,12 @@ tauri-build = { version = "2", features = [] }
 sha2 = "0.10"
 serde_json = "1"
 
+[features]
+# Test harnesses only (never enabled in a release build): lets FORGE_TEST_SELF_INSTALL=1 stand in
+# for "running from a mounted AppImage" and FORGE_TEST_UPDATE_ENDPOINT/_PUBKEY aim the updater at
+# a fake feed. Without this feature none of those variables is read.
+test-self-install = []
+
 [dependencies]
 # `tray-icon` is what makes the menu-bar extra (src/tray.rs) compile; on Linux it additionally
 # needs libayatana-appindicator3 (or libappindicator3) present at build time.

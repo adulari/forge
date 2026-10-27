@@ -231,6 +231,8 @@ export function useDiagnostics() {
 const SIX_HOURS_MS = 6 * 3600 * 1000;
 
 /** The daemon's update status. A daemon without the endpoint (404) simply has none to report. */
+const FIVE_MINUTES_MS = 5 * 60_000;
+
 export function useDaemonUpdate(enabled = true) {
   const { baseUrl } = useAuth();
   return useQuery({
@@ -238,7 +240,8 @@ export function useDaemonUpdate(enabled = true) {
     queryFn: () => getDaemonUpdate(baseUrl as string),
     enabled: enabled && baseUrl != null,
     staleTime: SIX_HOURS_MS,
-    refetchInterval: SIX_HOURS_MS,
+    // A pending update is re-read often so a busy daemon gets its update soon after it goes idle.
+    refetchInterval: (query) => (query.state.data?.update_available ? FIVE_MINUTES_MS : SIX_HOURS_MS),
     retry: false,
   });
 }

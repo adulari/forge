@@ -31,7 +31,9 @@ pub(crate) async fn chat(
         };
     }
     // Plain path: blocking update check is fine (no TUI to corrupt).
-    update_check::maybe_notify(&forge_config::load().unwrap_or_default()).await;
+    let update_config = forge_config::load().unwrap_or_default();
+    crate::update_auto::on_launch(&update_config).await;
+    update_check::maybe_notify(&update_config).await;
 
     // Plain line mode: read prompts from stdin.
     // Picker is already ruled out by resolve_resume_mode for headless/plain.

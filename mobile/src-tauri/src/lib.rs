@@ -195,6 +195,7 @@ pub fn run(process_start: Instant) {
             ota::ota_mark_healthy,
             ota::ota_apply_pending,
             ota::ota_reset,
+            auto_update::desktop_update_policy,
             serve_discovery::detect_forge_serve,
             serve_discovery::forge_binary_available,
             serve_discovery::start_forge_serve,
@@ -271,7 +272,7 @@ pub fn run(process_start: Instant) {
                 eprintln!("forge: tray unavailable: {error}");
             }
 
-            auto_update::spawn(app.handle().clone());
+            auto_update::start(app.handle().clone());
             ota.spawn(app.handle().clone());
 
             Ok(())

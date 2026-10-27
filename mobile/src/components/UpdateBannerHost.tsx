@@ -2,20 +2,30 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { useAuth } from "../lib/auth";
 import { useApplyDaemonUpdate, useDaemonUpdate, useIdentityUpdateHint } from "../lib/queries";
 import { isTauri } from "../lib/platform";
 import {
   bannerActionLabel,
   bannerMessage,
+  DEFAULT_POLICY,
   canSkip,
   chooseUpdateBanner,
+  daemonAutoTarget,
   loadPrefs,
   savePrefs,
   skip,
   snooze,
+  type DaemonAutoState,
+  type DesktopUpdatePolicy,
   type UpdatePrefs,
 } from "../lib/updateBanner";
-import { installDesktopUpdate, openDesktopReleasePage, useDesktopUpdateState } from "../lib/updater";
+import {
+  getDesktopUpdatePolicy,
+  installDesktopUpdate,
+  openDesktopReleasePage,
+  useDesktopUpdateState,
+} from "../lib/updater";
 import { Banner } from "./ds/Banner";
 import { useToast } from "./ds/ToastHost";
 
@@ -60,6 +70,28 @@ export function UpdateBannerHost({ appVersion }: { appVersion: string }) {
   const [prefs, setPrefs] = useState<UpdatePrefs>(loadPrefs);
   const [busy, setBusy] = useState(false);
   const [now] = useState(() => Date.now());
+  const { baseUrl } = useAuth();
+  const [policy, setPolicy] = useState<DesktopUpdatePolicy>(DEFAULT_POLICY);
+  const [daemonAuto, setDaemonAuto] = useState<DaemonAutoState | null>(null);
+  // Versions already tried in this app run, win or lose: the daemon is never asked twice.
+  const [attempted, setAttempted] = useState<ReadonlySet<string>>(() => new Set());
+
+  useEffect(() => {
+    void getDesktopUpdatePolicy().then(setPolicy);
+  }, []);
+
+  const daemon = daemonQuery.data ?? null;
+  const autoTarget = daemonAutoTarget({ isDesktop: isTauri, policy, baseUrl, daemon, attempted });
+  const mutateDaemon = applyDaemon.mutateAsync;
+  useEffect(() => {
+    if (!autoTarget) return;
+    setAttempted((prev) => new Set(prev).add(autoTarget));
+    setDaemonAuto({ phase: "running", version: autoTarget });
+    mutateDaemon().then(
+      (result) => setDaemonAuto({ phase: "done", version: autoTarget, restart: result.restart }),
+      () => setDaemonAuto({ phase: "failed", version: autoTarget }),
+    );
+  }, [autoTarget, mutateDaemon]);
 
   const banner = useMemo(
     () =>
@@ -67,12 +99,14 @@ export function UpdateBannerHost({ appVersion }: { appVersion: string }) {
         isDesktop: isTauri,
         desktop,
         installedVersion,
-        daemon: daemonQuery.data ?? null,
+        // Once the desktop has updated the daemon, its stale "update available" no longer applies.
+        daemon: daemonAuto?.phase === "done" ? null : daemon,
+        daemonAuto,
         identityLatest: identityHint.data ?? null,
         prefs,
         now,
       }),
-    [daemonQuery.data, desktop, identityHint.data, installedVersion, now, prefs],
+    [daemon, daemonAuto, desktop, identityHint.data, installedVersion, now, prefs],
   );
 
   const update = useCallback((next: UpdatePrefs) => {

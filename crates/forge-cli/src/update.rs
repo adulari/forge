@@ -137,6 +137,18 @@ fn release_list_builder() -> self_update::backends::github::ReleaseListBuilder {
 /// never a downgrade). `FORGE_UPDATE_TARGET` points the swap at another file (tests); progress
 /// is only drawn on request, since a bar would corrupt a full-screen TUI.
 pub fn apply_in_place(show_progress: bool) -> Result<Option<String>> {
+    apply_to(swap_target_override(), show_progress)
+}
+
+/// `FORGE_UPDATE_TARGET`: replace this file instead of the running binary (tests).
+pub(crate) fn swap_target_override() -> Option<std::path::PathBuf> {
+    std::env::var_os("FORGE_UPDATE_TARGET").map(Into::into)
+}
+
+/// [`apply_in_place`] aimed at an explicit file: the newest release's binary is written over
+/// `target` (the running binary when `None`). Staging uses this to fetch a build without
+/// touching the one that is running.
+pub fn apply_to(target: Option<std::path::PathBuf>, show_progress: bool) -> Result<Option<String>> {
     // Our release archives lay the binary out as `forge-<target>/forge[.exe]`.
     let bin_in_archive = format!("forge-{{{{target}}}}/forge{}", std::env::consts::EXE_SUFFIX);
     let mut builder = self_update::backends::github::Update::configure();
@@ -152,8 +164,8 @@ pub fn apply_in_place(show_progress: bool) -> Result<Option<String>> {
     if let Some(base) = crate::update_feed::feed_override() {
         builder.api_base_url(base);
     }
-    if let Some(target) = std::env::var_os("FORGE_UPDATE_TARGET") {
-        builder.bin_install_path(std::path::PathBuf::from(target));
+    if let Some(target) = target {
+        builder.bin_install_path(target);
     }
     let status = builder
         .build()

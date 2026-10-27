@@ -103,6 +103,7 @@ mod startup_trace;
 mod telemetry;
 mod terminal_owner;
 mod update;
+mod update_auto;
 mod update_check;
 mod update_feed;
 mod update_state;
