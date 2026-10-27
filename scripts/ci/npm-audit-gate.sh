@@ -33,11 +33,6 @@ allowed_ids=(
   # i.e. the bundler/CLI globbing repository paths at build time. Not imported by app runtime code.
   # Recheck 2027-01-11.
   GHSA-vfj7-8cjw-p6xm
-  # node-forge: RSA PKCS#1 v1.5 signature verification flaw. Affected range is '*' (1.4.0 is the
-  # newest published). Reached only via expo-updates -> @expo/code-signing-certificates and
-  # @expo/cli, i.e. the build/publish-time code-signing CLI; the app bundle never imports it.
-  # Recheck 2027-01-11.
-  GHSA-86w9-cpqp-85rv
 )
 
 # Advisories fixed only in a newer MAJOR that a dependency's pin keeps out of the tree. The range
