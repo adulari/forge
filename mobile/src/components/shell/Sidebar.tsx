@@ -6,7 +6,7 @@
 // control). Replaces `ExpandedFleetRail` (components/fleet/DesktopDrillDown.tsx).
 import { router, usePathname } from "expo-router";
 import { Bell, BellDot, Gauge, History, PanelLeftClose, Plus, Search, Settings2 } from "lucide-react-native";
-import React, { useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, StyleSheet, Text, View, type GestureResponderEvent } from "react-native";
 
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
@@ -16,6 +16,7 @@ import type { SessionRow } from "../../lib/api";
 import { useShortcutLabel } from "../../lib/shortcuts";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { useAuth } from "../../lib/auth";
+import { requestSessionPrewarm, useSessionActivationOverride } from "../../lib/sessionPrewarm";
 import { usePrefetchSessionHistory, useSessions } from "../../lib/queries";
 import { useScopedFleet, type ScopedSessionRow } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -90,6 +91,11 @@ function DenseSessionRow({ row, serverId, selected, paneNumber, paneFocused, pan
   const tokens = useTokens();
   const { setActive } = useAuth();
   const prefetchHistory = usePrefetchSessionHistory();
+  // Hover: fetch the transcript, then mount the session hidden so the click is a visibility flip.
+  const warmSession = useCallback(
+    (id: string) => void prefetchHistory(id).then(() => requestSessionPrewarm(id)),
+    [prefetchHistory],
+  );
   // Re-render on the shared clock: the list only re-renders when the fleet changes, so a
   // computed "4m" otherwise froze at whatever it read when the row last changed.
   useRelativeClock();
@@ -139,7 +145,8 @@ function DenseSessionRow({ row, serverId, selected, paneNumber, paneFocused, pan
         onPress={onPress}
         // Start the transcript fetch while the button is still going down: the click lands ~100 ms
         // later and the session screen then paints from cache instead of a spinner.
-        onPressIn={() => prefetchHistory(row.id)}
+        onHoverIn={() => warmSession(row.id)}
+        onPressIn={() => void prefetchHistory(row.id)}
         accessibilityRole="button"
         accessibilityLabel={`${title}, ${state}${row.waiting ? ", needs a decision" : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}`}
         accessibilityHint="Opens in the focused pane. Right-click for split options, or drag onto a pane."
@@ -238,7 +245,8 @@ export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarP
   // The Inbox lists the active server's waiting sessions, so its badge counts the same set.
   const { data: activeRows } = useSessions();
   const waitingCount = useMemo(() => (activeRows ?? []).filter((r) => r.waiting).length, [activeRows]);
-  const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
+  const activationOverride = useSessionActivationOverride();
+  const selectedSessionId = activationOverride ?? pathname.match(/^\/session\/([^/]+)/)?.[1];
   const workbench = useWorkbench();
   const paneTotal = workbench.paneIds.length;
   const paneNumbers = useMemo(() => {

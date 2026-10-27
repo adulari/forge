@@ -46,6 +46,9 @@ def main():
     def want(n):
         return wanted is None or n in wanted
 
+    if want("firstVisits"):
+        time.sleep(3)  # let idle-time prewarming finish, as a user who looks at the chat first would
+        res.update(ins.eval_async("__bench.firstVisits()"))
     for name in ["tabChatToTasks", "tabTasksToChat", "tabChatToAgents", "tabChatToReview", "tabChatToFiles", "tabChatToReplay", "palette", "usageDock", "terminalDock"]:
         if want(name):
             res[name] = ins.eval_async(f"__bench.runScenario('{name}', {a.runs})")
@@ -57,18 +60,18 @@ def main():
     if want("scroll"):
         res["scroll"] = ins.eval_async("__bench.scroll(60)")
 
-    if want("sessionSwitch"):
-        res["sessionSwitch"] = ins.eval_async(f"__bench.sessionSwitch({a.runs})")
+    if want("sessions"):
+        res.update(ins.eval_async("__bench.sessions()"))
 
     print(f"== {a.label} (runs={a.runs}) ==")
-    print(f"{'scenario':20} {'paint-med':>9} {'paint-p95':>9} {'commit-med':>10} {'commit-p95':>10} {'sync':>6} {'gapMax':>7} ok")
+    print(f"{'scenario':20} {'paint-med':>9} {'paint-p95':>9} {'commit-med':>10} {'commit-p95':>10} {'first-frame':>11} {'sync':>6} {'gapMax':>7} ok")
     for k, v in res.items():
         if v is None:
             print(f"{k:20} n/a")
         elif "avgFrame" in v:
             print(f"{k:20} frame avg {v['avgFrame']} p95 {v['p95Frame']} max {v['maxFrame']} (scrollHeight {v['scrollHeight']})")
         else:
-            print(f"{k:20} {v['med']:9} {v['p95']:9} {v['commitMed']:10} {v['commitP95']:10} {v['syncMed']:6} {v['gapMax']:7} {v['ok']}/{v['n']}")
+            print(f"{k:20} {v['med']:9} {v['p95']:9} {v['commitMed']:10} {v['commitP95']:10} {v['earlyMed']:11} {v['syncMed']:6} {v['gapMax']:7} {v['ok']}/{v['n']}")
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
 
