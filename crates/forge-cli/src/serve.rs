@@ -2762,7 +2762,7 @@ async fn ws_handler(
         return rejection;
     }
     let Some(handle) = state.registry.get(&params.session).await else {
-        return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+        return crate::serve_agents::child_or_404(&state, &params.session, params.rev, ws).await;
     };
     let snapshot_rx = handle.snapshot_rx.clone();
     let events = handle.events.clone();

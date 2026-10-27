@@ -497,6 +497,7 @@ async fn drive_session(
 
     let mut last_snap: Option<remote::Snapshot> = None;
     let mut revision: u64 = 0;
+    let mut child_links = crate::serve_agents::ChildLinks::default();
     let mut model_pinned = false;
     let mut dirty = true;
     // The most recent genuine turn failure (PresenterEvent::Error), latched so the busy falling
@@ -688,6 +689,7 @@ async fn drive_session(
                 st.notes.clone(),
                 revision,
             );
+            child_links.mark(&queue_store, &session_id, &mut snap);
             if last_snap.as_ref() != Some(&snap) {
                 revision += 1;
                 snap.revision = revision;

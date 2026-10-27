@@ -62,6 +62,10 @@ export interface SnapshotSubagent {
    * a child), so no child is ever blocked on its own prompt and the host always sends null.
    * Session-level prompts live on `Snapshot.permission_prompt`. */
   permission_prompt?: string | null;
+  /** The child's own persisted session id, when the host can serve it as a nested read-only
+   * session (`/ws?session=<id>`, `/api/history`). Absent from older hosts and for subagents that
+   * have no session of their own — those rows stay non-interactive. */
+  session_id?: string | null;
 }
 
 /** v8.1 additive: workflow-run state. Absent/null when no workflow is active. Server
@@ -209,10 +213,14 @@ export interface Snapshot {
    * while none is available — never implies one is pending. */
   suggested_prompt?: string | null;
   prompt_seq: number;
+  /** Rows that ever entered the host's live transcript tail; absent from an older host. */
+  transcript_total?: number;
   notes: string[];
   revision: number;
   resync: boolean;
   closed: boolean;
+  /** Set only on the snapshot of a subagent child session, naming the session it hangs off. */
+  parent?: { id: string; title: string } | null;
 }
 
 /** Protocol identity guard narrowed to the full snapshot contract used by this adapter. */

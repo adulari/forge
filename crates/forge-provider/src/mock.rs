@@ -169,6 +169,38 @@ impl Provider for MockProvider {
             ));
         }
 
+        // Delegation turn → fan out two read-only children, then summarize. Gated on the tool
+        // being offered so a child, which never has `spawn_agents`, answers its own task instead.
+        let wants_agents =
+            lu.contains("mock:agents") && tools.iter().any(|t| t.name == "spawn_agents");
+        if wants_agents {
+            let spawned = messages.iter().any(|m| {
+                m.role == Role::Assistant && m.tool_calls.iter().any(|c| c.name == "spawn_agents")
+            }) && messages.iter().any(|m| m.role == Role::Tool);
+            if spawned {
+                let content = "Both agents reported back.";
+                stream_words(content, on_event).await;
+                return Ok(resp(content, vec![], 42, 18));
+            }
+            let content = "Delegating two lookups.";
+            stream_words(content, on_event).await;
+            return Ok(resp(
+                content,
+                vec![ToolCall {
+                    id: new_id(),
+                    name: "spawn_agents".to_string(),
+                    args: json!({
+                        "agents": [
+                            {"agent": "explore", "task": "Read Cargo.toml and report the workspace members."},
+                            {"agent": "plan", "task": "Outline how to add a logging flag."},
+                        ],
+                    }),
+                }],
+                30,
+                12,
+            ));
+        }
+
         // Dispatch coordinator turn → propose the canned three-item split, then stop for review.
         // Gated on the tool being offered as well: a dispatched worker's prompt quotes the
         // coordinator's title (which carries the user's `mock:dispatch` request), and a worker must
@@ -430,6 +462,46 @@ mod tests {
         ];
         let res2 = p.complete("mock", &after, &[], &mut |_| {}).await.unwrap();
         assert!(!res2.wants_tools(), "stops after the plan is on screen");
+    }
+
+    #[tokio::test]
+    async fn an_agents_prompt_spawns_two_children_then_summarizes() {
+        let p = MockProvider;
+        let tools = [ToolSpec {
+            name: "spawn_agents".into(),
+            description: String::new(),
+            schema: json!({}),
+        }];
+        let prompt = "mock:agents look around";
+        let res = p
+            .complete("mock", &[Message::user(prompt)], &tools, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(res.tool_calls[0].name, "spawn_agents");
+        assert_eq!(
+            res.tool_calls[0].args["agents"].as_array().unwrap().len(),
+            2
+        );
+
+        let after = vec![
+            Message::user(prompt),
+            Message::assistant_tool_calls("Delegating two lookups.", res.tool_calls.clone()),
+            Message::new(Role::Tool, "results"),
+        ];
+        let done = p
+            .complete("mock", &after, &tools, &mut |_| {})
+            .await
+            .unwrap();
+        assert!(!done.wants_tools());
+
+        let child = p
+            .complete("mock", &[Message::user(prompt)], &[], &mut |_| {})
+            .await
+            .unwrap();
+        assert_ne!(
+            child.tool_calls.first().map(|c| c.name.as_str()),
+            Some("spawn_agents")
+        );
     }
 
     #[tokio::test]
