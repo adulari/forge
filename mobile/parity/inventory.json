@@ -120,15 +120,15 @@
     "category": "behavior"
   },
   {
-    "file": "mobile/src/components/UpdateNotice.tsx",
-    "platform": "desktop",
-    "reason": "desktop shows the changelog section matching its installed version (shared with the daemon) and links to the published release notes; mobile builds have their own version line and show the newest daemon release; plus runtime-gated update-seen seeding for unattended desktop performance launches",
-    "category": "behavior"
-  },
-  {
     "file": "mobile/src/components/UpdateBannerHost.tsx",
     "platform": "desktop",
     "reason": "desktop installs or restarts into app and CLI updates in place; web and phones only get a read-only notice that the host CLI is outdated, because nothing can be installed from there",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/UpdateNotice.tsx",
+    "platform": "desktop",
+    "reason": "desktop shows the changelog section matching its installed version (shared with the daemon) and links to the published release notes; mobile builds have their own version line and show the newest daemon release; plus runtime-gated update-seen seeding for unattended desktop performance launches",
     "category": "behavior"
   },
   {
@@ -507,6 +507,12 @@
     "file": "mobile/src/lib/secureStore.web.ts",
     "platform": "web",
     "reason": "platform-specific implementation required by Expo resolution",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/sessionPrewarm.ts",
+    "platform": "web",
+    "reason": "wide desktop windows keep the last three sessions mounted hidden and activate a rail click locally; phones and narrow windows stack sessions as screens and keep Back",
     "category": "capability"
   },
   {

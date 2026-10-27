@@ -22,8 +22,10 @@ export function Review() {
   const plan = snapshot?.plan ?? null;
   const diff = snapshot?.diff ?? null;
   const hasContent = plan != null || diff != null;
-  const [surface, setSurface] = useState<ReviewSurface>("turn");
-  const choseInitialSurface = useRef(false);
+  // Decided up front (not only in the effect below): a prewarmed, still-hidden Review runs no
+  // effects, so the effect alone would defer the working-tree mount to the first time it is shown.
+  const [surface, setSurface] = useState<ReviewSurface>(snapshot != null && !hasContent ? "working-tree" : "turn");
+  const choseInitialSurface = useRef(snapshot != null);
 
   // An idle session with no turn artifact should open useful repository state instead of an empty
   // card. Never steal the user's choice when a later diff arrives.

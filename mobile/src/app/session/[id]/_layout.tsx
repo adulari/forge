@@ -13,7 +13,7 @@
 import * as Clipboard from "expo-clipboard";
 import { router, Slot, useLocalSearchParams, usePathname } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Activity, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -27,6 +27,7 @@ import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import {
   KEEP_SEGMENTS_ALIVE,
+  RouteScreensHostedContext,
   SegmentKeepAlive,
   SegmentsHostedContext,
   type KeptSegment,
@@ -66,16 +67,27 @@ import { useDesktopMenuAction } from "../../../lib/desktopMenu";
 import { assessCompatibility } from "../../../lib/diagnostics";
 import { goBackOr } from "../../../lib/nav";
 import { useAppShortcut } from "../../../lib/shortcuts";
-import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
+import { useHistory, usePrefetchSessionPanels, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { useReviewComments } from "../../../lib/reviewComments";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
-import { isSegmentPath, segmentFromPathname, type SegmentValue } from "../../../lib/sessionSegments";
+import {
+  getSessionPrewarmRequest,
+  MAX_KEPT_SESSIONS,
+  rememberSessionPath,
+  settleActivation,
+  subscribeSessionPrewarm,
+  useSessionActivationOverride,
+  useKeepSessionsMounted,
+} from "../../../lib/sessionPrewarm";
+import { isSegmentPath, type SegmentValue } from "../../../lib/sessionSegments";
+import { useSessionSegment } from "../../../lib/useSessionSegment";
 import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
+import { routedSessionId } from "../../../components/shell/activeSession";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
 import { SessionAgents } from "./agents";
 import { SessionFiles } from "./files";
@@ -83,17 +95,9 @@ import { SessionChat } from "./index";
 import { SessionReplayScreen } from "./replay";
 import { Review as SessionReview } from "./review";
 import { SessionTasks } from "./tasks";
-
-// Path suffix appended to `/session/{id}` for each segment ("" = the index/Chat route).
-const SEGMENT_SUFFIX: Record<SegmentValue, string> = {
-  chat: "",
-  tasks: "tasks",
-  agents: "agents",
-  review: "review",
-  files: "files",
-  terminal: "terminal",
-  replay: "replay",
-};
+import { SessionTerminal } from "./terminal";
+import { WorkflowRunScreen } from "./workflow";
+import { WorkflowLibraryScreen } from "./workflows";
 
 // Module-level so the memoised host below never re-renders with the layout's per-frame churn.
 const SEGMENT_SCREENS: readonly SegmentScreen[] = [
@@ -115,10 +119,20 @@ function OnFirstOpen({ visible, children }: { visible: boolean; children: React.
   return opened ? <>{children}</> : null;
 }
 
-function SessionShell({ sessionId }: { sessionId: string }) {
+function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; active: boolean; hostRoutes: boolean }) {
   const tokens = useTokens();
   const toast = useToast();
-  const pathname = usePathname();
+  // A hidden (kept-alive) session must not follow the URL of the session that is open now: it
+  // holds the pathname it last had while active, and resumes following when shown again.
+  const livePathname = usePathname();
+  const [pathname, setPathname] = useState(livePathname);
+  // Only follow the URL while it is this session's: right after a rail click the URL still names
+  // the previous session for a moment.
+  const ownsUrl = routedSessionId(livePathname) === sessionId;
+  if (active && ownsUrl && pathname !== livePathname) setPathname(livePathname);
+  useEffect(() => {
+    if (active && ownsUrl) rememberSessionPath(sessionId, livePathname);
+  }, [active, ownsUrl, sessionId, livePathname]);
   const { isCompact, isExpanded } = useBreakpoint();
   const workbench = useWorkbench();
   const activeRightSurface = activeWorkbenchSurface(workbench.state, "right");
@@ -185,6 +199,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   // query so the finalized turn appears from the store. The shell only needs to call the
   // hook to fire that side effect — segments consume useHistory independently.
   useTurnCompleted(snapshot);
+  usePrefetchSessionPanels(sessionId, KEEP_SEGMENTS_ALIVE);
 
   const lastCopyText = useRef<string | null>(null);
 
@@ -233,10 +248,12 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     lastCopyText.current = null;
   }, [sessionId]);
 
-  const activeSegment = segmentFromPathname(pathname);
-  // The terminal segment is deliberately not kept alive: hiding it would pause its PTY socket.
-  const keptSegment: KeptSegment | null =
-    isSegmentPath(pathname) && activeSegment !== "terminal" ? activeSegment : null;
+  const { segment: activeSegment, setSegment: onSegmentChange } = useSessionSegment(pathname, sessionId, KEEP_SEGMENTS_ALIVE);
+  // The terminal segment is deliberately not kept alive (hiding it would pause its PTY socket):
+  // it mounts when active and unmounts when left.
+  const onSegmentPath = isSegmentPath(pathname);
+  const keptSegment: KeptSegment | null = onSegmentPath && activeSegment !== "terminal" ? activeSegment : null;
+  const terminalActive = KEEP_SEGMENTS_ALIVE && onSegmentPath && activeSegment === "terminal";
 
   const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
@@ -271,15 +288,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     segmentY.value = withTiming(0, { duration: durations.base, easing: easings.standard });
   }, [activeSegment, reduced, segmentOpacity, segmentY]);
   const segmentStyle = useAnimatedStyle(() => ({ opacity: segmentOpacity.value, transform: [{ translateY: segmentY.value }] }));
-
-  const onSegmentChange = useCallback(
-    (value: SegmentValue) => {
-      if (value === activeSegment) return;
-      const suffix = SEGMENT_SUFFIX[value];
-      router.replace(`/session/${sessionId}${suffix ? `/${suffix}` : ""}` as never);
-    },
-    [activeSegment, sessionId],
-  );
 
   // Web/desktop in-session keyboard shortcuts (native `useHotkey` is a no-op). Alt+C/T/A/R
   // switch the Chat/Tasks/Agents/Review segment (Alt+1..4 is already tab-level navigation in
@@ -581,9 +589,10 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
       {KEEP_SEGMENTS_ALIVE ? (
         <SegmentsHostedContext.Provider value>
-          <SegmentKeepAlive active={keptSegment} screens={SEGMENT_SCREENS} />
-          <View style={keptSegment ? styles.none : styles.flex}>
-            <Slot />
+          <SegmentKeepAlive active={keptSegment} screens={SEGMENT_SCREENS} deferFirstFrame={active} />
+          {terminalActive ? <SessionTerminal /> : null}
+          <View style={keptSegment || terminalActive ? styles.none : styles.flex}>
+            {hostRoutes ? (active && !onSegmentPath ? <PushedScreen pathname={pathname} /> : null) : <Slot />}
           </View>
         </SegmentsHostedContext.Provider>
       ) : (
@@ -599,6 +608,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 export default function SessionLayout() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const keepMounted = useKeepSessionsMounted();
+
+  // Wide desktop: `session/_layout` hosts the sessions (HostedSessions); this layout only has to
+  // stay a navigator so the child routes resolve, and those render nothing.
+  if (keepMounted) return <Slot />;
 
   // No id (shouldn't happen under `session/[id]`, but keeps this defensive): render a bare
   // back affordance rather than crashing on a null SessionProvider sessionId.
@@ -616,8 +630,80 @@ export default function SessionLayout() {
 
   return (
     <SessionProvider sessionId={id}>
-      <SessionShell sessionId={id} />
+      <SessionShell sessionId={id} active hostRoutes={false} />
     </SessionProvider>
+  );
+}
+
+function PushedScreen({ pathname }: { pathname: string }) {
+  if (pathname.endsWith("/workflows")) return <WorkflowLibraryScreen />;
+  if (pathname.endsWith("/workflow")) return <WorkflowRunScreen />;
+  return null;
+}
+
+/** Wide web/desktop host, rendered by `session/_layout`: the open session plus the most recent
+ * others stay mounted (see KeptSessions); the `[id]` route tree sits beside them, hidden, because
+ * its screens render nothing in this mode. */
+export function HostedSessions() {
+  const pathname = usePathname();
+  const routedId = routedSessionId(pathname);
+  // Off a session route (Settings pushed over it) the last open session stays the active one.
+  const [routedActive, setRoutedActive] = useState(routedId);
+  if (routedId != null && routedId !== routedActive) setRoutedActive(routedId);
+  // A rail click names the session before the URL does (see activateSession).
+  const override = useSessionActivationOverride();
+  useEffect(() => settleActivation(routedId), [routedId, override]);
+  const activeId = override ?? routedActive;
+  return (
+    <SegmentsHostedContext.Provider value>
+      <RouteScreensHostedContext.Provider value>
+        {activeId ? <KeptSessions activeId={activeId} /> : null}
+        <View style={styles.none}>
+          <Slot />
+        </View>
+      </RouteScreensHostedContext.Provider>
+    </SegmentsHostedContext.Provider>
+  );
+}
+
+// Wide web/desktop: the open session plus the most recent others (MAX_KEPT_SESSIONS in all) stay
+// mounted. Hidden ones sit in <Activity mode="hidden">: display:none, state and DOM kept, effects
+// cleaned up (so their socket is closed and nothing renders live snapshots) and re-renders
+// deferred; showing one again re-runs its effects, which reconnect from the last revision.
+// Memoised so a switch re-renders only the session leaving and the one arriving, not every kept one.
+const KeptSession = React.memo(function KeptSession({ sessionId, active }: { sessionId: string; active: boolean }) {
+  return (
+    <SessionProvider sessionId={sessionId}>
+      <SessionShell sessionId={sessionId} active={active} hostRoutes />
+    </SessionProvider>
+  );
+});
+
+function KeptSessions({ activeId }: { activeId: string }) {
+  const [recent, setRecent] = useState<string[]>([activeId]);
+  if (recent[0] !== activeId) {
+    setRecent([activeId, ...recent.filter((sid) => sid !== activeId)].slice(0, MAX_KEPT_SESSIONS));
+  }
+  // A session the rail is hovering is mounted hidden before the click (it only takes a free
+  // slot: it never evicts the open session or a more recent one).
+  const warmRequest = useSyncExternalStore(subscribeSessionPrewarm, getSessionPrewarmRequest, getSessionPrewarmRequest);
+  const [warm, setWarm] = useState<string[]>([]);
+  const [seenRequest, setSeenRequest] = useState(warmRequest);
+  if (warmRequest !== seenRequest) {
+    setSeenRequest(warmRequest);
+    if (warmRequest && !recent.includes(warmRequest.id)) {
+      setWarm([warmRequest.id, ...warm.filter((sid) => sid !== warmRequest.id)].slice(0, MAX_KEPT_SESSIONS));
+    }
+  }
+  const ids = [...recent, ...warm.filter((sid) => !recent.includes(sid))].slice(0, MAX_KEPT_SESSIONS);
+  return (
+    <>
+      {ids.map((sid) => (
+        <Activity key={sid} mode={sid === activeId ? "visible" : "hidden"}>
+          <KeptSession sessionId={sid} active={sid === activeId} />
+        </Activity>
+      ))}
+    </>
   );
 }
 

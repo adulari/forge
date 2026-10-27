@@ -28,11 +28,19 @@ def main():
     a = ap.parse_args()
     ins = Inspector(a.port)
     ins.eval(open(os.path.join(HERE, "bench.js")).read())
+    if a.scenario == "sessionsHover":
+        ins.eval_async("__bench.sessions('hoverPrep')")
+    if a.scenario == "sessionsRecent":
+        ins.eval_async("__bench.sessions('warm')")
     ins.send("ScriptProfiler.startTracking", {"includeSamples": True})
     if a.scenario in ("typing",):
         ins.eval_async(f"__bench.typing({a.runs * 5})")
-    elif a.scenario == "sessionSwitch":
-        ins.eval_async(f"__bench.sessionSwitch({a.runs})")
+    elif a.scenario == "sessionsHover":
+        ins.eval_async("__bench.sessions('hoverClick')")
+    elif a.scenario == "sessionsRecent":
+        ins.eval_async("__bench.sessions('recent')")
+    elif a.scenario == "sessions":
+        ins.eval_async("__bench.sessions()")
     else:
         ins.eval_async(f"__bench.runScenario('{a.scenario}', {a.runs})")
     ins.send("ScriptProfiler.stopTracking")

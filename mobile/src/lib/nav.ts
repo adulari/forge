@@ -5,6 +5,8 @@
 import { router } from "expo-router";
 import { Platform } from "react-native";
 
+import { activateSession, getActivationOverride } from "./sessionPrewarm";
+
 export function goBackOr(fallback: Parameters<typeof router.replace>[0]) {
   if (router.canGoBack()) {
     router.back();
@@ -41,8 +43,9 @@ export function openSession(id: string): void {
     router.push(href);
     return;
   }
-  if (current === `/session/${id}`) return;
-  router.replace(href);
+  const openId = getActivationOverride() ?? current.match(/^\/session\/([^/]+)/)?.[1];
+  if (openId === id) return;
+  activateSession(id);
 }
 
 export function leaveSettings(): void {

@@ -214,13 +214,19 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     setHeight(clampComposerHeight(content));
   }, [text]);
 
+  // The session whose stored draft has been loaded into this composer. When a kept-alive session
+  // is shown again (its effects re-run) the in-memory draft is newer than storage's 300 ms
+  // debounce, so reloading would clobber what was typed before switching away.
+  const draftLoadedFor = useRef<string | null>(null);
   useEffect(() => {
+    if (draftLoadedFor.current === sessionId) return;
     let cancelled = false;
     setDraftLoadedSession(null);
     setText("");
     void getDraft(sessionId).then((draft) => {
       if (cancelled) return;
       setText(draft ?? "");
+      draftLoadedFor.current = sessionId;
       setDraftLoadedSession(sessionId);
     });
     return () => {

@@ -11,7 +11,7 @@
 //
 // Phones keep the old `<Slot/>` behaviour untouched: a mounted-but-hidden native screen would
 // hold memory the OS reclaims today, so `KEEP_SEGMENTS_ALIVE` is web-only.
-import React, { Activity, createContext, useContext, useState } from "react";
+import React, { Activity, createContext, useContext, startTransition, useEffect, useState } from "react";
 import { Platform, StyleSheet, View } from "react-native";
 
 export type KeptSegment = "chat" | "tasks" | "agents" | "review" | "files" | "replay";
@@ -20,6 +20,14 @@ export const KEEP_SEGMENTS_ALIVE = Platform.OS === "web";
 
 /** Set by the session layout when it renders the segments itself. */
 export const SegmentsHostedContext = createContext(false);
+
+/** True where the session host renders the pushed workflow screens itself (the multi-session
+ * desktop host has no per-session route outlet). */
+export const RouteScreensHostedContext = createContext(false);
+
+export function useRouteScreensHosted(): boolean {
+  return useContext(RouteScreensHostedContext);
+}
 
 /** Route files call this: true means the layout already renders this segment. */
 export function useSegmentsHosted(): boolean {
@@ -37,7 +45,11 @@ export interface SegmentScreen {
 export const SegmentKeepAlive = React.memo(function SegmentKeepAlive({
   active,
   screens,
+  deferFirstFrame = true,
 }: {
+  /** Paint the header before the body. False for a session mounted hidden (prewarm): its effects
+   * do not run, so a deferral waiting on one would never end. */
+  deferFirstFrame?: boolean;
   /** The segment to show, or null while a non-segment route (workflow, ...) is on top. */
   active: KeptSegment | null;
   screens: readonly SegmentScreen[];
@@ -46,6 +58,43 @@ export const SegmentKeepAlive = React.memo(function SegmentKeepAlive({
   if (active && !visited.has(active)) {
     setVisited(new Set([...visited, active]));
   }
+
+  // Lightweight first frame: a session that has just been opened paints its header and tab strip
+  // (rendered by the layout around this host) in the first commit; the segments, the transcript
+  // above all, mount in the next frame. Without it the open waits for the whole screen.
+  const [bodyReady, setBodyReady] = useState(!deferFirstFrame);
+  useEffect(() => {
+    if (bodyReady) return;
+    let raf = 0;
+    const timer = setTimeout(() => {
+      raf = requestAnimationFrame(() => startTransition(() => setBodyReady(true)));
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      cancelAnimationFrame(raf);
+    };
+  }, [bodyReady]);
+
+  // Prewarm: once the session has painted, mount the remaining segments one idle slice at a time
+  // (hidden, so their effects and data fetches stay paused) so the FIRST visit to a tab is a
+  // display toggle too, not a mount.
+  const hasActive = active != null;
+  const remaining = screens.find((screen) => !visited.has(screen.segment) && screen.segment !== active);
+  useEffect(() => {
+    if (!hasActive || !remaining) return;
+    const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
+    let idleId: number | undefined;
+    const timer = setTimeout(() => {
+      const warm = () => setVisited((prev) => (prev.has(remaining.segment) ? prev : new Set([...prev, remaining.segment])));
+      if (w.requestIdleCallback) idleId = w.requestIdleCallback(warm, { timeout: 1000 });
+      else warm();
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      if (idleId != null) w.cancelIdleCallback?.(idleId);
+    };
+  }, [hasActive, remaining]);
+  if (!bodyReady) return <View style={styles.shown} />;
   return (
     <>
       {screens

@@ -28,13 +28,14 @@ import {
   workflowTitle,
 } from "../../../components/workflow/format";
 import type { SnapshotSubagent } from "../../../lib/ws";
+import { useRouteScreensHosted } from "../../../components/session/SegmentKeepAlive";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { space } from "../../../theme/tokens";
 import { formatCost, tabularNums, type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
 
-export default function WorkflowRunScreen() {
+export function WorkflowRunScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const { snapshot, snapshotTimedOut, send } = useSessionCtx();
@@ -206,3 +207,8 @@ const styles = StyleSheet.create({
   resultMedallion: { width: 18, height: 18, borderRadius: 9, alignItems: "center", justifyContent: "center" },
   resultTitle: { flex: 1, fontSize: 19 },
 });
+
+// The multi-session desktop host renders this screen itself (inside the right session's provider).
+export default function SessionWorkflowRunRoute() {
+  return useRouteScreensHosted() ? null : <WorkflowRunScreen />;
+}
