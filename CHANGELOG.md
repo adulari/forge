@@ -6,16 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-
-- **The desktop performance fixture can set its window title.** `perf-fixture` called `setTitle`, which the main window's capability did not allow, so it raised an unhandled rejection (caught by the new bug reporting as issue #1713); `core:window:allow-set-title` is now granted (`mobile/src-tauri/capabilities/default.json`).
-
 ### Added
 
 - **A subagent opens as its own session, rendered exactly like the main chat.** In the full-screen TUI press `Ctrl+O`, pick an agent with `↑↓` and press `Enter` (in a workflow's view, `Enter` on an agent does the same): its conversation, tool rows, markdown and scrolling come from the same transcript renderer as your session, under a `main chat › explore · model · running` breadcrumb with its task. A running child updates as it saves each message, a finished one reads from the store, and that includes children from a session you resumed. `Esc` returns to the main chat exactly where you left it (scroll, panels and queue untouched), `↑↓`/`PgUp`/`PgDn`/`Home`/`End` or the wheel scroll the child, and `Ctrl+T` expands its tool calls. The agents panel and the `Agents` line in the transcript now say how to open one. New `forge_core::stored_replay_items` reads any session's persisted conversation as replay items (`crates/forge-tui/src/app/child_view.rs`, `crates/forge-cli/src/cli/commands/run/child_view.rs`, `crates/forge-core/src/replay.rs`).
 - **A subagent opens as its own session in the desktop, web and phone apps.** The Agents tab and the running-agents pills above the composer now open each child as a nested, read-only session that renders with the same chat as any other: messages, tool rows and groups, markdown and scrolling, updating while the child works. The header reads `parent session > explore` and takes you back, the composer is replaced by a note that the child works for its parent, and the child never appears in the session list. It rides the existing `/ws?session=<id>` and `/api/history` routes (so it works over Forge Anywhere unchanged), and a host without the new `session_id` on each agent row keeps the cards as plain, non-clickable rows.
 
 ### Fixed
+
+- **The desktop performance fixture can set its window title.** `perf-fixture` called `setTitle`, which the main window's capability did not allow, so it raised an unhandled rejection (caught by the new bug reporting as issue #1713); `core:window:allow-set-title` is now granted (`mobile/src-tauri/capabilities/default.json`).
 
 - **The hosted benchmark data loads from forge.adulari.dev.** The site's proxy to the `benchmarks-data` release answered 502 because GitHub's redirect headers outgrew nginx's default header buffer; both proxy blocks now use 32k buffers, so clients get the mirror from the site instead of falling back to the GitHub URL (`crates/forge-relay/deploy/forge.adulari.dev.nginx`).
 
