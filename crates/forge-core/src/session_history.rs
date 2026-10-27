@@ -165,26 +165,8 @@ impl Session {
     /// untouched conversation after a resume, even though the model only ever saw the compacted
     /// view. Falls back to the in-memory transcript if the store read fails.
     pub fn replay_items_full(&self) -> Vec<forge_types::ReplayItem> {
-        match self.store.load_all_messages(&self.id) {
-            Ok(stored) => {
-                let msgs: Vec<Message> = stored
-                    .into_iter()
-                    .map(|m| Message {
-                        reasoning: None,
-                        provider_items: None,
-                        role: m.role,
-                        content: m.content,
-                        tool_calls: m.tool_calls,
-                        tool_call_id: m.tool_call_id,
-                        images: Vec::new(),
-                        visibility: m.visibility,
-                        kind: m.kind,
-                    })
-                    .collect();
-                messages_to_replay_items(&msgs)
-            }
-            Err(_) => self.replay_items(),
-        }
+        crate::replay::stored_replay_items(&self.store, &self.id)
+            .unwrap_or_else(|_| self.replay_items())
     }
 
     /// The newest `limit` messages as replay items, plus the session's total message count — what

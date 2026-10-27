@@ -12,6 +12,7 @@ pub(crate) fn subagent_header_line() -> TextLine<'static> {
     TextLine::from(vec![
         Span::styled(format!("  {} ", g().group), styles::brand()),
         Span::styled("Agents", styles::fg().bold()),
+        Span::styled("  Ctrl+O, then Enter opens one", styles::faint()),
     ])
 }
 

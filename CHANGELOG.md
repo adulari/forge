@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A subagent opens as its own session, rendered exactly like the main chat.** In the full-screen TUI press `Ctrl+O`, pick an agent with `↑↓` and press `Enter` (in a workflow's view, `Enter` on an agent does the same): its conversation, tool rows, markdown and scrolling come from the same transcript renderer as your session, under a `main chat › explore · model · running` breadcrumb with its task. A running child updates as it saves each message, a finished one reads from the store, and that includes children from a session you resumed. `Esc` returns to the main chat exactly where you left it (scroll, panels and queue untouched), `↑↓`/`PgUp`/`PgDn`/`Home`/`End` or the wheel scroll the child, and `Ctrl+T` expands its tool calls. The agents panel and the `Agents` line in the transcript now say how to open one. New `forge_core::stored_replay_items` reads any session's persisted conversation as replay items (`crates/forge-tui/src/app/child_view.rs`, `crates/forge-cli/src/cli/commands/run/child_view.rs`, `crates/forge-core/src/replay.rs`).
+
 ### Fixed
 
 - **The desktop and web composer grows with your message again.** It measured the right height for wrapped text, but the textarea's `flex: 1` (a 0% basis inside a column) overrode that height, so the box stayed one row tall and older lines scrolled out of view. The web textarea now sizes from its measured height, up to six lines and then scrolling (`mobile/src/components/chat/Composer.tsx`).

@@ -381,6 +381,8 @@ pub struct App {
     /// over the whole frame using the MAIN terminal — no nested alternate screen — so it can never
     /// collide with the chat. Inline mode uses the separate-alt-screen `run_transcript_viewer`.
     pub viewer: Option<ViewerState>,
+    /// A subagent's own session shown in place of the chat (see `child_view`).
+    child_view: Option<child_view::ChildView>,
     /// The dynamic `/config` settings editor overlay (modal while `open`).
     pub config_editor: crate::config_editor::ConfigEditor,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
@@ -3529,6 +3531,7 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 
 mod card_flow;
 mod card_text;
+mod child_view;
 mod group_body;
 mod group_flow;
 mod group_rows;

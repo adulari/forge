@@ -93,6 +93,7 @@ pub(crate) use driver::*;
 mod btw;
 mod busy_commands;
 mod busy_queue;
+mod child_view;
 mod queue_images;
 mod trust_hint;
 pub(crate) use busy_commands::*;
@@ -793,6 +794,7 @@ pub(crate) async fn run_chat_tui(
     // turn, and this id practically never changes mid-turn anyway, so a stale reuse costs nothing).
     let mut cached_session_id = session.lock().await.session_id().to_string();
     let mut cached_model_pinned = session.lock().await.pinned_model().is_some();
+    let mut child_feed = child_view::ChildFeed::new(session.lock().await.store.clone());
     // The store seam behind the remote server's `GET /api/history` scrollback pagination
     // (docs/features/remote-control.md §2b): reads persisted transcript pages for whatever
     // session id the latest snapshot carries (it follows `/new`/resume automatically). A
@@ -1092,6 +1094,9 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
             }
         }
+        if child_feed.poll(&mut app) {
+            dirty = true;
+        }
         if dirty {
             app.busy = busy;
             app.set_autonomy_chips(
@@ -1229,7 +1234,9 @@ pub(crate) async fn run_chat_tui(
                     // open, same as its ↑/↓ key handling below), else the activity viewer
                     // (full-screen), else the main transcript. A few rows per notch feels natural.
                     const STEP: usize = 3;
-                    if app.workflow.open {
+                    if app.child_view_scroll(up, STEP) {
+                        // The subagent session view took the wheel.
+                    } else if app.workflow.open {
                         let key = if up { KeyKind::Up } else { KeyKind::Down };
                         if app.workflow.zoom.is_some() {
                             for _ in 0..STEP {
@@ -1293,6 +1300,9 @@ pub(crate) async fn run_chat_tui(
                     // Full-screen mouse: drag to select text (copied on release), click the floating
                     // jump-to-bottom bar. Only meaningful in the transcript (not the activity viewer).
                     use forge_tui::MouseKind;
+                    if app.child_view_id().is_some() {
+                        continue;
+                    }
                     if app.fullscreen {
                         match kind {
                             MouseKind::Down => {
@@ -1384,7 +1394,9 @@ pub(crate) async fn run_chat_tui(
             // A bare Esc no longer quits — see the idle-Esc branch below.
             let key = if matches!(key, KeyKind::ExitOrDelete) {
                 let idle = !busy && pending.is_none() && !app.awaiting_question();
-                let overlay = app.viewer.is_some() || any_remote_modal_open(&app);
+                let overlay = app.viewer.is_some()
+                    || app.child_view_id().is_some()
+                    || any_remote_modal_open(&app);
                 let Some(key) = app.ctrl_d(idle, overlay) else {
                     continue;
                 };
@@ -1397,6 +1409,7 @@ pub(crate) async fn run_chat_tui(
                     && pending.is_none()
                     && !app.awaiting_question()
                     && app.viewer.is_none()
+                    && app.child_view_id().is_none()
                     && !any_remote_modal_open(&app)
                 {
                     match app.idle_interrupt(&mut prompt_history) {
@@ -1416,6 +1429,11 @@ pub(crate) async fn run_chat_tui(
                 key
             };
 
+            if app.child_view_key(key) {
+                dirty = true;
+                continue;
+            }
+
             // The workflow view is modal while open: ↑↓ move the row selection, Enter zooms into
             // the selected agent's transcript (Esc steps back out), Esc/q background the view —
             // the script keeps running and the one-line status band takes over above the input.
@@ -1434,7 +1452,12 @@ pub(crate) async fn run_chat_tui(
                             app.workflow.selected = app.workflow.rows.len().saturating_sub(1);
                         }
                         KeyKind::Enter if !app.workflow.rows.is_empty() => {
-                            app.workflow.zoom = Some(Default::default());
+                            let opened = app
+                                .selected_workflow_session()
+                                .is_some_and(|id| child_feed.open(&mut app, &id));
+                            if !opened {
+                                app.workflow.zoom = Some(Default::default());
+                            }
                         }
                         _ => {}
                     }
@@ -2969,6 +2992,12 @@ pub(crate) async fn run_chat_tui(
                             // a viewer with zero entries — the inline alt-screen path used to panic
                             // on the empty view list and take the whole session with it.
                             app.activity_focused = false;
+                        } else if app.fullscreen
+                            && app
+                                .subagent_session_at(idx)
+                                .is_some_and(|id| child_feed.open(&mut app, &id))
+                        {
+                            // A subagent opens as its own session view.
                         } else if app.fullscreen {
                             // Full-screen: open the in-loop viewer (same terminal, no nested
                             // alt-screen). The main render loop keeps draining events, so the

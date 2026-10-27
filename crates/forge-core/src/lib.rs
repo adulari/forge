@@ -215,6 +215,7 @@ pub mod zero_retention;
 pub use llm_router::LlmRouter;
 pub use pinned_context::render_task_list;
 use replay::messages_to_replay_items;
+pub use replay::stored_replay_items;
 pub use session_usage_detail::SessionUsageDetail;
 use session_virtual_tools::ASK_USER_TOOL;
 pub use session_virtual_tools::{remember_spec, REMEMBER_TOOL};

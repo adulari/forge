@@ -12,6 +12,10 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         crate::app::output_view::render_output_view(frame, view);
         return;
     }
+    if let Some(view) = &app.child_view {
+        crate::app::child_view::render_child_view(frame, view, app);
+        return;
+    }
     // The dedicated workflow view takes over the whole frame while open (auto-opened when a
     // workflow starts; Esc backgrounds it). Same-terminal rendering, like the activity viewer.
     if app.workflow.open {
