@@ -68,11 +68,14 @@ export interface SessionStableCtxValue {
    * call for this; it isn't inferred automatically). 0 until the shell's first layout pass. */
   headerHeight: number;
   setHeaderHeight: (h: number) => void;
-  /** Composer draft for THIS session — see `Draft` above. */
-  draftText: string;
-  draftAttachments: Attachment[];
+  /** Setters + a reader for the composer draft of THIS session (see `Draft` above). The draft
+   * VALUE lives in its own context (`useSessionDraft`): it changes on every keystroke, and
+   * keeping it here re-rendered every stable-context consumer — the whole chat screen and the
+   * session shell — once per character typed. `getDraftText` reads the latest text without
+   * subscribing to it (quote/edit actions only need it at click time). */
   setDraftText: (text: string) => void;
   setDraftAttachments: (next: Attachment[] | ((prev: Attachment[]) => Attachment[])) => void;
+  getDraftText: () => string;
   lastPrompt: string | null;
   setLastPrompt: (text: string) => void;
   /** `suggested_prompt` value already consumed by a send, keyed per session — a completed turn
@@ -94,7 +97,14 @@ export interface SessionStableCtxValue {
  * genuinely read both (or haven't been split yet). */
 export interface SessionCtxValue extends SessionStableCtxValue, SessionLiveCtxValue {}
 
+/** The composer draft itself — changes per keystroke, so only the Composer subscribes. */
+export interface SessionDraftCtxValue {
+  draftText: string;
+  draftAttachments: Attachment[];
+}
+
 const SessionLiveCtx = createContext<SessionLiveCtxValue | null>(null);
+const SessionDraftCtx = createContext<SessionDraftCtxValue | null>(null);
 const SessionStableCtx = createContext<SessionStableCtxValue | null>(null);
 
 export function SessionProvider({
@@ -126,6 +136,11 @@ export function SessionProvider({
   const [pendingAnswer, setPendingAnswer] = useState<PendingAnswer | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const draft = drafts[sessionId] ?? EMPTY_DRAFT;
+  const draftTextRef = useRef(draft.text);
+  useEffect(() => {
+    draftTextRef.current = draft.text;
+  }, [draft.text]);
+  const getDraftText = useCallback(() => draftTextRef.current, []);
   const [lastPrompts, setLastPrompts] = useState<Record<string, string>>({});
   const [suppressedSuggestions, setSuppressedSuggestions] = useState<Record<string, string | null>>({});
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
@@ -192,10 +207,9 @@ export function SessionProvider({
       clearPendingAnswer,
       headerHeight,
       setHeaderHeight,
-      draftText: draft.text,
-      draftAttachments: draft.attachments,
       setDraftText,
       setDraftAttachments,
+      getDraftText,
       lastPrompt: lastPrompts[sessionId] ?? null,
       setLastPrompt,
       suppressedSuggestion: suppressedSuggestions[sessionId] ?? null,
@@ -211,7 +225,7 @@ export function SessionProvider({
       setPendingAnswer,
       clearPendingAnswer,
       headerHeight,
-      draft,
+      getDraftText,
       setDraftText,
       setDraftAttachments,
       lastPrompts,
@@ -223,9 +237,16 @@ export function SessionProvider({
     ],
   );
 
+  const draftValue = useMemo<SessionDraftCtxValue>(
+    () => ({ draftText: draft.text, draftAttachments: draft.attachments }),
+    [draft],
+  );
+
   return (
     <SessionStableCtx.Provider value={stable}>
-      <SessionLiveCtx.Provider value={live}>{children}</SessionLiveCtx.Provider>
+      <SessionDraftCtx.Provider value={draftValue}>
+        <SessionLiveCtx.Provider value={live}>{children}</SessionLiveCtx.Provider>
+      </SessionDraftCtx.Provider>
     </SessionStableCtx.Provider>
   );
 }
@@ -236,6 +257,13 @@ export function SessionProvider({
 export function useSessionStable(): SessionStableCtxValue {
   const ctx = useContext(SessionStableCtx);
   if (!ctx) throw new Error("useSessionStable must be used within a SessionProvider");
+  return ctx;
+}
+
+/** The composer draft (text + attachments). Subscribe only where the draft is rendered. */
+export function useSessionDraft(): SessionDraftCtxValue {
+  const ctx = useContext(SessionDraftCtx);
+  if (!ctx) throw new Error("useSessionDraft must be used within a SessionProvider");
   return ctx;
 }
 

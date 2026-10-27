@@ -16,7 +16,8 @@ import type { SessionRow } from "../../lib/api";
 import { useShortcutLabel } from "../../lib/shortcuts";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { useAuth } from "../../lib/auth";
-import { useSessions } from "../../lib/queries";
+import { openSession } from "../../lib/nav";
+import { usePrefetchSessionHistory, useSessions } from "../../lib/queries";
 import { useScopedFleet, type ScopedSessionRow } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../theme/tokens";
@@ -72,6 +73,7 @@ function hostShortMeta(host: AnywhereHost): string {
 function DenseSessionRow({ row, serverId, selected }: { row: SessionRow; serverId: string; selected: boolean }) {
   const tokens = useTokens();
   const { setActive } = useAuth();
+  const prefetchHistory = usePrefetchSessionHistory();
   // Re-render on the shared clock: the list only re-renders when the fleet changes, so a
   // computed "4m" otherwise froze at whatever it read when the row last changed.
   useRelativeClock();
@@ -82,8 +84,11 @@ function DenseSessionRow({ row, serverId, selected }: { row: SessionRow; serverI
     <Pressable
       onPress={() => {
         if (serverId) setActive(serverId);
-        router.push(`/session/${row.id}`);
+        openSession(row.id);
       }}
+      // Start the transcript fetch while the button is still going down: the click lands ~100 ms
+      // later and the session screen then paints from cache instead of a spinner.
+      onPressIn={() => prefetchHistory(row.id)}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${state}${row.waiting ? ", needs a decision" : ""}`}
       style={[styles.denseRow, (row.waiting || selected) && { backgroundColor: tokens.selection }]}

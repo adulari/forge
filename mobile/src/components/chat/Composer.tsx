@@ -44,7 +44,7 @@ import {
 import { isMacOS } from "../../lib/platform";
 import { recordComposerImeCommit, recordComposerInput } from "../../lib/performance";
 import { useUpload, useWorkspaceSearch } from "../../lib/queries";
-import { useSessionStable } from "../../lib/sessionContext";
+import { useSessionDraft, useSessionStable } from "../../lib/sessionContext";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
@@ -70,6 +70,7 @@ import {
   composerInputVerticalPadding,
   composerScrollEnabled,
   composerUsesNativeMirror,
+  textFitsOneLine,
   COMPOSER_LINE_HEIGHT as LINE_HEIGHT,
   COMPOSER_MAX_HEIGHT as MAX_HEIGHT,
   COMPOSER_MIN_HEIGHT as MIN_HEIGHT,
@@ -139,10 +140,9 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   // between Chat/Tasks/Agents/Review segments underneath it, which unmounts this component on
   // every tab switch — plain useState here would wipe a half-typed message. Keyed per session
   // (not per-component-instance) so it can't bleed across a session change either.
+  const { draftText: text, draftAttachments: attachments } = useSessionDraft();
   const {
-    draftText: text,
     setDraftText: setText,
-    draftAttachments: attachments,
     setDraftAttachments: setAttachments,
     lastPrompt,
     setLastPrompt,
@@ -182,6 +182,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
   const textRef = useRef(text);
+  const measuredForText = useRef<string | null>(null);
   useEffect(() => {
     textRef.current = text;
   }, [text]);
@@ -196,7 +197,16 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   useEffect(() => {
     if (Platform.OS !== "web") return;
     const node = inputRef.current as unknown as HTMLTextAreaElement | null;
-    if (!node || typeof node.scrollHeight !== "number" || !node.style) return;
+    // (`scrollHeight` is never read in this guard: reading it forces a synchronous layout.)
+    if (!node || !node.style) return;
+    // Effects re-run when the segment is revealed again (see SegmentKeepAlive); the height was
+    // already measured for this exact text, so there is nothing to do.
+    if (measuredForText.current === text) return;
+    measuredForText.current = text;
+    if (textFitsOneLine(node, text)) {
+      setHeight(MIN_HEIGHT);
+      return;
+    }
     const prev = node.style.height;
     node.style.height = "0px";
     const content = node.scrollHeight;
