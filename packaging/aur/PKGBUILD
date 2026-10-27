@@ -7,8 +7,9 @@ pkgver=2.23.6
 pkgrel=1
 pkgdesc="Fast, model-agnostic AI coding harness and CLI in Rust (prebuilt binary)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/florisvoskamp/forge"
+url="https://github.com/Adulari/forge"
 license=('AGPL-3.0-only')
+install=forge-bin.install
 provides=('forge')
 conflicts=('forge')
 # Upstream binary is already stripped; don't let makepkg try to strip it again.

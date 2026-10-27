@@ -88,7 +88,7 @@ unchanged.
 
 ## Config editor and setup wizard
 
-`config_editor/render.rs`, `init_wizard.rs`. `/config` is a `Settings` takeover: search row with a
+`config_editor/render.rs`, `onboarding/`. `/config` is a `Settings` takeover: search row with a
 `scope: User Project` control (`Tab` toggles), sections with counts beside the current section's
 settings from 120 columns, or a `PROVIDERS & KEYS  PgUp/PgDn section 1/7` header below that. Rows are
 a caret, label, muted description and a value in one grammar (`○ not set`, `✓ keyring`, `● on` /

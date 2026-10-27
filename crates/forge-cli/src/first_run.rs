@@ -23,10 +23,26 @@ pub(crate) fn bare_starts_chat(terminal: bool, dumb_term: bool, configured: bool
 }
 
 /// The command bare `forge` runs, or `None` after printing the welcome screen.
+///
+/// On a terminal, onboarding opens first when the state file says it has not run or a required
+/// step is missing; the answer to "is a provider configured" is read after it, so a person who
+/// has just set one up goes straight into a chat.
 pub(crate) fn bare_command() -> Option<Command> {
     let stdout_tty = std::io::stdout().is_terminal();
     let terminal = stdout_tty && std::io::stdin().is_terminal();
     let dumb_term = std::env::var("TERM").is_ok_and(|t| t == "dumb");
+    if terminal && !dumb_term {
+        // The theme normally resolves after the command is chosen; onboarding draws before that.
+        if let Ok(config) = forge_config::load() {
+            forge_tui::theme::init(&config.tui);
+        }
+        match crate::onboarding::maybe_open(false) {
+            // Onboarding just ran and said where things stand; the static panel would repeat it.
+            Ok(true) if !provider_configured() => return None,
+            Ok(_) => {}
+            Err(error) => eprintln!("setup could not open: {error:#}"),
+        }
+    }
     let configured = provider_configured();
     if bare_starts_chat(terminal, dumb_term, configured) {
         return Some(Command::Chat {

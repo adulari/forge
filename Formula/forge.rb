@@ -43,6 +43,13 @@ class Forge < Formula
     man1.install "forge.1" if File.exist?("forge.1")
   end
 
+  def caveats
+    <<~EOS
+      Run `forge` to finish setup: the first launch opens a short guided onboarding
+      (connect a model, safety and cost, search). `forge setup` reopens it any time.
+    EOS
+  end
+
   test do
     assert_match "forge", shell_output("#{bin}/forge --version")
   end

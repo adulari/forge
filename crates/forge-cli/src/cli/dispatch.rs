@@ -377,8 +377,8 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             }
         }
         Command::Provider { cmd } => provider_cmd(cmd),
-        Command::Setup => setup("forge setup"),
-        Command::Init => setup("forge init"),
+        Command::Setup => crate::onboarding::setup("forge setup"),
+        Command::Init => crate::onboarding::setup("forge init"),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::Memory { cmd, global } => memory_cmd(cmd, global),
         Command::McpServe { transport, bind } => {

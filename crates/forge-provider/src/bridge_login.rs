@@ -2,6 +2,15 @@
 
 use crate::cli_provider::{self, CliKind};
 
+pub use crate::cli_provider::credentials::CliCredentials;
+
+/// The credential verdict for one bridge CLI: file and environment evidence plus any "not signed
+/// in" the CLI itself reported this process. No subprocess, no network. Onboarding reads it to
+/// say "signed in" or "not signed in" before it launches anything.
+pub fn bridge_credentials(kind: CliKind) -> CliCredentials {
+    cli_provider::credentials::credentials(kind)
+}
+
 /// Whether ANY installed CLI bridge has POSITIVE evidence of a login. Distinct from
 /// [`CliKind::routable`], which deliberately treats `Unknown` as routable so an unproven bridge
 /// still gets a turn: for "does this machine have any way to reach a model at all", an unproven

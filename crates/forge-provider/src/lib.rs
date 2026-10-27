@@ -52,7 +52,9 @@ pub use cli_provider::{
 };
 
 mod bridge_login;
-pub use bridge_login::{any_bridge_logged_in, bridge_credentials_known_absent};
+pub use bridge_login::{
+    any_bridge_logged_in, bridge_credentials, bridge_credentials_known_absent, CliCredentials,
+};
 
 pub use codex_oauth::{
     detected_plan as codex_oauth_detected_plan, exchange_code as exchange_codex_oauth_code,

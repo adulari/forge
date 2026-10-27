@@ -1,6 +1,5 @@
 use super::assay::bundle_source;
 use super::import::{convert_mdc_to_command_md, copy_catalog_assets};
-use super::local::bridge_plans;
 use super::replay::most_recent_to_continue;
 use super::run::{
     chat_action, expand_at_files, extract_code_blocks, loop_stop_reason, models_for_provider,
@@ -647,39 +646,6 @@ fn models_for_provider_lists_models_with_badges() {
         "bare entry hidden"
     );
     assert!(sub[0].subtitle.contains("subscription"));
-}
-
-#[test]
-fn onboarding_only_when_nothing_is_configured() {
-    let needs = |has_any_key: bool, any_bridge: bool, config_exists: bool| {
-        needs_onboarding_with(config_exists, || has_any_key, || any_bridge)
-    };
-    // Fresh machine: no key, no bridge, no config → onboard.
-    assert!(needs(false, false, false));
-    // Any one signal of prior setup suppresses it.
-    assert!(!needs(true, false, false)); // has a key
-    assert!(!needs(false, true, false)); // a bridge is installed
-    assert!(!needs(false, false, true)); // a saved config exists
-
-    // With a saved config neither answer is computed: the key scan is a keyring round trip per
-    // provider, and it used to run on every `forge chat` start.
-    assert!(!needs_onboarding_with(
-        true,
-        || panic!("the key scan must not run when a config exists"),
-        || panic!("the bridge probe must not run when a config exists"),
-    ));
-}
-
-#[test]
-fn bridge_plans_cover_both_clis_with_stored_slugs() {
-    let claude = bridge_plans(forge_provider::CliKind::ClaudeCode);
-    assert!(claude.iter().any(|(_, slug)| *slug == "max-20x"));
-    let codex = bridge_plans(forge_provider::CliKind::Codex);
-    assert!(codex.iter().any(|(_, slug)| *slug == "plus"));
-    // Every plan has a non-empty human label + slug.
-    for (label, slug) in claude.iter().chain(codex) {
-        assert!(!label.is_empty() && !slug.is_empty());
-    }
 }
 
 #[test]

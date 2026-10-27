@@ -12,7 +12,7 @@ pub(crate) async fn chat(
     mut first_prompt: Option<String>,
 ) -> Result<()> {
     crate::startup_trace::mark("chat entered");
-    maybe_first_run_setup(mock)?;
+    let _ = crate::onboarding::maybe_open(mock)?;
     crate::startup_trace::mark("first-run check");
     maybe_autostart_local();
     crate::startup_trace::mark("local autostart check");

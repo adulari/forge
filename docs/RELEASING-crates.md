@@ -53,14 +53,15 @@ Then publish the versioned Forge graph:
 9. `forge-agent-mcp`
 10. `forge-agent-mesh`
 11. `forge-agent-index`
-12. `forge-agent-tui`
-13. `forge-agent-provider`
-14. `forge-agent-browser`
-15. `forge-agent-proxy`
-16. `forge-agent-device`
-17. `forge-agent-tools`
-18. `forge-agent-core`
-19. `forge-agent` (the binary crate, published last)
+12. `forge-agent-provider`
+13. `forge-agent-onboarding`
+14. `forge-agent-tui`
+15. `forge-agent-browser`
+16. `forge-agent-proxy`
+17. `forge-agent-device`
+18. `forge-agent-tools`
+19. `forge-agent-core`
+20. `forge-agent` (the binary crate, published last)
 
 (`forge-relay` and `xtasks` are `publish = false` and are never released.)
 
@@ -90,8 +91,8 @@ cargo info --registry crates-io forge-agent-genai@0.6.5-forge.1 >/dev/null 2>&1 
 
 for crate in forge-agent-anywhere-protocol forge-agent-types forge-agent-workflow forge-agent-voice \
              forge-agent-skills forge-agent-store forge-agent-config forge-agent-lsp forge-agent-mcp \
-             forge-agent-mesh forge-agent-index forge-agent-tui forge-agent-provider \
-             forge-agent-browser forge-agent-proxy forge-agent-device forge-agent-tools \
+             forge-agent-mesh forge-agent-index forge-agent-provider forge-agent-onboarding \
+             forge-agent-tui forge-agent-browser forge-agent-proxy forge-agent-device forge-agent-tools \
              forge-agent-core forge-agent; do
   cargo publish -p "$crate" --locked
   # give the index a moment so the next crate can resolve this one
