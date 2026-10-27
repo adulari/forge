@@ -13,6 +13,7 @@ import { TaskRow } from "../../../components/fleet/TaskRow";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { space } from "../../../theme/tokens";
 import type { SnapshotTask } from "../../../lib/ws";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
 // A first snapshot hasn't arrived yet (fresh connect, reconnecting, dead daemon) — we
 // genuinely don't know whether there are tasks. Show the shape of the list instead of
@@ -30,7 +31,7 @@ function TasksSkeleton() {
   );
 }
 
-export default function SessionTasks() {
+export function SessionTasks() {
   const { snapshot, snapshotTimedOut } = useSessionCtx();
   const tasks = snapshot?.tasks ?? [];
   const busy = snapshot?.busy ?? false;
@@ -72,3 +73,9 @@ const styles = StyleSheet.create({
     gap: space.space12,
   },
 });
+
+// Desktop/web: the session layout keeps this segment mounted itself (SegmentKeepAlive), so the
+// route renders nothing there; phones render the screen as the route.
+export default function SessionTasksRoute() {
+  return useSegmentsHosted() ? null : <SessionTasks />;
+}

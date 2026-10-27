@@ -231,6 +231,8 @@ export function useDiagnostics() {
 const SIX_HOURS_MS = 6 * 3600 * 1000;
 
 /** The daemon's update status. A daemon without the endpoint (404) simply has none to report. */
+const FIVE_MINUTES_MS = 5 * 60_000;
+
 export function useDaemonUpdate(enabled = true) {
   const { baseUrl } = useAuth();
   return useQuery({
@@ -238,7 +240,8 @@ export function useDaemonUpdate(enabled = true) {
     queryFn: () => getDaemonUpdate(baseUrl as string),
     enabled: enabled && baseUrl != null,
     staleTime: SIX_HOURS_MS,
-    refetchInterval: SIX_HOURS_MS,
+    // A pending update is re-read often so a busy daemon gets its update soon after it goes idle.
+    refetchInterval: (query) => (query.state.data?.update_available ? FIVE_MINUTES_MS : SIX_HOURS_MS),
     retry: false,
   });
 }
@@ -427,12 +430,12 @@ export function useHistory(sessionId: string | null, options: { includeTools?: b
 }
 
 /** Starts the session screen's first history page at press-in, before navigation has finished. */
-export function usePrefetchSessionHistory(): (sessionId: string) => void {
+export function usePrefetchSessionHistory(): (sessionId: string) => Promise<void> {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
   return useCallback((sessionId: string) => {
-    if (baseUrl == null) return;
-    void queryClient.prefetchInfiniteQuery({
+    if (baseUrl == null) return Promise.resolve();
+    return queryClient.prefetchInfiniteQuery({
       ...historyQueryOptions(baseUrl, sessionId, true),
       staleTime: 10_000,
     }).catch(() => undefined);
@@ -702,6 +705,28 @@ export function useGitStatus(sessionId: string | null) {
     enabled: baseUrl != null && sessionId != null,
     refetchOnWindowFocus: true,
   });
+}
+
+/** Warm the Review and Files tabs' first fetch shortly after a session opens, so their first
+ * visit paints from cache instead of waiting on the daemon (their segments are prewarmed hidden,
+ * and hidden screens run no effects). Skipped on native, which mounts one route at a time. */
+export function usePrefetchSessionPanels(sessionId: string | null, enabled: boolean): void {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!enabled || baseUrl == null || sessionId == null) return;
+    const timer = setTimeout(() => {
+      void queryClient.prefetchQuery({
+        queryKey: keys(baseUrl).gitStatus(sessionId),
+        queryFn: () => getGitStatus(baseUrl, sessionId),
+      }).catch(() => undefined);
+      void queryClient.prefetchQuery({
+        queryKey: keys(baseUrl).workspaceEntries(sessionId, ""),
+        queryFn: () => getWorkspaceEntries(baseUrl, sessionId, ""),
+      }).catch(() => undefined);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [enabled, baseUrl, sessionId, queryClient]);
 }
 
 export function useGitDiff(sessionId: string | null, path: string | null, staged = false) {

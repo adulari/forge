@@ -337,7 +337,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             json,
             smoke,
         } => mesh_explain(prompt.join(" "), json, smoke).await,
-        Command::Benchmarks { refresh } => benchmarks_cmd(refresh).await,
+        Command::Benchmarks {
+            refresh,
+            export_mirror,
+            previous,
+        } => benchmarks_cmd(refresh, export_mirror, previous).await,
         Command::Local { sub } => local_cmd(sub).await,
         Command::Doctor => {
             let fails = doctor::run().await?;
@@ -373,8 +377,8 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             }
         }
         Command::Provider { cmd } => provider_cmd(cmd),
-        Command::Setup => setup("forge setup"),
-        Command::Init => setup("forge init"),
+        Command::Setup => crate::onboarding::setup("forge setup"),
+        Command::Init => crate::onboarding::setup("forge init"),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::Memory { cmd, global } => memory_cmd(cmd, global),
         Command::McpServe { transport, bind } => {

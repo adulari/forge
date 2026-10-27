@@ -1,12 +1,13 @@
-import { useLocalSearchParams } from "expo-router";
+import { useSessionStable } from "../../../lib/sessionContext";
 import React from "react";
 import { StyleSheet } from "react-native";
 
 import { Screen } from "../../../components/ds/Screen";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 import { TerminalDock } from "../../../components/shell/TerminalDock";
 
-export default function SessionTerminal() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+export function SessionTerminal() {
+  const { sessionId: id } = useSessionStable();
 
   return (
     <Screen
@@ -23,3 +24,7 @@ export default function SessionTerminal() {
 const styles = StyleSheet.create({
   content: { paddingHorizontal: 0 },
 });
+
+export default function SessionTerminalRoute() {
+  return useSegmentsHosted() ? null : <SessionTerminal />;
+}

@@ -37,7 +37,7 @@ https://github.com/Adulari/forge/raw/main/docs/assets/forge-promo.mp4
 ---
 
 ```bash
-forge setup                                   # first run: keys, bridges, optional local model
+forge setup                                   # guided setup (opens by itself on first launch)
 forge                                         # full-screen TUI, multi-turn (same as `forge chat`)
 forge chat "explain this repo"                # open the TUI with a first message
 forge run "add pagination to the user list"   # one-shot task
@@ -117,6 +117,11 @@ default — that you watch and merge back from the same board. See
 This is the wedge no other terminal agent has. You don't pick a model; you connect providers and let
 Forge pick. Every task is classified into a tier, then routed to the **cheapest model that meets the
 bar** — benchmark-ranked against real Artificial Analysis intelligence + coding scores.
+No key needed: Forge reads a published copy of the scores (refreshed every few hours), falls back to
+a snapshot bundled in the binary when offline, and uses your own free key from
+[artificialanalysis.ai](https://artificialanalysis.ai) instead if you set one. Set
+`mesh.benchmark_mirror = false` (or `FORGE_BENCHMARK_MIRROR=0`) to keep Forge off the network for
+this. Benchmark data: [Artificial Analysis](https://artificialanalysis.ai).
 
 | Tier | Examples | Goes to |
 |------|----------|---------|
@@ -670,8 +675,9 @@ use the release archives above when you need Forge's glibc 2.31 portability floo
 > **First time?** The **[Quick Setup Guide →](./docs/quickstart.md)** covers install, connecting a free provider, and your first session step-by-step.
 
 ```bash
-# Guided setup: API keys + subscription plans + optional local LLM
-# (offered automatically on first launch in an interactive terminal; re-run anytime)
+# Guided setup: connects a model, sets safety and cost, search, imports, the background service.
+# Detection fills in what you already have, so it is a few Enter presses. It opens by itself the
+# first time you launch Forge in a terminal; re-run anytime. See docs/features/onboarding.md.
 forge setup
 
 # Optional: run a local model that fits your machine (via Ollama)
@@ -914,7 +920,7 @@ session still behaves the same, while `fork --turn N` isolates one changed varia
 ### 🩺 Setup, health, models, memory
 
 ```bash
-forge setup              # guided: API keys + subscription plans + optional local LLM
+forge setup              # guided onboarding: models, safety, search, imports, service
 forge doctor             # diagnose config, providers/keys, bridges, Ollama, git, terminal
 forge models             # catalog overview + auto-pick per tier
 forge models --probe     # recheck only benched/excluded models (cheap)

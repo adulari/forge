@@ -4,17 +4,18 @@
 // the shell's header/status-strip/Segmented already consumed the top inset) and renders no
 // header of its own — the shell's SessionHeader back arrow + "Replay" Segmented tab already
 // own that chrome.
+import { useSessionStable } from "../../../lib/sessionContext";
 import React, { useCallback, useMemo } from "react";
 import { StyleSheet } from "react-native";
-import { useLocalSearchParams } from "expo-router";
 
 import { ReplayView } from "../../../components/session/ReplayView";
 import { Screen } from "../../../components/ds/Screen";
 import { useHistory } from "../../../lib/queries";
 import { usePullRefresh } from "../../../lib/usePullRefresh";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
-export default function SessionReplayScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+export function SessionReplayScreen() {
+  const { sessionId: id } = useSessionStable();
   // A replay is the record of what the session DID, so it asks for the tool rows the chat stream
   // leaves out — calls and results both (ReplayView tells them apart by `tool_phase`). Its own
   // cache entry, so the chat tab's plain stream is untouched by this.
@@ -46,3 +47,9 @@ export default function SessionReplayScreen() {
 const styles = StyleSheet.create({
   sessionColumn: { width: "100%", maxWidth: 760, alignSelf: "center" },
 });
+
+// Desktop/web: the session layout keeps this segment mounted itself (SegmentKeepAlive), so the
+// route renders nothing there; phones render the screen as the route.
+export default function SessionReplayRoute() {
+  return useSegmentsHosted() ? null : <SessionReplayScreen />;
+}

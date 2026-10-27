@@ -8,12 +8,15 @@
 // matches clicks on the bar element itself, which the flex spacer covers. Double-click to
 // maximize comes from Tauri's drag script, so the bar has no onDoubleClick of its own.
 import { useQueries } from "@tanstack/react-query";
-import { router } from "expo-router";
+import { router, usePathname } from "expo-router";
 import { Check, ChevronDown, Flame, Minus, Search, Square, X } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions, type ViewProps } from "react-native";
 
 import { getSessions } from "../lib/api";
+import { useAuth } from "../lib/auth";
+import { LayoutControl } from "./shell/LayoutMenu";
+import { RAILLESS_ROUTES } from "./shell/railless";
 import { isMacOS, isTauri } from "../lib/platform";
 import { transportForBaseUrl } from "../lib/serverTargets";
 import { useFleetScope } from "../lib/useScopedFleet";
@@ -71,6 +74,11 @@ export function DesktopWindowChrome() {
     closeMenu();
   };
   const paletteHint = useShortcutLabel("command.palette");
+  // The workbench (panes, docks) only exists in the paired, wide shell, and not on the
+  // settings-family routes that bring their own rail.
+  const { isPaired } = useAuth();
+  const pathname = usePathname();
+  const showLayout = isPaired && windowWidth >= 1024 && !RAILLESS_ROUTES.test(pathname);
   const [windowControls, setWindowControls] = useState<WindowControls | null>(null);
 
   useEffect(() => {
@@ -167,6 +175,12 @@ export function DesktopWindowChrome() {
           </View>
         ) : null}
       </Modal>
+
+      {showLayout ? (
+        <WebView dataSet={{ tauriDragRegion: "false" }}>
+          <LayoutControl />
+        </WebView>
+      ) : null}
 
       <WebView dataSet={{ tauriDragRegion: "false" }}>
         <Pressable

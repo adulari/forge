@@ -9,7 +9,9 @@ import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
 import { useAuth } from "../../lib/auth";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
-import { useSessions } from "../../lib/queries";
+import { openSession } from "../../lib/nav";
+import { requestSessionPrewarm, useSessionActivationOverride } from "../../lib/sessionPrewarm";
+import { usePrefetchSessionHistory, useSessions } from "../../lib/queries";
 import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useShortcutLabel } from "../../lib/shortcuts";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -55,18 +57,24 @@ function SessionIconButton({
   worktree,
   selected,
   onPress,
+  onPressIn,
+  onHoverIn,
 }: {
   title: string;
   state: StatusDotState;
   worktree: boolean;
   selected: boolean;
   onPress: () => void;
+  onPressIn?: () => void;
+  onHoverIn?: () => void;
 }) {
   const tokens = useTokens();
   const glyphColor = state === "idle" ? tokens.ink4 : selected ? tokens.ink : tokens.ink2;
   return (
     <Pressable
       onPress={onPress}
+      onPressIn={onPressIn}
+      onHoverIn={onHoverIn}
       accessibilityRole="button"
       accessibilityLabel={`${title}, ${state}${worktree ? ", worktree" : ""}`}
       style={[styles.sessionButton, selected && { backgroundColor: tokens.bg3 }]}
@@ -94,11 +102,13 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
   const pathname = usePathname();
   const palette = usePalette();
   const { setActive } = useAuth();
+  const prefetchHistory = usePrefetchSessionHistory();
   const { rows } = useScopedFleet();
   const { data: activeRows } = useSessions();
   const waitingCount = useMemo(() => (activeRows ?? []).filter((row) => row.waiting).length, [activeRows]);
   const noticesUnseen = totalUnseen(useNoticesStore().hosts);
-  const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
+  const activationOverride = useSessionActivationOverride();
+  const selectedSessionId = activationOverride ?? pathname.match(/^\/session\/([^/]+)/)?.[1];
   const { rings } = useProviderPace();
 
   return (
@@ -135,8 +145,10 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
               selected={row.id === selectedSessionId}
               onPress={() => {
                 if (serverId) setActive(serverId);
-                router.push(`/session/${row.id}`);
+                openSession(row.id);
               }}
+              onPressIn={() => void prefetchHistory(row.id)}
+              onHoverIn={() => void prefetchHistory(row.id).then(() => requestSessionPrewarm(row.id))}
             />
           );
         })}

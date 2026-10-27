@@ -1,0 +1,4235 @@
+{
+  "schema": 1,
+  "generated_at": 1793045976,
+  "source_fetched_at": 1793045976,
+  "attribution": {
+    "text": "Benchmark data: Artificial Analysis",
+    "url": "https://artificialanalysis.ai"
+  },
+  "models": [
+    {
+      "name": "Claude Opus 5.5 (Max, Default Fallback)",
+      "intelligence": 57.6,
+      "coding": 81.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 5.5 (Xhigh, Default Fallback)",
+      "intelligence": 56.0,
+      "coding": 81.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 5.5 (Max, Default Fallback)",
+      "intelligence": 56.0,
+      "coding": 81.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "Muse Wonder Full (Max)",
+      "intelligence": 55.8,
+      "coding": 81.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "Kimi K3.1 Pro",
+      "intelligence": 55.1,
+      "coding": 81.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 5.5 (High, Default Fallback)",
+      "intelligence": 53.6,
+      "coding": 81.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Fable 5.1 (Max, Default Fallback)",
+      "intelligence": 53.4,
+      "coding": 81.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Fable 5.1 (Xhigh, Default Fallback)",
+      "intelligence": 53.2,
+      "coding": 80.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Astra (Max)",
+      "intelligence": 52.7,
+      "coding": 76.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 4 Argon (High)",
+      "intelligence": 52.6,
+      "coding": 81.26,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6 Astra (Xhigh)",
+      "intelligence": 52.4,
+      "coding": 75.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Muse Wonder (Max)",
+      "intelligence": 52.4,
+      "coding": 80.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 5.5 (Xhigh, Default Fallback)",
+      "intelligence": 51.9,
+      "coding": 80.18,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6.1 Sol (Max)",
+      "intelligence": 51.8,
+      "coding": 80.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Fable 5.1 (High, Default Fallback)",
+      "intelligence": 51.2,
+      "coding": 79.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 5.5 (Medium, Default Fallback)",
+      "intelligence": 51.2,
+      "coding": 79.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6.1 Sol (Xhigh)",
+      "intelligence": 51.0,
+      "coding": 78.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6 Astra (High)",
+      "intelligence": 50.9,
+      "coding": 77.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 5 (Max)",
+      "intelligence": 50.8,
+      "coding": 78.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Sol (High)",
+      "intelligence": 50.2,
+      "coding": 77.56,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 5 (Xhigh)",
+      "intelligence": 49.7,
+      "coding": 77.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Fable 5 (Max, Opus 4.8 Fallback)",
+      "intelligence": 49.6,
+      "coding": 76.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Astra (Medium)",
+      "intelligence": 49.6,
+      "coding": 76.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Fable 5.1 (Medium, Default Fallback)",
+      "intelligence": 48.9,
+      "coding": 77.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 5 (High)",
+      "intelligence": 48.1,
+      "coding": 76.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Terra (Max)",
+      "intelligence": 48.1,
+      "coding": 75.84,
+      "coding_estimated": true
+    },
+    {
+      "name": "Muse Spark 1.3 (Max)",
+      "intelligence": 48.1,
+      "coding": 75.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Sol (Medium)",
+      "intelligence": 47.8,
+      "coding": 76.02,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6 Sol (Max)",
+      "intelligence": 47.6,
+      "coding": 75.7,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Sol (Max)",
+      "intelligence": 47.0,
+      "coding": 77.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Fable 5.1 (Low, Default Fallback)",
+      "intelligence": 46.8,
+      "coding": 75.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Sonnet 5.5 (High, Default Fallback)",
+      "intelligence": 46.8,
+      "coding": 77.35,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.7 (Xhigh)",
+      "intelligence": 46.4,
+      "coding": 76.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.7 (High)",
+      "intelligence": 46.3,
+      "coding": 76.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiMo-V2.6-Pro",
+      "intelligence": 46.3,
+      "coding": 76.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6 Astra (Low)",
+      "intelligence": 45.8,
+      "coding": 75.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Terra (Xhigh)",
+      "intelligence": 45.4,
+      "coding": 76.2,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.8 Max (0902)",
+      "intelligence": 45.4,
+      "coding": 76.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4.1 Flash 1017 (Max)",
+      "intelligence": 45.1,
+      "coding": 75.7,
+      "coding_estimated": true
+    },
+    {
+      "name": "Muse Spark 1.3 (Xhigh)",
+      "intelligence": 45.1,
+      "coding": 76.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 5 (Medium)",
+      "intelligence": 44.8,
+      "coding": 74.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5.3 (Max)",
+      "intelligence": 44.8,
+      "coding": 74.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4.6 (High)",
+      "intelligence": 44.3,
+      "coding": 76.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Sol (Xhigh)",
+      "intelligence": 44.2,
+      "coding": 75.9,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.6 (Xhigh)",
+      "intelligence": 44.2,
+      "coding": 75.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Sol (Xhigh)",
+      "intelligence": 44.0,
+      "coding": 78.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Terra (High)",
+      "intelligence": 43.9,
+      "coding": 75.38,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ling 3.1 Flash 1019",
+      "intelligence": 43.9,
+      "coding": 75.38,
+      "coding_estimated": true
+    },
+    {
+      "name": "Step 5 Preview",
+      "intelligence": 43.7,
+      "coding": 75.76,
+      "coding_estimated": true
+    },
+    {
+      "name": "Kimi K3 (Max)",
+      "intelligence": 43.6,
+      "coding": 76.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Haiku 5.5 (Max)",
+      "intelligence": 43.4,
+      "coding": 75.24,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.6 (Medium)",
+      "intelligence": 42.8,
+      "coding": 74.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiniMax-M3.1-Flash",
+      "intelligence": 42.7,
+      "coding": 74.63,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6 Sol (High)",
+      "intelligence": 42.4,
+      "coding": 75.37,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 5.5 (Low, Default Fallback)",
+      "intelligence": 42.3,
+      "coding": 75.19,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Sol (High)",
+      "intelligence": 42.3,
+      "coding": 77.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4.7 (Low)",
+      "intelligence": 42.2,
+      "coding": 75.37,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Terra (Max)",
+      "intelligence": 42.1,
+      "coding": 76.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Sol (Low)",
+      "intelligence": 42.1,
+      "coding": 75.19,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 4.8 (Max)",
+      "intelligence": 41.8,
+      "coding": 74.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5.3-Flash",
+      "intelligence": 41.8,
+      "coding": 71.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Terra (Medium)",
+      "intelligence": 41.3,
+      "coding": 74.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Haiku 5.5 (Xhigh)",
+      "intelligence": 41.2,
+      "coding": 74.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ling 3.1 Flash",
+      "intelligence": 41.1,
+      "coding": 74.32,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3.8 Flash (High)",
+      "intelligence": 40.9,
+      "coding": 76.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Sonnet 5.5 (Medium, Default Fallback)",
+      "intelligence": 40.8,
+      "coding": 74.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 4.7 (Max)",
+      "intelligence": 40.7,
+      "coding": 73.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.8 Max",
+      "intelligence": 40.2,
+      "coding": 71.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.8 2.4T A95B",
+      "intelligence": 39.9,
+      "coding": 71.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Sol (Medium)",
+      "intelligence": 39.8,
+      "coding": 73.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3.8 Flash (Medium)",
+      "intelligence": 39.8,
+      "coding": 74.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.8-Flash-Next",
+      "intelligence": 39.8,
+      "coding": 73.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 3.7 Flash (Medium)",
+      "intelligence": 39.6,
+      "coding": 71.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Muse Spark 1.2 (Xhigh)",
+      "intelligence": 39.6,
+      "coding": 72.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4.1 Flash (Max)",
+      "intelligence": 39.5,
+      "coding": 72.55,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 5 (Low)",
+      "intelligence": 39.4,
+      "coding": 66.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Sol (Medium)",
+      "intelligence": 39.2,
+      "coding": 76.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 3.7 Flash (High)",
+      "intelligence": 39.1,
+      "coding": 76.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.4 (Xhigh)",
+      "intelligence": 39.0,
+      "coding": 71.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Muse Spark Open (Xhigh)",
+      "intelligence": 38.9,
+      "coding": 72.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.5 (High)",
+      "intelligence": 38.8,
+      "coding": 72.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.5 (Xhigh)",
+      "intelligence": 38.4,
+      "coding": 74.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mistral Large 4 Preview",
+      "intelligence": 38.4,
+      "coding": 71.49,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 5 (Max)",
+      "intelligence": 38.2,
+      "coding": 71.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Luna (Max)",
+      "intelligence": 38.1,
+      "coding": 71.09,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Terra (Xhigh)",
+      "intelligence": 38.0,
+      "coding": 70.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiMo-V2.6-Flash",
+      "intelligence": 37.9,
+      "coding": 70.72,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Haiku 5.5 (High)",
+      "intelligence": 37.8,
+      "coding": 70.75,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Luna (Max)",
+      "intelligence": 37.3,
+      "coding": 71.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.5 (High)",
+      "intelligence": 37.0,
+      "coding": 71.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 3.7 Flash (Low)",
+      "intelligence": 36.9,
+      "coding": 71.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Terra (Low)",
+      "intelligence": 36.2,
+      "coding": 69.65,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V4 Pro 0813 (Max)",
+      "intelligence": 36.0,
+      "coding": 68.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Sonnet 5.5 (Low, Default Fallback)",
+      "intelligence": 35.9,
+      "coding": 69.47,
+      "coding_estimated": true
+    },
+    {
+      "name": "Agnes 2.5 Pro Beta",
+      "intelligence": 35.2,
+      "coding": 62.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4.6 (Low)",
+      "intelligence": 35.1,
+      "coding": 66.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4 Flash Vision (Max)",
+      "intelligence": 34.8,
+      "coding": 65.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Luna (Xhigh)",
+      "intelligence": 34.6,
+      "coding": 68.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Luna (Xhigh)",
+      "intelligence": 34.6,
+      "coding": 69.7,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Haiku 5.5 (Medium)",
+      "intelligence": 34.5,
+      "coding": 69.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 5 (Xhigh)",
+      "intelligence": 34.4,
+      "coding": 69.3,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V4 Flash 0731 (Max)",
+      "intelligence": 34.3,
+      "coding": 69.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5.3 (Low)",
+      "intelligence": 34.3,
+      "coding": 69.31,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Terra (High)",
+      "intelligence": 34.2,
+      "coding": 67.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Sol (Low)",
+      "intelligence": 34.2,
+      "coding": 69.11,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3.6 Flash (High)",
+      "intelligence": 34.0,
+      "coding": 69.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "JT-4.1 Flash 236B A21B (Reasoning)",
+      "intelligence": 33.9,
+      "coding": 68.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.5 (Medium)",
+      "intelligence": 33.8,
+      "coding": 71.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5.2 (Max)",
+      "intelligence": 33.7,
+      "coding": 68.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Muse Spark 1.1 (Xhigh)",
+      "intelligence": 33.7,
+      "coding": 71.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.8 27B (Xhigh)",
+      "intelligence": 33.7,
+      "coding": 68.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 3.5 Flash (Medium)",
+      "intelligence": 33.6,
+      "coding": 67.9,
+      "coding_estimated": true
+    },
+    {
+      "name": "Motif 3",
+      "intelligence": 33.6,
+      "coding": 63.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Sol (Low)",
+      "intelligence": 33.5,
+      "coding": 69.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6.1 Terra (Non-reasoning)",
+      "intelligence": 33.5,
+      "coding": 67.7,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3.8 Flash (Low)",
+      "intelligence": 33.5,
+      "coding": 73.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Luna (High)",
+      "intelligence": 32.9,
+      "coding": 66.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3.5 Flash (High)",
+      "intelligence": 32.6,
+      "coding": 70.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.3 Codex (Xhigh)",
+      "intelligence": 32.5,
+      "coding": 65.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Motif 3 (Beta)",
+      "intelligence": 32.3,
+      "coding": 62.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Luna (High)",
+      "intelligence": 32.1,
+      "coding": 63.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 4.6 (Max)",
+      "intelligence": 31.9,
+      "coding": 64.32,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 5 (High)",
+      "intelligence": 31.7,
+      "coding": 63.92,
+      "coding_estimated": true
+    },
+    {
+      "name": "Muse Spark",
+      "intelligence": 31.3,
+      "coding": 58.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 4.7 (Non-reasoning, High)",
+      "intelligence": 30.9,
+      "coding": 62.31,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.5 (Low)",
+      "intelligence": 30.7,
+      "coding": 60.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "K2 Horizon 375B A23B",
+      "intelligence": 30.5,
+      "coding": 61.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4 Pro 0424 (Max)",
+      "intelligence": 30.4,
+      "coding": 59.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.2 (Xhigh)",
+      "intelligence": 30.4,
+      "coding": 61.3,
+      "coding_estimated": true
+    },
+    {
+      "name": "Beam 1.0",
+      "intelligence": 30.3,
+      "coding": 61.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 4.6 (Max)",
+      "intelligence": 30.1,
+      "coding": 63.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4 Pro 0424 (High)",
+      "intelligence": 30.1,
+      "coding": 58.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Terra (Medium)",
+      "intelligence": 30.1,
+      "coding": 64.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Kimi K3 (Low)",
+      "intelligence": 30.1,
+      "coding": 72.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Luna (Medium)",
+      "intelligence": 29.9,
+      "coding": 60.77,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3.1 Pro Preview",
+      "intelligence": 29.7,
+      "coding": 68.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Haiku 5.5 (Low)",
+      "intelligence": 29.5,
+      "coding": 61.74,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.7 Max",
+      "intelligence": 29.5,
+      "coding": 66.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiniMax-M3",
+      "intelligence": 29.2,
+      "coding": 58.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 4.5 (Reasoning)",
+      "intelligence": 29.1,
+      "coding": 60.91,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiMo-V2-Pro",
+      "intelligence": 28.6,
+      "coding": 59.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.2 Codex (Xhigh)",
+      "intelligence": 28.5,
+      "coding": 59.73,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-6 Sol (Non-reasoning)",
+      "intelligence": 28.5,
+      "coding": 59.73,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.6 Max Preview",
+      "intelligence": 28.4,
+      "coding": 60.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Sol (Non-reasoning)",
+      "intelligence": 28.3,
+      "coding": 65.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nex-N2-Pro (Based on Qwen3.5-397B-A17B)",
+      "intelligence": 28.2,
+      "coding": 59.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Sonnet 5 (Medium)",
+      "intelligence": 28.1,
+      "coding": 59.37,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3 Pro Preview (High)",
+      "intelligence": 28.0,
+      "coding": 59.86,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-5 (Reasoning)",
+      "intelligence": 27.9,
+      "coding": 59.65,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.4 (Low)",
+      "intelligence": 27.6,
+      "coding": 58.31,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.8 27B (Medium)",
+      "intelligence": 27.6,
+      "coding": 56.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Terra (Low)",
+      "intelligence": 27.5,
+      "coding": 58.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "JT-4.1 Flash 236B A21B (Non-reasoning)",
+      "intelligence": 27.3,
+      "coding": 52.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok Build 0.1 0616",
+      "intelligence": 27.2,
+      "coding": 51.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Kimi K2.6 (Reasoning)",
+      "intelligence": 27.0,
+      "coding": 61.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.6 Plus",
+      "intelligence": 27.0,
+      "coding": 54.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Quasar 438B (Max, Based on GLM-5.2)",
+      "intelligence": 26.7,
+      "coding": 61.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5-Turbo",
+      "intelligence": 26.6,
+      "coding": 56.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Pro 4",
+      "intelligence": 26.6,
+      "coding": 56.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.2 (Medium)",
+      "intelligence": 26.5,
+      "coding": 56.66,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nemotron 3.5 Super VL",
+      "intelligence": 26.5,
+      "coding": 56.66,
+      "coding_estimated": true
+    },
+    {
+      "name": "Apodex 1.1",
+      "intelligence": 26.4,
+      "coding": 60.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Opus 4.6 (Non-reasoning, High)",
+      "intelligence": 26.4,
+      "coding": 58.56,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3 Flash Preview (Reasoning)",
+      "intelligence": 26.3,
+      "coding": 58.34,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.8 27B (Low)",
+      "intelligence": 26.2,
+      "coding": 58.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5.1 (Reasoning)",
+      "intelligence": 26.1,
+      "coding": 55.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.5 Instant (June 2026)",
+      "intelligence": 26.0,
+      "coding": 39.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiMo-V2.5-Pro (Reasoning)",
+      "intelligence": 26.0,
+      "coding": 60.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Kimi K2.7 Code",
+      "intelligence": 25.8,
+      "coding": 60.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4.20 0309 v2 (Reasoning)",
+      "intelligence": 25.7,
+      "coding": 54.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "Inkling Small",
+      "intelligence": 25.7,
+      "coding": 52.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Hy3",
+      "intelligence": 25.3,
+      "coding": 58.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "K2 Horizon MoVA 36B A4B",
+      "intelligence": 25.3,
+      "coding": 53.92,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.20 0309 (Reasoning)",
+      "intelligence": 25.2,
+      "coding": 53.7,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.7 Plus",
+      "intelligence": 25.2,
+      "coding": 55.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiMo-V2-Omni-0327",
+      "intelligence": 25.1,
+      "coding": 53.49,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Luna (Medium)",
+      "intelligence": 25.0,
+      "coding": 50.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Inkling (Xhigh)",
+      "intelligence": 25.0,
+      "coding": 52.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5 Codex (High)",
+      "intelligence": 24.9,
+      "coding": 53.07,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.3 (High)",
+      "intelligence": 24.9,
+      "coding": 42.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4.3 (Medium)",
+      "intelligence": 24.8,
+      "coding": 52.85,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 4.6 (Non-reasoning, High)",
+      "intelligence": 24.7,
+      "coding": 51.47,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V4.1 Flash (Non-reasoning)",
+      "intelligence": 24.7,
+      "coding": 51.47,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.1 (High)",
+      "intelligence": 24.7,
+      "coding": 49.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Solar Open2 250B",
+      "intelligence": 24.7,
+      "coding": 45.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Ling-3.0-flash-VL",
+      "intelligence": 24.6,
+      "coding": 57.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4 Flash 0420 (High)",
+      "intelligence": 24.4,
+      "coding": 52.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Sonnet 5 (Low)",
+      "intelligence": 24.3,
+      "coding": 51.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.3 (Low)",
+      "intelligence": 24.3,
+      "coding": 51.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V4 Flash 0420 (Max)",
+      "intelligence": 24.2,
+      "coding": 56.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5.1 (Non-reasoning)",
+      "intelligence": 24.2,
+      "coding": 51.57,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.4 mini (Xhigh)",
+      "intelligence": 24.1,
+      "coding": 56.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Solar Mini 4",
+      "intelligence": 24.1,
+      "coding": 51.36,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiMo-V2-Omni",
+      "intelligence": 23.9,
+      "coding": 50.93,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3.5 Flash (Minimal)",
+      "intelligence": 23.8,
+      "coding": 50.72,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Opus 4.5 (Non-reasoning)",
+      "intelligence": 23.7,
+      "coding": 51.02,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.1 Codex (High)",
+      "intelligence": 23.7,
+      "coding": 51.02,
+      "coding_estimated": true
+    },
+    {
+      "name": "Kimi K2.6 (Non-reasoning)",
+      "intelligence": 23.6,
+      "coding": 50.81,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM 5V Turbo (Reasoning)",
+      "intelligence": 23.5,
+      "coding": 50.59,
+      "coding_estimated": true
+    },
+    {
+      "name": "Kimi K2.5 (Reasoning)",
+      "intelligence": 23.5,
+      "coding": 46.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude Sonnet 4.6 (Non-reasoning, Low)",
+      "intelligence": 23.3,
+      "coding": 51.74,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Sonnet 5 (Non-reasoning, High)",
+      "intelligence": 23.2,
+      "coding": 66.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.5 (Non-reasoning)",
+      "intelligence": 23.2,
+      "coding": 56.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5 (High)",
+      "intelligence": 23.0,
+      "coding": 37.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5 (Medium)",
+      "intelligence": 22.9,
+      "coding": 52.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nemotron 3 Ultra 550B A55B (Reasoning)",
+      "intelligence": 22.9,
+      "coding": 49.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.5 27B (Reasoning)",
+      "intelligence": 22.9,
+      "coding": 52.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4.1 Opus (Reasoning)",
+      "intelligence": 22.8,
+      "coding": 50.63,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiniMax-M2.5",
+      "intelligence": 22.8,
+      "coding": 50.63,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiniMax-M2.7",
+      "intelligence": 22.8,
+      "coding": 52.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.5 Instant (May 2026)",
+      "intelligence": 22.7,
+      "coding": 48.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Hy3-preview (Reasoning)",
+      "intelligence": 22.7,
+      "coding": 48.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ling-3.0-flash-Fin",
+      "intelligence": 22.6,
+      "coding": 55.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4",
+      "intelligence": 22.5,
+      "coding": 48.44,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-5.2 (Non-reasoning)",
+      "intelligence": 22.4,
+      "coding": 46.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiMo-V2-Flash (Feb 2026)",
+      "intelligence": 22.4,
+      "coding": 49.74,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 3 Pro Preview (Low)",
+      "intelligence": 22.3,
+      "coding": 49.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-4.7 (Reasoning)",
+      "intelligence": 22.2,
+      "coding": 45.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 3.5 Flash-Lite",
+      "intelligence": 22.2,
+      "coding": 49.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Kimi K2 Thinking",
+      "intelligence": 22.0,
+      "coding": 47.36,
+      "coding_estimated": true
+    },
+    {
+      "name": "o3-pro",
+      "intelligence": 21.9,
+      "coding": 47.15,
+      "coding_estimated": true
+    },
+    {
+      "name": "G9v3-39A5B",
+      "intelligence": 21.8,
+      "coding": 33.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-5 (Non-reasoning)",
+      "intelligence": 21.8,
+      "coding": 48.41,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiMo-V2.5",
+      "intelligence": 21.8,
+      "coding": 56.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "KAT Coder Pro V2",
+      "intelligence": 21.7,
+      "coding": 59.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "A.X-K2",
+      "intelligence": 21.5,
+      "coding": 38.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V3.2 (Reasoning)",
+      "intelligence": 21.5,
+      "coding": 44.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Luna (Low)",
+      "intelligence": 21.5,
+      "coding": 47.75,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nemotron 3.5 Bolt 74B-A9B",
+      "intelligence": 21.4,
+      "coding": 47.25,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 397B A17B (Non-reasoning)",
+      "intelligence": 21.4,
+      "coding": 47.25,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.6 27B (Reasoning)",
+      "intelligence": 21.4,
+      "coding": 53.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 Max Thinking",
+      "intelligence": 21.3,
+      "coding": 47.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Luna (Low)",
+      "intelligence": 21.0,
+      "coding": 44.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiniMax-M2.1",
+      "intelligence": 20.9,
+      "coding": 49.19,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V4 Pro 0424 (Non-reasoning)",
+      "intelligence": 20.8,
+      "coding": 48.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5 (Low)",
+      "intelligence": 20.8,
+      "coding": 48.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.6 Terra (Non-reasoning)",
+      "intelligence": 20.8,
+      "coding": 52.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiMo-V2-Flash (Reasoning)",
+      "intelligence": 20.8,
+      "coding": 48.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4.5 Sonnet (Reasoning)",
+      "intelligence": 20.7,
+      "coding": 52.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.4 nano (Xhigh)",
+      "intelligence": 20.7,
+      "coding": 56.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude 4 Opus (Reasoning)",
+      "intelligence": 20.6,
+      "coding": 45.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5 mini (Medium)",
+      "intelligence": 20.6,
+      "coding": 45.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "K2 Horizon 7B",
+      "intelligence": 20.6,
+      "coding": 38.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4 Pro 0813 (Non-reasoning)",
+      "intelligence": 20.4,
+      "coding": 48.01,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.1 Codex mini (High)",
+      "intelligence": 20.4,
+      "coding": 48.01,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.1 Fast (Reasoning)",
+      "intelligence": 20.4,
+      "coding": 48.01,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 Omni Plus",
+      "intelligence": 20.4,
+      "coding": 48.01,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.8 27B (Non-reasoning)",
+      "intelligence": 20.2,
+      "coding": 44.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "o3",
+      "intelligence": 20.2,
+      "coding": 44.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ling 3.0 Flash",
+      "intelligence": 20.1,
+      "coding": 50.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.4 nano (Medium)",
+      "intelligence": 20.0,
+      "coding": 44.16,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.6 27B (Non-reasoning)",
+      "intelligence": 19.8,
+      "coding": 46.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.4 mini (Medium)",
+      "intelligence": 19.7,
+      "coding": 46.36,
+      "coding_estimated": true
+    },
+    {
+      "name": "K-EXAONE 2.0 0803",
+      "intelligence": 19.7,
+      "coding": 40.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Step 3.7 Flash",
+      "intelligence": 19.5,
+      "coding": 39.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Kimi K2.5 (Non-reasoning)",
+      "intelligence": 19.4,
+      "coding": 45.66,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 27B (Non-reasoning)",
+      "intelligence": 19.4,
+      "coding": 45.66,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4.5 Sonnet (Non-reasoning)",
+      "intelligence": 19.3,
+      "coding": 45.77,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 35B A3B (Reasoning)",
+      "intelligence": 19.3,
+      "coding": 45.77,
+      "coding_estimated": true
+    },
+    {
+      "name": "LongCat 2.0",
+      "intelligence": 19.1,
+      "coding": 45.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude 4 Sonnet (Reasoning)",
+      "intelligence": 18.9,
+      "coding": 37.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V4 Flash 0420 (Non-reasoning)",
+      "intelligence": 18.9,
+      "coding": 44.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "JT-35B-Flash",
+      "intelligence": 18.7,
+      "coding": 44.01,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4.1 Opus (Non-reasoning)",
+      "intelligence": 18.6,
+      "coding": 43.78,
+      "coding_estimated": true
+    },
+    {
+      "name": "KAT-Coder-Pro V1",
+      "intelligence": 18.6,
+      "coding": 43.78,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiniMax-M2",
+      "intelligence": 18.6,
+      "coding": 43.78,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-4.6 (Reasoning)",
+      "intelligence": 18.5,
+      "coding": 45.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-6 Luna (Non-reasoning)",
+      "intelligence": 18.5,
+      "coding": 43.54,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 397B A17B (Reasoning)",
+      "intelligence": 18.4,
+      "coding": 48.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiMo-V2.5-Pro (Non-reasoning)",
+      "intelligence": 18.3,
+      "coding": 43.07,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.4 (Non-reasoning)",
+      "intelligence": 18.2,
+      "coding": 42.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.6 35B A3B (Reasoning)",
+      "intelligence": 18.2,
+      "coding": 41.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 3 Flash Preview (Non-reasoning)",
+      "intelligence": 17.9,
+      "coding": 42.12,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4 Fast (Reasoning)",
+      "intelligence": 17.9,
+      "coding": 42.12,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 3.7 Sonnet (Reasoning)",
+      "intelligence": 17.7,
+      "coding": 36.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.5 122B A10B (Non-reasoning)",
+      "intelligence": 17.7,
+      "coding": 43.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Muse Glimmer (High)",
+      "intelligence": 17.5,
+      "coding": 49.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-4.7 (Non-reasoning)",
+      "intelligence": 17.4,
+      "coding": 41.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.2 (Non-reasoning)",
+      "intelligence": 17.0,
+      "coding": 41.59,
+      "coding_estimated": true
+    },
+    {
+      "name": "Hy3-preview (Non-reasoning)",
+      "intelligence": 17.0,
+      "coding": 41.59,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ling-2.6-1T",
+      "intelligence": 17.0,
+      "coding": 41.59,
+      "coding_estimated": true
+    },
+    {
+      "name": "Step 3.5 Flash 2603",
+      "intelligence": 17.0,
+      "coding": 41.59,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4.5 Haiku (Reasoning)",
+      "intelligence": 16.9,
+      "coding": 43.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Doubao Seed Code",
+      "intelligence": 16.9,
+      "coding": 41.34,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5 mini (High)",
+      "intelligence": 16.8,
+      "coding": 15.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemma 4 26B A4B (Reasoning)",
+      "intelligence": 16.7,
+      "coding": 39.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "o4-mini (High)",
+      "intelligence": 16.7,
+      "coding": 39.3,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4 Opus (Non-reasoning)",
+      "intelligence": 16.6,
+      "coding": 40.61,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4 Sonnet (Non-reasoning)",
+      "intelligence": 16.6,
+      "coding": 40.61,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V3.2 Exp (Reasoning)",
+      "intelligence": 16.6,
+      "coding": 40.61,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ring-2.6-1T",
+      "intelligence": 16.6,
+      "coding": 42.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Step 3.5 Flash",
+      "intelligence": 16.6,
+      "coding": 40.61,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Max Thinking (Preview)",
+      "intelligence": 16.3,
+      "coding": 41.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Pro",
+      "intelligence": 16.1,
+      "coding": 33.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V3.2 (Non-reasoning)",
+      "intelligence": 16.0,
+      "coding": 40.57,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiMo-V2-Flash (Non-reasoning)",
+      "intelligence": 16.0,
+      "coding": 49.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 3.1 Flash-Lite",
+      "intelligence": 15.6,
+      "coding": 34.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "K2 Horizon 3.7B",
+      "intelligence": 15.6,
+      "coding": 26.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 Max",
+      "intelligence": 15.6,
+      "coding": 39.55,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 122B A10B (Reasoning)",
+      "intelligence": 15.6,
+      "coding": 45.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5.6 Luna (Non-reasoning)",
+      "intelligence": 15.5,
+      "coding": 39.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 2.5 Flash Preview (Sep '25) (Reasoning)",
+      "intelligence": 15.5,
+      "coding": 39.3,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 4.5 Haiku (Non-reasoning)",
+      "intelligence": 15.4,
+      "coding": 39.71,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 3.7 Sonnet (Non-reasoning)",
+      "intelligence": 15.3,
+      "coding": 38.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "Kimi K2 0905",
+      "intelligence": 15.3,
+      "coding": 38.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.6 35B A3B (Non-reasoning)",
+      "intelligence": 15.2,
+      "coding": 28.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "o1",
+      "intelligence": 15.2,
+      "coding": 39.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.5 35B A3B (Non-reasoning)",
+      "intelligence": 15.1,
+      "coding": 37.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 2.5 Pro Preview (Mar' 25)",
+      "intelligence": 15.0,
+      "coding": 46.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-4.6 (Non-reasoning)",
+      "intelligence": 14.9,
+      "coding": 37.46,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-4.7-Flash (Reasoning)",
+      "intelligence": 14.9,
+      "coding": 37.46,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V3.1 Terminus (Reasoning)",
+      "intelligence": 14.8,
+      "coding": 43.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemma 4 31B (Reasoning)",
+      "intelligence": 14.7,
+      "coding": 43.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 3 mini Reasoning (High)",
+      "intelligence": 14.6,
+      "coding": 36.71,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.20 0309 (Non-reasoning)",
+      "intelligence": 14.6,
+      "coding": 36.71,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V3.2 Speciale",
+      "intelligence": 14.5,
+      "coding": 36.46,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Pro Preview (May' 25)",
+      "intelligence": 14.5,
+      "coding": 36.46,
+      "coding_estimated": true
+    },
+    {
+      "name": "K-EXAONE (Reasoning)",
+      "intelligence": 14.4,
+      "coding": 32.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "ERNIE 5.0 Thinking Preview",
+      "intelligence": 14.3,
+      "coding": 34.24,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 4 12B (Reasoning)",
+      "intelligence": 14.2,
+      "coding": 31.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4.20 0309 v2 (Non-reasoning)",
+      "intelligence": 14.2,
+      "coding": 34.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Medium 3.5",
+      "intelligence": 14.2,
+      "coding": 46.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nova 2.0 Pro Preview (Medium)",
+      "intelligence": 14.2,
+      "coding": 34.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok Code Fast 1",
+      "intelligence": 14.1,
+      "coding": 33.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 4.3 (Non-reasoning)",
+      "intelligence": 14.0,
+      "coding": 35.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V3.1 Terminus (Non-reasoning)",
+      "intelligence": 13.9,
+      "coding": 30.99,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V3.2 Exp (Non-reasoning)",
+      "intelligence": 13.9,
+      "coding": 30.99,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 4 31B (Non-reasoning)",
+      "intelligence": 13.9,
+      "coding": 33.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Apriel-v1.5-15B-Thinker",
+      "intelligence": 13.8,
+      "coding": 30.76,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V3.1 (Non-reasoning)",
+      "intelligence": 13.7,
+      "coding": 29.91,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova 2.0 Omni (Medium)",
+      "intelligence": 13.6,
+      "coding": 28.86,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V3.1 (Reasoning)",
+      "intelligence": 13.5,
+      "coding": 28.65,
+      "coding_estimated": true
+    },
+    {
+      "name": "Apriel-v1.6-15B-Thinker",
+      "intelligence": 13.4,
+      "coding": 28.44,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova 2.0 Lite (High)",
+      "intelligence": 13.4,
+      "coding": 23.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 VL 235B A22B (Reasoning)",
+      "intelligence": 13.4,
+      "coding": 28.44,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.1 (Non-reasoning)",
+      "intelligence": 13.3,
+      "coding": 27.63,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 9B (Non-reasoning)",
+      "intelligence": 13.3,
+      "coding": 23.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "EXAONE 4.5 33B (Reasoning)",
+      "intelligence": 13.2,
+      "coding": 23.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Command A+",
+      "intelligence": 13.1,
+      "coding": 27.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek R1 0528 (May '25)",
+      "intelligence": 13.1,
+      "coding": 27.22,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Flash (Reasoning)",
+      "intelligence": 13.1,
+      "coding": 27.22,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 4 26B A4B (Non-reasoning)",
+      "intelligence": 13.1,
+      "coding": 27.22,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 4B (Reasoning)",
+      "intelligence": 13.1,
+      "coding": 22.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5 nano (High)",
+      "intelligence": 13.0,
+      "coding": 27.01,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nemotron 3.5 Lightning",
+      "intelligence": 12.9,
+      "coding": 26.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-4.5 (Reasoning)",
+      "intelligence": 12.8,
+      "coding": 25.38,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nemotron 3 Super 120B A12B (Reasoning)",
+      "intelligence": 12.8,
+      "coding": 37.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nova 2.0 Pro Preview (Low)",
+      "intelligence": 12.8,
+      "coding": 25.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-4.1",
+      "intelligence": 12.7,
+      "coding": 25.18,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.2 30B",
+      "intelligence": 12.7,
+      "coding": 29.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Kimi K2",
+      "intelligence": 12.7,
+      "coding": 25.18,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 235B A22B 2507 (Reasoning)",
+      "intelligence": 12.7,
+      "coding": 22.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 Max (Preview)",
+      "intelligence": 12.6,
+      "coding": 24.98,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5 nano (Medium)",
+      "intelligence": 12.5,
+      "coding": 24.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiniCPM5-2B",
+      "intelligence": 12.5,
+      "coding": 14.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nova 2.0 Lite (Medium)",
+      "intelligence": 12.5,
+      "coding": 24.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 Omni Flash",
+      "intelligence": 12.5,
+      "coding": 24.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "o3-mini",
+      "intelligence": 12.5,
+      "coding": 24.79,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Flash Preview (Sep '25) (Non-reasoning)",
+      "intelligence": 12.4,
+      "coding": 24.59,
+      "coding_estimated": true
+    },
+    {
+      "name": "o1-pro",
+      "intelligence": 12.4,
+      "coding": 24.59,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mercury 2.5",
+      "intelligence": 12.3,
+      "coding": 24.89,
+      "coding_estimated": true
+    },
+    {
+      "name": "JT-MINI",
+      "intelligence": 12.2,
+      "coding": 25.89,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 3",
+      "intelligence": 12.1,
+      "coding": 25.14,
+      "coding_estimated": true
+    },
+    {
+      "name": "Seed-OSS-36B-Instruct",
+      "intelligence": 12.1,
+      "coding": 25.14,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 235B A22B 2507 Instruct",
+      "intelligence": 12.0,
+      "coding": 25.89,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Coder 480B A35B Instruct",
+      "intelligence": 11.9,
+      "coding": 25.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 VL 32B (Reasoning)",
+      "intelligence": 11.9,
+      "coding": 25.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Magistral Medium 1.2",
+      "intelligence": 11.8,
+      "coding": 21.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nova 2.0 Lite (Low)",
+      "intelligence": 11.8,
+      "coding": 23.81,
+      "coding_estimated": true
+    },
+    {
+      "name": "Sonar Reasoning Pro",
+      "intelligence": 11.8,
+      "coding": 23.81,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.4 nano (Non-reasoning)",
+      "intelligence": 11.7,
+      "coding": 23.61,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Flash Preview (Reasoning)",
+      "intelligence": 11.7,
+      "coding": 23.61,
+      "coding_estimated": true
+    },
+    {
+      "name": "HyperNova 60B 2605 (High, Based on gpt-oss-120b)",
+      "intelligence": 11.7,
+      "coding": 23.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiniMax M1 80k",
+      "intelligence": 11.7,
+      "coding": 23.61,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nemotron Cascade 2 30B A3B",
+      "intelligence": 11.7,
+      "coding": 25.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "gpt-oss-120b (High)",
+      "intelligence": 11.6,
+      "coding": 30.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "K2 Think V2",
+      "intelligence": 11.5,
+      "coding": 21.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "LongCat Flash Lite",
+      "intelligence": 11.5,
+      "coding": 24.82,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek R1 (Jan '25)",
+      "intelligence": 11.4,
+      "coding": 24.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-5 (Minimal)",
+      "intelligence": 11.4,
+      "coding": 24.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "HyperCLOVA X SEED Think (32B)",
+      "intelligence": 11.4,
+      "coding": 24.6,
+      "coding_estimated": true
+    },
+    {
+      "name": "o1-preview",
+      "intelligence": 11.4,
+      "coding": 34.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4.1 Fast (Non-reasoning)",
+      "intelligence": 11.3,
+      "coding": 24.38,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Small 4 (Reasoning)",
+      "intelligence": 11.3,
+      "coding": 26.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-4.6V (Reasoning)",
+      "intelligence": 11.2,
+      "coding": 24.17,
+      "coding_estimated": true
+    },
+    {
+      "name": "K-EXAONE (Non-reasoning)",
+      "intelligence": 11.2,
+      "coding": 24.17,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Next 80B A3B (Reasoning)",
+      "intelligence": 11.2,
+      "coding": 17.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.5 9B (Reasoning)",
+      "intelligence": 11.2,
+      "coding": 28.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-4.5-Air",
+      "intelligence": 11.1,
+      "coding": 23.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5.4 mini (Non-reasoning)",
+      "intelligence": 11.1,
+      "coding": 23.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.2 8B",
+      "intelligence": 11.1,
+      "coding": 22.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Grok 4 Fast (Non-reasoning)",
+      "intelligence": 11.1,
+      "coding": 23.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ling 3.0 Tiny",
+      "intelligence": 11.1,
+      "coding": 26.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nova 2.0 Omni (Low)",
+      "intelligence": 11.1,
+      "coding": 23.95,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mi:dm K 2.5 Pro",
+      "intelligence": 11.0,
+      "coding": 23.74,
+      "coding_estimated": true
+    },
+    {
+      "name": "o3-mini (High)",
+      "intelligence": 11.0,
+      "coding": 16.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Ring-1T",
+      "intelligence": 10.9,
+      "coding": 23.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "G9v3-3B",
+      "intelligence": 10.8,
+      "coding": 9.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mercury 2",
+      "intelligence": 10.8,
+      "coding": 31.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3.5 4B (Non-reasoning)",
+      "intelligence": 10.8,
+      "coding": 20.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Trinity Large Thinking",
+      "intelligence": 10.8,
+      "coding": 25.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GLM-4.7-Flash (Non-reasoning)",
+      "intelligence": 10.6,
+      "coding": 22.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "INTELLECT-3 (Based on GLM-4.5-Air)",
+      "intelligence": 10.6,
+      "coding": 22.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5 (ChatGPT)",
+      "intelligence": 10.4,
+      "coding": 21.62,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Flash-Lite Preview (Sep '25) (Reasoning)",
+      "intelligence": 10.4,
+      "coding": 21.62,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 3 Reasoning Beta",
+      "intelligence": 10.4,
+      "coding": 21.62,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Open 100B (Reasoning)",
+      "intelligence": 10.4,
+      "coding": 21.62,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nemotron 3 Nano Omni 30B A3B Reasoning",
+      "intelligence": 10.3,
+      "coding": 13.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-4.1 mini",
+      "intelligence": 10.2,
+      "coding": 20.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "gpt-oss-120b (Low)",
+      "intelligence": 10.2,
+      "coding": 21.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiniMax M1 40k",
+      "intelligence": 10.0,
+      "coding": 20.78,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova 2.0 Pro Preview (Non-reasoning)",
+      "intelligence": 10.0,
+      "coding": 20.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "gpt-oss-20b (Low)",
+      "intelligence": 10.0,
+      "coding": 20.78,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5 mini (Minimal)",
+      "intelligence": 9.9,
+      "coding": 20.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Flash (Non-reasoning)",
+      "intelligence": 9.9,
+      "coding": 20.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "K2-V2 (High)",
+      "intelligence": 9.9,
+      "coding": 20.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "North Mini Code",
+      "intelligence": 9.9,
+      "coding": 36.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 VL 235B A22B Instruct",
+      "intelligence": 9.9,
+      "coding": 20.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 30B A3B 2507 (Reasoning)",
+      "intelligence": 9.8,
+      "coding": 12.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "o1-mini",
+      "intelligence": 9.8,
+      "coding": 20.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek V3 0324",
+      "intelligence": 9.7,
+      "coding": 21.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Ling 2.6 Flash",
+      "intelligence": 9.7,
+      "coding": 25.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-4.5 (Preview)",
+      "intelligence": 9.6,
+      "coding": 20.75,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Coder 30B A3B Instruct",
+      "intelligence": 9.6,
+      "coding": 20.75,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Next 80B A3B Instruct",
+      "intelligence": 9.6,
+      "coding": 20.75,
+      "coding_estimated": true
+    },
+    {
+      "name": "Tri-21B-think Preview",
+      "intelligence": 9.6,
+      "coding": 20.75,
+      "coding_estimated": true
+    },
+    {
+      "name": "DiffusionGemma 26B A4B",
+      "intelligence": 9.5,
+      "coding": 19.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "QwQ 32B",
+      "intelligence": 9.5,
+      "coding": 20.53,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 235B A22B (Reasoning)",
+      "intelligence": 9.5,
+      "coding": 20.53,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 VL 30B A3B (Reasoning)",
+      "intelligence": 9.5,
+      "coding": 20.53,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.0 Flash Thinking Experimental (Jan '25)",
+      "intelligence": 9.4,
+      "coding": 24.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemma 4 12B (Non-reasoning)",
+      "intelligence": 9.4,
+      "coding": 20.32,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.5 Flash-Lite Preview (Sep '25) (Non-reasoning)",
+      "intelligence": 9.3,
+      "coding": 20.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 4 Maverick",
+      "intelligence": 9.3,
+      "coding": 16.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mistral Large 3",
+      "intelligence": 9.3,
+      "coding": 20.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Ling-1T",
+      "intelligence": 9.2,
+      "coding": 20.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Medium 3.1",
+      "intelligence": 9.2,
+      "coding": 20.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Motif-2-12.7B-Reasoning",
+      "intelligence": 9.2,
+      "coding": 20.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova Premier",
+      "intelligence": 9.2,
+      "coding": 20.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Coder Next",
+      "intelligence": 9.2,
+      "coding": 36.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Granite 4.2 3B",
+      "intelligence": 9.1,
+      "coding": 17.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Magistral Medium 1",
+      "intelligence": 9.1,
+      "coding": 19.89,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Pro 2 (Preview) (Reasoning)",
+      "intelligence": 9.1,
+      "coding": 19.89,
+      "coding_estimated": true
+    },
+    {
+      "name": "Devstral Medium",
+      "intelligence": 9.0,
+      "coding": 20.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-4o (March 2025, chatgpt-4o-latest)",
+      "intelligence": 9.0,
+      "coding": 20.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "K2-V2 (Medium)",
+      "intelligence": 9.0,
+      "coding": 20.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama Nemotron Super 49B v1.5 (Reasoning)",
+      "intelligence": 9.0,
+      "coding": 20.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Medium 3",
+      "intelligence": 9.0,
+      "coding": 20.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Small 4 (Non-reasoning)",
+      "intelligence": 9.0,
+      "coding": 20.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "Tri-21B-Think",
+      "intelligence": 9.0,
+      "coding": 20.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "gpt-oss-20b (High)",
+      "intelligence": 9.0,
+      "coding": 20.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude 3.5 Haiku",
+      "intelligence": 8.9,
+      "coding": 15.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 2.0 Flash (Feb '25)",
+      "intelligence": 8.9,
+      "coding": 19.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 4 E4B (Reasoning)",
+      "intelligence": 8.9,
+      "coding": 19.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.3 Nemotron Super 49B v1 (Reasoning)",
+      "intelligence": 8.9,
+      "coding": 19.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "NVIDIA Nemotron 3 Nano 30B A3B (Reasoning)",
+      "intelligence": 8.9,
+      "coding": 14.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "MiniCPM5-1B (Reasoning)",
+      "intelligence": 8.8,
+      "coding": 19.02,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 4B 2507 (Reasoning)",
+      "intelligence": 8.8,
+      "coding": 19.02,
+      "coding_estimated": true
+    },
+    {
+      "name": "Sarvam 105B (High)",
+      "intelligence": 8.8,
+      "coding": 19.02,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 3 Opus",
+      "intelligence": 8.7,
+      "coding": 19.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Devstral Small (May '25)",
+      "intelligence": 8.7,
+      "coding": 18.8,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.0 Pro Experimental (Feb '25)",
+      "intelligence": 8.7,
+      "coding": 25.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 2.5 Flash Preview (Non-reasoning)",
+      "intelligence": 8.7,
+      "coding": 18.8,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiniCPM5-1B (Non-reasoning)",
+      "intelligence": 8.7,
+      "coding": 18.8,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova 2.0 Lite (Non-reasoning)",
+      "intelligence": 8.7,
+      "coding": 18.8,
+      "coding_estimated": true
+    },
+    {
+      "name": "Sonar Reasoning",
+      "intelligence": 8.7,
+      "coding": 18.8,
+      "coding_estimated": true
+    },
+    {
+      "name": "Devstral 2",
+      "intelligence": 8.6,
+      "coding": 31.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Magistral Small 1.2",
+      "intelligence": 8.6,
+      "coding": 14.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek V3 (Dec '24)",
+      "intelligence": 8.5,
+      "coding": 23.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 2.5 Flash-Lite (Reasoning)",
+      "intelligence": 8.5,
+      "coding": 19.05,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek R1 Distill Qwen 32B",
+      "intelligence": 8.4,
+      "coding": 17.45,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-4.6V (Non-reasoning)",
+      "intelligence": 8.4,
+      "coding": 17.45,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-4o (Nov '24)",
+      "intelligence": 8.4,
+      "coding": 17.45,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2.5-2.6B",
+      "intelligence": 8.4,
+      "coding": 7.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nanbeige4.1-3B",
+      "intelligence": 8.4,
+      "coding": 9.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 VL 32B Instruct",
+      "intelligence": 8.4,
+      "coding": 17.45,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 235B A22B (Non-reasoning)",
+      "intelligence": 8.3,
+      "coding": 14.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "EXAONE 4.0 32B (Reasoning)",
+      "intelligence": 8.2,
+      "coding": 17.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.0 Flash (experimental)",
+      "intelligence": 8.2,
+      "coding": 17.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "Magistral Small 1",
+      "intelligence": 8.2,
+      "coding": 17.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova 2.0 Omni (Non-reasoning)",
+      "intelligence": 8.2,
+      "coding": 17.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 VL 8B (Reasoning)",
+      "intelligence": 8.2,
+      "coding": 17.03,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek R1 0528 Qwen3 8B",
+      "intelligence": 8.1,
+      "coding": 16.82,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen2.5 Max",
+      "intelligence": 8.0,
+      "coding": 16.62,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 3.5 Sonnet (Oct '24)",
+      "intelligence": 7.9,
+      "coding": 30.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek R1 Distill Llama 70B",
+      "intelligence": 7.9,
+      "coding": 16.41,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 1.5 Pro (Sep '24)",
+      "intelligence": 7.9,
+      "coding": 23.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Hermes 4 - Llama-3.1 70B (Reasoning)",
+      "intelligence": 7.9,
+      "coding": 16.41,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 VL 30B A3B Instruct",
+      "intelligence": 7.9,
+      "coding": 16.41,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Pro 2 (Preview) (Non-reasoning)",
+      "intelligence": 7.9,
+      "coding": 16.41,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek R1 Distill Qwen 14B",
+      "intelligence": 7.8,
+      "coding": 16.57,
+      "coding_estimated": true
+    },
+    {
+      "name": "Falcon-H1R-7B",
+      "intelligence": 7.8,
+      "coding": 16.57,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-4.1 nano",
+      "intelligence": 7.8,
+      "coding": 11.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemma 4 E2B (Reasoning)",
+      "intelligence": 7.8,
+      "coding": 7.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Ling-flash-2.0",
+      "intelligence": 7.8,
+      "coding": 16.57,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Omni 30B A3B (Reasoning)",
+      "intelligence": 7.8,
+      "coding": 16.57,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Pro 3",
+      "intelligence": 7.8,
+      "coding": 16.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-4o (Aug '24)",
+      "intelligence": 7.7,
+      "coding": 16.36,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.3 Instruct 70B",
+      "intelligence": 7.7,
+      "coding": 11.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen2.5 Instruct 72B",
+      "intelligence": 7.7,
+      "coding": 16.36,
+      "coding_estimated": true
+    },
+    {
+      "name": "Sonar",
+      "intelligence": 7.7,
+      "coding": 16.36,
+      "coding_estimated": true
+    },
+    {
+      "name": "Step3 VL 10B",
+      "intelligence": 7.7,
+      "coding": 16.36,
+      "coding_estimated": true
+    },
+    {
+      "name": "Devstral Small (Jul '25)",
+      "intelligence": 7.6,
+      "coding": 16.15,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-4.5V (Reasoning)",
+      "intelligence": 7.6,
+      "coding": 16.15,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Large 2 (Nov '24)",
+      "intelligence": 7.6,
+      "coding": 16.15,
+      "coding_estimated": true
+    },
+    {
+      "name": "QwQ 32B-Preview",
+      "intelligence": 7.6,
+      "coding": 16.15,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 30B A3B (Reasoning)",
+      "intelligence": 7.6,
+      "coding": 16.15,
+      "coding_estimated": true
+    },
+    {
+      "name": "Sonar Pro",
+      "intelligence": 7.6,
+      "coding": 16.15,
+      "coding_estimated": true
+    },
+    {
+      "name": "Devstral Small 2",
+      "intelligence": 7.5,
+      "coding": 29.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "ERNIE 4.5 300B A47B",
+      "intelligence": 7.5,
+      "coding": 15.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 4 E4B (Non-reasoning)",
+      "intelligence": 7.5,
+      "coding": 15.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "Hermes 4 - Llama-3.1 405B (Reasoning)",
+      "intelligence": 7.5,
+      "coding": 15.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.1 Nemotron Ultra 253B v1 (Reasoning)",
+      "intelligence": 7.5,
+      "coding": 15.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "NVIDIA Nemotron Nano 12B v2 VL (Reasoning)",
+      "intelligence": 7.5,
+      "coding": 15.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 30B A3B 2507 Instruct",
+      "intelligence": 7.5,
+      "coding": 15.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Pro 2 (Reasoning)",
+      "intelligence": 7.5,
+      "coding": 15.94,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.0 Flash-Lite (Feb '25)",
+      "intelligence": 7.4,
+      "coding": 15.73,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.1 30B",
+      "intelligence": 7.4,
+      "coding": 10.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Hermes 4 - Llama-3.1 405B (Non-reasoning)",
+      "intelligence": 7.4,
+      "coding": 15.73,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama Nemotron Super 49B v1.5 (Non-reasoning)",
+      "intelligence": 7.4,
+      "coding": 15.73,
+      "coding_estimated": true
+    },
+    {
+      "name": "NVIDIA Nemotron Nano 9B V2 (Reasoning)",
+      "intelligence": 7.4,
+      "coding": 15.73,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-4o (May '24)",
+      "intelligence": 7.3,
+      "coding": 24.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 2.0 Flash-Lite (Preview)",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "K2-V2 (Low)",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Kimi Linear 48B A3B Instruct",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.1 Instruct 405B",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.1 Nemotron Nano 4B v1.1 (Reasoning)",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.3 Nemotron Super 49B v1 (Non-reasoning)",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 32B (Non-reasoning)",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 VL 8B Instruct",
+      "intelligence": 7.3,
+      "coding": 14.27,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 3.5 Sonnet (June '24)",
+      "intelligence": 7.2,
+      "coding": 26.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-4o (ChatGPT)",
+      "intelligence": 7.2,
+      "coding": 14.08,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2.5-8B-A1B",
+      "intelligence": 7.2,
+      "coding": 14.08,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.1 Tulu3 405B",
+      "intelligence": 7.2,
+      "coding": 14.08,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 32B (Reasoning)",
+      "intelligence": 7.2,
+      "coding": 15.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 4B (Reasoning)",
+      "intelligence": 7.2,
+      "coding": 14.08,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ring-flash-2.0",
+      "intelligence": 7.2,
+      "coding": 14.08,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-5 nano (Minimal)",
+      "intelligence": 7.1,
+      "coding": 12.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 1.5 Flash (Sep '24)",
+      "intelligence": 7.1,
+      "coding": 12.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok 2 (Dec '24)",
+      "intelligence": 7.1,
+      "coding": 12.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Small 3.1",
+      "intelligence": 7.1,
+      "coding": 26.3,
+      "coding_estimated": false
+    },
+    {
+      "name": "Olmo 3.1 32B Think",
+      "intelligence": 7.1,
+      "coding": 12.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Pixtral Large",
+      "intelligence": 7.1,
+      "coding": 12.68,
+      "coding_estimated": true
+    },
+    {
+      "name": "Command A",
+      "intelligence": 7.0,
+      "coding": 13.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-4 Turbo",
+      "intelligence": 7.0,
+      "coding": 21.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mistral Small 3.2",
+      "intelligence": 7.0,
+      "coding": 12.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Nova Pro",
+      "intelligence": 7.0,
+      "coding": 13.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 VL 4B (Reasoning)",
+      "intelligence": 7.0,
+      "coding": 13.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Pro 2 (Non-reasoning)",
+      "intelligence": 7.0,
+      "coding": 13.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok Beta",
+      "intelligence": 6.9,
+      "coding": 13.49,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.1 Instruct 8B",
+      "intelligence": 6.9,
+      "coding": 5.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Llama 3.1 Nemotron Instruct 70B",
+      "intelligence": 6.9,
+      "coding": 13.49,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen2.5 Instruct 32B",
+      "intelligence": 6.9,
+      "coding": 13.49,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 2B (Reasoning)",
+      "intelligence": 6.9,
+      "coding": 2.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mistral Large 2 (Jul '24)",
+      "intelligence": 6.8,
+      "coding": 14.45,
+      "coding_estimated": true
+    },
+    {
+      "name": "NVIDIA Nemotron 3 Nano 30B A3B (Non-reasoning)",
+      "intelligence": 6.8,
+      "coding": 14.45,
+      "coding_estimated": true
+    },
+    {
+      "name": "NVIDIA Nemotron Nano 9B V2 (Non-reasoning)",
+      "intelligence": 6.8,
+      "coding": 14.45,
+      "coding_estimated": true
+    },
+    {
+      "name": "GLM-4.5V (Non-reasoning)",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-4",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "GPT-4o mini",
+      "intelligence": 6.7,
+      "coding": 11.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemini 2.5 Flash-Lite (Non-reasoning)",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Hermes 4 - Llama-3.1 70B (Non-reasoning)",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Small 3",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova Lite",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen2.5 Coder Instruct 32B",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 14B (Non-reasoning)",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 4B 2507 Instruct",
+      "intelligence": 6.7,
+      "coding": 13.1,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek-V2.5",
+      "intelligence": 6.6,
+      "coding": 11.23,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek-V2.5 (Dec '24)",
+      "intelligence": 6.6,
+      "coding": 11.23,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 2.0 Flash Thinking Experimental (Dec '24)",
+      "intelligence": 6.6,
+      "coding": 11.23,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.1 8B",
+      "intelligence": 6.6,
+      "coding": 9.5,
+      "coding_estimated": false
+    },
+    {
+      "name": "Llama 3.1 Instruct 70B",
+      "intelligence": 6.6,
+      "coding": 11.23,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 30B A3B (Non-reasoning)",
+      "intelligence": 6.6,
+      "coding": 11.23,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 4B (Non-reasoning)",
+      "intelligence": 6.6,
+      "coding": 11.23,
+      "coding_estimated": true
+    },
+    {
+      "name": "Sarvam 30B (High)",
+      "intelligence": 6.6,
+      "coding": 11.23,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek R1 Distill Llama 8B",
+      "intelligence": 6.5,
+      "coding": 11.06,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 4 E2B (Non-reasoning)",
+      "intelligence": 6.5,
+      "coding": 11.06,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 4 Scout",
+      "intelligence": 6.5,
+      "coding": 8.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mistral Saba",
+      "intelligence": 6.5,
+      "coding": 11.06,
+      "coding_estimated": true
+    },
+    {
+      "name": "Olmo 3 32B Think",
+      "intelligence": 6.5,
+      "coding": 11.06,
+      "coding_estimated": true
+    },
+    {
+      "name": "Olmo 3.1 32B Instruct",
+      "intelligence": 6.5,
+      "coding": 11.06,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 1.5 Pro (May '24)",
+      "intelligence": 6.4,
+      "coding": 19.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Llama 3.2 Instruct 90B (Vision)",
+      "intelligence": 6.4,
+      "coding": 9.21,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen2.5 Turbo",
+      "intelligence": 6.4,
+      "coding": 9.21,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 14B (Reasoning)",
+      "intelligence": 6.4,
+      "coding": 13.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "R1 1776",
+      "intelligence": 6.4,
+      "coding": 9.21,
+      "coding_estimated": true
+    },
+    {
+      "name": "Reka Flash (Sep '24)",
+      "intelligence": 6.4,
+      "coding": 9.21,
+      "coding_estimated": true
+    },
+    {
+      "name": "Solar Mini",
+      "intelligence": 6.4,
+      "coding": 9.21,
+      "coding_estimated": true
+    },
+    {
+      "name": "Celeris-1",
+      "intelligence": 6.3,
+      "coding": 14.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "EXAONE 4.0 32B (Non-reasoning)",
+      "intelligence": 6.3,
+      "coding": 9.07,
+      "coding_estimated": true
+    },
+    {
+      "name": "Grok-1",
+      "intelligence": 6.3,
+      "coding": 9.07,
+      "coding_estimated": true
+    },
+    {
+      "name": "Phi-4 Mini Instruct",
+      "intelligence": 6.3,
+      "coding": 3.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen2 Instruct 72B",
+      "intelligence": 6.3,
+      "coding": 9.07,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 1.5 Flash-8B",
+      "intelligence": 6.2,
+      "coding": 10.55,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 2B (Non-reasoning)",
+      "intelligence": 6.2,
+      "coding": 2.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepHermes 3 - Mistral 24B Preview (Non-reasoning)",
+      "intelligence": 6.1,
+      "coding": 11.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Jamba 1.7 Large",
+      "intelligence": 6.1,
+      "coding": 11.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 0.8B (Reasoning)",
+      "intelligence": 6.1,
+      "coding": 0.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek-Coder-V2",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.0 H Small",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Hermes 3 - Llama-3.1 70B",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Jamba 1.5 Large",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Jamba 1.6 Large",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ministral 3 14B",
+      "intelligence": 6.0,
+      "coding": 14.4,
+      "coding_estimated": false
+    },
+    {
+      "name": "OLMo 2 32B",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 8B (Non-reasoning)",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 Omni 30B A3B Instruct",
+      "intelligence": 6.0,
+      "coding": 11.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 3 Sonnet",
+      "intelligence": 5.9,
+      "coding": 11.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 1.5 Flash (May '24)",
+      "intelligence": 5.9,
+      "coding": 11.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.1 3B",
+      "intelligence": 5.9,
+      "coding": 4.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "LFM2 24B A2B",
+      "intelligence": 5.9,
+      "coding": 11.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "Nova Micro",
+      "intelligence": 5.9,
+      "coding": 11.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "Phi-4",
+      "intelligence": 5.9,
+      "coding": 11.48,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 1.0 Ultra",
+      "intelligence": 5.8,
+      "coding": 17.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemma 3n E4B Instruct Preview (May '25)",
+      "intelligence": 5.8,
+      "coding": 10.04,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Large (Feb '24)",
+      "intelligence": 5.8,
+      "coding": 10.04,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Small (Sep '24)",
+      "intelligence": 5.8,
+      "coding": 10.04,
+      "coding_estimated": true
+    },
+    {
+      "name": "NVIDIA Nemotron Nano 12B v2 VL (Non-reasoning)",
+      "intelligence": 5.8,
+      "coding": 10.04,
+      "coding_estimated": true
+    },
+    {
+      "name": "Phi-3 Mini Instruct 3.8B",
+      "intelligence": 5.8,
+      "coding": 10.04,
+      "coding_estimated": true
+    },
+    {
+      "name": "Phi-4 Multimodal Instruct",
+      "intelligence": 5.8,
+      "coding": 10.04,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen2.5 Coder Instruct 7B",
+      "intelligence": 5.8,
+      "coding": 10.04,
+      "coding_estimated": true
+    },
+    {
+      "name": "Jamba Reasoning 3B",
+      "intelligence": 5.7,
+      "coding": 9.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 2 Chat 7B",
+      "intelligence": 5.7,
+      "coding": 9.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.2 Instruct 3B",
+      "intelligence": 5.7,
+      "coding": 9.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "MiniCPM-V 4.6 1.3B",
+      "intelligence": 5.7,
+      "coding": 0.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mixtral 8x22B Instruct",
+      "intelligence": 5.7,
+      "coding": 9.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen1.5 Chat 110B",
+      "intelligence": 5.7,
+      "coding": 9.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 VL 4B Instruct",
+      "intelligence": 5.7,
+      "coding": 9.87,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 2.1",
+      "intelligence": 5.6,
+      "coding": 14.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Claude 3 Haiku",
+      "intelligence": 5.6,
+      "coding": 9.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Molmo 7B-D",
+      "intelligence": 5.6,
+      "coding": 9.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "OLMo 2 7B",
+      "intelligence": 5.6,
+      "coding": 9.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Olmo 3 7B Think",
+      "intelligence": 5.6,
+      "coding": 9.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Reka Flash 3",
+      "intelligence": 5.6,
+      "coding": 9.69,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude 2.0",
+      "intelligence": 5.5,
+      "coding": 12.9,
+      "coding_estimated": false
+    },
+    {
+      "name": "DeepSeek R1 Distill Qwen 1.5B",
+      "intelligence": 5.5,
+      "coding": 9.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek-V2-Chat",
+      "intelligence": 5.5,
+      "coding": 9.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "GPT-3.5 Turbo",
+      "intelligence": 5.5,
+      "coding": 10.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Ling-mini-2.0",
+      "intelligence": 5.5,
+      "coding": 9.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3 Instruct 70B",
+      "intelligence": 5.5,
+      "coding": 9.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ministral 3 8B",
+      "intelligence": 5.5,
+      "coding": 9.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Mistral Medium",
+      "intelligence": 5.5,
+      "coding": 9.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral Small (Feb '24)",
+      "intelligence": 5.5,
+      "coding": 9.52,
+      "coding_estimated": true
+    },
+    {
+      "name": "Arctic Instruct",
+      "intelligence": 5.4,
+      "coding": 9.35,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM 40B",
+      "intelligence": 5.4,
+      "coding": 9.35,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.2 Instruct 11B (Vision)",
+      "intelligence": 5.4,
+      "coding": 9.35,
+      "coding_estimated": true
+    },
+    {
+      "name": "PALM-2",
+      "intelligence": 5.4,
+      "coding": 4.6,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen Chat 72B",
+      "intelligence": 5.4,
+      "coding": 9.35,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3.5 0.8B (Non-reasoning)",
+      "intelligence": 5.4,
+      "coding": 1.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Command-R+ (Apr '24)",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "DBRX Instruct",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek Coder V2 Lite Instruct",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepSeek LLM 67B Chat (V1)",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Exaone 4.0 1.2B (Reasoning)",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemini 1.0 Pro",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 2 Chat 13B",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 2 Chat 70B",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "OpenChat 3.5 (1210)",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Sarvam M (Reasoning, Based on Mistral Small 3.1)",
+      "intelligence": 5.3,
+      "coding": 8.83,
+      "coding_estimated": true
+    },
+    {
+      "name": "Exaone 4.0 1.2B (Non-reasoning)",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.0 H 1B",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Jamba 1.5 Mini",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Jamba 1.6 Mini",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Jamba 1.7 Mini",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2 2.6B",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2.5-1.2B-Instruct",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2.5-1.2B-Thinking",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Olmo 3 7B Instruct",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 1.7B (Reasoning)",
+      "intelligence": 5.2,
+      "coding": 8.67,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 8B (Reasoning)",
+      "intelligence": 5.2,
+      "coding": 9.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Apertus 70B Instruct",
+      "intelligence": 5.1,
+      "coding": 8.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "DeepHermes 3 - Llama-3.1 8B Preview (Non-reasoning)",
+      "intelligence": 5.1,
+      "coding": 8.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 3 270M",
+      "intelligence": 5.1,
+      "coding": 8.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.0 Micro",
+      "intelligence": 5.1,
+      "coding": 8.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mixtral 8x7B Instruct",
+      "intelligence": 5.1,
+      "coding": 8.5,
+      "coding_estimated": true
+    },
+    {
+      "name": "Claude Instant",
+      "intelligence": 5.0,
+      "coding": 7.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "Command-R (Mar '24)",
+      "intelligence": 5.0,
+      "coding": 8.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.0 1B",
+      "intelligence": 5.0,
+      "coding": 8.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 65B",
+      "intelligence": 5.0,
+      "coding": 8.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Mistral 7B Instruct",
+      "intelligence": 5.0,
+      "coding": 8.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Molmo2-8B",
+      "intelligence": 5.0,
+      "coding": 8.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen Chat 14B",
+      "intelligence": 5.0,
+      "coding": 8.33,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 3 27B Instruct",
+      "intelligence": 4.9,
+      "coding": 10.1,
+      "coding_estimated": false
+    },
+    {
+      "name": "Granite 3.3 8B (Non-reasoning)",
+      "intelligence": 4.9,
+      "coding": 8.17,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2 8B A1B",
+      "intelligence": 4.9,
+      "coding": 8.17,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 1.7B (Non-reasoning)",
+      "intelligence": 4.9,
+      "coding": 8.17,
+      "coding_estimated": true
+    },
+    {
+      "name": "Apertus 8B Instruct",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 3 1B Instruct",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 3 4B Instruct",
+      "intelligence": 4.8,
+      "coding": 2.7,
+      "coding_estimated": false
+    },
+    {
+      "name": "Gemma 3n E2B Instruct",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 3n E4B Instruct",
+      "intelligence": 4.8,
+      "coding": 3.2,
+      "coding_estimated": false
+    },
+    {
+      "name": "Granite 4.0 350M",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Granite 4.0 H 350M",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2 1.2B",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "LFM2.5-VL-1.6B",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3 Instruct 8B",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Llama 3.2 Instruct 1B",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Ministral 3 3B",
+      "intelligence": 4.8,
+      "coding": 4.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "NVIDIA Nemotron 3 Nano 4B",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": false
+    },
+    {
+      "name": "Qwen3 0.6B (Non-reasoning)",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Qwen3 0.6B (Reasoning)",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Tiny Aya Global",
+      "intelligence": 4.8,
+      "coding": 8.0,
+      "coding_estimated": true
+    },
+    {
+      "name": "Gemma 3 12B Instruct",
+      "intelligence": 3.8,
+      "coding": 5.8,
+      "coding_estimated": false
+    },
+    {
+      "name": "K2 Horizon 0.9B",
+      "intelligence": 3.0,
+      "coding": 3.4,
+      "coding_estimated": false
+    }
+  ]
+}

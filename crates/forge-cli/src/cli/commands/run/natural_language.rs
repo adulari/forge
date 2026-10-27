@@ -17,7 +17,7 @@ pub(crate) async fn nl_cmd(query: String, mode: Option<Mode>) -> Result<()> {
             "empty query — usage: forge nl \"what changed performance-wise since last week\""
         );
     }
-    maybe_first_run_setup(false)?;
+    let _ = crate::onboarding::maybe_open(false)?;
     // Gather shell context so the model can run the right commands.
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())

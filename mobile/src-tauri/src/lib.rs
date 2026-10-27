@@ -19,7 +19,11 @@ use tauri::{RunEvent, WindowEvent};
 mod about;
 mod auto_update;
 mod menu;
+mod ota;
 mod preview;
+#[cfg(test)]
+#[path = "../runtime_version.rs"]
+mod runtime_version;
 #[cfg(test)]
 mod security_config;
 mod serve_discovery;
@@ -177,12 +181,21 @@ pub fn run(process_start: Instant) {
     builder = builder.plugin(tauri_plugin_process::init());
     perf_mark(|timeline| timeline.plugin_process_ms = Some(perf_elapsed_ms()));
     builder = builder.manage(about::AboutState::default());
+    let mut context = tauri::generate_context!();
+    let ota = ota::install_into(&mut context);
+    builder = builder.manage(ota.clone());
     perf_mark(|timeline| timeline.plugins_registered_ms = Some(perf_elapsed_ms()));
     builder
         .register_uri_scheme_protocol(about::URI_SCHEME, about::serve)
         .invoke_handler(tauri::generate_handler![
             auto_update::desktop_update_installable,
             auto_update::desktop_update_installed_version,
+            ota::ota_status,
+            ota::ota_check_now,
+            ota::ota_mark_healthy,
+            ota::ota_apply_pending,
+            ota::ota_reset,
+            auto_update::desktop_update_policy,
             serve_discovery::detect_forge_serve,
             serve_discovery::forge_binary_available,
             serve_discovery::start_forge_serve,
@@ -221,7 +234,7 @@ pub fn run(process_start: Instant) {
                 PageLoadEvent::Finished => timeline.dom_content_loaded_ms = Some(perf_elapsed_ms()),
             });
         })
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(not(target_os = "macos"))]
             {
                 let main_window = app
@@ -259,7 +272,8 @@ pub fn run(process_start: Instant) {
                 eprintln!("forge: tray unavailable: {error}");
             }
 
-            auto_update::spawn(app.handle().clone());
+            auto_update::start(app.handle().clone());
+            ota.spawn(app.handle().clone());
 
             Ok(())
         })
@@ -283,7 +297,7 @@ pub fn run(process_start: Instant) {
                 let _ = window.hide();
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .inspect(|_app| {
             perf_mark(|timeline| timeline.build_finished_ms = Some(perf_elapsed_ms()));
         })

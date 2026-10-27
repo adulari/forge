@@ -1,0 +1,192 @@
+name: desktop-ota
+
+# Publishes the desktop web UI as a signed over-the-air bundle on every push to main that
+# changes it, so installed desktop apps pick up UI changes without a full release. How it works:
+# docs/features/desktop-ota.md.
+#
+# The bundle is stamped with the desktop RUNTIME VERSION (a hash of the native shell, computed by
+# the same code that build.rs bakes into the binary), and an installed app only applies bundles
+# whose runtime version equals its own. A change to the Rust side therefore never reaches an old
+# binary: it needs a full release, which carries the new runtime version.
+#
+# Bundles go to the rolling `desktop-ota` PRERELEASE. The Tauri updater reads
+# releases/latest/download/latest.json, so this release must never become "Latest"; the job
+# re-asserts that on every run and fails if it is.
+#
+# Signed with the Tauri updater key (the same `TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]` secrets
+# app-desktop.yml uses), so one public key in tauri.conf.json vouches for both channels.
+
+on:
+  push:
+    branches:
+      - main
+    # `mobile/src-tauri/**` is excluded: a native-only change has no installed binary with the new
+    # runtime version, so a bundle for it would have no consumer until the next full release.
+    paths:
+      - "mobile/**"
+      - "!mobile/src-tauri/**"
+      - "scripts/ci/desktop_ota_pack.py"
+      - ".github/workflows/desktop-ota.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A publish is a sequence of uploads; cutting one off half way would leave a manifest pointing at
+# a bundle that is not there yet, so a newer push queues behind the running one.
+concurrency:
+  group: desktop-ota-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: desktop-ota
+
+jobs:
+  publish:
+    name: publish desktop bundle
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Test bundle packer
+        run: python3 scripts/ci/test_desktop_ota_pack.py
+
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        working-directory: mobile
+        run: npm ci
+
+      - name: Build the runtime-version tool
+        run: cargo build --release --locked --manifest-path mobile/src-tauri/tools/runtime-version/Cargo.toml
+
+      - name: Compute the desktop runtime version
+        id: runtime
+        run: |
+          set -euo pipefail
+          tool=mobile/src-tauri/tools/runtime-version/target/release/forge-desktop-runtime-version
+          runtime="$("$tool" mobile/src-tauri)"
+          [[ "$runtime" =~ ^[0-9a-f]{16}$ ]] || { echo "unexpected runtime version: $runtime" >&2; exit 1; }
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+
+      # The same export app-desktop.yml's `beforeBuildCommand` runs, with the same public env, so
+      # the bundle is byte-for-byte what a full release would have embedded for this commit.
+      - name: Export the desktop web bundle
+        working-directory: mobile
+        env:
+          EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+          EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
+          METRO_MAX_WORKERS: "2"
+        run: |
+          # Private Metro cache per run: see eas-update.yml for why the shared /tmp one fails.
+          export TMPDIR="$RUNNER_TEMP/metro"
+          mkdir -p "$TMPDIR"
+          node scripts/export-web-clean.mjs
+
+      - name: Pack and sign
+        id: pack
+        env:
+          RUNTIME: ${{ steps.runtime.outputs.runtime }}
+          # Lets an emergency raise the floor without a code change: apps older than this ignore
+          # the bundle. Unset means every app with a matching runtime version may take it.
+          MIN_APP_VERSION: ${{ vars.DESKTOP_OTA_MIN_APP_VERSION || '0.0.0' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo '::error title=Desktop OTA not published::TAURI_SIGNING_PRIVATE_KEY is not set for this repository'
+            exit 1
+          fi
+          out="$RUNNER_TEMP/desktop-ota"
+          rm -rf "$out"
+          python3 scripts/ci/desktop_ota_pack.py pack \
+            --dist mobile/dist \
+            --runtime "$RUNTIME" \
+            --bundle-id "$GITHUB_SHA" \
+            --created-at "$(git show -s --format=%ct HEAD)" \
+            --min-app-version "$MIN_APP_VERSION" \
+            --out "$out"
+          (cd mobile && for file in "$out/bundle-$RUNTIME-$GITHUB_SHA.zip" "$out/manifest-$RUNTIME.json"; do
+            npx --no-install tauri signer sign "$file" >/dev/null
+          done)
+          # Refuse to publish anything an installed app would reject: verify with the app's own
+          # code against the public key shipped in tauri.conf.json.
+          tool="$PWD/mobile/src-tauri/tools/runtime-version/target/release/forge-desktop-runtime-version"
+          for file in "$out/bundle-$RUNTIME-$GITHUB_SHA.zip" "$out/manifest-$RUNTIME.json"; do
+            "$tool" verify mobile/src-tauri "$file" "$file.sig"
+          done
+          echo "out=$out" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Desktop OTA bundle"
+            echo "- runtime version: \`$RUNTIME\`"
+            echo "- bundle: \`$GITHUB_SHA\`"
+            echo "- size: $(stat -c %s "$out/bundle-$RUNTIME-$GITHUB_SHA.zip") bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish to the rolling desktop-ota prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNTIME: ${{ steps.runtime.outputs.runtime }}
+          OUT: ${{ steps.pack.outputs.out }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --prerelease --latest=false \
+              --title "Desktop OTA bundles (rolling)" \
+              --notes "Signed web-UI bundles that installed desktop apps apply over the air. Not a release: do not download. See docs/features/desktop-ota.md."
+          fi
+          # Latest must stay the newest full release; the updater endpoint depends on it.
+          gh release edit "$RELEASE_TAG" --prerelease --latest=false
+          # Bundle first, manifest last: a manifest only ever names a bundle that already exists.
+          gh release upload "$RELEASE_TAG" --clobber \
+            "$OUT/bundle-$RUNTIME-$GITHUB_SHA.zip" \
+            "$OUT/bundle-$RUNTIME-$GITHUB_SHA.zip.sig"
+          gh release upload "$RELEASE_TAG" --clobber \
+            "$OUT/manifest-$RUNTIME.json.sig" \
+            "$OUT/manifest-$RUNTIME.json"
+
+      - name: Prune old bundles (keep the newest 5 per runtime version)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          assets="$RUNNER_TEMP/ota-assets.json"
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets' > "$assets"
+          python3 scripts/ci/desktop_ota_pack.py prune --assets "$assets" --keep 5 | while read -r name; do
+            [ -n "$name" ] || continue
+            gh release delete-asset "$RELEASE_TAG" "$name" --yes
+          done
+
+      - name: Assert the updater's Latest release is untouched
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          latest="$(gh release view --json tagName --jq .tagName)"
+          if [ "$latest" = "$RELEASE_TAG" ]; then
+            echo "::error title=desktop-ota became Latest::the Tauri updater reads releases/latest/download/latest.json; restore Latest immediately"
+            exit 1
+          fi
+          echo "Latest release is $latest."
+
+      - name: Bound persistent dependency cache
+        if: always()
+        run: bash scripts/ci/trim-runner-cache.sh

@@ -635,14 +635,22 @@ pub(crate) enum Command {
         smoke: bool,
     },
     /// Show measured model benchmark scores (Artificial Analysis, ADR-0011) and how well they
-    /// cover the discovered catalog. `--refresh` forces a re-fetch (needs ARTIFICIALANALYSIS_API_KEY
-    /// or `forge auth artificialanalysis`).
+    /// cover the discovered catalog. No key needed: scores come from the published Forge mirror,
+    /// or your own key (ARTIFICIALANALYSIS_API_KEY or `forge auth artificialanalysis`) when set.
+    /// `--refresh` forces a re-fetch.
     ///
     /// See also: `forge models` (the discovered catalog + per-tier picks) and `forge mesh`
     /// (how those scores drive routing for a specific prompt).
     Benchmarks {
         #[arg(long)]
         refresh: bool,
+        /// Publisher use: fetch the feed with the key in the environment and write the Forge
+        /// mirror document to PATH instead of showing scores.
+        #[arg(long, hide = true, value_name = "PATH")]
+        export_mirror: Option<std::path::PathBuf>,
+        /// With `--export-mirror`: the previously published document, to reject a truncated feed.
+        #[arg(long, hide = true, value_name = "PATH", requires = "export_mirror")]
+        previous: Option<std::path::PathBuf>,
     },
     /// Manage local LLMs (Ollama): detect specs, install/run a Gemma model that fits, list/start.
     Local {

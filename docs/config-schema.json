@@ -225,7 +225,8 @@
       "description": "Startup update check against GitHub releases (checked at most every 6 hours).",
       "additionalProperties": true,
       "properties": {
-        "enabled": { "type": "boolean", "default": true }
+        "enabled": { "type": "boolean", "default": true },
+        "auto": { "type": "boolean", "default": true, "description": "Install a newer release automatically on an interactive launch." }
       }
     },
     "TelemetryConfig": {

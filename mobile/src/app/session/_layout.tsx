@@ -6,12 +6,20 @@
 // looked like "the same screen", navigated inside the current session's nested routes, and kept
 // showing the session you were already on. Here `/session/A` → `/session/B` diverges on `id` and
 // pushes a real screen, with Back returning to A.
+//
+// Wide web/desktop windows use a plain Slot instead: the `[id]` layout stays mounted across
+// sessions and keeps the last few of them mounted itself (see `[id]/_layout.tsx`), so going back
+// to a recent session is a visibility flip. There is no Back button there to need the stack.
 import { Stack } from "expo-router";
 import React from "react";
 
+import { useKeepSessionsMounted } from "../../lib/sessionPrewarm";
+import { HostedSessions } from "./[id]/_layout";
 import { useTokens } from "../../theme/ThemeProvider";
 
 export default function SessionStackLayout() {
   const tokens = useTokens();
+  const keepMounted = useKeepSessionsMounted();
+  if (keepMounted) return <HostedSessions />;
   return <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: tokens.bg1 } }} />;
 }

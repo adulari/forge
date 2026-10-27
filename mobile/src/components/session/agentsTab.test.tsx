@@ -4,7 +4,7 @@ import * as server from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Snapshot, SnapshotSubagent } from "../../lib/ws";
-import SessionAgents from "../../app/session/[id]/agents";
+import { SessionAgents } from "../../app/session/[id]/agents";
 
 const renderToStaticMarkup = (server as { renderToStaticMarkup: (el: React.ReactElement) => string }).renderToStaticMarkup;
 

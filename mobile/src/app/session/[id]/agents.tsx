@@ -13,6 +13,7 @@ import { Skeleton } from "../../../components/ds/Skeleton";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { space } from "../../../theme/tokens";
 import type { SnapshotSubagent } from "../../../lib/ws";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
 // Shaped like an AgentRow (dot+name+cost header, task line, meta line) — shown only until
 // the first snapshot confirms whether any subagents exist, never claiming "no active agents"
@@ -34,7 +35,7 @@ function AgentsSkeleton() {
   );
 }
 
-export default function SessionAgents() {
+export function SessionAgents() {
   const { snapshot, snapshotTimedOut, send } = useSessionCtx();
   const agents = snapshot?.subagents ?? [];
   const promptSeq = snapshot?.prompt_seq;
@@ -78,3 +79,9 @@ const styles = StyleSheet.create({
   skeletonHeader: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   skeletonGap: { marginTop: space.space4 },
 });
+
+// Desktop/web: the session layout keeps this segment mounted itself (SegmentKeepAlive), so the
+// route renders nothing there; phones render the screen as the route.
+export default function SessionAgentsRoute() {
+  return useSegmentsHosted() ? null : <SessionAgents />;
+}

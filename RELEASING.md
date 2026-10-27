@@ -32,6 +32,16 @@ grep -n "X.Y.Z" Cargo.toml
 grep -n "<old version>" Cargo.toml # empty
 ```
 
+Refresh the benchmark snapshot that ships inside the binary (it ranks models for a user who is
+offline on first run) from the published mirror, and commit the result with the bump:
+
+```bash
+scripts/refresh-benchmarks-snapshot.sh   # rewrites crates/forge-cli/data/benchmarks-snapshot.json
+```
+
+If the mirror has never been published (the `ARTIFICIALANALYSIS_API_KEY` secret is unset), skip this
+step; the checked-in snapshot is still valid.
+
 ## 3. Changelog
 
 Bump `mobile/src-tauri/tauri.conf.json`'s `version` to `X.Y.Z` in the SAME commit as the workspace
@@ -165,6 +175,10 @@ If manifest automation needs manual recovery, run
 If the desktop matrix needs repair after a tag was created, merge the workflow fix and run
 `gh workflow run app-desktop.yml --ref main -f release_tag=vX.Y.Z`; this checks out and rebuilds the
 exact existing tag, then transactionally republishes the complete platform set.
+
+Desktop UI changes also ship over the air between releases (`desktop-ota.yml`, rolling `desktop-ota`
+prerelease; see `docs/features/desktop-ota.md`). A release never needs to wait for them and never
+touches that prerelease, and `releases/latest` must keep pointing at the newest full release.
 
 ## 7. Verify
 

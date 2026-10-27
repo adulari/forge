@@ -1,0 +1,260 @@
+// In-page interaction latency harness. Injected by desktop-interactions.py (never shipped).
+// latency = trigger() call -> the first rAF after the frame in which `ready()` became true,
+// i.e. the interaction's final DOM has been handed to the compositor and one more frame has begun.
+(function () {
+  // Re-injecting replaces the harness (the rAF recorder below is shared across injections).
+  const frame = () => new Promise((r) => requestAnimationFrame(r));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const text = () => document.body.textContent || "";
+  // checkVisibility() needs style recalc only; getClientRects() forces a full layout, which the
+  // MutationObserver below would then trigger once per mutation batch and distort the numbers.
+  const shown = (e) => (e.checkVisibility ? e.checkVisibility() : e.getClientRects().length > 0);
+  const tab = (name) => [...document.querySelectorAll('[role=tab]')].filter((e) => shown(e)).find((e) => (e.textContent || "").trim().startsWith(name));
+  const key = (k, o) => window.dispatchEvent(new KeyboardEvent("keydown", Object.assign({ key: k, ctrlKey: true, bubbles: true, cancelable: true }, o || {})));
+  const press = (el) => {
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    el.click();
+  };
+
+  let gaps = [];
+  let recording = false;
+  window.__benchRecorder = (window.__benchRecorder || 0) + 1;
+  const recorderId = window.__benchRecorder;
+  (async function loop() {
+    let last = performance.now();
+    for (;;) {
+      const t = await frame();
+      if (recorderId !== window.__benchRecorder) return;
+      if (recording) gaps.push(t - last);
+      last = t;
+    }
+  })();
+
+  async function idle(frames) {
+    for (let i = 0; i < (frames || 4); i++) await frame();
+    await sleep(60);
+  }
+
+  const visible = (sel) => [...document.querySelectorAll(sel)].filter((e) => shown(e));
+  const leaf = (txt) => [...document.querySelectorAll("div,span")].some((e) => e.children.length === 0 && (e.textContent || "").includes(txt) && shown(e));
+  const composer = () => visible("[data-testid=composer-input]")[0] || null;
+
+  // `ready` is re-evaluated after every DOM mutation batch (cheap: no per-frame polling), then
+  // the result is stamped two frames later so the committed DOM has actually been presented.
+  async function measure(trigger, ready, timeoutMs, early) {
+    await idle(6);
+    gaps = [];
+    recording = true;
+    const t0 = performance.now();
+    let readyAt = null;
+    let earlyAt = null;
+    const check = () => {
+      if (early && earlyAt === null && early()) earlyAt = performance.now();
+      if (readyAt === null && ready()) readyAt = performance.now();
+    };
+    const mo = new MutationObserver(check);
+    mo.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+    trigger();
+    const sync = performance.now() - t0;
+    check();
+    const limit = timeoutMs || 4000;
+    for (;;) {
+      const t = await frame();
+      check();
+      if (readyAt !== null && t > readyAt) {
+        const t2 = await frame();
+        mo.disconnect(); recording = false;
+        return { ms: t2 - t0, commit: readyAt - t0, early: (earlyAt ?? readyAt) - t0, sync, maxGap: Math.max.apply(null, gaps), ok: true };
+      }
+      if (t - t0 > limit) { mo.disconnect(); recording = false; return { ms: t - t0, commit: limit, early: limit, sync, maxGap: Math.max.apply(null, gaps), ok: false }; }
+    }
+  }
+
+  function stats(rows) {
+    const col = (k) => rows.map((r) => r[k]).sort((a, b) => a - b);
+    const q = (a, p) => a[Math.min(a.length - 1, Math.floor(p * a.length))];
+    const ms = col("ms"), sync = col("sync"), gap = col("maxGap"), commit = col("commit"), early = col("early");
+    return { n: rows.length, ok: rows.filter((r) => r.ok).length, med: +q(ms, 0.5).toFixed(1), p95: +q(ms, 0.95).toFixed(1), max: +ms[ms.length - 1].toFixed(1), earlyMed: +q(early, 0.5).toFixed(1), commitMed: +q(commit, 0.5).toFixed(1), commitP95: +q(commit, 0.95).toFixed(1), syncMed: +q(sync, 0.5).toFixed(1), gapMax: +gap[gap.length - 1].toFixed(1) };
+  }
+
+  const scenarios = {
+    tabChatToTasks: {
+      setup: () => press(tab("Chat")),
+      trigger: () => press(tab("Tasks")),
+      ready: () => leaf("Verify the build"),
+      after: () => press(tab("Chat")),
+    },
+    tabTasksToChat: {
+      setup: () => press(tab("Tasks")),
+      trigger: () => press(tab("Chat")),
+      ready: () => !!composer() && leaf("Turn "),
+    },
+    tabChatToAgents: {
+      setup: () => press(tab("Chat")),
+      trigger: () => press(tab("Agents")),
+      ready: () => leaf("no active agents"),
+      after: () => press(tab("Chat")),
+    },
+    tabChatToReview: {
+      setup: () => press(tab("Chat")),
+      trigger: () => press(tab("Review")),
+      ready: () => leaf("Working tree clean"),
+      after: () => press(tab("Chat")),
+    },
+    tabChatToFiles: {
+      setup: () => press(tab("Chat")),
+      trigger: () => press(tab("Files")),
+      ready: () => leaf("calc.py"),
+      after: () => press(tab("Chat")),
+    },
+    tabChatToReplay: {
+      setup: () => press(tab("Chat")),
+      trigger: () => press(tab("Replay")),
+      ready: () => leaf("→ run_code"),
+      after: () => press(tab("Chat")),
+    },
+    palette: {
+      setup: () => press(tab("Chat")),
+      trigger: () => key("k"),
+      ready: () => !!document.querySelector("input[placeholder*=command]"),
+      after: () => key("Escape", { ctrlKey: false }),
+    },
+    usageDock: {
+      setup: () => press(tab("Chat")),
+      trigger: () => key("u"),
+      ready: () => /Updated \d+s ago/.test(text()),
+      after: () => key("u"),
+    },
+    terminalDock: {
+      setup: () => press(tab("Chat")),
+      trigger: () => key("j"),
+      ready: () => /connected · \d+×\d+/.test(text()),
+      after: () => key("j"),
+    },
+  };
+
+  async function runScenario(name, runs) {
+    const s = scenarios[name];
+    const rows = [];
+    for (let i = 0; i < runs; i++) {
+      if (s.setup) { s.setup(); await idle(8); await sleep(150); }
+      rows.push(await measure(s.trigger, s.ready));
+      if (s.after) { s.after(); await idle(6); await sleep(150); }
+    }
+    return stats(rows);
+  }
+
+  // One measurement per tab, in a fresh session, before anything has been visited.
+  async function firstVisits() {
+    const out = {};
+    for (const [label, name] of [["Tasks", "tabChatToTasks"], ["Agents", "tabChatToAgents"], ["Review", "tabChatToReview"], ["Files", "tabChatToFiles"], ["Replay", "tabChatToReplay"]]) {
+      out["first_" + label] = await runScenario(name, 1);
+    }
+    return out;
+  }
+
+  // Sidebar session switches, in the order a user meets them in a fresh app:
+  //   new       sessions never opened (cold mount), no hover
+  //   newHover  never opened, but the pointer rests on the row 450 ms first (hover prefetch/prewarm)
+  //   recent    flipping between the two most recently opened sessions
+  // `early` = the new session's header is on screen; `commit` = its transcript and composer are too.
+  async function sessions(mode) {
+    const ids = { 0: "perf-sess-0", 1: "perf-sess-1", 2: "perf-sess-2", 3: "perf-sess-3", 4: "perf-sess-4", 5: "perf-sess-5", s: "synthetic-long-history-0001" };
+    const label = (k) => (k === "s" ? "Synthetic long history" : "Perf session " + k);
+    const leaves = (txt) => [...document.querySelectorAll("div,span")].filter((e) => e.children.length === 0 && (e.textContent || "").trim() === txt && shown(e));
+    const item = (k) => leaves(label(k))[0];
+    // RNW's hover is a pointerenter with pointerType "mouse" on the Pressable's host element.
+    const hover = (el) => {
+      let host = el;
+      while (host && host.getAttribute("role") !== "button") host = host.parentElement;
+      (host || el).dispatchEvent(new PointerEvent("pointerenter", { pointerType: "mouse", bubbles: false }));
+    };
+    const go = async (k, withHover) => {
+      const el = item(k);
+      if (withHover) { hover(el); await sleep(450); }
+      return measure(
+        () => press(el),
+        () => leaves(label(k)).length >= 2 && !!composer() && leaf("Turn "),
+        4000,
+        () => leaves(label(k)).length >= 2,
+      );
+    };
+    if (mode === "hoverPrep") { hover(item(3)); await sleep(900); return null; }
+    if (mode === "hoverClick") { const r = []; r.push(await go(3, false)); return { sessionHoverClick: stats(r) }; }
+    if (mode === "warm") {
+      for (const k of [4, 5]) { await go(k, false); await sleep(300); }
+      return null;
+    }
+    if (mode === "recent") {
+      const only = [];
+      for (let i = 0; i < 12; i++) { only.push(await go(i % 2 === 0 ? 4 : 5, false)); await sleep(200); }
+      return { sessionRecent: stats(only) };
+    }
+    const out = {};
+    const fresh = [];
+    for (const k of [1, 2, 3]) { fresh.push(await go(k, false)); await sleep(300); }
+    out.sessionNew = stats(fresh);
+    const hovered = [];
+    for (const k of [4, 5, "s"]) { hovered.push(await go(k, true)); await sleep(300); }
+    out.sessionNewHover = stats(hovered);
+    const recent = [];
+    for (let i = 0; i < 12; i++) { recent.push(await go(i % 2 === 0 ? 5 : "s", false)); await sleep(200); }
+    out.sessionRecent = stats(recent);
+    return out;
+  }
+
+  const composerMirrorOk = () => true;
+  async function typing(runs) {
+    const input = composer;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+    const typeChar = (ch) => { const el = input(); setter.call(el, el.value + ch); el.dispatchEvent(new Event("input", { bubbles: true })); };
+    input().focus();
+    const rows = [];
+    for (let i = 0; i < runs; i++) {
+      const ch = "abcdefghij"[i % 10];
+      const before = input().value.length;
+      rows.push(await measure(() => typeChar(ch), () => input().value.length > before && composerMirrorOk(), 1000));
+      await sleep(30);
+    }
+    setter.call(input(), ""); input().dispatchEvent(new Event("input", { bubbles: true }));
+    return stats(rows);
+  }
+
+  async function expandToolGroup(runs) {
+    const rows = [];
+    const groups = () => [...document.querySelectorAll("div")].filter((e) => e.children.length === 0 && /^Ran \d+ /.test(e.textContent || "") && shown(e));
+    for (let i = 0; i < runs; i++) {
+      const g = groups();
+      if (!g.length) break;
+      const el = g[g.length - 1 - (i % Math.min(g.length, 5))];
+      const before = text().length;
+      rows.push(await measure(() => press(el), () => text().length !== before, 1500));
+      await sleep(100);
+      press(el);
+      await idle(6);
+    }
+    return rows.length ? stats(rows) : null;
+  }
+
+  async function scroll(steps) {
+    const sc = [...document.querySelectorAll("div")].filter((e) => e.scrollHeight > e.clientHeight + 500 && /auto|scroll/.test(getComputedStyle(e).overflowY)).sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+    if (!sc) return null;
+    await idle(6);
+    gaps = [];
+    recording = true;
+    const t0 = performance.now();
+    sc.scrollTop = sc.scrollHeight;
+    for (let i = 0; i < steps; i++) {
+      sc.scrollTop = Math.max(0, sc.scrollTop - 400);
+      await frame();
+    }
+    const total = performance.now() - t0;
+    recording = false;
+    const g = gaps.slice().sort((a, b) => a - b);
+    return { frames: g.length, avgFrame: +(total / steps).toFixed(1), p95Frame: +g[Math.floor(g.length * 0.95)].toFixed(1), maxFrame: +g[g.length - 1].toFixed(1), scrollHeight: sc.scrollHeight };
+  }
+
+  window.__bench = { sessions, firstVisits, composer, visible, runScenario, typing, expandToolGroup, scroll, scenarios, tab, press, key, text, idle, sleep, measure, stats };
+  return "installed";
+})();

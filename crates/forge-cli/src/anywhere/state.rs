@@ -342,6 +342,13 @@ impl LocalState {
     }
 }
 
+/// Whether this machine is signed in to Forge Anywhere (a refresh token is stored).
+pub(crate) fn signed_in() -> bool {
+    StateStore::platform()
+        .and_then(|store| store.load())
+        .is_ok_and(|state| state.is_logged_in())
+}
+
 /// State-file operations lock and fsync; on a multi-thread runtime hand the worker back to tokio
 /// while they run instead of stalling every task parked on it.
 pub(super) fn blocking_fs<T>(operation: impl FnOnce() -> T) -> T {

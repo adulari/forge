@@ -457,15 +457,27 @@ export function useSessionSocket(
     };
   }, [baseUrl, sessionId, teardown, clearReconnectTimer, clearLivenessTimer, frames]);
 
+  // Remembers which (server, session) this hook last connected for. When the effect re-runs for
+  // the SAME key it is a resume — a hidden <Activity> (a kept-alive session the user navigated
+  // away from) being shown again: its effects were cleaned up, closing the socket, so nothing
+  // streamed while it was hidden. Keep the last snapshot on screen and the revision so the daemon
+  // replays only the gap, instead of blanking to a skeleton and refetching everything.
+  const connectedKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
+    const key = `${baseUrl}|${sessionId}`;
+    const resuming = connectedKeyRef.current === key;
+    connectedKeyRef.current = key;
     closedRef.current = false;
-    revRef.current = 0;
     attemptRef.current = 0;
     shouldRunRef.current = true;
     frames.cancel();
-    streamingRef.current = EMPTY_STREAMING;
-    setSnapshot(null);
-    setConnectionState("idle");
+    if (!resuming) {
+      revRef.current = 0;
+      streamingRef.current = EMPTY_STREAMING;
+      setSnapshot(null);
+      setConnectionState("idle");
+    }
     connect();
     return () => {
       shouldRunRef.current = false;

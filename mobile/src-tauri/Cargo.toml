@@ -21,6 +21,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# runtime_version.rs is shared with tools/runtime-version, so build.rs hashes with the same code CI does.
+sha2 = "0.10"
+serde_json = "1"
+
+[features]
+# Test harnesses only (never enabled in a release build): lets FORGE_TEST_SELF_INSTALL=1 stand in
+# for "running from a mounted AppImage" and FORGE_TEST_UPDATE_ENDPOINT/_PUBKEY aim the updater at
+# a fake feed. Without this feature none of those variables is read.
+test-self-install = []
 
 [dependencies]
 # `tray-icon` is what makes the menu-bar extra (src/tray.rs) compile; on Linux it additionally
@@ -41,6 +50,13 @@ serde_json = "1"
 # Desktop auto-detect (detect_forge_serve): resolves the same OS config dir `forge serve`
 # writes serve-state.json into. Pinned to the same major version forge-config uses.
 directories = "6"
+# ota.rs: verify (minisign, the updater's own key), hash and unpack signed UI bundles.
+minisign-verify = "0.2"
+sha2 = "0.10"
+base64 = "0.22"
+semver = "1"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(unix)'.dependencies]
 # detect_forge_serve's pid-liveness check (`kill(pid, 0)`).
@@ -52,6 +68,9 @@ libc = "0.2"
 webkit2gtk = { version = "2.0", features = ["v2_8"] }
 
 [dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+# ota tests sign manifests with a throwaway keypair.
+minisign = "0.7"
 # security_config.rs parses the HTTP scope exactly as tauri-plugin-http 2.5 does.
 regex = "1"
 url = "2"

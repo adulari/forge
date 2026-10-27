@@ -47,6 +47,8 @@ pub(crate) struct UpdateStatus {
     pub busy_sessions: usize,
     pub service_managed: bool,
     pub checked_at: u64,
+    /// The daemon installs updates itself when no session is mid-turn; clients need not.
+    pub auto_update: bool,
 }
 
 /// The wire status for what is known. Pure, so every state is testable without a daemon.
@@ -71,6 +73,7 @@ pub(crate) fn status_from(
         busy_sessions,
         service_managed,
         checked_at: state.last_check,
+        auto_update: false,
     }
 }
 
@@ -133,13 +136,9 @@ async fn get_update(
     let managed = tokio::task::spawn_blocking(service_managed)
         .await
         .unwrap_or(false);
-    json_response(&status_from(
-        &update,
-        CURRENT,
-        detect_install_method(),
-        busy,
-        managed,
-    ))
+    let mut status = status_from(&update, CURRENT, detect_install_method(), busy, managed);
+    status.auto_update = status.can_self_update && crate::update_auto::auto_enabled(&config);
+    json_response(&status)
 }
 
 /// The seams of [`run_update`], so the decision logic is testable without replacing a binary or
@@ -247,6 +246,86 @@ async fn post_update(State(state): State<Arc<DaemonState>>, headers: HeaderMap) 
             response
         }
         Err(_) => err_response(StatusCode::INTERNAL_SERVER_ERROR, "the update task failed"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonAction {
+    /// Nothing to do, or not yet: the daemon is busy or the update was already applied.
+    Wait,
+    /// Replace the binary, then restart once idle.
+    Apply,
+    /// The binary on disk is already newer than the running daemon: just restart once idle.
+    RestartOnly,
+}
+
+pub(crate) struct DaemonFacts {
+    pub auto: bool,
+    pub method: InstallMethod,
+    pub newer_known: bool,
+    pub binary_replaced: bool,
+    pub busy_sessions: usize,
+    /// This run already put that version in place.
+    pub already_applied: bool,
+}
+
+/// What the daemon's own updater does now. A running turn is never interrupted: any busy
+/// session means wait. Only a standalone install updates itself; package managers keep their own.
+pub(crate) fn daemon_action(f: &DaemonFacts) -> DaemonAction {
+    if !f.auto || f.method != InstallMethod::Binary || f.busy_sessions > 0 {
+        return DaemonAction::Wait;
+    }
+    if f.binary_replaced {
+        DaemonAction::RestartOnly
+    } else if f.newer_known && !f.already_applied {
+        DaemonAction::Apply
+    } else {
+        DaemonAction::Wait
+    }
+}
+
+pub(crate) fn start_auto(registry: &Arc<SessionRegistry>) {
+    tokio::spawn(auto_update_loop(registry.clone()));
+}
+
+/// The daemon updates itself: on start and every check interval, when nothing is mid-turn,
+/// replace the binary and restart the service. A foreground `forge serve` (no service) keeps
+/// running the old build until it is restarted by hand.
+pub(crate) async fn auto_update_loop(registry: Arc<SessionRegistry>) {
+    let mut applied = false;
+    loop {
+        let config = forge_config::load().unwrap_or_default();
+        if crate::update_auto::auto_enabled(&config) {
+            let state = crate::update_check::refresh_state(false).await;
+            let action = daemon_action(&DaemonFacts {
+                auto: true,
+                method: detect_install_method(),
+                newer_known: state.offer(CURRENT).is_some(),
+                binary_replaced: forge_types::self_exe::running_binary_replaced(),
+                busy_sessions: busy_sessions(&registry).await,
+                already_applied: applied,
+            });
+            let ready = match action {
+                DaemonAction::Wait => false,
+                DaemonAction::RestartOnly => true,
+                DaemonAction::Apply => {
+                    let done =
+                        tokio::task::spawn_blocking(|| crate::update::apply_in_place(false)).await;
+                    applied = matches!(done, Ok(Ok(Some(_))));
+                    applied
+                }
+            };
+            let managed = tokio::task::spawn_blocking(service_managed)
+                .await
+                .unwrap_or(false);
+            if ready && managed {
+                restart_when_idle(registry.clone()).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(
+            crate::update_state::check_interval().clamp(30, 6 * 3600),
+        ))
+        .await;
     }
 }
 
@@ -517,6 +596,65 @@ mod tests {
             let refused = call("POST", "/tok/api/update", host).await.unwrap();
             assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{host:?}");
         }
+    }
+
+    fn daemon_facts() -> DaemonFacts {
+        DaemonFacts {
+            auto: true,
+            method: InstallMethod::Binary,
+            newer_known: true,
+            binary_replaced: false,
+            busy_sessions: 0,
+            already_applied: false,
+        }
+    }
+
+    #[test]
+    fn the_daemon_updates_itself_only_when_idle_and_enabled() {
+        assert_eq!(daemon_action(&daemon_facts()), DaemonAction::Apply);
+        let busy = DaemonFacts {
+            busy_sessions: 1,
+            ..daemon_facts()
+        };
+        assert_eq!(daemon_action(&busy), DaemonAction::Wait, "never mid-turn");
+        let off = DaemonFacts {
+            auto: false,
+            ..daemon_facts()
+        };
+        assert_eq!(daemon_action(&off), DaemonAction::Wait);
+        let brew = DaemonFacts {
+            method: InstallMethod::Homebrew,
+            ..daemon_facts()
+        };
+        assert_eq!(
+            daemon_action(&brew),
+            DaemonAction::Wait,
+            "package managers own it"
+        );
+        let nothing_new = DaemonFacts {
+            newer_known: false,
+            ..daemon_facts()
+        };
+        assert_eq!(daemon_action(&nothing_new), DaemonAction::Wait);
+    }
+
+    #[test]
+    fn a_replaced_binary_only_needs_a_restart_and_an_applied_update_is_not_repeated() {
+        let replaced = DaemonFacts {
+            binary_replaced: true,
+            ..daemon_facts()
+        };
+        assert_eq!(daemon_action(&replaced), DaemonAction::RestartOnly);
+        let busy = DaemonFacts {
+            busy_sessions: 2,
+            ..replaced
+        };
+        assert_eq!(daemon_action(&busy), DaemonAction::Wait);
+        let applied = DaemonFacts {
+            already_applied: true,
+            ..daemon_facts()
+        };
+        assert_eq!(daemon_action(&applied), DaemonAction::Wait);
     }
 
     #[test]

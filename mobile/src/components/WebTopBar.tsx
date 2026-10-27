@@ -12,6 +12,7 @@ import { useAuth } from "../lib/auth";
 import { useShortcutLabel } from "../lib/shortcuts";
 import { useSessions } from "../lib/queries";
 import { usePalette } from "./overlay/CommandPalette";
+import { LayoutControl } from "./shell/LayoutMenu";
 import { useProviderPace, UsageRing } from "./shell/UsageRing";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
@@ -96,6 +97,7 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
           <UsageRing pct={combinedPct} size={15} />
         </Pressable>
       ) : null}
+      <LayoutControl />
       <Pressable
         onPress={() => palette.open("default")}
         accessibilityRole="button"

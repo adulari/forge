@@ -138,7 +138,21 @@ esac
 
 if [ "${FORGE_DESKTOP:-}" = 1 ]; then
   sh -c "$(fetch https://raw.githubusercontent.com/$REPO/main/install-desktop.sh)"
-elif [ "${FORGE_DESKTOP:-}" = 0 ]; then
+fi
+
+# Guided setup: with a usable terminal and no FORGE_NO_SETUP, hand it over to `forge setup`. It
+# offers the desktop app itself, so the separate prompt below only runs when setup does not.
+setup_ran=0
+if [ -z "${FORGE_NO_SETUP:-}" ] && ( : </dev/tty ) 2>/dev/null; then
+  printf 'install: starting setup (set FORGE_NO_SETUP=1 to skip it)\n' >&2
+  if "$INSTALL_DIR/forge" setup </dev/tty; then
+    setup_ran=1
+  else
+    printf 'install: setup did not finish; run `forge setup` any time\n' >&2
+  fi
+fi
+
+if [ "${FORGE_DESKTOP:-}" = 1 ] || [ "${FORGE_DESKTOP:-}" = 0 ] || [ "$setup_ran" = 1 ]; then
   :
 elif ( : </dev/tty ) 2>/dev/null; then
   printf 'Also install the Forge desktop app? [Y/n] ' >&2

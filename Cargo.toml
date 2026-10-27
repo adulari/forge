@@ -35,6 +35,7 @@ forge-provider = { package = "forge-agent-provider", path = "crates/forge-provid
 forge-skills = { package = "forge-agent-skills", path = "crates/forge-skills", version = "2.13.6" }
 forge-store = { package = "forge-agent-store", path = "crates/forge-store", version = "2.13.6" }
 forge-tools = { package = "forge-agent-tools", path = "crates/forge-tools", version = "2.13.6" }
+forge-onboarding = { package = "forge-agent-onboarding", path = "crates/forge-onboarding", version = "2.13.6" }
 forge-tui = { package = "forge-agent-tui", path = "crates/forge-tui", version = "2.13.6" }
 forge-voice = { package = "forge-agent-voice", path = "crates/forge-voice", version = "2.13.6" }
 forge-workflow = { package = "forge-agent-workflow", path = "crates/forge-workflow", version = "2.13.6" }

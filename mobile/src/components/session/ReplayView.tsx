@@ -23,12 +23,12 @@ import { Clock, Route as RouteIcon } from "lucide-react-native";
 import React, { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  FlatList,
   type GestureResponderEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Platform,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -121,7 +121,7 @@ export function ReplayView({
   loadingMore = false,
 }: ReplayViewProps) {
   const tokens = useTokens();
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<FlatList<HistoryRow>>(null);
   const contentHeight = useRef(0);
   const viewportHeight = useRef(0);
   const [progress, setProgress] = useState(0); // 0..1 scroll fraction
@@ -145,10 +145,19 @@ export function ReplayView({
     [onEndReached, loadingMore],
   );
 
+  // `seq` is NOT unique on a tools page: an assistant carrier's synthesized call rows all carry
+  // the carrier's own seq, so the position has to join the key.
+  const rowKey = useCallback((row: HistoryRow, index: number) => `${row.seq}-${index}`, []);
+  const lastIndex = rows.length - 1;
+  const renderRow = useCallback(
+    ({ item, index }: { item: HistoryRow; index: number }) => <ReplayRow row={item} showSeparator={index < lastIndex} />,
+    [lastIndex],
+  );
+
   const seekTo = useCallback((fraction: number) => {
     const clamped = Math.max(0, Math.min(1, fraction));
     const max = Math.max(0, contentHeight.current - viewportHeight.current);
-    scrollRef.current?.scrollTo({ y: clamped * max, animated: false });
+    scrollRef.current?.scrollToOffset({ offset: clamped * max, animated: false });
     setProgress(clamped);
   }, []);
 
@@ -188,14 +197,29 @@ export function ReplayView({
 
   return (
     <View style={styles.root}>
-      <ScrollView
+      {/* Windowed: this used to be a ScrollView that mounted every row (each with a Markdown
+          tree) the moment the tab opened — 1.4 s on a 70-turn session. */}
+      <FlatList
         ref={scrollRef}
+        data={rows}
+        renderItem={renderRow}
+        keyExtractor={rowKey}
         style={styles.log}
         contentContainerStyle={styles.logContent}
         onContentSizeChange={onContentSizeChange}
         onLayout={(e) => onLayout(e.nativeEvent.layout.height)}
         onScroll={onScroll}
         scrollEventThrottle={32}
+        initialNumToRender={14}
+        maxToRenderPerBatch={10}
+        windowSize={7}
+        ListFooterComponent={
+          loadingMore ? (
+            <View style={styles.loadingMore}>
+              <ActivityIndicator color={tokens.accent} />
+            </View>
+          ) : null
+        }
         refreshControl={
           Platform.OS !== "web" && onRefresh ? (
             <RefreshControl
@@ -206,18 +230,7 @@ export function ReplayView({
             />
           ) : undefined
         }
-      >
-        {/* `seq` is NOT unique on a tools page: an assistant carrier's synthesized call rows all
-            carry the carrier's own seq, so the position has to join the key. */}
-        {rows.map((row, index) => (
-          <ReplayRow key={`${row.seq}-${index}`} row={row} showSeparator={index < rows.length - 1} />
-        ))}
-        {loadingMore ? (
-          <View style={styles.loadingMore}>
-            <ActivityIndicator color={tokens.accent} />
-          </View>
-        ) : null}
-      </ScrollView>
+      />
 
       {rows.length > 1 ? (
         <View style={styles.scrubWrap}>

@@ -38,10 +38,10 @@ mod git_location;
 mod headless;
 mod heartbeat_args;
 mod help;
-pub mod init_wizard;
 mod json_result;
 mod keybind_configurator;
 pub mod keybinds;
+pub mod onboarding;
 mod overlays;
 mod peer_message;
 pub mod perf;
@@ -94,7 +94,6 @@ pub use driver::{
 };
 pub use headless::HeadlessPresenter;
 pub use help::{run_help, HelpTab};
-pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
 pub use keybind_configurator::run_keybind_configurator;
 /// A styled scrollback line, re-exported so binaries can route out-of-band output to the right
 /// sink (native scrollback inline, or the transcript log full-screen) without depending on ratatui.

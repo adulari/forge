@@ -102,6 +102,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/DesktopOtaHost.tsx",
+    "platform": "desktop",
+    "reason": "Tauri-only: reports the app shell rendered to the native OTA module and offers 'Reload to update'; renders nothing on phones and the plain web build",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/DesktopWindowChrome.tsx",
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -114,15 +120,15 @@
     "category": "behavior"
   },
   {
-    "file": "mobile/src/components/UpdateNotice.tsx",
-    "platform": "desktop",
-    "reason": "desktop shows the changelog section matching its installed version (shared with the daemon) and links to the published release notes; mobile builds have their own version line and show the newest daemon release; plus runtime-gated update-seen seeding for unattended desktop performance launches",
-    "category": "behavior"
-  },
-  {
     "file": "mobile/src/components/UpdateBannerHost.tsx",
     "platform": "desktop",
     "reason": "desktop installs or restarts into app and CLI updates in place; web and phones only get a read-only notice that the host CLI is outdated, because nothing can be installed from there",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/UpdateNotice.tsx",
+    "platform": "desktop",
+    "reason": "desktop shows the changelog section matching its installed version (shared with the daemon) and links to the published release notes; mobile builds have their own version line and show the newest daemon release; plus runtime-gated update-seen seeding for unattended desktop performance launches",
     "category": "behavior"
   },
   {
@@ -282,16 +288,28 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/components/session/SegmentKeepAlive.tsx",
+    "platform": "web",
+    "reason": "desktop/web keep visited session segments mounted behind <Activity>; phones keep one mounted route so the OS can reclaim hidden screens",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/components/shell/QuickComposer.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
     "category": "capability"
   },
   {
-    "file": "mobile/src/components/shell/SplitPanes.tsx",
+    "file": "mobile/src/components/shell/ResizeHandle.tsx",
     "platform": "web/native",
-    "reason": "shared surface contains platform-specific handling",
-    "category": "capability"
+    "reason": "web-only cursor, hover/focus highlight and arrow-key nudging on the desktop drag seams; touch platforms never render this chrome",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/shell/Sidebar.tsx",
+    "platform": "web/native",
+    "reason": "the sidebar's right-click session menu is web/desktop-only (contextmenu has no touch equivalent); the rail itself only renders on the expanded desktop shell",
+    "category": "behavior"
   },
   {
     "file": "mobile/src/components/shell/TerminalDock.tsx",
@@ -384,6 +402,18 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/lib/desktopOta.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/desktopOta.ts",
+    "platform": "desktop",
+    "reason": "Tauri-only client of the native desktop OTA commands; every entry point is a no-op outside the desktop shell",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/lib/desktopServe.test.ts",
     "platform": "desktop",
     "reason": "Tauri desktop capability boundary: covers the launch connection ladder for the desktop shell",
@@ -411,6 +441,12 @@
     "file": "mobile/src/lib/incomingShare.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/nav.ts",
+    "platform": "web",
+    "reason": "a wide desktop window replaces the open session instead of stacking it (no Back button there); phones and narrow windows still push",
     "category": "capability"
   },
   {
@@ -471,6 +507,12 @@
     "file": "mobile/src/lib/secureStore.web.ts",
     "platform": "web",
     "reason": "platform-specific implementation required by Expo resolution",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/sessionPrewarm.ts",
+    "platform": "web",
+    "reason": "wide desktop windows keep the last three sessions mounted hidden and activate a rail click locally; phones and narrow windows stack sessions as screens and keep Back",
     "category": "capability"
   },
   {

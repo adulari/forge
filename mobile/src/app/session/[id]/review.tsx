@@ -13,16 +13,19 @@ import { DiffCard } from "../../../components/review/DiffCard";
 import { PlanCard } from "../../../components/review/PlanCard";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { space } from "../../../theme/tokens";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
 type ReviewSurface = "turn" | "working-tree";
 
-export default function Review() {
+export function Review() {
   const { sessionId, snapshot, snapshotTimedOut, send, setPendingAnswer } = useSessionCtx();
   const plan = snapshot?.plan ?? null;
   const diff = snapshot?.diff ?? null;
   const hasContent = plan != null || diff != null;
-  const [surface, setSurface] = useState<ReviewSurface>("turn");
-  const choseInitialSurface = useRef(false);
+  // Decided up front (not only in the effect below): a prewarmed, still-hidden Review runs no
+  // effects, so the effect alone would defer the working-tree mount to the first time it is shown.
+  const [surface, setSurface] = useState<ReviewSurface>(snapshot != null && !hasContent ? "working-tree" : "turn");
+  const choseInitialSurface = useRef(snapshot != null);
 
   // An idle session with no turn artifact should open useful repository state instead of an empty
   // card. Never steal the user's choice when a later diff arrives.
@@ -99,3 +102,9 @@ const styles = StyleSheet.create({
   git: { flex: 1, minHeight: 0 },
   loading: { minHeight: 96 },
 });
+
+// Desktop/web: the session layout keeps this segment mounted itself (SegmentKeepAlive), so the
+// route renders nothing there; phones render the screen as the route.
+export default function SessionReviewRoute() {
+  return useSegmentsHosted() ? null : <Review />;
+}

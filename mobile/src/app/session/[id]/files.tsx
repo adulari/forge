@@ -1,12 +1,13 @@
-import { useLocalSearchParams } from "expo-router";
+import { useSessionStable } from "../../../lib/sessionContext";
 import React from "react";
 import { StyleSheet } from "react-native";
 
 import { Screen } from "../../../components/ds/Screen";
 import { WorkspaceDock } from "../../../components/workspace/WorkspaceDock";
+import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
-export default function SessionFiles() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+export function SessionFiles() {
+  const { sessionId: id } = useSessionStable();
 
   return (
     <Screen
@@ -23,3 +24,9 @@ export default function SessionFiles() {
 const styles = StyleSheet.create({
   content: { paddingHorizontal: 0 },
 });
+
+// Desktop/web: the session layout keeps this segment mounted itself (SegmentKeepAlive), so the
+// route renders nothing there; phones render the screen as the route.
+export default function SessionFilesRoute() {
+  return useSegmentsHosted() ? null : <SessionFiles />;
+}
