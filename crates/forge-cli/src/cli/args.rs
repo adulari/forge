@@ -660,6 +660,9 @@ pub(crate) enum Command {
     /// Diagnose your setup — config, providers/keys, CLI bridges, Ollama, git, terminal — with
     /// actionable fixes. Paste its output into bug reports. Exits non-zero if anything is broken.
     Doctor,
+    /// Automatic error reports: see exactly what would be sent, what was sent, switch the mode,
+    /// or report a problem yourself. Reports never contain prompts, replies, code, paths or keys.
+    Report(crate::report_args::ReportArgs),
     /// Update Forge to the latest release. A standalone binary install (curl/zip) is replaced in
     /// place; Homebrew/cargo installs print the right upgrade command. `--check` only reports.
     Update {

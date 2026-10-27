@@ -2040,6 +2040,7 @@ dependencies = [
  "forge-agent-mesh",
  "forge-agent-onboarding",
  "forge-agent-provider",
+ "forge-agent-reporting",
  "forge-agent-skills",
  "forge-agent-store",
  "forge-agent-tools",
@@ -2152,6 +2153,7 @@ dependencies = [
  "forge-agent-mcp",
  "forge-agent-mesh",
  "forge-agent-provider",
+ "forge-agent-reporting",
  "forge-agent-skills",
  "forge-agent-store",
  "forge-agent-tools",
@@ -2303,6 +2305,7 @@ version = "2.23.6"
 dependencies = [
  "forge-agent-config",
  "forge-agent-provider",
+ "forge-agent-reporting",
  "forge-agent-types",
  "portable-pty",
  "serde",
@@ -2350,6 +2353,24 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "forge-agent-reporting"
+version = "2.23.6"
+dependencies = [
+ "chrono",
+ "forge-agent-config",
+ "libc",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2475,7 +2496,9 @@ dependencies = [
  "governor",
  "http-body-util",
  "p256",
+ "regex",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.1",

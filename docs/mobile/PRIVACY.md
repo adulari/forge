@@ -38,6 +38,20 @@ counters. It never includes prompts, responses, file contents, paths, repository
 account IDs, IP-derived location, or stable device/user identifiers. Full field definitions and
 retention are documented in [telemetry.md](../telemetry.md).
 
+## Automatic error reports
+
+When the app itself crashes or hits an internal bug it can send a scrubbed error report to the
+Forge relay, which files it as a GitHub issue so the maintainers can fix it. It is on by default and
+can be set to Ask first or Off in Settings, Error reports ("What gets sent" shows the last report).
+A report contains the Forge version, platform, a short error message, the code location and a few
+recent app event names with durations, plus a random install id used to rate-limit. It never
+includes prompts, replies, file contents, paths, hostnames, keys or tokens. The full contract is in
+[issue-reporting.md](../features/issue-reporting.md).
+
+Release note for the next native iOS build: declare crash data (not linked, not used for tracking,
+app functionality) in `PrivacyInfo.xcprivacy` and `ios.privacyManifests`. It is deliberately not
+changed in the same commit as the feature because it alters the native OTA fingerprint.
+
 ## Platform services
 
 Apple, Google, Expo, GitHub, a tunnel provider you select, and a provider used by your Forge host

@@ -192,6 +192,7 @@ pub(super) async fn request_provider_response(
                 forge_config::provider_of(active_model)
             )))
         } else {
+            crate::error_report::note_request(active_model, session.temper().label());
             session.presenter.emit(PresenterEvent::ProviderRequest {
                 model: active_model.clone(),
                 step,

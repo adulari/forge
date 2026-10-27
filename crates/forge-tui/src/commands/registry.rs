@@ -138,6 +138,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/doctor",
     },
     Command {
+        name: "bug",
+        desc: "report a problem to the maintainers: shows exactly what is sent, then asks",
+        usage: "/bug <what went wrong>",
+    },
+    Command {
         name: "init",
         desc: "scan the repo and generate .forge/AGENTS.md project memory",
         usage: "/init",

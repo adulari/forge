@@ -631,6 +631,9 @@ async fn drive_session(
         if st.app.drain_deferred() {
             dirty = true;
         }
+        if crate::reporting::poll(&mut st.app) {
+            dirty = true;
+        }
         // 5b. Session heartbeats: `on_turn_done` already checks immediately when a turn ends; this
         // coarse periodic check (see [`HEARTBEAT_CHECK_INTERVAL`]) catches a heartbeat coming due
         // while the session just sits idle with nothing else waking this loop up.

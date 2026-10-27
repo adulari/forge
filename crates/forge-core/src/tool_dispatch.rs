@@ -153,6 +153,20 @@ impl Session {
         msg_id: &str,
         call: &forge_types::ToolCall,
     ) -> Result<String, CoreError> {
+        let started = std::time::Instant::now();
+        let result = self.invoke_tool_inner(msg_id, call).await;
+        forge_reporting::event(
+            "tool_call",
+            Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        );
+        result
+    }
+
+    async fn invoke_tool_inner(
+        &mut self,
+        msg_id: &str,
+        call: &forge_types::ToolCall,
+    ) -> Result<String, CoreError> {
         // Idempotent: the model loop already resolved `tool_call` and removed the placeholder
         // values, so its counters saw the same call.
         let call = &self.resolve_model_call(call);

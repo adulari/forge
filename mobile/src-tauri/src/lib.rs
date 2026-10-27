@@ -22,6 +22,7 @@ mod menu;
 mod onboarding;
 mod ota;
 mod preview;
+mod reporting;
 #[cfg(test)]
 #[path = "../runtime_version.rs"]
 mod runtime_version;
@@ -164,6 +165,7 @@ fn perf_fixture_enabled() -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(process_start: Instant) {
     let _ = PERF_START.set(process_start);
+    reporting::install_panic_hook();
     perf_mark(|timeline| timeline.process_start_ms = Some(0.0));
     perf_mark(|timeline| timeline.builder_start_ms = Some(perf_elapsed_ms()));
     let mut builder = tauri::Builder::default();
@@ -223,6 +225,10 @@ pub fn run(process_start: Instant) {
             menu::set_menu_accelerators,
             about::set_about_info,
             about::open_about_window,
+            reporting::reporting_env,
+            reporting::get_reporting_mode,
+            reporting::set_reporting_mode,
+            reporting::take_queued_reports,
             perf_native_now,
             perf_native_timeline,
             perf_seed_server,

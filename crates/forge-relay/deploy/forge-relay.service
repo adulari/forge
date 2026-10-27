@@ -8,6 +8,7 @@ Type=simple
 User=forge-relay
 DynamicUser=yes
 EnvironmentFile=/etc/forge-relay/relay.env
+StateDirectory=forge-relay
 LoadCredential=apns-key:/etc/forge-relay/AuthKey.p8
 # Ubuntu 22.04's systemd cannot expand the newer %d credential-directory specifier inside an
 # Environment= assignment, so expand the systemd-provided variable in a minimal shell wrapper.
@@ -15,7 +16,8 @@ ExecStart=/bin/sh -c 'exec env FORGE_APNS_KEY_PATH="$CREDENTIALS_DIRECTORY/apns-
 Restart=on-failure
 RestartSec=5
 
-# The relay needs outbound HTTPS and a loopback listener, but no filesystem writes or ambient
+# The relay needs outbound HTTPS, a loopback listener and its own StateDirectory (the reports
+# SQLite), but no other filesystem writes or ambient
 # privileges. Keep additions deliberate and verify them with `systemd-analyze security`.
 NoNewPrivileges=yes
 CapabilityBoundingSet=

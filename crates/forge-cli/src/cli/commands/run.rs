@@ -3808,6 +3808,7 @@ pub(crate) async fn run_chat_tui(
         let (update_changed, update_installed) = update_flow::drain(&mut app, &upd_rx);
         dirty |= update_changed | update_flow::animate(&mut app);
         upgrade_noted |= update_installed;
+        dirty |= crate::reporting::poll(&mut app);
 
         // Drain remote-control inputs (a browser sent a prompt / answer / interrupt) and inject
         // them exactly like local keystrokes. We process the whole queue each iteration so a

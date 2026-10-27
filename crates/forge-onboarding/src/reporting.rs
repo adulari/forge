@@ -1,34 +1,38 @@
-//! The error-report choice. Adapter over the `[reporting] mode` config key: the reporting crate
-//! is built separately, so this reads and writes the key directly. When that crate lands, swap
-//! the two functions for `forge_reporting::{mode, set_mode}`.
+//! The error-report choice, as the onboarding step sees it: a thin string-typed adapter over
+//! `forge_reporting::{mode, set_mode}`.
 
 use forge_config::ConfigScope;
+use forge_reporting::ReportingMode;
 
 pub const MODES: [&str; 3] = ["auto", "ask", "off"];
 
-fn configured() -> Option<String> {
-    let path = forge_config::scope_path(ConfigScope::User).ok()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let doc: toml::Table = text.parse().ok()?;
-    let mode = doc.get("reporting")?.get("mode")?.as_str()?.to_lowercase();
-    MODES.contains(&mode.as_str()).then_some(mode)
-}
-
-/// The effective mode: what the config says, else `auto`.
+/// The effective mode (`FORGE_NO_REPORTS` wins, else the config, else `auto`).
 pub fn mode() -> String {
-    configured().unwrap_or_else(|| "auto".to_string())
+    forge_reporting::mode().as_str().to_string()
 }
 
-/// Whether the person has chosen a mode already.
+/// Whether the person has written a mode to their config already.
 pub fn chosen() -> bool {
-    configured().is_some()
+    let Ok(path) = forge_config::scope_path(ConfigScope::User) else {
+        return false;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|doc| {
+            doc.get("reporting")?
+                .get("mode")?
+                .as_str()
+                .map(ReportingMode::parse)
+        })
+        .is_some_and(|mode| mode.is_some())
 }
 
 pub fn set_mode(mode: &str) -> Result<(), String> {
-    if !MODES.contains(&mode) {
+    let Some(parsed) = ReportingMode::parse(mode).filter(|_| MODES.contains(&mode)) else {
         return Err(format!("{mode} is not an error report mode."));
-    }
-    forge_config::set_config_value(ConfigScope::User, "reporting.mode", mode)
+    };
+    forge_reporting::set_mode(parsed)
         .map_err(|e| format!("Could not save the error report setting: {e}"))
 }
 

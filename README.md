@@ -517,6 +517,11 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   success/failure outcomes, coarse latency/cost/token buckets, and public release downloads
 - Telemetry never blocks Forge and is easy to disable everywhere with
   `[telemetry] enabled = false`; the complete event contract is in [`docs/telemetry.md`](docs/telemetry.md)
+- When Forge itself crashes or hits an internal bug it sends a scrubbed, content-free error report
+  so the maintainers can fix it (on by default): never prompts, replies, code, paths, hostnames or
+  keys. `forge report --show-last` shows exactly what would be sent; turn it off with
+  `[reporting] mode = "off"`, `forge report --mode off` or `FORGE_NO_REPORTS=1`, or choose `ask` to
+  approve each report. Details: [`docs/features/issue-reporting.md`](docs/features/issue-reporting.md)
 - Native iOS push uses the open-source hosted APNs relay by default. The APNs device or Live
   Activity token, environment, and notification payload cross it in transit, but stock public-relay
   alerts are deliberately generic: no session ID/title, question or permission summary, response
@@ -1102,6 +1107,9 @@ auto_initialize = true # model-backed tailored setup for new, uninitialized proj
 
 [telemetry]
 enabled = false        # opt out of anonymous product-count telemetry; no functionality changes
+
+[reporting]
+mode = "ask"           # error reports for Forge's own bugs: "auto" (default), "ask" or "off"
 ```
 
 When enabled, Forge runs the same safe setup as `/init` once per uninitialized project: it inspects
@@ -1183,6 +1191,7 @@ command = "bash -c 'jq .args >> audit.log'"
 | [Forge Anywhere](./docs/features/forge-anywhere.md) | Optional paid encrypted relay, sync, recovery, handoff, shares, and exact free/paid boundary |
 | [Context pipeline](./docs/features/context-pipeline.md) | Guidance, retrieval, task state, memories, and compaction order |
 | [Anonymous telemetry contract](./docs/telemetry.md) | Exact events, excluded data, opt-out, and PostHog dashboard setup |
+| [Automatic issue reports](./docs/features/issue-reporting.md) | What a bug report contains, the scrubbing rules, modes, opt-out, relay and GitHub issue flow |
 | [Mobile App Store checklist](./docs/mobile/APP_STORE_CHECKLIST.md) | iOS privacy, OTA/runtime, TestFlight, and submission status |
 | [`docs/features/`](./docs/features/) | Per-feature design docs |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | How to build, test, and contribute |

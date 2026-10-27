@@ -91,6 +91,9 @@ mod push;
 mod push_tool;
 mod remote;
 mod replay;
+#[path = "cli/report_args.rs"]
+mod report_args;
+mod reporting;
 mod serve;
 mod serve_diagnostics;
 mod serve_dispatch;
@@ -274,16 +277,24 @@ async fn run_cli(login_path_added: Vec<String>) {
     cli::commands::trust::startup_trust_gate(&command);
     startup_trace::mark("trust gate");
     push_tool::install_local_sink();
+    reporting::start(&command);
     let telemetry_run = telemetry::start(&command);
     startup_trace::mark("telemetry start");
     if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
         println!(
-            "note: Forge sends anonymous usage counts (never code, prompts, paths, or device IDs).\n\
-             Disable with `[telemetry] enabled = false` or `DO_NOT_TRACK=1`."
+            "note: Forge sends anonymous usage counts (never code, prompts, paths, or device IDs)\n\
+             and, when it crashes or hits an internal error, a scrubbed error report (never your\n\
+             prompts, replies, code, paths or keys; see `forge report --show-last`).\n\
+             Disable with `[telemetry] enabled = false` / `DO_NOT_TRACK=1` and `forge report --mode off`\n\
+             / `FORGE_NO_REPORTS=1`."
         );
     }
     let result = cli::dispatch::dispatch(command).await;
     telemetry::finish(telemetry_run, result.is_ok());
+    if let Err(e) = &result {
+        reporting::report_top_level(e);
+    }
+    reporting::finish();
     if let Err(e) = result {
         if is_broken_pipe(&e) {
             std::process::exit(141);

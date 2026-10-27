@@ -37,6 +37,7 @@ import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { IconButton } from "../../components/ds/IconButton";
 import { Input } from "../../components/ds/Input";
 import { ListRow } from "../../components/ds/ListRow";
+import { Segmented } from "../../components/ds/Segmented";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
 import { BackLink } from "../../components/ds/BackLink";
@@ -67,6 +68,8 @@ import {
   isAnonymousTelemetryEnabled,
   setAnonymousTelemetryEnabled,
 } from "../../lib/anonymousTelemetry";
+import { REPORTING_MODES, setReportingMode, useReporting, type ReportingMode } from "../../lib/reporting";
+import { ReportProblemSheet, WhatGetsSentSheet } from "../../components/ReportingUi";
 import { useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { catalogModels } from "../../lib/modelCatalog";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
@@ -341,6 +344,9 @@ export function SettingsScreen() {
     };
   }, []);
   const [hapticsEnabled, setHapticsEnabledState] = useState(isHapticsEnabled);
+  const reporting = useReporting();
+  const [whatSentOpen, setWhatSentOpen] = useState(false);
+  const [reportProblemOpen, setReportProblemOpen] = useState(false);
   const [anonymousTelemetry, setAnonymousTelemetry] = useState(true);
   const [anonymousTelemetryLoaded, setAnonymousTelemetryLoaded] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
@@ -491,6 +497,12 @@ export function SettingsScreen() {
     void setAnonymousTelemetryEnabled(value).catch(() => {
       setAnonymousTelemetry(previous);
       toast.show("couldn't save anonymous statistics preference.", { tone: "danger" });
+    });
+  };
+
+  const onReportingModeChange = (mode: ReportingMode) => {
+    void setReportingMode(mode).catch(() => {
+      toast.show("couldn't save the error report preference.", { tone: "danger" });
     });
   };
 
@@ -741,6 +753,34 @@ export function SettingsScreen() {
             }
           />
         </View>
+
+        <View>
+          <SectionHeader>Error reports</SectionHeader>
+          <ListRow
+            title="Report bugs automatically"
+            subtitle={
+              reporting.sent[0]
+                ? `Anonymous and scrubbed. Last report sent ${new Date(reporting.sent[0].at).toLocaleString()}.`
+                : "Anonymous and scrubbed. Never sends prompts, code, paths, keys or accounts."
+            }
+            showSeparator={false}
+          />
+          <View style={{ paddingHorizontal: 16, paddingBottom: 8 }}>
+            <Segmented
+              testID="reporting-mode"
+              value={reporting.mode}
+              onChange={onReportingModeChange}
+              options={REPORTING_MODES.map((value) => ({
+                value,
+                label: value === "auto" ? "Automatic" : value === "ask" ? "Ask first" : "Off",
+              }))}
+            />
+          </View>
+          <ListRow title="What gets sent" onPress={() => setWhatSentOpen(true)} />
+          <ListRow title="Report a problem" onPress={() => setReportProblemOpen(true)} showSeparator={false} />
+        </View>
+        <WhatGetsSentSheet visible={whatSentOpen} onClose={() => setWhatSentOpen(false)} />
+        <ReportProblemSheet visible={reportProblemOpen} onClose={() => setReportProblemOpen(false)} />
 
         {Platform.OS !== "web" ? (
           <View>

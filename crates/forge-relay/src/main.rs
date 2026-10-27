@@ -17,7 +17,14 @@
 
 mod apns;
 mod config;
+mod github;
 mod ratelimit;
+mod reports;
+mod reports_db;
+mod reports_scrub;
+mod reports_sync;
+#[cfg(test)]
+mod reports_tests;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -37,7 +44,8 @@ use ratelimit::RateLimiters;
 const APNS_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
 struct AppState {
-    auth: ApnsAuth,
+    auth: Option<ApnsAuth>,
+    reports: Arc<reports::ReportsState>,
     client: reqwest::Client,
     allowed_topics: Vec<String>,
     relay_token: Option<String>,
@@ -53,7 +61,14 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = RelayConfig::from_env()?;
-    let auth = ApnsAuth::new(&config.key_pem, &config.team_id, &config.key_id)?;
+    let auth = config
+        .apns
+        .as_ref()
+        .map(|apns| ApnsAuth::new(&apns.key_pem, &apns.team_id, &apns.key_id))
+        .transpose()?;
+    if auth.is_none() {
+        tracing::warn!("APNs credentials not configured: push routes disabled (reports-only)");
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
@@ -66,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         auth,
+        reports: reports::ReportsState::from_env()?,
         client,
         allowed_topics: config.allowed_topics,
         relay_token: config.relay_token,
@@ -76,12 +92,7 @@ async fn main() -> anyhow::Result<()> {
         upstream_base_url: None,
     });
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/3/device", post(send_push_from_header))
-        .route("/3/device/{device_token}", post(send_push))
-        .layer(DefaultBodyLimit::max(APNS_MAX_PAYLOAD_BYTES))
-        .with_state(state.clone());
+    let app = build_router(state.clone());
 
     let addr = SocketAddr::new(config.bind_addr, config.port);
     tracing::info!("forge-relay listening on {addr}");
@@ -92,6 +103,18 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+fn build_router(state: Arc<AppState>) -> Router {
+    let push = Router::new()
+        .route("/3/device", post(send_push_from_header))
+        .route("/3/device/{device_token}", post(send_push))
+        .layer(DefaultBodyLimit::max(APNS_MAX_PAYLOAD_BYTES));
+    Router::new()
+        .route("/health", get(health))
+        .merge(push)
+        .merge(reports::router())
+        .with_state(state)
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -401,7 +424,10 @@ async fn send_push(
     let upstream_base_url = apns::host(environment);
     let url = format!("{upstream_base_url}/3/device/{device_token}");
     let outbound_payload = outbound_payload(&payload, push_type, state.generic_alerts);
-    let bearer_token = match state.auth.bearer_token(now) {
+    let Some(auth) = state.auth.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "push is not configured").into_response();
+    };
+    let bearer_token = match auth.bearer_token(now) {
         Ok(token) => token,
         Err(error) => {
             tracing::error!("APNs authorization token cache unavailable: {error}");
@@ -754,7 +780,8 @@ mod tests {
         upstream_base_url: Option<String>,
     ) -> Arc<AppState> {
         Arc::new(AppState {
-            auth: ApnsAuth::from_scalar(&[7u8; 32], "TEAM", "KEY"),
+            auth: Some(ApnsAuth::from_scalar(&[7u8; 32], "TEAM", "KEY")),
+            reports: reports::ReportsState::new(reports::test_config(None)).unwrap(),
             client: reqwest::Client::new(),
             allowed_topics: allowed_topics.iter().map(|s| s.to_string()).collect(),
             relay_token: relay_token.map(str::to_string),

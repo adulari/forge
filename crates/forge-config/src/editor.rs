@@ -192,6 +192,7 @@ pub fn setting_options(path: &str) -> Option<Vec<&'static str>> {
         "tui.theme" => vec!["auto", "dark", "light"],
         "tui.color" => vec!["auto", "truecolor", "256", "16", "none"],
         "tui.glyphs" => vec!["auto", "unicode", "ascii"],
+        "reporting.mode" => vec!["auto", "ask", "off"],
         _ => return None,
     })
 }
@@ -241,6 +242,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "recap.enabled" => Some(("Interface", "Per-turn recap")),
         "update.check" => Some(("Interface", "Check for updates")),
         "update.auto" => Some(("Interface", "Install updates automatically")),
+        "reporting.mode" => Some(("Privacy", "Error reports")),
         "shell.explain_errors" => Some(("Shell", "Explain failed commands")),
         "lattice.enabled" => Some(("Code Intelligence", "Enabled")),
         "lattice.inject" => Some(("Code Intelligence", "Auto-inject context")),
@@ -476,6 +478,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "tui.fold_tool_groups" => "Fold each run of tool calls into one summary row in the full-screen transcript (Read 3 files, ran 2 shell commands). Click it, or Alt+↑/↓ then Enter, to open it; Alt+O opens every group. Off shows every call as its own card.",
         "project.auto_initialize" => "Run a model-backed, tailored Forge setup once when opening an uninitialized project.",
         "recap.enabled" => "Show a one-line AI recap after each completed turn.",
+        "reporting.mode" => "Report Forge's own crashes and internal errors to the maintainers: auto sends a scrubbed, content-free report in the background, ask shows exactly what would be sent first, off sends nothing. FORGE_NO_REPORTS=1 forces off. Run `forge report --show-last` to see the last report.",
         "update.check" => "Check GitHub for a newer Forge release on startup (checked at most every 6 hours).",
         "update.auto" => "Install a newer Forge release automatically on launch (standalone installs swap before the TUI opens; Homebrew/Scoop upgrade in the background). FORGE_NO_AUTO_UPDATE=1 also disables it.",
         "shell.explain_errors" => "When a shell command fails, the AI explains the likely cause + a fix.",

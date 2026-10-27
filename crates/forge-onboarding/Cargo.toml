@@ -13,6 +13,7 @@ name = "forge_onboarding"
 [dependencies]
 forge-config.workspace = true
 forge-provider.workspace = true
+forge-reporting.workspace = true
 forge-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true

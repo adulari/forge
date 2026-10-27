@@ -79,6 +79,7 @@
     },
     "update": { "$ref": "#/$defs/UpdateConfig" },
     "telemetry": { "$ref": "#/$defs/TelemetryConfig" },
+    "reporting": { "$ref": "#/$defs/ReportingConfig" },
     "statusline": {
       "type": "object",
       "description": "Customizable statusline layout (left / center / right widget segments).",
@@ -227,6 +228,19 @@
       "properties": {
         "enabled": { "type": "boolean", "default": true },
         "auto": { "type": "boolean", "default": true, "description": "Install a newer release automatically on an interactive launch." }
+      }
+    },
+    "ReportingConfig": {
+      "type": "object",
+      "description": "Automatic, scrubbed error reports for Forge's own bugs. See docs/features/issue-reporting.md. FORGE_NO_REPORTS=1 forces off.",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["auto", "ask", "off"],
+          "default": "auto",
+          "description": "auto sends a scrubbed report in the background, ask shows the exact report first, off sends nothing."
+        }
       }
     },
     "TelemetryConfig": {
