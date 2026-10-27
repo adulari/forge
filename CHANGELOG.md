@@ -13,6 +13,8 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The desktop performance fixture can set its window title.** `perf-fixture` called `setTitle`, which the main window's capability did not allow, so it raised an unhandled rejection (caught by the new bug reporting as issue #1713); `core:window:allow-set-title` is now granted (`mobile/src-tauri/capabilities/default.json`).
+
 - **The hosted benchmark data loads from forge.adulari.dev.** The site's proxy to the `benchmarks-data` release answered 502 because GitHub's redirect headers outgrew nginx's default header buffer; both proxy blocks now use 32k buffers, so clients get the mirror from the site instead of falling back to the GitHub URL (`crates/forge-relay/deploy/forge.adulari.dev.nginx`).
 
 - **The desktop and web composer grows with your message again.** It measured the right height for wrapped text, but the textarea's `flex: 1` (a 0% basis inside a column) overrode that height, so the box stayed one row tall and older lines scrolled out of view. The web textarea now sizes from its measured height, up to six lines and then scrolling (`mobile/src/components/chat/Composer.tsx`).
