@@ -99,7 +99,7 @@ pub(crate) fn plan_launch(f: &LaunchFacts) -> LaunchAction {
             .method
             .upgrade_command()
             .map_or(LaunchAction::Nothing, LaunchAction::UpgradeInBackground),
-        InstallMethod::Aur | InstallMethod::Cargo => LaunchAction::Nothing,
+        InstallMethod::Aur | InstallMethod::Cargo | InstallMethod::Source => LaunchAction::Nothing,
     }
 }
 
@@ -415,7 +415,11 @@ mod tests {
 
     #[test]
     fn root_or_build_installs_keep_the_card() {
-        for m in [InstallMethod::Aur, InstallMethod::Cargo] {
+        for m in [
+            InstallMethod::Aur,
+            InstallMethod::Cargo,
+            InstallMethod::Source,
+        ] {
             let mut f = facts(m);
             f.cached_newer = true;
             assert_eq!(plan_launch(&f), LaunchAction::Nothing);

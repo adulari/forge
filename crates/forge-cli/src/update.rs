@@ -22,6 +22,9 @@ pub enum InstallMethod {
     Aur,
     /// Scoop-managed (Windows): defer to `scoop update`.
     Scoop,
+    /// Built from source (no `FORGE_DISTRIBUTION` baked in at build time): never replaced by a
+    /// release, which would overwrite a developer's own build with an older or different one.
+    Source,
 }
 
 impl InstallMethod {
@@ -33,6 +36,7 @@ impl InstallMethod {
             Self::Cargo => "cargo",
             Self::Aur => "aur",
             Self::Scoop => "scoop",
+            Self::Source => "source",
         }
     }
 
@@ -47,6 +51,7 @@ impl InstallMethod {
             )),
             Self::Aur => Some("yay -Syu forge-bin".to_string()),
             Self::Scoop => Some("scoop update forge".to_string()),
+            Self::Source => Some("git pull && cargo build --release -p forge-agent".to_string()),
         }
     }
 }
@@ -61,7 +66,25 @@ pub fn detect_install_method() -> InstallMethod {
     if raw == "/usr/bin/forge" && std::path::Path::new("/etc/arch-release").exists() {
         return InstallMethod::Aur;
     }
-    classify_path(&raw, in_cargo_home)
+    with_build_origin(
+        classify_path(&raw, in_cargo_home),
+        option_env!("FORGE_DISTRIBUTION").is_some(),
+        swap_target_override().is_some(),
+    )
+}
+
+/// A path that looks like a standalone install is only one when the binary is an official release
+/// build; a source build in its place (a symlink into `target/`, a copied dev build) is `Source`.
+/// `FORGE_UPDATE_TARGET` (tests) swaps a separate file, so it keeps the standalone path.
+fn with_build_origin(
+    method: InstallMethod,
+    release_build: bool,
+    test_target: bool,
+) -> InstallMethod {
+    match method {
+        InstallMethod::Binary if !release_build && !test_target => InstallMethod::Source,
+        other => other,
+    }
 }
 
 /// Pure path classifier (separated for testing). `in_cargo_home` is a caller-resolved hint that the
@@ -191,6 +214,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_source_build_is_never_a_standalone_install() {
+        assert_eq!(
+            with_build_origin(InstallMethod::Binary, false, false),
+            InstallMethod::Source
+        );
+        assert_eq!(
+            with_build_origin(InstallMethod::Binary, true, false),
+            InstallMethod::Binary
+        );
+        assert_eq!(
+            with_build_origin(InstallMethod::Binary, false, true),
+            InstallMethod::Binary,
+            "tests aiming the swap at a temp file keep the standalone path"
+        );
+        assert_eq!(
+            with_build_origin(InstallMethod::Homebrew, false, false),
+            InstallMethod::Homebrew
+        );
+    }
+
+    #[test]
     fn classify_path_distinguishes_install_methods() {
         // Homebrew (Apple Silicon + Intel Cellar layouts).
         assert_eq!(
@@ -222,6 +266,7 @@ mod tests {
             Some("yay -Syu forge-bin")
         );
         assert_eq!(InstallMethod::Binary.upgrade_command(), None);
+        assert!(InstallMethod::Source.upgrade_command().is_some());
         // Standalone binary installs (curl install.sh / manual).
         assert_eq!(
             classify_path("/home/me/.local/bin/forge", false),
