@@ -45,7 +45,6 @@ tauri-plugin-dialog = "2"
 tauri-plugin-websocket = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-tokio = { version = "1", features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Desktop auto-detect (detect_forge_serve): resolves the same OS config dir `forge serve`
