@@ -1,0 +1,18 @@
+[package]
+name = "forge-desktop-runtime-version"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "CI companion of the desktop OTA code: prints the runtime version and verifies signatures"
+
+# Standalone workspace so the repo-root workspace does not claim this crate.
+[workspace]
+
+[dependencies]
+# The same crates and the same source files as the app, so CI cannot drift from it.
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+minisign-verify = "0.2"
+base64 = "0.22"
+semver = "1"

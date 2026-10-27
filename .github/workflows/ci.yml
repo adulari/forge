@@ -141,6 +141,8 @@ jobs:
         run: bash scripts/ci/test-desktop-updater-guard.sh
       - name: Enforce desktop updater artifacts
         run: bash scripts/ci/desktop-updater-guard.sh
+      - name: Test desktop OTA bundle packer
+        run: python3 scripts/ci/test_desktop_ota_pack.py
 
   anywhere-policy:
     name: anywhere plaintext-canary harness
