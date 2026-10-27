@@ -270,9 +270,13 @@ install -m 0755 "$OLD" "$BIN/forge"
   forge_env "$BIN/forge" run UPGRADE_OLD_MARKER --mock --mode bypass
 ) > "$ROOT/old-run.log" 2>&1
 forge_env "$BIN/forge" sessions > "$ROOT/old-sessions.txt"
-CLI_SESSION="$(grep -Eom1 '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' "$ROOT/old-run.log")"
-[[ -n "$CLI_SESSION" ]]
-forge_env "$BIN/forge" replay "$CLI_SESSION" --json > "$ROOT/old-replay.json"
+# `forge run` output is prose and has not always carried the full id (v2.23.6 prints none), so
+# take the short id from the session list and let replay resolve it to the full one.
+SHORT_SESSION="$(awk '/UPGRADE_OLD_MARKER/ { print $1; exit }' "$ROOT/old-sessions.txt")"
+[[ "$SHORT_SESSION" =~ ^[0-9a-f]{8}$ ]]
+forge_env "$BIN/forge" replay "$SHORT_SESSION" --json > "$ROOT/old-replay.json"
+CLI_SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_id"])' "$ROOT/old-replay.json")"
+[[ "$CLI_SESSION" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
 grep -q UPGRADE_OLD_MARKER "$ROOT/old-replay.json"
 
 PORT="$(python3 - <<'PY'
