@@ -680,4 +680,17 @@ mod tests {
         assert_eq!(failed.status, "failed");
         assert!(!restarted.load(std::sync::atomic::Ordering::SeqCst));
     }
+
+    #[test]
+    fn a_source_build_daemon_never_updates_or_restarts_itself() {
+        let f = DaemonFacts {
+            auto: true,
+            method: InstallMethod::Source,
+            newer_known: true,
+            binary_replaced: true,
+            busy_sessions: 0,
+            already_applied: false,
+        };
+        assert_eq!(daemon_action(&f), DaemonAction::Wait);
+    }
 }
