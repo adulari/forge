@@ -64,6 +64,7 @@ impl Session {
             repo_root: self.workspace.root().to_path_buf(),
             effective_pin: self.effective_pin(),
             inherit_pin: !self.subagents_free(),
+            asker: None,
         };
         let request = subagent::AgentRequest {
             agent: fork.agent.clone(),

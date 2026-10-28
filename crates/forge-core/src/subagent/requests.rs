@@ -17,7 +17,7 @@ use forge_tools::ToolRegistry;
 use forge_types::{EffortLevel, PermissionMode, SideEffect, TaskTier};
 use serde_json::Value;
 
-use super::{SPAWN_AGENTS_TOOL, SUBAGENT_SYSTEM, SUBAGENT_TOOLS};
+use super::{GENERAL_PURPOSE_AGENT, SPAWN_AGENTS_TOOL, SUBAGENT_SYSTEM};
 
 /// [`spawn_agents_spec`] plus the named agent types loaded for this workspace, so the model sees
 /// each type's description and tool set and can pick one with `agent` (Claude Code's
@@ -47,8 +47,9 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
              are routed to the cheapest capable model. Use only when at least two child results \
              are independently useful. Do not use for routine repository exploration, code \
              search, test discovery, or review within one bug, feature, or refactor; direct tools \
-             share context and are faster. Up to {max_agents} agents per call. Each agent gets \
-             read-only tools and returns a concise result. Returns all results, labeled. \
+             share context and are faster. Up to {max_agents} agents per call. Each agent has the \
+             tools its `agent` type lists (see below; omitting `agent` gives general-purpose, with \
+             every tool) under your own permission mode, and returns a concise result. Returns all results, labeled. \
              Set `detached: true` to admit the agents WITHOUT waiting: the call returns \
              immediately with each child's id/name/model, the children keep running in the \
              background, and their results are delivered as a labeled message the next time you \
@@ -67,7 +68,7 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
                         "properties": {
                             "agent": {
                                 "type": "string",
-                                "description": "optional named agent type (also accepted as `subagent_type`); omit for a general read-only agent"
+                                "description": "optional named agent type (also accepted as `subagent_type`); omit for general-purpose (all tools, can edit files and run commands under the session's permission mode); `explore` and `plan` are read-only"
                             },
                             "task": {
                                 "type": "string",
@@ -235,7 +236,7 @@ pub fn parse_requests(
             .or_else(|| entry.get("subagent_type"))
             .and_then(|a| a.as_str())
             .filter(|a| !a.trim().is_empty())
-            .unwrap_or("general")
+            .unwrap_or(GENERAL_PURPOSE_AGENT)
             .to_string();
         out.push(AgentRequest {
             agent,
@@ -247,7 +248,8 @@ pub fn parse_requests(
 
 /// A request resolved against the loaded agent types — owned so it can move into a spawned
 /// task. A named agent supplies its system prompt / tool subset / pinned tier; an unknown or
-/// inline (`general`) agent falls back to the default read-only investigator.
+/// inline (`general`) agent falls back to the `general-purpose` type: every tool, the parent's
+/// temper.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedAgent {
     pub name: String,
@@ -299,16 +301,19 @@ pub fn narrowed_mode(parent: PermissionMode, requested: Option<PermissionMode>) 
     }
 }
 
-/// The tool names the child is offered: the agent's own list (or the read-only default) minus its
+/// The tool names the child is offered: the agent's own list (or, when it names none, every tool in
+/// `registry`, as a Claude Code agent file without `tools:` inherits them all) minus its
 /// `disallowedTools`. `spawn_agents` is never in it; recursion is offered separately.
-pub fn effective_tools(agent: &ResolvedAgent) -> Vec<&str> {
-    let base: Vec<&str> = if agent.tools.is_empty() {
-        SUBAGENT_TOOLS.to_vec()
+pub fn effective_tools(agent: &ResolvedAgent, registry: &ToolRegistry) -> Vec<String> {
+    let base: Vec<String> = if agent.tools.is_empty() {
+        let mut all: Vec<String> = registry.names().map(str::to_string).collect();
+        all.sort();
+        all
     } else {
-        agent.tools.iter().map(String::as_str).collect()
+        agent.tools.clone()
     };
     base.into_iter()
-        .filter(|t| *t != SPAWN_AGENTS_TOOL && !agent.disallowed_tools.iter().any(|d| d == t))
+        .filter(|t| t != SPAWN_AGENTS_TOOL && !agent.disallowed_tools.iter().any(|d| d == t))
         .collect()
 }
 
@@ -336,9 +341,15 @@ pub fn system_prompt_with_skills(
 
 /// Resolve a parsed request against the loaded agent-type map (RFC subagent-orchestration Ph2).
 pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> ResolvedAgent {
-    match find_agent(agents, &req.agent) {
+    let named = find_agent(agents, &req.agent);
+    let def = named.or_else(|| agents.get(GENERAL_PURPOSE_AGENT));
+    match def {
         Some(def) => ResolvedAgent {
-            name: def.name.clone(),
+            name: if named.is_some() {
+                def.name.clone()
+            } else {
+                req.agent.clone()
+            },
             task: req.task.clone(),
             system_prompt: if def.system_prompt.is_empty() {
                 SUBAGENT_SYSTEM.to_string()
@@ -371,9 +382,9 @@ pub fn is_write_capable(agent: &ResolvedAgent, registry: &ToolRegistry) -> bool 
     if agent.mode == Some(PermissionMode::Plan) {
         return false;
     }
-    effective_tools(agent).iter().any(|name| {
+    effective_tools(agent, registry).iter().any(|name| {
         registry
-            .get(name)
+            .get(name.as_str())
             .map(|t| matches!(t.side_effect(), SideEffect::Write | SideEffect::Shell))
             .unwrap_or(false)
     })
@@ -476,8 +487,8 @@ mod tests {
             },
             &agents,
         );
-        assert_eq!(general.system_prompt, SUBAGENT_SYSTEM);
         assert!(general.tools.is_empty());
+        assert_eq!(general.mode, None);
     }
 
     #[test]
@@ -498,10 +509,14 @@ mod tests {
             disallowed_tools: vec!["shell".into()],
             ..ResolvedAgent::default()
         };
-        assert_eq!(effective_tools(&agent), ["read_file"]);
+        let registry = ToolRegistry::with_core_tools();
+        assert_eq!(effective_tools(&agent, &registry), ["read_file"]);
         agent.tools.clear();
-        agent.disallowed_tools = vec!["search".into()];
-        assert_eq!(effective_tools(&agent), ["read_file", "list_dir"]);
+        agent.disallowed_tools = vec!["write_file".into(), "edit_file".into()];
+        let tools = effective_tools(&agent, &registry);
+        assert!(tools.iter().any(|t| t == "read_file"));
+        assert!(!tools.iter().any(|t| t == "write_file" || t == "edit_file"));
+        assert!(tools.iter().any(|t| t == "shell"));
     }
 
     #[test]

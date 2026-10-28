@@ -71,8 +71,9 @@ before it, so a user rule can lift or tighten any single command. When auto asks
 names the reason.
 
 Selectable with `forge run --mode auto`, `permission_mode = "auto"` in config, `/mode`, and the
-SHIFT+TAB cycle (Ask, Auto-edit, Auto, Read-only). Subagents and the bridge treat an ask as a
-deny (no interactive surface), as for every mode.
+SHIFT+TAB cycle (Ask, Auto-edit, Auto, Read-only). The bridge treats an ask as a
+deny (no interactive surface), as for every mode; a subagent's ask goes to the parent's prompt when
+there is one (see `subagent-orchestration.md`).
 
 ## `schedule_wakeup`
 
