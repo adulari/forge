@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.24.1] - 2026-10-28
+
 ### Added
 
 - **Every subagent a session ever started is reachable from the apps, not just the current batch.** The Agents tab lists the live batch first, then every earlier child grouped by turn, newest first, and a `spawn_agents` or workflow row in the chat gets a chip per child it started that opens it. The host serves the list at `GET /api/sessions/{id}/agents` (also bridged through Forge Anywhere); chat rows are matched to children by the time window the call spanned, so rows from before this release link too. A host without the route keeps showing the live batch only. Back from a subagent now returns to its parent even in a window narrowed from the desktop layout.
@@ -5296,7 +5298,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.24.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.24.1...HEAD
+[2.24.1]: https://github.com/Adulari/forge/compare/v2.24.0...v2.24.1
 [2.24.0]: https://github.com/Adulari/forge/compare/v2.23.6...v2.24.0
 [2.23.6]: https://github.com/Adulari/forge/compare/v2.23.5...v2.23.6
 [2.23.5]: https://github.com/Adulari/forge/compare/v2.23.4...v2.23.5
