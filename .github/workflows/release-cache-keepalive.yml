@@ -4,7 +4,9 @@ name: release-cache-keepalive
 # further apart than that, so the hosted release legs (the critical path of release.yml) kept
 # starting from nothing: with a warm cache Windows builds in ~13 min and x86_64 macOS in ~6, cold
 # they take ~20 and ~15. This restores the three caches every few days, restore-only, so release.yml
-# always finds them. It uses the exact rust-cache inputs release.yml uses; keep the two in step.
+# always finds them. It uses the exact rust-cache inputs release.yml uses; keep the two in step. On
+# a dependency change the exact key misses and the newest entry is restored as a prefix fallback,
+# which still counts as an access, so the entry survives until release.yml saves a fresh one.
 on:
   schedule:
     - cron: "23 5 */3 * *"
@@ -46,5 +48,4 @@ jobs:
         with:
           key: ${{ matrix.target }}-${{ steps.toolchain.outputs.channel }}
           add-job-id-key: false
-          add-rust-environment-hash-key: false
           save-if: false

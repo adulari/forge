@@ -38,15 +38,15 @@ for path, jobs in heavy_jobs.items():
 release = workflow(".github/workflows/release.yml")
 if 'CARGO_BUILD_JOBS: "4"' not in release:
     raise SystemExit("release.yml must cap Cargo parallelism at four jobs")
-for option in (
-    "--memory-reservation 6g",
-    "--memory 8g",
-    "--memory-swap 9g",
-    "--cpus 4",
-    "--pids-limit 2048",
-):
-    if option not in release:
-        raise SystemExit(f"release Docker builder is missing resource limit: {option}")
+# The Linux release legs build on GitHub-hosted runners (they no longer share the maintainer's
+# machine), so the laptop memory caps do not apply. What must hold instead: no release leg or job
+# may land back on a self-hosted runner without the budget being reconsidered, and the container
+# keeps a pid cap.
+if re.search(r"runs-on:[^\n]*self-hosted", release) or release.count("[release,") != 1:
+    raise SystemExit("release.yml must stay on GitHub-hosted runners except the package-manifest job")
+builder = open("scripts/ci/build-portable-linux.sh", encoding="utf-8").read()
+if "--pids-limit" not in builder:
+    raise SystemExit("release Docker builder is missing resource limit: --pids-limit")
 
 dispatch_loop = re.search(r"for workflow in ([^;]+); do", release)
 if not dispatch_loop:

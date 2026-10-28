@@ -9,6 +9,14 @@ on:
         description: Existing vX.Y.Z tag at the protected-main dispatch SHA
         required: true
         type: string
+      dry_run:
+        description: >-
+          Build, package and run the upgrade gate from the dispatched commit WITHOUT a tag or
+          publishing: no attestation, no GitHub Release, no desktop/web/OTA dispatch, no manifest PR.
+          release_tag is then only a label.
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: release-${{ inputs.release_tag }}
@@ -19,6 +27,8 @@ permissions:
 
 env:
   CARGO_BUILD_JOBS: "4"
+  # A dry run builds the dispatched commit; a real release builds the tag.
+  SOURCE_REF: ${{ inputs.dry_run && github.sha || format('refs/tags/{0}', inputs.release_tag) }}
 
 jobs:
   # Hosted on purpose: every build leg waits on this job, and on the single heavy runner it queued
@@ -31,24 +41,29 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: ${{ env.SOURCE_REF }}
           fetch-depth: 0
       - name: Verify tag matches Cargo version and dispatch SHA
+        if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "release tag must look like v2.6.6: $RELEASE_TAG" >&2
-            exit 1
-          }
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
-          [ "$RELEASE_TAG" = "v$version" ] || {
-            echo "release tag $RELEASE_TAG does not match workspace version $version" >&2
-            exit 1
-          }
+          if [[ -x scripts/ci/require-release-version.sh ]]; then
+            scripts/ci/require-release-version.sh "$RELEASE_TAG"
+          else
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "release tag must look like v2.6.6: $RELEASE_TAG" >&2
+              exit 1
+            }
+            version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+            [ "$RELEASE_TAG" = "v$version" ] || {
+              echo "release tag $RELEASE_TAG does not match workspace version $version" >&2
+              exit 1
+            }
+          fi
           TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           [ "$(git rev-parse HEAD)" = "$TAG_SHA" ] || {
             echo "checked-out source does not match $RELEASE_TAG" >&2
@@ -65,51 +80,59 @@ jobs:
           }
 
   # Generate shell completions + the man page ONCE (they're platform-independent text). Runs
-  # fully in parallel with `build` below (no `needs` either way) — it used to hard-block every
-  # platform build for its own ~6min compile (it links most of forge-cli's dependency graph in
-  # release mode just to introspect the clap tree), even though nothing needs its output until
-  # `release` assembles the final archives. Driven by `xtasks gen-dist`, which reads forge-cli's
-  # clap tree via its library facade — no runtime CLI subcommand.
+  # fully in parallel with `build` below (no `needs` either way). Driven by `xtasks gen-dist`, which
+  # reads forge-cli's clap tree via its library facade — no runtime CLI subcommand.
+  #
+  # The output is text derived from the clap tree, identical in every profile, so this compiles in
+  # the unoptimised dev profile with debuginfo off (no thin-LTO link, no codegen of 548 crates at
+  # opt-level 3) instead of the release profile: it was a ~9 minute cold release compile on the
+  # laptop for a few KB of text. rust-cache keeps the dependency build between releases.
   assets:
     name: completions + man page
     needs: preflight
-    runs-on: [release, linux, x64, heavy]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
-      # checkout's `git clean -ffdx` wipes ./target, so this compile (548 crates, ~6.5 min) was cold
-      # on every release. The `release` slot beside the checkout survives the clean and is shared
-      # with ci.yml's release-build job. It also stops this job from fighting the x86_64 Linux leg
-      # for CPU on the same machine.
-      - name: Use persistent Cargo target dir
+          ref: ${{ env.SOURCE_REF }}
+      - name: Stamp release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ -f scripts/ci/cargo-cache-env.sh ]]; then
-            bash scripts/ci/cargo-cache-env.sh release
-          else
-            echo "::notice::persistent target dir unavailable on this older release tag"
+          if [[ -x scripts/ci/stamp-release-version.sh && "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            scripts/ci/stamp-release-version.sh "${BASH_REMATCH[1]}"
           fi
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        with:
+          key: assets-dev-${{ steps.toolchain.outputs.channel }}
+          add-job-id-key: false
       - name: Generate completions + man page
-        run: cargo run --release --locked -p xtasks -- gen-dist dist-assets
+        run: cargo run --locked -p xtasks -- gen-dist dist-assets
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: forge-assets
           path: dist-assets/**
           if-no-files-found: error
-      - name: Bound persistent build cache
-        if: always()
-        run: |
-          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
-            bash scripts/ci/trim-runner-cache.sh
-          else
-            echo "::notice::cache bound unavailable on this older release tag"
-          fi
 
   # Raw per-platform binary only — no packaging here. Packaging (bundling README/LICENSE/
-  # completions/man page into the final archive) now happens once in `release`, after both this
-  # and `assets` finish, so this job has zero dependency on `assets` and starts immediately.
+  # completions/man page into the final archive) happens once in `release`, after both this and
+  # `assets` finish, so this job has zero dependency on `assets` and starts immediately.
+  #
+  # Every leg is GitHub-hosted and runs in parallel: nothing waits for the maintainer's laptop any
+  # more. The Linux legs build natively inside the pinned Bullseye image (glibc 2.31 floor) —
+  # x86_64 on an x64 runner, aarch64 on GitHub's free ARM runner — see
+  # scripts/ci/build-portable-linux.sh. Previously aarch64 was cross-compiled on the single laptop
+  # release runner and could not start until the x86_64 leg finished (+11 min on v2.24.0).
   build:
     name: build ${{ matrix.target }}
     needs: preflight
@@ -119,77 +142,73 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: [forge-release-sandbox]
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            self_hosted: true
             portable_linux: true
-            linux_cross: false
             bin: forge
-          # Keep ARM on the dedicated Arch release runner too. The pinned Bullseye container
-          # supplies its aarch64 cross-linker and a glibc 2.31 sysroot, so this neither spends
-          # hosted-runner quota nor inherits the rolling host's glibc/libstdc++ requirements.
-          - os: [forge-release-sandbox]
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            self_hosted: true
             portable_linux: true
-            linux_cross: true
             bin: forge
           - os: macos-latest
             target: aarch64-apple-darwin
-            self_hosted: false
             portable_linux: false
-            linux_cross: false
             bin: forge
           - os: macos-latest
             target: x86_64-apple-darwin
-            self_hosted: false
             portable_linux: false
-            linux_cross: false
             bin: forge
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            self_hosted: false
             portable_linux: false
-            linux_cross: false
             bin: forge.exe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: ${{ env.SOURCE_REF }}
+      - name: Stamp release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ -x scripts/ci/stamp-release-version.sh && "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            scripts/ci/stamp-release-version.sh "${BASH_REMATCH[1]}"
+          fi
 
       # dtolnay/rust-toolchain does NOT read rust-toolchain.toml; its `toolchain` input defaults to
       # `stable`. Left implicit, the action installs `targets:` for stable while cargo — which does
       # obey the toolchain file — builds with the pinned channel, whose only installed target is the
       # host. That is exactly how v2.13.3's x86_64-apple-darwin leg failed with `can't find crate
       # for std`. Resolve the channel from the file so the pin and the targets stay one decision.
+      # (The Linux legs build inside the container, but rust-cache needs this toolchain on the host
+      # to key and trim the shared target directory.)
       - name: Resolve the pinned toolchain
-        if: ${{ !matrix.portable_linux }}
         id: toolchain
         shell: bash
         run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
-        if: ${{ !matrix.portable_linux }}
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
-      # The portable Linux legs instead use dedicated Docker volumes on the release runner.
       #
-      # The key is deliberately just target + pinned channel. The default also hashes every rustc
-      # on the image (the preinstalled one rotates with each runner-image release) and the job id,
-      # so a runner-image bump orphaned the cache, and release-cache-keepalive.yml could not have
-      # refreshed it. GitHub evicts a cache nobody restored for 7 days, and releases are often
-      # further apart than that: v2.16.1 (6 days after the previous one) built Windows in 12m43s,
-      # v2.17.0 (10 days after) in 20m11s with "No cache found".
-      - if: ${{ !matrix.self_hosted }}
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+      # The key is target + pinned channel, and rust-cache's default `add-rust-environment-hash-key`
+      # stays ON because that flag also gates the Cargo.lock/manifest hash in the key. It used to
+      # be switched off, which froze the cache: rust-cache saves only on an exact-key miss, so the
+      # 2026-10-09 entry was restored on every run and never refreshed. By v2.24.0 (19 days later)
+      # 222 dependency crates were recompiling on every Windows build. With the hash in the key, a
+      # dependency or manifest change misses, restores the newest entry as a prefix fallback,
+      # rebuilds only the delta, and saves a fresh entry. The toolchain is pinned above, so the
+      # environment half of the hash no longer churns with the runner image's preinstalled rustc,
+      # which was the original reason for turning it off. release-cache-keepalive.yml restores the
+      # same prefix so GitHub's 7-day eviction never fires.
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
         with:
           key: ${{ matrix.target }}-${{ steps.toolchain.outputs.channel }}
           add-job-id-key: false
-          add-rust-environment-hash-key: false
 
       - name: Build
         if: ${{ !matrix.portable_linux }}
@@ -206,92 +225,7 @@ jobs:
           FORGE_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
           FORGE_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
           FORGE_DISTRIBUTION: github-release
-          LINUX_CROSS: ${{ matrix.linux_cross }}
-          TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          image='rust:1.88.0-bullseye@sha256:b315f988b86912bafa7afd39a6ded0a497bf850ec36578ca9a3bdd6a14d5db4e'
-          artifact_dir="$GITHUB_WORKSPACE/target/$TARGET/release"
-          cache_target="forge-release-bullseye-target-${TARGET//_/-}"
-          container_name="forge-release-${TARGET//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$artifact_dir"
-
-          # rust-toolchain.toml pins a channel the pinned image does not ship, so every fresh
-          # container downloaded and installed rustc/cargo/clippy/rustfmt (~20s) plus the
-          # cross-target std. A per-target volume keeps them; it is per target because the two
-          # Linux legs may one day run side by side and must not race one rustup install.
-          docker pull "$image"
-          # The release runner itself is containerized. Bind-mounting its
-          # `$GITHUB_WORKSPACE` into a sibling Docker container resolves that path on the
-          # Docker host and silently produces an empty `/workspace`. Copy the checkout through
-          # the Docker API instead; this works for both containerized and bare-metal runners.
-          docker create --name "$container_name" \
-            --memory-reservation 6g \
-            --memory 8g \
-            --memory-swap 9g \
-            --cpus 4 \
-            --pids-limit 2048 \
-            --env CARGO_TARGET_DIR=/out \
-            --env CARGO_BUILD_JOBS \
-            --env FORGE_DISTRIBUTION \
-            --env FORGE_POSTHOG_HOST \
-            --env FORGE_POSTHOG_KEY \
-            --env LINUX_CROSS \
-            --env TARGET \
-            --volume forge-release-cargo-git:/usr/local/cargo/git \
-            --volume forge-release-cargo-registry:/usr/local/cargo/registry \
-            --volume "forge-release-rustup-${TARGET//_/-}:/usr/local/rustup" \
-            --volume "$cache_target:/out" \
-            --workdir /workspace \
-            "$image" \
-            bash -euxo pipefail -c '
-              # Bullseye is EOL and its security pool rotated out from under the live mirror: the
-              # index advertises libc-dev-bin 2.31-13+deb11u14 while deb.debian.org has already
-              # deleted that .deb, so apt 404s and the release build dies 24 seconds in, before a
-              # line of Rust is compiled. It broke both Linux targets of v2.14.0.
-              # archive.debian.org is not the answer yet either: mid-transition it has no
-              # bullseye-security Release file at all.
-              #
-              # snapshot.debian.org is: a frozen, timestamped view that keeps the security suite
-              # and cannot rotate underneath a build. Pinning it makes this step reproducible the
-              # same way the image digest and toolchain already are. Move the timestamp forward
-              # deliberately when the build needs newer packages, never automatically.
-              snapshot=20260901T000000Z
-              base=http://snapshot.debian.org/archive
-              printf "deb %s/debian/%s bullseye main\n" "$base" "$snapshot" > /etc/apt/sources.list
-              printf "deb %s/debian-security/%s bullseye-security main\n" "$base" "$snapshot" >> /etc/apt/sources.list
-              printf "deb %s/debian/%s bullseye-updates main\n" "$base" "$snapshot" >> /etc/apt/sources.list
-              # A snapshot Release file is deliberately older than apt tolerates by default.
-              printf "Acquire::Check-Valid-Until \"false\";\n" > /etc/apt/apt.conf.d/99forge-snapshot
-              apt-get update -qq
-              packages=(cmake libclang-dev)
-              if [[ "$LINUX_CROSS" == true ]]; then
-                packages+=(gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user)
-              fi
-              apt-get install -y -qq --no-install-recommends "${packages[@]}"
-
-              if [[ "$LINUX_CROSS" == true ]]; then
-                rustup target add "$TARGET"
-                export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
-                export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-                export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
-                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-                export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu"
-              fi
-
-              cargo build --release --locked --bin forge --target "$TARGET"
-
-              if [[ "$LINUX_CROSS" == true ]]; then
-                qemu-aarch64 -L /usr/aarch64-linux-gnu "/out/$TARGET/release/forge" --version
-              else
-                "/out/$TARGET/release/forge" --version
-              fi
-            '
-          trap 'docker rm -f "$container_name" >/dev/null 2>&1 || true' EXIT
-          docker cp "$GITHUB_WORKSPACE/." "$container_name:/workspace"
-          docker start --attach "$container_name"
-          docker cp "$container_name:/out/$TARGET/release/forge" "$artifact_dir/forge"
-          chmod 0755 "$artifact_dir/forge"
+        run: bash scripts/ci/build-portable-linux.sh "${{ matrix.target }}"
 
       - name: Verify portable Linux runtime dependencies
         if: ${{ matrix.portable_linux }}
@@ -304,39 +238,42 @@ jobs:
           name: forge-raw-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.bin }}
           if-no-files-found: error
-      - name: Bound persistent workspace cache
-        if: always() && matrix.self_hosted
-        run: |
-          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
-            bash scripts/ci/trim-runner-cache.sh
-          else
-            echo "::notice::cache bound unavailable on this older release tag"
-          fi
 
-  release-cache-cleanup:
-    name: bound persistent release cache
+  # The release-boundary gate that used to run on every push to main (ci.yml `release-build`): the
+  # x86_64 binary this very run just built, installed over the latest public release in an isolated
+  # HOME, then reconnect + rollback. It needs no laptop, only the artifact, so it runs hosted and in
+  # parallel with the slower Windows/macOS legs. `release` waits for it, so a bad upgrade path still
+  # blocks publication.
+  upgrade-e2e:
+    name: upgrade, reconnect and rollback gate
     needs: build
-    if: always()
-    runs-on: [forge-release-sandbox]
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          # Cleanup policy is operational, not release content. Using protected main keeps repair
-          # runs for older tags working even when that tag predates this script.
-          ref: main
-      - name: Bound persistent Docker volumes
+          ref: ${{ env.SOURCE_REF }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: forge-raw-x86_64-unknown-linux-gnu
+          path: candidate
+      - name: Verify upgrade, reconnect, and rollback from latest release
         env:
-          FORGE_TRIM_RELEASE_DOCKER_VOLUMES: "1"
-        run: bash scripts/ci/trim-runner-cache.sh
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod 0755 candidate/forge
+          scripts/release-upgrade-e2e.sh "" "$PWD/candidate/forge"
 
   release:
     name: package + publish release
-    needs: [assets, build, release-cache-cleanup]
-    runs-on: [release, linux, x64]
+    needs: [assets, build, upgrade-e2e]
+    # Hosted: nothing here needs the laptop, and `release`-labelled jobs queue behind every CI job.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: release
-    if: startsWith(inputs.release_tag, 'v')
+    # A dry run must not wait on, or be refused by, the `release` environment's branch policy;
+    # GitHub creates the unprotected `release-dry-run` environment on first use.
+    environment: ${{ inputs.dry_run && 'release-dry-run' || 'release' }}
+    if: startsWith(inputs.release_tag, 'v') || inputs.dry_run
     permissions:
       attestations: write
       contents: write
@@ -345,7 +282,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: ${{ env.SOURCE_REF }}
+      - name: Stamp release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ -x scripts/ci/stamp-release-version.sh && "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            scripts/ci/stamp-release-version.sh "${BASH_REMATCH[1]}"
+          fi
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -358,6 +303,7 @@ jobs:
           path: raw
 
       - name: Verify native release binary version
+        if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -457,6 +403,7 @@ jobs:
           echo "----- composed release body -----"; cat dist/RELEASE_NOTES.md
 
       - name: Attest CLI/TUI release provenance
+        if: ${{ !inputs.dry_run }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: |
@@ -465,6 +412,7 @@ jobs:
             dist/checksums.txt
 
       - name: Publish
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: ${{ inputs.release_tag }}
@@ -509,6 +457,7 @@ jobs:
       # signal. Recover with `gh workflow run app-desktop.yml --ref main -f release_tag=vX.Y.Z`
       # (RELEASING.md §6) — never by publishing the draft by hand.
       - name: Dispatch matching desktop and web releases from protected main
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -517,6 +466,7 @@ jobs:
           gh workflow run app-web.yml --ref main -f release_tag="$RELEASE_TAG"
 
       - name: Upload CLI checksums for the manifest job
+        if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: forge-cli-checksums
@@ -538,6 +488,7 @@ jobs:
   manifests:
     name: update package-manager manifests
     needs: release
+    if: ${{ !inputs.dry_run }}
     runs-on: [release, linux, x64]
     timeout-minutes: 20
     permissions:
@@ -559,17 +510,26 @@ jobs:
           git clone --depth 1 --branch main \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" brew-repo
           cd brew-repo
+          # The release was stamped from its tag in CI, so main may still carry the previous
+          # version. Ride the same PR: it brings Cargo.toml, Cargo.lock, tauri.conf.json and
+          # CHANGELOG.md up to what actually shipped. No-op for a release prepared by hand.
+          if [[ -x scripts/ci/release-catchup.sh ]]; then
+            git fetch --depth 1 origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            scripts/ci/release-catchup.sh "$VERSION"
+          fi
           bash scripts/update-package-manifests.sh "$VERSION" "$GITHUB_WORKSPACE/dist/checksums.txt"
           (cd packaging/aur && makepkg --printsrcinfo > .SRCINFO)
-          if git diff --quiet Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json; then
+          files=(Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json
+                 Cargo.toml Cargo.lock CHANGELOG.md crates/forge-cli/CHANGELOG.md mobile/src-tauri/tauri.conf.json)
+          if git diff --quiet "${files[@]}"; then
             echo "package manifests already current"; exit 0
           fi
           BRANCH="dist/v$VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json
-          git commit -m "chore(dist): update manifests to v$VERSION"
+          git add "${files[@]}"
+          git commit -m "chore(dist): update manifests and version files to v$VERSION"
           git push -f origin "$BRANCH"
           if ! gh pr view "$BRANCH" --json url --jq .url >/dev/null 2>&1; then
             gh pr create --base main --head "$BRANCH" \
@@ -596,6 +556,7 @@ jobs:
   ota:
     name: publish the matching iOS OTA
     needs: release
+    if: ${{ !inputs.dry_run }}
     # Hosted: it is one `gh workflow run`. On the single release runner it queued 13 minutes behind
     # the CI runs that every release-triggered push starts (published 18:39, started 18:53 on v2.17.0).
     runs-on: ubuntu-latest

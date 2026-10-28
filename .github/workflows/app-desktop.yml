@@ -21,7 +21,9 @@ permissions:
 jobs:
   preflight:
     name: app preflight
-    runs-on: [self-hosted, linux, x64]
+    # Hosted: it is git + npm ci + a typecheck, and on the one laptop it queued behind CI jobs
+    # before every build leg (the Linux x86_64 leg waited ~4 minutes for it).
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
@@ -59,11 +61,15 @@ jobs:
             exit 1
           }
           if [[ "$RELEASE_TAG" == v* ]]; then
-            cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
-            [ "$RELEASE_TAG" = "v$cargo_version" ] || {
-              echo "unified desktop tag $RELEASE_TAG does not match workspace version $cargo_version" >&2
-              exit 1
-            }
+            if [[ -x scripts/ci/require-release-version.sh ]]; then
+              scripts/ci/require-release-version.sh "$RELEASE_TAG"
+            else
+              cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+              [ "$RELEASE_TAG" = "v$cargo_version" ] || {
+                echo "unified desktop tag $RELEASE_TAG does not match workspace version $cargo_version" >&2
+                exit 1
+              }
+            fi
           fi
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -78,14 +84,6 @@ jobs:
       - name: Verify app
         working-directory: .
         run: bash scripts/ci/mobile-release-check.sh
-      - name: Bound persistent dependency cache
-        if: always()
-        run: |
-          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
-            bash scripts/ci/trim-runner-cache.sh
-          else
-            echo "::notice::cache bound unavailable on this older release tag"
-          fi
 
   build:
     # `matrix.os` is a label ARRAY for the self-hosted linux leg, which renders as the literal
@@ -283,6 +281,18 @@ jobs:
       - name: Install dependencies
         working-directory: mobile
         run: npm ci
+
+      # A release is stamped from its tag (see docs/ci/releasing.md): the committed version may be
+      # older. Done before the cargo-metadata comparison below, which then holds by construction.
+      - name: Stamp release version from the tag
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          if [[ -x scripts/ci/stamp-release-version.sh && "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            scripts/ci/stamp-release-version.sh "${BASH_REMATCH[1]}"
+          fi
 
       # The updater compares the app's built-in version against latest.json's version. Derive the
       # desktop stamp from the workspace release source, then require the tag to agree with it;
