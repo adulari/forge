@@ -21,7 +21,9 @@ permissions:
 jobs:
   preflight:
     name: app preflight
-    runs-on: [self-hosted, linux, x64]
+    # Hosted: it is git + npm ci + a typecheck, and on the one laptop it queued behind CI jobs
+    # before every build leg (the Linux x86_64 leg waited ~4 minutes for it).
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
@@ -82,14 +84,6 @@ jobs:
       - name: Verify app
         working-directory: .
         run: bash scripts/ci/mobile-release-check.sh
-      - name: Bound persistent dependency cache
-        if: always()
-        run: |
-          if [[ -f scripts/ci/trim-runner-cache.sh ]]; then
-            bash scripts/ci/trim-runner-cache.sh
-          else
-            echo "::notice::cache bound unavailable on this older release tag"
-          fi
 
   build:
     # `matrix.os` is a label ARRAY for the self-hosted linux leg, which renders as the literal
