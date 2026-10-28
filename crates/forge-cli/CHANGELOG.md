@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.24.1] - 2026-10-28
+
 ### Added
 
 - **Every subagent a session ever started is reachable from the apps, not just the current batch.** The Agents tab lists the live batch first, then every earlier child grouped by turn, newest first, and a `spawn_agents` or workflow row in the chat gets a chip per child it started that opens it. The host serves the list at `GET /api/sessions/{id}/agents` (also bridged through Forge Anywhere); chat rows are matched to children by the time window the call spanned, so rows from before this release link too. A host without the route keeps showing the live batch only. Back from a subagent now returns to its parent even in a window narrowed from the desktop layout.
@@ -13,6 +15,8 @@ All notable changes to Forge are documented here. The format follows
 - **A subagent opens as its own session in the desktop, web and phone apps.** The Agents tab and the running-agents pills above the composer now open each child as a nested, read-only session that renders with the same chat as any other: messages, tool rows and groups, markdown and scrolling, updating while the child works. The header reads `parent session > explore` and takes you back, the composer is replaced by a note that the child works for its parent, and the child never appears in the session list. It rides the existing `/ws?session=<id>` and `/api/history` routes (so it works over Forge Anywhere unchanged), and a host without the new `session_id` on each agent row keeps the cards as plain, non-clickable rows.
 
 ### Fixed
+
+- **pulldown-cmark 0.13.5 fixes RUSTSEC-2026-0414** (exponential event growth with `ENABLE_WIKILINKS`, high); the lockfile moves off 0.13.4.
 
 - **The shell tool refuses a fixed `sleep` of 30 seconds or more and points at polling.** A model waiting on a remote job ran `sleep 540; ssh host check` and sat for minutes whether or not the job had finished. A standalone `sleep N` (also `10m`, `1m 30s`) at the top level of a command, or in a `commands` batch, is now refused before anything runs, with the check part of the command echoed back as a `poll_until_exit_zero` example; sleeps inside `while`/`until`/`for`/`if` bodies, groups, subshells and `&` background jobs, and anything under 30 seconds, still run. The tool description, the base prompt and the bridge preamble now say to poll for the condition, never sleep (`crates/forge-tools/src/shell/wait.rs`).
 - **The Git review dock works for any session the chat can show, and says what is wrong.** The dock looked a session up only among the ones the daemon had loaded, so a saved session that was idle or left over from before a restart answered "no such session" and the app showed "pairing invalid, re-scan" with a Retry button that could never work; the status, diff, branch and index routes now fall back to the session's saved worktree or folder (a detached-HEAD worktree included). The app also shows the daemon's own message for a missing session instead of the pairing error, which is now kept for a wrong token only, and the dock shows a plain "not known to this server" or "not a git repository" state.
@@ -5296,7 +5300,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.24.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.24.1...HEAD
+[2.24.1]: https://github.com/Adulari/forge/compare/v2.24.0...v2.24.1
 [2.24.0]: https://github.com/Adulari/forge/compare/v2.23.6...v2.24.0
 [2.23.6]: https://github.com/Adulari/forge/compare/v2.23.5...v2.23.6
 [2.23.5]: https://github.com/Adulari/forge/compare/v2.23.4...v2.23.5

@@ -2016,7 +2016,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge-agent"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-anywhere-protocol"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "base64 0.23.1",
  "bip39",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-browser"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "anyhow",
  "futures",
@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-config"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-core"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-device"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-index"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-lsp"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "forge-agent-config",
  "serde",
@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mcp"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "forge-agent-config",
  "forge-agent-types",
@@ -2289,7 +2289,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mesh"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-onboarding"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "forge-agent-config",
  "forge-agent-provider",
@@ -2317,7 +2317,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-provider"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2343,7 +2343,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-proxy"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-reporting"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "chrono",
  "forge-agent-config",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-skills"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "forge-agent-types",
  "tracing",
@@ -2383,7 +2383,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-store"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "chrono",
  "forge-agent-types",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tools"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tui"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "crossterm",
  "forge-agent-config",
@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-types"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-voice"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "cpal",
  "futures",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-workflow"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "rquickjs",
  "serde_json",
@@ -2488,7 +2488,7 @@ dependencies = [
 
 [[package]]
 name = "forge-relay"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4833,9 +4833,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
 dependencies = [
  "bitflags 2.13.0",
  "memchr",
@@ -8307,7 +8307,7 @@ dependencies = [
 
 [[package]]
 name = "xtasks"
-version = "2.24.0"
+version = "2.24.1"
 dependencies = [
  "anyhow",
  "clap",
