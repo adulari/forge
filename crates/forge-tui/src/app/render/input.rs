@@ -191,7 +191,9 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     if app.input.is_empty() && app.prompt.is_none() {
         let ellipsis = crate::theme::glyphs::g().ellipsis;
-        let ghost = if app.busy {
+        let ghost = if let Some(ghost) = crate::app::child_view::composer_ghost(app) {
+            ghost
+        } else if app.busy {
             format!("queue a follow-up{ellipsis}")
         } else {
             match &app.suggested_prompt {

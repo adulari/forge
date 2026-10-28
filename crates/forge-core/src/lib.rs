@@ -12037,6 +12037,60 @@ mod tests {
             .any(|m| m.role == Role::Assistant && m.content.contains("deeper: confirmed")));
     }
 
+    #[tokio::test]
+    async fn a_user_message_to_a_child_runs_it_in_the_childs_own_session() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let config = tiered_config();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(SpawnThenFollowUpProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        let parent_id = session.id().to_string();
+        let child_id = store
+            .create_child_session(".", "default", &parent_id)
+            .unwrap();
+        store.set_session_title(&child_id, "scout").unwrap();
+        store
+            .add_message(&child_id, 0, Role::User, "scan the auth module", None)
+            .unwrap();
+        store
+            .add_message(
+                &child_id,
+                1,
+                Role::Assistant,
+                "first finding: suspicious module",
+                None,
+            )
+            .unwrap();
+        let before = store.load_messages(&child_id).unwrap().len();
+
+        let outcome = session
+            .message_child(&child_id, "and the session module?")
+            .await
+            .unwrap();
+        assert!(outcome.ok);
+        let msgs = store.load_messages(&child_id).unwrap();
+        assert!(
+            msgs.len() > before,
+            "the exchange is persisted on the child"
+        );
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == Role::User && m.content == "and the session module?"));
+        assert_eq!(
+            store.named_child_sessions(&parent_id).unwrap().len(),
+            1,
+            "no second child"
+        );
+        assert!(session.message_child("not-a-child", "hi").await.is_err());
+    }
+
     #[test]
     fn child_addresses_resolve_by_name_then_prefix_most_recent_first() {
         use crate::subagent::resolve_child_address;

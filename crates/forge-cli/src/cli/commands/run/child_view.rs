@@ -5,6 +5,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::{DoneGuard, Session};
+
 const POLL_EVERY: Duration = Duration::from_millis(400);
 
 pub(crate) struct ChildFeed {
@@ -57,6 +59,36 @@ impl ChildFeed {
         app.refresh_child_view(&items);
         true
     }
+}
+
+/// Run `message` as a follow-up turn of subagent `child_id`, shaped like any other turn (spinner,
+/// done signal) so the chat treats it as the work in flight. The reply lands in the child's own
+/// session, which the open view is already following.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_child_message(
+    child_id: String,
+    message: String,
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut Instant,
+) -> tokio::task::JoinHandle<()> {
+    app.reopen_subagent(&child_id);
+    app.done = false;
+    app.tick = 0;
+    *busy = true;
+    *busy_since = Instant::now();
+    let s = session.clone();
+    let dt = done_tx.clone();
+    tokio::spawn(async move {
+        let _done = DoneGuard(dt, gen);
+        let mut sess = s.lock().await;
+        if let Err(e) = sess.message_child(&child_id, &message).await {
+            sess.notify_error(&format!("message to subagent failed: {e}"));
+        }
+    })
 }
 
 fn signature(items: &[forge_types::ReplayItem]) -> (usize, usize) {
