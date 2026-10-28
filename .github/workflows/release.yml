@@ -51,15 +51,19 @@ jobs:
           DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "release tag must look like v2.6.6: $RELEASE_TAG" >&2
-            exit 1
-          }
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
-          [ "$RELEASE_TAG" = "v$version" ] || {
-            echo "release tag $RELEASE_TAG does not match workspace version $version" >&2
-            exit 1
-          }
+          if [[ -x scripts/ci/require-release-version.sh ]]; then
+            scripts/ci/require-release-version.sh "$RELEASE_TAG"
+          else
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "release tag must look like v2.6.6: $RELEASE_TAG" >&2
+              exit 1
+            }
+            version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+            [ "$RELEASE_TAG" = "v$version" ] || {
+              echo "release tag $RELEASE_TAG does not match workspace version $version" >&2
+              exit 1
+            }
+          fi
           TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           [ "$(git rev-parse HEAD)" = "$TAG_SHA" ] || {
             echo "checked-out source does not match $RELEASE_TAG" >&2
@@ -94,6 +98,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ env.SOURCE_REF }}
+      - name: Stamp release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ -x scripts/ci/stamp-release-version.sh && "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            scripts/ci/stamp-release-version.sh "${BASH_REMATCH[1]}"
+          fi
       - name: Resolve the pinned toolchain
         id: toolchain
         run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
@@ -154,6 +166,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ env.SOURCE_REF }}
+      - name: Stamp release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ -x scripts/ci/stamp-release-version.sh && "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            scripts/ci/stamp-release-version.sh "${BASH_REMATCH[1]}"
+          fi
 
       # dtolnay/rust-toolchain does NOT read rust-toolchain.toml; its `toolchain` input defaults to
       # `stable`. Left implicit, the action installs `targets:` for stable while cargo — which does
@@ -263,6 +283,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ env.SOURCE_REF }}
+      - name: Stamp release version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ -x scripts/ci/stamp-release-version.sh && "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            scripts/ci/stamp-release-version.sh "${BASH_REMATCH[1]}"
+          fi
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -482,17 +510,26 @@ jobs:
           git clone --depth 1 --branch main \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" brew-repo
           cd brew-repo
+          # The release was stamped from its tag in CI, so main may still carry the previous
+          # version. Ride the same PR: it brings Cargo.toml, Cargo.lock, tauri.conf.json and
+          # CHANGELOG.md up to what actually shipped. No-op for a release prepared by hand.
+          if [[ -x scripts/ci/release-catchup.sh ]]; then
+            git fetch --depth 1 origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            scripts/ci/release-catchup.sh "$VERSION"
+          fi
           bash scripts/update-package-manifests.sh "$VERSION" "$GITHUB_WORKSPACE/dist/checksums.txt"
           (cd packaging/aur && makepkg --printsrcinfo > .SRCINFO)
-          if git diff --quiet Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json; then
+          files=(Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json
+                 Cargo.toml Cargo.lock CHANGELOG.md crates/forge-cli/CHANGELOG.md mobile/src-tauri/tauri.conf.json)
+          if git diff --quiet "${files[@]}"; then
             echo "package manifests already current"; exit 0
           fi
           BRANCH="dist/v$VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json
-          git commit -m "chore(dist): update manifests to v$VERSION"
+          git add "${files[@]}"
+          git commit -m "chore(dist): update manifests and version files to v$VERSION"
           git push -f origin "$BRANCH"
           if ! gh pr view "$BRANCH" --json url --jq .url >/dev/null 2>&1; then
             gh pr create --base main --head "$BRANCH" \

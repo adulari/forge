@@ -4,6 +4,11 @@ A fixed checklist for cutting a release. Follow it top to bottom — most releas
 a *skipped step* (a stale Homebrew version that shipped the previous binary, an empty changelog on
 a minor bump), not a hard problem. Do not improvise the order.
 
+> **Quick path (preferred):** `scripts/release.sh vX.Y.Z`. The version, Cargo.lock, tauri.conf.json
+> and the CHANGELOG roll are stamped from the tag inside the release workflow, so steps 1-3 and 5
+> below are not needed. See [`docs/ci/releasing.md`](docs/ci/releasing.md). The manual steps remain
+> valid and the workflow accepts a hand-prepared release unchanged.
+
 Replace `X.Y.Z` with the version below. Pick the bump per SemVer: **patch** for fixes only,
 **minor** for new features or behaviour changes, **major** for breaking changes. A version with no
 user-facing change should not be released at all.
