@@ -108,24 +108,23 @@ fn worktree_is_isolated_until_merge() {
 }
 
 /// A read-only child (no Write/Shell tools) does NOT get a worktree: is_write_capable returns
-/// false for the default SUBAGENT_TOOLS set, so no WorktreeGuard would be allocated.
+/// false for a read-only tool list, so no WorktreeGuard would be allocated.
 #[test]
 fn read_only_agent_is_not_write_capable() {
     let registry = forge_tools::ToolRegistry::with_core_tools();
 
-    // Default subagent toolset (empty tools list → read-only investigator).
     let read_only = forge_core::subagent::ResolvedAgent {
         name: "general".into(),
         task: "find things".into(),
         system_prompt: "s".into(),
-        tools: Vec::new(),
+        tools: vec!["read_file".into(), "list_dir".into(), "search".into()],
         tier: None,
         pinned_model: None,
         ..Default::default()
     };
     assert!(
         !forge_core::subagent::is_write_capable(&read_only, &registry),
-        "default subagent tools are read-only"
+        "a read-only tool list is not write-capable"
     );
 
     // Agent with write_file is write-capable.
