@@ -154,7 +154,9 @@ jobs:
             target: aarch64-apple-darwin
             portable_linux: false
             bin: forge
-          - os: macos-latest
+          # Native Intel runner: cross-compiling x86_64 on the arm64 macos-latest took 22-29 minutes
+          # in the dry runs, against ~9 for the native arm64 leg.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             portable_linux: false
             bin: forge
