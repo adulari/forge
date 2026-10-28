@@ -161,14 +161,13 @@ for workflow in \
   .github/workflows/e2e.yml \
   .github/workflows/eas-update.yml \
   .github/workflows/mobile-android.yml \
-  .github/workflows/mobile-typecheck.yml \
-  .github/workflows/release.yml; do
+  .github/workflows/mobile-typecheck.yml; do
   grep -Fq "scripts/ci/trim-runner-cache.sh" "$workflow" || {
     echo "persistent cache workflow lacks a trim step: $workflow" >&2
     exit 1
   }
 done
-grep -Fq "FORGE_TRIM_RELEASE_DOCKER_VOLUMES: \"1\"" .github/workflows/release.yml
+# release.yml builds on ephemeral hosted runners and leaves nothing to trim.
 
 # Out-of-tree slots from cargo-cache-env.sh count toward the same budget, and nothing but
 # `<root>/<slot>/target` is removed.
