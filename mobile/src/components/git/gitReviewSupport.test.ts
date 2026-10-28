@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { isGitReviewReadOnly, isGitReviewSupported } from "./gitReviewSupport";
+import { classifyGitStatusError, isGitReviewReadOnly, isGitReviewSupported } from "./gitReviewSupport";
 
 // `lib/transport/index.ts` imports `../platform` (which imports `react-native` for `Platform.OS`)
 // and re-exports `anywhereCredentialStore`, which imports `expo-secure-store` — both mocked the
@@ -42,5 +42,33 @@ describe("isGitReviewReadOnly", () => {
     expect(isGitReviewReadOnly(null)).toBe(false);
     expect(isGitReviewReadOnly("http://192.168.1.5:4823")).toBe(false);
     expect(isGitReviewReadOnly("https://tunnel.example.com")).toBe(false);
+  });
+});
+
+describe("classifyGitStatusError", () => {
+  it("treats a JSON 404 as a session the server does not know, not a bad pairing", () => {
+    const problem = classifyGitStatusError(
+      { message: "no such session", status: 404, body: { error: "no such session" } },
+      "laptop",
+    );
+    expect(problem.kind).toBe("missing-session");
+    expect(problem.message).toContain("laptop");
+  });
+
+  it("keeps the generic message for a bodiless 404 (a wrong token)", () => {
+    const problem = classifyGitStatusError(
+      { message: "pairing invalid, re-scan", status: 404, body: undefined },
+      "laptop",
+    );
+    expect(problem).toEqual({ kind: "error", message: "pairing invalid, re-scan" });
+  });
+
+  it("recognises repository-resolution failures", () => {
+    expect(
+      classifyGitStatusError({ message: "session directory is not inside a git repository" }, null).kind,
+    ).toBe("not-repo");
+    expect(classifyGitStatusError({ message: "session has no working directory on this host" }, null).kind).toBe(
+      "not-repo",
+    );
   });
 });

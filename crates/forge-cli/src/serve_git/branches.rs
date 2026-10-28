@@ -7,13 +7,20 @@ struct SessionGitContext {
 }
 
 async fn session_git_context(state: &DaemonState, session: &str) -> Option<SessionGitContext> {
-    let handle = state.registry.get(session).await?;
-    let managed_worktree = handle.worktree.is_some();
-    let dir = handle
-        .worktree
-        .clone()
-        .unwrap_or_else(|| handle.cwd.clone());
-    let self_busy = handle.snapshot_rx.borrow().snapshot.busy;
+    let (dir, managed_worktree, self_busy) = match state.registry.get(session).await {
+        Some(handle) => (
+            handle
+                .worktree
+                .clone()
+                .unwrap_or_else(|| handle.cwd.clone()),
+            handle.worktree.is_some(),
+            handle.snapshot_rx.borrow().snapshot.busy,
+        ),
+        None => {
+            let (dir, managed_worktree) = stored_session_dir(state, session).await?;
+            (dir, managed_worktree, false)
+        }
+    };
     // A shared checkout is process-global repository state: switching it underneath a different
     // busy session is just as unsafe as switching underneath the addressed one. Worktree-backed
     // sessions are isolated and do not participate in this check.

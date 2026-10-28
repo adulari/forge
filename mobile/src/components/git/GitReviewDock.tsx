@@ -17,7 +17,7 @@ import { GitBranchPicker } from "./GitBranchPicker";
 import { GitCommitBox } from "./GitCommitBox";
 import { GitDiffPane } from "./GitDiffPane";
 import { GitFileList, type GitSelection } from "./GitFileList";
-import { isGitReviewReadOnly, isGitReviewSupported } from "./gitReviewSupport";
+import { classifyGitStatusError, isGitReviewReadOnly, isGitReviewSupported } from "./gitReviewSupport";
 import { type GitStatusResponse } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useCommitStaged, useGitDiff, useGitStatus, useStagePaths, useUnstagePaths } from "../../lib/queries";
@@ -33,13 +33,6 @@ const STACK_BELOW = 700;
  * file list; at 260 the list was left one clipped row tall. */
 const STACKED_COLUMN_HEIGHT = 400;
 
-/** The daemon's repo-resolution failures ([`repo_root_of`] in serve_git.rs) are facts about the
- * session, not transient faults — retrying them is pointless, so they get the quiet empty-state
- * treatment instead of an error with a Retry button. */
-function isNotARepo(message: string): boolean {
-  return message.includes("not inside a git repository") || message.includes("no working directory");
-}
-
 function firstSelection(status: GitStatusResponse): GitSelection | null {
   const staged = status.staged[0];
   if (staged) return { path: staged.path, staged: true };
@@ -50,7 +43,7 @@ function firstSelection(status: GitStatusResponse): GitSelection | null {
 
 export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.Element {
   const tokens = useTokens();
-  const { baseUrl } = useAuth();
+  const { baseUrl, host } = useAuth();
   const [width, setWidth] = useState(0);
   const [selection, setSelection] = useState<GitSelection | null>(null);
   const [message, setMessage] = useState("");
@@ -97,22 +90,20 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
 
   // Outside a repository there is no branch to pick and no diff to show: rendering the picker
   // ("detached HEAD") and an empty "select a file" pane under the notice read as a broken repo.
-  if (status.error && isNotARepo(status.error.message)) {
+  const problem = status.error ? classifyGitStatusError(status.error, host) : null;
+  if (problem && problem.kind !== "error") {
     return (
       <View style={[styles.empty, { backgroundColor: tokens.bg0 }]}>
-        <EmptyState icon={GitBranch} message={status.error.message} />
+        <EmptyState icon={GitBranch} message={problem.message} />
       </View>
     );
   }
 
   let column: React.ReactNode;
   if (status.error) {
-    const text = status.error.message;
-    column = isNotARepo(text) ? (
-      <EmptyState icon={GitBranch} message={text} />
-    ) : (
+    column = (
       <View style={styles.errorBlock}>
-        <Text style={[typeScale.sub, { color: tokens.danger }]}>{text}</Text>
+        <Text style={[typeScale.sub, { color: tokens.danger }]}>{status.error.message}</Text>
         <Pressable
           onPress={() => status.refetch()}
           accessibilityRole="button"

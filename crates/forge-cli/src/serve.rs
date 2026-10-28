@@ -7554,6 +7554,128 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A session the chat can show (persisted) but the registry has not loaded must still answer
+    /// the git dock, including a detached-HEAD worktree; only an id the store has never seen is a
+    /// 404, and that 404 carries a JSON error the client can show.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn git_dock_resolves_persisted_sessions_the_registry_has_not_loaded() {
+        use tower::ServiceExt;
+
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("forge-serve-git-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("git-store.db"));
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .expect("git must be on PATH for this test");
+            assert!(ok.status.success(), "git {args:?}: {ok:?}");
+        };
+        git(&repo, &["init", "-q", "."]);
+        git(&repo, &["config", "user.email", "test@forge.local"]);
+        git(&repo, &["config", "user.name", "Forge Test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("tracked.txt"), "one\n").unwrap();
+        git(&repo, &["add", "tracked.txt"]);
+        git(
+            &repo,
+            &["-c", "core.hooksPath=/dev/null", "commit", "-qm", "init"],
+        );
+        let detached = dir.join("detached");
+        git(
+            &repo,
+            &["worktree", "add", "--detach", detached.to_str().unwrap()],
+        );
+        std::fs::write(detached.join("tracked.txt"), "one\nchanged\n").unwrap();
+
+        let store = Arc::new(crate::open_store().unwrap());
+        let plain = store
+            .create_session(repo.to_str().unwrap(), "default")
+            .unwrap();
+        let wt = store
+            .create_session(repo.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .set_session_worktree(&wt, detached.to_str().unwrap())
+            .unwrap();
+        let gone = store
+            .create_session(dir.join("missing").to_str().unwrap(), "default")
+            .unwrap();
+
+        let router = daemon_router(Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        }));
+        let get = |path: String| {
+            let router = router.clone();
+            async move {
+                let response = router
+                    .oneshot(
+                        axum::http::Request::get(path)
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                (
+                    status,
+                    serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default(),
+                )
+            }
+        };
+
+        let (status, body) = get(format!("/tok/api/git/status?session={plain}")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["branch"].as_str().map(str::is_empty), Some(false));
+
+        let (status, body) = get(format!("/tok/api/git/status?session={wt}")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["branch"], "HEAD");
+        assert_eq!(body["unstaged"][0]["path"], "tracked.txt");
+
+        let (status, body) = get(format!("/tok/api/git/branches?session={wt}")).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+        let (status, body) = get(format!(
+            "/tok/api/git/diff?session={wt}&path=tracked.txt&staged=false"
+        ))
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+
+        let (status, body) = get(format!("/tok/api/git/status?session={gone}")).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no working directory"));
+
+        let (status, body) = get("/tok/api/git/status?session=ghost".into()).await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "no such session");
+
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn daemon_token_rejects_a_corrupted_file() {
         let dir = std::env::temp_dir().join(format!("forge-serve-token2-{}", std::process::id()));

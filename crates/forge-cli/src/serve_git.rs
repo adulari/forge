@@ -239,16 +239,41 @@ fn default_branch_rows() -> usize {
     DEFAULT_BRANCH_ROWS
 }
 
+/// A session persisted in the store but not loaded in the registry (idle, or the daemon restarted):
+/// its recorded worktree, else its cwd, and whether that is a managed worktree.
+async fn stored_session_dir(state: &DaemonState, session: &str) -> Option<(String, bool)> {
+    let store = state.store.clone();
+    let session = session.to_string();
+    tokio::task::spawn_blocking(move || {
+        let worktree = store.session_worktree(&session).ok().flatten();
+        match worktree {
+            Some(worktree) => Some((worktree, true)),
+            None => store
+                .session_cwd(&session)
+                .ok()
+                .flatten()
+                .map(|cwd| (cwd, false)),
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// The directory a session's git commands run in: its worktree when it has one (that is where the
-/// agent is actually editing), otherwise its cwd. `None` = no such session.
+/// agent is actually editing), otherwise its cwd. Falls back to the store for sessions that are
+/// not currently loaded, so the dock works for any session the chat can show. `None` = no such
+/// session.
 async fn session_dir(state: &DaemonState, session: &str) -> Option<String> {
-    let handle = state.registry.get(session).await?;
-    Some(
-        handle
-            .worktree
-            .clone()
-            .unwrap_or_else(|| handle.cwd.clone()),
-    )
+    if let Some(handle) = state.registry.get(session).await {
+        return Some(
+            handle
+                .worktree
+                .clone()
+                .unwrap_or_else(|| handle.cwd.clone()),
+        );
+    }
+    stored_session_dir(state, session).await.map(|(dir, _)| dir)
 }
 
 /// Resolve the enclosing repository root of a session's directory. This is the ONLY way a route
