@@ -2325,7 +2325,7 @@ mod tests {
 
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0].model, "openai::gpt-test");
-        assert_eq!(handles[0].name, "general-purpose");
+        assert_eq!(handles[0].name, "general");
         assert!(
             !handles[0].child_id.is_empty(),
             "admission handle carries a real child id"
@@ -2403,7 +2403,7 @@ mod tests {
         let id_len = handles[0].child_id.len();
         assert_eq!(
             seen.lock().unwrap().first().cloned(),
-            Some(format!("start general-purpose openai::gpt-test {id_len}")),
+            Some(format!("start general openai::gpt-test {id_len}")),
             "Start is reported at admission"
         );
 
@@ -2415,7 +2415,7 @@ mod tests {
         }
         assert_eq!(
             seen.lock().unwrap().get(1).cloned(),
-            Some("done general-purpose true child done done".to_string())
+            Some("done general true child done done".to_string())
         );
         assert!(
             !registry.is_running(&handles[0].child_id),
