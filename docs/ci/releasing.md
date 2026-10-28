@@ -56,6 +56,13 @@ prepared by hand) it is a no-op.
 - **Hand-prepared releases still work.** Bump the version yourself, tag, dispatch; the stamp sees
   nothing to do.
 
+## Major version bumps
+
+The stamp only moves the workspace version. Inter-crate requirements in the root `Cargo.toml`
+(`version = "2.13.6"` beside each `path = "crates/..."`) are minimums and stay put, which is fine for
+any 2.x release. A 3.0.0 release must raise them by hand in an ordinary PR first, otherwise the build
+fails fast with `failed to select a version for the requirement`.
+
 ## Rehearsal
 
 `--dry-run` dispatches `release.yml` with `dry_run=true` from the current branch. It stamps a fake
