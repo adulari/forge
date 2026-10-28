@@ -341,10 +341,15 @@ pub fn system_prompt_with_skills(
 
 /// Resolve a parsed request against the loaded agent-type map (RFC subagent-orchestration Ph2).
 pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> ResolvedAgent {
-    let def = find_agent(agents, &req.agent).or_else(|| agents.get(GENERAL_PURPOSE_AGENT));
+    let named = find_agent(agents, &req.agent);
+    let def = named.or_else(|| agents.get(GENERAL_PURPOSE_AGENT));
     match def {
         Some(def) => ResolvedAgent {
-            name: def.name.clone(),
+            name: if named.is_some() {
+                def.name.clone()
+            } else {
+                req.agent.clone()
+            },
             task: req.task.clone(),
             system_prompt: if def.system_prompt.is_empty() {
                 SUBAGENT_SYSTEM.to_string()
@@ -362,7 +367,7 @@ pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> Resolv
             skills: def.skills.clone(),
         },
         None => ResolvedAgent {
-            name: GENERAL_PURPOSE_AGENT.to_string(),
+            name: req.agent.clone(),
             task: req.task.clone(),
             system_prompt: SUBAGENT_SYSTEM.to_string(),
             ..ResolvedAgent::default()

@@ -225,6 +225,6 @@ async fn types_resolve_to_the_expected_write_capability() {
         },
         &agents,
     );
-    assert_eq!(general.name, GENERAL_PURPOSE_AGENT);
+    assert_eq!(general.name, "whatever");
     assert!(is_write_capable(&general, &registry));
 }
