@@ -57,11 +57,16 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::Changelog => exact(Method::GET, "/api/changelog"),
         RouteId::ListNotices => exact(Method::GET, "/api/notices"),
         RouteId::Identity => exact(Method::GET, "/api/identity"),
-        RouteId::SessionDiff => {
+        RouteId::SessionDiff | RouteId::SessionAgents => {
             let id = single_path_parameter(request)?;
+            let leaf = if request.route == RouteId::SessionDiff {
+                "diff"
+            } else {
+                "agents"
+            };
             Ok(RouteTarget {
                 method: Method::GET,
-                path: format!("/api/sessions/{id}/diff"),
+                path: format!("/api/sessions/{id}/{leaf}"),
                 query: query_parameter(&request.parameters, 1)?,
             })
         }
@@ -255,7 +260,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 13] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 14] = [
             (
                 RouteId::WorkspaceEntries,
                 "GET",
@@ -319,6 +324,13 @@ mod tests {
                 &["session_7"],
                 Method::GET,
                 "/api/sessions/session_7/diff",
+            ),
+            (
+                RouteId::SessionAgents,
+                "GET",
+                &["session_7"],
+                Method::GET,
+                "/api/sessions/session_7/agents",
             ),
             (
                 RouteId::PauseSchedule,

@@ -21,10 +21,28 @@ use std::sync::Arc;
 
 use axum::extract::{Json, Path as AxumPath, Query, State};
 use axum::response::Response;
+use axum::routing::{get, post};
+use axum::Router;
 
 use crate::serve::{
     err_response, git_stdout, json_response, worktree_repo_and_branch, DaemonState,
 };
+
+/// The review dock's routes; every one is session-addressed and runs git only in that session's
+/// own repository.
+pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
+    Router::new()
+        .route(&format!("{base}/api/git/status"), get(git_status))
+        .route(
+            &format!("{base}/api/git/branches"),
+            get(git_branches).post(git_create_branch),
+        )
+        .route(&format!("{base}/api/git/switch"), post(git_switch_branch))
+        .route(&format!("{base}/api/git/diff"), get(git_diff))
+        .route(&format!("{base}/api/git/stage"), post(git_stage))
+        .route(&format!("{base}/api/git/unstage"), post(git_unstage))
+        .route(&format!("{base}/api/git/commit"), post(git_commit))
+}
 
 mod branches;
 mod diff;

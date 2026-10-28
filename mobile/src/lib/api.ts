@@ -968,6 +968,23 @@ export function commitStaged(baseUrl: string, body: GitCommitRequest): Promise<G
   return request(baseUrl, "/api/git/commit", { method: "POST", body: JSON.stringify(body) });
 }
 
+/** One child agent of a session, from any turn (`GET /api/sessions/{id}/agents`). Newest first. */
+export interface AgentIndexRow {
+  session_id: string;
+  agent: string;
+  task: string;
+  model: string | null;
+  status: "running" | "done" | "failed" | "cancelled";
+  cost_usd: number;
+  created_at: number;
+  /** 1-based person-typed turn of the parent that spawned it. */
+  turn: number;
+}
+
+export function getSessionAgents(baseUrl: string, id: string): Promise<AgentIndexRow[]> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/agents`);
+}
+
 export function getSessionDiff(baseUrl: string, id: string): Promise<SessionDiffResponse> {
   return expectObject(request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/diff`), "diff");
 }

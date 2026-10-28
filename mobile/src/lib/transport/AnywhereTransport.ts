@@ -46,6 +46,7 @@ export type BridgeRoute =
   | "git_branches"
   | "git_diff"
   | "session_diff"
+  | "session_agents"
   | "workspace_entries"
   | "read_workspace_file"
   | "write_workspace_file"
@@ -307,6 +308,10 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
   const sessionDiff = path.match(/^\/api\/sessions\/([^/]+)\/diff$/);
   if (sessionDiff && method === "GET") {
     return { route: "session_diff", parameters: [sessionPathParameter(sessionDiff[1])] };
+  }
+  const sessionAgents = path.match(/^\/api\/sessions\/([^/]+)\/agents$/);
+  if (sessionAgents && method === "GET") {
+    return { route: "session_agents", parameters: [sessionPathParameter(sessionAgents[1])] };
   }
   const schedule = path.match(/^\/api\/schedules\/([^/]+)\/(pause|resume|delete)$/);
   if (schedule && method === "POST") {

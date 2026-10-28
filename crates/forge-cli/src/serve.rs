@@ -948,36 +948,8 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_onboarding::routes(&base))
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/changelog"), get(changelog_page))
-        // Git review dock (serve_git.rs) — every route is session-addressed and runs git only in
-        // that session's own repository.
-        .route(
-            &format!("{base}/api/git/status"),
-            get(crate::serve_git::git_status),
-        )
-        .route(
-            &format!("{base}/api/git/branches"),
-            get(crate::serve_git::git_branches).post(crate::serve_git::git_create_branch),
-        )
-        .route(
-            &format!("{base}/api/git/switch"),
-            post(crate::serve_git::git_switch_branch),
-        )
-        .route(
-            &format!("{base}/api/git/diff"),
-            get(crate::serve_git::git_diff),
-        )
-        .route(
-            &format!("{base}/api/git/stage"),
-            post(crate::serve_git::git_stage),
-        )
-        .route(
-            &format!("{base}/api/git/unstage"),
-            post(crate::serve_git::git_unstage),
-        )
-        .route(
-            &format!("{base}/api/git/commit"),
-            post(crate::serve_git::git_commit),
-        )
+        .merge(crate::serve_git::routes(&base))
+        .merge(crate::serve_agents::routes(&base))
         // Workspace inspector/editor (serve_workspace.rs). Roots come only from the live session;
         // relative paths are canonicalized and confined before any filesystem operation.
         .route(

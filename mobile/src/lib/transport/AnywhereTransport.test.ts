@@ -226,6 +226,7 @@ describe("AnywhereTransport", () => {
       body: JSON.stringify({ session: "s1", path: "a.rs", content: "x" }),
     });
     await transport.fetch("fany://host-1/api/sessions/s1/diff");
+    await transport.fetch("fany://host-1/api/sessions/s1/agents");
     await transport.fetch("fany://host-1/api/schedules/nightly-1/pause", { method: "POST" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
@@ -233,6 +234,7 @@ describe("AnywhereTransport", () => {
       ["read_workspace_file", "?session=s1&path=a.rs"],
       ["write_workspace_file", ""],
       ["session_diff", "s1"],
+      ["session_agents", "s1"],
       ["pause_schedule", "nightly-1"],
     ]);
     await expect(

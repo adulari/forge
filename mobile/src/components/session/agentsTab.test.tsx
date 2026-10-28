@@ -31,6 +31,7 @@ vi.mock("lucide-react-native", () => ({
   ChevronRight: () => React.createElement("i", null, "chevron"),
   WifiOff: () => null,
 }));
+vi.mock("../../lib/queries", () => ({ useSessionAgents: () => ({ data: undefined }) }));
 vi.mock("../../lib/nav", () => ({ openSession: () => undefined }));
 vi.mock("../../theme/ThemeProvider", () => ({ useTokens: () => ({}) }));
 vi.mock("../ds/StatusDot", () => ({

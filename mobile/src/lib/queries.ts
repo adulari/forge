@@ -76,6 +76,8 @@ import {
   commitStaged,
   type SessionDiffResponse,
   getSessionDiff,
+  getSessionAgents,
+  type AgentIndexRow,
 
   type WorkspaceEntriesResponse,
   getWorkspaceEntries,
@@ -162,6 +164,7 @@ function keys(baseUrl: string | null) {
     projects: ["projects", baseUrl] as const,
     projectBrowse: (path?: string) => ["projects", "browse", baseUrl, path ?? "default"] as const,
     sessionTree: ["sessions", "tree", baseUrl] as const,
+    sessionAgents: (sessionId: string) => ["sessions", "agents", baseUrl, sessionId] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
     sessionSearch: (query?: string, limit?: number) =>
       query === undefined
@@ -772,6 +775,26 @@ export function useCommitStaged() {
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionDiff(body.session) });
     },
   });
+}
+
+/** Every child agent of a session, any turn. A host without the route answers an error, which the
+ * callers treat as "no index" and fall back to the live batch. `signal` changes whenever the live
+ * batch does, so a finished child shows up without waiting for a poll. */
+export function useSessionAgents(sessionId: string | null, signal: string) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  const query = useQuery<AgentIndexRow[]>({
+    queryKey: keys(baseUrl).sessionAgents(sessionId ?? ""),
+    queryFn: () => getSessionAgents(baseUrl as string, sessionId as string),
+    enabled: baseUrl != null && sessionId != null,
+    retry: false,
+    staleTime: 15_000,
+  });
+  useEffect(() => {
+    if (baseUrl == null || sessionId == null) return;
+    void queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionAgents(sessionId) });
+  }, [signal, baseUrl, sessionId, queryClient]);
+  return query;
 }
 
 /** A fork's whole diff against its base — powers the "Diff" action on session-tree rows. Only

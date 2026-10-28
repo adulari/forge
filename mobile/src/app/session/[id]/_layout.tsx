@@ -360,10 +360,12 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   // before, none of which changes what any handler does.
   const onBack = useCallback(() => goBackOr("/(tabs)"), []);
   const parentId = parentSession?.id ?? null;
-  const onBackToParent = useCallback(() => goBackOr(`/session/${parentId}/agents` as never), [parentId]);
+  // `navigate`, not `back`: a window narrowed from the desktop layout has no stack to pop (the
+  // rail replaces sessions), and Back from there landed on the fleet instead of the parent.
+  const onBackToParent = useCallback(() => router.navigate(`/session/${parentId}/agents` as never), [parentId]);
   const onOpenParent = useCallback(() => {
     if (parentId == null) return;
-    if (isCompact) goBackOr(`/session/${parentId}` as never);
+    if (isCompact) router.navigate(`/session/${parentId}` as never);
     else openSession(parentId);
   }, [parentId, isCompact]);
   const onNewHere = useCallback(() => {
