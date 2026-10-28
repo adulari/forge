@@ -9,6 +9,14 @@ on:
         description: Existing vX.Y.Z tag at the protected-main dispatch SHA
         required: true
         type: string
+      dry_run:
+        description: >-
+          Build, package and run the upgrade gate from the dispatched commit WITHOUT a tag or
+          publishing: no attestation, no GitHub Release, no desktop/web/OTA dispatch, no manifest PR.
+          release_tag is then only a label.
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: release-${{ inputs.release_tag }}
@@ -19,6 +27,8 @@ permissions:
 
 env:
   CARGO_BUILD_JOBS: "4"
+  # A dry run builds the dispatched commit; a real release builds the tag.
+  SOURCE_REF: ${{ inputs.dry_run && github.sha || format('refs/tags/{0}', inputs.release_tag) }}
 
 jobs:
   # Hosted on purpose: every build leg waits on this job, and on the single heavy runner it queued
@@ -31,9 +41,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: ${{ env.SOURCE_REF }}
           fetch-depth: 0
       - name: Verify tag matches Cargo version and dispatch SHA
+        if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -78,7 +89,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: ${{ env.SOURCE_REF }}
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       # checkout's `git clean -ffdx` wipes ./target, so this compile (548 crates, ~6.5 min) was cold
       # on every release. The `release` slot beside the checkout survives the clean and is shared
@@ -155,7 +166,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: ${{ env.SOURCE_REF }}
 
       # dtolnay/rust-toolchain does NOT read rust-toolchain.toml; its `toolchain` input defaults to
       # `stable`. Left implicit, the action installs `targets:` for stable while cargo — which does
@@ -330,13 +341,41 @@ jobs:
           FORGE_TRIM_RELEASE_DOCKER_VOLUMES: "1"
         run: bash scripts/ci/trim-runner-cache.sh
 
+  # The release-boundary gate that used to run on every push to main (ci.yml `release-build`): the
+  # x86_64 binary this very run just built, installed over the latest public release in an isolated
+  # HOME, then reconnect + rollback. It needs no laptop, only the artifact, so it runs hosted and in
+  # parallel with the slower Windows/macOS legs. `release` waits for it, so a bad upgrade path still
+  # blocks publication.
+  upgrade-e2e:
+    name: upgrade, reconnect and rollback gate
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.SOURCE_REF }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: forge-raw-x86_64-unknown-linux-gnu
+          path: candidate
+      - name: Verify upgrade, reconnect, and rollback from latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod 0755 candidate/forge
+          scripts/release-upgrade-e2e.sh "" "$PWD/candidate/forge"
+
   release:
     name: package + publish release
-    needs: [assets, build, release-cache-cleanup]
-    runs-on: [release, linux, x64]
+    needs: [assets, build, upgrade-e2e, release-cache-cleanup]
+    # Hosted: nothing here needs the laptop, and `release`-labelled jobs queue behind every CI job.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: release
-    if: startsWith(inputs.release_tag, 'v')
+    # A dry run must not wait on, or be refused by, the `release` environment's branch policy;
+    # GitHub creates the unprotected `release-dry-run` environment on first use.
+    environment: ${{ inputs.dry_run && 'release-dry-run' || 'release' }}
+    if: startsWith(inputs.release_tag, 'v') || inputs.dry_run
     permissions:
       attestations: write
       contents: write
@@ -345,7 +384,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: refs/tags/${{ inputs.release_tag }}
+          ref: ${{ env.SOURCE_REF }}
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
@@ -358,6 +397,7 @@ jobs:
           path: raw
 
       - name: Verify native release binary version
+        if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -457,6 +497,7 @@ jobs:
           echo "----- composed release body -----"; cat dist/RELEASE_NOTES.md
 
       - name: Attest CLI/TUI release provenance
+        if: ${{ !inputs.dry_run }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: |
@@ -465,6 +506,7 @@ jobs:
             dist/checksums.txt
 
       - name: Publish
+        if: ${{ !inputs.dry_run }}
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: ${{ inputs.release_tag }}
@@ -509,6 +551,7 @@ jobs:
       # signal. Recover with `gh workflow run app-desktop.yml --ref main -f release_tag=vX.Y.Z`
       # (RELEASING.md §6) — never by publishing the draft by hand.
       - name: Dispatch matching desktop and web releases from protected main
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -517,6 +560,7 @@ jobs:
           gh workflow run app-web.yml --ref main -f release_tag="$RELEASE_TAG"
 
       - name: Upload CLI checksums for the manifest job
+        if: ${{ !inputs.dry_run }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: forge-cli-checksums
@@ -538,6 +582,7 @@ jobs:
   manifests:
     name: update package-manager manifests
     needs: release
+    if: ${{ !inputs.dry_run }}
     runs-on: [release, linux, x64]
     timeout-minutes: 20
     permissions:
@@ -596,6 +641,7 @@ jobs:
   ota:
     name: publish the matching iOS OTA
     needs: release
+    if: ${{ !inputs.dry_run }}
     # Hosted: it is one `gh workflow run`. On the single release runner it queued 13 minutes behind
     # the CI runs that every release-triggered push starts (published 18:39, started 18:53 on v2.17.0).
     runs-on: ubuntu-latest

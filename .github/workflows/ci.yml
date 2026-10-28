@@ -237,14 +237,16 @@ jobs:
   # Catch it on every affected Rust PR. One platform keeps it cheap; the `lto = "thin"` link runs once.
   release-build:
     needs: changes
-    # Not a PR gate. The release build plus its upgrade/reconnect/rollback e2e is the single
-    # longest job in the pipeline (~12 min) and every heavy job in the repo serializes on one
-    # runner, so running it per PR set the merge throughput of the whole project. It runs on the
-    # post-merge push to main, on the weekly schedule, and on the manual dispatch release.yml
-    # fires — i.e. before anything ships — which is where a packaging break has to be caught.
+    # Not a PR gate and, since 2026-10-28, not a push gate either. The release build plus its
+    # upgrade/reconnect/rollback e2e was the single longest job in the pipeline (~9 min) and sits on
+    # the one heavy runner, so on every merge to main it ran BEFORE `test` and pushed main's CI from
+    # ~8 to ~16 minutes. The same checks now run where they protect a release: release.yml compiles
+    # the real release artifacts and runs scripts/release-upgrade-e2e.sh against the x86_64 binary
+    # before anything is published. This copy remains for the weekly schedule (catches drift between
+    # releases) and for manual dispatch (a maintainer who wants the answer on a branch now).
     if: >-
       needs.changes.outputs.release_build == 'true'
-      && github.event_name != 'pull_request'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     # See `test` above: heavy jobs serialize on the one heavy runner.
     runs-on: [self-hosted, linux, x64, heavy]
     timeout-minutes: 90
