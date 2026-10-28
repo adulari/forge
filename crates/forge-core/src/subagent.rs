@@ -14,7 +14,7 @@
 //! read-only `read_file`/`list_dir`/`search`). Recursive delegation is disabled by default and
 //! bounded by `mesh.subagents.max_depth` when explicitly enabled. Named agent types load from
 //! `.forge/agents/*.md` (system prompt + optional tool subset + optional pinned tier);
-//! unknown/inline agents use the default read-only investigator and are mesh-routed.
+//! unknown/inline agents use the built-in `general-purpose` type (every tool) and are mesh-routed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,13 +33,43 @@ use crate::{worktree, CoreError};
 /// The virtual tool name the parent model calls to delegate subtasks.
 pub const SPAWN_AGENTS_TOOL: &str = "spawn_agents";
 
-/// Tools a subagent may use in Phase 1: read-only investigation only. Writes/shell require an
-/// agent-type opt-in (Phase 2) plus a permitting mode; the safety denylist always applies.
-const SUBAGENT_TOOLS: &[&str] = &["read_file", "list_dir", "search"];
+/// The built-in agent type a request with no (or an unknown) `agent` resolves to: every tool, the
+/// parent's temper.
+pub const GENERAL_PURPOSE_AGENT: &str = "general-purpose";
 
 const SUBAGENT_SYSTEM: &str = "You are a focused Forge subagent working on ONE delegated \
-    subtask. Investigate with the tools you have and return a concise, self-contained answer \
-    to the task — just the result the parent agent needs, no preamble.";
+    subtask. Do the task with the tools you have, editing files and running commands when it \
+    calls for it, and return a concise, self-contained answer — just the result the parent \
+    agent needs, no preamble. If a tool call is refused, say so plainly in your answer.";
+
+/// A permission question a child raises when its tool call needs approval.
+#[derive(Debug, Clone)]
+pub struct ChildQuestion {
+    /// The child's display name, so the prompt can say who is asking.
+    pub child: String,
+    pub tool: String,
+    pub side_effect: forge_types::SideEffect,
+    pub args: serde_json::Value,
+}
+
+/// The parent surface's answer to a [`ChildQuestion`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildAnswer {
+    Allow,
+    /// With the note the user typed, if any.
+    Deny(Option<String>),
+}
+
+/// How a child reaches someone who can approve a call the permission gate says to ask about. The
+/// parent turn is blocked inside its `spawn_agents` call, so its own prompt can host the question.
+/// Absent for headless contexts, where the call is refused with a reason instead.
+pub type ChildAsker = Arc<
+    dyn Fn(
+            ChildQuestion,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ChildAnswer> + Send>>
+        + Send
+        + Sync,
+>;
 
 mod detached;
 pub use detached::{
@@ -52,6 +82,8 @@ use execution::{execute_tool, tool_result_failed};
 
 mod progress;
 mod requests;
+#[cfg(test)]
+mod write_tests;
 pub use requests::{
     cancel_subagent_spec, effective_tools, find_agent, is_write_capable, list_subagents_spec,
     narrowed_mode, parse_detached_flag, parse_requests, resolve, resolve_child_address,
@@ -90,6 +122,8 @@ pub struct AgentCtx {
     /// than read back off `config` here, so the runtime command and the config default meet in ONE
     /// place and a child can never disagree with the session that spawned it.
     pub inherit_pin: bool,
+    /// Where a child's `Ask` decision is sent. `None` = nobody can be asked: the call is refused.
+    pub asker: Option<ChildAsker>,
 }
 
 /// The result of running one child agent.
@@ -287,13 +321,14 @@ async fn run_agent_loop(
         ..ctx.clone()
     };
     let ctx = &narrowed;
+    let child_label = format!("{}-{}", agent.name, &child_id[..child_id.len().min(4)]);
     let full = ToolRegistry::with_core_tools();
     let can_recurse = ctx.depth < ctx.max_depth
         && !agent
             .disallowed_tools
             .iter()
             .any(|t| t == SPAWN_AGENTS_TOOL);
-    let allowed = effective_tools(agent);
+    let allowed = effective_tools(agent, &full);
     let mut specs: Vec<ToolSpec> = allowed
         .iter()
         .filter_map(|name| full.get(name))
@@ -442,7 +477,7 @@ async fn run_agent_loop(
                 // Grandchildren aren't shown in the live panel — they roll up into this result.
                 run_nested_spawn(ctx.clone(), child_id.to_string(), call.args.clone(), budget).await
             } else {
-                execute_tool(ctx, &full, &msg_id, call).await?
+                execute_tool(ctx, &full, &allowed, &child_label, &msg_id, call).await?
             };
             // Last outcome wins, not a permanent latch: a child that hits one failing tool call
             // but RECOVERS with a later successful one is not a failed child. (Seen live in a
@@ -924,7 +959,7 @@ mod tests {
         let reqs = parse_requests(&args, 8).unwrap();
         assert_eq!(reqs.len(), 2);
         assert_eq!(reqs[0].agent, "reviewer");
-        assert_eq!(reqs[1].agent, "general"); // omitted agent → general inline
+        assert_eq!(reqs[1].agent, "general-purpose"); // omitted agent → general-purpose
         assert_eq!(reqs[1].task, "find all call sites of foo");
     }
 
@@ -981,7 +1016,7 @@ mod tests {
             },
             &agents,
         );
-        assert!(unknown.tools.is_empty()); // → default read-only set
+        assert!(unknown.tools.is_empty()); // → every tool
         assert_eq!(unknown.tier, None); // → mesh-routed
         assert_eq!(unknown.system_prompt, SUBAGENT_SYSTEM);
     }
@@ -1210,12 +1245,14 @@ mod tests {
     }
 
     #[test]
-    fn default_subagent_toolset_is_read_only() {
-        // The base child toolset is read-only. The loop may separately add spawn_agents only when
-        // the explicitly configured recursion depth allows it.
-        assert!(!SUBAGENT_TOOLS.contains(&SPAWN_AGENTS_TOOL));
-        // And the read-only set is exactly investigation tools (no write/shell).
-        assert_eq!(SUBAGENT_TOOLS, &["read_file", "list_dir", "search"]);
+    fn an_agent_without_tools_gets_every_tool_but_spawn_agents() {
+        let registry = ToolRegistry::with_core_tools();
+        let agent = ResolvedAgent::default();
+        let tools = effective_tools(&agent, &registry);
+        for name in ["read_file", "write_file", "edit_file", "shell"] {
+            assert!(tools.iter().any(|t| t == name), "{name} missing: {tools:?}");
+        }
+        assert!(!tools.iter().any(|t| t == SPAWN_AGENTS_TOOL));
     }
 
     #[test]
@@ -1310,6 +1347,7 @@ mod tests {
             repo_root: std::path::PathBuf::from("."),
             effective_pin: None,
             inherit_pin: true,
+            asker: None,
         }
     }
 
@@ -1861,7 +1899,7 @@ mod tests {
         };
         assert!(is_write_capable(&shell_agent, &registry));
 
-        // An agent with empty tools falls back to SUBAGENT_TOOLS (read-only), so not write-capable.
+        // An agent with empty tools inherits every tool, so it is write-capable.
         let default_agent = ResolvedAgent {
             name: "general".into(),
             task: "t".into(),
@@ -1871,7 +1909,7 @@ mod tests {
             pinned_model: None,
             ..Default::default()
         };
-        assert!(!is_write_capable(&default_agent, &registry));
+        assert!(is_write_capable(&default_agent, &registry));
     }
 
     #[test]
@@ -2287,7 +2325,7 @@ mod tests {
 
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0].model, "openai::gpt-test");
-        assert_eq!(handles[0].name, "general");
+        assert_eq!(handles[0].name, "general-purpose");
         assert!(
             !handles[0].child_id.is_empty(),
             "admission handle carries a real child id"
@@ -2365,7 +2403,7 @@ mod tests {
         let id_len = handles[0].child_id.len();
         assert_eq!(
             seen.lock().unwrap().first().cloned(),
-            Some(format!("start general openai::gpt-test {id_len}")),
+            Some(format!("start general-purpose openai::gpt-test {id_len}")),
             "Start is reported at admission"
         );
 
@@ -2377,7 +2415,7 @@ mod tests {
         }
         assert_eq!(
             seen.lock().unwrap().get(1).cloned(),
-            Some("done general true child done done".to_string())
+            Some("done general-purpose true child done done".to_string())
         );
         assert!(
             !registry.is_running(&handles[0].child_id),

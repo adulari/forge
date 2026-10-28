@@ -74,6 +74,7 @@ impl Session {
             repo_root,
             effective_pin: self.effective_pin(),
             inherit_pin: !self.subagents_free(),
+            asker: None,
         };
         let parent_id = self.id.clone();
         let max_concurrency = self.config.mesh.subagents.max_concurrency;
@@ -110,17 +111,39 @@ impl Session {
 
         // Drive the shared orchestrator, turning each child lifecycle into a presenter event
         // (running children animate live; completed ones fold into the scrollback box).
-        let presenter = &mut self.presenter;
-        let mut on_event = |ev: subagent::Lifecycle| presenter.emit(lifecycle_event(ev));
-        let (combined, all_ok) = subagent::orchestrate(
-            &ctx,
-            &parent_id,
-            requests,
-            budget,
-            max_concurrency,
-            &mut on_event,
-        )
-        .await?;
+        // A child's `Ask` decision is hosted on this session's prompt while it waits in here; an
+        // unattended surface has no one to ask, so the child's call is refused with a reason.
+        let (asker, mut questions) = crate::child_ask::channel_asker();
+        let ctx = subagent::AgentCtx {
+            asker: self.presenter.is_attended().then_some(asker),
+            ..ctx
+        };
+        let (combined, all_ok) = {
+            let presenter = std::sync::Mutex::new(&mut self.presenter);
+            let mut on_event = |ev: subagent::Lifecycle| {
+                if let Ok(mut p) = presenter.lock() {
+                    p.emit(lifecycle_event(ev));
+                }
+            };
+            let orchestrated = subagent::orchestrate(
+                &ctx,
+                &parent_id,
+                requests,
+                budget,
+                max_concurrency,
+                &mut on_event,
+            );
+            tokio::pin!(orchestrated);
+            let mut granted = crate::child_ask::Granted::default();
+            loop {
+                tokio::select! {
+                    done = &mut orchestrated => break done?,
+                    Some((question, reply)) = questions.recv() => {
+                        let _ = reply.send(crate::child_ask::answer(&presenter, &mut granted, &question));
+                    }
+                }
+            }
+        };
 
         // SubagentStop lifecycle hook (Claude-Code parity): the spawned child agent(s) finished.
         // Enforce a block decision at the subagent boundary: this `spawn_agents` call returns a tool
@@ -244,6 +267,7 @@ impl Session {
             repo_root,
             effective_pin: self.effective_pin(),
             inherit_pin: !self.subagents_free(),
+            asker: None,
         };
         let decision = subagent::route_child(&ctx, &resolved, budget).await;
 
@@ -340,6 +364,7 @@ impl Session {
             repo_root: repo_root.clone(),
             effective_pin: self.effective_pin(),
             inherit_pin: !self.subagents_free(),
+            asker: None,
         };
         let workflows_dir = repo_root.join(".forge").join("workflows");
 
@@ -459,6 +484,7 @@ impl Session {
             repo_root: repo_root.clone(),
             effective_pin: self.effective_pin(),
             inherit_pin: !self.subagents_free(),
+            asker: None,
         };
         let workflows_dir = repo_root.join(".forge").join("workflows");
         if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
@@ -646,6 +672,7 @@ impl Session {
             repo_root,
             effective_pin: self.effective_pin(),
             inherit_pin: !self.subagents_free(),
+            asker: None,
         };
         let parent_id = self.id.clone();
 

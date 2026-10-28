@@ -870,6 +870,7 @@ mod tests {
             repo_root: std::path::PathBuf::from("."),
             effective_pin: None,
             inherit_pin: true,
+            asker: None,
         }
     }
 

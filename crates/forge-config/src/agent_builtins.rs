@@ -26,9 +26,26 @@ shell is limited to read-only commands. Return a concise implementation plan: th
 order, the exact files to touch with `path:line` references, how to verify the result, and any \
 open questions the parent must decide.";
 
+const GENERAL_PURPOSE_PROMPT: &str =
+    "You are a general-purpose Forge subagent working for a parent agent \
+on ONE delegated task. Do it end to end with the tools you have: search and read code, edit and \
+create files, run commands and tests. Prefer editing existing files to creating new ones, and \
+touch only what the task needs. Your tools run under the session's permission mode; if a call is \
+refused, say so in your answer rather than working around it. Finish with a concise report of \
+what you found or changed (files and `path:line` references), written for the parent, no preamble.";
+
 pub(crate) fn builtin_agents() -> HashMap<String, AgentDef> {
     let tools = || READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect();
     [
+        AgentDef {
+            name: "general-purpose".into(),
+            description: "General-purpose agent for researching, searching and carrying out \
+                          multi-step tasks, including editing files and running commands under \
+                          the session's permission mode."
+                .into(),
+            system_prompt: GENERAL_PURPOSE_PROMPT.into(),
+            ..AgentDef::default()
+        },
         AgentDef {
             name: "explore".into(),
             description: "Fast read-only codebase search: find files, symbols and how code \
@@ -61,10 +78,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtins_are_read_only_and_unsourced() {
+    fn explore_and_plan_are_read_only_and_unsourced() {
         let agents = builtin_agents();
-        assert_eq!(agents.len(), 2);
-        for def in agents.values() {
+        assert_eq!(agents.len(), 3);
+        for name in ["explore", "plan"] {
+            let def = &agents[name];
             assert_eq!(def.permission_mode, Some(PermissionMode::Plan));
             assert!(def.path.is_none());
             assert!(!def
@@ -74,5 +92,14 @@ mod tests {
         }
         assert_eq!(agents["explore"].tier, Some(TaskTier::Trivial));
         assert_eq!(agents["plan"].tier, None);
+    }
+
+    #[test]
+    fn general_purpose_has_every_tool_and_the_parents_temper() {
+        let def = &builtin_agents()["general-purpose"];
+        assert!(def.tools.is_empty());
+        assert!(def.disallowed_tools.is_empty());
+        assert_eq!(def.permission_mode, None);
+        assert!(def.path.is_none());
     }
 }

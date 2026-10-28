@@ -119,6 +119,7 @@ mod hooks_worktree;
 pub mod host_move;
 pub use hooks_cc::forge_tool_to_cc;
 pub mod bridge_progress;
+mod child_ask;
 pub mod context_report;
 mod file_restore;
 mod instructions;

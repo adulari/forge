@@ -226,6 +226,7 @@ impl LazySubagents {
             repo_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             effective_pin: None,
             inherit_pin: config.mesh.subagents.inherit_pin,
+            asker: super::permission_relay::child_asker(),
         };
         Ok(SubagentSupport {
             ctx,
@@ -386,8 +387,12 @@ impl ForgeMcp {
         // Detached admission (RFC retained-async-subagents), bridge parity with the direct path's
         // `Session::spawn_agents`: admit immediately, return admission handles without waiting.
         if subagent::parse_detached_flag(args) {
+            let detached_ctx = AgentCtx {
+                asker: None,
+                ..s.ctx.clone()
+            };
             return match subagent::spawn_detached(
-                &s.ctx,
+                &detached_ctx,
                 &s.detached_registry,
                 &s.detached_parent,
                 requests,

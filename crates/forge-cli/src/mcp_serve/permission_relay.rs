@@ -42,6 +42,39 @@ pub(super) async fn gate(
     }
 }
 
+/// Where a bridged child's `Ask` goes: the parent session's prompt, through the same sink a
+/// bridged tool call uses. `None` when the bridge gave no sink. One question is open at a time, so
+/// concurrent siblings take turns at the parent's prompt.
+pub(super) fn child_asker() -> Option<forge_core::subagent::ChildAsker> {
+    use forge_core::subagent::{ChildAnswer, ChildQuestion};
+    let sink = std::env::var(forge_provider::SUBAGENT_SINK_ENV).ok()?;
+    let turn = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    Some(std::sync::Arc::new(move |q: ChildQuestion| {
+        let (sink, turn) = (sink.clone(), std::sync::Arc::clone(&turn));
+        Box::pin(async move {
+            let _turn = turn.lock().await;
+            let label = forge_core::permission::confirm_label(&q.tool, &q.args)
+                .unwrap_or_else(|| q.tool.clone());
+            let label = format!("{}: {label}", q.child);
+            let question = Question {
+                tool: &label,
+                side_effect: q.side_effect,
+                prompt: Prompt {
+                    args: Some(&q.args),
+                    diff: None,
+                },
+            };
+            match relay_permission(&sink, &question, PERMISSION_RELAY_WAIT).await {
+                RelayAnswer::Allowed => ChildAnswer::Allow,
+                RelayAnswer::Denied(note) => ChildAnswer::Deny(note),
+                RelayAnswer::NoAnswer | RelayAnswer::Unavailable => {
+                    ChildAnswer::Deny(Some("nobody answered the approval prompt".to_string()))
+                }
+            }
+        })
+    }))
+}
+
 /// Run the `PermissionRequest` hooks for a bridged call that would ask. Returns the settled
 /// decision and the (possibly rewritten) arguments, or the refusal text the model reads.
 pub(super) async fn permission_hooks(

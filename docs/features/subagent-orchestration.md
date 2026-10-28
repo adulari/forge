@@ -232,7 +232,7 @@ pub enum SubagentStatus {
 pub struct SubagentSpec {
     pub task: String,                 // the child's user prompt
     pub system: Option<String>,       // optional role/instructions for the child
-    pub tools: Vec<String>,           // tool-name allowlist; empty = inherit a safe read-only set
+    pub tools: Vec<String>,           // tool-name allowlist; empty = every tool
     pub tier_hint: Option<TaskTier>,  // bias the Mesh (frontier for hard, trivial for narrow)
     pub budget_usd: Option<f64>,      // per-subagent cap; default = config.subagent_budget_usd
     pub result_schema: Option<serde_json::Value>, // JSON Schema for a structured result
@@ -429,14 +429,14 @@ Built-in types, replaceable by a file of the same name:
 | --- | --- | --- | --- |
 | `explore` | `read_file`, `list_dir`, `search`, `glob`, read-only `shell` | trivial | `plan` |
 | `plan` | same | mesh-routed | `plan` |
-| `general-purpose` | the default read-only set (no file needed) | mesh-routed | the parent's |
+| `general-purpose` | every tool (no file needed); what a request with no or an unknown `agent` gets | mesh-routed | the parent's |
 
 An agent file is Markdown with front matter (the body is the system prompt). Besides `name`,
 `description`, `tools`, `tier` and `model`, Claude Code's fields are read:
 
 | field | effect |
 | --- | --- |
-| `disallowedTools` | removed from the child's tool set, including the default one; naming `spawn_agents` stops it recursing |
+| `disallowedTools` | removed from the child's tool set, including the all-tools default; naming `spawn_agents` stops it recursing |
 | `permissionMode` | the child's temper, applied only when stricter than the parent's (`plan`, `default`); a wider mode is ignored so a cloned repo cannot widen what a child does unasked |
 | `maxTurns` | the child's model-step cap, never above `[mesh] max_steps` when that is set (it defaults to none); a child that stops getting anywhere is stopped by its own [progress ledger](progress-supervision.md) and returns its last words with `ok = false` |
 | `skills` | each listed skill's methodology is appended to the child's system prompt (skipped when the model could not load it: `disable-model-invocation`, or a project skill in an untrusted project) |
@@ -444,6 +444,20 @@ An agent file is Markdown with front matter (the body is the system prompt). Bes
 | `isolation: worktree` | the child runs in its own git worktree even when `worktree_isolation` is off |
 | `mcpServers`, `color` | recorded and shown by `/agents`; children have no MCP tool surface yet, so servers are not connected |
 
-A child whose temper is `plan` cannot write whatever its tools are, so it is never given a worktree.
+An agent file with no `tools:` field inherits every tool the session has, as in Claude Code; list `tools`
+to narrow it. A child never exceeds the parent's temper: under `plan` it cannot write, and the safety
+denylist always applies.
+
+When a child's call needs approval (the `default` temper's ask, `accept-edits` shell, `auto` doubts),
+the question goes to the parent's own prompt, labelled with the child (`general-purpose-ab12: write_file`),
+one at a time across siblings. "Allow for this session" on a non-shell tool covers the rest of that
+`spawn_agents` call. On the bridge the question is relayed through the parent's sink like a bridged
+call's. With nobody to ask (`forge run`, detached children) the call is refused and the tool result says
+so (`permission denied: ... no one can be asked here`), so the parent can report it and the user can
+rerun with `auto-edit` or `full`.
+
+Children edit the session's tree in place. With `[mesh.subagents] worktree_isolation` (or `isolation:
+worktree`) a write-capable child gets its own worktree whose changes are merged back into the tree when it
+finishes, and conflicts are reported in its result. A child in `plan` temper is never given a worktree.
 `context: fork` in a skill (see `command-skill-system.md`) runs the skill as one child of the type its
 `agent:` names.

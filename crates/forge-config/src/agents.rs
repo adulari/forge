@@ -5,7 +5,7 @@
 //! ---
 //! name: reviewer
 //! description: Reviews a code change for bugs and risk.
-//! tools: [read_file, list_dir, search]   # optional; omit → default read-only set
+//! tools: [read_file, list_dir, search]   # optional; omit → every tool
 //! tier: standard                          # optional; omit → mesh-routed per task
 //! model: sonnet                           # optional; haiku/sonnet/opus pick a tier, `provider::model` pins
 //! ---
@@ -33,7 +33,7 @@ use forge_skills::frontmatter::{self, Frontmatter};
 use forge_types::{EffortLevel, PermissionMode, TaskTier};
 
 /// A reusable subagent type. The `system_prompt` is the file body; `tools`/`tier` are optional
-/// overrides resolved by the orchestrator (empty `tools` → the default read-only set).
+/// overrides resolved by the orchestrator (empty `tools` → every tool, as in Claude Code).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentDef {
     pub name: String,
@@ -133,8 +133,10 @@ pub fn agent_catalog(agents: &HashMap<String, AgentDef>) -> String {
         } else {
             def.description.as_str()
         };
-        let tools = if def.tools.is_empty() {
-            "read-only tools".to_string()
+        let tools = if def.permission_mode == Some(PermissionMode::Plan) {
+            "read-only".to_string()
+        } else if def.tools.is_empty() {
+            "all tools".to_string()
         } else {
             def.tools.join(", ")
         };
@@ -371,7 +373,7 @@ mod tests {
         let text = "---\ndescription: just a body\n---\nDo the thing.";
         let def = parse_agent(text, "myagent").unwrap();
         assert_eq!(def.name, "myagent"); // falls back to file stem
-        assert!(def.tools.is_empty()); // → default read-only set, decided in core
+        assert!(def.tools.is_empty()); // → every tool, decided in core
         assert_eq!(def.tier, None); // → mesh-routed
         assert_eq!(def.system_prompt, "Do the thing.");
     }
@@ -579,7 +581,7 @@ mod tests {
             );
         }
         let cat = agent_catalog(&agents);
-        assert_eq!(cat, "\n- a: first [shell]\n- b: second [read-only tools]");
+        assert_eq!(cat, "\n- a: first [shell]\n- b: second [all tools]");
         assert!(agent_catalog(&HashMap::new()).is_empty());
     }
 }

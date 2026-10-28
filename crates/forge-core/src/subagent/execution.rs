@@ -1,37 +1,45 @@
-//! Running one tool call on behalf of a child, with nobody to ask.
+//! Running one tool call on behalf of a child.
 //!
-//! A subagent is headless by construction: it runs in parallel with its siblings and has no
-//! interactive surface, so the parent's `invoke_tool` contract does not transfer. Here an `Ask`
-//! decision resolves to **Deny** rather than blocking on a prompt that can never be answered, no
-//! presenter events are emitted, and the safety denylist still applies. Everything else about the
-//! child's loop lives with the loop.
+//! A child runs in parallel with its siblings and owns no interactive surface, so the parent's
+//! `invoke_tool` contract does not transfer. An `Ask` decision goes to the context's
+//! [`ChildAsker`](super::ChildAsker), which hosts the question on the parent's prompt; with no
+//! asker it resolves to **Deny** with a reason the parent model can report. The safety denylist
+//! still applies. Everything else about the child's loop lives with the loop.
 
 use forge_tools::ToolRegistry;
 use forge_types::{PermissionDecision, SideEffect, Usage};
 
-use super::{rewrite_args_for_root, AgentCtx};
+use super::{rewrite_args_for_root, AgentCtx, ChildAnswer, ChildQuestion};
 use crate::{permission, CoreError};
 
-/// Run one subagent tool call through the permission gate (headless). Differs from the parent's
-/// `invoke_tool` in that there is no interactive surface: an `Ask` decision resolves to **Deny**
-/// (a parallel/headless child can't prompt), and no presenter events are emitted. The safety
-/// denylist always applies. Unknown / non-read-only tools are refused.
+/// Run one subagent tool call through the permission gate. An `Ask` decision is put to the
+/// context's asker (the parent's prompt); with none it is refused and says why. The safety
+/// denylist always applies. `offered` is the child's toolset: a call outside it is refused.
 pub(super) async fn execute_tool(
     ctx: &AgentCtx,
     registry: &ToolRegistry,
+    offered: &[String],
+    child: &str,
     msg_id: &str,
     call: &forge_types::ToolCall,
 ) -> Result<String, CoreError> {
     // A child's model fills in optional properties like any other: judge and run the call it meant.
     let args = registry.normalize_args(&call.name, &call.args);
     let args_json = serde_json::to_string(&args)?;
-    let Some(tool) = registry.get(&call.name) else {
-        let result = format!("error: tool '{}' is not available to subagents", call.name);
+    let tool = registry
+        .get(&call.name)
+        .filter(|_| offered.contains(&call.name));
+    let Some(tool) = tool else {
+        let result = format!(
+            "error: tool '{}' is not available to this subagent",
+            call.name
+        );
         ctx.store
             .record_tool_call(msg_id, &call.name, &args_json, &result, "n/a", "error")?;
         return Ok(result);
     };
     let side_effect = tool.side_effect();
+    let mut refusal = None;
     let allowed = match permission::decide_in(
         ctx.mode,
         side_effect,
@@ -41,8 +49,47 @@ pub(super) async fn execute_tool(
         Some(ctx.worktree_root.as_deref().unwrap_or(&ctx.repo_root)),
     ) {
         PermissionDecision::Allow => true,
-        // No interactive surface in a subagent → Ask becomes Deny (safe default).
-        PermissionDecision::Deny | PermissionDecision::Ask => false,
+        PermissionDecision::Deny => {
+            refusal = Some("permission denied by policy".to_string());
+            false
+        }
+        PermissionDecision::Ask => match &ctx.asker {
+            Some(asker) => {
+                let answer = asker(ChildQuestion {
+                    child: child.to_string(),
+                    tool: call.name.clone(),
+                    side_effect,
+                    args: args.clone(),
+                })
+                .await;
+                match answer {
+                    ChildAnswer::Allow => true,
+                    ChildAnswer::Deny(note) => {
+                        refusal = Some(match note {
+                            Some(note) => format!(
+                                "permission denied by the user: {}. The user said: {note}",
+                                call.name
+                            ),
+                            None => format!(
+                                "permission denied by the user: {}. Do not retry it; report what you would have done.",
+                                call.name
+                            ),
+                        });
+                        false
+                    }
+                }
+            }
+            None => {
+                refusal = Some(format!(
+                    "permission denied: `{}` needs approval in the `{}` temper and no one can be \
+                     asked here (headless run). The tool exists; the session must run with a \
+                     permissive temper (auto-edit or full) or an allow rule for it.",
+                    call.name,
+                    ctx.mode.key()
+                ));
+                false
+            }
+        },
     };
     let (result, status) = if allowed {
         // A daemon may host sessions rooted anywhere. Never let a child's relative path fall back
@@ -65,7 +112,10 @@ pub(super) async fn execute_tool(
             Err(e) => (format!("error: {e}"), "error"),
         }
     } else {
-        ("permission denied by policy".to_string(), "error")
+        (
+            refusal.unwrap_or_else(|| "permission denied by policy".to_string()),
+            "error",
+        )
     };
     ctx.store.record_tool_call(
         msg_id,
