@@ -40,8 +40,10 @@ use crate::sandbox::{self, SandboxPolicy};
 use crate::{Tool, ToolError};
 mod background;
 mod poll;
+mod wait;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
 use poll::{run_poll, watched_jobs, PollJobs};
+use wait::refuse_fixed_wait;
 mod preview;
 pub use preview::{
     reap_orphan_tunnels, set_preview_settings, PreviewSettings, ReapReason, ReapReport,
@@ -140,10 +142,12 @@ impl Tool for ShellTool {
          write_file over sed/awk/perl -i/heredoc redirects: they are cheaper, exact, and keep the \
          change reviewable. Args: command (or commands), cwd \
          (default \".\"), timeout_secs (default 120, max 600), pty (default false). To WAIT for a \
-         long external job (CI run / release build that takes minutes), set \
+         long external job (CI run / release build / remote job that takes minutes), set \
          poll_until_exit_zero:true — the call re-runs `command` every poll_interval_secs until it \
          exits 0, yielding a resumable 'call again' result if still not ready; call it repeatedly \
-         until ready instead of one long blocking watch (which gets killed at the timeout). \
+         until ready instead of one long blocking watch (which gets killed at the timeout). NEVER \
+         wait with a fixed `sleep N` (30s or more is refused): poll for the condition so you \
+         return the moment it holds. \
          To start something that must KEEP RUNNING after the call returns (emulator, dev server, \
          tunnel, daemon), set background:true — a normal call SIGKILLs everything it started when \
          it returns, and `nohup`/`&` do NOT survive that. A background job returns a job id \
@@ -218,6 +222,15 @@ impl Tool for ShellTool {
             return Err(ToolError::BadArgs(message.to_string()));
         }
         if let Some(list) = batch::batch_arg(args) {
+            if let Some(refusal) = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find_map(refuse_fixed_wait)
+            {
+                return Err(ToolError::Failed(refusal));
+            }
             let single_only = ["background", "pty", "poll_until_exit_zero"]
                 .into_iter()
                 .find(|key| args.get(*key).and_then(Value::as_bool).unwrap_or(false));
@@ -274,6 +287,11 @@ impl Tool for ShellTool {
             .get("poll_until_exit_zero")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        if !poll {
+            if let Some(refusal) = refuse_fixed_wait(command) {
+                return Err(ToolError::Failed(refusal));
+            }
+        }
         if poll {
             if use_pty {
                 return Ok(crate::ToolRun::from(
@@ -861,6 +879,23 @@ mod tests {
                 .map(|s| s.contains(") Z"))
                 .unwrap_or(true);
         assert!(!alive, "grandchild {pid} survived the drop");
+    }
+
+    #[tokio::test]
+    async fn a_fixed_long_sleep_is_refused_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let tool = ShellTool::in_workspace(dir.path());
+        let command = format!("sleep 540; touch {}", marker.display());
+        for args in [
+            serde_json::json!({ "command": command }),
+            serde_json::json!({ "commands": ["true", command] }),
+        ] {
+            let err = tool.run(&args).await.unwrap_err().to_string();
+            assert!(err.contains("refused: a fixed 'sleep 540'"), "{err}");
+            assert!(err.contains("poll_until_exit_zero"), "{err}");
+        }
+        assert!(!marker.exists());
     }
 
     #[cfg(unix)]

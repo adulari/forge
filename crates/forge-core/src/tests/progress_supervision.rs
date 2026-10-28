@@ -542,7 +542,7 @@ async fn a_watch_cut_by_the_shell_time_limit_and_repeated_is_a_wait() {
                 "Watching the run again.".to_string(),
                 tool(
                     "shell",
-                    serde_json::json!({"command": "sleep 30", "timeout_secs": 1}),
+                    serde_json::json!({"command": "sleep 25", "timeout_secs": 1}),
                 ),
             )
         })

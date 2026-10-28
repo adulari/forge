@@ -355,6 +355,7 @@ Tools:
 - During long multi-step work, include a one-sentence progress note for the user every several \
 tool calls, in the same response as the next tool calls (never instead of them).
 - When you need several independent reads or searches, request them together in one step.
+- When waiting on a result, poll for the condition (shell poll mode or a background job); never a fixed sleep.
 - edit_file replaces ONE exact, unique occurrence — include enough surrounding context in `old` to \
 match exactly once, and read the file first so whitespace matches. To change one file in several \
 places at once, multi_edit applies a list of edits atomically. For a large or multi-file change, \
