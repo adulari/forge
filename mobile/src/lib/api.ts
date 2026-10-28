@@ -652,14 +652,16 @@ export async function request<T>(
 
   try {
     if (res.status === 404) {
-      // Deliberately unrevealing per §1.1 — could be wrong token OR a real 404 route.
-      let body: unknown;
+      // A wrong token falls through to the daemon's plain-text fallback, so it never carries the
+      // JSON `{error}` body a real route answers with; keeping the token case generic is §1.1.
+      let body: ErrorBody | undefined;
       try {
-        body = await res.json();
+        body = (await res.json()) as ErrorBody;
       } catch {
         // no body
       }
-      throw new ApiError(404, "pairing invalid, re-scan", body);
+      const routeMessage = typeof body?.error === "string" && body.error !== "" ? body.error : null;
+      throw new ApiError(404, routeMessage ?? "pairing invalid, re-scan", body);
     }
 
     if (!res.ok) {
