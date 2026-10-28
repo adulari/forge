@@ -22,6 +22,7 @@ date_utc="${2:-$(date -u +%F)}"
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$root"
 
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 py=$(command -v python3 || command -v python)
 "$py" - "$version" "$date_utc" <<'PY'
 import json, re, sys
