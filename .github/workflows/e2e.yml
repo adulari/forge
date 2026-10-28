@@ -57,7 +57,7 @@ jobs:
       # The self-hosted Arch leg skips it: target/ already persists on that box's local disk
       # between runs, so a network cache round-trip would be pure overhead on top of that.
       - if: matrix.label != 'archlinux'
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
 
       # The release binary uses the production store path unless FORGE_DB is explicit. Keep every
       # diagnostic and real-turn invocation on the runner's disposable workspace; the Arch runner
