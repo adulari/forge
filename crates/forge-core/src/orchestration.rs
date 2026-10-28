@@ -230,6 +230,37 @@ impl Session {
             );
         };
 
+        let outcome = self
+            .follow_up_child(&child_id, &agent_name, &message, true)
+            .await?;
+        let label = if agent_name.is_empty() {
+            child_id[..8].to_string()
+        } else {
+            agent_name
+        };
+        let result = format!("[{label}] {}", outcome.final_text);
+        self.store.record_tool_call(
+            msg_id,
+            &call.name,
+            &args_json,
+            &result,
+            "allowed",
+            if outcome.ok { "ok" } else { "error" },
+        )?;
+        Ok(result)
+    }
+
+    /// Run `message` as a follow-up turn of an existing child session: the persisted transcript
+    /// is rebuilt, the agent definition re-resolved by name, and the same child loop runs again.
+    /// `announce` emits the `SubagentStart` that gives a model-driven `send_to_agent` its own
+    /// panel row; a user typing into an open child view already has one.
+    async fn follow_up_child(
+        &mut self,
+        child_id: &str,
+        agent_name: &str,
+        message: &str,
+        announce: bool,
+    ) -> Result<subagent::SubagentOutcome, CoreError> {
         // Re-resolve the agent definition by its recorded name so a named type keeps its
         // persona + toolset; the follow-up message becomes the routed "task".
         let agents = Arc::new(forge_config::load_agents_layered(
@@ -237,8 +268,8 @@ impl Session {
             &self.config.mesh.subagents.agents_dir,
         ));
         let request = subagent::AgentRequest {
-            agent: agent_name.clone(),
-            task: message.clone(),
+            agent: agent_name.to_string(),
+            task: message.to_string(),
         };
         let resolved = subagent::resolve(&request, &agents);
         let budget = BudgetState {
@@ -271,55 +302,60 @@ impl Session {
         };
         let decision = subagent::route_child(&ctx, &resolved, budget).await;
 
-        self.presenter.emit(PresenterEvent::SubagentStart {
-            id: child_id.clone(),
-            agent: agent_name.clone(),
-            task: format!("↩ {message}"),
-            model: Some(decision.model.clone()),
-            phase: None,
-        });
+        if announce {
+            self.presenter.emit(PresenterEvent::SubagentStart {
+                id: child_id.to_string(),
+                agent: agent_name.to_string(),
+                task: format!("↩ {message}"),
+                model: Some(decision.model.clone()),
+                phase: None,
+            });
+        }
         let presenter = &mut self.presenter;
         let mut on_delta = |ev: StreamEvent| {
             if let StreamEvent::Text(snippet) | StreamEvent::Reasoning(snippet) = ev {
                 presenter.emit(PresenterEvent::SubagentProgress {
-                    id: child_id.clone(),
+                    id: child_id.to_string(),
                     snippet,
                 });
             }
         };
         let outcome = subagent::resume_subagent(
             &ctx,
-            &child_id,
+            child_id,
             &resolved,
-            &message,
+            message,
             decision,
             budget,
             &mut on_delta,
         )
         .await?;
-        let cost = self.store.session_cost(&child_id).unwrap_or(0.0);
+        let cost = self.store.session_cost(child_id).unwrap_or(0.0);
         self.presenter.emit(PresenterEvent::SubagentResult {
-            id: child_id.clone(),
-            agent: agent_name.clone(),
+            id: child_id.to_string(),
+            agent: agent_name.to_string(),
             ok: outcome.ok,
             summary: outcome.final_text.clone(),
             cost_usd: cost,
         });
-        let label = if agent_name.is_empty() {
-            child_id[..8].to_string()
-        } else {
-            agent_name
+        Ok(outcome)
+    }
+
+    /// Send a message the user typed in a subagent's session view to that subagent. `child_id`
+    /// must be one of this session's children.
+    pub async fn message_child(
+        &mut self,
+        child_id: &str,
+        message: &str,
+    ) -> Result<subagent::SubagentOutcome, CoreError> {
+        let children = self.store.named_child_sessions(&self.id)?;
+        let Some((_, title)) = children.into_iter().find(|(id, _)| id == child_id) else {
+            return Err(CoreError::Precondition(format!(
+                "{child_id} is not a subagent of this session"
+            )));
         };
-        let result = format!("[{label}] {}", outcome.final_text);
-        self.store.record_tool_call(
-            msg_id,
-            &call.name,
-            &args_json,
-            &result,
-            "allowed",
-            if outcome.ok { "ok" } else { "error" },
-        )?;
-        Ok(result)
+        self.follow_up_child(child_id, title.as_deref().unwrap_or(""), message, false)
+            .await
     }
 
     /// Handle a `run_workflow` call: build the shared mesh-routed execution context (same shape

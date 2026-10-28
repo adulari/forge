@@ -1429,9 +1429,56 @@ pub(crate) async fn run_chat_tui(
                 key
             };
 
-            if app.child_view_key(key) {
-                dirty = true;
-                continue;
+            match app.child_view_key(key) {
+                forge_tui::ChildKey::Inactive => {}
+                forge_tui::ChildKey::Handled => {
+                    dirty = true;
+                    continue;
+                }
+                forge_tui::ChildKey::Switch(id) => {
+                    if !child_feed.open(&mut app, &id) {
+                        app.child_view_notice("could not read that agent's session");
+                    }
+                    dirty = true;
+                    continue;
+                }
+                forge_tui::ChildKey::Submit(line) => {
+                    let agent = app.child_view_agent().unwrap_or_default();
+                    let Some(child_id) = app.child_view_id().map(str::to_owned) else {
+                        continue;
+                    };
+                    if busy {
+                        app.child_view_notice(&format!(
+                            "a turn is still running — your message to {agent} waits in the composer; press Enter once it ends"
+                        ));
+                        app.replace_input(line);
+                    } else if app.child_view_running() {
+                        app.child_view_notice(&format!(
+                            "{agent} is still working — press Enter again once it is done"
+                        ));
+                        app.replace_input(line);
+                    } else if line.starts_with('/') || line.starts_with('!') {
+                        app.child_view_notice(
+                            "commands and shell lines run in the main chat — Esc goes back",
+                        );
+                        app.replace_input(line);
+                    } else {
+                        prompt_history.record(&line);
+                        turn_gen += 1;
+                        turn_handle = Some(child_view::spawn_child_message(
+                            child_id,
+                            line,
+                            &session,
+                            &done_tx,
+                            turn_gen,
+                            &mut app,
+                            &mut busy,
+                            &mut busy_since,
+                        ));
+                    }
+                    dirty = true;
+                    continue;
+                }
             }
 
             // The workflow view is modal while open: ↑↓ move the row selection, Enter zooms into
@@ -2939,99 +2986,51 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
-            // Ctrl+O toggles focus on the sticky activity panel (main chat + subagents + critics).
-            // When a workflow exists this turn (running or just finished) it opens the dedicated
-            // workflow view instead — workflow rows live there, not in the activity panel.
-            if matches!(key, KeyKind::ToggleSubagentDetail) {
-                if app.workflow.exists() {
-                    app.workflow.open = true;
-                } else if app.has_activity() || !app.tasks().is_empty() {
-                    app.activity_focused = !app.activity_focused;
-                    if app.activity_focused {
-                        app.activity_idx =
-                            app.activity_idx.min(app.activity_len().saturating_sub(1));
-                    }
-                }
-                dirty = true;
-                continue;
-            }
-
-            // Ctrl+O over a bare TASK list (no subagents, no critics) expands the details panels
-            // but leaves nothing to select: `activity_len()` is 0, and `render_activity_panel`
-            // early-returns so not even the "↑↓ select · ⏎ open · esc" hint is drawn. The exclusive
-            // key-capture below then swallowed EVERY keystroke — no typing, no Enter, no visible
-            // way out; it read as a hung TUI. Consume only Esc (collapse the details) and let every
-            // other key fall through to normal input handling.
-            if app.activity_focused && app.activity_len() == 0 {
-                if matches!(key, KeyKind::Esc) {
-                    app.activity_focused = false;
+            // Ctrl+O shows the sticky agents panel (or, with a workflow this turn, the workflow
+            // view). While it has focus ↑↓ select, Enter opens the selected subagent as its own
+            // session view, Esc hides it. Handled before the global Esc so Esc steps out of the
+            // panel instead of quitting.
+            match app.activity_key(key) {
+                forge_tui::PanelKey::Unhandled => {}
+                forge_tui::PanelKey::Handled => {
                     dirty = true;
                     continue;
                 }
-            } else if app.activity_focused {
-                // While the activity panel has focus: ↑↓ move the selection (wrapping), Enter opens
-                // the selected entry's full-screen transcript viewer, Esc unfocuses. Handled before
-                // the global Esc so Esc steps out of the panel instead of quitting.
-                match key {
-                    KeyKind::Up => {
-                        let n = app.activity_len();
-                        if n > 0 {
-                            app.activity_idx = (app.activity_idx + n - 1) % n;
-                        }
+                forge_tui::PanelKey::OpenChild(id) => {
+                    if !child_feed.open(&mut app, &id) {
+                        app.note("could not read that subagent's session");
                     }
-                    KeyKind::Down => {
-                        let n = app.activity_len();
-                        if n > 0 {
-                            app.activity_idx = (app.activity_idx + 1) % n;
-                        }
-                    }
-                    KeyKind::Enter => {
-                        let idx = app.activity_idx;
-                        if app.activity_len() == 0 {
-                            // Belt-and-braces (the guard above already excludes this): never enter
-                            // a viewer with zero entries — the inline alt-screen path used to panic
-                            // on the empty view list and take the whole session with it.
-                            app.activity_focused = false;
-                        } else if app.fullscreen
-                            && app
-                                .subagent_session_at(idx)
-                                .is_some_and(|id| child_feed.open(&mut app, &id))
-                        {
-                            // A subagent opens as its own session view.
-                        } else if app.fullscreen {
-                            // Full-screen: open the in-loop viewer (same terminal, no nested
-                            // alt-screen). The main render loop keeps draining events, so the
-                            // selected entry auto-updates while open.
-                            app.open_viewer(idx);
-                            app.activity_focused = false;
-                        } else {
-                            // Inline: the live region is tiny, so take over a separate alternate
-                            // screen for the viewer and drain events in its refresh closure.
-                            tui.run_fullscreen(|| {
-                                forge_tui::run_transcript_viewer(idx, || {
-                                    while let Ok(msg) = rx.try_recv() {
-                                        match msg {
-                                            UiMsg::Event(e) => app.apply(e),
-                                            UiMsg::Permission { reply, .. } => {
-                                                let _ = reply.send(ConfirmOutcome::Deny.into());
-                                            }
-                                            UiMsg::Question { reply, .. } => {
-                                                let _ = reply.send(Vec::new());
-                                            }
+                    dirty = true;
+                    continue;
+                }
+                forge_tui::PanelKey::OpenPager(idx) => {
+                    if app.fullscreen {
+                        // A critic has no session of its own; its output is the viewer's.
+                        app.open_viewer(idx);
+                        app.activity_focused = false;
+                    } else {
+                        // Inline: the live region is tiny, so take over a separate alternate
+                        // screen for the viewer and drain events in its refresh closure.
+                        tui.run_fullscreen(|| {
+                            forge_tui::run_transcript_viewer(idx, || {
+                                while let Ok(msg) = rx.try_recv() {
+                                    match msg {
+                                        UiMsg::Event(e) => app.apply(e),
+                                        UiMsg::Permission { reply, .. } => {
+                                            let _ = reply.send(ConfirmOutcome::Deny.into());
+                                        }
+                                        UiMsg::Question { reply, .. } => {
+                                            let _ = reply.send(Vec::new());
                                         }
                                     }
-                                    app.activity_views()
-                                })
-                            })?;
-                        }
+                                }
+                                app.activity_views()
+                            })
+                        })?;
                     }
-                    KeyKind::Esc => {
-                        app.activity_focused = false;
-                    }
-                    _ => {}
+                    dirty = true;
+                    continue;
                 }
-                dirty = true;
-                continue;
             }
 
             // Tool groups: Alt+↑/↓ focus a group, Alt+O opens or folds them all, and while a group

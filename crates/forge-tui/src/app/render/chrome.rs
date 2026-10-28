@@ -451,6 +451,7 @@ fn default_hints(app: &App) -> Vec<Hint> {
 /// its own set through its `hints` hook; otherwise the composer's own state decides.
 pub(crate) fn hints(app: &App) -> Vec<Hint> {
     super::permission::hints(app)
+        .or_else(|| crate::app::child_view::hints(app))
         .or_else(|| super::popups::hints(app))
         .or_else(|| super::panels::hints(app))
         .unwrap_or_else(|| default_hints(app))

@@ -383,6 +383,11 @@ pub struct App {
     pub viewer: Option<ViewerState>,
     /// A subagent's own session shown in place of the chat (see `child_view`).
     child_view: Option<child_view::ChildView>,
+    /// Where each subagent view was left (scroll offset, following), so switching away and back
+    /// returns to the same place.
+    child_scrolls: std::collections::HashMap<String, (usize, bool)>,
+    /// A line shown in the open subagent view's header until the next key (why a message waited).
+    child_notice: Option<String>,
     /// The dynamic `/config` settings editor overlay (modal while `open`).
     pub config_editor: crate::config_editor::ConfigEditor,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
@@ -3532,6 +3537,7 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 mod card_flow;
 mod card_text;
 mod child_view;
+pub use child_view::{ChildKey, PanelKey};
 mod group_body;
 mod group_flow;
 mod group_rows;

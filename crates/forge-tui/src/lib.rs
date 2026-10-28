@@ -73,9 +73,9 @@ mod workflow_view;
 pub use app::{
     banner_lines, handle_key, input_cursor_up, insert_voice_transcript, lattice_view_lines,
     page_file, print_banner_direct, render_mesh_overlay, render_usage_overlay,
-    render_voice_overlay, ActivityKind, ActivityStatus, App, Deferred, DeferredInbox,
+    render_voice_overlay, ActivityKind, ActivityStatus, App, ChildKey, Deferred, DeferredInbox,
     IdleInterrupt, InputOutcome, KeyKind, MeshCandRow, MeshOverlay, MeshQuotaRow, OutputAction,
-    OutputView, TranscriptRow, TranscriptView, UsageOverlay, UsagePaceNote, VoiceOverlay,
+    OutputView, PanelKey, TranscriptRow, TranscriptView, UsageOverlay, UsagePaceNote, VoiceOverlay,
     VoicePhase,
 };
 pub use app_remote::{

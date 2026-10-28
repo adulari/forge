@@ -12,7 +12,7 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         crate::app::output_view::render_output_view(frame, view);
         return;
     }
-    if let Some(view) = &app.child_view {
+    if let Some(view) = app.child_view.as_ref().filter(|_| !prompt_owns_screen(app)) {
         crate::app::child_view::render_child_view(frame, view, app);
         return;
     }
@@ -259,4 +259,10 @@ pub(crate) fn split_panel_budget(want_a: u16, want_t: u16, budget: u16) -> (u16,
     } else {
         (half, budget.saturating_sub(half).min(want_t))
     }
+}
+
+/// A permission prompt or question needs the chat's decision block, so the subagent view steps
+/// aside until it is answered.
+pub(crate) fn prompt_owns_screen(app: &App) -> bool {
+    app.prompt.is_some() || app.awaiting_question()
 }
