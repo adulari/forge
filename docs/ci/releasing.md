@@ -59,7 +59,7 @@ prepared by hand) it is a no-op.
 ## Rehearsal
 
 `--dry-run` dispatches `release.yml` with `dry_run=true` from the current branch. It stamps a fake
-`v99.0.0`, builds all five targets, assembles the archives and runs the upgrade/reconnect/rollback
+`v2.99.0`, builds all five targets, assembles the archives and runs the upgrade/reconnect/rollback
 gate; it attests, publishes and dispatches nothing.
 
 ## Where the time goes (dry run, hosted runners)

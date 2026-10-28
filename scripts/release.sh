@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 if [[ "${1:-}" == "--dry-run" ]]; then
-  gh workflow run release.yml --ref "$(git branch --show-current)" -f release_tag=v99.0.0 -f dry_run=true
+  gh workflow run release.yml --ref "$(git branch --show-current)" -f release_tag=v2.99.0 -f dry_run=true
   echo "dry run dispatched: gh run list -w release.yml -L 1"
   exit 0
 fi
