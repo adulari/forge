@@ -61,6 +61,8 @@ pub enum RouteId {
     GitDiff,
     /// A fork's worktree diff against its merge base (`GET /api/sessions/{id}/diff`).
     SessionDiff,
+    /// Every child agent of a session, from any turn (`GET /api/sessions/{id}/agents`).
+    SessionAgents,
     // The Files tab. Reading and saving a file in the session's workspace is strictly less than
     // what the bridged terminal already allows, so the bridge carries it rather than leaving the
     // tab as a "connect directly" dead end on the transport phones actually use.

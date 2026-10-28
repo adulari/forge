@@ -112,6 +112,10 @@ export interface ToolInvocation {
   args: string;
   /** What came back. `null` while the call is still in flight or its result was never stored. */
   result: string | null;
+  /** Unix seconds the call row and its result row were written; they bound which child agents a
+   * delegating call (`spawn_agents`, a workflow) started. Absent from a row the store gave no time. */
+  at?: number;
+  resultAt?: number | null;
 }
 
 export type TranscriptEntry =
@@ -165,7 +169,7 @@ export function buildTranscript(rowsNewestFirst: HistoryRow[]): TranscriptEntry[
       out.push({
         kind: "tool",
         key: `t${row.seq}-${n++}`,
-        invocation: { seq: row.seq, tool: row.tool ?? null, args: row.content, result: null },
+        invocation: { seq: row.seq, tool: row.tool ?? null, args: row.content, result: null, at: row.created_at },
       });
       const queue = awaiting.get(name) ?? [];
       queue.push(out.length - 1);
@@ -177,12 +181,13 @@ export function buildTranscript(rowsNewestFirst: HistoryRow[]): TranscriptEntry[
     const pending = at === undefined ? undefined : out[at];
     if (pending && pending.kind === "tool" && pending.invocation.result === null) {
       pending.invocation.result = row.content;
+      pending.invocation.resultAt = row.created_at;
       continue;
     }
     out.push({
       kind: "tool",
       key: `t${row.seq}-${n++}`,
-      invocation: { seq: row.seq, tool: row.tool ?? null, args: "", result: row.content },
+      invocation: { seq: row.seq, tool: row.tool ?? null, args: "", result: row.content, at: row.created_at, resultAt: row.created_at },
     });
   }
   return out.reverse();

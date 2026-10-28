@@ -51,8 +51,9 @@ import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
 import { reconcilePendingMessages, unqueuedPendingMessages } from "../../../lib/sessionReconciler";
 import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { haptics } from "../../../lib/haptics";
-import { useHistory, useLiveHistoryRefresh, useSessions } from "../../../lib/queries";
+import { useHistory, useLiveHistoryRefresh, useSessionAgents, useSessions } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
+import { AgentIndexProvider } from "../../../lib/agentLinks";
 import { openSession } from "../../../lib/nav";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { useTokens } from "../../../theme/ThemeProvider";
@@ -80,6 +81,7 @@ type TimelineItem =
   | { kind: "pendingSent"; id: string; text: string; attachments: SentAttachment[] };
 
 const EMPTY_TIMELINE: TimelineItem[] = [];
+const NO_AGENTS: never[] = [];
 
 // How long an optimistic "pendingSent" bubble is allowed to linger without a real history row
 // ever landing for it (session closed mid-turn, WS never came back, etc.) — a safety net, not
@@ -122,6 +124,8 @@ export function SessionChat() {
   // input-less case server-side too (`reject_ws_if_local_read_only` in `serve.rs`). The fleet list
   // is the only place that carries the flag, so look this session up there rather than adding it
   // to every other response shape.
+  const agentsSignal = (snapshot?.subagents ?? []).map((s) => (s.done ? "d" : "r")).join("");
+  const agentIndex = useSessionAgents(snapshot?.parent ? null : sessionId, agentsSignal).data ?? NO_AGENTS;
   const sessionsQuery = useSessions();
   const parentSession = snapshot?.parent ?? null;
   const readOnly = parentSession != null || (sessionsQuery.data?.find((row) => row.id === sessionId)?.read_only ?? false);
@@ -782,6 +786,7 @@ export function SessionChat() {
   return (
     // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
     // panel bleeds through it) so Screen's bg1 never shows as a seam below the composer.
+    <AgentIndexProvider value={agentIndex}>
     <Screen edges={["left", "right"]} keyboardAvoiding keyboardVerticalOffset={headerHeight} contentContainerStyle={styles.sessionColumn}>
       <View style={styles.flex}>
         <BoundedList<TimelineItem>
@@ -935,6 +940,7 @@ export function SessionChat() {
         />
       )}
     </Screen>
+    </AgentIndexProvider>
   );
 }
 

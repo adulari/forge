@@ -66,7 +66,7 @@ mod usage_store;
 
 pub use bench_solve_store::{BenchSolveRun, BenchSolveTotals};
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
-pub use child_view_store::ChildSessionInfo;
+pub use child_view_store::{ChildIndexRow, ChildSessionInfo};
 pub use codemode_store::{CodemodeStats, ToolCallRow};
 pub use compaction_source_store::CompactionSource;
 pub use detached_child_store::{DetachedChild, DetachedChildStatus};

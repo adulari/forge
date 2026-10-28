@@ -2,8 +2,8 @@
 // `subagents` -> Agents segment; Hearth core rule 1 — a running agent carries its accent
 // StatusDot instead of living in its own Card, see AgentRow.tsx).
 import { Bot, WifiOff } from "lucide-react-native";
-import React, { useCallback } from "react";
-import { StyleSheet, View } from "react-native";
+import React, { useCallback, useMemo } from "react";
+import { StyleSheet, Text, View } from "react-native";
 
 import { openSession } from "../../../lib/nav";
 import { AgentRow } from "../../../components/session/AgentRow";
@@ -11,9 +11,12 @@ import { BoundedList } from "../../../components/ds/BoundedList";
 import { EmptyState } from "../../../components/ds/EmptyState";
 import { Screen } from "../../../components/ds/Screen";
 import { Skeleton } from "../../../components/ds/Skeleton";
+import { useSessionAgents } from "../../../lib/queries";
 import { useSessionCtx } from "../../../lib/sessionContext";
+import { agentListItems, type AgentListItem } from "../../../lib/agentList";
+import { useTokens } from "../../../theme/ThemeProvider";
+import { type as typeScale } from "../../../theme/typography";
 import { space } from "../../../theme/tokens";
-import type { SnapshotSubagent } from "../../../lib/ws";
 import { useSegmentsHosted } from "../../../components/session/SegmentKeepAlive";
 
 // Shaped like an AgentRow (dot+name+cost header, task line, meta line) — shown only until
@@ -37,28 +40,33 @@ function AgentsSkeleton() {
 }
 
 export function SessionAgents() {
-  const { snapshot, snapshotTimedOut, send } = useSessionCtx();
-  const agents = snapshot?.subagents ?? [];
+  const tokens = useTokens();
+  const { sessionId, snapshot, snapshotTimedOut, send } = useSessionCtx();
+  const live = snapshot?.subagents;
   const promptSeq = snapshot?.prompt_seq;
+  const signal = (live ?? []).map((s) => (s.done ? "d" : "r")).join("");
+  const index = useSessionAgents(sessionId, signal).data;
+  const items = useMemo(() => agentListItems(live ?? [], index ?? []), [live, index]);
 
   // A child agent never parks on a permission prompt today (a child resolves `Ask` as deny), so
   // `permission_prompt` is always null and these props stay inert — they are passed so the inline
   // Allow/Deny answers through the same `allow` message the session-level card uses if that
   // changes, rather than needing a call-site edit then.
   const renderItem = useCallback(
-    ({ item }: { item: SnapshotSubagent }) => (
-      <AgentRow
-        agent={item}
-        send={send}
-        promptSeq={promptSeq}
-        onOpen={item.session_id ? () => openSession(item.session_id as string) : undefined}
-      />
-    ),
-    [send, promptSeq],
+    ({ item }: { item: AgentListItem }) =>
+      item.kind === "header" ? (
+        <Text style={[typeScale.section, styles.header, { color: tokens.ink4 }]}>{item.label}</Text>
+      ) : (
+        <AgentRow
+          agent={item.agent}
+          send={send}
+          promptSeq={promptSeq}
+          onOpen={item.agent.session_id ? () => openSession(item.agent.session_id as string) : undefined}
+        />
+      ),
+    [send, promptSeq, tokens.ink4],
   );
-  // Snapshot.subagents has no stable id — index+agent name is stable enough for this
-  // read-only, effectively-append-only list.
-  const keyExtractor = useCallback((item: SnapshotSubagent, index: number) => `${index}-${item.agent}`, []);
+  const keyExtractor = useCallback((item: AgentListItem) => item.key, []);
 
   return (
     <Screen edges={["left", "right", "bottom"]} scroll={false} contentContainerStyle={styles.sessionColumn}>
@@ -68,7 +76,7 @@ export function SessionAgents() {
         <AgentsSkeleton />
       ) : (
         <BoundedList
-          data={agents}
+          data={items}
           renderItem={renderItem}
           keyExtractor={keyExtractor}
           ListEmptyComponent={<EmptyState icon={Bot} message="no active agents" />}
@@ -82,6 +90,7 @@ export function SessionAgents() {
 const styles = StyleSheet.create({
   sessionColumn: { width: "100%", maxWidth: 760, alignSelf: "center" },
   content: { paddingTop: space.space8 },
+  header: { paddingHorizontal: space.space4, paddingTop: space.space12, paddingBottom: space.space8 },
   skeletonWrap: { paddingVertical: space.space12, gap: space.space20 },
   skeletonRow: { paddingHorizontal: space.space20, gap: space.space8 },
   skeletonHeader: { flexDirection: "row", alignItems: "center", gap: space.space8 },

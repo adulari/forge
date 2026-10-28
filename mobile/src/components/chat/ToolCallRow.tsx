@@ -11,7 +11,9 @@ import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react-native";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
+import { agentsForInvocation, useAgentIndex } from "../../lib/agentLinks";
 import { haptics } from "../../lib/haptics";
+import { openSession } from "../../lib/nav";
 import { callHeadline, callVerb, readableArgs } from "../../lib/toolLabels";
 import { formatArgs, resultFailed, type ToolInvocation } from "../../lib/toolRows";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -111,6 +113,8 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
   const argsBody = useMemo(() => (args.trim() ? formatArgs(args) : ""), [args]);
   const argSections = useMemo(() => readableArgs(tool, args), [tool, args]);
   const [raw, setRaw] = useState(false);
+  const agentIndex = useAgentIndex();
+  const children = useMemo(() => agentsForInvocation(invocation, agentIndex), [invocation, agentIndex]);
   const resultBody = (result ?? "").trim();
   const hasDetail = argsBody.length > 0 || resultBody.length > 0;
 
@@ -150,6 +154,25 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
             <Text style={[type.meta, { color: tokens.danger }]}>failed</Text>
           ) : null}
         </Pressable>
+        {children.length > 0 ? (
+          <View style={styles.agentLinks}>
+            {children.map((child) => (
+              <Pressable
+                key={child.session_id}
+                onPress={() => openSession(child.session_id)}
+                accessibilityRole="button"
+                accessibilityLabel={`Open ${child.agent} transcript`}
+                style={[styles.agentChip, { backgroundColor: tokens.bg3 }]}
+                hitSlop={6}
+              >
+                <Text style={[type.monoMeta, { color: tokens.ink2 }]} numberOfLines={1}>
+                  {child.agent}
+                </Text>
+                <ChevronRight size={12} strokeWidth={1.75} color={tokens.ink3} />
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
         {open && hasDetail ? (
           <View>
             {raw
@@ -191,6 +214,8 @@ const styles = StyleSheet.create({
     paddingVertical: space.space4,
     minHeight: 30,
   },
+  agentLinks: { flexDirection: "row", flexWrap: "wrap", gap: space.space4, paddingHorizontal: space.space8, paddingBottom: space.space4 },
+  agentChip: { flexDirection: "row", alignItems: "center", gap: space.space4, height: 24, paddingHorizontal: space.space8, borderRadius: radii.radiusPill },
   chevronSlot: { width: 13, height: 13 },
   name: { flexShrink: 0, minWidth: 40 },
   target: { flex: 1, minWidth: 0 },
