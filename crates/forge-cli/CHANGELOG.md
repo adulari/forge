@@ -16,6 +16,8 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **pulldown-cmark 0.13.5 fixes RUSTSEC-2026-0414** (exponential event growth with `ENABLE_WIKILINKS`, high); the lockfile moves off 0.13.4.
+
 - **The shell tool refuses a fixed `sleep` of 30 seconds or more and points at polling.** A model waiting on a remote job ran `sleep 540; ssh host check` and sat for minutes whether or not the job had finished. A standalone `sleep N` (also `10m`, `1m 30s`) at the top level of a command, or in a `commands` batch, is now refused before anything runs, with the check part of the command echoed back as a `poll_until_exit_zero` example; sleeps inside `while`/`until`/`for`/`if` bodies, groups, subshells and `&` background jobs, and anything under 30 seconds, still run. The tool description, the base prompt and the bridge preamble now say to poll for the condition, never sleep (`crates/forge-tools/src/shell/wait.rs`).
 - **The Git review dock works for any session the chat can show, and says what is wrong.** The dock looked a session up only among the ones the daemon had loaded, so a saved session that was idle or left over from before a restart answered "no such session" and the app showed "pairing invalid, re-scan" with a Retry button that could never work; the status, diff, branch and index routes now fall back to the session's saved worktree or folder (a detached-HEAD worktree included). The app also shows the daemon's own message for a missing session instead of the pairing error, which is now kept for a wrong token only, and the dock shows a plain "not known to this server" or "not a git repository" state.
 
