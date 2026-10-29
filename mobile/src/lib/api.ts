@@ -310,8 +310,10 @@ export interface DeleteScheduleResponse { ok: true; deleted: true; }
 
 /** `section` is the `### Added` / `### Changed` / `### Fixed` heading the bullet sat under. */
 export interface ChangelogEntry { section: string; text: string; }
-/** `date` is null for the `Unreleased` section, which carries none. */
-export interface ChangelogRelease { version: string; date: string | null; entries: ChangelogEntry[]; }
+/** `date` is null for the `Unreleased` section, which carries none. `headline` and `chips` come
+ * from the optional `<!-- headline: … -->` / `<!-- chips: A | B -->` lines under a release heading;
+ * a daemon that predates them (or a release without them) omits both. */
+export interface ChangelogRelease { version: string; date: string | null; headline?: string; chips?: string[]; entries: ChangelogEntry[]; }
 
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };

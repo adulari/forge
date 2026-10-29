@@ -24,6 +24,7 @@ import {
   type PushKeys,
 } from "./pushE2e";
 import { subscribePush as apiSubscribePush, unsubscribePush as apiUnsubscribePush } from "../api";
+import { flushUnsubscribes, queueUnsubscribe, type OutboxStore } from "./pushOutbox";
 import { pushRegistrationDue, withRegistration, withoutRegistration, type RegistrationLedger } from "./pushRegistrations";
 
 export type PushSubscriptionState = "unsupported" | "subscribed" | "unsubscribed";
@@ -31,6 +32,12 @@ export type PushSubscriptionState = "unsupported" | "subscribed" | "unsubscribed
 const SUBSCRIBED_TOKEN_KEY = "forge.apnsDeviceToken";
 const REGISTRATIONS_KEY = "forge.apnsRegistrations.v1";
 const APP_LOCK_KEY = "forge.appLock";
+const UNSUBSCRIBE_OUTBOX_KEY = "forge.pushUnsubscribeOutbox.v1";
+
+const outbox: OutboxStore = {
+  read: () => AsyncStorage.getItem(UNSUBSCRIBE_OUTBOX_KEY),
+  write: (value) => AsyncStorage.setItem(UNSUBSCRIBE_OUTBOX_KEY, value),
+};
 
 // The private half lives in a keychain access group shared with the Notification Service
 // Extension, which is the only other process that can read it. AFTER_FIRST_UNLOCK because the
@@ -143,11 +150,13 @@ export async function disablePush(baseUrl: string): Promise<PushSubscriptionStat
   await AsyncStorage.removeItem(SUBSCRIBED_TOKEN_KEY);
   await writeLedger(withoutRegistration(await readLedger(), baseUrl));
   if (storedToken) {
+    const body = { device_token: storedToken };
     try {
-      await apiUnsubscribePush(baseUrl, { device_token: storedToken });
+      await apiUnsubscribePush(baseUrl, body);
     } catch {
-      // local unsubscribe already took effect; the daemon prunes a stale token on its next
-      // failed send regardless (410 BadDeviceToken/Unregistered), same as Web Push.
+      // The local unsubscribe already took effect; the daemon would otherwise only prune this
+      // token on its next failed send (410 BadDeviceToken/Unregistered), so retry on a later open.
+      await queueUnsubscribe(outbox, { baseUrl, body }).catch(() => undefined);
     }
   }
 
@@ -161,7 +170,9 @@ export async function disablePush(baseUrl: string): Promise<PushSubscriptionStat
  * ledger, the active host, where the toggle was used). A failure is silent; the next open retries.
  */
 export async function refreshPushRegistration(activeBaseUrl: string | null): Promise<void> {
-  if (!isPushSupported() || !activeBaseUrl) return;
+  if (!isPushSupported()) return;
+  await flushUnsubscribes(outbox, (item) => apiUnsubscribePush(item.baseUrl, item.body)).catch(() => undefined);
+  if (!activeBaseUrl) return;
   try {
     const stored = await AsyncStorage.getItem(SUBSCRIBED_TOKEN_KEY);
     if (!stored) return;

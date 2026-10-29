@@ -9,11 +9,13 @@ import { Platform, StyleSheet, Text, View } from "react-native";
 import { haptics } from "../../lib/haptics";
 import { useTranscribe } from "../../lib/queries";
 import { chordHold, PUSH_TO_TALK_MIN_MS } from "../../lib/voice/chordHold";
+import { canOpenMicSettings, isMicDenied, MIC_DENIED_MESSAGE, MIC_WEB_INSTRUCTIONS, openMicSettings } from "../../lib/voice/micAccess";
 import { voice } from "../../lib/voice/voice";
 import { useThermalPulse } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, tapTarget } from "../../theme/tokens";
 import { monoFamily, tabularNums, type } from "../../theme/typography";
+import { Button } from "../ds/Button";
 import { IconButton } from "../ds/IconButton";
 import { StatusDot } from "../ds/StatusDot";
 
@@ -50,6 +52,7 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
   const [levels, setLevels] = useState<number[]>(() => Array(MIN_BAR_COUNT).fill(0));
   const [elapsed, setElapsed] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [micDenied, setMicDenied] = useState(false);
   const startedAt = useRef(0);
   const closedRef = useRef(false);
 
@@ -75,6 +78,11 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
       .catch((err: unknown) => {
         if (cancelled) return;
         setPhase("error");
+        if (isMicDenied(err)) {
+          setMicDenied(true);
+          setErrorMsg(MIC_DENIED_MESSAGE);
+          return;
+        }
         setErrorMsg(err instanceof Error ? err.message : "couldn't start recording");
       });
     return () => {
@@ -98,6 +106,7 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
           withTiming(-SHAKE_DISTANCE, { duration: 60 }),
           withTiming(0, { duration: 60 }),
         );
+    if (micDenied) return;
     const t = setTimeout(close, ERROR_CLEAR_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -209,7 +218,33 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
         shakeStyle,
       ]}
     >
-      {phase === "error" ? (
+      {phase === "error" && micDenied ? (
+        <>
+          <View style={styles.errorText}>
+            <Text style={[type.meta, { color: tokens.danger }]} numberOfLines={1}>{MIC_DENIED_MESSAGE}</Text>
+            {canOpenMicSettings() ? null : (
+              <Text style={[type.meta, { color: tokens.ink3 }]} numberOfLines={2}>{MIC_WEB_INSTRUCTIONS}</Text>
+            )}
+          </View>
+          {canOpenMicSettings() ? (
+            <Button
+              label="Open settings"
+              variant="secondary"
+              onPress={() => {
+                void openMicSettings();
+                close();
+              }}
+              accessibilityLabel="Open settings to allow microphone access"
+            />
+          ) : null}
+          <IconButton
+            icon={<X size={18} strokeWidth={2} color={tokens.ink2} />}
+            onPress={close}
+            accessibilityLabel="dismiss"
+            testID="voice-dismiss"
+          />
+        </>
+      ) : phase === "error" ? (
         <Text style={[type.meta, styles.errorText, { color: tokens.danger }]} numberOfLines={1}>
           {errorMsg ?? "something went wrong"}
         </Text>

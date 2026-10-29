@@ -11,7 +11,8 @@ import { Screen } from "../components/ds/Screen";
 import { BoundedList } from "../components/ds/BoundedList";
 import { Segmented } from "../components/ds/Segmented";
 import { useSessions, useUsage } from "../lib/queries";
-import { buildProviderBlocks, formatDurationShort, isModelScopedWindow, isSubscription, quotaAccount, kindLabel, priceLabel, quotaSummary, quotaTiming, windowLabel, windowShortLabel, type DisplayQuota, type ProviderBlock } from "../lib/usageWindows";
+import { buildProviderBlocks, isModelScopedWindow, isSubscription, quotaAccount, kindLabel, priceLabel, quotaSummary, quotaTiming, windowLabel, windowShortLabel, type DisplayQuota, type ProviderBlock } from "../lib/usageWindows";
+import { paceAnnotation } from "../lib/usagePace";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
@@ -21,38 +22,6 @@ import { usePullRefresh } from "../lib/usePullRefresh";
 const compact = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
 const kindTone = (kind: string) => kind === "api" ? "neutral" : "success";
 
-// Fixed window durations for the quota kinds the wire actually sends (api.ts UsageQuota;
-// "secondary" has no known fixed length, so it's excluded from pace projection). "monthly" is
-// OpenCode Go's calendar window — 30 days nominal, matching nominal_window_secs in Rust.
-const WEEK_SEC = 7 * 24 * 3600;
-const WINDOW_DURATION_SEC: Record<string, number> = { five_hour: 5 * 3600, weekly: WEEK_SEC, weekly_fable: WEEK_SEC, weekly_opus: WEEK_SEC, weekly_sonnet: WEEK_SEC, monthly: 30 * 24 * 3600 };
-
-/**
- * Pace-dot annotation ("● ≈75% by reset" warn / "● runs out 1d 8h" danger), computed
- * entirely from existing quota fields — fraction, resetsAt, windowKind, status. No new
- * backend data: the server's own "warning"/"exhausted" status gates whether to project at
- * all (rather than this file inventing its own percent threshold), and the projection math
- * (linear extrapolation of the current fraction over the elapsed portion of the window)
- * only ever runs on top of that real signal.
- */
-function paceAnnotation(quota: DisplayQuota, nowSec: number): { text: string; tone: "warn" | "danger" } | null {
-  if (quota.status !== "warning" && quota.status !== "exhausted") return null;
-  const duration = WINDOW_DURATION_SEC[quota.windowKind];
-  if (!duration || quota.fraction == null || quota.resetsAt == null) return null;
-  const remainingSec = quota.resetsAt - nowSec;
-  const elapsedSec = duration - remainingSec;
-  if (remainingSec <= 0 || elapsedSec <= 0) return null;
-  const rate = quota.fraction / elapsedSec;
-  if (rate <= 0) return null;
-  if (quota.fraction < 1) {
-    const secToExhaust = (1 - quota.fraction) / rate;
-    if (secToExhaust < remainingSec) {
-      return { text: `runs out ${formatDurationShort(secToExhaust)}`, tone: "danger" };
-    }
-  }
-  const projected = rate * duration;
-  return { text: `≈${Math.round(Math.min(999, projected * 100))}% by reset`, tone: "warn" };
-}
 /**
  * The pacing verdict the mesh acts on, quoted verbatim from the daemon so the phone tells the
  * same story as `forge mesh`: used vs allowed, and whether routing is holding models back. The

@@ -13,6 +13,7 @@ import {
 import { File } from "expo-file-system";
 import { Platform } from "react-native";
 
+import { MicDeniedError } from "./micAccess";
 import type { VoiceRecorder } from "./types";
 
 const POLL_MS = 80; // ~12Hz — within DESIGN.md's 10-15Hz metering-poll spec
@@ -94,7 +95,7 @@ export const voice: VoiceRecorder = {
   async start(onLevel) {
     const perm = await requestRecordingPermissionsAsync();
     if (!perm.granted) {
-      throw new Error("microphone permission denied");
+      throw new MicDeniedError();
     }
     await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
 

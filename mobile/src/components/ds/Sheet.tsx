@@ -19,6 +19,7 @@ import Animated, {
 
 import { isTauri } from "../../lib/platform";
 import { useOverlayEscape } from "../../lib/useOverlayEscape";
+import { watchKeyboardInset } from "../../lib/webKeyboardInset";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space } from "../../theme/tokens";
@@ -137,12 +138,17 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   // did was wrong: it left the rename field in SessionLifecycleSheet fully covered). iOS only
   // has `keyboardWillShow`/`keyboardWillHide`; Android only has the "Did" pair (no native
   // "Will" event — see RN's Keyboard.js), firing with real metrics independent of any window
-  // resize. react-native-web's Keyboard module never fires either pair, so this stays a
-  // natural no-op there.
+  // resize. react-native-web's Keyboard module never fires either pair, so web reads the browser's
+  // visual viewport instead.
   useEffect(() => {
-    if (!visible || Platform.OS === "web") {
+    if (!visible) {
       keyboardOffset.value = 0;
       return;
+    }
+    if (Platform.OS === "web") {
+      return watchKeyboardInset((inset) => {
+        keyboardOffset.value = reduced ? inset : withTiming(inset, { duration: durations.base, easing: easings.standard });
+      });
     }
     const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
     const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";

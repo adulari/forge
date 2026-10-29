@@ -27,6 +27,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { type } from "../theme/typography";
 import { Markdown } from "./chat/Markdown";
+import { ReleaseHero } from "./shell/ReleaseHero";
 import { Button } from "./ds/Button";
 import { Sheet } from "./ds/Sheet";
 
@@ -84,7 +85,7 @@ export function UpdateNotice() {
 
   const release = releaseForApp(changelog.data, notice.appVersion, isTauri);
   const heading = notice.kind === "app"
-    ? `Installed Forge app: ${notice.appVersion}`
+    ? `What's new in v${notice.appVersion}`
     : "Installed Forge update";
   const subtitle =
     notice.kind === "app"
@@ -99,6 +100,7 @@ export function UpdateNotice() {
 
         {release ? (
           <>
+            <ReleaseHero release={release} />
             <Text style={[type.section, styles.section, { color: tokens.ink4 }]}>
               {release.version}
               {release.date ? ` · ${release.date}` : ""}

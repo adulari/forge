@@ -8,8 +8,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, type AppStateStatus, Platform } from "react-native";
 
 import { createFrameCoalescer } from "./frameCoalescer";
+import { requestHostRediscovery } from "./hostDiscovery";
 import { accumulateStreaming, EMPTY_STREAMING, streamingDisplayText, type StreamingAccumulator } from "./streamingText";
 import { TWebSocket } from "./transport";
+import { backoffDelay, shouldRediscover } from "./wsBackoff";
 import { decideSnapshotRevision } from "./sessionReconciler";
 import { isValidSnapshotFrame as isValidSnapshotIdentity } from "./remoteProtocol";
 export { PROTOCOL_VERSION } from "./remoteProtocol";
@@ -288,7 +290,6 @@ export type ConnectionState =
   | "unreachable"
   | "closed";
 
-const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000];
 // After this many consecutive failed attempts (~15s of backoff), stop presenting the
 // outage as a routine "reconnecting…" blip and escalate to a harder "unreachable"
 // state — retries keep running in the background, but the UI should say so plainly
@@ -381,6 +382,14 @@ export function useSessionSocket(
       s === "idle" ? "connecting" : s === "unreachable" ? "unreachable" : "reconnecting",
     );
 
+    const scheduleRetry = () => {
+      const delay = backoffDelay(attemptRef.current);
+      attemptRef.current += 1;
+      if (shouldRediscover(attemptRef.current)) requestHostRediscovery();
+      clearReconnectTimer();
+      reconnectTimerRef.current = setTimeout(connect, delay);
+    };
+
     const generation = ++socketGenerationRef.current;
     let ws: WebSocket;
     try {
@@ -391,10 +400,7 @@ export function useSessionSocket(
       // schedule another attempt: the screen sat on "reconnecting…" until the app was reopened.
       // Treat it exactly like a failed connection and take the normal backoff path.
       setConnectionState(attemptRef.current >= UNREACHABLE_AFTER_ATTEMPTS ? "unreachable" : "reconnecting");
-      const delay = BACKOFF_MS[Math.min(attemptRef.current, BACKOFF_MS.length - 1)];
-      attemptRef.current += 1;
-      clearReconnectTimer();
-      reconnectTimerRef.current = setTimeout(connect, delay);
+      scheduleRetry();
       return;
     }
     wsRef.current = ws;
@@ -486,11 +492,7 @@ export function useSessionSocket(
         return;
       }
       setConnectionState(attemptRef.current >= UNREACHABLE_AFTER_ATTEMPTS ? "unreachable" : "reconnecting");
-      const delay =
-        BACKOFF_MS[Math.min(attemptRef.current, BACKOFF_MS.length - 1)];
-      attemptRef.current += 1;
-      clearReconnectTimer();
-      reconnectTimerRef.current = setTimeout(connect, delay);
+      scheduleRetry();
     };
   }, [baseUrl, sessionId, teardown, clearReconnectTimer, clearLivenessTimer, frames]);
 
