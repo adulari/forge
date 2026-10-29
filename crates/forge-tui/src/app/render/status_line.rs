@@ -114,6 +114,8 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
                 )];
             };
             let mut head = Vec::new();
+            let (mark, slot) = glyphs.provider(&routing.model);
+            head.push(Span::styled(format!("{mark} "), styles::category(slot)));
             if w >= 100 {
                 // A CLI bridge's name is plumbing: `haiku` already says which model answers.
                 // A bare bridge id has no model to say, so its provider stays.

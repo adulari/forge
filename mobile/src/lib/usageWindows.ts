@@ -127,6 +127,19 @@ export function buildProviderBlocks(usage: readonly UsageProvider[] | undefined,
   );
 }
 
+/** "4h 1m", "2d 3h" or "12m": how long until a quota window rolls over, from epoch seconds. */
+export function resetsInLabel(resetsAt: number | null, nowSec: number): string | null {
+  if (resetsAt == null) return null;
+  const minutes = Math.max(0, Math.round((resetsAt - nowSec) / 60));
+  if (minutes < 1) return "under a minute";
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const rest = minutes % 60;
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  if (hours > 0) return rest > 0 ? `${hours}h ${rest}m` : `${hours}h`;
+  return `${rest}m`;
+}
+
 export function resetLabel(resetsAt: number | null): string | null {
   if (resetsAt == null) return null;
   return `resets ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(resetsAt * 1000))}`;

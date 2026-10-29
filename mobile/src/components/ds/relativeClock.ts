@@ -26,3 +26,10 @@ export function useRelativeClock() {
   const [, tick] = useState(0);
   useEffect(() => subscribe(() => tick((value) => value + 1)), []);
 }
+
+/** The current time in epoch seconds, refreshed on the shared tick. */
+export function useClockSeconds(): number {
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => subscribe(() => setNow(Math.floor(Date.now() / 1000))), []);
+  return now;
+}

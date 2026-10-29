@@ -22,6 +22,7 @@ import { ConfirmDialog } from "../components/ds/ConfirmDialog";
 import { EmptyState } from "../components/ds/EmptyState";
 import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
+import { ProviderGlyph } from "../components/ds/ProviderGlyph";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
 import { Segmented } from "../components/ds/Segmented";
@@ -52,6 +53,7 @@ import {
   useSwitchOAuthAccount,
 } from "../lib/queries";
 import { providerReadiness } from "../lib/modelCatalog";
+import { providerFamily } from "../lib/providerFamily";
 import { supportsDirectDaemonEndpoints } from "../lib/transport";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space, type ColorTokens } from "../theme/tokens";
@@ -168,6 +170,7 @@ function ProviderItem({
         {/* Same tone as the badge beside it: keying the dot off `configured` painted an expired
             or unverified login green next to a red EXPIRED / amber VERIFY LOGIN badge. */}
         <View style={[styles.statusDot, { backgroundColor: toneColor(statusTone(provider), tokens) }]} />
+        <ProviderGlyph provider={providerFamily(provider.id) !== "other" ? provider.id : provider.label} size={15} color={provider.enabled ? tokens.ink2 : tokens.ink4} accessibilityLabel={null} />
         <View style={styles.providerTitle}>
           <Text style={[styles.providerName, { color: provider.enabled ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
             {provider.label}

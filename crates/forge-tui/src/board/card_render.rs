@@ -123,6 +123,8 @@ pub(super) fn draw_card(
     if card.past {
         l1.add(format!("{} messages", card.message_count), styles::muted());
     } else {
+        let (mark, slot) = g().provider(&card.model);
+        l1.add(format!("{mark} "), styles::category(slot));
         l1.add(model_short(&card.model), styles::fg());
     }
     if let Some(tier) = &card.tier {

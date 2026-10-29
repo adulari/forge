@@ -84,6 +84,7 @@ import {
 } from "../workspace/workspaceModel";
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
+import { ProviderGlyph } from "../ds/ProviderGlyph";
 import { modelChipLabel } from "./modelChipLabel";
 
 interface NativeComposerMirrorProps {
@@ -811,6 +812,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                   // model pinned yet) — same value StatusStrip already special-cases. A raw
                   // dash on the chip reads as broken/missing data, not as "automatic".
                   label={modelChipLabel(model, modelPinned, isCompact)}
+                  icon={<ProviderGlyph provider={model} size={12} color={tokens.ink3} accessibilityLabel={null} />}
                   color={tokens.ink2}
                   accessibilityLabel={`model: ${modelChipLabel(model, modelPinned)} — change model`}
                   testID="composer-model-chip"

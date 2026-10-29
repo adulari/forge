@@ -116,6 +116,28 @@ impl Store {
         Ok(new_id)
     }
 
+    /// The session each of `ids` descends from: its fork source, else the session that spawned
+    /// it. Sessions with neither are absent from the map.
+    pub fn session_parents(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.lock()?;
+        let marks = vec!["?"; ids.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, COALESCE(forked_from, parent_session_id) FROM session \
+             WHERE id IN ({marks}) AND COALESCE(forked_from, parent_session_id) IS NOT NULL"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(StoreError::from)
+    }
+
     /// `forge tree` shows conversations, not worker fan-out.
     pub fn fork_nodes(&self) -> Result<Vec<ForkNode>> {
         let conn = self.lock()?;
@@ -177,5 +199,25 @@ mod compacted_fork_tests {
         let loaded = store.load_messages(&fork).unwrap();
         assert!(!loaded.iter().any(|m| m.content.contains("the summary")));
         assert!(loaded.iter().any(|m| m.content == "m2"));
+    }
+}
+
+#[cfg(test)]
+mod session_parent_tests {
+    use super::*;
+    use forge_types::Role;
+
+    #[test]
+    fn a_fork_reports_its_source_and_a_root_reports_nothing() {
+        let store = Store::open_in_memory().unwrap();
+        let root = store.create_session("/tmp", "Default").unwrap();
+        store.add_message(&root, 0, Role::User, "hi", None).unwrap();
+        let fork = store.fork_session(&root, 1).unwrap();
+        let parents = store
+            .session_parents(&[root.clone(), fork.clone(), "missing".to_string()])
+            .unwrap();
+        assert_eq!(parents.get(&fork), Some(&root));
+        assert!(!parents.contains_key(&root));
+        assert!(store.session_parents(&[]).unwrap().is_empty());
     }
 }

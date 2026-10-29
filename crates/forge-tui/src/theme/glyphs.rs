@@ -228,3 +228,141 @@ fn ascii_twin(c: char) -> &'static str {
         _ => "?",
     }
 }
+
+/// The provider families the fleet and the statusline tell apart by a one-cell mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFamily {
+    Claude,
+    OpenAi,
+    Gemini,
+    OpenCode,
+    Grok,
+    Kimi,
+    Qwen,
+    Ollama,
+    OpenRouter,
+    Bedrock,
+    Other,
+}
+
+fn family_of_name(name: &str) -> ProviderFamily {
+    let name = name.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| name.contains(n));
+    if has(&["openrouter"]) {
+        ProviderFamily::OpenRouter
+    } else if has(&["opencode"]) {
+        ProviderFamily::OpenCode
+    } else if has(&["bedrock"]) {
+        ProviderFamily::Bedrock
+    } else if has(&["claude", "anthropic"]) {
+        ProviderFamily::Claude
+    } else if has(&["codex", "openai", "gpt"]) {
+        ProviderFamily::OpenAi
+    } else if has(&["gemini", "google"]) {
+        ProviderFamily::Gemini
+    } else if has(&["grok", "xai"]) {
+        ProviderFamily::Grok
+    } else if has(&["kimi", "moonshot"]) {
+        ProviderFamily::Kimi
+    } else if has(&["qwen", "dashscope"]) {
+        ProviderFamily::Qwen
+    } else if has(&["ollama"]) {
+        ProviderFamily::Ollama
+    } else {
+        ProviderFamily::Other
+    }
+}
+
+/// The family of a routed model id (`namespace::model`) or a bare provider id. The namespace
+/// decides; a custom namespace (`inferhub::...`) falls back to what the model name says.
+pub fn provider_family(id: &str) -> ProviderFamily {
+    match id.split_once("::") {
+        Some((namespace, model)) => match family_of_name(namespace) {
+            ProviderFamily::Other => family_of_name(model),
+            family => family,
+        },
+        None => family_of_name(id),
+    }
+}
+
+impl Glyphs {
+    /// A one-cell mark for `id`'s provider and the categorical colour slot it is drawn in, so the
+    /// same provider reads the same on every surface. ASCII tiers get a letter.
+    pub fn provider(&self, id: &str) -> (&'static str, usize) {
+        let (unicode, ascii, slot) = match provider_family(id) {
+            ProviderFamily::Claude => ("◈", "C", 1),
+            ProviderFamily::OpenAi => ("◍", "O", 2),
+            ProviderFamily::Gemini => ("✧", "G", 3),
+            ProviderFamily::OpenCode => ("▣", "P", 4),
+            ProviderFamily::Grok => ("◪", "X", 5),
+            ProviderFamily::Kimi => ("◐", "K", 0),
+            ProviderFamily::Qwen => ("◓", "Q", 2),
+            ProviderFamily::Ollama => ("◒", "L", 3),
+            ProviderFamily::OpenRouter => ("⇄", "R", 4),
+            ProviderFamily::Bedrock => ("▤", "B", 5),
+            ProviderFamily::Other => ("◇", "-", 0),
+        };
+        (if self.unicode { unicode } else { ascii }, slot)
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+
+    #[test]
+    fn the_namespace_decides_and_a_custom_one_falls_back_to_the_model_name() {
+        assert_eq!(
+            provider_family("claude-cli::sonnet"),
+            ProviderFamily::Claude
+        );
+        assert_eq!(
+            provider_family("codex-oauth::gpt-5.5"),
+            ProviderFamily::OpenAi
+        );
+        assert_eq!(
+            provider_family("bedrock::global.moonshotai.kimi-k3"),
+            ProviderFamily::Bedrock
+        );
+        assert_eq!(
+            provider_family("openrouter::qwen/qwen3"),
+            ProviderFamily::OpenRouter
+        );
+        assert_eq!(provider_family("opencode::muse"), ProviderFamily::OpenCode);
+        assert_eq!(
+            provider_family("inferhub::cb/gemini-flash"),
+            ProviderFamily::Gemini
+        );
+        assert_eq!(
+            provider_family("inferhub::cb/deepseek-v4.1-flash"),
+            ProviderFamily::Other
+        );
+        assert_eq!(provider_family("mock"), ProviderFamily::Other);
+    }
+
+    #[test]
+    fn every_family_has_a_single_cell_mark_in_both_tiers() {
+        for id in [
+            "claude",
+            "codex",
+            "gemini",
+            "opencode",
+            "grok",
+            "kimi",
+            "qwen",
+            "ollama",
+            "openrouter",
+            "bedrock",
+            "other",
+        ] {
+            for tier in [GlyphTier::Unicode, GlyphTier::Ascii] {
+                let (mark, slot) = set(tier).provider(id);
+                assert_eq!(mark.chars().count(), 1, "{id} {tier:?}");
+                assert!(slot < 6);
+                if tier == GlyphTier::Ascii {
+                    assert!(mark.is_ascii());
+                }
+            }
+        }
+    }
+}

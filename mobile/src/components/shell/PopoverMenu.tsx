@@ -87,15 +87,15 @@ export function PopoverMenu({ anchor, entries, onClose, accessibilityLabel, widt
                   accessibilityState={{ checked: entry.checked, disabled: entry.disabled }}
                   style={({ pressed, hovered, focused }: { pressed: boolean; hovered?: boolean; focused?: boolean }) => [
                     styles.item,
-                    entry.disabled && styles.disabled,
                     (hovered || focused || pressed) && !entry.disabled && { backgroundColor: tokens.bg3 },
                   ]}
                 >
                   <View style={styles.check}>{entry.checked ? <Check size={12} color={tokens.accent} strokeWidth={2} /> : null}</View>
-                  <Text style={[styles.label, { color: entry.checked ? tokens.accent : tokens.ink }]} numberOfLines={1}>
+                  <Text style={[styles.label, entry.disabled && styles.disabled, { color: entry.checked ? tokens.accent : tokens.ink }]} numberOfLines={1}>
                     {entry.label}
                   </Text>
-                  {entry.hint ? <Text style={[styles.hint, { color: tokens.ink4 }]}>{entry.hint}</Text> : null}
+                  {/* A refused action says why, so its reason stays readable while the label dims. */}
+                  {entry.hint ? <Text style={[styles.hint, { color: entry.disabled ? tokens.ink3 : tokens.ink4 }]}>{entry.hint}</Text> : null}
                 </Pressable>
               );
             })}

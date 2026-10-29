@@ -553,6 +553,16 @@ false`; the WS route still refuses those server-side (`reject_ws_if_local_read_o
 is cleared on clean exit *and* on start (a killed predecessor's port is very likely someone else's
 by now), and ignored once the presence heartbeat goes stale.
 
+**Presentation metadata (`provider` / `parent_id` / `diff_added` / `diff_removed` / `branch`).**
+`GET /api/sessions` rows also say which provider answers (the model id's namespace, e.g.
+`claude-cli`, `null` when the id has none), which session this one was forked from or spawned by,
+and how much its working tree has changed against HEAD (lines added and removed) on which branch.
+All five are additive. The git figures come from `serve/serve_session_meta.rs`, which refreshes them
+in the background every ten seconds per working directory: a request never waits on `git`, so a
+row's first listing carries `null`s and the next one the numbers. Clients nest a fork under its
+`parent_id` only when the parent is in the same list, and show a checkout's change count on a row
+only when no other listed session shares that directory.
+
 **Turn outcome (`last_turn_outcome` / `last_stop_reason`).** `busy: false` says a turn ended,
 never how. A session that did the work and one that burned a whole turn producing no assistant
 text and making no successful change were the same signal from the fleet API, the phone, and any

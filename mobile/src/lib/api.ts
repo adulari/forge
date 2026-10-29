@@ -376,6 +376,16 @@ export interface SessionRow {
   /** The precise reason behind `last_turn_outcome` (`final_answer`, `max_steps`,
    * `budget_exhausted`, `interrupted`, `no_output`, `stalled`). Additive. */
   last_stop_reason?: string | null;
+  /** The model's namespace (`claude-cli`, `inferhub`), so a row can show its provider mark. Absent
+   * from an older daemon; `providerFamily(row.model)` reads the same thing off the model id. */
+  provider?: string | null;
+  /** The session this one was forked from or spawned by. Additive. */
+  parent_id?: string | null;
+  /** Working-tree lines added/removed against HEAD; null until the daemon has measured them. */
+  diff_added?: number | null;
+  diff_removed?: number | null;
+  /** The checked-out branch of the session's working directory. */
+  branch?: string | null;
 }
 
 export interface PastSessionRow {

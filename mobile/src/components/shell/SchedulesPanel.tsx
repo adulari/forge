@@ -8,6 +8,8 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { type CreateScheduleRequest, type ScheduleRow } from "../../lib/api";
 import { nextCronRun } from "../../lib/cron";
+import { activeWorkspaceProjects, useShellPrefs } from "../../lib/shellPrefs";
+import { projectName } from "../../lib/sidebarModel";
 import {
   useCreateSchedule,
   useDeleteSchedule,
@@ -201,7 +203,8 @@ export function SchedulesPanel({ visible, onClose }: SchedulesPanelProps) {
   const tokens = useTokens();
   const query = useSchedules();
   const [creating, setCreating] = useState(false);
-  const rows = query.data ?? [];
+  const workspaceProjects = activeWorkspaceProjects(useShellPrefs());
+  const rows = (query.data ?? []).filter((row) => !workspaceProjects || workspaceProjects.has(projectName(row.cwd)));
 
   return (
     <Sheet visible={visible} onClose={onClose} accessibilityLabel="Schedules">
