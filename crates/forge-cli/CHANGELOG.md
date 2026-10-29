@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.25.2] - 2026-10-29
+
 ## [2.25.1] - 2026-10-29
 
 ### Added
@@ -5403,7 +5405,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.25.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.25.2...HEAD
+[2.25.2]: https://github.com/Adulari/forge/compare/v2.25.1...v2.25.2
 [2.25.1]: https://github.com/Adulari/forge/compare/v2.25.0...v2.25.1
 [2.25.0]: https://github.com/Adulari/forge/compare/v2.24.1...v2.25.0
 [2.24.1]: https://github.com/Adulari/forge/compare/v2.24.0...v2.24.1
