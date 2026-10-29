@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.25.1] - 2026-10-29
+
 ### Added
 
 - **Settings search finds any setting, and the theme is yours to change.** The Settings rail (and the top of Settings on a phone) has a search field over every page and every configuration row, so typing "sleep" lands on Keep this computer awake, scrolled into view and highlighted; the command palette's Settings chip lists the same rows. Configuration groups fields into Notifications, Terminal, Threads, Git, Worktrees, Audio and Archived sections when the daemon has settings for them. Appearance gains six colour presets (Midnight, Graphite, Forest, Nord, Solarized, Rose) that keep your light or dark choice and persist, a WCAG contrast readout that warns on low-contrast pairs, and import and export of a theme as JSON (32 KiB cap, saved as `custom:<slug>`).
@@ -5400,7 +5402,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.25.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.25.1...HEAD
+[2.25.1]: https://github.com/Adulari/forge/compare/v2.25.0...v2.25.1
 [2.25.0]: https://github.com/Adulari/forge/compare/v2.24.1...v2.25.0
 [2.24.1]: https://github.com/Adulari/forge/compare/v2.24.0...v2.24.1
 [2.24.0]: https://github.com/Adulari/forge/compare/v2.23.6...v2.24.0
