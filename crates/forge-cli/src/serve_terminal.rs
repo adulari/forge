@@ -8,7 +8,9 @@
 //! - `WS {base}/ws/terminal?session=<id>&terminal=term-1[&cols=&rows=&restart=true]`
 //! - client text: `input`, `resize`, `clear`, or `close` tagged JSON frames
 //! - server binary: raw PTY bytes
-//! - server text: bounded `status` and `cleared` control frames
+//! - server text: bounded `status` (with `exit_code` once a shell has exited on its own) and
+//!   `cleared` control frames
+//! - a `close` frame discards the terminal and its snapshot, including after its shell has exited
 //!
 //! Security: the client never supplies a cwd. The live Forge session determines the worktree/cwd,
 //! and terminal ids are validated as short opaque labels. The daemon token already grants agent
@@ -16,9 +18,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -27,6 +28,11 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::serve::{err_response, json_response, DaemonState};
+use crate::serve_terminal_util::{
+    clamp_size, now_ms, terminal_id_order, terminal_shell, valid_terminal_id,
+};
+#[cfg(test)]
+use crate::serve_terminal_util::{MAX_COLS, MAX_ROWS, MAX_TERMINAL_ID_BYTES};
 
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 const OUTPUT_CHANNEL_CHUNKS: usize = 64;
@@ -35,9 +41,10 @@ const BROADCAST_CHANNEL_EVENTS: usize = 256;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MAX_HISTORY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TERMINALS_PER_SESSION: usize = 8;
-const MAX_TERMINAL_ID_BYTES: usize = 64;
-const MAX_COLS: u16 = 1_000;
-const MAX_ROWS: u16 = 1_000;
+const EXIT_DRAIN_MS: u64 = 250;
+/// How long a socket stays open after its shell exited, so the client can discard the terminal.
+const EXIT_LINGER: std::time::Duration = std::time::Duration::from_secs(30);
+const NO_EXIT_CODE: i64 = -1;
 
 fn default_terminal_id() -> String {
     "term-1".to_string()
@@ -98,7 +105,11 @@ impl TerminalStatus {
 #[derive(serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum TerminalServerFrame {
-    Status { status: TerminalStatus },
+    Status {
+        status: TerminalStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+    },
     Cleared,
 }
 
@@ -108,6 +119,12 @@ pub(crate) struct TerminalSummary {
     status: TerminalStatus,
     clients: usize,
     updated_at_ms: u64,
+    /// Bumps on every output chunk or clear, so a client can tell a tab it is not looking at has
+    /// printed something since it last looked.
+    sequence: u64,
+    /// The shell's own exit code. Absent while it runs and when it was killed rather than exiting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i64>,
 }
 
 #[derive(Clone, Eq)]
@@ -183,9 +200,27 @@ struct TerminalHandle {
     status: Arc<AtomicU8>,
     clients: AtomicUsize,
     updated_at_ms: AtomicU64,
+    sequence: AtomicU64,
+    exit_code: AtomicI64,
 }
 
 impl TerminalHandle {
+    fn exit_code(&self) -> Option<i64> {
+        let code = self.exit_code.load(Ordering::Acquire);
+        (code != NO_EXIT_CODE).then_some(code)
+    }
+
+    fn status_frame(&self, status: TerminalStatus) -> TerminalServerFrame {
+        TerminalServerFrame::Status {
+            exit_code: if status == TerminalStatus::Exited {
+                self.exit_code()
+            } else {
+                None
+            },
+            status,
+        }
+    }
+
     fn status(&self) -> TerminalStatus {
         TerminalStatus::from_u8(self.status.load(Ordering::Acquire))
     }
@@ -196,6 +231,7 @@ impl TerminalHandle {
 
     async fn clear(&self) {
         let sequence = self.history.lock().await.clear();
+        self.sequence.store(sequence, Ordering::Release);
         self.touch();
         let _ = self.events.send(TerminalEvent::Cleared { sequence });
     }
@@ -206,6 +242,8 @@ impl TerminalHandle {
             status: self.status(),
             clients: self.clients.load(Ordering::Acquire),
             updated_at_ms: self.updated_at_ms.load(Ordering::Acquire),
+            sequence: self.sequence.load(Ordering::Acquire),
+            exit_code: self.exit_code(),
         }
     }
 }
@@ -280,6 +318,23 @@ impl TerminalRegistry {
         }
     }
 
+    /// Start the session's first terminal before anyone asks for it, so opening the dock attaches
+    /// to a shell that is already running. A host that caps terminals is left alone: an unused
+    /// shell must not use up a slot a person asked for.
+    pub(crate) async fn prewarm(&self, session_id: &str, cwd: String) {
+        if cwd.is_empty()
+            || crate::host_caps::terminal_limit() != 0
+            || !forge_config::load().unwrap_or_default().terminal.prewarm
+        {
+            return;
+        }
+        let key = TerminalKey {
+            session_id: session_id.to_string(),
+            terminal_id: default_terminal_id(),
+        };
+        let _ = self.ensure_within(key, cwd, 80, 24, 0).await;
+    }
+
     pub(crate) async fn close_session(&self, session_id: &str) {
         let handles = {
             let mut terminals = self.terminals.lock().await;
@@ -324,47 +379,6 @@ impl TerminalRegistry {
     }
 }
 
-fn terminal_id_order(left: &str, right: &str) -> std::cmp::Ordering {
-    fn numeric_suffix(value: &str) -> Option<u64> {
-        value.strip_prefix("term-")?.parse().ok()
-    }
-    match (numeric_suffix(left), numeric_suffix(right)) {
-        (Some(left), Some(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
-}
-
-fn valid_terminal_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= MAX_TERMINAL_ID_BYTES
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
-fn login_shell() -> String {
-    if cfg!(windows) {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-    }
-}
-
-fn clamp_size(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
-    (
-        cols.unwrap_or(80).clamp(1, MAX_COLS),
-        rows.unwrap_or(24).clamp(1, MAX_ROWS),
-    )
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
-}
-
 fn spawn_terminal(
     key: TerminalKey,
     cwd: String,
@@ -381,7 +395,9 @@ fn spawn_terminal(
         .openpty(size)
         .map_err(|error| format!("failed to open a pty: {error}"))?;
 
-    let mut command = CommandBuilder::new(login_shell());
+    let (shell, shell_args) = terminal_shell();
+    let mut command = CommandBuilder::new(shell);
+    command.args(shell_args);
     command.cwd(&cwd);
     command.env("TERM", "xterm-256color");
     let mut child = pair
@@ -434,10 +450,13 @@ fn spawn_terminal(
         }
     });
 
-    let (exit_tx, mut exit_rx) = mpsc::channel::<()>(1);
+    let (exit_tx, mut exit_rx) = mpsc::channel::<Option<i64>>(1);
     let wait_task = tokio::task::spawn_blocking(move || {
-        let _ = child.wait();
-        let _ = exit_tx.blocking_send(());
+        let code = child
+            .wait()
+            .ok()
+            .map(|status| i64::from(status.exit_code()));
+        let _ = exit_tx.blocking_send(code);
     });
 
     let (commands, mut command_rx) = mpsc::channel(COMMAND_CHANNEL_CHUNKS);
@@ -452,6 +471,8 @@ fn spawn_terminal(
         status: status.clone(),
         clients: AtomicUsize::new(0),
         updated_at_ms: AtomicU64::new(now_ms()),
+        sequence: AtomicU64::new(0),
+        exit_code: AtomicI64::new(NO_EXIT_CODE),
     });
     let runtime_handle = handle.clone();
 
@@ -459,8 +480,17 @@ fn spawn_terminal(
         loop {
             tokio::select! {
                 output = output_rx.recv() => {
-                    let Some(bytes) = output else { break; };
+                    let Some(bytes) = output else {
+                        // The pty closed, which is how a shell exiting shows up first; its exit
+                        // status follows within moments.
+                        let wait = std::time::Duration::from_millis(EXIT_DRAIN_MS * 4);
+                        if let Ok(Some(Some(code))) = tokio::time::timeout(wait, exit_rx.recv()).await {
+                            runtime_handle.exit_code.store(code, Ordering::Release);
+                        }
+                        break;
+                    };
                     let sequence = history.lock().await.append(&bytes);
+                    runtime_handle.sequence.store(sequence, Ordering::Release);
                     runtime_handle.touch();
                     let _ = events.send(TerminalEvent::Output { sequence, bytes });
                 }
@@ -487,7 +517,20 @@ fn spawn_terminal(
                         }
                     }
                 }
-                _ = exit_rx.recv() => break,
+                code = exit_rx.recv() => {
+                    // The shell is gone but its last words may still sit in the pipe; a client
+                    // that attaches later replays them from the snapshot, so they must land.
+                    let drain = std::time::Duration::from_millis(EXIT_DRAIN_MS);
+                    while let Ok(Some(bytes)) = tokio::time::timeout(drain, output_rx.recv()).await {
+                        let sequence = history.lock().await.append(&bytes);
+                        runtime_handle.sequence.store(sequence, Ordering::Release);
+                        let _ = events.send(TerminalEvent::Output { sequence, bytes });
+                    }
+                    if let Some(code) = code.flatten() {
+                        runtime_handle.exit_code.store(code, Ordering::Release);
+                    }
+                    break;
+                }
             }
         }
 
@@ -621,6 +664,30 @@ enum Refusal {
     Other(String),
 }
 
+/// An exited shell keeps its snapshot so the tab can still be read. The client either discards it
+/// (a `close` frame: the shell ended cleanly and the tab goes away) or reattaches with `restart`;
+/// nothing else is accepted, and a client that does neither is let go after [`EXIT_LINGER`].
+async fn linger_after_exit(socket: &mut WebSocket, registry: &TerminalRegistry, key: &TerminalKey) {
+    let waiting = async {
+        while let Some(Ok(message)) = socket.recv().await {
+            match message {
+                WsMessage::Text(text) => {
+                    if matches!(
+                        serde_json::from_str::<TerminalFrame>(&text),
+                        Ok(TerminalFrame::Close)
+                    ) {
+                        registry.close(key).await;
+                        return;
+                    }
+                }
+                WsMessage::Close(_) => return,
+                _ => {}
+            }
+        }
+    };
+    let _ = tokio::time::timeout(EXIT_LINGER, waiting).await;
+}
+
 async fn attach_terminal(
     mut socket: WebSocket,
     terminal: Arc<TerminalHandle>,
@@ -631,20 +698,14 @@ async fn attach_terminal(
     let _client = TerminalClientGuard::new(terminal.clone());
     let mut events = terminal.events.subscribe();
     let initial_status = terminal.status();
-    if !send_server_frame(
-        &mut socket,
-        TerminalServerFrame::Status {
-            status: initial_status,
-        },
-    )
-    .await
-    {
+    if !send_server_frame(&mut socket, terminal.status_frame(initial_status)).await {
         return;
     }
     let Some(mut delivered_sequence) = send_history(&mut socket, &terminal).await else {
         return;
     };
     if initial_status == TerminalStatus::Exited {
+        linger_after_exit(&mut socket, &registry, &key).await;
         let _ = socket.send(WsMessage::Close(None)).await;
         return;
     }
@@ -669,10 +730,11 @@ async fn attach_terminal(
                         }
                     }
                     Ok(TerminalEvent::Status(status)) => {
-                        if !send_server_frame(&mut socket, TerminalServerFrame::Status { status }).await {
+                        if !send_server_frame(&mut socket, terminal.status_frame(status)).await {
                             break;
                         }
                         if status == TerminalStatus::Exited {
+                            linger_after_exit(&mut socket, &registry, &key).await;
                             break;
                         }
                     }
@@ -868,6 +930,102 @@ mod tests {
         registry.close_session("session-a").await;
         wait_for_exit(&first).await;
         assert_eq!(registry.diagnostic_counts().await, (0, 0));
+    }
+
+    fn use_plain_sh() {
+        // An empty HOME sends zsh into its first-run wizard, which eats the keystrokes.
+        std::env::set_var("SHELL", "/bin/sh");
+    }
+
+    #[tokio::test]
+    async fn a_shell_that_exits_reports_its_code_and_keeps_its_last_words() {
+        use_plain_sh();
+        let cwd = tempfile::tempdir().unwrap();
+        let registry = TerminalRegistry::new();
+        let terminal = registry
+            .ensure(
+                key("exits", "term-1"),
+                cwd.path().display().to_string(),
+                80,
+                24,
+            )
+            .await
+            .unwrap();
+        assert_eq!(terminal.summary().exit_code, None);
+        terminal
+            .commands
+            .send(TerminalCommand::Input(
+                b"echo __LAST_WORDS__; exit 3\r\n".to_vec(),
+            ))
+            .await
+            .unwrap();
+        wait_for_exit(&terminal).await;
+        let summary = terminal.summary();
+        assert_eq!(summary.exit_code, Some(3));
+        assert!(summary.sequence > 0);
+        let (_, snapshot) = terminal.history.lock().await.snapshot();
+        assert!(snapshot
+            .windows(b"__LAST_WORDS__".len())
+            .any(|window| window == b"__LAST_WORDS__"));
+        let frame = serde_json::to_value(terminal.status_frame(TerminalStatus::Exited)).unwrap();
+        assert_eq!(frame["exit_code"], 3);
+        let running = serde_json::to_value(terminal.status_frame(TerminalStatus::Running)).unwrap();
+        assert!(running.get("exit_code").is_none());
+        assert!(registry.close(&key("exits", "term-1")).await);
+    }
+
+    #[tokio::test]
+    async fn a_clean_exit_reports_code_zero_and_a_kill_reports_none() {
+        use_plain_sh();
+        let cwd = tempfile::tempdir().unwrap();
+        let registry = TerminalRegistry::new();
+        let clean = registry
+            .ensure(
+                key("clean", "term-1"),
+                cwd.path().display().to_string(),
+                80,
+                24,
+            )
+            .await
+            .unwrap();
+        clean
+            .commands
+            .send(TerminalCommand::Input(b"exit\r\n".to_vec()))
+            .await
+            .unwrap();
+        wait_for_exit(&clean).await;
+        assert_eq!(clean.summary().exit_code, Some(0));
+
+        let killed = registry
+            .ensure(
+                key("killed", "term-1"),
+                cwd.path().display().to_string(),
+                80,
+                24,
+            )
+            .await
+            .unwrap();
+        assert!(registry.close(&key("killed", "term-1")).await);
+        wait_for_exit(&killed).await;
+        assert_eq!(killed.summary().exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn prewarm_starts_the_first_terminal_once() {
+        let cwd = tempfile::tempdir().unwrap();
+        let registry = TerminalRegistry::new();
+        registry
+            .prewarm("warm", cwd.path().display().to_string())
+            .await;
+        registry
+            .prewarm("warm", cwd.path().display().to_string())
+            .await;
+        let listed = registry.list("warm").await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].terminal_id, "term-1");
+        registry.prewarm("blank", String::new()).await;
+        assert!(registry.list("blank").await.is_empty());
+        registry.close_session("warm").await;
     }
 
     #[tokio::test]

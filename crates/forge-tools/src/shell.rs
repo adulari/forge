@@ -384,9 +384,9 @@ async fn run_command_inner(
     timeout_secs: u64,
     policy: &SandboxPolicy,
 ) -> (String, Option<i32>, Option<String>) {
-    let (shell, flag) = shell_invocation();
+    let (shell, leading_args) = shell_invocation();
     let mut cmd = Command::new(shell);
-    cmd.arg(flag)
+    cmd.args(leading_args)
         .arg(command)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -732,17 +732,28 @@ fn maybe_install_sandbox(
     }
 }
 
-/// The OS shell + its "run this command string" flag: `sh -c` on Unix, `cmd /C` on Windows
-/// (Windows has no `sh` by default). Keeps the tool runnable on all three platforms
-/// (cross-platform mandate; known-issues.md).
-fn shell_invocation() -> (&'static str, &'static str) {
+/// The shell + the arguments that precede the command string: `[terminal] agent_shell` when set,
+/// else `sh -c` on Unix and `cmd /C` on Windows (Windows has no `sh` by default). Keeps the tool
+/// runnable on all three platforms (cross-platform mandate; known-issues.md). The config is read
+/// once per process: changing the shell takes a restart.
+fn shell_invocation() -> (&'static str, &'static [&'static str]) {
+    static CONFIGURED: std::sync::OnceLock<Option<(&'static str, &'static [&'static str])>> =
+        std::sync::OnceLock::new();
+    let configured = CONFIGURED.get_or_init(|| {
+        forge_config::load()
+            .ok()
+            .and_then(|config| config.terminal.agent_shell.invocation())
+    });
+    if let Some(invocation) = configured {
+        return *invocation;
+    }
     #[cfg(windows)]
     {
-        ("cmd", "/C")
+        ("cmd", &["/C"])
     }
     #[cfg(not(windows))]
     {
-        ("sh", "-c")
+        ("sh", &["-c"])
     }
 }
 

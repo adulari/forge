@@ -390,6 +390,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/components/shell/useTerminalLinkOpener.ts",
+    "platform": "desktop/web/native",
+    "reason": "A terminal URL opens in the desktop app's embedded Preview dock, which only the Tauri shell has; web and phones open the system browser",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/components/shell/UsageRing.tsx",
     "platform": "web",
     "reason": "the hover tooltip is a web title attribute; touch has no hover, the same text is the spoken label everywhere",

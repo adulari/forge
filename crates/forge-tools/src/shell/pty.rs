@@ -47,9 +47,9 @@ pub async fn run_command_pty(
         Err(e) => return (format!("shell(pty): failed to open pty: {e}"), None),
     };
 
-    let (shell, flag) = shell_invocation();
+    let (shell, leading_args) = shell_invocation();
     let mut cb = CommandBuilder::new(shell);
-    cb.arg(flag);
+    cb.args(leading_args);
     cb.arg(command);
     cb.cwd(cwd);
     for var in forge_types::child_env::scrubbed_vars() {

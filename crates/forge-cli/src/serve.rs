@@ -1330,6 +1330,13 @@ async fn create_session(
         .filter(|_| req.resume.is_none());
     match start_session(&state, req).await {
         Ok(handle) => {
+            let terminals = state.terminals.clone();
+            let terminal_session = handle.session_id.clone();
+            let terminal_cwd = handle
+                .worktree
+                .clone()
+                .unwrap_or_else(|| handle.cwd.clone());
+            tokio::spawn(async move { terminals.prewarm(&terminal_session, terminal_cwd).await });
             if let Some(text) = initial_prompt {
                 // Same send used to kick off a dispatch coordinator/worker's first turn
                 // (serve_dispatch/start.rs, serve_dispatch.rs::start_worker): queue it on the

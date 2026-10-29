@@ -75,3 +75,40 @@ describe("AnsiScrollback", () => {
     expect(render(buffer)).toEqual(["fresh"]);
   });
 });
+
+describe("OSC 8 hyperlinks", () => {
+  const BEL = "\x07";
+  const ST = "\x1b\\";
+
+  it("tags the wrapped text with its target and prints neither the sequence nor the target", () => {
+    const buffer = new AnsiScrollback();
+    buffer.write(`see \x1b]8;;https://forge.dev/docs${BEL}the docs\x1b]8;;${BEL} now`);
+    expect(render(buffer)).toEqual(["see the docs now"]);
+    const spans = buffer.lines()[0].spans;
+    expect(spans.map((span) => [span.text, span.link])).toEqual([
+      ["see ", undefined],
+      ["the docs", "https://forge.dev/docs"],
+      [" now", undefined],
+    ]);
+  });
+
+  it("accepts the string-terminator form, link params, and a sequence split across frames", () => {
+    const buffer = new AnsiScrollback();
+    buffer.write("\x1b]8;id=7;https://a.dev/x");
+    buffer.write(`${ST}link\x1b]8;;`);
+    buffer.write(ST);
+    const spans = buffer.lines()[0].spans;
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({ text: "link", link: "https://a.dev/x" });
+  });
+
+  it("drops a target that is not a URI and forgets the link on clear", () => {
+    const buffer = new AnsiScrollback();
+    buffer.write(`\x1b]8;;not a uri${BEL}plain`);
+    expect(buffer.lines()[0].spans[0].link).toBeUndefined();
+    buffer.write(`\x1b]8;;https://a.dev${BEL}`);
+    buffer.clear();
+    buffer.write("after");
+    expect(buffer.lines()[0].spans[0].link).toBeUndefined();
+  });
+});

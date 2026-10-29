@@ -108,6 +108,22 @@
         "max_terminals": { "type": "integer", "minimum": 0, "default": 0 },
         "max_helpers": { "type": "integer", "minimum": 0, "default": 0 }
       }
+    },
+    "terminal": {
+      "type": "object",
+      "description": "Which shell terminal tabs and the agent's shell tool use.",
+      "additionalProperties": false,
+      "properties": {
+        "shell": { "type": "string", "description": "Program a new terminal tab runs. Unset uses $SHELL (%COMSPEC% on Windows)." },
+        "shell_args": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "agent_shell": {
+          "type": "string",
+          "enum": ["auto", "sh", "bash", "pwsh", "powershell", "cmd"],
+          "default": "auto",
+          "description": "Shell the agent's shell tool runs commands in. PowerShell variants run with -NoProfile."
+        },
+        "prewarm": { "type": "boolean", "default": true, "description": "Start a session's first terminal when the session is created. Skipped when [host] max_terminals is set." }
+      }
     }
   },
   "$defs": {

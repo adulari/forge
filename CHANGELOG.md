@@ -51,6 +51,13 @@ All notable changes to Forge are documented here. The format follows
 - **`forge service logs` shows the daemon's output.** `-n` sets the line count and `-f` follows; it reads the user journal on Linux and `serve.log` in the data directory on macOS.
 - **Forge runs as a container.** `packaging/docker/Dockerfile` installs the released binary (checksum verified) into a Debian slim image that runs `forge serve --lan --port 7420` as an unprivileged user under `tini`, with a health check and everything Forge keeps under `/home/forge`. `docs/features/host-durability.md` covers it with the rest of this host work.
 - **On Windows, a shell's children die with the daemon.** Shell tool and background-job children are placed in a job object created with `KILL_ON_JOB_CLOSE`, so a crashed `forge serve` no longer leaves dev servers and build tools running.
+- **A terminal that exits on its own cleans up after itself.** A shell that ends with code 0 closes its tab and selects the neighbour; any other exit keeps the tab, its output and a Restart button, labelled `exited (3)` with the code. The daemon now records each shell's exit code (`exit_code` on the terminal list and on the `status` frame) and drains the shell's last output before it marks the terminal exited, so `echo bye; exit 3` no longer loses `bye`.
+- **Links in terminal output are clickable.** `http(s)` URLs open in the Preview dock in the desktop app (the system browser on web and phones), `src/a.ts:5` style paths open the Files dock at that line (the Files screen on a phone), and OSC 8 hyperlinks a program prints work the same way. A bare file name in `ls` output is left alone, and dragging across text to select it never counts as a click.
+- **Ctrl+C and Cmd+C copy a selection in the terminal, and a second press within half a second interrupts.** With nothing selected Ctrl+C is the interrupt as before and Ctrl+Shift+C copies.
+- **A background terminal tab shows when it has printed.** A dot marks output you have not seen, a `live` badge shows a tab that is printing right now, and an exited tab shows its code. The daemon's terminal list carries an output counter (`sequence`) for this.
+- **A session's first terminal starts when the session is created, and its terminal tabs come back.** The dock opens onto a shell that is already running, and reopening the app or switching sessions restores that session's tabs from the daemon, keeping each tab's history. `[terminal] prewarm = false` turns the early start off; a host with `[host] max_terminals` set never starts one early.
+- **`[terminal] shell`, `shell_args` and `agent_shell` choose the shells.** `shell` and `shell_args` set what a new terminal tab runs (default: `$SHELL`, or `%COMSPEC%` on Windows). `agent_shell = "auto" | "sh" | "bash" | "pwsh" | "powershell" | "cmd"` sets the shell the agent's `shell` tool uses; the PowerShell choices run with `-NoProfile -NonInteractive`.
+- **Appearance has a Terminal section: text size, scroll speed and a close prompt.** Text size runs 11 to 16, scroll speed 0.5× to 3× on the desktop and web apps, and closing a terminal tab whose shell is still running asks first (turn it off in the same place).
 
 ### Changed
 
@@ -63,6 +70,7 @@ All notable changes to Forge are documented here. The format follows
 - **Account-wide usage refreshes every five minutes instead of every 30 seconds.** The interval is the new Usage setting on the Desktop page; a running session's own usage still updates live.
 - **A dropped connection retries with jitter and looks for a moved daemon.** Reconnect delays are spread by 25% either way so a restarted daemon is not hit by every session at once, and every third failed attempt makes the desktop app re-detect a local daemon that came back on a new address. `forge run --help` now says what a run does with a permission prompt when stdin is not a terminal: it denies the call.
 - **The generated systemd unit is hardened.** `forge service install` now writes `NoNewPrivileges=true`, `ProtectSystem=full`, `LockPersonality=true` and `RestrictSUIDSGID=true`: nothing an agent runs can gain privileges through setuid, and `/usr`, `/boot` and `/etc` are read-only to it, while your home directory and projects stay writable. A drop-in loosens it for a workflow that needs `sudo`. Re-run `forge service install` to pick it up.
+- **The terminal measures its real glyph width and settles resizes.** The column count comes from a measured character width instead of a 0.6em estimate, so it stays right after a font or zoom change. Resizes wait for a drag to settle once the scrollback is large, and a terminal reattached after a reload gets a one-column nudge so a program that repaints in place redraws at the right size.
 
 ### Fixed
 
@@ -72,6 +80,8 @@ All notable changes to Forge are documented here. The format follows
 - **A phone browser's keyboard no longer covers the field in a sheet.** The sheet now rides up by the part of the screen the on-screen keyboard takes, read from the browser's visual viewport.
 - **The server list survives a kill mid-save, and turning push off while offline is retried.** The list is written to a staging key first and promoted afterwards, so a half-finished save is finished on the next launch instead of reading as no servers, and an unsubscribe the daemon could not be told about is replayed on a later open.
 - **The fleet socket noticed a closed app only on the next change or ping.** It never read from the socket, so a vanished client lingered for up to 25 seconds; it now drops as soon as the client goes.
+- **Typing the same character twice in a row in the desktop and web terminal no longer drops the second one.** `ll` and `//` reached the shell as `l` and `/`.
+- **Switching terminal tabs no longer leaves the status line on "disconnected".** A socket the dock had already replaced could report its close after the new one connected, and its late output could land in the new terminal's scrollback.
 
 ### Security
 
