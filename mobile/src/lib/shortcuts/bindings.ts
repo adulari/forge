@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useSyncExternalStore } from "react";
 
 import { isTauri } from "../platform";
+import { syncGlobalQuickComposer } from "./globalChord";
 
 export type AppShortcutAction =
   | "nav.fleet"
@@ -69,7 +70,7 @@ export const APP_SHORTCUTS: readonly AppShortcutDescriptor[] = [
   { action: "session.search", label: "Search sessions", description: "Open global thread search.", group: "Navigation", defaultBinding: binding("p", { mod: true }) },
   { action: "shell.sidebar", label: "Toggle sidebar", description: "Collapse or expand the desktop sidebar.", group: "Workbench", defaultBinding: binding("\\", { mod: true }) },
   { action: "shell.usage", label: "Toggle usage panel", description: "Show or hide the usage dock.", group: "Workbench", defaultBinding: binding("u", { mod: true }) },
-  { action: "shell.quickComposer", label: "Quick composer", description: "Open the in-window quick composer.", group: "Workbench", defaultBinding: binding("space", { alt: true }) },
+  { action: "shell.quickComposer", label: "Quick composer", description: "Open the quick composer, from any app on desktop.", group: "Workbench", defaultBinding: binding("space", { alt: true }) },
   { action: "workbench.split", label: "Split pane", description: "Open another session in a new pane beside this one.", group: "Workbench", defaultBinding: binding("d", { mod: true }) },
   { action: "workbench.terminal", label: "Toggle terminal", description: "Open or close the terminal dock.", group: "Workbench", defaultBinding: binding("j", { mod: true }) },
   { action: "workbench.gitReview", label: "Toggle Git review", description: "Open or close working-tree review.", group: "Workbench", defaultBinding: binding("g", { mod: true }) },
@@ -452,6 +453,8 @@ function tauriAccelerator(value: ShortcutBinding): string {
 
 async function syncNativeMenuShortcuts(overrides: ShortcutOverrides): Promise<void> {
   if (!isTauri) return;
+  // First, and it never rejects: a chord another app owns must not roll back the saved binding.
+  await syncGlobalQuickComposer(tauriAccelerator(getResolvedShortcut("shell.quickComposer", overrides)));
   const accelerators = Object.entries(NATIVE_MENU_ACTIONS).map(([action, id]) => ({
     id,
     // A duplicate native key equivalent would be swallowed by whichever macOS menu

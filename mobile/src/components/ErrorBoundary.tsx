@@ -1,28 +1,75 @@
 // Top-level crash guard. Mounted in root `_layout.tsx` directly inside SafeAreaProvider,
 // above ThemeProvider and everything else — so it must survive a THROW IN ThemeProvider
 // ITSELF. That means the fallback UI can't call useTokens() or lean on any app provider:
-// no theme hooks here, just plain RN primitives with hardcoded colors.
+// no theme hooks here, just plain RN primitives with hardcoded colors (see CrashScreen).
+//
+// Three things take the app down to the crash screen, each labelled so a report says which:
+// a render error (React boundary), an uncaught error or unhandled rejection BEFORE the app first
+// became interactive (a startup failure), and a native renderer that crashed in a loop. After
+// startup an uncaught async error is only remembered — most are a dropped request, and blanking a
+// working window for one would be worse than the error.
 import * as SplashScreen from "expo-splash-screen";
 import React from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform } from "react-native";
 
 import { markAnonymousTelemetryAppError } from "../lib/anonymousTelemetry";
+import {
+  classifyCrash,
+  errorMessage,
+  errorStack,
+  nativeCrashLoopFromSearch,
+  type CrashInfo,
+  type CrashSource,
+} from "../lib/crashCore";
 import { reportBoundaryError } from "../lib/reporting";
+import { isStartupComplete } from "../lib/startupState";
+import { CrashScreen } from "./CrashScreen";
 
 interface ErrorBoundaryProps {
   children: React.ReactNode;
 }
 
 interface ErrorBoundaryState {
-  hasError: boolean;
-  error: Error | null;
+  crash: CrashInfo | null;
+}
+
+function initialCrash(): CrashInfo | null {
+  if (Platform.OS !== "web" || typeof window === "undefined") return null;
+  if (!nativeCrashLoopFromSearch(window.location.search)) return null;
+  return {
+    kind: classifyCrash("native-renderer-loop", false),
+    message: "The desktop shell stopped reloading the renderer after repeated crashes.",
+    stack: null,
+  };
 }
 
 export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  state: ErrorBoundaryState = { hasError: false, error: null };
+  state: ErrorBoundaryState = { crash: initialCrash() };
 
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error };
+  /** Latest uncaught error after startup, folded into the next crash report. */
+  private lastBackgroundError: string | null = null;
+
+  static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
+    return {
+      crash: {
+        kind: classifyCrash("render", isStartupComplete()),
+        message: errorMessage(error),
+        stack: errorStack(error),
+      },
+    };
+  }
+
+  componentDidMount(): void {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    window.addEventListener("error", this.onWindowError);
+    window.addEventListener("unhandledrejection", this.onUnhandledRejection);
+    if (this.state.crash) this.hideSplash();
+  }
+
+  componentWillUnmount(): void {
+    if (Platform.OS !== "web" || typeof window === "undefined") return;
+    window.removeEventListener("error", this.onWindowError);
+    window.removeEventListener("unhandledrejection", this.onUnhandledRejection);
   }
 
   componentDidCatch(error: Error): void {
@@ -31,71 +78,51 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
     console.error("[ErrorBoundary] caught render error:", error);
     // A crash before RootNavigator's normal `isLoading` effect runs would otherwise leave
     // the native splash screen up forever, hiding this fallback behind it.
+    this.hideSplash();
+  }
+
+  private hideSplash(): void {
     SplashScreen.hideAsync().catch(() => {
       // best-effort — nothing sensible to do if the splash is already gone
     });
   }
 
+  private onWindowError = (event: ErrorEvent): void => {
+    // Resource load failures (a broken <img>) arrive here with no error object.
+    if (!event.error && !event.message) return;
+    this.handleAsync("script-error", event.error ?? event.message);
+  };
+
+  private onUnhandledRejection = (event: PromiseRejectionEvent): void => {
+    this.handleAsync("unhandled-rejection", event.reason);
+  };
+
+  private handleAsync(source: Extract<CrashSource, "script-error" | "unhandled-rejection">, value: unknown): void {
+    const message = errorMessage(value);
+    if (isStartupComplete()) {
+      this.lastBackgroundError = `${source}: ${message}`;
+      return;
+    }
+    if (this.state.crash) return;
+    this.setState({
+      crash: { kind: classifyCrash(source, false), message, stack: errorStack(value) },
+    });
+    this.hideSplash();
+  }
+
   reset = (): void => {
-    this.setState({ hasError: false, error: null });
+    this.setState({ crash: null });
   };
 
   render(): React.ReactNode {
-    if (this.state.hasError) {
-      return (
-        <View style={styles.container}>
-          <Text style={styles.title}>something went wrong</Text>
-          <Text style={styles.message}>{this.state.error?.message ?? "unknown error"}</Text>
-          <Pressable
-            style={styles.button}
-            onPress={this.reset}
-            accessibilityRole="button"
-            accessibilityLabel="Try loading Forge again"
-          >
-            <Text style={styles.buttonText}>Try again</Text>
-          </Pressable>
-        </View>
-      );
+    const { crash } = this.state;
+    if (crash) {
+      const info =
+        this.lastBackgroundError && crash.kind === "render"
+          ? { ...crash, message: `${crash.message} (after ${this.lastBackgroundError})` }
+          : crash;
+      return <CrashScreen info={info} onTryAgain={crash.kind === "renderer-loop" ? undefined : this.reset} />;
     }
     return this.props.children;
   }
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#111111",
-    paddingHorizontal: 24,
-  },
-  title: {
-    color: "#dddddd",
-    fontSize: 18,
-    fontWeight: "600",
-    marginBottom: 12,
-  },
-  message: {
-    color: "#999999",
-    fontSize: 13,
-    // Not monoFamily — JetBrains Mono may not have loaded when this renders, and
-    // iOS has no "monospace" alias.
-    fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }),
-    textAlign: "center",
-    marginBottom: 24,
-  },
-  button: {
-    minHeight: 44,
-    borderWidth: 1,
-    borderColor: "#dddddd",
-    borderRadius: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    justifyContent: "center",
-  },
-  buttonText: {
-    color: "#dddddd",
-    fontSize: 14,
-    fontWeight: "500",
-  },
-});

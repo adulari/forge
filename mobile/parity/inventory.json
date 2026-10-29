@@ -60,6 +60,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/app/desktop.tsx",
+    "platform": "desktop",
+    "reason": "Tauri-only settings page (launch at login, background notifications, usage refresh); other targets see a note that the page belongs to the desktop app",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/app/diagnostics.tsx",
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -102,6 +108,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/CrashScreen.tsx",
+    "platform": "desktop",
+    "reason": "web and the desktop app can reload or relaunch from the crash screen and offer update actions on desktop; phones only get Try again and Copy diagnostics",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/DesktopOtaHost.tsx",
     "platform": "desktop",
     "reason": "Tauri-only: reports the app shell rendered to the native OTA module and offers 'Reload to update'; renders nothing on phones and the plain web build",
@@ -114,9 +126,21 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/ErrorBoundary.tsx",
+    "platform": "web/native",
+    "reason": "window error and unhandled-rejection capture, and the desktop shell's renderer-loop marker, exist only where a window does; render errors are handled on every platform",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/OperationalNotice.tsx",
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/StartupWatchdog.tsx",
+    "platform": "desktop",
+    "reason": "Restart and Reload need a window and update actions need the Tauri updater; native phones only get Keep waiting",
     "category": "behavior"
   },
   {
@@ -256,6 +280,12 @@
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
     "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/overlay/PaletteRows.tsx",
+    "platform": "web",
+    "reason": "Palette options carry listbox/option ARIA attributes and hover selection on web only; native renders plain buttons.",
+    "category": "behavior"
   },
   {
     "file": "mobile/src/components/pairing/QRScan.native.tsx",
@@ -402,6 +432,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/lib/desktopLaunch.ts",
+    "platform": "desktop",
+    "reason": "Tauri-only bridge to the shell's launch-at-login settings; resolves null elsewhere",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/lib/desktopMenu.ts",
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
@@ -441,6 +477,12 @@
     "file": "mobile/src/lib/desktopServe.ts",
     "platform": "desktop",
     "reason": "Tauri desktop capability boundary",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/escapeSkip.ts",
+    "platform": "web",
+    "reason": "The overlay Escape stack skips elements marked with a data attribute, which only exists on web.",
     "category": "capability"
   },
   {
@@ -564,6 +606,12 @@
     "category": "capability"
   },
   {
+    "file": "mobile/src/lib/shortcuts/globalChord.ts",
+    "platform": "desktop",
+    "reason": "Tauri-only: registers the Quick Composer chord system-wide through the shell; a no-op elsewhere",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/lib/shortcuts/useHotkeys.web.ts",
     "platform": "web",
     "reason": "platform-specific implementation required by Expo resolution",
@@ -598,6 +646,12 @@
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
     "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/useOverlayEscape.ts",
+    "platform": "web",
+    "reason": "Escape-key overlay stack registration is web and desktop only; native overlays close through hardware back or gestures.",
+    "category": "capability"
   },
   {
     "file": "mobile/src/lib/voice/chordHold.ts",
@@ -642,21 +696,9 @@
     "category": "behavior"
   },
   {
-    "file": "mobile/src/components/overlay/PaletteRows.tsx",
-    "platform": "web",
-    "reason": "Palette options carry listbox/option ARIA attributes and hover selection on web only; native renders plain buttons.",
-    "category": "behavior"
-  },
-  {
-    "file": "mobile/src/lib/escapeSkip.ts",
-    "platform": "web",
-    "reason": "The overlay Escape stack skips elements marked with a data attribute, which only exists on web.",
-    "category": "capability"
-  },
-  {
-    "file": "mobile/src/lib/useOverlayEscape.ts",
-    "platform": "web",
-    "reason": "Escape-key overlay stack registration is web and desktop only; native overlays close through hardware back or gestures.",
+    "file": "mobile/src/theme/useBreakpoint.ts",
+    "platform": "desktop",
+    "reason": "the desktop app keeps the expanded workbench layout at medium window widths; web and phones keep the 1024 threshold",
     "category": "capability"
   }
 ]

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { answerTrayDecision, buildTrayDecision, newestWaiting } from "./trayDecisionCore";
+import { answerTrayDecision, buildTrayDecision, newestWaiting, trayRowOrder } from "./trayDecisionCore";
 
 const permission = { session_id: "s-new", prompt_seq: 9, permission_prompt: { tool: "shell" }, question: null };
 
@@ -80,5 +80,30 @@ describe("answerTrayDecision", () => {
     await expect(answerTrayDecision({ ...target, serverId: "gone" }, true, deps())).resolves.toBe("no-server");
     const rejected = deps({ answer: vi.fn(async () => Promise.reject(new Error("409"))) });
     await expect(answerTrayDecision(target, true, rejected)).resolves.toBe("failed");
+  });
+});
+
+describe("trayRowOrder", () => {
+  const row = (id: string, state: "waiting" | "busy" | "idle", last_activity: number) => ({
+    id,
+    waiting: state === "waiting",
+    busy: state === "busy",
+    last_activity,
+  });
+
+  it("puts waiting, then busy, then the most recently touched idle threads", () => {
+    const ordered = trayRowOrder([
+      row("old-idle", "idle", 10),
+      row("busy", "busy", 5),
+      row("new-idle", "idle", 90),
+      row("waiting", "waiting", 1),
+    ]);
+    expect(ordered.map((item) => item.id)).toEqual(["waiting", "busy", "new-idle", "old-idle"]);
+  });
+
+  it("is stable for equal activity and does not mutate its input", () => {
+    const input = [row("a", "idle", 1), row("b", "idle", 1)];
+    expect(trayRowOrder(input).map((item) => item.id)).toEqual(["a", "b"]);
+    expect(input.map((item) => item.id)).toEqual(["a", "b"]);
   });
 });

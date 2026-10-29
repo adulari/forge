@@ -19,6 +19,7 @@ import { useEffect, useRef } from "react";
 import { isAppLockEngaged } from "../components/AppLock";
 import { answer as answerPermission } from "./api";
 import { useAuth } from "./auth";
+import { routeForDeepLink } from "./deepLinkCore";
 import { decisionCopy, isContentLocked, redactTrayTitle } from "./desktopNotifyCore";
 import { isTauri } from "./platform";
 import { useDiagnostics, useSessions } from "./queries";
@@ -26,6 +27,7 @@ import {
   answerTrayDecision,
   buildTrayDecision,
   newestWaiting,
+  trayRowOrder,
   type TrayDecisionSummary,
   type TrayDecisionTarget,
 } from "./trayDecisionCore";
@@ -37,6 +39,9 @@ import { formatRelativeTime } from "../theme/typography";
 
 /** Mirrors `menu::MENU_EVENT` in src-tauri/src/menu.rs. */
 const MENU_EVENT = "forge://menu";
+
+/** Mirrors `desktop_shell::DEEP_LINK_EVENT`. */
+const DEEP_LINK_EVENT = "forge://deep-link";
 
 /** Mirrors `tray::TRAY_SESSION_PREFIX`. */
 const TRAY_SESSION_PREFIX = "tray:session:";
@@ -256,6 +261,21 @@ function runDefault(id: string): void {
   }
 }
 
+/** A chord pressed during a cold start arrives before RootNavigator has claimed its handler (it
+ * mounts after pairing state resolves), so wait for the claim instead of dropping the request. */
+function dispatchWhenClaimed(id: DesktopMenuId, attempts = 80): void {
+  if ((registry.get(id)?.length ?? 0) > 0 || attempts <= 0) {
+    dispatch(id);
+    return;
+  }
+  setTimeout(() => dispatchWhenClaimed(id, attempts - 1), 250);
+}
+
+function openDeepLink(link: string): void {
+  const route = routeForDeepLink(link);
+  if (route) router.push(route as never);
+}
+
 /** Run a menu action as if its menu item had been chosen — for in-app surfaces (the command
  * palette) that offer the same action on platforms without a native menu bar. */
 export function runDesktopMenuAction(id: DesktopMenuId): void {
@@ -442,7 +462,7 @@ export function useDesktopNativeSync(): void {
       waiting: waiting.length,
       costUsd: rows.reduce((total, row) => total + (row.cost_usd || 0), 0) || undefined,
       decision,
-      sessions: rows.slice(0, TRAY_SESSION_LIMIT).map((row) => ({
+      sessions: trayRowOrder(rows).slice(0, TRAY_SESSION_LIMIT).map((row) => ({
         id: row.id,
         title: redactTrayTitle(row.title, locked),
         state: row.waiting ? "waiting" : row.busy ? "busy" : "idle",
@@ -491,9 +511,22 @@ export function useDesktopMenu(): void {
         }
         dispatch(id);
       });
-      if (active) unlisten = stop;
-      else stop();
-    })();
+      const stopLinks = await listen<string>(DEEP_LINK_EVENT, (event) => openDeepLink(event.payload));
+      if (!active) {
+        stop();
+        stopLinks();
+        return;
+      }
+      unlisten = () => {
+        stop();
+        stopLinks();
+      };
+      // Listening now: collect whatever the shell parked while this webview was still booting.
+      const { invoke } = await import("@tauri-apps/api/core");
+      const backlog = await invoke<{ quickComposer: boolean; deepLinks: string[] }>("desktop_shell_ready");
+      for (const link of backlog.deepLinks) openDeepLink(link);
+      if (backlog.quickComposer) dispatchWhenClaimed("session:quick-composer");
+    })().catch(() => undefined);
 
     // App-level About facts are context-free, so they can be pushed from here; the daemon line
     // is filled in by whoever holds the paired-server state.

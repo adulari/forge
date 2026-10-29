@@ -127,11 +127,12 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows";
+type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
   { key: "appearance", label: "Appearance", href: "/appearance" },
+  { key: "desktop", label: "Desktop", href: "/desktop" },
   { key: "keybindings", label: "Keyboard shortcuts", href: "/keybindings" },
   { key: "diagnostics", label: "Diagnostics & updates", href: "/diagnostics" },
   { key: "legal", label: "Legal & support", href: "/legal" },
@@ -165,7 +166,7 @@ export function SettingsNavRail({ active }: { active: string }) {
     <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border }]}>
       <BackLink label="Back" accessibilityLabel="Leave Settings" onPress={leaveSettings} />
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
-      {SETTINGS_NAV_ITEMS.map((item) => {
+      {SETTINGS_NAV_ITEMS.filter((item) => item.key !== "desktop" || isTauri).map((item) => {
         const selected = item.key === active;
         // Only the "anywhere" row ever carries a trailing badge — the entitlement summary
         // from the desktop rail comp (desktop.dc.html "Desktop Settings", line 106).
@@ -542,7 +543,7 @@ export function SettingsScreen() {
     if (notifyBusy) return;
     setNotifyBusy(true);
     try {
-      await notify("Forge", "Test notification — this is what a session alert looks like.");
+      await notify("Forge", "Test notification — this is what a session alert looks like.", { force: true });
       const permission = getNotifyPermission();
       setNotifyPermission(permission);
       if (permission !== "granted") {
@@ -648,7 +649,10 @@ export function SettingsScreen() {
           <SectionHeader>Preferences</SectionHeader>
           {/* Shortcut capture only exists on desktop and web (the screen says so itself); on a
               phone the row opened a list of bindings that do nothing there. */}
-          <NavListRow label="Appearance" onPress={() => router.push("/appearance")} showSeparator={Platform.OS === "web"} />
+          <NavListRow label="Appearance" onPress={() => router.push("/appearance")} showSeparator={isTauri || Platform.OS === "web"} />
+          {isTauri ? (
+            <NavListRow label="Desktop" onPress={() => router.push("/desktop")} showSeparator />
+          ) : null}
           {Platform.OS === "web" ? (
             <NavListRow label="Keyboard shortcuts" onPress={() => router.push("/keybindings")} showSeparator={false} />
           ) : null}

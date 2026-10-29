@@ -34,7 +34,7 @@ test-self-install = []
 [dependencies]
 # `tray-icon` is what makes the menu-bar extra (src/tray.rs) compile; on Linux it additionally
 # needs libayatana-appindicator3 (or libappindicator3) present at build time.
-tauri = { version = "2", features = ["tray-icon", "unstable"] }
+tauri = { version = "2", features = ["tray-icon", "unstable", "image-png"] }
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 # The JS transport seam (mobile/src/lib/transport/index.ts) calls
@@ -45,6 +45,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-websocket = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# desktop_shell.rs: system-wide Quick Composer chord, one window per user, launch at login.
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Desktop auto-detect (detect_forge_serve): resolves the same OS config dir `forge serve`

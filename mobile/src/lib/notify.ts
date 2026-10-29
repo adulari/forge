@@ -8,6 +8,7 @@
 // - Web (non-Tauri): the browser `Notification` API directly.
 // - Native: no-op — v1 has no local-notification story on iOS/Android (native APNs is a
 //   flagged backend gap, ARCHITECTURE.md §7).
+import { getDesktopShellPrefs } from "./desktopShellPrefs";
 import { isTauri, isWeb } from "./platform";
 
 export type NotifyPermission = "granted" | "denied" | "default" | "unsupported";
@@ -62,9 +63,12 @@ async function notifyWeb(title: string, body?: string): Promise<void> {
 /** Best-effort system notification. Never throws — callers don't need a try/catch.
  * Check `getNotifyPermission()` after a call if you need to know whether it actually
  * went out (e.g. to show a "notifications are blocked" hint in Settings). */
-export async function notify(title: string, body?: string): Promise<void> {
+export async function notify(title: string, body?: string, options?: { force?: boolean }): Promise<void> {
   try {
     if (isTauri) {
+      // On by default; the Desktop settings page can switch background notifications off. A
+      // test notification from that page (`force`) must still go out so the permission can be seen.
+      if (!options?.force && !(await getDesktopShellPrefs()).notifyWhenBackground) return;
       await notifyTauri(title, body);
     } else if (isWeb) {
       await notifyWeb(title, body);
