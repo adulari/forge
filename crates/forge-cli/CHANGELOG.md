@@ -89,6 +89,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **Desktop releases build again.** The new desktop plugins moved the Rust `tauri` crate to 2.12 while `@tauri-apps/api` stayed on 2.11, and `tauri build` refuses that split, so every desktop bundle of v2.25.0 failed. Both are on 2.12 now, and PR CI checks that they share a minor.
 - **Forge Anywhere no longer drops the relay link in a loop over one stale envelope.** A host that received an envelope whose sequence it had already accepted closed the whole relay connection; the relay redelivered the same envelope after the reconnect, so the host went down again every minute and phones and desktops showed it as offline. The envelope is now discarded and logged with its sender and sequence.
 - **Resizing the desktop window from desktop to phone width no longer throws a render error.** The Fleet tabs swapped a stack navigator for a tab navigator when the window crossed the breakpoint, handing the tab view a state with no `preloadedRouteKeys`; one tab navigator now serves both widths and the tab bar is simply hidden on wide windows.
 - **File names with underscores are no longer italicised in replies.** `src/my_file_name.ts` read as `my` + italic `file` + `name.ts`; an underscore inside a word now stays literal, as in standard Markdown.
