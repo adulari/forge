@@ -30,6 +30,7 @@ All notable changes to Forge are documented here. The format follows
 - **A tool group opens by itself while a call in it is running and folds once the run is done.** Your own tap still wins: a group you closed stays closed.
 - **Shell rows are titled by what they do.** The `bash -lc '…'` wrapper and a leading `cd dir &&` are dropped, and `sed -n 'a,bp' file` reads "View file a-b". File paths in tool rows keep their end (`…/deep/dir/name.rs`) instead of losing the file name.
 - **A very long reply stops re-laying out all of its Markdown on every frame while it streams.** Past 16,000 characters only the newest part keeps Markdown layout, the older part shows as plain text, and the whole reply renders as Markdown once the turn settles.
+- **The mobile app's Expo SDK 57 packages are at the patch versions Expo now expects.** Twelve patch bumps (`expo` 57.0.31 and eleven `expo-*` modules), applied by `package.json` and a lock regenerated in place; `expo-doctor` in PR CI had started failing on a clean `main`, which made every mobile pull request unmergeable.
 
 ### Fixed
 
