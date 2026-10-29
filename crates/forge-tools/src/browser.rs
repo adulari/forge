@@ -64,6 +64,38 @@ fn attach_endpoint() -> Option<String> {
         })
 }
 
+static ALLOW_EVAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ALLOW_COOKIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Installed once at startup from `[browser] allow_eval` / `allow_cookie_access`.
+pub fn set_browser_permissions(allow_eval: bool, allow_cookie_access: bool) {
+    ALLOW_EVAL.store(allow_eval, std::sync::atomic::Ordering::Relaxed);
+    ALLOW_COOKIES.store(allow_cookie_access, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Refusal for an action the user has not enabled; names the key that enables it.
+fn gate(action: &str) -> Result<(), ToolError> {
+    let (allowed, key, what) = match action {
+        "eval" => (&ALLOW_EVAL, "allow_eval", "running JavaScript in the page"),
+        "replay" => (
+            &ALLOW_EVAL,
+            "allow_eval",
+            "replaying requests with the page's login",
+        ),
+        "cookies" => (&ALLOW_COOKIES, "allow_cookie_access", "reading cookies"),
+        _ => return Ok(()),
+    };
+    if allowed.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    Err(ToolError::Failed(format!(
+        "browser action \"{action}\" is disabled: {what} needs `[browser] {key} = true` in the \
+         Forge config, which the user has not set"
+    )))
+}
+
+const MAX_BATCH_STEPS: usize = 25;
+
 static SESSIONS: std::sync::OnceLock<Mutex<HashMap<String, Arc<BrowserSession>>>> =
     std::sync::OnceLock::new();
 
@@ -108,7 +140,10 @@ impl Tool for BrowserTool {
          (user_agent, platform, timezone, viewport). \"replay\" re-issues a request from inside \
          the page with your changes, reusing its login — the core loop for reverse-engineering an \
          API. \"intercept\" blocks or rewrites requests. Actions: open, navigate, click, type, \
-         eval, html, screenshot, cookies, replay, intercept, intercept_clear, close. When the user \
+         eval, html, screenshot, cookies, replay, intercept, intercept_clear, close, batch (a `steps` \
+         array of the other actions, run in order, stopping at the first failure, with one compact \
+         report and a final page snapshot). eval, replay and cookies are refused unless the user \
+         enabled `[browser] allow_eval` / `allow_cookie_access`. When the user \
          configured `[browser] attach` (or FORGE_BROWSER_CDP), \"open\" instead attaches to their \
          already-running, LOGGED-IN browser in a new tab of Forge's own: it never touches their \
          other tabs, and proxy/fingerprint/headless are ignored. Treat that browser's sessions as \
@@ -127,8 +162,15 @@ impl Tool for BrowserTool {
                     "type": "string",
                     "enum": ["open", "navigate", "click", "type", "eval", "html",
                              "screenshot", "cookies", "replay", "intercept", "intercept_clear",
-                             "close"],
+                             "close", "batch"],
                     "description": "What to do."
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "For batch: objects shaped like a single browser call \
+                                    (action plus its arguments), run in order. Stops at the first \
+                                    failure. Not nestable.",
+                    "items": {"type": "object"}
                 },
                 "url": {"type": "string", "description": "For open/navigate/replay."},
                 "selector": {"type": "string", "description": "CSS selector, for click/type."},
@@ -176,7 +218,81 @@ impl Tool for BrowserTool {
     }
 
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
+        if str_arg(args, "action")? == "batch" {
+            return run_batch(args).await;
+        }
+        run_step(args).await
+    }
+}
+
+/// Run `steps` in order and stop at the first failure. The report lists each step's outcome up to
+/// that point, then one snapshot of the page as it ended up.
+async fn run_batch(args: &Value) -> Result<String, ToolError> {
+    let steps = args
+        .get("steps")
+        .and_then(Value::as_array)
+        .filter(|steps| !steps.is_empty())
+        .ok_or_else(|| ToolError::Failed("batch needs a non-empty `steps` array".into()))?;
+    if steps.len() > MAX_BATCH_STEPS {
+        return Err(ToolError::Failed(format!(
+            "batch is limited to {MAX_BATCH_STEPS} steps, got {}",
+            steps.len()
+        )));
+    }
+    let profile = profile_name(args);
+    let mut report = Vec::new();
+    let mut failed = false;
+    for (index, step) in steps.iter().enumerate() {
+        let n = index + 1;
+        let action = step.get("action").and_then(Value::as_str).unwrap_or("");
+        if action == "batch" {
+            report.push(format!("step {n} (batch): error: batch cannot be nested"));
+            failed = true;
+            break;
+        }
+        let mut step = step.clone();
+        if let Some(map) = step.as_object_mut() {
+            map.entry("profile").or_insert_with(|| json!(profile));
+        }
+        match run_step(&step).await {
+            Ok(output) => report.push(format!("step {n} ({action}): ok: {}", brief(&output))),
+            Err(err) => {
+                report.push(format!("step {n} ({action}): error: {err}"));
+                failed = true;
+                break;
+            }
+        }
+    }
+    let status = if failed {
+        format!("batch stopped at step {} of {}", report.len(), steps.len())
+    } else {
+        format!("batch completed {} steps", steps.len())
+    };
+    let snapshot = match require_session(&profile).await {
+        Ok(session) => match session.html().await {
+            Ok(html) => forge_browser::truncate(&html, 4_000),
+            Err(err) => format!("(snapshot unavailable: {err})"),
+        },
+        Err(_) => "(no browser open, no snapshot)".to_string(),
+    };
+    let text = format!("{status}\n{}\nsnapshot:\n{snapshot}", report.join("\n"));
+    if failed {
+        Err(ToolError::Failed(text))
+    } else {
+        Ok(text)
+    }
+}
+
+/// First line of a step's output, capped, so a batch report stays compact.
+fn brief(output: &str) -> String {
+    let line = output.lines().next().unwrap_or("");
+    forge_browser::truncate(line, 200)
+}
+
+async fn run_step(args: &Value) -> Result<String, ToolError> {
+    {
         let action = str_arg(args, "action")?;
+        gate(action)?;
         let profile = profile_name(args);
 
         if action == "open" {
@@ -630,6 +746,52 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn eval_cookies_and_replay_are_refused_until_enabled() {
+        for (action, key) in [
+            ("eval", "allow_eval"),
+            ("replay", "allow_eval"),
+            ("cookies", "allow_cookie_access"),
+        ] {
+            let err = BrowserTool
+                .run(&json!({"action": action, "profile": "gate-test"}))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("disabled") && err.contains(key), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_stops_at_the_first_failing_step() {
+        let args = json!({
+            "action": "batch",
+            "profile": "batch-test",
+            "steps": [
+                {"action": "close"},
+                {"action": "eval", "expression": "1"},
+                {"action": "close"}
+            ]
+        });
+        let err = BrowserTool.run(&args).await.unwrap_err().to_string();
+        assert!(err.contains("stopped at step 2 of 3"), "{err}");
+        assert!(err.contains("step 1 (close): ok"), "{err}");
+        assert!(
+            err.contains("step 2 (eval): error") && err.contains("allow_eval"),
+            "{err}"
+        );
+        assert!(!err.contains("step 3"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_empty_and_nested_steps() {
+        let empty = json!({"action": "batch", "steps": []});
+        assert!(BrowserTool.run(&empty).await.is_err());
+        let nested = json!({"action": "batch", "steps": [{"action": "batch"}]});
+        let err = BrowserTool.run(&nested).await.unwrap_err().to_string();
+        assert!(err.contains("cannot be nested"), "{err}");
+    }
 
     #[test]
     fn a_status_filter_can_be_open_ended_on_either_side() {

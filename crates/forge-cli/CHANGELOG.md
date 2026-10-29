@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The browser tool gains a `batch` action, and `eval` and cookie reads are now opt-in.** `batch` takes a `steps` array of ordinary browser calls, runs them in order, stops at the first failure and returns one compact report plus a single final page snapshot. `eval`, `replay` and `cookies` now return a refusal that names `[browser] allow_eval` or `[browser] allow_cookie_access`, both default false, until the user enables them.
+
 ## [2.25.2] - 2026-10-29
 
 ## [2.25.1] - 2026-10-29
