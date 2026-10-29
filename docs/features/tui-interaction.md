@@ -47,7 +47,7 @@ typing its letter (Ctrl+X, Ctrl+B and Ctrl+Q used to insert `x`, `b`, `q`).
 | `Ctrl+A` · `Ctrl+E` | Start / end of the line |
 | `Ctrl+W` · `Ctrl+U` · `Ctrl+K` | Cut the word before the cursor / to the start / to the end of the line (`Alt+K` for the end of the line in the default keymap, where `Ctrl+K` is the command center) |
 | `Ctrl+Y` · `Alt+Y` | Paste the last cut; right after it, `Alt+Y` swaps in the next older cut (a ring of 16) |
-| `Ctrl+_` | Undo the last edit (a run of typing is one step; a cut, a `Ctrl+Y` and `Ctrl+G` are one step each) |
+| `Ctrl+_` · `Alt+_` | Undo the last edit (a run of typing is one step; a cut, a `Ctrl+Y` and `Ctrl+G` are one step each) / redo it. Any new edit forgets what was undone. Redo is `Alt+_` because `Ctrl+Shift+_` is the same key as undo on a terminal that sends the raw `0x1F` byte |
 | `Ctrl+P` · `Ctrl+N` | Previous / next prompt in history |
 | `Ctrl+D` | Delete the character under the cursor; on an empty prompt press twice to quit |
 | `Ctrl+G` | Edit the draft in `$VISUAL`, then `$EDITOR`, then `vi`; the saved text replaces the draft |

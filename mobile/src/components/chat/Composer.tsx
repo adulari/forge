@@ -17,16 +17,20 @@
 //            call TelemetrySheet's "Model" row already makes.
 //   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
 //            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
-import { ArrowUp, ChevronDown, Clock, FileCode2, Gauge, FileText, Image as ImageIcon, MessageSquare, Mic, MousePointer2, RotateCcw, Sparkles, Square, Zap } from "lucide-react-native";
+import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Gauge, Image as ImageIcon, ListEnd, MessageSquare, Mic, MousePointer2, RotateCcw, ShieldHalf, Sparkles, Square, Upload, Zap } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { type ColorValue, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { mergeCommandSources } from "../../lib/commandSources";
-import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
+import { EMPTY_EDITS, type EditStack, recordEdit, redoEdit, undoEdit } from "../../lib/composerUndo";
+import { clearDraft, clearDraftAttachments, getDraft, getDraftAttachments, setDraft, setDraftAttachments } from "../../lib/drafts";
+import { effectiveMode, type FollowUpMode, FOLLOW_UP_KEY } from "../../lib/followUp";
+import { useFollowUpSetting } from "../../lib/useFollowUpSetting";
+import { collapsePrompts, RECALL_IDLE, type RecallState, recallStep } from "../../lib/promptRecall";
 import {
   clearReviewComments,
   formatReviewCommentsPrompt,
@@ -43,7 +47,7 @@ import {
 } from "../../lib/visualAnnotations";
 import { isMacOS } from "../../lib/platform";
 import { recordComposerImeCommit, recordComposerInput } from "../../lib/performance";
-import { useUpload, useWorkspaceSearch } from "../../lib/queries";
+import { useUpdateConfig, useUpload, useWorkspaceSearch } from "../../lib/queries";
 import { useSessionDraft, useSessionStable } from "../../lib/sessionContext";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
@@ -55,12 +59,16 @@ import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
+import { AttachmentTray } from "./AttachmentTray";
+import { MiniPressable } from "./MiniPressable";
 import {
+  filesFromDragEvent,
   formDataFromPicked,
   formDataFromWebFiles,
   imagesFromClipboardEvent,
   makeAttachmentId,
   type PickedFile,
+  pickedFromDroppedFile,
   pickDocuments,
   pickImages,
   type SentAttachment,
@@ -85,7 +93,10 @@ import {
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
 import { ProviderGlyph } from "../ds/ProviderGlyph";
-import { modelChipLabel } from "./modelChipLabel";
+import { composerPlaceholder, modelChipLabel } from "./modelChipLabel";
+
+const ICON_ONLY_CHIPS_BELOW = 420;
+const RECALL_SENT_MAX = 50;
 
 interface NativeComposerMirrorProps {
   color: ColorValue;
@@ -123,11 +134,17 @@ export interface ComposerProps {
    * session; `undefined` (older host) is unknown. */
   modelPinned?: boolean;
   effort?: string | null;
-  onSend: (text: string, attachments: SentAttachment[]) => boolean;
+  /** Snapshot.temper (the operating mode label); its chip opens the daemon's own `/mode` picker. */
+  temper?: string | null;
+  /** `mode` only matters mid-turn: "queue" waits behind the turn, "steer" also offers the
+   * prompt to it at its next step. */
+  onSend: (text: string, attachments: SentAttachment[], mode?: FollowUpMode) => boolean;
   onInterrupt: () => void;
+  /** The session's earlier user prompts, oldest first, for ArrowUp recall. */
+  recallPrompts?: readonly string[];
 }
 
-function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPinned, effort, onSend, onInterrupt }: ComposerProps) {
+function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPinned, effort, temper, onSend, onInterrupt, recallPrompts }: ComposerProps) {
   const { scheme, tokens } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
   const imeProps = { onCompositionEnd: recordComposerImeCommit } as unknown as React.ComponentProps<typeof TextInput>;
@@ -153,7 +170,12 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     // The session socket's own sender — the model/effort chips are pickers over the existing
     // slash-command path (see file header), which is a `RemoteInput`, not an `onSend` prompt.
     send,
+    baseUrl,
   } = useSessionStable();
+  const followUp = useFollowUpSetting();
+  const updateConfig = useUpdateConfig();
+  const { width: windowWidth } = useWindowDimensions();
+  const iconOnlyChips = windowWidth < ICON_ONLY_CHIPS_BELOW;
   const reviewComments = useReviewComments(sessionId);
   const visualAnnotations = useVisualAnnotations(sessionId);
   const toast = useToast();
@@ -182,7 +204,16 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   }, []);
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
+  const wrapRef = useRef<View>(null);
+  const [dragging, setDragging] = useState(false);
   const textRef = useRef(text);
+  const editsRef = useRef<EditStack>(EMPTY_EDITS);
+  const recallRef = useRef<{ state: RecallState; shown: string | null }>({ state: RECALL_IDLE, shown: null });
+  const sentRef = useRef<string[]>([]);
+  const recallEntriesRef = useRef<string[]>([]);
+  useEffect(() => {
+    recallEntriesRef.current = collapsePrompts([...(recallPrompts ?? []), ...sentRef.current]);
+  }, [recallPrompts, text]);
   const measuredForText = useRef<string | null>(null);
   useEffect(() => {
     textRef.current = text;
@@ -224,16 +255,20 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     let cancelled = false;
     setDraftLoadedSession(null);
     setText("");
-    void getDraft(sessionId).then((draft) => {
+    editsRef.current = EMPTY_EDITS;
+    recallRef.current = { state: RECALL_IDLE, shown: null };
+    sentRef.current = [];
+    void Promise.all([getDraft(sessionId), getDraftAttachments(sessionId)]).then(([draft, storedAttachments]) => {
       if (cancelled) return;
       setText(draft ?? "");
+      if (storedAttachments.length > 0) setAttachments((prev) => (prev.length > 0 ? prev : storedAttachments));
       draftLoadedFor.current = sessionId;
       setDraftLoadedSession(sessionId);
     });
     return () => {
       cancelled = true;
     };
-  }, [sessionId, setText]);
+  }, [sessionId, setText, setAttachments]);
 
   useEffect(() => {
     if (draftLoadedSession !== sessionId) return;
@@ -247,6 +282,12 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     return () => clearTimeout(timer);
   }, [draftLoadedSession, sessionId, text]);
 
+  useEffect(() => {
+    if (draftLoadedSession !== sessionId) return;
+    const timer = setTimeout(() => void setDraftAttachments(sessionId, attachments), 300);
+    return () => clearTimeout(timer);
+  }, [draftLoadedSession, sessionId, attachments]);
+
   // Shell→Composer focus bridge: the session shell increments `composerFocusSignal` (e.g.
   // the ⌘E web shortcut) to request that this input take focus. A counter so repeated
   // requests always re-fire. Native `useHotkey` is a no-op, so this never fires there.
@@ -259,6 +300,25 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     if (commandFocusSignal === 0) return;
     inputRef.current?.focus();
   }, [commandFocusSignal]);
+
+  // An edit the composer makes itself (voice transcript, @-mention, accepted suggestion) is
+  // recorded so Ctrl/Cmd+Z can take it back — the browser's own undo forgets a value set from code.
+  const applyProgrammatic = useCallback(
+    (next: string) => {
+      editsRef.current = recordEdit(editsRef.current, textRef.current, next);
+      recallRef.current = { state: RECALL_IDLE, shown: null };
+      if (Platform.OS !== "web") setNativeText(next);
+      setText(next);
+    },
+    [setText],
+  );
+  const focusEnd = useCallback((value: string) => {
+    requestAnimationFrame(() => {
+      const node = inputRef.current as unknown as HTMLTextAreaElement | null;
+      node?.focus();
+      node?.setSelectionRange?.(value.length, value.length);
+    });
+  }, []);
 
   const canSend =
     (text.trim().length > 0 || reviewComments.length > 0 || visualAnnotations.length > 0) &&
@@ -307,10 +367,9 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     const mention = workspaceMentionRef.current;
     if (!mention) return;
     const next = replaceWorkspaceMention(textRef.current, mention, path);
-    if (Platform.OS !== "web") setNativeText(next);
-    setText(next);
+    applyProgrammatic(next);
     requestAnimationFrame(() => inputRef.current?.focus());
-  }, [setText]);
+  }, [applyProgrammatic]);
   const insertWorkspaceMentionRef = useRef(insertWorkspaceMention);
   useEffect(() => {
     workspaceMentionRef.current = workspaceMention;
@@ -324,14 +383,14 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     workspaceMentionSelection,
   ]);
   const insertSuggestion = (suggestion: string) => {
-    setText(suggestion);
+    applyProgrammatic(suggestion);
     requestAnimationFrame(() => {
       inputRef.current?.focus();
     });
   };
 
   const insertCommand = (command: string) => {
-    setText(command);
+    applyProgrammatic(command);
     setCommandFocusSignal((signal) => signal + 1);
   };
 
@@ -339,6 +398,12 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   // back on `Snapshot.overlay` and OverlayHost renders it, so nothing has to be replicated here.
   const openModelPicker = () => {
     if (!send({ kind: "prompt", text: "/model" })) {
+      toast.show("not sent — reconnect and try again", { tone: "danger" });
+    }
+  };
+
+  const openModePicker = () => {
+    if (!send({ kind: "prompt", text: "/mode" })) {
       toast.show("not sent — reconnect and try again", { tone: "danger" });
     }
   };
@@ -397,7 +462,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     transform: [{ translateY: suggestionTranslateY.value }],
   }));
 
-  const commit = (value: string) => {
+  const commit = (value: string, invert = false) => {
     const trimmed = value.trim();
     if (!trimmed && reviewComments.length === 0 && visualAnnotations.length === 0) return;
     // An attachment still in flight (or failed) must never be silently dropped from the send —
@@ -420,14 +485,19 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
       formatReviewCommentsPrompt(trimmed, reviewComments),
       visualAnnotations,
     );
-    if (!onSend(prompt, sent)) return;
+    const mode: FollowUpMode = busy ? effectiveMode(followUp, invert) : "steer";
+    if (!onSend(prompt, sent, mode)) return;
     setLastPrompt(prompt);
+    if (trimmed) sentRef.current = [...sentRef.current, trimmed].slice(-RECALL_SENT_MAX);
+    editsRef.current = EMPTY_EDITS;
+    recallRef.current = { state: RECALL_IDLE, shown: null };
     // Whatever suggestion is live right now belongs to the turn that's ending, not the one this
     // send just started — mask it so it can't flash back in once the draft clears below.
     if (suggestedPrompt) setSuppressedSuggestion(suggestedPrompt);
     haptics.sendPrompt();
     setText("");
     void clearDraft(sessionId);
+    void clearDraftAttachments(sessionId);
     setAttachments([]);
     clearReviewComments(sessionId);
     clearVisualAnnotations(sessionId);
@@ -439,8 +509,12 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   // captured when the listener was attached (otherwise a mount-while-disconnected session
   // would queue Enter-sent messages offline forever, even after the WS reconnects).
   const commitRef = useRef(commit);
+  const setTextRef = useRef(setText);
+  const focusEndRef = useRef(focusEnd);
   useEffect(() => {
     commitRef.current = commit;
+    setTextRef.current = setText;
+    focusEndRef.current = focusEnd;
   });
 
   const runUpload = async (picked: PickedFile, webFile?: File) => {
@@ -467,6 +541,56 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     }
   };
 
+  const runUploadRef = useRef(runUpload);
+  useEffect(() => {
+    runUploadRef.current = runUpload;
+  });
+
+  // Web/desktop drop target: files dragged over the composer upload like a picked file. Counting
+  // enter/leave keeps the overlay steady while the drag crosses the composer's child elements.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const node = wrapRef.current as unknown as HTMLElement | null;
+    if (!node) return;
+    let depth = 0;
+    const carriesFiles = (e: DragEvent) => e.dataTransfer?.types?.includes("Files") ?? false;
+    const onEnter = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      depth += 1;
+      setDragging(true);
+    };
+    const onOver = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    };
+    const onLeave = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDragging(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      setDragging(false);
+      for (const file of filesFromDragEvent(e)) {
+        void runUploadRef.current(pickedFromDroppedFile(file, URL.createObjectURL(file)), file);
+      }
+    };
+    node.addEventListener("dragenter", onEnter);
+    node.addEventListener("dragover", onOver);
+    node.addEventListener("dragleave", onLeave);
+    node.addEventListener("drop", onDrop);
+    return () => {
+      node.removeEventListener("dragenter", onEnter);
+      node.removeEventListener("dragover", onOver);
+      node.removeEventListener("dragleave", onLeave);
+      node.removeEventListener("drop", onDrop);
+    };
+  }, []);
+
   const onAttachImage = async () => {
     const picked = await pickImages();
     for (const p of picked) void runUpload(p);
@@ -488,7 +612,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     const trimmed = transcript.trim();
     if (!trimmed) return;
     const current = textRef.current;
-    setText(current.trim().length > 0 ? `${current} ${trimmed}` : trimmed);
+    applyProgrammatic(current.trim().length > 0 ? `${current} ${trimmed}` : trimmed);
   };
 
   // Web: Enter=send / Shift+Enter=newline + paste-image. Bound directly to the underlying DOM
@@ -527,11 +651,53 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
           return;
         }
       }
-      // Enter (no Shift) already sends; ⌘/Ctrl+Enter (T5.1 alias) sends too, even in the
-      // edge case both modifiers are held at once, so the desktop shortcut always works.
+      // Enter (no Shift) sends; ⌘/Ctrl+Enter sends too, even with Shift held, and mid-turn does
+      // the opposite of the "Enter sends as" setting (steer <-> queue).
       if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        commitRef.current(textRef.current);
+        commitRef.current(textRef.current, e.metaKey || e.ctrlKey);
+        return;
+      }
+      const plain = !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey;
+      if (plain && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        const caret = node.selectionStart ?? 0;
+        const step = recallStep(
+          e.key === "ArrowUp" ? "up" : "down",
+          recallEntriesRef.current,
+          recallRef.current.state,
+          textRef.current,
+          caret,
+          caret !== (node.selectionEnd ?? caret),
+        );
+        if (step.handled) {
+          e.preventDefault();
+          recallRef.current = { state: step.state, shown: step.text };
+          textRef.current = step.text;
+          setTextRef.current(step.text);
+          focusEndRef.current(step.text);
+        }
+        return;
+      }
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && !e.altKey && e.key.toLowerCase() === "z") {
+        const redo = e.shiftKey;
+        const result = (redo ? redoEdit : undoEdit)(editsRef.current, textRef.current);
+        if (result) {
+          e.preventDefault();
+          editsRef.current = result.stack;
+          textRef.current = result.text;
+          setTextRef.current(result.text);
+          focusEndRef.current(result.text);
+        }
+      } else if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "y") {
+        const result = redoEdit(editsRef.current, textRef.current);
+        if (result) {
+          e.preventDefault();
+          editsRef.current = result.stack;
+          textRef.current = result.text;
+          setTextRef.current(result.text);
+          focusEndRef.current(result.text);
+        }
       }
     };
     const onPasteEvt = (e: ClipboardEvent) => {
@@ -571,7 +737,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
       }
       e.preventDefault();
       const suggestion = activeSuggestion;
-      setText(suggestion);
+      applyProgrammatic(suggestion);
       const node = inputRef.current as unknown as HTMLTextAreaElement | null;
       // Cursor must land at the end, editable — the value swap alone doesn't reliably move it
       // on every browser, so place it explicitly once the DOM has the new value.
@@ -583,7 +749,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
 
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [showGhost, activeSuggestion, recording, setText]);
+  }, [showGhost, activeSuggestion, recording, applyProgrammatic]);
 
   // Web/desktop: Ctrl/Cmd+Shift+V starts voice recording from anywhere in the window, not just
   // when the composer input is focused — mirrors the mic button's own onPress. Document-level
@@ -619,8 +785,18 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [recording, attachments]);
 
+  const sendMode: FollowUpMode = busy ? effectiveMode(followUp, false) : "steer";
+  const otherMode: FollowUpMode = sendMode === "steer" ? "queue" : "steer";
+  const modKey = isMacOS ? "⌘" : "Ctrl";
+  const previewUriFor = (a: { image: boolean; path?: string }) =>
+    a.image && a.path && baseUrl
+      ? `${baseUrl}/api/upload?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(a.path)}`
+      : undefined;
+  const sideQuestion = /^\/(btw|side)(\s|$)/i.test(text);
+
   return (
     <View
+      ref={wrapRef}
       style={[
         styles.wrap,
         {
@@ -677,29 +853,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
       ) : null}
 
       {!recording && attachments.length > 0 ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.commandScroll}
-          contentContainerStyle={styles.chipsRow}
-          keyboardShouldPersistTaps="handled"
-        >
-          {attachments.map((a) => (
-            <Chip
-              key={a.id}
-              icon={
-                a.image && a.uri ? (
-                  <Image source={{ uri: a.uri }} style={styles.chipThumb} />
-                ) : (
-                  <FileText size={14} strokeWidth={1.75} color={tokens.ink3} />
-                )
-              }
-              label={a.state === "uploading" ? `${a.name} …` : a.state === "error" ? `${a.name} ⚠` : a.name}
-              selected={a.state === "done"}
-              onPress={() => removeAttachment(a.id)}
-            />
-          ))}
-        </ScrollView>
+        <AttachmentTray attachments={attachments} onRemove={removeAttachment} previewUriFor={previewUriFor} />
       ) : null}
 
       {!recording && workspaceMention && workspaceMentionQuery.length > 0 ? (
@@ -837,6 +991,18 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
               {/* Attach sits in this row's free space: a row of its own made the composer a
                   quarter of a phone screen, and squeezing it beside the input made short
                   replies wrap. */}
+              {temper ? (
+                <MetaChip
+                  label={iconOnlyChips ? "" : temper.toLowerCase()}
+                  icon={<ShieldHalf size={11} strokeWidth={1.75} color={tokens.ink4} />}
+                  color={tokens.ink3}
+                  accessibilityLabel={`mode: ${temper} — change mode`}
+                  testID="composer-temper-chip"
+                  fixed
+                  bare={iconOnlyChips}
+                  onPress={openModePicker}
+                />
+              ) : null}
               <View style={styles.metaSpacer} />
               <IconButton
                 icon={<ImageIcon size={18} strokeWidth={1.75} color={tokens.ink3} />}
@@ -881,6 +1047,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
               value={Platform.OS === "web" ? text : nativeText}
               onChangeText={(next) => {
                 recordComposerInput();
+                if (recallRef.current.shown !== next) recallRef.current = { state: RECALL_IDLE, shown: null };
                 if (Platform.OS !== "web") setNativeText(next);
                 setText(next);
               }}
@@ -899,7 +1066,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
               textAlignVertical="top"
               // Hidden while the ghost is showing — it renders the same "empty state" copy
               // itself, and both at once would double up.
-              placeholder={showGhost ? undefined : "message…"}
+              placeholder={showGhost ? undefined : composerPlaceholder(model, isCompact)}
               placeholderTextColor={tokens.ink3}
               style={[
                 type.body,
@@ -951,14 +1118,16 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
             />
           ) : null}
           <IconButton
-            icon={<View style={styles.actionIcon}><Animated.View style={sendIconStyle}>{action === "steer" ? <Zap size={18} strokeWidth={2} color={tokens.onAccent} fill={tokens.onAccent} /> : online ? <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} /> : <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />}</Animated.View><Animated.View style={[styles.actionLayer, stopIconStyle]}><Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} /></Animated.View></View>}
+            icon={<View style={styles.actionIcon}><Animated.View style={sendIconStyle}>{action === "steer" ? (sendMode === "queue" ? <ListEnd size={18} strokeWidth={2} color={tokens.onAccent} /> : <Zap size={18} strokeWidth={2} color={tokens.onAccent} fill={tokens.onAccent} />) : online ? <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} /> : <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />}</Animated.View><Animated.View style={[styles.actionLayer, stopIconStyle]}><Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} /></Animated.View></View>}
             onPress={action === "stop" ? onInterrupt : () => commit(text)}
             disabled={action !== "stop" && !canSend}
             accessibilityLabel={
               action === "stop"
                 ? "stop"
                 : action === "steer"
-                  ? "steer — sent to the model at this turn's next step"
+                  ? sendMode === "queue"
+                    ? "queue — runs after this turn"
+                    : "steer — sent to the model at this turn's next step"
                   : online
                     ? "send"
                     : "queue — will send on reconnect"
@@ -971,7 +1140,36 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
       {!online && !recording ? (
         <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>will send on reconnect</Text>
       ) : action === "steer" && !recording ? (
-        <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>⚡ steer — the model gets this at its next step</Text>
+        <View style={styles.hintRow}>
+          <Text style={[type.meta, styles.hintText, { color: tokens.ink3 }]} numberOfLines={2}>
+            {sendMode === "queue" ? "⏳ queue — runs after this turn" : "⚡ steer — the model gets this at its next step"}
+            {Platform.OS === "web" && followUp.supported ? ` · ${modKey}↵ ${otherMode}s instead` : ""}
+          </Text>
+          {followUp.supported ? (
+            <MiniPressable
+              onPress={() => updateConfig.mutate({ key: FOLLOW_UP_KEY, value: otherMode, scope: "user" })}
+              accessibilityRole="button"
+              accessibilityLabel={`Enter sends as ${followUp.mode}. Switch to ${invertLabel(followUp.mode)}`}
+              idleBorderColor={tokens.border}
+              style={styles.hintToggle}
+              testID="composer-followup-toggle"
+            >
+              <Text style={[type.monoMeta, { color: tokens.ink2 }]}>Enter: {followUp.mode}</Text>
+            </MiniPressable>
+          ) : null}
+        </View>
+      ) : sideQuestion && !recording ? (
+        <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>side question — the answer is shown here and never joins the transcript</Text>
+      ) : null}
+      {dragging ? (
+        <View
+          pointerEvents="none"
+          style={[styles.dropZone, { backgroundColor: tokens.selection, borderColor: tokens.accent }]}
+          testID="composer-drop-zone"
+        >
+          <Upload size={18} strokeWidth={1.75} color={tokens.accent} />
+          <Text style={[type.sub, { color: tokens.accent }]}>Drop to attach</Text>
+        </View>
       ) : null}
       <GoalSheet visible={goalVisible} onClose={() => setGoalVisible(false)} onSubmit={commit} />
       {/* Headless: the composer's own chip is the trigger, so the picker contributes only its
@@ -993,6 +1191,10 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
  * change any of them (see `mobile/src/app/session/[id]/index.tsx`'s `handleSend`). */
 export const Composer = React.memo(ComposerImpl);
 
+function invertLabel(mode: FollowUpMode): FollowUpMode {
+  return mode === "steer" ? "queue" : "steer";
+}
+
 /** One control-row chip: mono value + a chevron marking it as a picker, not a readout. */
 function MetaChip({
   label,
@@ -1001,6 +1203,7 @@ function MetaChip({
   testID,
   onPress,
   fixed = false,
+  bare = false,
   icon,
 }: {
   label: string;
@@ -1011,6 +1214,8 @@ function MetaChip({
   icon?: React.ReactNode;
   /** Keep the full label; the other chip in the row gives up the width instead. */
   fixed?: boolean;
+  /** Icon only, without the picker chevron, for a phone-width row. */
+  bare?: boolean;
 }) {
   const { tokens } = useTheme();
   return (
@@ -1023,8 +1228,8 @@ function MetaChip({
       style={[styles.metaChip, fixed && styles.metaChipFixed, { borderColor: tokens.border }]}
     >
       {icon}
-      <Text style={[type.monoMeta, styles.metaChipLabel, { color }]} numberOfLines={1}>{label}</Text>
-      <ChevronDown size={11} strokeWidth={1.75} color={tokens.ink4} />
+      {label ? <Text style={[type.monoMeta, styles.metaChipLabel, { color }]} numberOfLines={1}>{label}</Text> : null}
+      {bare ? null : <ChevronDown size={11} strokeWidth={1.75} color={tokens.ink4} />}
     </Pressable>
   );
 }
@@ -1056,7 +1261,6 @@ const styles = StyleSheet.create({
   mentionPath: { flexShrink: 0, maxWidth: "38%" },
   mentionParent: { flex: 1 },
   mentionNotice: { paddingHorizontal: space.space12, paddingVertical: space.space8 },
-  chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
   // D Main / M Session Chat composer: one bordered card (radius4, hairline) wrapping the
   // optional model/effort meta row and the icon+input control row beneath it.
   composerCard: {
@@ -1134,4 +1338,27 @@ const styles = StyleSheet.create({
   actionIcon: { width: 20, height: 20, alignItems: "center", justifyContent: "center" },
   actionLayer: { position: "absolute" },
   offlineHint: { paddingLeft: space.space4 },
+  hintRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingLeft: space.space4 },
+  hintText: { flex: 1, minWidth: 0 },
+  hintToggle: {
+    flexShrink: 0,
+    borderRadius: radii.radius4,
+    paddingHorizontal: space.space8,
+    paddingVertical: 2,
+  },
+  dropZone: {
+    position: "absolute",
+    top: space.space4,
+    left: space.space12,
+    right: space.space12,
+    bottom: space.space4,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: space.space8,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderRadius: radii.radius8,
+    opacity: 0.94,
+  },
 });

@@ -45,6 +45,24 @@ the composer:
   hands the head of the queue to the next turn), the band now says so. It stays out of the way
   while a permission prompt or question owns the keyboard, where Esc means deny or dismiss.
 
+## Queue or steer: `[chat] follow_up`
+
+`follow_up = "steer"` (the default) is the behaviour above. `follow_up = "queue"` makes Enter typed
+mid-turn only queue the prompt: it runs after the turn and is never offered to it, which keeps a
+long turn on its original task. It is also the `Enter while busy` setting in `/config` and in the
+app's Settings. The app's composer sends `RemoteInput::Queue` for it and inverts it on
+Cmd/Ctrl+Enter, so one chord does the other thing.
+
+## Editing the queue from the app
+
+The app draws the same queue above its composer (`QueueStrip`): every row can be pulled back to
+the composer, moved earlier or later, sent now, or removed. The moves are the
+`queue_move { index, text, to }` and `queue_send_now { index, text }` inputs. Like `dequeue`
+they echo the row they were rendered from, so an edit made against a queue that has since shifted is
+refused with a note. A move reorders the steer inbox with the queue, so the running turn still
+absorbs prompts in the order shown; send-now moves the row to the head and interrupts the turn,
+exactly what Esc does in the terminal.
+
 ## Esc after an absorbed steer
 
 An absorbed steer is already persisted, in the model transcript and echoed. If Esc kills the turn

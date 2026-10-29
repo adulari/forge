@@ -80,6 +80,22 @@ impl SteerInbox {
         })
     }
 
+    /// Put the not-yet-taken texts in the order `order` lists them (the surface's visible queue,
+    /// after the user reordered it). A text the queue does not list keeps its place at the back.
+    pub fn reorder_pending(&self, order: &[String]) {
+        if let Ok(mut q) = self.inner.lock() {
+            let mut rest = std::mem::take(&mut q.pending);
+            for text in order {
+                if let Some(i) = rest.iter().position(|t| t == text) {
+                    if let Some(taken) = rest.remove(i) {
+                        q.pending.push_back(taken);
+                    }
+                }
+            }
+            q.pending.extend(rest);
+        }
+    }
+
     /// Take every queued text, oldest first, recording each as delivered.
     pub fn drain(&self) -> Vec<String> {
         self.inner
@@ -153,6 +169,20 @@ mod tests {
         assert!(inbox.remove_pending("a"));
         assert!(!inbox.remove_pending("a"));
         assert_eq!(inbox.drain(), ["b"]);
+    }
+
+    #[test]
+    fn reordering_follows_the_visible_queue_and_skips_what_it_does_not_hold() {
+        let inbox = SteerInbox::default();
+        inbox.push("a");
+        inbox.push("b");
+        inbox.push("c");
+        inbox.reorder_pending(&["/compact".into(), "c".into(), "a".into(), "b".into()]);
+        assert_eq!(inbox.drain(), ["c", "a", "b"]);
+        inbox.push("x");
+        inbox.push("y");
+        inbox.reorder_pending(&["y".into()]);
+        assert_eq!(inbox.drain(), ["y", "x"], "an unlisted text keeps the back");
     }
 
     #[test]

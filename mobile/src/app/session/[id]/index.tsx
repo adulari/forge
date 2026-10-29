@@ -10,7 +10,7 @@
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router, useIsFocused, useNavigation } from "expo-router";
-import { ChevronDown, ChevronUp, Clock, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
+import { ChevronDown, ChevronUp, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -30,7 +30,7 @@ import { Composer } from "../../../components/chat/Composer";
 import { MessageActionsMenu } from "../../../components/chat/MessageActionsMenu";
 import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
 import { StreamingAnswer, TurnActivity } from "../../../components/chat/LiveTurn";
-import { MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
+import { displayMessageText, MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
 import { ToolCallRow } from "../../../components/chat/ToolCallRow";
 import { ToolGroupRow } from "../../../components/chat/ToolGroupRow";
 import { TurnFooter } from "../../../components/chat/TurnFooter";
@@ -41,9 +41,9 @@ import { foldToolGroups, GroupMemo, type FoldedEntry, type ToolGroupEntry } from
 import { withTurnFooters } from "../../../lib/turnFooter";
 import { useAppearancePreferences } from "../../../lib/appearancePreferences";
 import { fillerHistoryRows } from "../../../lib/transcriptFiller";
+import { QueueStrip } from "../../../components/chat/QueueStrip";
 import { SubagentStrip } from "../../../components/session/SubagentStrip";
 import { BoundedList } from "../../../components/ds/BoundedList";
-import { Chip } from "../../../components/ds/Chip";
 import { EmptyState } from "../../../components/ds/EmptyState";
 import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
@@ -52,6 +52,9 @@ import { answerAlreadyShown, historyHasRealContentSince, shouldRetryEmptyHistory
 import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
 import { reconcilePendingMessages, unqueuedPendingMessages } from "../../../lib/sessionReconciler";
 import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
+import { collapsePrompts } from "../../../lib/promptRecall";
+import { type FollowUpMode } from "../../../lib/followUp";
+import { useFollowUpSetting } from "../../../lib/useFollowUpSetting";
 import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessionAgents, useSessions } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
@@ -274,7 +277,7 @@ export function SessionChat() {
   const latestSeqRef = useRef(-1);
 
   const handleSend = useCallback(
-    (text: string, attachments: SentAttachment[]): boolean => {
+    (text: string, attachments: SentAttachment[], mode: FollowUpMode = "steer"): boolean => {
       const id = `p${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
       // Only uploaded (path-bearing) attachments can ride the wire — correlate this exact send's
@@ -282,8 +285,11 @@ export function SessionChat() {
       const withPath = attachments
         .filter((a): a is SentAttachment & { path: string } => a.path != null)
         .map((a) => ({ path: a.path, image: a.image }));
-      if (send({ kind: "prompt", text, attachments: withPath })) {
-        setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
+      // A side question's answer is a card, not a transcript row, so its text never gets a bubble
+      // that no history row would ever claim.
+      const sideQuestion = /^\/(btw|side)(\s|$)/i.test(text);
+      if (send({ kind: mode === "queue" ? "queue" : "prompt", text, attachments: withPath })) {
+        if (!sideQuestion) setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
         return true;
       }
       // Socket closed between the `online` render and here (race window). Fall through to
@@ -306,20 +312,6 @@ export function SessionChat() {
     if (!send({ kind: "interrupt" })) setPendingInterrupt(true);
   }, [send]);
 
-  const handleDequeue = useCallback(
-    (index: number, text: string) => {
-      if (!online) return;
-      send({ kind: "dequeue", index, text });
-      haptics.select();
-    },
-    [online, send],
-  );
-
-  const removeQueuedOffline = useCallback((index: number) => {
-    setOfflineQueue((prev) => prev.filter((_, i) => i !== index));
-    haptics.select();
-  }, []);
-
   // ---------------------------------------------------------------------
   // Timeline construction (ARCHITECTURE §4.1.4)
   // ---------------------------------------------------------------------
@@ -330,6 +322,18 @@ export function SessionChat() {
     // PWA renders every row, styling "ui" as a note). Filtering to one drops the conversation.
     return pages.flat();
   }, [historyQuery.data]);
+
+  const followUp = useFollowUpSetting();
+  const recallPrompts = useMemo(
+    () =>
+      collapsePrompts(
+        historyRows
+          .filter((row) => row.role === "user" && row.kind !== "nudge" && row.visibility === "llm")
+          .map(displayMessageText)
+          .reverse(),
+      ),
+    [historyRows],
+  );
 
   useEffect(() => {
     latestSeqRef.current = historyRows[0]?.seq ?? -1;
@@ -870,26 +874,14 @@ export function SessionChat() {
       </View>
 
       {hasPending ? (
-        <View style={[styles.pendingRow, { borderTopColor: tokens.border }]}>
-          {/* Tapping a queued chip sends `dequeue` (index+text echoed) so the daemon can reject a
-           * stale tap after the queue shifted. */}
-          {queued.map((text, i) => (
-            // A server-queued prompt is also in the turn's steer inbox: it reaches the model at
-            // the next tool boundary (or starts the next turn if the current one ends first).
-            <Chip key={`q${i}`} label={`⚡ ${text}`} onPress={() => handleDequeue(i, text)} />
-          ))}
-          {offlineQueue.map((q, i) => (
-            // Deliberately NOT `selected` (ember/accent) — this is a normal "will send on
-            // reconnect" queue state, not an error, and the message itself already rendered as
-            // a normal sent bubble via `pendingSent` above. Calm ink3 + a clock glyph instead.
-            <Chip
-              key={`o${i}`}
-              label={`${q.text} (offline)`}
-              icon={<Clock size={13} strokeWidth={1.75} color={tokens.ink3} />}
-              onPress={() => removeQueuedOffline(i)}
-            />
-          ))}
-        </View>
+        <QueueStrip
+          queued={queued}
+          offline={offlineQueue}
+          online={online}
+          canReorder={followUp.supported}
+          onOfflineChange={setOfflineQueue}
+          onDropped={(text) => setPendingSent((prev) => prev.filter((p) => p.text !== text))}
+        />
       ) : null}
 
       <CardSlot />
@@ -919,7 +911,9 @@ export function SessionChat() {
           model={snapshot?.model ?? null}
           modelPinned={snapshot?.model_pinned}
           effort={snapshot?.effort ?? null}
+          temper={snapshot?.temper ?? null}
           onSend={handleSend}
+          recallPrompts={recallPrompts}
           onInterrupt={handleInterrupt}
         />
       )}
@@ -986,14 +980,6 @@ const styles = StyleSheet.create({
   },
   responseNav: { position: "absolute", bottom: 68, alignSelf: "center", minHeight: 44, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space4, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth },
   responseButton: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
-  pendingRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: space.space8,
-    paddingHorizontal: space.space16,
-    paddingTop: space.space8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
 });
 
 // Desktop/web: the session layout keeps this segment mounted itself (SegmentKeepAlive), so the

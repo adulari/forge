@@ -1,6 +1,6 @@
 //! Readline editing on top of the pure [`handle_key`]: a kill ring fed by Ctrl+K / Ctrl+U /
 //! Ctrl+W (Ctrl+Y yanks the latest kill, Alt+Y right after cycles to older ones) and an undo stack
-//! for Ctrl+_. Consecutive kills join one ring entry and a run of typing undoes as one step, the
+//! for Ctrl+_ with Alt+_ to redo. Consecutive kills join one ring entry and a run of typing undoes as one step, the
 //! way readline and Claude Code behave.
 
 use super::*;
@@ -30,6 +30,7 @@ struct YankSpan {
 pub struct InputEditState {
     ring: Vec<String>,
     undo: Vec<(String, usize)>,
+    redo: Vec<(String, usize)>,
     yank: Option<YankSpan>,
     last: Option<LastEdit>,
     /// `(len, cursor)` as the last edit left the line. Anything else changed it since (history
@@ -43,6 +44,7 @@ impl InputEditState {
     }
 
     fn push_undo(&mut self, text: String, cursor: usize) {
+        self.redo.clear();
         if self.undo.len() == UNDO_MAX {
             self.undo.remove(0);
         }
@@ -97,6 +99,10 @@ impl App {
                 self.undo_edit();
                 return InputOutcome::Editing;
             }
+            KeyKind::RedoEdit => {
+                self.redo_edit();
+                return InputOutcome::Editing;
+            }
             KeyKind::Yank => {
                 self.yank();
                 return InputOutcome::Editing;
@@ -113,6 +119,7 @@ impl App {
         let outcome = handle_key(&mut self.input, &mut self.input_cursor, key);
         if let InputOutcome::Submit(_) = outcome {
             self.input_edit.undo.clear();
+            self.input_edit.redo.clear();
             self.input_edit.yank = None;
             self.input_edit.last = None;
             return outcome;
@@ -174,7 +181,20 @@ impl App {
         let Some((text, cursor)) = self.input_edit.undo.pop() else {
             return false;
         };
-        self.input = text;
+        let current = (std::mem::replace(&mut self.input, text), self.input_cursor);
+        self.input_edit.redo.push(current);
+        self.input_cursor = cursor.min(self.input.len());
+        self.finish_edit(LastEdit::Other);
+        true
+    }
+
+    /// Alt+_: put back the edit the last Ctrl+_ took off. Any new edit forgets what was undone.
+    pub fn redo_edit(&mut self) -> bool {
+        let Some((text, cursor)) = self.input_edit.redo.pop() else {
+            return false;
+        };
+        let current = (std::mem::replace(&mut self.input, text), self.input_cursor);
+        self.input_edit.undo.push(current);
         self.input_cursor = cursor.min(self.input.len());
         self.finish_edit(LastEdit::Other);
         true
@@ -295,6 +315,28 @@ mod tests {
         app.edit_key(KeyKind::Char('x'));
         app.edit_key(KeyKind::YankPop);
         assert_eq!(app.input, "a bx");
+    }
+
+    #[test]
+    fn redo_puts_back_what_undo_took_off_until_a_new_edit() {
+        let mut app = App::default();
+        typed(&mut app, "fix the bug");
+        app.edit_key(KeyKind::KillLineBack);
+        assert!(!app.redo_edit(), "nothing was undone yet");
+        app.edit_key(KeyKind::UndoEdit);
+        assert_eq!(app.input, "fix the bug");
+        app.edit_key(KeyKind::RedoEdit);
+        assert_eq!(app.input, "");
+        app.edit_key(KeyKind::UndoEdit);
+        app.edit_key(KeyKind::UndoEdit);
+        assert_eq!(app.input, "fix the");
+        app.edit_key(KeyKind::RedoEdit);
+        assert_eq!(app.input, "fix the bug");
+        assert_eq!(app.input_cursor, 11);
+        app.edit_key(KeyKind::UndoEdit);
+        app.edit_key(KeyKind::Char('!'));
+        assert!(!app.redo_edit(), "a new edit forgets what was undone");
+        assert_eq!(app.input, "fix the!");
     }
 
     #[test]

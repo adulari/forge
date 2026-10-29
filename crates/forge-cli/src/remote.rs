@@ -871,6 +871,20 @@ pub enum RemoteInput {
     /// running turn at its next step, so a peer's follow-up cannot act as a steer. While idle it
     /// starts a turn immediately, exactly like [`RemoteInput::Prompt`].
     FollowUp { text: String },
+    /// The app's "queue, don't steer" send: like a [`RemoteInput::Prompt`] typed mid-turn, but the
+    /// text only waits behind the running turn and is never offered to it. While idle it starts a
+    /// turn immediately, exactly like a prompt.
+    Queue {
+        text: String,
+        #[serde(default)]
+        attachments: Vec<PromptAttachment>,
+    },
+    /// Move ONE queued prompt to position `to` in [`Snapshot::queued`]. `index` + `text` echo the
+    /// row the client rendered, so a queue that shifted under the tap is detected and dropped.
+    QueueMove { index: u64, text: String, to: u64 },
+    /// Run ONE queued prompt next: put it at the head of the queue and stop the running turn, as
+    /// Esc does in the terminal (`index` + `text` as on [`RemoteInput::QueueMove`]).
+    QueueSendNow { index: u64, text: String },
 }
 
 /// One message-correlated attachment riding a [`RemoteInput::Prompt`] (v7.1) — the client's own
@@ -2504,6 +2518,38 @@ mod tests {
         assert!(
             serde_json::from_str::<RemoteInput>(r#"{"kind":"dequeue","index":0,"text":"x"}"#)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn queue_inputs_parse_and_are_seq_free() {
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"queue","text":"later"}"#).unwrap(),
+            RemoteInput::Queue {
+                text: "later".into(),
+                attachments: Vec::new()
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(
+                r#"{"kind":"queue_move","index":2,"text":"c","to":0}"#
+            )
+            .unwrap(),
+            RemoteInput::QueueMove {
+                index: 2,
+                text: "c".into(),
+                to: 0
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(
+                r#"{"kind":"queue_send_now","index":1,"text":"b"}"#
+            )
+            .unwrap(),
+            RemoteInput::QueueSendNow {
+                index: 1,
+                text: "b".into()
+            }
         );
     }
 

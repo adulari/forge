@@ -9,67 +9,10 @@
 // skills autocomplete and highlight too.
 import { useMemo } from "react";
 
+import { BUILTIN_COMMANDS } from "./builtinCommands";
 import { useSkills } from "./queries";
 
-/**
- * The complete list of built-in slash commands the daemon accepts, each prefixed with `/`.
- * Derived from the daemon's `COMMANDS` registry (`crates/forge-tui/src/commands.rs`) plus the
- * two always-injected built-in skill-commands (`/orchestrate`, `/rust`). De-duplicated, with
- * the most frequently used ones surfaced first (mirrors the registry's `/help` display order).
- */
-export const BUILTIN_COMMANDS: string[] = [
-  // Session / model basics (most frequent first)
-  "/help",
-  "/keys",
-  "/mode",
-  "/model",
-  "/models",
-  "/new",
-  "/resume",
-  "/sessions",
-  "/config",
-  "/compact",
-  "/uncompact",
-  "/commit",
-  "/clear",
-  "/undo",
-  "/rewind",
-  "/checkpoint",
-  "/checkpoints",
-  "/usage",
-  // Authoring / planning
-  "/plan",
-  "/execute",
-  "/goal",
-  "/pr",
-  "/loop",
-  "/effort",
-  "/subagents",
-  "/remember",
-  "/memories",
-  // Inspection / tooling
-  "/assay",
-  "/lattice",
-  "/mcp",
-  "/mesh",
-  "/remote",
-  "/self-mcp",
-  "/thinking",
-  "/image",
-  "/init",
-  "/copy",
-  "/replay",
-  "/duel",
-  "/workflow",
-  "/voice",
-  "/statusline",
-  "/quit",
-  // Built-in skill-commands injected by the forge-skills catalog (always present unless a
-  // user/project command of the same name overrides them — the bare invocation still resolves
-  // to the builtin, so they belong in the known set).
-  "/orchestrate",
-  "/rust",
-];
+export { BUILTIN_COMMANDS, skillInvoked } from "./builtinCommands";
 
 export interface SkillCommand {
   /** The slash-invocation form, e.g. `/agent-creator`. */

@@ -27,10 +27,13 @@ pub(crate) fn queue_prompt(
     app: &mut forge_tui::App,
     line: String,
     images: Vec<ImageAttachment>,
+    offer_to_turn: bool,
 ) {
     let with_images = !images.is_empty();
     let steered = if with_images {
         app.stash_queued_images(&line, images);
+        false
+    } else if !offer_to_turn {
         false
     } else {
         steer.push_behind(line.clone(), prompts_ahead(queue))
@@ -100,8 +103,9 @@ mod tests {
             &mut app,
             "what is this".into(),
             vec![img()],
+            true,
         );
-        queue_prompt(&mut queue, &steer, &mut app, "plain".into(), vec![]);
+        queue_prompt(&mut queue, &steer, &mut app, "plain".into(), vec![], true);
         assert_eq!(queue, ["what is this", "plain"]);
         assert!(
             steer.drain().is_empty(),
@@ -136,7 +140,7 @@ mod tests {
 
         let mut drawn = forge_tui::App::default();
         drawn.queue_visible = true;
-        queue_prompt(&mut queue, &steer, &mut drawn, "one".into(), vec![]);
+        queue_prompt(&mut queue, &steer, &mut drawn, "one".into(), vec![], true);
         crate::cli::commands::run::queue_command(&mut queue, &mut drawn, "/compact");
         assert_eq!(drawn.queued, ["one", "/compact"]);
         assert!(
@@ -146,10 +150,31 @@ mod tests {
 
         let mut mirrored = forge_tui::App::default();
         let mut queue = Vec::new();
-        queue_prompt(&mut queue, &steer, &mut mirrored, "one".into(), vec![]);
+        queue_prompt(
+            &mut queue,
+            &steer,
+            &mut mirrored,
+            "one".into(),
+            vec![],
+            true,
+        );
         assert!(
             flushed_text(&mut mirrored).contains("queued (1 pending)"),
             "a headless mirror has no band, so it keeps announcing the queue"
+        );
+    }
+
+    #[test]
+    fn a_queue_only_prompt_waits_behind_the_turn_without_being_offered_to_it() {
+        let steer = forge_core::steer::SteerInbox::default();
+        let mut app = forge_tui::App::default();
+        let mut queue = Vec::new();
+        queue_prompt(&mut queue, &steer, &mut app, "later".into(), vec![], false);
+        queue_prompt(&mut queue, &steer, &mut app, "now".into(), vec![], true);
+        assert_eq!(queue, ["later", "now"]);
+        assert!(
+            steer.drain().is_empty(),
+            "a steered prompt may not overtake the queue-only one ahead of it"
         );
     }
 
@@ -158,8 +183,8 @@ mod tests {
         let steer = forge_core::steer::SteerInbox::default();
         let mut app = forge_tui::App::default();
         let mut queue = Vec::new();
-        queue_prompt(&mut queue, &steer, &mut app, "first".into(), vec![]);
-        queue_prompt(&mut queue, &steer, &mut app, "second".into(), vec![]);
+        queue_prompt(&mut queue, &steer, &mut app, "first".into(), vec![], true);
+        queue_prompt(&mut queue, &steer, &mut app, "second".into(), vec![], true);
 
         assert!(pull_back_queued(&mut queue, &steer, &mut app));
         assert_eq!(queue, ["first"]);
@@ -192,6 +217,7 @@ mod tests {
             &mut app,
             "what is this".into(),
             vec![img()],
+            true,
         );
         assert!(pull_back_queued(&mut queue, &steer, &mut app));
         let (text, images) = app.resolve_paste_blocks(app.input.clone());

@@ -27,11 +27,25 @@ fn is_undo_chord(k: &KeyEvent) -> bool {
         }
 }
 
+/// Alt+_ (redo what Ctrl+_ undid). Ctrl+Shift+_ cannot be told apart from the undo chord on a
+/// legacy terminal, so redo takes the Alt form, which every terminal reports as ESC then `_`.
+fn is_redo_chord(k: &KeyEvent) -> bool {
+    alt_only(k)
+        && match k.code {
+            KeyCode::Char('_') => true,
+            KeyCode::Char('-') => k.modifiers.contains(KeyModifiers::SHIFT),
+            _ => false,
+        }
+}
+
 /// Map a key press to its built-in meaning. `ctrl_r_reasoning` is whether the built-in Ctrl+R
 /// still belongs to the reasoning toggle (it is released once that action is rebound).
 pub(super) fn static_key(k: &KeyEvent, ctrl_r_reasoning: bool) -> Option<KeyKind> {
     if is_undo_chord(k) {
         return Some(KeyKind::UndoEdit);
+    }
+    if is_redo_chord(k) {
+        return Some(KeyKind::RedoEdit);
     }
     let key = match k.code {
         // AltGr arrives as Ctrl+Alt on Windows: a non-letter it produces (`@`, `€`, `ł`) is text.
@@ -145,6 +159,14 @@ mod tests {
             ctrl_char('-'),
             None,
             "plain Ctrl+- stays the terminal's zoom"
+        );
+        assert_eq!(
+            press(KeyCode::Char('_'), KeyModifiers::ALT),
+            Some(KeyKind::RedoEdit)
+        );
+        assert_eq!(
+            press(KeyCode::Char('-'), KeyModifiers::ALT | KeyModifiers::SHIFT),
+            Some(KeyKind::RedoEdit)
         );
     }
 

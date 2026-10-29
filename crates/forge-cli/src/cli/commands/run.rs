@@ -94,6 +94,8 @@ mod btw;
 mod busy_commands;
 mod busy_queue;
 mod child_view;
+mod queue_edit;
+pub(crate) use queue_edit::STALE_QUEUE_EDIT_NOTE;
 mod queue_images;
 mod trust_hint;
 pub(crate) use busy_commands::*;
@@ -3251,7 +3253,14 @@ pub(crate) async fn run_chat_tui(
                         }
                     } else {
                         prompt_history.record(&line);
-                        queue_prompt(&mut queued_prompts, &steer, &mut app, line, imgs);
+                        queue_prompt(
+                            &mut queued_prompts,
+                            &steer,
+                            &mut app,
+                            line,
+                            imgs,
+                            tui_config.chat.follow_up.steers(),
+                        );
                     }
                 }
                 dirty = true;
@@ -3873,7 +3882,32 @@ pub(crate) async fn run_chat_tui(
                 // fleet-addressable), but `RemoteInput` is one shared enum, so this normalizes
                 // Steer the same way regardless: while idle there's no backlog to outrank, so it
                 // behaves exactly like a normal Prompt.
+                let mut queue_only = false;
                 let input = match input {
+                    remote::RemoteInput::QueueMove { index, text, to } => {
+                        if queue_edit::move_queued(&mut queued_prompts, &steer, index, &text, to) {
+                            app.set_queued(&queued_prompts);
+                        } else {
+                            push_remote_note(&mut remote_notes, STALE_QUEUE_EDIT_NOTE);
+                        }
+                        continue;
+                    }
+                    remote::RemoteInput::QueueSendNow { index, text } => {
+                        if !busy {
+                            continue;
+                        }
+                        if queue_edit::move_queued(&mut queued_prompts, &steer, index, &text, 0) {
+                            app.set_queued(&queued_prompts);
+                            remote::RemoteInput::Interrupt
+                        } else {
+                            push_remote_note(&mut remote_notes, STALE_QUEUE_EDIT_NOTE);
+                            continue;
+                        }
+                    }
+                    remote::RemoteInput::Queue { text, attachments } => {
+                        queue_only = true;
+                        remote::RemoteInput::Prompt { text, attachments }
+                    }
                     remote::RemoteInput::Steer { text } if busy && !is_command_line(&text) => {
                         prompt_history.record(&text);
                         steer.push_front(text.clone());
@@ -3981,15 +4015,22 @@ pub(crate) async fn run_chat_tui(
                                 }
                             } else {
                                 prompt_history.record(&text);
-                                steer.push_behind(
-                                    text.clone(),
-                                    queue_images::prompts_ahead(&queued_prompts),
-                                );
+                                if !queue_only {
+                                    steer.push_behind(
+                                        text.clone(),
+                                        queue_images::prompts_ahead(&queued_prompts),
+                                    );
+                                }
                                 queued_prompts.push(text.clone());
                                 app.set_queued(&queued_prompts);
                                 app.note(&format!(
-                                    "⏳ queued ({} pending) — sent at this turn's next step",
-                                    queued_prompts.len()
+                                    "⏳ queued ({} pending) — {}",
+                                    queued_prompts.len(),
+                                    if queue_only {
+                                        "runs when this turn finishes"
+                                    } else {
+                                        "sent at this turn's next step"
+                                    }
                                 ));
                             }
                         } else if let Some(rest) = text.strip_prefix("//") {
@@ -4481,8 +4522,12 @@ pub(crate) async fn run_chat_tui(
                     }
                     // Normalized away above (into a queue-front insert + `continue`, or a plain
                     // `Prompt`) before this match ever sees it.
-                    remote::RemoteInput::Steer { .. } | remote::RemoteInput::FollowUp { .. } => {
-                        unreachable!("Steer and FollowUp are normalized above")
+                    remote::RemoteInput::Steer { .. }
+                    | remote::RemoteInput::FollowUp { .. }
+                    | remote::RemoteInput::Queue { .. }
+                    | remote::RemoteInput::QueueMove { .. }
+                    | remote::RemoteInput::QueueSendNow { .. } => {
+                        unreachable!("queue inputs are normalized above")
                     }
                 }
             }

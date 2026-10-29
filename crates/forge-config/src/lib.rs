@@ -17,6 +17,7 @@ mod agent_builtins;
 pub mod agents;
 pub mod browser;
 pub mod cc_rules;
+pub mod chat;
 pub mod codemode;
 mod commit_policy;
 mod compact_model;
@@ -195,6 +196,9 @@ pub struct Config {
     /// Attach the browser tool to an existing logged-in browser (`[browser] attach`).
     #[serde(default)]
     pub browser: browser::BrowserConfig,
+    /// What Enter does with a prompt typed mid-turn (`[chat] follow_up = "steer" | "queue"`).
+    #[serde(default)]
+    pub chat: chat::ChatConfig,
     /// Public preview URLs for agent-started dev servers (`shell_job` expose).
     #[serde(default)]
     pub preview: preview::PreviewConfig,
@@ -2933,6 +2937,7 @@ impl Default for Config {
             statusline: StatuslineConfig::default(),
             notifications: notifications::NotificationsConfig::default(),
             browser: browser::BrowserConfig::default(),
+            chat: chat::ChatConfig::default(),
             preview: preview::PreviewConfig::default(),
             codemode: codemode::CodemodeConfig::default(),
             pr: pr::PrConfig::default(),

@@ -331,6 +331,7 @@ impl DriverState {
                         &mut self.app,
                         line,
                         imgs,
+                        self.follow_up.steers(),
                     );
                 }
             } else {
