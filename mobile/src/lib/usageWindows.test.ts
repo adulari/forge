@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { UsageProvider, UsageQuota } from "./api";
-import { buildProviderBlocks, priceLabel, quotaSummary } from "./usageWindows";
+import { buildProviderBlocks, priceLabel, quotaSummary, resetsInLabel } from "./usageWindows";
 
 const usage = (provider: string, kind: UsageProvider["kind"], costUsd: number): UsageProvider => ({
   provider,
@@ -53,5 +53,16 @@ describe("buildProviderBlocks", () => {
     const [api] = buildProviderBlocks([usage("inferhub", "api", 0)], []);
     expect(api.quotas).toEqual([]);
     expect(priceLabel(api)).toBe("No price");
+  });
+});
+
+describe("resetsInLabel", () => {
+  it("reads the time left in the largest two units", () => {
+    expect(resetsInLabel(null, 0)).toBeNull();
+    expect(resetsInLabel(4 * 3600 + 60, 0)).toBe("4h 1m");
+    expect(resetsInLabel(2 * 86400 + 3 * 3600, 0)).toBe("2d 3h");
+    expect(resetsInLabel(12 * 60, 0)).toBe("12m");
+    expect(resetsInLabel(10, 0)).toBe("under a minute");
+    expect(resetsInLabel(-50, 0)).toBe("under a minute");
   });
 });

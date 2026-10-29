@@ -857,7 +857,7 @@ fn a_coordinator_card_says_what_its_dispatch_is_doing() {
 fn a_worker_card_carries_its_dispatch_chip() {
     let mut app = board(running());
     let s = screen(&mut app, 160, 40);
-    assert!(s.contains("◆ 2/3 gpt-5"), "{s}");
+    assert!(s.contains("◆ 2/3 ◍ gpt-5"), "{s}");
 }
 
 #[test]

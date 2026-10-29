@@ -3,21 +3,27 @@
 // session with a status-dot badge, a usage-pace ring column, settings, and the
 // expand affordance. `Sidebar`'s dense-row twin — same session data, icon density.
 import { router, usePathname } from "expo-router";
-import { Bell, BellDot, Flame, Gauge, History, Plus, Search, Settings2, SquareChevronRight } from "lucide-react-native";
+import { Bell, BellDot, Flame, Gauge, Globe, History, Plus, Search, Settings2, SquareChevronRight } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 
+import type { SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { totalUnseen, useNoticesStore } from "../../lib/notices/store";
 import { openSession } from "../../lib/nav";
 import { requestSessionPrewarm, useSessionActivationOverride } from "../../lib/sessionPrewarm";
 import { usePrefetchSessionHistory, useSessions } from "../../lib/queries";
+import { providerIdOf } from "../../lib/providerFamily";
+import { failedTurn, sessionStateWord } from "../../lib/sidebarModel";
 import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useShortcutLabel } from "../../lib/shortcuts";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space, statusDotColor, type StatusDotState } from "../../theme/tokens";
+import { hexToRgba, radii, space, statusDotColor, type StatusDotState } from "../../theme/tokens";
+import { ProviderGlyph } from "../ds/ProviderGlyph";
+import { useClockSeconds } from "../ds/relativeClock";
 import { usePalette } from "../overlay/CommandPalette";
-import { useProviderPace, UsageRing } from "./UsageRing";
+import { useWorkbench } from "../workbench/WorkbenchProvider";
+import { ringSummary, useProviderPace, UsageRing } from "./UsageRing";
 
 const ICON_SIZE = 30;
 
@@ -51,37 +57,54 @@ function RailIconButton({
   );
 }
 
+type RailTint = "working" | "needs-you" | "done" | "failed" | "idle";
+
+function railTint(row: Pick<SessionRow, "busy" | "waiting" | "last_turn_outcome">): RailTint {
+  if (row.waiting) return "needs-you";
+  if (row.busy) return "working";
+  if (failedTurn(row)) return "failed";
+  return row.last_turn_outcome === "success" ? "done" : "idle";
+}
+
 function SessionIconButton({
   title,
-  state,
-  worktree,
+  row,
   selected,
   onPress,
   onPressIn,
   onHoverIn,
 }: {
   title: string;
-  state: StatusDotState;
-  worktree: boolean;
+  row: SessionRow;
   selected: boolean;
   onPress: () => void;
   onPressIn?: () => void;
   onHoverIn?: () => void;
 }) {
   const tokens = useTokens();
-  const glyphColor = state === "idle" ? tokens.ink4 : selected ? tokens.ink : tokens.ink2;
+  const tint = railTint(row);
+  const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
+  const tintColor =
+    tint === "needs-you" ? tokens.danger : tint === "working" ? tokens.accent : tint === "done" ? tokens.success : tint === "failed" ? tokens.danger : null;
+  const glyphColor = tint === "idle" ? tokens.ink4 : selected ? tokens.ink : tokens.ink2;
   return (
     <Pressable
       onPress={onPress}
       onPressIn={onPressIn}
       onHoverIn={onHoverIn}
       accessibilityRole="button"
-      accessibilityLabel={`${title}, ${state}${worktree ? ", worktree" : ""}`}
-      style={[styles.sessionButton, selected && { backgroundColor: tokens.bg3 }]}
+      accessibilityLabel={`${title}, ${sessionStateWord(row)}${row.worktree ? ", worktree" : ""}`}
+      style={[
+        styles.sessionButton,
+        tintColor && { backgroundColor: hexToRgba(tintColor, tint === "done" ? 0.1 : 0.16) },
+        selected && { backgroundColor: tokens.bg3, borderWidth: 1, borderColor: tokens.borderStrong },
+      ]}
     >
-      <Flame size={13} strokeWidth={1.75} color={worktree ? tokens.accent : glyphColor} />
+      <ProviderGlyph provider={providerIdOf(row)} size={14} color={row.worktree ? tokens.accent : glyphColor} accessibilityLabel={null} />
       {state !== "idle" ? (
         <View style={[styles.badge, { backgroundColor: statusDotColor(state, tokens), borderColor: tokens.bg1 }]} />
+      ) : tint === "failed" ? (
+        <View style={[styles.badge, { backgroundColor: tokens.danger, borderColor: tokens.bg1 }]} />
       ) : null}
     </Pressable>
   );
@@ -110,6 +133,9 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
   const activationOverride = useSessionActivationOverride();
   const selectedSessionId = activationOverride ?? pathname.match(/^\/session\/([^/]+)/)?.[1];
   const { rings } = useProviderPace();
+  const nowSec = useClockSeconds();
+  const workbench = useWorkbench();
+  const browserSessionId = workbench.focusedSessionId ?? selectedSessionId;
 
   return (
     <View style={styles.rail}>
@@ -130,18 +156,23 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
         accessibilityLabel="Forge a new session"
         accessibilityHint={newSessionHint}
       />
+      {browserSessionId ? (
+        <RailIconButton
+          icon={<Globe size={14} strokeWidth={1.75} color={tokens.ink2} />}
+          onPress={() => workbench.toggleSurface({ kind: "preview", sessionId: browserSessionId })}
+          accessibilityLabel="Browser preview"
+        />
+      ) : null}
       <View style={[styles.divider, { backgroundColor: tokens.border }]} />
 
       <ScrollView style={styles.sessionList} contentContainerStyle={styles.sessionListContent} showsVerticalScrollIndicator={false}>
         {rows.map(({ row, serverId }) => {
           const title = row.title || `session ${row.id.slice(0, 8)}`;
-          const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
           return (
             <SessionIconButton
               key={row.id}
               title={title}
-              state={state}
-              worktree={!!row.worktree}
+              row={row}
               selected={row.id === selectedSessionId}
               onPress={() => {
                 if (serverId) setActive(serverId);
@@ -167,7 +198,14 @@ export function IconRail({ onExpand, onToggleDock, dockOpen = false }: IconRailP
               style={styles.ringColumn}
             >
               {rings.map((ring) => (
-                <UsageRing key={ring.provider} pct={ring.pct} accessibilityLabel={`${ring.provider} usage ${ring.pct}%`} />
+                <UsageRing
+                  key={ring.provider}
+                  pct={ring.pct}
+                  size={22}
+                  provider={ring.provider}
+                  tooltip={ringSummary(ring, nowSec)}
+                  accessibilityLabel={ringSummary(ring, nowSec)}
+                />
               ))}
             </Pressable>
           </>

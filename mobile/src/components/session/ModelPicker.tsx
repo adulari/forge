@@ -10,6 +10,7 @@ import { monoFamily, type as typeScale } from "../../theme/typography";
 import { Badge } from "../ds/Badge";
 import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
+import { ProviderGlyph } from "../ds/ProviderGlyph";
 import { ListRow } from "../ds/ListRow";
 import { SearchField } from "../ds/SearchField";
 import { Sheet } from "../ds/Sheet";
@@ -120,6 +121,7 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
               <ModelOption
                 key={`${provider}:${model.id}`}
                 title={model.name}
+                providerId={`${provider}::${model.id}`}
                 subtitle={`${provider} · ${model.id}`}
                 selected={value === model.id}
                 health={model.health ? "benched" : "ready"}
@@ -157,7 +159,7 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
   );
 }
 
-function ModelOption({ title, subtitle, selected, health, onPress }: { title: string; subtitle: string; selected: boolean; health?: "ready" | "benched"; onPress: () => void }) {
+function ModelOption({ title, subtitle, providerId, selected, health, onPress }: { title: string; subtitle: string; providerId?: string; selected: boolean; health?: "ready" | "benched"; onPress: () => void }) {
   const tokens = useTokens();
   return (
     <Pressable
@@ -173,6 +175,7 @@ function ModelOption({ title, subtitle, selected, health, onPress }: { title: st
         },
       ]}
     >
+      {providerId ? <ProviderGlyph provider={providerId} size={16} color={tokens.ink2} accessibilityLabel={null} /> : null}
       <View style={styles.optionText}>
         <View style={styles.optionTitle}>
           <Text style={[typeScale.body, styles.optionName, { color: tokens.ink }]} numberOfLines={1}>{title}</Text>

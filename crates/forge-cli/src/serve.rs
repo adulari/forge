@@ -532,6 +532,9 @@ struct SessionRow {
     /// `dispatch_id` / `dispatch_role` / `dispatch_index` (additive; null outside a dispatch).
     #[serde(flatten)]
     dispatch: crate::serve_dispatch::SessionDispatchFields,
+    /// `provider` / `parent_id` / `diff_added` / `diff_removed` / `branch` (additive).
+    #[serde(flatten)]
+    meta: serve_session_meta::SessionMetaFields,
 }
 
 /// Fleet ordering: waiting-on-decision first (they need a human NOW), then busy, then idle —
@@ -1199,6 +1202,7 @@ mod serve_mcp;
 mod serve_models;
 mod serve_projects;
 mod serve_providers;
+mod serve_session_meta;
 mod serve_usage;
 mod serve_workflows;
 use serve_assets::*;
@@ -1241,6 +1245,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             read_only: false,
             terminal: false,
             dispatch: Default::default(),
+            meta: Default::default(),
         });
     }
     let store = state.store.clone();
@@ -1276,11 +1281,13 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             read_only: local.control_url.is_none(),
             terminal: true,
             dispatch: Default::default(),
+            meta: Default::default(),
         });
     }
     for row in &mut rows {
         row.dispatch = crate::serve_dispatch::session_dispatch_fields(&state.store, &row.id);
     }
+    serve_session_meta::annotate(&state.store, &mut rows).await;
     sort_session_rows(&mut rows);
     json_response(&rows)
 }
@@ -6700,6 +6707,7 @@ pub(crate) mod tests {
             read_only: false,
             terminal: false,
             dispatch: Default::default(),
+            meta: Default::default(),
         };
         let mut rows = vec![
             mk("new-idle", false, 30),
@@ -6765,6 +6773,7 @@ pub(crate) mod tests {
                 read_only: false,
                 terminal,
                 dispatch: Default::default(),
+                meta: Default::default(),
             };
         // A terminal session that is BOTH waiting and newer than every daemon-hosted session must
         // still sort last. It is drivable now, but the daemon publishes no `waiting` state for it

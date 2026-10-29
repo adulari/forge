@@ -19,19 +19,23 @@ import Animated, {
 
 import { ApiError, type MergeDirtyConflictResponse, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
+import { useHasDraft } from "../../lib/drafts";
+import { providerIdOf } from "../../lib/providerFamily";
+import { diffLabel, failedTurn, projectAccent, projectName } from "../../lib/sidebarModel";
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession, usePrefetchSessionHistory } from "../../lib/queries";
 import { transportForBaseUrl } from "../../lib/serverTargets";
 import { useOpenSession } from "../../lib/useScopedFleet";
-import { useTokens } from "../../theme/ThemeProvider";
+import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
 import { cardPadding, space, type StatusDotState } from "../../theme/tokens";
-import { formatCost, formatCwd, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
+import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { Badge } from "../ds/Badge";
 import { Card } from "../ds/Card";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
+import { ProviderGlyph } from "../ds/ProviderGlyph";
 import { RelativeTime } from "../ds/RelativeTime";
 import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
@@ -107,6 +111,12 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const hasWorktree = !!row.worktree;
   const title = row.title || `session ${row.id.slice(0, 8)}`;
   const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
+  const { scheme } = useTheme();
+  const hasDraft = useHasDraft(row.id);
+  const failed = failedTurn(row);
+  const providerId = providerIdOf(row);
+  const project = projectName(row.cwd);
+  const diff = diffLabel(row.diff_added, row.diff_removed);
   const actionCount = hasWorktree ? 3 : 1;
   const actionsWidth = ACTION_WIDTH * actionCount;
 
@@ -117,7 +127,6 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
     if (state === "waiting" && previousState.current !== "waiting") haptics.select();
     previousState.current = state;
   }, [state]);
-  const cwdLabel = formatCwd(row.cwd);
 
   const closeSwipe = useCallback(() => {
     translateX.value = reduced ? 0 : withSpring(0, springs.press);
@@ -284,12 +293,13 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                   onPress={goToSession}
                   onLongPress={openActions}
                   accessibilityRole={Platform.OS === "web" ? undefined : "button"}
-                  accessibilityLabel={`${title}, ${state}, ${row.cwd}`}
+                  accessibilityLabel={`${title}, ${state}${failed ? ", last turn failed" : ""}${hasDraft ? ", unsent draft" : ""}, ${row.cwd}`}
                   accessibilityState={{ selected }}
                   style={styles.cardPressable}
                 >
                   <View style={styles.row1}>
                     <StatusDot state={state} size={state === "idle" ? 7 : 8} />
+                    <ProviderGlyph provider={providerId} size={13} color={state === "idle" ? tokens.ink3 : tokens.ink2} />
                     <Text
                       style={[
                         styles.title,
@@ -303,6 +313,10 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                     >
                       {title}
                     </Text>
+                    {failed ? <Badge label="failed" tone="danger" /> : null}
+                    {hasDraft ? (
+                      <View accessibilityRole="image" accessibilityLabel="unsent draft" style={[styles.draftDot, { backgroundColor: tokens.accent }]} />
+                    ) : null}
                     {notDaemonHosted ? <Badge label="local" tone="outline" /> : null}
                     <SessionMetric row={row} state={state} />
                   </View>
@@ -323,8 +337,32 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                     ellipsizeMode="tail"
                       accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
                     >
-                      {row.waiting ? "needs a decision" : `${hostLabel} · ${transportLabel} · ${cwdLabel} · ${shortModelLabel(row.model)}`}
+                      {row.waiting ? "needs a decision" : `${hostLabel} · ${transportLabel} · ${shortModelLabel(row.model)}`}
                     </Text>
+                  {!row.waiting ? (
+                    <View style={styles.chips}>
+                      <View style={styles.chip}>
+                        <View style={[styles.swatch, { backgroundColor: projectAccent(project, scheme) }]} />
+                        <Text style={[styles.chipText, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
+                          {project}
+                        </Text>
+                      </View>
+                      {row.branch || hasWorktree ? (
+                        <View style={styles.chip}>
+                          <Text style={[styles.chipText, { color: hasWorktree ? tokens.accent : tokens.ink3 }]}>⑂</Text>
+                          <Text style={[styles.chipText, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
+                            {row.branch ?? (row.worktree ?? "").replace(/\/+$/, "").split("/").pop()}
+                          </Text>
+                          {diff ? (
+                            <>
+                              <View style={[styles.dirtyDot, { backgroundColor: tokens.warn }]} />
+                              <Text style={[styles.chipText, tabularNums, { color: tokens.success }]}>{diff}</Text>
+                            </>
+                          ) : null}
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : null}
                 </Pressable>
                 <IconButton
                   icon={
@@ -458,6 +496,11 @@ export const SessionCard = React.memo(SessionCardBase, (prev, next) => {
     a.waiting === b.waiting &&
     a.cost_usd === b.cost_usd &&
     a.model === b.model &&
+    a.provider === b.provider &&
+    a.branch === b.branch &&
+    a.diff_added === b.diff_added &&
+    a.diff_removed === b.diff_removed &&
+    a.last_turn_outcome === b.last_turn_outcome &&
     a.last_activity === b.last_activity
   );
 });
@@ -477,6 +520,12 @@ const styles = StyleSheet.create({
   title: { flex: 1, fontWeight: "600" },
   meta: { marginTop: 2, paddingRight: 36 },
   metric: { fontSize: 11, lineHeight: 15 },
+  chips: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.space8, marginTop: 4, paddingRight: 36 },
+  chip: { flexDirection: "row", alignItems: "center", gap: 4, maxWidth: "100%" },
+  chipText: { fontFamily: monoFamily.regular, fontSize: 10.5, lineHeight: 14 },
+  swatch: { width: 7, height: 7, borderRadius: 2 },
+  dirtyDot: { width: 4, height: 4, borderRadius: 2 },
+  draftDot: { width: 6, height: 6, borderRadius: 3 },
   sheetBody: { paddingHorizontal: space.space4, paddingBottom: space.space16, gap: space.space4 },
   fileRow: { paddingHorizontal: space.space16 },
 });

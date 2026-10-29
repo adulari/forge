@@ -36,6 +36,16 @@ describe("fleet row cache", () => {
     expect(peekFleetRows("https://host.example")).toBeUndefined();
   });
 
+  it("keeps the presentation metadata the sidebar and Fleet cards render", async () => {
+    const storage = memoryStorage();
+    const meta = { provider: "claude-cli", parent_id: "p", diff_added: 4, diff_removed: 1, branch: "main" };
+    rememberFleetRows("fany://h1", [row("a", meta)], storage);
+    await vi.advanceTimersByTimeAsync(2000);
+    resetFleetRowCacheForTests();
+    await loadFleetRows(["h1"], storage);
+    expect(peekFleetRows("fany://h1")?.[0]).toMatchObject(meta);
+  });
+
   it("persists debounced, projects away unknown fields, and seeds a fresh process", async () => {
     const storage = memoryStorage();
     rememberFleetRows("fany://h1", [row("a", { transcript: "secret prompt text" }), row("b")], storage);

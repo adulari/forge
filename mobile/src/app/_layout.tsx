@@ -40,6 +40,7 @@ import { DockHost } from "../components/shell/DockHost";
 import { IconRail } from "../components/shell/IconRail";
 import { QuickComposer } from "../components/shell/QuickComposer";
 import { Sidebar } from "../components/shell/Sidebar";
+import { useShellPrefs } from "../lib/shellPrefs";
 import { LayoutTip } from "../components/shell/LayoutTip";
 import { RAILLESS_ROUTES } from "../components/shell/railless";
 import { PaneGrid } from "../components/shell/SplitPanes";
@@ -72,7 +73,6 @@ import { monoFamily } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
 
 const SIDEBAR_COLLAPSED_KEY = "forge.sidebarCollapsed";
-const SIDEBAR_WIDTH = 232;
 const ICON_RAIL_WIDTH = 48;
 
 // Keep the native splash up until pairing state resolves (avoids a flash of the
@@ -156,6 +156,7 @@ function RootNavigator() {
   // below, gated on `isPaired && isExpanded`.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [quickComposerOpen, setQuickComposerOpen] = useState(false);
+  const sidebarWidth = useShellPrefs().sidebarWidth;
   const workbench = useWorkbench();
   const rightSurface = activeWorkbenchSurface(workbench.state, "right");
   const bottomSurface = activeWorkbenchSurface(workbench.state, "bottom");
@@ -250,7 +251,7 @@ function RootNavigator() {
   // The pane grid wraps the live route stack rather than replacing it (see SplitPanes.tsx), and
   // the terminal dock sits under the content column — beside the rail, per D Rail + Terminal,
   // not spanning the whole window.
-  const railWidth = sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH;
+  const railWidth = sidebarCollapsed ? ICON_RAIL_WIDTH : sidebarWidth;
   const detail = (
     <View style={styles.detailColumn}>
       {!railless ? <LayoutTip /> : null}

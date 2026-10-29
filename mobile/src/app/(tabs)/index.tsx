@@ -20,9 +20,12 @@ import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { TaskComposer } from "../../components/ds/TaskComposer";
+import { OfflineHosts } from "../../components/fleet/OfflineHosts";
+import { ProjectChips } from "../../components/fleet/ProjectChips";
 import { ServerScopePills } from "../../components/fleet/ServerScopePills";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { ServerScope } from "../../lib/auth";
+import { filterByProject, projectChips } from "../../lib/fleetProjects";
 import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useUsage } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -118,6 +121,7 @@ export function FleetScreen() {
   // here and never animate the spinner without a gesture.
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
+  const [project, setProject] = useState<string | null>(null);
   const [peek, setPeek] = useState<{ sessionId: string; serverId: string } | null>(null);
   const [composerText, setComposerText] = useState("");
   const newSessionHint = useShortcutLabel("session.new");
@@ -171,7 +175,13 @@ export function FleetScreen() {
   }, []);
 
   const data = useMemo(() => fleet.rows.map((item) => item.row), [fleet.rows]);
-  const filteredData = useMemo(() => filterSessions(data, "", needsYouOnly), [data, needsYouOnly]);
+  const chips = useMemo(() => projectChips(data), [data]);
+  // A project whose last session went away stops filtering, instead of leaving an empty list.
+  const activeProject = project && chips.some((chip) => chip.name === project) ? project : null;
+  const filteredData = useMemo(
+    () => filterByProject(filterSessions(data, "", needsYouOnly), activeProject),
+    [data, needsYouOnly, activeProject],
+  );
   const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
   const hasData = data.length > 0;
   const isFirstLoad = fleet.isLoading && !hasData;
@@ -252,6 +262,7 @@ export function FleetScreen() {
       <FleetTitle />
       {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
       <ServerScopePills />
+      <ProjectChips chips={chips} selected={activeProject} onSelect={setProject} />
       {showingLastKnown ? (
         <Text style={[typeScale.monoMeta, styles.lastKnown, { color: tokens.ink4 }]} accessibilityLiveRegion="polite">
           {fleet.isError ? "Last known fleet — host not reachable" : "Last known fleet — updating…"}
@@ -270,6 +281,7 @@ export function FleetScreen() {
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           ListEmptyComponent={emptyComponent}
+          ListFooterComponent={<OfflineHosts />}
           refreshing={manualRefreshing}
           onRefresh={onRefresh}
           contentContainerStyle={styles.listContent}

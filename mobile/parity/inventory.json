@@ -312,7 +312,7 @@
     "category": "behavior"
   },
   {
-    "file": "mobile/src/components/shell/Sidebar.tsx",
+    "file": "mobile/src/components/shell/SidebarSessionRow.tsx",
     "platform": "web/native",
     "reason": "the sidebar's right-click session menu is web/desktop-only (contextmenu has no touch equivalent); the rail itself only renders on the expanded desktop shell",
     "category": "behavior"
@@ -322,6 +322,12 @@
     "platform": "web/native",
     "reason": "Android delivers the soft keyboard's Enter as a submit, not a key press, so the newline is sent there",
     "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/shell/UsageRing.tsx",
+    "platform": "web",
+    "reason": "the hover tooltip is a web title attribute; touch has no hover, the same text is the spoken label everywhere",
+    "category": "behavior"
   },
   {
     "file": "mobile/src/lib/AnywhereProvider.tsx",

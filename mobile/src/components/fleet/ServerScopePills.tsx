@@ -5,45 +5,14 @@
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
-import type { SessionRow } from "../../lib/api";
+import { fleetStatuses, type ServerFleetStatus, type ServerReachability } from "../../lib/fleetStatuses";
 import { useServerFleets } from "../../lib/queries";
 import { useFleetScope } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 
-export type ServerReachability = "pending" | "reachable" | "unreachable";
-
-export interface ServerFleetStatus {
-  id: string;
-  name: string;
-  reachability: ServerReachability;
-  waiting: number;
-  waitingIds: string[];
-}
-
-interface FleetQueryState {
-  data?: SessionRow[];
-  isPending: boolean;
-  isSuccess: boolean;
-  failureCount: number;
-}
-
-export function fleetStatuses(servers: readonly { id: string; name: string }[], fleets: readonly FleetQueryState[]): ServerFleetStatus[] {
-  return servers.map((server, index) => {
-    const fleet = fleets[index];
-    // One failed poll is a blip, not an outage: `failureCount` resets on the next success.
-    const reachable = fleet.isSuccess || (fleet.data !== undefined && fleet.failureCount < 2);
-    const waitingIds = (fleet.data ?? []).filter((row) => row.waiting).map((row) => row.id);
-    return {
-      id: server.id,
-      name: server.name,
-      reachability: fleet.isPending ? "pending" : reachable ? "reachable" : "unreachable",
-      waiting: waitingIds.length,
-      waitingIds,
-    };
-  });
-}
+export { fleetStatuses, type ServerFleetStatus, type ServerReachability } from "../../lib/fleetStatuses";
 
 /** Per-server reachability + waiting count, from the same shared per-server fleet poll. */
 export function useServerFleetStatuses(): ServerFleetStatus[] {

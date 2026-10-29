@@ -18,6 +18,8 @@ import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useSessions } from "../../lib/queries";
+import { activeWorkspaceProjects, useShellPrefs } from "../../lib/shellPrefs";
+import { projectName } from "../../lib/sidebarModel";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
@@ -53,7 +55,12 @@ export function InboxScreen() {
   const tokens = useTokens();
   const query = useSessions();
   const pull = usePullRefresh(query.refetch);
-  const rows = useMemo(() => (query.data ?? []).filter((s) => s.waiting), [query.data]);
+  const prefs = useShellPrefs();
+  const workspaceProjects = activeWorkspaceProjects(prefs);
+  const rows = useMemo(
+    () => (query.data ?? []).filter((s) => s.waiting && (!workspaceProjects || workspaceProjects.has(projectName(s.cwd)))),
+    [query.data, workspaceProjects],
+  );
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
 
   const onPeek = useCallback((row: SessionRow) => setPeekSessionId(row.id), []);
