@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModelRow, ModelsResponse } from "./api";
-import { catalogHasModel, catalogModels, providerReadiness } from "./modelCatalog";
+import { catalogHasModel, catalogModels, deadPin, pickerSections, providerReadiness, pushRecent, runtimeLabel } from "./modelCatalog";
 
 const model = (id: string, health: ModelRow["health"] = null): ModelRow => ({
   id,
@@ -64,8 +64,6 @@ describe("catalogModels", () => {
     expect(catalogHasModel(undefined, "claude-cli::fable")).toBe(false);
   });
 });
-
-import { deadPin, pickerSections, pushRecent, runtimeLabel } from "./modelCatalog";
 
 describe("picker sections", () => {
   const data = response([
