@@ -689,6 +689,19 @@ an explicit terminal close or session shutdown sends a bounded kill command, mar
 exited, and removes it from the registry. Reconnects reuse the same handle and replay its bounded
 history; a close never leaves an orphaned child behind.
 
+A shell that exits on its own is marked exited but keeps its history, so a tab can still be read.
+The `status` frame and `GET /api/terminals` then carry its `exit_code` (absent for a shell that was
+killed), after the daemon has drained the shell's last output. The socket stays open for up to 30
+seconds so the client can send a `close` frame to discard the terminal (what the apps do on exit
+code 0) or reattach with `restart=true` (the Restart button after any other code). The list also
+carries a per-terminal output counter, `sequence`, that moves on every output chunk or clear; the
+apps compare it with the value they last saw to mark a background tab as having new output.
+
+`POST /api/sessions` starts the session's first terminal (`term-1`) right away so the dock opens
+onto a running shell. `[terminal] prewarm = false` turns that off, and a host with
+`[host] max_terminals` set never starts one early. `[terminal] shell` and `shell_args` choose what a
+new terminal runs (default `$SHELL`, `%COMSPEC%` on Windows).
+
 Two host-level rules also apply to terminals (see `docs/features/host-durability.md`). With
 `[host] max_terminals` set, a terminal that would exceed the host-wide ceiling is refused: the
 WebSocket upgrades and is closed at once with application code `4429` whose reason is the
