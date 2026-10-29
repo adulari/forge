@@ -2182,6 +2182,9 @@ pub struct MeshConfig {
     /// disabled model never enters the catalog, so the mesh won't route to or fail over onto it.
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Model ids a picker pins above the rest. Pure presentation: routing ignores it.
+    #[serde(default)]
+    pub favorites: Vec<String>,
     /// Cap on the output tokens requested per completion. Providers otherwise default to a
     /// model's full max (often 65k), which a free / low-credit account can't afford — OpenRouter
     /// then returns HTTP 402 ("requested 65536 tokens, can only afford 669") and the model looks
@@ -2927,6 +2930,7 @@ impl Default for Config {
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),
+                favorites: Vec::new(),
                 max_output_tokens: default_max_output_tokens(),
                 credit_mode: CreditMode::Normal,
                 auto_memory: default_auto_memory(),

@@ -1,9 +1,9 @@
-import { Check, ChevronDown, Cpu } from "lucide-react-native";
+import { Check, ChevronDown, Cpu, EyeOff, Star } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { type CatalogModel, catalogModels } from "../../lib/modelCatalog";
-import { useModels } from "../../lib/queries";
+import { type CatalogModel, catalogModels, loadRecents, pickerSections, pushRecent, runtimeLabel, saveRecents } from "../../lib/modelCatalog";
+import { useModels, useUpdateModel } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
@@ -26,6 +26,9 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
   const [visible, setVisible] = useState(false);
   const [search, setSearch] = useState("");
   const [manualModel, setManualModel] = useState(value);
+  const [recents, setRecents] = useState<string[]>(loadRecents);
+  const update = useUpdateModel();
+  const favorites = useMemo(() => query.data?.favorites ?? [], [query.data?.favorites]);
 
   useEffect(() => {
     if (visible) setManualModel(value);
@@ -50,11 +53,18 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
     `${model.name} ${model.id} ${provider}`.toLocaleLowerCase().includes(needle),
   );
 
+  const sections = useMemo(() => pickerSections(filtered, favorites, needle ? [] : recents), [filtered, favorites, recents, needle]);
+
   const close = () => {
     setVisible(false);
     setSearch("");
   };
   const select = (model: string) => {
+    if (model) {
+      const next = pushRecent(recents, model);
+      setRecents(next);
+      saveRecents(next);
+    }
     onChange(model);
     close();
   };
@@ -117,16 +127,29 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
                   : "No models match this search."}
               </Text>
             ) : null}
-            {filtered.map(({ provider, model }) => (
-              <ModelOption
-                key={`${provider}:${model.id}`}
-                title={model.name}
-                providerId={`${provider}::${model.id}`}
-                subtitle={`${provider} · ${model.id}`}
-                selected={value === model.id}
-                health={model.health ? "benched" : "ready"}
-                onPress={() => select(model.id)}
-              />
+            {sections.map((section) => (
+              <View key={section.key} style={styles.group} accessibilityRole="radiogroup" accessibilityLabel={section.title}>
+                <Text style={[typeScale.meta, styles.groupTitle, { color: tokens.ink3 }]}>{section.title}</Text>
+                {section.rows.map((row) => {
+                  const { provider, model } = row;
+                  const isFavorite = favorites.includes(model.id);
+                  return (
+                    <ModelOption
+                      key={`${section.key}:${provider}:${model.id}`}
+                      title={model.name}
+                      providerId={`${provider}::${model.id}`}
+                      subtitle={`${provider} · ${model.id}`}
+                      runtime={runtimeLabel(row)}
+                      selected={value === model.id}
+                      health={model.health ? "benched" : "ready"}
+                      favorite={isFavorite}
+                      onPress={() => select(model.id)}
+                      onToggleFavorite={() => update.mutate({ model: model.id, favorite: !isFavorite })}
+                      onHide={() => update.mutate({ model: model.id, hidden: true })}
+                    />
+                  );
+                })}
+              </View>
             ))}
           </View>
 
@@ -159,9 +182,23 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
   );
 }
 
-function ModelOption({ title, subtitle, providerId, selected, health, onPress }: { title: string; subtitle: string; providerId?: string; selected: boolean; health?: "ready" | "benched"; onPress: () => void }) {
+interface ModelOptionProps {
+  title: string;
+  subtitle: string;
+  providerId?: string;
+  runtime?: string;
+  selected: boolean;
+  health?: "ready" | "benched";
+  favorite?: boolean;
+  onPress: () => void;
+  onToggleFavorite?: () => void;
+  onHide?: () => void;
+}
+
+function ModelOption({ title, subtitle, providerId, runtime, selected, health, favorite, onPress, onToggleFavorite, onHide }: ModelOptionProps) {
   const tokens = useTokens();
   return (
+    <View style={styles.optionRow}>
     <Pressable
       onPress={onPress}
       accessibilityRole="radio"
@@ -179,12 +216,31 @@ function ModelOption({ title, subtitle, providerId, selected, health, onPress }:
       <View style={styles.optionText}>
         <View style={styles.optionTitle}>
           <Text style={[typeScale.body, styles.optionName, { color: tokens.ink }]} numberOfLines={1}>{title}</Text>
+          {runtime ? <Badge label={runtime} tone="outline" /> : null}
           {health ? <Badge label={health} tone={health === "ready" ? "success" : "danger"} /> : null}
         </View>
         <Text style={[typeScale.meta, { color: tokens.ink3, fontFamily: monoFamily.regular }]} numberOfLines={1}>{subtitle}</Text>
       </View>
       {selected ? <Check size={18} strokeWidth={2} color={tokens.accent} /> : null}
     </Pressable>
+    {onToggleFavorite ? (
+      <Pressable
+        onPress={onToggleFavorite}
+        accessibilityRole="button"
+        accessibilityLabel={`${favorite ? "Unfavourite" : "Favourite"} ${title}`}
+        accessibilityState={{ selected: favorite }}
+        hitSlop={6}
+        style={styles.action}
+      >
+        <Star size={16} strokeWidth={1.75} color={favorite ? tokens.accent : tokens.ink3} fill={favorite ? tokens.accent : "none"} />
+      </Pressable>
+    ) : null}
+    {onHide ? (
+      <Pressable onPress={onHide} accessibilityRole="button" accessibilityLabel={`Hide ${title}`} hitSlop={6} style={styles.action}>
+        <EyeOff size={16} strokeWidth={1.75} color={tokens.ink3} />
+      </Pressable>
+    ) : null}
+    </View>
   );
 }
 
@@ -202,7 +258,11 @@ const styles = StyleSheet.create({
   sheetContent: { paddingHorizontal: space.space16, paddingBottom: space.space24, gap: space.space12 },
   sheetTitle: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   options: { gap: space.space8 },
-  option: { minHeight: 56, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, paddingVertical: space.space8, borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius8 },
+  group: { gap: space.space8 },
+  groupTitle: { textTransform: "uppercase", letterSpacing: 0.6, marginTop: space.space4 },
+  optionRow: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  action: { width: 32, height: 44, alignItems: "center", justifyContent: "center" },
+  option: { flex: 1, minHeight: 56, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, paddingVertical: space.space8, borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius8 },
   optionText: { flex: 1, gap: 2 },
   optionTitle: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   optionName: { flex: 1 },

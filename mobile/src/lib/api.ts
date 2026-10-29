@@ -139,6 +139,10 @@ export interface ModelsResponse {
   refreshed_at?: number | null;
   /** The daemon is rediscovering behind this answer; a follow-up fetch returns a newer catalog. */
   refreshing?: boolean;
+  /** `[mesh] disabled` entries (hidden models/providers). Disabled ids are absent from `providers`. */
+  disabled?: string[];
+  /** `[mesh] favorites` model ids. */
+  favorites?: string[];
 }
 export interface ModelProvider {
   provider: string;
@@ -879,6 +883,11 @@ export function getWorkflows(baseUrl: string, session?: string): Promise<Workflo
  * projecting its cached catalog — what a pull-to-refresh should mean. */
 export function getModels(baseUrl: string, refresh = false): Promise<ModelsResponse> {
   return request(baseUrl, refresh ? "/api/models?refresh=true" : "/api/models");
+}
+
+export interface UpdateModelRequest { model: string; favorite?: boolean; hidden?: boolean }
+export function updateModel(baseUrl: string, body: UpdateModelRequest): Promise<{ ok: boolean }> {
+  return request(baseUrl, "/api/models", { method: "PATCH", body: JSON.stringify(body) });
 }
 
 export function getProviders(baseUrl: string): Promise<ProvidersResponse> {

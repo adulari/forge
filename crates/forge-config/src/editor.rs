@@ -607,6 +607,29 @@ pub(crate) fn set_model_disabled_at(
     entry: &str,
     disabled: bool,
 ) -> Result<bool, ConfigError> {
+    set_mesh_list_at(file, "disabled", entry, disabled)
+}
+
+/// Add or remove one entry in `[mesh] favorites`, the model ids a picker pins to the top.
+pub fn set_model_favorite(
+    scope: ConfigScope,
+    entry: &str,
+    favorite: bool,
+) -> Result<bool, ConfigError> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return Err(ConfigError::Write("a model id is required".into()));
+    }
+    set_mesh_list_at(&scope_path(scope)?, "favorites", entry, favorite)
+}
+
+fn set_mesh_list_at(
+    file: &std::path::Path,
+    key: &str,
+    entry: &str,
+    on: bool,
+) -> Result<bool, ConfigError> {
+    let disabled = on;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ConfigError::Write(e.to_string()))?;
     }
@@ -614,7 +637,7 @@ pub(crate) fn set_model_disabled_at(
 
     let mut entries: Vec<String> = doc
         .get("mesh")
-        .and_then(|mesh| mesh.get("disabled"))
+        .and_then(|mesh| mesh.get(key))
         .and_then(|value| value.as_array())
         .map(|array| {
             array
@@ -634,16 +657,14 @@ pub(crate) fn set_model_disabled_at(
 
     crate::toml_write::set_dotted(
         &mut doc,
-        "mesh.disabled",
+        &format!("mesh.{key}"),
         &toml::Value::Array(entries.into_iter().map(toml::Value::String).collect()),
     );
 
     Figment::from(Serialized::defaults(Config::default()))
         .merge(Toml::string(&doc.to_string()))
         .extract::<Config>()
-        .map_err(|e| {
-            ConfigError::Write(format!("invalid config after editing mesh.disabled: {e}"))
-        })?;
+        .map_err(|e| ConfigError::Write(format!("invalid config after editing mesh.{key}: {e}")))?;
 
     crate::toml_write::save_doc(file, &doc)?;
     Ok(true)
@@ -917,5 +938,25 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("cannot parse config"));
         assert!(message.contains("config.toml"));
+    }
+}
+
+#[cfg(test)]
+mod favorite_tests {
+    use super::*;
+
+    #[test]
+    fn favorites_and_disabled_lists_are_independent_and_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(set_mesh_list_at(&path, "favorites", "a::m", true).unwrap());
+        assert!(!set_mesh_list_at(&path, "favorites", "a::m", true).unwrap());
+        assert!(set_model_disabled_at(&path, "b::n", true).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("favorites") && text.contains("a::m"));
+        assert!(text.contains("disabled") && text.contains("b::n"));
+        assert!(set_mesh_list_at(&path, "favorites", "a::m", false).unwrap());
+        assert!(!set_mesh_list_at(&path, "favorites", "a::m", false).unwrap());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("b::n"));
     }
 }
