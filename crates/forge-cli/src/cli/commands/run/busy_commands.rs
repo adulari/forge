@@ -8,7 +8,7 @@
 //! normal dispatch at the turn boundary, in order. They are never added to the steer inbox, which
 //! feeds text to the running model turn.
 
-use forge_tui::{App, CommandAction};
+use forge_tui::{App, CommandAction, GoalControl};
 
 /// How a command behaves while a turn is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,9 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Btw(_)
         | CommandAction::Remote { .. }
         | CommandAction::Anywhere
+        | CommandAction::GoalControl(
+            GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
+        )
         | CommandAction::Thinking
         | CommandAction::ToolOutput
         | CommandAction::Image(_)
@@ -63,6 +66,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Refine(_)
         | CommandAction::Lattice(_)
         | CommandAction::Goal { .. }
+        | CommandAction::GoalControl(GoalControl::Resume)
         | CommandAction::Pr(_)
         | CommandAction::Loop { .. }
         | CommandAction::Replay(_, _)
@@ -209,8 +213,13 @@ mod tests {
             "/statusline",
             "/voice",
             "/rename x",
+            "/goal pause",
+            "/goal clear",
+            "/goal status",
+            "/goal edit sharper wording",
         ];
         let queued = [
+            "/goal resume",
             "/dispatch build it",
             "/model",
             "/model groq::x",

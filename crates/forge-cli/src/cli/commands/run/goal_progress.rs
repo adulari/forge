@@ -371,6 +371,9 @@ pub(crate) async fn advance_goal(
     app: &mut forge_tui::App,
     cwd: &Path,
 ) -> GoalNext {
+    if let Some(stop) = apply_goal_requests(gs, session, app).await {
+        return stop;
+    }
     if !gs.eval.evaluating {
         gs.eval.pending_tokens = app.turn_in + app.turn_out;
         let s = session.lock().await;
@@ -387,6 +390,7 @@ pub(crate) async fn advance_goal(
             if !met {
                 app.note(&reason);
             }
+            app.goal_ended(met, &reason);
             session.lock().await.set_active_goal(None);
             GoalNext::Stop
         }
@@ -441,6 +445,11 @@ pub(crate) fn launch_goal_step(
         GoalNext::Continue(prompt) => steer(app).unwrap_or(prompt),
     };
     gs.iter += 1;
+    app.goal_sync(
+        gs.iter,
+        gs.budget.tokens_used,
+        gs.budget.started_at.elapsed().as_secs(),
+    );
     arm_run_budget(session, Some(&gs.budget));
     let handle = spawn_turn_with(
         prompt.clone(),

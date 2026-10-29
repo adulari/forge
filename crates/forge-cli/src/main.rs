@@ -101,6 +101,7 @@ mod serve_dispatch;
 mod serve_git;
 mod serve_onboarding;
 mod serve_schedules;
+mod serve_spend;
 mod serve_terminal;
 mod serve_update;
 mod serve_workspace;

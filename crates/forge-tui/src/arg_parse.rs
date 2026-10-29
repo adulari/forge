@@ -2,7 +2,7 @@
 //! the `/loop`/`/goal` autonomy options. Split from `commands.rs` so the command registry file
 //! stays within its architecture-size budget.
 
-use crate::commands::CommandAction;
+use crate::commands::{CommandAction, GoalControl};
 
 /// Extract a comma-separated lens list from `--flag <value>` in a raw arg string.
 /// `/assay --only dead-weight,unsafe` → `extract_flag(arg, "--only")` → `["dead-weight", "unsafe"]`
@@ -62,6 +62,9 @@ pub(crate) fn mcp_action(arg: String) -> CommandAction {
 
 /// `/goal <objective> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`
 pub(crate) fn goal_action(arg: &str) -> CommandAction {
+    if let Some(control) = goal_control(arg) {
+        return CommandAction::GoalControl(control);
+    }
     let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(arg) else {
         return bad_budget("/goal", arg);
     };
@@ -71,6 +74,23 @@ pub(crate) fn goal_action(arg: &str) -> CommandAction {
         max_tokens,
         max_minutes,
     }
+}
+
+/// The steering verbs are whole-word matches, so a goal that merely starts with one of them
+/// ("pause the nightly job") is still a goal; `edit` needs text after it.
+fn goal_control(arg: &str) -> Option<GoalControl> {
+    let arg = arg.trim();
+    match arg.to_ascii_lowercase().as_str() {
+        "pause" => return Some(GoalControl::Pause),
+        "resume" => return Some(GoalControl::Resume),
+        "clear" => return Some(GoalControl::Clear),
+        "status" => return Some(GoalControl::Status),
+        _ => {}
+    }
+    let (verb, rest) = arg.split_once(char::is_whitespace)?;
+    let rest = rest.trim();
+    (verb.eq_ignore_ascii_case("edit") && !rest.is_empty())
+        .then(|| GoalControl::Edit(rest.to_string()))
 }
 
 /// `/loop <task> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`

@@ -35,6 +35,7 @@ pub mod config_editor;
 mod copy_mark;
 mod driver;
 mod git_location;
+pub mod goal_status;
 mod headless;
 mod heartbeat_args;
 mod help;
@@ -84,8 +85,9 @@ pub use app_remote::{
 };
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,
-    Command, CommandAction, HeartbeatAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow,
-    RefineAction, RemoteMode, SlashToken, StatuslineAction, WorkflowAction, COMMANDS,
+    Command, CommandAction, GoalControl, HeartbeatAction, Palette, PaletteEntry, Picker,
+    PickerKind, PickerRow, RefineAction, RemoteMode, SlashToken, StatuslineAction, WorkflowAction,
+    COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{

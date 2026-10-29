@@ -24,6 +24,21 @@ pub enum StatuslineAction {
     Edit,
 }
 
+/// `/goal` verbs that steer a goal instead of setting one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalControl {
+    /// Stop re-driving after the turn in flight; the goal can be resumed.
+    Pause,
+    /// Continue a paused goal with its counters and budget intact.
+    Resume,
+    /// Drop the goal. A running one stops after the turn in flight.
+    Clear,
+    /// Print the goal's state and budget.
+    Status,
+    /// Reword the goal; a running one takes the new wording at its next turn.
+    Edit(String),
+}
+
 /// `/workflow` sub-actions (docs/rfcs/forge-workflow.md).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowAction {
@@ -102,6 +117,8 @@ pub enum CommandAction {
         max_tokens: Option<u64>,
         max_minutes: Option<u64>,
     },
+    /// Steer the goal that is running or paused (`/goal pause|resume|clear|status|edit <text>`).
+    GoalControl(GoalControl),
     /// Turn this session's work into a branch + commit + pull request with a provenance-rich
     /// body (`/pr [title]`).
     Pr(String),
@@ -654,6 +671,45 @@ mod tests {
             CommandAction::Export(Some("out/session.html".into()))
         );
         assert_eq!(parse_command("/record"), CommandAction::Voice);
+    }
+
+    #[test]
+    fn goal_steering_verbs_are_whole_words_and_everything_else_is_still_a_goal() {
+        let goal = |objective: &str| CommandAction::Goal {
+            objective: objective.into(),
+            gates: Vec::new(),
+            max_tokens: None,
+            max_minutes: None,
+        };
+        assert_eq!(
+            parse_command("/goal pause"),
+            CommandAction::GoalControl(GoalControl::Pause)
+        );
+        assert_eq!(
+            parse_command("/goal  RESUME "),
+            CommandAction::GoalControl(GoalControl::Resume)
+        );
+        assert_eq!(
+            parse_command("/goal clear"),
+            CommandAction::GoalControl(GoalControl::Clear)
+        );
+        assert_eq!(
+            parse_command("/goal status"),
+            CommandAction::GoalControl(GoalControl::Status)
+        );
+        assert_eq!(
+            parse_command("/goal edit make it faster"),
+            CommandAction::GoalControl(GoalControl::Edit("make it faster".into()))
+        );
+        assert_eq!(
+            parse_command("/goal pause the nightly job"),
+            goal("pause the nightly job")
+        );
+        assert_eq!(
+            parse_command("/goal clear the cache"),
+            goal("clear the cache")
+        );
+        assert_eq!(parse_command("/goal edit"), goal("edit"));
     }
 
     #[test]

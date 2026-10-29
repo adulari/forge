@@ -217,7 +217,7 @@ pub use llm_router::LlmRouter;
 pub use pinned_context::render_task_list;
 use replay::messages_to_replay_items;
 pub use replay::stored_replay_items;
-pub use session_usage_detail::SessionUsageDetail;
+pub use session_usage_detail::{row_notional_cost, SessionUsageDetail};
 use session_virtual_tools::ASK_USER_TOOL;
 pub use session_virtual_tools::{remember_spec, REMEMBER_TOOL};
 use text_policy::{completed_tasks_recap, memory_scope_at, recap_line, sanitize_suggestion};

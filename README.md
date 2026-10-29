@@ -758,7 +758,7 @@ click it (or `Ctrl+T` for the most recent) to expand the full arguments and the 
 | `/usage` · `/mesh [task]` | API spend + token usage · inspect mesh routing |
 | `/mcp [server]` | Show MCP server status (or one server's tools) |
 | `/assay [--diff\|--branch <b>\|--since <ref>\|<path>] [--only/--skip <lens,…>]` | Run code-quality analysis crew |
-| `/goal <objective>` · `/loop <task>` | Set a persistent goal · run autonomously until complete (≤25 turns) |
+| `/goal <objective>` · `/loop <task>` | Set a persistent goal (`/goal pause\|resume\|edit <objective>\|clear\|status` steers it) · run autonomously until complete (≤25 turns) |
 | `/pr [title]` | Branch + commit + open a pull request from this session's work, with a provenance-rich body (session id, models, spend) |
 | `/replay <id> [<id2>]` | Show a session transcript, or diff two sessions |
 | `/lattice <symbol>` · `/image <path>` · `/thinking` | Query code intel · attach image · toggle reasoning blocks |

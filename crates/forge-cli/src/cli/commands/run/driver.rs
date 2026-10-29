@@ -847,7 +847,7 @@ impl DriverState {
         self.turn_gen += 1;
         self.busy = false;
         self.loop_state = None;
-        self.goal_state = None;
+        abandon_goal(&mut self.goal_state, &mut self.app);
         self.pending = None;
         self.pending_question = None;
         self.app.prompt = None;
@@ -1031,7 +1031,8 @@ impl DriverState {
                 max_minutes,
             } => {
                 self.turn_gen += 1;
-                self.goal_state = Some(GoalState::new(
+                self.goal_state = Some(GoalState::begin(
+                    &mut self.app,
                     self.turn_gen,
                     goal,
                     gates,
@@ -1089,7 +1090,7 @@ impl DriverState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     /// Point this process's store at a throwaway file before any test opens one.
@@ -1106,7 +1107,7 @@ mod tests {
     /// the schema migration at once and one loses with `database is locked` (reproduced at 5/30
     /// locally). `get_or_init` serializes exactly one caller, so migrating here means every test
     /// afterwards opens a store that is already at the current schema.
-    fn isolate_store() {
+    pub(in crate::cli::commands::run) fn isolate_store() {
         static STORE: std::sync::OnceLock<Option<tempfile::TempDir>> = std::sync::OnceLock::new();
         STORE.get_or_init(|| {
             let (path, keep) = match std::env::var_os("FORGE_DB") {
@@ -1771,6 +1772,47 @@ mod tests {
                 ..
             })
         ));
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_paused_goal_is_not_redriven_and_resume_picks_it_up_again() {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        state
+            .submit_line("/goal ship the thing --max-tokens 5000".into(), None)
+            .await
+            .unwrap();
+        let gen = state.turn_gen;
+
+        state.busy_command("/goal pause".into()).await.unwrap();
+        assert_eq!(state.app.goal.as_ref().unwrap().phase, GoalPhase::Active);
+        assert_eq!(
+            state.app.goal.as_ref().unwrap().request.map(|r| r.wire()),
+            Some("pause")
+        );
+
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen).await;
+        assert!(
+            state.goal_state.is_none(),
+            "the evaluator does not re-drive a paused goal"
+        );
+        assert!(state.turn_handle.is_none());
+        assert_eq!(state.app.goal.as_ref().unwrap().phase, GoalPhase::Paused);
+
+        state
+            .submit_line("/goal resume".into(), None)
+            .await
+            .unwrap();
+        let gs = state
+            .goal_state
+            .as_ref()
+            .expect("resume restarts the goal run");
+        assert_eq!(gs.goal, "ship the thing");
+        assert_eq!(gs.budget.max_tokens, Some(5000));
+        assert_eq!(state.app.goal.as_ref().unwrap().phase, GoalPhase::Active);
+        assert!(state.busy);
         state.turn_handle.take().unwrap().abort();
     }
 

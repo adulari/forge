@@ -10,6 +10,7 @@ import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { setFoldToolGroups, setWrapCodeBlocks, useAppearancePreferences } from "../lib/appearancePreferences";
+import { setDockPlacement, useDockPrefs } from "../lib/composerDocks";
 import { useTheme } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
@@ -19,6 +20,7 @@ export default function AppearanceScreen() {
   const { preference, setScheme, tokens } = useTheme();
   const appearance = useAppearancePreferences();
   const toast = useToast();
+  const docks = useDockPrefs();
 
   const updateCodeWrap = (value: boolean) => {
     void setWrapCodeBlocks(value).catch(() => {
@@ -97,6 +99,23 @@ export default function AppearanceScreen() {
             />
             <Text style={[type.sub, styles.note, { color: tokens.ink3 }]}>
               Failed calls and calls still running stay listed under their summary.
+            </Text>
+          </View>
+
+          <View>
+            <SectionHeader>Thread docks</SectionHeader>
+            <Segmented
+              options={[
+                { value: "composer", label: "Above the composer" },
+                { value: "panel", label: "Side panel" },
+              ]}
+              value={docks.placement}
+              onChange={(value) => void setDockPlacement(value)}
+            />
+            <Text style={[type.sub, styles.note, { color: tokens.ink3 }]}>
+              Where the task plan lives while a chat works. The side panel needs a wide window and opens from Layout or
+              with the Tasks shortcut; narrower windows always keep it above the composer. The spend dock stays above
+              the composer, and every dock can be moved or hidden from its menu.
             </Text>
           </View>
         </Screen>

@@ -46,6 +46,20 @@ fn add_opt(total: Option<u64>, part: Option<u64>) -> Option<u64> {
     }
 }
 
+/// What one usage row would cost at list price: its recorded spend when it was billed, else the
+/// model's reference rate. `None` when a zero-cost call that used tokens has no tracked price.
+pub fn row_notional_cost(row: &forge_store::ModelUsageRow, pricing: &Pricing) -> Option<f64> {
+    if !row.zero_cost {
+        Some(row.usage.cost_usd)
+    } else if row.usage.total_tokens() == 0 {
+        Some(0.0)
+    } else {
+        row.model
+            .as_deref()
+            .and_then(|model| pricing.reference_cost_for_usage(model, &row.usage))
+    }
+}
+
 pub(crate) fn usage_detail_from_rows(
     rows: &[forge_store::ModelUsageRow],
     tool_calls: u64,
@@ -65,16 +79,8 @@ pub(crate) fn usage_detail_from_rows(
         detail.reasoning_tokens = add_opt(detail.reasoning_tokens, usage.reasoning_tokens);
         detail.cost_usd += usage.cost_usd;
         detail.model_calls += row.calls;
-        let row_notional = if !row.zero_cost {
-            Some(usage.cost_usd)
-        } else if usage.total_tokens() == 0 {
-            Some(0.0)
-        } else {
-            row.model
-                .as_deref()
-                .and_then(|model| pricing.reference_cost_for_usage(model, usage))
-        };
-        detail.notional_cost_usd = match (detail.notional_cost_usd, row_notional) {
+        detail.notional_cost_usd = match (detail.notional_cost_usd, row_notional_cost(row, pricing))
+        {
             (Some(total), Some(part)) => Some(total + part),
             _ => None,
         };
