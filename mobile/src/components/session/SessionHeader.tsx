@@ -177,7 +177,16 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
       <Sheet visible={actionsVisible} onClose={closeActions} accessibilityLabel="Session actions" snapPoints={[0.8]}>
         <ScrollView contentContainerStyle={styles.actions} keyboardShouldPersistTaps="handled">
           <Text style={[typeScale.heading, { color: tokens.ink }]}>Session actions</Text>
-          <ListRow title="Find in conversation" leading={<Search size={20} color={tokens.ink2} />} onPress={() => run(() => void findController.request())} />
+          <ListRow
+            title={props.terminalActive ? "Find in terminal" : "Find in conversation"}
+            leading={<Search size={20} color={tokens.ink2} />}
+            onPress={() =>
+              run(() => {
+                if (props.terminalActive) findController.markFocus("terminal");
+                findController.request();
+              })
+            }
+          />
           <ListRow title="Start another session here" leading={<Plus size={20} color={tokens.ink2} />} onPress={() => run(props.onNewHere)} />
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
