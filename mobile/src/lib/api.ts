@@ -422,6 +422,15 @@ export interface HistoryRow {
    * (`created_at` is stored in whole seconds). Absent from a pre-v9 daemon, null when the epoch
    * could not be read. */
   elapsed_ms?: number | null;
+  /** Lines an edit call added and removed, counted by the daemon from the call's full arguments
+   * (the stored copy is capped). Present on an edit-call row of an `include_tools` page. */
+  adds?: number;
+  dels?: number;
+  /** What the model reply behind this row consumed and cost. Absent from older daemons and from
+   * rows that were not produced by a billed reply. */
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
 }
 
 export type PermissionMode = "default" | "accept-edits" | "bypass" | "plan";

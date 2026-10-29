@@ -6,20 +6,24 @@
 // one thing a reader needs without asking. Permission prompts live in CardSlot above the
 // composer, so folding never hides a decision.
 import { ChevronDown, ChevronRight } from "lucide-react-native";
-import React, { useCallback } from "react";
+import React, { useCallback, useMemo } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
+import { mergeEdits } from "../../lib/editMerge";
 import { haptics } from "../../lib/haptics";
 import { collapsedCalls, type ToolGroupEntry } from "../../lib/toolGroups";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
+import { MergedEditRow } from "./MergedEditRow";
 import { ToolCallRow } from "./ToolCallRow";
 
 export interface ToolGroupRowProps {
   group: ToolGroupEntry;
-  expanded: boolean;
-  onToggle: (key: string) => void;
+  /** The person's choice for this group, when they made one. Without it a group is open while
+   * one of its calls runs (so a long run is watched, not hidden) and folds once it is done. */
+  expanded: boolean | undefined;
+  onToggle: (key: string, next: boolean) => void;
 }
 
 export function groupAccessibilityLabel(group: ToolGroupEntry): string {
@@ -30,17 +34,19 @@ export function groupAccessibilityLabel(group: ToolGroupEntry): string {
   return parts.join(", ");
 }
 
-function ToolGroupRowImpl({ group, expanded, onToggle }: ToolGroupRowProps) {
+function ToolGroupRowImpl({ group, expanded: chosen, onToggle }: ToolGroupRowProps) {
   const tokens = useTokens();
   const { summary, key } = group;
+  const running = summary.running > 0;
+  const expanded = chosen ?? running;
   const toggle = useCallback(() => {
     haptics.select();
-    onToggle(key);
-  }, [key, onToggle]);
+    onToggle(key, !expanded);
+  }, [key, onToggle, expanded]);
   // The first call of a group shows alone until it finishes: there is nothing to sum up yet.
   const hasSummary = summary.finished > 0;
-  const running = summary.running > 0;
   const calls = !hasSummary || expanded ? group.calls : collapsedCalls(group);
+  const shown = useMemo(() => (expanded ? mergeEdits(calls) : calls.map((call) => ({ kind: "call" as const, call }))), [expanded, calls]);
   // A failure is marked once: on the call's own row when it is listed below, else on the summary.
   const failedBelow = calls.filter((c) => c.status === "failed").length;
   const failedUnlisted = summary.failed - failedBelow;
@@ -77,9 +83,13 @@ function ToolGroupRowImpl({ group, expanded, onToggle }: ToolGroupRowProps) {
       ) : null}
       {calls.length > 0 ? (
         <View style={hasSummary ? styles.nested : undefined}>
-          {calls.map((call) => (
-            <ToolCallRow key={call.key} invocation={call.invocation} />
-          ))}
+          {shown.map((item) =>
+            item.kind === "edits" ? (
+              <MergedEditRow key={item.key} merged={item} />
+            ) : (
+              <ToolCallRow key={item.call.key} invocation={item.call.invocation} />
+            ),
+          )}
         </View>
       ) : null}
     </View>

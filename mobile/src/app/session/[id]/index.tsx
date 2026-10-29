@@ -33,10 +33,12 @@ import { StreamingAnswer, TurnActivity } from "../../../components/chat/LiveTurn
 import { MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
 import { ToolCallRow } from "../../../components/chat/ToolCallRow";
 import { ToolGroupRow } from "../../../components/chat/ToolGroupRow";
+import { TurnFooter } from "../../../components/chat/TurnFooter";
 import { useHistoryAutofill } from "../../../components/chat/useHistoryAutofill";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { buildTranscript, type ToolInvocation } from "../../../lib/toolRows";
 import { foldToolGroups, GroupMemo, type FoldedEntry, type ToolGroupEntry } from "../../../lib/toolGroups";
+import { withTurnFooters } from "../../../lib/turnFooter";
 import { useAppearancePreferences } from "../../../lib/appearancePreferences";
 import { fillerHistoryRows } from "../../../lib/transcriptFiller";
 import { SubagentStrip } from "../../../components/session/SubagentStrip";
@@ -76,6 +78,7 @@ type TimelineItem =
   | { kind: "history"; id: string; row: HistoryRow }
   | { kind: "tool"; id: string; invocation: ToolInvocation }
   | { kind: "toolGroup"; id: string; group: ToolGroupEntry }
+  | { kind: "turnFooter"; id: string; text: string }
   | { kind: "filler"; id: string; text: string }
   | { kind: "note"; id: string; text: string }
   | { kind: "pendingSent"; id: string; text: string; attachments: SentAttachment[] };
@@ -554,17 +557,14 @@ export function SessionChat() {
     () => (foldEnabled ? foldToolGroups(fillerTranscript, busy, fillerGroupMemo) : fillerTranscript),
     [foldEnabled, fillerTranscript, busy, fillerGroupMemo],
   );
+  const timelineHistory = useMemo(() => withTurnFooters(foldedHistory, busy), [foldedHistory, busy]);
   const retained = busy && !answerAlreadyShown(useTranscriptFiller ? foldedFiller : foldedHistory, track.retainedText);
   const displayText = streamingText || (retained ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
   // Open groups by id (the id of the group's first call), so they stay open while the list
   // re-renders, virtualises cells away and grows.
-  const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleGroup = useCallback((id: string) => {
-    setOpenGroups((prev) => {
-      const next = new Set(prev);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
+  const [openGroups, setOpenGroups] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+  const toggleGroup = useCallback((id: string, next: boolean) => {
+    setOpenGroups((prev) => new Map(prev).set(id, next));
   }, []);
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
@@ -593,8 +593,10 @@ export function SessionChat() {
       // Collapse the call/result row PAIR the daemon serves into one ToolCallRow entry, and keep
       // ordinary turns as message rows. `historyRows` is already newest-first, which is what
       // buildTranscript takes and returns.
-      for (const entry of foldedHistory) {
-        if (entry.kind === "toolGroup") {
+      for (const entry of timelineHistory) {
+        if (entry.kind === "turnFooter") {
+          list.push({ kind: "turnFooter", id: entry.key, text: entry.text });
+        } else if (entry.kind === "toolGroup") {
           list.push({ kind: "toolGroup", id: entry.key, group: entry });
         } else if (entry.kind === "tool") {
           list.push({ kind: "tool", id: entry.key, invocation: entry.invocation });
@@ -635,7 +637,7 @@ export function SessionChat() {
       }
     }
     return list;
-  }, [displayText, streamingText, busy, shownPending, useTranscriptFiller, historyRows, foldedHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
+  }, [displayText, streamingText, busy, shownPending, useTranscriptFiller, historyRows, timelineHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
@@ -688,8 +690,10 @@ export function SessionChat() {
           return <MessageRow row={item.row} onLongPress={onMessageLongPress} />;
         case "tool":
           return <ToolCallRow invocation={item.invocation} />;
+        case "turnFooter":
+          return <TurnFooter text={item.text} />;
         case "toolGroup":
-          return <ToolGroupRow group={item.group} expanded={openGroups.has(item.group.key)} onToggle={toggleGroup} />;
+          return <ToolGroupRow group={item.group} expanded={openGroups.get(item.group.key)} onToggle={toggleGroup} />;
         case "pendingSent":
           // Renders through the same MessageRow the real (server-truth) row will use once
           // history lands, so there's no visual "jump" when this optimistic bubble is replaced.

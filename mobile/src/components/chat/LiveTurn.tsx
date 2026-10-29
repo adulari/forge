@@ -2,7 +2,7 @@
 // saying what the turn is doing while no text is coming in ("Thinking · 12s", "Run cargo test ·
 // 4s"). It replaced a bare "thinking…" beside the pull-to-refresh spinner, which is absolutely
 // positioned and rendered as a large ember arc floating over the composer's chips.
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import Animated, {
   useAnimatedStyle,
@@ -13,6 +13,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import { splitStreamedText } from "../../lib/streamCap";
 import { summarizeToolLine } from "../../lib/toolRows";
 import { easings, useEmberdot } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -126,6 +127,7 @@ export function StreamingAnswer({ text, streaming }: { text: string; streaming: 
   const reduced = useReducedMotion();
   const prose = useChatProseStyle();
   const displayText = useFrameText(text, reduced);
+  const { head, tail } = useMemo(() => splitStreamedText(displayText, streaming), [displayText, streaming]);
 
   const caretOpacity = useSharedValue(1);
   useEffect(() => {
@@ -147,7 +149,12 @@ export function StreamingAnswer({ text, streaming }: { text: string; streaming: 
   return (
     <View style={styles.answerRow}>
       <View style={styles.answerText}>
-        <Markdown content={displayText} style={prose} />
+        {head ? (
+          <Text selectable style={[typeScale.body, prose, styles.olderText, { color: tokens.ink }]}>
+            {head}
+          </Text>
+        ) : null}
+        <Markdown content={tail} style={prose} />
       </View>
       {streaming ? (
         <Animated.View
@@ -166,5 +173,6 @@ const styles = StyleSheet.create({
   activityLabel: { flexShrink: 1, minWidth: 0 },
   answerRow: { flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap" },
   answerText: { flexShrink: 1, minWidth: 0 },
+  olderText: { marginBottom: space.space12 },
   caret: { width: CARET_SIZE, height: CARET_SIZE, borderRadius: CARET_SIZE / 2, marginLeft: 4, marginBottom: 8 },
 });

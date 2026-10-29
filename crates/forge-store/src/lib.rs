@@ -26,6 +26,7 @@ mod handoff;
 mod handoff_types;
 mod harness_store;
 mod heartbeat_store;
+mod history_stats;
 mod host_state_store;
 mod lattice_store;
 mod live_session_store;
@@ -79,6 +80,7 @@ pub use handoff_types::{
     HandoffSessionImport, ImportedSessionMetadata,
 };
 pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
+pub use history_stats::RowStats;
 pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
@@ -1651,6 +1653,8 @@ pub struct HistoryRow {
     /// something the person typed — stored `role=user` either way (see `migration_0036` and
     /// [`Store::add_nudge_message`]). Always `false` on a synthesized `Role::Tool` call/result row.
     pub nudge: bool,
+    /// What an edit call changed and what a model reply cost (see [`RowStats`]).
+    pub stats: RowStats,
 }
 
 /// Which half of a tool interaction a `Role::Tool` [`HistoryRow`] is: the CALL the model made
@@ -1701,7 +1705,7 @@ fn parse_tool_calls(carrier_json: &str) -> Vec<ToolCall> {
 /// short one; nothing is summarized or reworded.
 fn tool_call_args_summary(args: &serde_json::Value) -> String {
     let capped = cap_json_strings(args);
-    let line = serde_json::to_string(&capped).unwrap_or_else(|_| "{}".to_string());
+    let line = identifying_keys_first(&capped);
     let mut chars = line.chars();
     let head: String = chars.by_ref().take(MAX_CALL_ARGS_CHARS).collect();
     if chars.next().is_some() {
@@ -1709,6 +1713,40 @@ fn tool_call_args_summary(args: &serde_json::Value) -> String {
     } else {
         head
     }
+}
+
+/// Keys that say what a call acts on. Objects serialize alphabetically, so a long `new`/`old`
+/// pair would otherwise push `path` past the whole-line cap and leave the row unable to say which
+/// file it edited.
+const IDENTIFYING_KEYS: [&str; 8] = [
+    "path",
+    "file_path",
+    "notebook_path",
+    "command",
+    "pattern",
+    "query",
+    "url",
+    "cwd",
+];
+
+fn identifying_keys_first(value: &serde_json::Value) -> String {
+    let Some(fields) = value.as_object() else {
+        return serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    };
+    let lead = IDENTIFYING_KEYS.iter().filter(|k| fields.contains_key(**k));
+    let rest = fields
+        .keys()
+        .filter(|k| !IDENTIFYING_KEYS.contains(&k.as_str()));
+    let entries: Vec<String> = lead
+        .map(|k| k.to_string())
+        .chain(rest.cloned())
+        .map(|k| {
+            let key = serde_json::to_string(&k).unwrap_or_default();
+            let val = serde_json::to_string(&fields[&k]).unwrap_or_default();
+            format!("{key}:{val}")
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
 }
 
 /// Recursively cap every string in a JSON value to [`MAX_CALL_ARG_VALUE_CHARS`] characters,
@@ -2950,6 +2988,81 @@ mod tests {
             .find(|row| row.tool_phase == Some(ToolPhase::Result))
             .unwrap();
         assert_eq!(result.tool_name.as_deref(), Some("read_file"));
+    }
+
+    #[test]
+    fn a_long_edit_call_row_still_names_its_file() {
+        let args = serde_json::json!({
+            "new": "n".repeat(300), "old": "o".repeat(300), "path": "src/deep/file.rs", "replace_all": false
+        });
+        let summary = tool_call_args_summary(&args);
+        assert!(
+            summary.starts_with(r#"{"path":"src/deep/file.rs""#),
+            "{summary}"
+        );
+        let plain = tool_call_args_summary(&serde_json::json!({"b": 1, "a": 2}));
+        assert_eq!(plain, r#"{"a":2,"b":1}"#, "other keys keep their order");
+    }
+
+    #[test]
+    fn history_rows_state_what_an_edit_changed_and_what_a_reply_cost() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store.add_message(&sid, 0, Role::User, "q", None).unwrap();
+        let edit = ToolCall {
+            id: "call-a".into(),
+            name: "edit_file".into(),
+            args: serde_json::json!({"path": "a.rs", "old": "one\ntwo\n", "new": "one\n2\n3\n"}),
+        };
+        let carrier = store
+            .add_message_full(&sid, 1, Role::Assistant, "", None, &[edit], None)
+            .unwrap();
+        store
+            .record_usage(
+                &sid,
+                &carrier,
+                &Usage {
+                    input_tokens: 120,
+                    output_tokens: 30,
+                    cost_usd: 0.02,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+        let prose = store
+            .add_message(&sid, 2, Role::Assistant, "done", None)
+            .unwrap();
+        store
+            .record_usage(
+                &sid,
+                &prose,
+                &Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cost_usd: 0.01,
+                    ..Usage::default()
+                },
+                None,
+            )
+            .unwrap();
+
+        let rows = store.load_history_page_with(&sid, None, 20, true).unwrap();
+        let call = rows
+            .iter()
+            .find(|r| r.tool_phase == Some(ToolPhase::Call))
+            .unwrap();
+        assert_eq!((call.stats.adds, call.stats.dels), (Some(2), Some(1)));
+        assert_eq!(
+            (call.stats.input_tokens, call.stats.output_tokens),
+            (Some(120), Some(30)),
+            "a carrier with no prose hands its cost to its first call row"
+        );
+        let reply = rows.iter().find(|r| r.seq == 2).unwrap();
+        assert_eq!(reply.stats.input_tokens, Some(10));
+        assert!((reply.stats.cost_usd.unwrap() - 0.01).abs() < 1e-9);
+        let user = rows.iter().find(|r| r.seq == 0).unwrap();
+        assert_eq!(user.stats, RowStats::default());
     }
 
     #[test]

@@ -789,6 +789,10 @@ pub struct HistoryRow {
     /// the bundled PWA and older clients never saw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_phase: Option<String>,
+    /// Lines an edit call changed and what a model reply cost; each key is present only when the
+    /// store can state it.
+    #[serde(flatten)]
+    pub stats: forge_store::RowStats,
 }
 
 /// The seam through which the server reads persisted transcript pages WITHOUT depending on
@@ -2011,6 +2015,33 @@ mod tests {
     }
 
     #[test]
+    fn history_row_flattens_its_stats_and_omits_the_unknown_ones() {
+        let row = HistoryRow {
+            seq: 3,
+            role: "tool".into(),
+            content: "{}".into(),
+            model: None,
+            created_at: 1,
+            visibility: "llm".into(),
+            kind: "tool".into(),
+            elapsed_ms: None,
+            tool: Some("edit_file".into()),
+            tool_phase: Some("call".into()),
+            stats: forge_store::RowStats {
+                adds: Some(4),
+                dels: Some(1),
+                ..Default::default()
+            },
+        };
+        let v: serde_json::Value = serde_json::to_value(&row).unwrap();
+        assert_eq!((v["adds"].as_u64(), v["dels"].as_u64()), (Some(4), Some(1)));
+        assert!(
+            v.get("cost_usd").is_none() && v.get("input_tokens").is_none(),
+            "{v}"
+        );
+    }
+
+    #[test]
     fn history_row_serializes_the_wire_shape() {
         let row = HistoryRow {
             seq: 12,
@@ -2023,6 +2054,7 @@ mod tests {
             elapsed_ms: Some(4_500),
             tool: None,
             tool_phase: None,
+            stats: forge_store::RowStats::default(),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
@@ -2067,6 +2099,7 @@ mod tests {
             elapsed_ms: Some(5_500),
             tool: Some("read_file".into()),
             tool_phase: Some("result".into()),
+            stats: forge_store::RowStats::default(),
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&tool_row).unwrap()).unwrap();
@@ -2999,6 +3032,7 @@ mod tests {
                     elapsed_ms: Some(0),
                     tool: None,
                     tool_phase: None,
+                    stats: forge_store::RowStats::default(),
                 }]
             });
             let rc =

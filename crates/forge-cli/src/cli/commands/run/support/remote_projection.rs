@@ -232,6 +232,7 @@ pub(crate) fn map_history_row(
         tool_phase: (kind == "tool")
             .then(|| row.tool_phase.map(|phase| phase.as_str().to_string()))
             .flatten(),
+        stats: row.stats,
     }
 }
 
@@ -322,6 +323,7 @@ mod job_notice_tests {
             tool_name: None,
             tool_phase: None,
             nudge: false,
+            stats: forge_store::RowStats::default(),
         }
     }
 
