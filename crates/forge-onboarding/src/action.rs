@@ -546,15 +546,28 @@ mod tests {
         struct Echo;
         impl Host for Echo {
             fn forge_exe(&self) -> Option<std::path::PathBuf> {
-                let dir =
-                    std::env::temp_dir().join(format!("forge-onb-echo-{}", std::process::id()));
-                std::fs::create_dir_all(&dir).unwrap();
-                let exe = dir.join("forge");
-                std::fs::write(&exe, "#!/bin/sh\necho \"args: $*\"\necho oops 1>&2\n").unwrap();
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-                Some(exe)
+                static EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+                Some(EXE.get_or_init(echo_script).clone())
             }
+        }
+        // A test thread that forks while the script is still open for writing holds the
+        // write fd until it execs, and running the script then fails with ETXTBSY.
+        fn echo_script() -> std::path::PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("forge-onb-echo-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let exe = dir.join("forge");
+            std::fs::write(&exe, "#!/bin/sh\necho \"args: $*\"\necho oops 1>&2\n").unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for _ in 0..100 {
+                match std::process::Command::new(&exe).output() {
+                    Err(e) if e.raw_os_error() == Some(26) => {
+                        std::thread::sleep(std::time::Duration::from_millis(20))
+                    }
+                    _ => break,
+                }
+            }
+            exe
         }
         let jobs = Jobs::new();
         let id = jobs.run(
