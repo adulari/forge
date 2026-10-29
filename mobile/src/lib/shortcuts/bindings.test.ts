@@ -91,4 +91,10 @@ describe("app shortcut bindings", () => {
     })).rejects.toThrow("storage unavailable");
     expect(getResolvedShortcut("nav.fleet")).toEqual(getDefaultShortcut("nav.fleet"));
   });
+
+  it("binds Find to Mod+F without colliding with another action", () => {
+    const find = getDefaultShortcut("find");
+    expect(find).toEqual({ key: "f", mod: true, alt: false, shift: false });
+    expect(findShortcutConflicts("find", find)).toEqual([]);
+  });
 });

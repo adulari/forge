@@ -166,6 +166,14 @@ prompt; the quote takes at most 36 cells and never more than half the row, and t
 to "Previous message" when the row is too narrow for a useful quote or the message has no text.
 Below about 34 columns both pills shorten to the arrow and the chord.
 
+`Ctrl+F` finds text in the full-screen transcript. A bar on the last row takes the query as you type
+it (smart case, like `less`: an upper-case letter makes it case-sensitive); `Enter` and `↓` go to
+the next row that holds it, `↑` to the previous, and the view scrolls so the hit sits a third of the
+way down. Every occurrence on screen is bold and underlined and the current hit's row is filled.
+`PgUp`/`PgDn` still page while the bar is open, and `Esc` closes it where you are. Inline, the
+scrollback belongs to the terminal, so `Ctrl+F` says to use the terminal's own search. `/` is not a
+find key: it starts a slash command.
+
 The newest folded group ends its summary with a faint `click or Alt+O to expand`, so the fold is
 discoverable without the help screen. On macOS the Alt chords need the terminal's "Option as Meta"
 setting ([keybinds.md](keybinds.md)).

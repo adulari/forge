@@ -52,6 +52,9 @@ import { EmptyState } from "../ds/EmptyState";
 import { IconButton } from "../ds/IconButton";
 import { SearchField } from "../ds/SearchField";
 import { useToast } from "../ds/ToastHost";
+import { findController, findFocusProps } from "../../lib/find/findController";
+import { matchOffsets, steppedIndex } from "../../lib/find/matching";
+import { FindBar } from "../find/FindBar";
 import { useWorkbench } from "../workbench/WorkbenchProvider";
 import { WorkspaceNameSheet } from "./WorkspaceNameSheet";
 import { joinWorkspacePath, parentWorkspacePath, workspaceBasename } from "./workspaceModel";
@@ -408,6 +411,41 @@ function WorkspaceEditor({
   const inputRef = useRef<TextInput>(null);
   const [landing, setLanding] = useState<{ start: number; end: number } | null>(null);
 
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  });
+  useEffect(() => {
+    let hits: number[] = [];
+    let width = 0;
+    let index = -1;
+    const activate = (next: number) => {
+      index = next;
+      const at = hits[next];
+      if (at === undefined) return { count: hits.length, index };
+      const line = draftRef.current.slice(0, at).split("\n").length;
+      const range = { start: at, end: at + width };
+      setLanding(range);
+      revealLine(inputRef.current, range, line, false);
+      return { count: hits.length, index, detail: `line ${line}` };
+    };
+    return findController.register({
+      id: "editor",
+      label: "file",
+      search(query, caseSensitive) {
+        hits = matchOffsets(draftRef.current, query, caseSensitive);
+        width = query.length;
+        return activate(hits.length > 0 ? 0 : -1);
+      },
+      step: (direction) => activate(steppedIndex(index, hits.length, direction)),
+      clear() {
+        hits = [];
+        index = -1;
+        setLanding(null);
+      },
+    });
+  }, []);
+
   const loadedContent = file.data?.content ?? null;
   useEffect(() => {
     if (line == null || loadedContent == null) return;
@@ -466,7 +504,8 @@ function WorkspaceEditor({
 
   const lineCount = draft.length === 0 ? 0 : draft.split("\n").length;
   return (
-    <View style={styles.root}>
+    <View style={styles.root} {...findFocusProps("editor")}>
+      <FindBar targetId="editor" />
       <View style={[styles.editorToolbar, { borderBottomColor: tokens.border }]}>
         {onBack ? (
           <IconButton
@@ -549,11 +588,11 @@ export function lineRange(text: string, line: number): { start: number; end: num
 
 /** Select the line and scroll it into view. The textarea on web needs the scroll set by hand;
  * on a phone the platform scrolls a controlled selection into view itself. */
-function revealLine(input: TextInput | null, range: { start: number; end: number }, line: number) {
+function revealLine(input: TextInput | null, range: { start: number; end: number }, line: number, focus = true) {
   const node = input as unknown as { scrollTop?: number; focus?: () => void; setSelectionRange?: (a: number, b: number) => void } | null;
   if (!node || typeof node.scrollTop !== "number") return;
   node.scrollTop = Math.max(0, (line - 4) * EDITOR_LINE_HEIGHT);
-  node.focus?.();
+  if (focus) node.focus?.();
   node.setSelectionRange?.(range.start, range.end);
 }
 

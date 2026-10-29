@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { useAppVersion } from "../lib/appVersion";
-import { assessCompatibility } from "../lib/diagnostics";
+import { assessCompatibility, mismatchMessage } from "../lib/diagnostics";
 import { useDiagnostics } from "../lib/queries";
 import { PROTOCOL_VERSION } from "../lib/remoteProtocol";
 import { UpdateBannerHost } from "./UpdateBannerHost";
@@ -39,7 +39,7 @@ export function OperationalNotice() {
       <OperationalBanner
         compact
         tone="warn"
-        message={`Daemon protocol v${diagnostics.data?.host.protocol} is older than this app's v${PROTOCOL_VERSION}.`}
+        message={mismatchMessage("daemon-outdated", diagnostics.data?.host.protocol, PROTOCOL_VERSION)}
         actionLabel="Fix"
         onAction={() => router.push("/diagnostics")}
       />
@@ -50,7 +50,7 @@ export function OperationalNotice() {
       <OperationalBanner
         compact
         tone="warn"
-        message={`This app's protocol v${PROTOCOL_VERSION} is older than the daemon's v${diagnostics.data?.host.protocol}.`}
+        message={mismatchMessage("client-outdated", diagnostics.data?.host.protocol, PROTOCOL_VERSION)}
         actionLabel="Update"
         onAction={() => router.push("/diagnostics")}
       />

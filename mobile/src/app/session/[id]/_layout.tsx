@@ -65,7 +65,8 @@ import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useAnywhere } from "../../../lib/anywhere/store";
 import { useAuth } from "../../../lib/auth";
 import { useDesktopMenuAction } from "../../../lib/desktopMenu";
-import { assessCompatibility } from "../../../lib/diagnostics";
+import { assessCompatibility, mismatchMessage } from "../../../lib/diagnostics";
+import { socketChipModel } from "../../../lib/socketChip";
 import { useHostRestarting } from "../../../lib/hostStatus";
 import { goBackOr, openSession } from "../../../lib/nav";
 import { useAppShortcut } from "../../../lib/shortcuts";
@@ -325,11 +326,9 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
     : assessCompatibility(snapshot.protocol, undefined, PROTOCOL_VERSION, "");
   const protocolWarning = compatibility?.status === "client-limited"
     ? compatibility.detail
-    : compatibility?.status === "client-outdated"
-      ? `This app cannot safely interpret protocol v${snapshot?.protocol}. Update the app before continuing.`
-      : compatibility?.status === "daemon-outdated"
-        ? `Forge protocol v${snapshot?.protocol} lacks features required by this app. Update Forge before continuing.`
-        : null;
+    : compatibility?.status === "client-outdated" || compatibility?.status === "daemon-outdated"
+      ? mismatchMessage(compatibility.status, snapshot?.protocol, PROTOCOL_VERSION)
+      : null;
   const publicExposure = (snapshot?.exposure ?? "").startsWith("public");
   const reconnecting = connectionState === "reconnecting";
   const hostRestarting = useHostRestarting();
@@ -342,6 +341,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const wsDown = connectionState === "reconnecting" || connectionState === "unreachable";
   const sessionEnded = !isChild && wsDown && fleetRows != null && !fleetRows.some((row) => row.id === sessionId);
   const unreachable = connectionState === "unreachable" && !sessionEnded;
+  const socketChip = useMemo(() => socketChipModel(connectionState, sessionEnded), [connectionState, sessionEnded]);
   const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
 
   const statusState: StatusDotState =
@@ -466,6 +466,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             title={title}
             state={statusState}
             exposure={snapshot?.exposure ?? "loopback"}
+            socketChip={socketChip}
             onBack={onBack}
             showBack={!isExpanded}
             onNewHere={onNewHere}

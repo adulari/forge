@@ -1529,7 +1529,7 @@ pub(crate) async fn run_chat_tui(
             // The in-loop activity viewer (full-screen mode) is modal while open: it owns every key
             // (scroll / switch entry / Esc to close). Rendered through the main terminal, so there's
             // no nested alternate screen to collide with the chat.
-            if app.viewer_key(key) {
+            if app.viewer_key(key) || app.transcript_find_key(key) {
                 dirty = true;
                 continue;
             }

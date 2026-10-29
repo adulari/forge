@@ -106,6 +106,7 @@ mod serve_fleet_ws;
 mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
+mod serve_history;
 mod serve_media;
 mod serve_onboarding;
 mod serve_recovery;

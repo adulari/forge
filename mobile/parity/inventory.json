@@ -258,6 +258,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/find/FindBar.tsx",
+    "platform": "web",
+    "reason": "Enter steps to the next hit through onKeyPress on web (it carries Shift for the previous one) and through onSubmitEditing on native, which has no key events",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/fleet/FleetWatcher.tsx",
     "platform": "web/tauri/native",
     "reason": "window focus (web/Tauri) vs AppState (native) decides whether an alert is a toast or an OS notification; the fleet diff, routing rules and toast copy are shared",
@@ -699,6 +705,12 @@
     "file": "mobile/src/lib/updater.ts",
     "platform": "desktop",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/useFinePointer.ts",
+    "platform": "web",
+    "reason": "hover affordances (the prompt rail) need a precise pointer; read from matchMedia on web and always absent on a phone",
     "category": "behavior"
   },
   {

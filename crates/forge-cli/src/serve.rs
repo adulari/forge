@@ -32,7 +32,7 @@
 //!   the same merge-base machinery `merge` uses, but nothing is committed); see [`crate::serve_git`]
 //! - `POST /api/dispatch`, `GET /api/dispatches[/{id}]`, `POST /api/dispatches/{id}/proposal|
 //!   approve|revise|cancel`  plan and dispatch ([`crate::serve_dispatch`])
-//! - `GET  /api/history?session=<id>&before=<seq>&limit=<n>`  scrollback pagination
+//! - `GET  /api/history?session=<id>&before=<seq>&limit=<n>`  scrollback pagination (also `q`, `role`, `around`, `integrity`)
 //! - `GET  /api/changelog?limit=<n>`  parsed "What's New" releases from the compiled-in CHANGELOG
 //! - `GET|POST /api/git/*`            the git review dock ([`crate::serve_git`]): status, per-file
 //!   diff, stage/unstage, commit — always inside the addressed session's own repository
@@ -3421,6 +3421,14 @@ struct HistoryParams {
     /// Opt in to tool rows (`?include_tools=1`) — same contract as the `/remote` server's route;
     /// see `remote::history_include_tools` for why this is a string, not a bool.
     include_tools: Option<String>,
+    /// Only rows whose text contains this (case-insensitive) — Find.
+    q: Option<String>,
+    /// Only rows of this role (`user` or `assistant`) — the prompt rail.
+    role: Option<String>,
+    /// The page that ends just past this `seq`, so a jump lands once — see `serve_history`.
+    around: Option<i64>,
+    /// `?integrity=1` answers `{history_gap}` instead of a page.
+    integrity: Option<String>,
 }
 
 async fn history_page(
@@ -3429,8 +3437,12 @@ async fn history_page(
 ) -> Response {
     let limit = remote::history_page_limit(params.limit);
     let sid = params.session;
-    let before = params.before;
-    let include_tools = remote::history_include_tools(params.include_tools.as_deref());
+    let before = crate::serve_history::window_before(params.before, params.around);
+    let needle = crate::serve_history::needle(params.q.as_deref());
+    let role = crate::serve_history::role(params.role.as_deref());
+    let filtered = needle.is_some() || role.is_some();
+    let include_tools = remote::history_include_tools(params.include_tools.as_deref()) && !filtered;
+    let probe = remote::history_include_tools(params.integrity.as_deref());
     let store = state.store.clone();
     if sid.is_empty() {
         return err_response(axum::http::StatusCode::BAD_REQUEST, "session is required");
@@ -3454,6 +3466,9 @@ async fn history_page(
             }
         }
     }
+    if probe {
+        return crate::serve_history::integrity(store, sid).await;
+    }
     let rows: Vec<remote::HistoryRow> = {
         tokio::task::spawn_blocking(move || {
             // Same mapping the TUI's `/remote` provider uses, so both routes serve one shape —
@@ -3462,8 +3477,12 @@ async fn history_page(
             let epoch = store
                 .history_epoch_with(&sid, include_tools)
                 .unwrap_or_default();
+            let filter = forge_store::HistoryFilter {
+                role,
+                needle: needle.as_deref(),
+            };
             store
-                .load_history_page_with(&sid, before, limit, include_tools)
+                .load_history_filtered(&sid, before, limit, include_tools, &filter)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|r| crate::cli::commands::run::map_history_row(r, epoch))

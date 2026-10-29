@@ -137,6 +137,8 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    app.paint_find_matches(frame, area, scroll);
+
     // The two navigation pills exist only while the view is scrolled up off the tail: at the
     // bottom there is nowhere to jump to, and a pill there would only cover the newest rows.
     let scrolled_up = scroll < max_scroll;
@@ -150,8 +152,11 @@ pub(crate) fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     };
     app.prev_bar_geom.set(prev.flatten());
     // "Jump to bottom" centred on the last row.
-    let jump = (scrolled_up && area.height > 0).then(|| nav_pill(frame, area, NavPill::Bottom));
+    let finding = app.transcript_find_open();
+    let jump = (scrolled_up && area.height > 0 && !finding)
+        .then(|| nav_pill(frame, area, NavPill::Bottom));
     app.jump_bar_geom.set(jump.flatten());
+    app.render_find_bar(frame, area);
 }
 
 /// The user message "Previous message" goes to: `None` when none starts above the row at the

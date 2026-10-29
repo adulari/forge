@@ -15,6 +15,18 @@ export interface Compatibility {
   detail: string;
 }
 
+/** The banner for a protocol mismatch. The pairing survives it, and saying so keeps the
+ * message from reading like a reason to re-pair. */
+export function mismatchMessage(
+  status: "daemon-outdated" | "client-outdated",
+  daemonProtocol: number | undefined,
+  clientProtocol: number,
+): string {
+  return status === "daemon-outdated"
+    ? `Forge on the host speaks protocol v${daemonProtocol}, older than this app's v${clientProtocol}. Update the host to match; pairing retained.`
+    : `This app speaks protocol v${clientProtocol}, older than the host's v${daemonProtocol}. Update the app to match; pairing retained.`;
+}
+
 const ADDITIVE_CLIENT_GAPS: Record<string, { title: string; detail: string }> = {
   "9:10": {
     title: "Compatible with limited controls",

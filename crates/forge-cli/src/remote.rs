@@ -332,9 +332,11 @@ pub const PROTOCOL_VERSION: u32 = 10;
 
 mod event_log;
 mod goal;
+mod thread_error;
 use event_log::lock_event_log;
 pub use event_log::{EventLog, SnapshotFrame, EVENT_LOG_CAP};
 pub use goal::SnapGoal;
+pub use thread_error::{HistoryGap, ThreadError};
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
@@ -691,6 +693,13 @@ pub struct Snapshot {
     /// parent; absent for every ordinary session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SnapParent>,
+    /// Why the last turn failed, set from the turn's end until the next turn starts (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_error: Option<ThreadError>,
+    /// Set on the one resync frame a reconnecting client gets when the host could not replay what
+    /// it missed (additive). Per connection, never part of the shared broadcast frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_gap: Option<HistoryGap>,
 }
 
 impl Default for Snapshot {
@@ -747,6 +756,8 @@ impl Default for Snapshot {
             resync: false,
             closed: false,
             parent: None,
+            thread_error: None,
+            history_gap: None,
         }
     }
 }
@@ -1630,8 +1641,14 @@ pub(crate) async fn pump_ws_draining(
             // `borrow_and_update` (not `borrow`): mark it seen so the forward loop doesn't
             // deliver the same frame again right away.
             let current = snap.borrow_and_update().clone();
+            // A client that arrived with a revision, and could not be caught up from the log, is
+            // told how much it missed; a fresh connection (`since == 0`) missed nothing.
+            let text = match current.snapshot.revision.checked_sub(since) {
+                Some(missed) if since > 0 && missed > 0 => current.text_with_gap(missed),
+                _ => current.text(true),
+            };
             if tx
-                .send(Message::Text(current.text(true).to_string().into()))
+                .send(Message::Text(text.to_string().into()))
                 .await
                 .is_err()
             {
@@ -3158,6 +3175,10 @@ mod tests {
             let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert_eq!(v["revision"], 3, "fresh connect sees the current frame");
             assert_eq!(v["resync"], true, "fresh connect is a resync");
+            assert!(
+                v.get("history_gap").is_none(),
+                "a fresh connect missed nothing"
+            );
             drop(ws); // the phone goes through a tunnel…
 
             // 3. Frames 4 and 5 happen while disconnected.
@@ -3197,6 +3218,12 @@ mod tests {
                 "a long gap jumps straight to the present"
             );
             assert_eq!(v["resync"], true, "the jump is flagged as a resync");
+            assert_eq!(
+                v["history_gap"]["count"],
+                current - 6,
+                "and says how much it skipped"
+            );
+            assert_eq!(v["history_gap"]["reason"], "replay_window_exceeded");
             broadcast(current + 1);
             let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert_eq!(v["revision"], current + 1, "live-follow after the resync");
@@ -3209,6 +3236,10 @@ mod tests {
                 .expect("WS handshake with foreign rev");
             let v: serde_json::Value = next_snapshot(&mut ws).await;
             assert_eq!(v["resync"], true, "an unfillable gap resyncs");
+            assert!(
+                v.get("history_gap").is_none(),
+                "a foreign revision has no count"
+            );
             assert_eq!(
                 v["revision"],
                 current + 1,

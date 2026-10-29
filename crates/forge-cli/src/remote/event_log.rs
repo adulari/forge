@@ -51,6 +51,20 @@ impl SnapshotFrame {
             .clone()
     }
 
+    /// The resync form of this frame for a client that missed `missed` revisions the host could
+    /// no longer replay. Built per call: the gap is specific to the connection it is sent to.
+    pub(super) fn text_with_gap(&self, missed: u64) -> Arc<str> {
+        let mut snapshot = self.snapshot.clone();
+        snapshot.resync = true;
+        snapshot.history_gap = Some(super::HistoryGap {
+            count: missed,
+            reason: "replay_window_exceeded",
+        });
+        serde_json::to_string(&snapshot)
+            .unwrap_or_else(|_| "{}".into())
+            .into()
+    }
+
     /// What this frame costs the log: the struct is about as large as its JSON, and the resync
     /// copy is built on demand, so the serialized form counts twice.
     fn retained_bytes(&self) -> usize {
@@ -139,6 +153,17 @@ mod tests {
             ..Snapshot::default()
         };
         Arc::new(SnapshotFrame::new(snapshot))
+    }
+
+    #[test]
+    fn a_gapped_resync_carries_its_count_and_the_shared_frame_does_not() {
+        let frame = frame(30, 0);
+        let v: serde_json::Value = serde_json::from_str(&frame.text_with_gap(24)).unwrap();
+        assert_eq!(v["resync"], true);
+        assert_eq!(v["history_gap"]["count"], 24);
+        assert_eq!(v["history_gap"]["reason"], "replay_window_exceeded");
+        let plain: serde_json::Value = serde_json::from_str(&frame.text(true)).unwrap();
+        assert!(plain.get("history_gap").is_none());
     }
 
     #[test]

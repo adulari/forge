@@ -188,6 +188,18 @@ disconnects a non-event:
   exactly the row set above, so every existing client is unaffected. `elapsed_ms` is measured
   against `Store::history_epoch_with` for the SAME flag, so the scrubber's zero point is always
   the first row of the set the request actually returned.
+  The `forge serve` daemon's route takes four more opt-in parameters, all ignored by an older
+  daemon (so a client re-checks what it gets back): **`q=<text>`** keeps only rows whose text
+  contains it (case-insensitive for ASCII; tool rows are never searched), **`role=user|assistant`**
+  keeps one role (the app's prompt rail asks for `user`), **`around=<seq>`** returns the page that
+  ends 12 sequence numbers past `seq` so a jump to an unloaded row costs one request and `before`
+  continues from it, and **`integrity=1`** answers `{"history_gap": {count, reason} | null}`
+  instead of a page: `count` is how many rows of the session's message log are missing (sequence
+  numbers are dense from 0 and nothing deletes a row, so a hole means a damaged or repaired store).
+  The snapshot gains two additive fields: **`thread_error {category, summary, details}`**, set from
+  the end of a failed turn until the next turn starts, and **`history_gap {count, reason}`**, which
+  rides only on the one resync frame a reconnecting client gets when the event log could no longer
+  replay what it missed (`reason: "replay_window_exceeded"`).
 - **Rich transcript.** History messages and the live streaming edge render through a minimal
   markdown renderer written into the page (headings, lists, paragraphs, inline `code` /
   **bold** / *italic*, links as plain text — never live anchors) plus a self-contained

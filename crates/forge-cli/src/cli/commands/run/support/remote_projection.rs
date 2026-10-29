@@ -165,6 +165,8 @@ pub(crate) fn build_snapshot_frame(
         resync: false,
         closed: false,
         parent: None,
+        thread_error: None,
+        history_gap: None,
     }
 }
 

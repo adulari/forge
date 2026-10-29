@@ -37,6 +37,20 @@ import { ToolGroupRow } from "../../../components/chat/ToolGroupRow";
 import { TurnFooter } from "../../../components/chat/TurnFooter";
 import { useHistoryAutofill } from "../../../components/chat/useHistoryAutofill";
 import { useMessageJump } from "../../../components/chat/useMessageJump";
+import { useChatFind } from "../../../components/chat/useChatFind";
+import { usePromptRail } from "../../../components/chat/usePromptRail";
+import { useTopRow } from "../../../components/chat/useTopRow";
+import { PromptRail } from "../../../components/chat/PromptRail";
+import { StickyPromptBar } from "../../../components/chat/StickyPromptBar";
+import { FindBar } from "../../../components/find/FindBar";
+import { IntegrityDocks } from "../../../components/session/IntegrityDocks";
+import { useWorkbench } from "../../../components/workbench/WorkbenchProvider";
+import { findFocusProps } from "../../../lib/find/findController";
+import { useHistoryView } from "../../../lib/historyView";
+import { requestMessageJump } from "../../../lib/messageJump";
+import { railVisible } from "../../../lib/promptRail";
+import { stickyPromptFor, type PromptEntry } from "../../../lib/stickyPrompt";
+import { useFinePointer } from "../../../lib/useFinePointer";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { buildTranscript, type ToolInvocation } from "../../../lib/toolRows";
 import { foldToolGroups, GroupMemo, type FoldedEntry, type ToolGroupEntry } from "../../../lib/toolGroups";
@@ -277,6 +291,7 @@ export function SessionChat() {
   // `handleSend`, defined here, can read its current value without reordering the file.
   const [pendingSent, setPendingSent] = useState<PendingSent[]>([]);
   const latestSeqRef = useRef(-1);
+  const returnToLatestRef = useRef<() => void>(() => {});
 
   const handleSend = useCallback(
     (text: string, attachments: SentAttachment[], mode: FollowUpMode = "steer"): boolean => {
@@ -291,6 +306,7 @@ export function SessionChat() {
       // their text never gets a bubble that no history row would ever claim.
       const sideQuestion = /^\/(btw|side|goal)(\s|$)/i.test(text);
       if (send({ kind: mode === "queue" ? "queue" : "prompt", text, attachments: withPath })) {
+        returnToLatestRef.current();
         if (!sideQuestion) setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
         return true;
       }
@@ -324,6 +340,16 @@ export function SessionChat() {
     // PWA renders every row, styling "ui" as a note). Filtering to one drops the conversation.
     return pages.flat();
   }, [historyQuery.data]);
+
+  const view = useHistoryView(baseUrl, sessionId, historyQuery, historyRows);
+  const shownRows = view.rows;
+  useEffect(() => {
+    returnToLatestRef.current = view.returnToLatest;
+  });
+  const [findSeq, setFindSeq] = useState<number | null>(null);
+  const workbench = useWorkbench();
+  const findEnabled = useIsFocused() && (workbench.focusedSessionId == null || workbench.focusedSessionId === sessionId);
+  useChatFind({ enabled: findEnabled, baseUrl, sessionId, rows: shownRows, onActivate: setFindSeq });
 
   const followUp = useFollowUpSetting();
   const recallPrompts = useMemo(
@@ -541,7 +567,7 @@ export function SessionChat() {
   // `historyRows` come from react-query and are referentially stable between refetches, so this
   // only recomputes when history actually changes — not on every ~30ms WS snapshot that
   // re-renders SessionChat while streaming.
-  const historyTranscript = useMemo(() => buildTranscript(historyRows), [historyRows]);
+  const historyTranscript = useMemo(() => buildTranscript(shownRows), [shownRows]);
   const inFlight = busy || streamingText.length > 0 || pendingSent.length > 0;
   const fillerTranscript = useMemo(() => {
     if (!transcriptRows?.length) return [];
@@ -578,7 +604,8 @@ export function SessionChat() {
     // empty text as the thinking indicator below — so there's never a silent gap between
     // submit and the first token (previously nothing rendered here at all until `displayText`
     // was non-empty, which read as "stuck").
-    if (displayText || busy) {
+    const atLive = !view.detached;
+    if (atLive && (displayText || busy)) {
       list.push({ kind: "streaming", id: "streaming", text: displayText, streaming: busy || Boolean(streamingText) });
     }
     // Notes (turn-end notices, e.g. "compacting", "turn failed") are the NEWEST events — they must
@@ -587,14 +614,14 @@ export function SessionChat() {
     const historyNoteTexts = new Set(
       historyRows.filter((row) => row.visibility === "ui").map((row) => row.content),
     );
-    const notes = (snapshot?.notes ?? []).filter((note) => !historyNoteTexts.has(note));
+    const notes = atLive ? (snapshot?.notes ?? []).filter((note) => !historyNoteTexts.has(note)) : [];
     for (let i = notes.length - 1; i >= 0; i--) {
       list.push({ kind: "note", id: `n${i}`, text: notes[i] });
     }
     // Newest-first (inverted list): the user's own just-sent message is more recent than any
     // settled history row but older than the in-progress reply above, and later sends are newer
     // than earlier ones — walk pendingSent back-to-front.
-    for (const p of [...shownPending].reverse()) list.push({ kind: "pendingSent", id: p.id, text: p.text, attachments: p.attachments });
+    for (const p of atLive ? [...shownPending].reverse() : []) list.push({ kind: "pendingSent", id: p.id, text: p.text, attachments: p.attachments });
     if (!useTranscriptFiller) {
       // Collapse the call/result row PAIR the daemon serves into one ToolCallRow entry, and keep
       // ordinary turns as message rows. `historyRows` is already newest-first, which is what
@@ -643,38 +670,40 @@ export function SessionChat() {
       }
     }
     return list;
-  }, [displayText, streamingText, busy, shownPending, useTranscriptFiller, historyRows, timelineHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
+  }, [view.detached, displayText, streamingText, busy, shownPending, useTranscriptFiller, historyRows, timelineHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
   // page is appended at the far end (that only changes the last item, not the first).
   const newestKeyRef = useRef<string | null>(null);
+  const detachedRef = useRef(view.detached);
   useEffect(() => {
     const newestKey = items[0]?.id ?? null;
+    const swapped = detachedRef.current !== view.detached;
+    detachedRef.current = view.detached;
     if (newestKey !== newestKeyRef.current) {
       newestKeyRef.current = newestKey;
+      if (swapped) return;
       if (!showJumpRef.current) {
         listRef.current?.scrollToOffset({ offset: 0, animated: false });
       } else {
         setNewWhileAway((count) => count + 1);
       }
     }
-  }, [items]);
+  }, [items, view.detached]);
 
+  const topRow = useTopRow(items);
+  const { onRowLayout, onScroll: onTopRowScroll, onViewport } = topRow;
   const autofill = useHistoryAutofill(
-    {
-      hasNextPage: historyQuery.hasNextPage,
-      isFetchingNextPage: historyQuery.isFetchingNextPage,
-      isError: historyQuery.isError,
-      fetchNextPage: historyQuery.fetchNextPage,
-    },
+    view,
     transcriptReady && !useTranscriptFiller,
     historyRows.length,
   );
   const { onScrollNearEnd } = autofill;
-  const onScrollToIndexFailed = useMessageJump(sessionId, items, listRef, historyQuery);
+  const onScrollToIndexFailed = useMessageJump(sessionId, items, listRef, view, view.jumpAround);
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     onScrollNearEnd(e.nativeEvent);
+    onTopRowScroll(e.nativeEvent.contentOffset.y, e.nativeEvent.layoutMeasurement.height);
     const awayFromLatest = e.nativeEvent.contentOffset.y > JUMP_THRESHOLD_PX;
     setShowJump(awayFromLatest);
     if (!awayFromLatest) {
@@ -682,19 +711,27 @@ export function SessionChat() {
       return;
     }
     setShowResponseNav(true);
-  }, [onScrollNearEnd]);
+  }, [onScrollNearEnd, onTopRowScroll]);
 
+  const returnToLatest = view.returnToLatest;
   const jumpToLatest = useCallback(() => {
+    returnToLatest();
     setShowJump(false);
     setNewWhileAway(0);
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
-  }, []);
+  }, [returnToLatest]);
 
-  const renderItem = useCallback(
-    ({ item }: { item: TimelineItem }) => {
+  const renderRow = useCallback(
+    (item: TimelineItem) => {
       switch (item.kind) {
         case "history":
-          return <MessageRow row={item.row} onLongPress={onMessageLongPress} />;
+          return item.row.seq === findSeq ? (
+            <View style={{ backgroundColor: tokens.selection }}>
+              <MessageRow row={item.row} onLongPress={onMessageLongPress} />
+            </View>
+          ) : (
+            <MessageRow row={item.row} onLongPress={onMessageLongPress} />
+          );
         case "tool":
           return <ToolCallRow invocation={item.invocation} />;
         case "turnFooter":
@@ -760,16 +797,24 @@ export function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, busy, activity, activityToolLine, turnStartedAt, onMessageLongPress, openGroups, toggleGroup],
+    [tokens.ink2, tokens.ink3, tokens.selection, findSeq, busy, activity, activityToolLine, turnStartedAt, onMessageLongPress, openGroups, toggleGroup],
+  );
+
+  // Each row reports its height so the sticky prompt bar can tell which row is at the top.
+  const renderItem = useCallback(
+    ({ item }: { item: TimelineItem }) => (
+      <View onLayout={(e) => onRowLayout(item.id, e.nativeEvent.layout.height)}>{renderRow(item)}</View>
+    ),
+    [renderRow, onRowLayout],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);
 
   const onEndReached = useCallback(() => {
-    if (historyQuery.hasNextPage && !historyQuery.isFetchingNextPage) {
-      void historyQuery.fetchNextPage();
+    if (view.hasNextPage && !view.isFetchingNextPage) {
+      void view.fetchNextPage();
     }
-  }, [historyQuery]);
+  }, [view]);
 
   const queued = snapshot?.queued ?? [];
   const hasPending = queued.length > 0 || offlineQueue.length > 0;
@@ -791,7 +836,29 @@ export function SessionChat() {
   }, [assistantResponseIndices, responsePosition]);
   // On a phone the response stepper and the jump pill stacked two floating controls over the
   // reading area; the jump button alone stays there.
-  const { isCompact } = useBreakpoint();
+  const { isCompact, isExpanded } = useBreakpoint();
+  const finePointer = useFinePointer();
+  const promptEntries = useMemo<PromptEntry[]>(
+    () =>
+      items.flatMap((item, index) =>
+        item.kind === "history" && item.row.role === "user" && item.row.kind !== "nudge" && item.row.visibility === "llm"
+          ? [{ index, seq: item.row.seq, text: displayMessageText(item.row) }]
+          : [],
+      ),
+    [items],
+  );
+  const topIndex = topRow.top;
+  const stickyPrompt = topIndex != null ? stickyPromptFor(promptEntries, topIndex) : null;
+  const scrollToSticky = useCallback(() => {
+    if (!stickyPrompt) return;
+    try {
+      listRef.current?.scrollToIndex({ index: stickyPrompt.index, animated: true, viewPosition: 0.1 });
+    } catch {
+      requestMessageJump(sessionId, stickyPrompt.seq);
+    }
+  }, [stickyPrompt, sessionId]);
+  const rail = usePromptRail(baseUrl, sessionId, historyRows, isExpanded && finePointer);
+  const showRail = railVisible({ promptCount: rail.total, expanded: isExpanded, finePointer });
   const responseNavigatorVisible = !isCompact && showResponseNav && assistantResponseIndices.length > 1;
 
   return (
@@ -799,7 +866,7 @@ export function SessionChat() {
     // panel bleeds through it) so Screen's bg1 never shows as a seam below the composer.
     <AgentIndexProvider value={agentIndex}>
     <Screen edges={["left", "right"]} keyboardAvoiding keyboardVerticalOffset={headerHeight} contentContainerStyle={styles.sessionColumn}>
-      <View style={styles.flex}>
+      <View style={styles.flex} {...findFocusProps("chat")}>
         <BoundedList<TimelineItem>
           ref={listRef}
           // Only invert when there's content — an inverted FlatList mirrors its
@@ -811,11 +878,14 @@ export function SessionChat() {
           keyExtractor={keyExtractor}
           onScroll={onScroll}
           onScrollToIndexFailed={onScrollToIndexFailed}
-          onLayout={autofill.onLayout}
+          onLayout={(e) => {
+            autofill.onLayout(e);
+            onViewport(e.nativeEvent.layout.height);
+          }}
           onContentSizeChange={autofill.onContentSizeChange}
           scrollEventThrottle={32}
           onEndReached={onEndReached}
-          loadingMore={transcriptReady && historyQuery.isFetchingNextPage}
+          loadingMore={transcriptReady && view.isFetchingNextPage}
           ListEmptyComponent={
             !transcriptReady || (snapshot == null && !snapshotTimedOut) || (!historySettled && !historyQuery.isError) ? (
               <View style={styles.connectingRow}>
@@ -841,6 +911,15 @@ export function SessionChat() {
           }
         />
 
+        {stickyPrompt ? <StickyPromptBar text={stickyPrompt.text} onPress={scrollToSticky} /> : null}
+        {showRail ? (
+          <PromptRail
+            ticks={rail.ticks}
+            activeSeq={stickyPrompt?.seq ?? null}
+            onSelect={(seq) => requestMessageJump(sessionId, seq)}
+          />
+        ) : null}
+        <FindBar targetId="chat" />
         {responseNavigatorVisible ? (
           <View style={[styles.responseNav, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}>
             <Pressable
@@ -864,7 +943,7 @@ export function SessionChat() {
             </Pressable>
           </View>
         ) : null}
-        {showJump ? (
+        {showJump || view.detached ? (
           <Pressable
             onPress={jumpToLatest}
             accessibilityRole="button"
@@ -889,6 +968,8 @@ export function SessionChat() {
       ) : null}
 
       <CardSlot />
+
+      <IntegrityDocks baseUrl={baseUrl} sessionId={sessionId} snapshot={snapshot} />
 
       <SubagentStrip
         subagents={snapshot?.subagents ?? []}
