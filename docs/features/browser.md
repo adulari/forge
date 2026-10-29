@@ -15,7 +15,21 @@ deliberately small.
 ### `browser`
 
 `action` is one of `open`, `navigate`, `click`, `type`, `eval`, `html`, `screenshot`, `cookies`,
-`close`.
+`replay`, `intercept`, `intercept_clear`, `close`, `batch`.
+
+`eval`, `replay` (it runs script in the page, with the page's login) and `cookies` are off by
+default and return a refusal naming the key that enables them:
+
+```toml
+[browser]
+allow_eval = true           # eval, replay
+allow_cookie_access = true  # cookies
+```
+
+`batch` takes `steps`, an array of single-call objects (`{"action": "click", "selector": "#go"}`),
+runs them in order and stops at the first failure. The result lists each step's outcome up to that
+point and ends with one snapshot of the page HTML (4000 characters). Up to 25 steps; batches do not
+nest, and gated actions inside a batch are refused the same way.
 
 | argument | meaning |
 | --- | --- |
@@ -23,6 +37,7 @@ deliberately small.
 | `selector` | CSS selector, for `click` / `type` |
 | `text` | text to type |
 | `expression` | JavaScript, for `eval` |
+| `steps` | array of actions, for `batch` |
 | `headless` | open without a window. Default `false` |
 | `profile` | named persistent profile. Default `"default"` |
 | `max_chars` | cap for `html` output |

@@ -51,7 +51,7 @@ pub(crate) mod test_state {
 }
 
 pub use arg_shape::normalize_args;
-pub use browser::{set_attach_endpoint, BrowserNetworkTool, BrowserTool};
+pub use browser::{set_attach_endpoint, set_browser_permissions, BrowserNetworkTool, BrowserTool};
 pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
     ReadFileTool, WriteFileTool,

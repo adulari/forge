@@ -11,6 +11,10 @@ pub struct BrowserConfig {
     pub attach: Option<String>,
     /// Alias of `attach`, for people who think of it as "the CDP URL".
     pub cdp_url: Option<String>,
+    /// Let the model run arbitrary JavaScript in the page (`eval`, `replay`). Off by default.
+    pub allow_eval: bool,
+    /// Let the model read the browser's cookies (`cookies`). Off by default.
+    pub allow_cookie_access: bool,
 }
 
 impl BrowserConfig {
@@ -34,14 +38,25 @@ mod tests {
         let both = BrowserConfig {
             attach: Some("http://a:1".into()),
             cdp_url: Some("http://b:2".into()),
+            ..BrowserConfig::default()
         };
         assert_eq!(both.endpoint(), Some("http://a:1"));
         let alias = BrowserConfig {
             attach: Some("  ".into()),
             cdp_url: Some("http://b:2".into()),
+            ..BrowserConfig::default()
         };
         assert_eq!(alias.endpoint(), Some("http://b:2"));
         let parsed: BrowserConfig = toml::from_str("cdp_url = \"9222\"").unwrap();
         assert_eq!(parsed.endpoint(), Some("9222"));
+    }
+
+    #[test]
+    fn eval_and_cookie_access_default_off() {
+        let config = BrowserConfig::default();
+        assert!(!config.allow_eval && !config.allow_cookie_access);
+        let parsed: BrowserConfig =
+            toml::from_str("allow_eval = true\nallow_cookie_access = true").unwrap();
+        assert!(parsed.allow_eval && parsed.allow_cookie_access);
     }
 }

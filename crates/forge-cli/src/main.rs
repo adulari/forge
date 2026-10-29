@@ -283,6 +283,10 @@ async fn run_cli(login_path_added: Vec<String>) {
             // Resolved once, so every terminal surface (and the startup error below) shares it.
             forge_tui::theme::init(&config.tui);
             forge_tools::set_attach_endpoint(config.browser.endpoint());
+            forge_tools::set_browser_permissions(
+                config.browser.allow_eval,
+                config.browser.allow_cookie_access,
+            );
             preview::install(config);
         }
         open_pr_hooks::install(config.as_ref());
