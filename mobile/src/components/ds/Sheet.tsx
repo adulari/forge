@@ -18,6 +18,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { isTauri } from "../../lib/platform";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space } from "../../theme/tokens";
@@ -127,15 +128,8 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
     return () => sub.remove();
   }, [visible, close]);
 
-  // Web: Esc closes.
-  useEffect(() => {
-    if (!visible || Platform.OS !== "web") return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [visible, close]);
+  // Web: Esc closes, topmost overlay first.
+  useOverlayEscape(visible, close);
 
   // The Modal covers the full screen with no window resize to compensate, so an open keyboard
   // sits on top of a `bottom: 0` sheet on every platform — Android 15+ enforces edge-to-edge,

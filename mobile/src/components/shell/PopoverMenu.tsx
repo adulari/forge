@@ -6,6 +6,7 @@ import { Check } from "lucide-react-native";
 import React from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
@@ -41,6 +42,7 @@ export interface PopoverMenuProps {
 export function PopoverMenu({ anchor, entries, onClose, accessibilityLabel, width = 280 }: PopoverMenuProps) {
   const tokens = useTokens();
   const { height: windowHeight } = useWindowDimensions();
+  useOverlayEscape(anchor != null, onClose);
   return (
     <Modal visible={anchor != null} transparent animationType="none" onRequestClose={onClose}>
       <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel={`Close ${accessibilityLabel}`} />

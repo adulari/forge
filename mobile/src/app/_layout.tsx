@@ -378,16 +378,17 @@ export default function RootLayout() {
                           <OperationalNotice />
                           <ClaudeReconnectBanner />
                           <DesktopOtaHost />
-                          <PaletteHost>
-                            <WorkbenchProvider>
+                          <WorkbenchProvider>
+                            {/* Inside WorkbenchProvider: the palette opens files into the Files dock. */}
+                            <PaletteHost>
                               <AppLock>
                                 <RootNavigator />
                                 <NoticeBannerHost />
                               </AppLock>
                               {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
                               <DesktopWindowChrome />
-                            </WorkbenchProvider>
-                          </PaletteHost>
+                            </PaletteHost>
+                          </WorkbenchProvider>
                         </View>
                       </IncomingShareProvider>
                     </ToastHost>

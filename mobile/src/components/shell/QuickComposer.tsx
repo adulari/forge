@@ -32,6 +32,7 @@ import { formatCwd, type as typeScale, webInputTextStyle } from "../../theme/typ
 import { ListRow } from "../ds/ListRow";
 import { SectionHeader } from "../ds/SectionHeader";
 import { Sheet } from "../ds/Sheet";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 
 type Temper = "Read-only" | "Ask" | "Auto-edit" | "Full";
 const TEMPER_CYCLE: Temper[] = ["Read-only", "Ask", "Auto-edit", "Full"];
@@ -136,13 +137,13 @@ export function QuickComposer({ visible, onClose }: QuickComposerProps) {
     router.push({ pathname: "/new-session", params: { title: trimmed || undefined, cwd: cwd || undefined } });
   };
 
+  useOverlayEscape(visible, onClose);
+
   useEffect(() => {
     if (!visible || Platform.OS !== "web") return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      } else if (e.key === "Enter" && e.shiftKey) {
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === "Enter" && e.shiftKey) {
         e.preventDefault();
         openFull();
       } else if (e.key === "Enter") {

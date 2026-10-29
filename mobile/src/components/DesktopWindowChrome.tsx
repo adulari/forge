@@ -26,6 +26,7 @@ import { usePalette } from "./overlay/CommandPalette";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { monoFamily } from "../theme/typography";
+import { useOverlayEscape } from "../lib/useOverlayEscape";
 
 export const DESKTOP_WINDOW_CHROME_HEIGHT = 36;
 const CENTERED_TITLE_MIN_WIDTH = 900;
@@ -69,6 +70,7 @@ export function DesktopWindowChrome() {
       setMenuAnchor({ top: y + height + 4, right: Math.max(8, windowWidth - x - width) }),
     );
   const closeMenu = () => setMenuAnchor(null);
+  useOverlayEscape(menuAnchor != null, closeMenu);
   const choose = (pick: () => void) => {
     pick();
     closeMenu();

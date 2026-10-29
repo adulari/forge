@@ -28,6 +28,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { durations, easings } from "../../theme/motion";
 import { radii, space, tapTarget } from "../../theme/tokens";
 import { type } from "../../theme/typography";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 
 export interface ConfirmDialogProps {
   visible: boolean;
@@ -89,6 +90,8 @@ export function ConfirmDialog({
   };
 
   const fillStyle = useAnimatedStyle(() => ({ width: `${fill.value * 100}%` }));
+
+  useOverlayEscape(visible, onCancel);
 
   if (!visible) return null;
 

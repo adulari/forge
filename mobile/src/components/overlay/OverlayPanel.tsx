@@ -46,6 +46,7 @@ import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 
 export interface OverlayPanelProps {
   overlay: Overlay;
@@ -75,7 +76,7 @@ function groupRows(rows: OverlayRow[]): RowGroup[] {
   return groups;
 }
 
-const PASSTHROUGH_KEYS = new Set(["ArrowUp", "ArrowDown", "Enter", "Escape", "Tab", "PageUp", "PageDown"]);
+const PASSTHROUGH_KEYS = new Set(["ArrowUp", "ArrowDown", "Enter", "Tab", "PageUp", "PageDown"]);
 
 function isTypingTarget(target: EventTarget | null): boolean {
   if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return false;
@@ -90,13 +91,14 @@ export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelPr
   // T5.1 — overlay keyboard passthrough (closes the T4.1 deferral noted above): while open
   // on web/desktop, forward navigation keys to the daemon as raw `key` inputs so the
   // server-authoritative selection can be driven from the keyboard, not just row taps. Skips
-  // forwarding (except Esc, which should always reach the daemon) while focus is in the
-  // filter/free-text Input — those already handle their own Enter/typing locally.
+  // forwarding while focus is in the filter/free-text Input — those already handle their own
+  // Enter/typing locally. Esc is not forwarded here: the overlay stack routes it to `onClose`,
+  // which the host maps to `overlay_cancel` (the daemon's Esc).
   useEffect(() => {
     if (Platform.OS !== "web" || !visible) return;
     const handler = (e: KeyboardEvent) => {
       if (!PASSTHROUGH_KEYS.has(e.key)) return;
-      if (e.key !== "Escape" && isTypingTarget(e.target)) return;
+      if (isTypingTarget(e.target)) return;
       send({ kind: "key", key: e.key });
     };
     window.addEventListener("keydown", handler);
@@ -279,14 +281,7 @@ function CenteredModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, mounted, reduced]);
 
-  useEffect(() => {
-    if (Platform.OS !== "web") return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  useOverlayEscape(visible, onClose);
 
   const scrimStyle = useAnimatedStyle(() => ({ opacity: opacity.value }));
   const cardStyle = useAnimatedStyle(() => ({

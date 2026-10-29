@@ -10,6 +10,7 @@ import { Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 import { isPdfName, type SentAttachment } from "./attach";
 import { PdfPage } from "./AttachmentTray";
 
@@ -18,6 +19,7 @@ const THUMB = 72;
 export function AttachmentRow({ attachments }: { attachments: SentAttachment[] }) {
   const tokens = useTokens();
   const [preview, setPreview] = useState<SentAttachment | null>(null);
+  useOverlayEscape(preview !== null, () => setPreview(null));
 
   if (attachments.length === 0) return null;
 
