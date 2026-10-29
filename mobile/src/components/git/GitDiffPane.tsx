@@ -7,7 +7,11 @@ import { ChevronsDownUp, ChevronsUpDown, FileDiff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
-import { type DiffViewMode, GitDiffCard } from "./GitDiffCard";
+import { type DiffFindLine, type DiffViewMode, GitDiffCard } from "./GitDiffCard";
+import { FindBar } from "../find/FindBar";
+import { findController, findFocusProps } from "../../lib/find/findController";
+import { matchOffsets, steppedIndex } from "../../lib/find/matching";
+import { LINE_HEIGHT } from "./diffLines";
 import {
   CARD_RENDER_LIMIT,
   type DiffEntry,
@@ -23,6 +27,10 @@ export type { DiffViewMode } from "./GitDiffCard";
 
 /** Below this the two columns are narrower than a typical code line, so split is not offered. */
 const SPLIT_MIN_WIDTH = 560;
+/** Where a card's first line starts below its top edge, and how much context Find leaves above a
+ * hit. Approximate: hunk headers add a row each, so a hit deep in a file can land a little low. */
+const FIND_CARD_HEADER = 40;
+const FIND_LEAD = 72;
 
 export interface GitDiffFocusRequest {
   key: string;
@@ -97,6 +105,12 @@ export function GitDiffPane({
   const scroller = useRef<ScrollView>(null);
   const positions = useRef(new Map<string, number>());
 
+  const lineIndex = useRef(new Map<string, DiffFindLine[]>());
+  const onLines = useCallback((key: string, lines: DiffFindLine[]) => {
+    lineIndex.current.set(key, lines);
+  }, []);
+  const findRefs = useRef({ entries, scroll: (_y: number) => {}, show: (_key: string) => {} });
+
   const defaults = useMemo(() => defaultExpandedKeys(entries), [entries]);
   const isExpanded = useCallback(
     (key: string) => overrides[key] ?? defaults.has(key),
@@ -122,6 +136,52 @@ export function GitDiffPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRequest?.nonce]);
 
+  useEffect(() => {
+    findRefs.current = {
+      entries,
+      scroll: (y) => scroller.current?.scrollTo({ y: Math.max(0, y), animated: false }),
+      show: (key) => {
+        setFocusedKey(key);
+        setOverrides((current) => ({ ...current, [key]: true }));
+      },
+    };
+  });
+
+  useEffect(() => {
+    let hits: { key: string; path: string; lineNo: number; row: number }[] = [];
+    let index = -1;
+    const activate = (next: number) => {
+      index = next;
+      const hit = hits[next];
+      if (!hit) return { count: hits.length, index };
+      findRefs.current.show(hit.key);
+      const top = positions.current.get(hit.key) ?? 0;
+      findRefs.current.scroll(top + FIND_CARD_HEADER + hit.row * LINE_HEIGHT - FIND_LEAD);
+      return { count: hits.length, index, detail: `${hit.path}:${hit.lineNo}` };
+    };
+    return findController.register({
+      id: "diff",
+      label: "diff",
+      search(query, caseSensitive) {
+        hits = [];
+        for (const entry of findRefs.current.entries) {
+          for (const line of lineIndex.current.get(entry.key) ?? []) {
+            if (matchOffsets(line.text, query, caseSensitive, 1).length > 0) {
+              hits.push({ key: entry.key, path: entry.path, lineNo: line.lineNo, row: line.row });
+            }
+          }
+        }
+        return activate(hits.length > 0 ? 0 : -1);
+      },
+      step: (direction) => activate(steppedIndex(index, hits.length, direction)),
+      clear() {
+        hits = [];
+        index = -1;
+        setFocusedKey(null);
+      },
+    });
+  }, []);
+
   const splitAvailable = width === 0 || width >= SPLIT_MIN_WIDTH;
   const effectiveMode: DiffViewMode = splitAvailable ? mode : "unified";
 
@@ -145,7 +205,8 @@ export function GitDiffPane({
   const visible = entries.slice(0, renderLimit);
 
   return (
-    <View style={styles.pane} onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
+    <View style={styles.pane} onLayout={(event) => setWidth(event.nativeEvent.layout.width)} {...findFocusProps("diff")}>
+      <FindBar targetId="diff" />
       <View style={[styles.toolbar, { borderBottomColor: tokens.border }]}>
         <Text style={[styles.summary, tabularNums, { color: tokens.ink2 }]} numberOfLines={1}>
           {entries.length} file{entries.length === 1 ? "" : "s"}
@@ -204,6 +265,7 @@ export function GitDiffPane({
                 mode={effectiveMode}
                 ignoreWhitespace={ignoreWhitespace}
                 width={width}
+                onLines={onLines}
               />
             </View>
           ))}

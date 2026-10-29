@@ -51,6 +51,7 @@ import { PaneGrid } from "../components/shell/SplitPanes";
 import { WorkbenchProvider, useWorkbench } from "../components/workbench/WorkbenchProvider";
 import { activeWorkbenchSurface } from "../components/workbench/model";
 import { useWorkbenchCommands } from "../components/workbench/useWorkbenchCommands";
+import { FindHotkey } from "../components/find/FindHotkey";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -398,6 +399,7 @@ export default function RootLayout() {
                           <OperationalNotice />
                           <ClaudeReconnectBanner />
                           <DesktopOtaHost />
+                          <FindHotkey />
                           <WorkbenchProvider>
                             <VisibleSessionsPublisher />
                             {/* Inside WorkbenchProvider: the palette opens files into the Files dock. */}

@@ -253,6 +253,16 @@ export interface Snapshot {
   closed: boolean;
   /** Set only on the snapshot of a subagent child session, naming the session it hangs off. */
   parent?: { id: string; title: string } | null;
+  /** Why the last turn failed, from the turn's end until the next turn starts. */
+  thread_error?: ThreadError | null;
+  /** On the resync frame of a reconnect the host could not replay: how many updates were missed. */
+  history_gap?: { count: number; reason: string } | null;
+}
+
+export interface ThreadError {
+  category: "rate_limit" | "auth" | "context" | "network" | "provider" | "other";
+  summary: string;
+  details: string;
 }
 
 /** Protocol identity guard narrowed to the full snapshot contract used by this adapter. */
@@ -295,6 +305,7 @@ export type ConnectionState =
   | "open"
   | "reconnecting"
   | "unreachable"
+  | "paused"
   | "closed";
 
 // After this many consecutive failed attempts (~15s of backoff), stop presenting the
@@ -343,6 +354,10 @@ export function useSessionSocket(
   // artifact, not a connection failure, so onclose reconnects immediately at attempt 0 without
   // escalating backoff or the unreachable counter.
   const resyncPendingRef = useRef(false);
+  // Updates a non-contiguous frame skipped, until the reconnect it forced answers: if that
+  // answer is a resync (the host could not replay them) the client reports the gap itself,
+  // for a host that does not send `history_gap`.
+  const skippedRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const socketGenerationRef = useRef(0);
   const closedRef = useRef(false);
@@ -463,6 +478,7 @@ export function useSessionSocket(
           // This is a transient gap, not a failed connection — flag it so onclose reconnects
           // at once without counting toward the backoff/unreachable escalation.
           resyncPendingRef.current = true;
+          skippedRef.current = Math.max(0, data.revision - revRef.current - 1);
           ws.close();
           return;
         }
@@ -470,6 +486,10 @@ export function useSessionSocket(
         if (revisionDecision === "duplicate") return;
         revRef.current = data.revision;
       }
+      if (data.resync && !data.history_gap && skippedRef.current > 0) {
+        data.history_gap = { count: skippedRef.current, reason: "replay_window_exceeded" };
+      }
+      skippedRef.current = 0;
       streamingRef.current = accumulateStreaming(streamingRef.current, data.streaming ?? "", data.streaming_offset);
       const fullStreaming = streamingDisplayText(streamingRef.current);
       frames.push(fullStreaming === data.streaming ? data : { ...data, streaming: fullStreaming });
@@ -546,7 +566,7 @@ export function useSessionSocket(
     const goBackground = () => {
       shouldRunRef.current = false;
       teardown();
-      setConnectionState("idle");
+      setConnectionState("paused");
     };
     const goForeground = () => {
       shouldRunRef.current = true;

@@ -32,7 +32,7 @@ const BORDER_ANY: &[char] = &[
 ];
 
 impl App {
-    fn overlay_open(&self) -> bool {
+    pub(super) fn overlay_open(&self) -> bool {
         self.modal_surface_open()
             || self.viewer.is_some()
             || self.workflow.open

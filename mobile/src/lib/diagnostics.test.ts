@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { DiagnosticsResponse } from "./api";
-import { assessCompatibility, buildSupportSummary } from "./diagnostics";
+import { assessCompatibility, buildSupportSummary, mismatchMessage } from "./diagnostics";
 
 const diagnostics: DiagnosticsResponse = {
   checked_at: 1_785_500_000,
@@ -106,5 +106,16 @@ describe("buildSupportSummary", () => {
     expect(summary).not.toContain("release secret");
     expect(summary).not.toContain("connection token");
     expect(summary).not.toContain("fany://");
+  });
+});
+
+describe("mismatchMessage", () => {
+  it("names both versions and says the pairing is kept", () => {
+    expect(mismatchMessage("daemon-outdated", 9, 10)).toBe(
+      "Forge on the host speaks protocol v9, older than this app's v10. Update the host to match; pairing retained.",
+    );
+    expect(mismatchMessage("client-outdated", 11, 10)).toBe(
+      "This app speaks protocol v10, older than the host's v11. Update the app to match; pairing retained.",
+    );
   });
 });

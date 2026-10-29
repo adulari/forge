@@ -1,7 +1,8 @@
-// Scrolls the transcript to a message the palette asked for. History pages in from the newest
-// end, so a hit deep in an old session is not loaded yet: keep pulling older pages until the row
-// appears, then scroll it into the middle of the view.
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+// Scrolls the transcript to a message the palette or Find asked for. History pages in from the
+// newest end, so a hit deep in an old session is not loaded yet: ask the host for the window
+// around it (one request, one swap) and, for a host that cannot, keep pulling older pages until
+// the row appears. Then scroll it into the middle of the view.
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { FlatList } from "react-native";
 
 import {
@@ -28,6 +29,7 @@ export function useMessageJump<T extends { id: string }>(
   items: readonly T[],
   listRef: React.RefObject<FlatList<T> | null>,
   pager: Pager,
+  jumpAround?: (seq: number) => Promise<boolean>,
 ) {
   const target = useSyncExternalStore(
     subscribeMessageJump,
@@ -35,6 +37,8 @@ export function useMessageJump<T extends { id: string }>(
     () => null,
   );
   const pagesPulled = useRef(0);
+  const around = useRef<{ seq: number; state: "pending" | "failed" | "done" } | null>(null);
+  const [, settle] = useState(0);
   const scrollIndex = useRef(-1);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -48,7 +52,10 @@ export function useMessageJump<T extends { id: string }>(
   }, [listRef]);
 
   useEffect(() => {
-    if (target == null) pagesPulled.current = 0;
+    if (target == null) {
+      pagesPulled.current = 0;
+      around.current = null;
+    }
   }, [target]);
 
   useEffect(() => {
@@ -62,13 +69,27 @@ export function useMessageJump<T extends { id: string }>(
       return;
     }
     if (pager.isFetchingNextPage) return;
+    if (jumpAround && around.current?.seq !== target) {
+      around.current = { seq: target, state: "pending" };
+      void jumpAround(target).then((ok) => {
+        if (around.current?.seq !== target) return;
+        around.current = { seq: target, state: ok ? "done" : "failed" };
+        settle((n) => n + 1);
+      });
+      return;
+    }
+    if (jumpAround && around.current?.state === "pending") return;
+    if (jumpAround && around.current?.state === "done") {
+      clearMessageJump(sessionId);
+      return;
+    }
     if (pager.hasNextPage && pagesPulled.current < MAX_JUMP_PAGES) {
       pagesPulled.current += 1;
       void pager.fetchNextPage();
       return;
     }
     if (items.length > 0) clearMessageJump(sessionId);
-  }, [sessionId, target, items, pager, scrollToTarget]);
+  }, [sessionId, target, items, pager, scrollToTarget, jumpAround]);
 
   useEffect(
     () => () => {

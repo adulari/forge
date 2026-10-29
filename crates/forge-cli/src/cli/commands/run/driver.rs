@@ -699,6 +699,10 @@ async fn drive_session(
                 revision,
             );
             child_links.mark(&queue_store, &session_id, &mut snap);
+            snap.thread_error = turn_error
+                .as_deref()
+                .filter(|_| !snap.busy)
+                .map(remote::ThreadError::from_message);
             if last_snap.as_ref() != Some(&snap) {
                 revision += 1;
                 snap.revision = revision;

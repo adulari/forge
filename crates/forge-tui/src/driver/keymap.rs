@@ -65,6 +65,7 @@ pub(super) fn static_key(k: &KeyEvent, ctrl_r_reasoning: bool) -> Option<KeyKind
             'y' => KeyKind::Yank,
             'a' => KeyKind::Home,
             'e' => KeyKind::End,
+            'f' => KeyKind::FindTranscript,
             'd' => KeyKind::ExitOrDelete,
             'g' => KeyKind::ExternalEditor,
             'p' => KeyKind::Up,

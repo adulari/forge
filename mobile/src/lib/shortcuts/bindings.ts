@@ -12,6 +12,7 @@ export type AppShortcutAction =
   | "session.new"
   | "command.palette"
   | "session.search"
+  | "find"
   | "shell.sidebar"
   | "shell.usage"
   | "shell.quickComposer"
@@ -68,6 +69,7 @@ export const APP_SHORTCUTS: readonly AppShortcutDescriptor[] = [
   { action: "session.new", label: "New session", description: "Open the new-session flow.", group: "Navigation", defaultBinding: binding("n", { mod: true }) },
   { action: "command.palette", label: "Command palette", description: "Open actions and navigation.", group: "Navigation", defaultBinding: binding("k", { mod: true }) },
   { action: "session.search", label: "Search sessions", description: "Open global thread search.", group: "Navigation", defaultBinding: binding("p", { mod: true }) },
+  { action: "find", label: "Find", description: "Search the transcript, diff or file you are looking at.", group: "Navigation", defaultBinding: binding("f", { mod: true }) },
   { action: "shell.sidebar", label: "Toggle sidebar", description: "Collapse or expand the desktop sidebar.", group: "Workbench", defaultBinding: binding("\\", { mod: true }) },
   { action: "shell.usage", label: "Toggle usage panel", description: "Show or hide the usage dock.", group: "Workbench", defaultBinding: binding("u", { mod: true }) },
   { action: "shell.quickComposer", label: "Quick composer", description: "Open the quick composer, from any app on desktop.", group: "Workbench", defaultBinding: binding("space", { alt: true }) },

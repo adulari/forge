@@ -70,6 +70,16 @@ export interface GitDiffCardProps {
   ignoreWhitespace: boolean;
   /** Width of the stack, for the path budget. */
   width: number;
+  /** Reports the card's changed lines (and where each sits in the unified body) once loaded, for
+   * the pane's Find. */
+  onLines?: (key: string, lines: DiffFindLine[]) => void;
+}
+
+export interface DiffFindLine {
+  lineNo: number;
+  text: string;
+  /** Position among the unified rows, hunk headers included. */
+  row: number;
 }
 
 export const GitDiffCard = React.memo(function GitDiffCard({
@@ -81,6 +91,7 @@ export const GitDiffCard = React.memo(function GitDiffCard({
   mode,
   ignoreWhitespace,
   width,
+  onLines,
 }: GitDiffCardProps) {
   const tokens = useTokens();
   const [context, setContext] = useState(0);
@@ -99,6 +110,14 @@ export const GitDiffCard = React.memo(function GitDiffCard({
   const splitRows = useMemo(() => (file ? toSplitRows(file.hunks) : []), [file]);
   const unifiedRows = useMemo(() => (file ? toUnifiedRows(file.hunks) : []), [file]);
   const revision = useMemo(() => (file ? changeRevision(file.path, unifiedRows) : ""), [file, unifiedRows]);
+  useEffect(() => {
+    if (!onLines) return;
+    const lines: DiffFindLine[] = [];
+    unifiedRows.forEach((row, index) => {
+      if (row.kind === "line") lines.push({ lineNo: row.cell.lineNo, text: row.cell.text, row: index });
+    });
+    onLines(entry.key, lines);
+  }, [onLines, entry.key, unifiedRows]);
   const totalLines = file?.total_lines;
   const lastTotal = useRef<number | null>(null);
 

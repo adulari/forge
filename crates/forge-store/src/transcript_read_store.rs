@@ -59,6 +59,14 @@ fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> 
     }
 }
 
+/// Narrows a history page to one stored role (`"user"`, `"assistant"`) and/or rows whose text
+/// contains `needle`. The default keeps every row, which is the historical page.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HistoryFilter<'a> {
+    pub role: Option<&'a str>,
+    pub needle: Option<&'a str>,
+}
+
 impl Store {
     /// Prompts the user typed, oldest first, for the composer's ↑/↓ history: this session's own
     /// prompts (every row, rewound and compacted ones included — history is what was typed, not
@@ -328,6 +336,28 @@ impl Store {
         limit: usize,
         include_tools: bool,
     ) -> Result<Vec<HistoryRow>> {
+        self.load_history_filtered(
+            session_id,
+            before_seq,
+            limit,
+            include_tools,
+            &HistoryFilter::default(),
+        )
+    }
+
+    /// [`load_history_page_with`](Self::load_history_page_with) narrowed to rows of one role and/or
+    /// whose text contains a needle (case-insensitive for ASCII, like SQLite's `lower`). The page
+    /// is still newest first and `before_seq` still opens the next window, so a search pages
+    /// exactly like the transcript does. Used by the app's Find and prompt rail, which need every
+    /// matching row of a session without paging the whole of it in.
+    pub fn load_history_filtered(
+        &self,
+        session_id: &str,
+        before_seq: Option<i64>,
+        limit: usize,
+        include_tools: bool,
+        filter: &HistoryFilter<'_>,
+    ) -> Result<Vec<HistoryRow>> {
         let conn = self.lock()?;
         // The carrier lookup sits behind `CASE WHEN ?4 = 1 AND m.role = 'tool'` rather than in the
         // projection unconditionally: SQLite short-circuits the CASE, so the default page runs the
@@ -367,6 +397,8 @@ impl Store {
                AND (TRIM(m.content, char(9,10,13,32)) != ''
                     OR (?4 = 1 AND m.role = 'assistant' AND m.visibility != 'llm_only'
                         AND m.tool_calls_json IS NOT NULL))
+               AND (?5 IS NULL OR m.role = ?5)
+               AND (?6 IS NULL OR instr(lower(m.content), lower(?6)) > 0)
              ORDER BY m.seq DESC LIMIT ?3",
         )?;
         let rows = stmt.query_map(
@@ -374,7 +406,9 @@ impl Store {
                 session_id,
                 before_seq,
                 limit as i64,
-                i64::from(include_tools)
+                i64::from(include_tools),
+                filter.role,
+                filter.needle
             ],
             |row| {
                 let seq: i64 = row.get(0)?;
@@ -465,6 +499,19 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// How many rows of a session's message log are missing. Sequence numbers are handed out as
+    /// `MAX(seq) + 1` from zero and nothing deletes a row (a rewind or compaction only clears
+    /// `active`), so a hole means rows were lost to a damaged or repaired store, and a transcript
+    /// built from the rest is shorter than the conversation that happened.
+    pub fn history_missing_rows(&self, session_id: &str) -> Result<u64> {
+        let (count, next): (i64, i64) = self.lock()?.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(seq), -1) + 1 FROM message WHERE session_id = ?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(u64::try_from(next - count).unwrap_or(0))
     }
 
     /// When the session's FIRST user-facing row was written — the zero point a transcript replay
@@ -707,7 +754,67 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_role_with_diagnostic, parse_tool_calls_with_diagnostic, Role, Store};
+    use super::{
+        parse_role_with_diagnostic, parse_tool_calls_with_diagnostic, HistoryFilter, Role, Store,
+    };
+
+    fn three_turn_session(store: &Store) -> String {
+        let session = store.create_session("/tmp", "default").unwrap();
+        for (seq, role, text) in [
+            (0, Role::User, "fix the Parser bug"),
+            (1, Role::Assistant, "the parser skips a token"),
+            (2, Role::User, "now add tests"),
+            (3, Role::Assistant, "tests added"),
+        ] {
+            store.add_message(&session, seq, role, text, None).unwrap();
+        }
+        session
+    }
+
+    #[test]
+    fn a_filtered_page_keeps_only_matching_rows_newest_first() {
+        let store = Store::open_in_memory().unwrap();
+        let session = three_turn_session(&store);
+        let hits = store
+            .load_history_filtered(
+                &session,
+                None,
+                50,
+                false,
+                &HistoryFilter {
+                    role: None,
+                    needle: Some("PARSER"),
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.iter().map(|r| r.seq).collect::<Vec<_>>(), [1, 0]);
+        let prompts = store
+            .load_history_filtered(
+                &session,
+                Some(3),
+                50,
+                false,
+                &HistoryFilter {
+                    role: Some("user"),
+                    needle: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(prompts.iter().map(|r| r.seq).collect::<Vec<_>>(), [2, 0]);
+    }
+
+    #[test]
+    fn missing_rows_are_the_holes_in_the_sequence() {
+        let store = Store::open_in_memory().unwrap();
+        let session = three_turn_session(&store);
+        assert_eq!(store.history_missing_rows(&session).unwrap(), 0);
+        store
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM message WHERE seq IN (1, 2)", [])
+            .unwrap();
+        assert_eq!(store.history_missing_rows(&session).unwrap(), 2);
+    }
 
     /// A finished turn stores its answer twice (provider-continuity `llm_only` row + the published
     /// `ui` copy); replay must show one entry per answer, with the usage row's model attached.

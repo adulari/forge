@@ -1173,13 +1173,38 @@ export function getUsage(baseUrl: string, session?: string): Promise<UsageRespon
  * sends the same request and gets the same payload it always did. */
 export function getHistory(
   baseUrl: string,
-  params: { session: string; before?: number; limit?: number; include_tools?: boolean },
+  params: {
+    session: string;
+    before?: number;
+    limit?: number;
+    include_tools?: boolean;
+    /** Only rows whose text contains this. A host that predates it ignores it, so callers
+     * re-check the rows they get back. */
+    q?: string;
+    /** Only rows of this role. Same older-host caveat as `q`. */
+    role?: "user" | "assistant";
+    /** The page that ends just past this `seq`; an older host ignores it. */
+    around?: number;
+  },
 ): Promise<HistoryRow[]> {
   const { include_tools, ...page } = params;
   return expectArray(
     request<HistoryRow[]>(baseUrl, `/api/history${qs({ ...page, include_tools: include_tools ? 1 : undefined })}`),
     "history",
   );
+}
+
+export interface HistoryGap {
+  count: number;
+  reason: string;
+}
+
+/** Whether the host's stored record of this session has holes in it. An older host answers the
+ * page it always did, which reads as "no gap". */
+export async function getHistoryIntegrity(baseUrl: string, session: string): Promise<HistoryGap | null> {
+  const body = await request<unknown>(baseUrl, `/api/history${qs({ session, integrity: 1 })}`);
+  const gap = (body as { history_gap?: HistoryGap | null } | null)?.history_gap;
+  return gap && typeof gap.count === "number" && gap.count > 0 ? gap : null;
 }
 
 export function uploadFile(

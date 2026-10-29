@@ -29,6 +29,8 @@ import React, { useCallback, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { useShortcutLabel } from "../../lib/shortcuts";
+import { findController } from "../../lib/find/findController";
+import type { SocketChipModel } from "../../lib/socketChip";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
@@ -37,6 +39,7 @@ import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
 import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
+import { SocketChip } from "./SocketChip";
 
 export interface SessionHeaderProps {
   title: string;
@@ -47,6 +50,8 @@ export interface SessionHeaderProps {
    * mono meta line StatusStrip renders directly under this header (Hearth core rule 8:
    * "session titles are task titles ... repo · branch · model live in the mono meta line"). */
   exposure: string;
+  /** What the socket is doing; null before the first connect. */
+  socketChip?: SocketChipModel | null;
   onBack: () => void;
   showBack?: boolean;
   onNewHere: () => void;
@@ -106,6 +111,7 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
         {props.showBack !== false ? <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" style={styles.leadingBleed} /> : null}
         <StatusDot state={props.state} />
         <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
+        {props.socketChip ? <SocketChip model={props.socketChip} compact={!isExpanded} /> : null}
         {isPublic ? <Text style={[typeScale.meta, { color: tokens.danger }]}>public</Text> : null}
         {isExpanded && props.onToggleFiles ? (
           <IconButton
@@ -171,6 +177,7 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
       <Sheet visible={actionsVisible} onClose={closeActions} accessibilityLabel="Session actions" snapPoints={[0.8]}>
         <ScrollView contentContainerStyle={styles.actions} keyboardShouldPersistTaps="handled">
           <Text style={[typeScale.heading, { color: tokens.ink }]}>Session actions</Text>
+          <ListRow title="Find in conversation" leading={<Search size={20} color={tokens.ink2} />} onPress={() => run(() => void findController.request())} />
           <ListRow title="Start another session here" leading={<Plus size={20} color={tokens.ink2} />} onPress={() => run(props.onNewHere)} />
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />

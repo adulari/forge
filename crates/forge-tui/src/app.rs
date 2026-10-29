@@ -469,6 +469,8 @@ pub struct App {
     last_tool_output: Option<(String, forge_types::ToolOutputRef)>,
     /// The full-output viewer, while open (`/output`, or a card's "view full output" row).
     pub output_view: Option<OutputView>,
+    /// Find in the full-screen transcript, while its bar is open.
+    pub(crate) transcript_find: Option<transcript_find::TranscriptFind>,
     /// Results of background slash commands (`/doctor`, `/diff`), drained every frame.
     deferred: DeferredInbox,
     /// Attachment blocks shown inline as placeholders (pasted text or images): the placeholder
@@ -908,6 +910,8 @@ pub enum KeyKind {
     /// Ctrl+Home — jump the full-screen transcript to the most recent user message above the
     /// current view; pressed again, to the one before it (shell-handled).
     JumpPrevUser,
+    /// Ctrl+F — find text in the full-screen transcript (shell-handled; see `transcript_find`).
+    FindTranscript,
     /// Alt+↑ / Alt+↓ — move the keyboard focus to the previous / next tool group in the
     /// full-screen transcript (shell-handled; see `App::tool_group_key`).
     PrevToolGroup,
@@ -1176,6 +1180,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::PageDown
         | KeyKind::JumpBottom
         | KeyKind::JumpPrevUser
+        | KeyKind::FindTranscript
         | KeyKind::SkipModel
         | KeyKind::TierUp
         | KeyKind::TierDown
@@ -3541,6 +3546,7 @@ mod group_flow;
 mod group_rows;
 mod lines;
 mod state;
+mod transcript_find;
 mod transcript_flow;
 pub use lines::banner::{banner_lines, print_banner_direct};
 pub(crate) use lines::rail::rail_lines;

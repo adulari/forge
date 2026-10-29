@@ -78,7 +78,7 @@ const BRIDGE_NOTE: (&str, &str) = (
 );
 
 /// Keys that are not rebindable, in canonical spelling.
-const FIXED_KEYS: [(&str, &str); 20] = [
+const FIXED_KEYS: [(&str, &str); 21] = [
     ("Enter", "Send the message (queues it while a turn runs)"),
     (
         "↑",
@@ -128,6 +128,10 @@ const FIXED_KEYS: [(&str, &str); 20] = [
     (
         "Ctrl+Home",
         "Jump to the previous message (Ctrl+End the bottom)",
+    ),
+    (
+        "Ctrl+F",
+        "Find in the full-screen transcript (Enter next, ↑ previous, Esc close)",
     ),
 ];
 
