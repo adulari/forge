@@ -50,3 +50,70 @@ export function classifyGitStatusError(
   }
   return { kind: "error", message };
 }
+
+/** Where the commit button's "last used" action is remembered. */
+export type CommitAction = "commit" | "commit-push";
+
+export const COMMIT_ACTION_LABEL: Record<CommitAction, string> = {
+  commit: "Commit",
+  "commit-push": "Commit & push",
+};
+
+export function parseCommitAction(stored: string | null): CommitAction {
+  return stored === "commit-push" ? "commit-push" : "commit";
+}
+
+/** The Ctrl/Cmd+Enter chord, from a web key event's fields. Plain Enter must keep inserting a
+ * newline in the message well. */
+export function isCommitChord(event: { key?: string; ctrlKey?: boolean; metaKey?: boolean }): boolean {
+  return event.key === "Enter" && (event.ctrlKey === true || event.metaKey === true);
+}
+
+/** git's refusal to fast-forward a diverged branch - the one pull failure with a one-tap remedy. */
+export function isNotFastForward(message: string): boolean {
+  return /fast-forward|diverging branches|not possible to fast/i.test(message);
+}
+
+/** The prompt "Resolve with Forge" sends: the files, what is unfinished, and what to leave alone. */
+export function conflictResolutionPrompt(paths: readonly string[], operation: string | null | undefined): string {
+  const list = paths.map((path) => `- ${path}`).join("\n");
+  const header = operation
+    ? `A ${operation} is in progress and stopped on conflicts in these files:`
+    : "These files have merge conflicts:";
+  return [
+    header,
+    list,
+    "",
+    "Resolve each conflict by keeping the intent of both sides, remove every conflict marker, and run the project's checks. Stage the resolved files with git add, but do not commit or push, and do not abort the operation.",
+  ].join("\n");
+}
+
+/** `↑2 ↓1`-style label for the sync buttons; empty when level or when there is no upstream. */
+export function aheadBehindLabel(ahead: number, behind: number): string {
+  return [ahead > 0 ? `↑${ahead}` : "", behind > 0 ? `↓${behind}` : ""].filter(Boolean).join(" ");
+}
+
+export type DiscardKind = "tracked" | "untracked";
+
+export function discardMessage(
+  paths: readonly string[],
+  kind: DiscardKind,
+): { title: string; message: string } {
+  if (paths.length === 1) {
+    return kind === "untracked"
+      ? { title: "Delete this file?", message: `${paths[0]} is untracked and is deleted from disk. This cannot be undone.` }
+      : {
+          title: "Discard changes?",
+          message: `${paths[0]} goes back to its staged or committed version. This cannot be undone.`,
+        };
+  }
+  return kind === "untracked"
+    ? {
+        title: `Delete ${paths.length} files?`,
+        message: "These untracked files are deleted from disk. This cannot be undone.",
+      }
+    : {
+        title: `Discard ${paths.length} files?`,
+        message: "Their working-tree changes are thrown away. Staged changes stay. This cannot be undone.",
+      };
+}

@@ -26,6 +26,9 @@ const MAX_SEARCH_FILES: usize = 20_000;
 const DEFAULT_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_RESULTS: usize = 100;
 
+mod edit;
+pub(crate) use edit::routes as edit_routes;
+
 #[derive(Debug)]
 struct WorkspaceFailure {
     status: StatusCode,

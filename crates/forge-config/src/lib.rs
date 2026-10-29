@@ -34,6 +34,7 @@ mod keybind_migration;
 mod keybinds;
 mod progress_guard;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
+pub mod commit_language;
 mod lsp_diagnostics;
 pub mod mcp;
 pub mod notifications;
@@ -1244,6 +1245,9 @@ pub struct GitConfig {
     /// silences the commit/push reminders above.
     #[serde(default)]
     pub commit_policy: CommitPolicy,
+    /// Language the review dock's "generate commit message" button writes in (default English).
+    #[serde(default = "default_commit_language")]
+    pub commit_language: String,
 }
 
 impl Default for GitConfig {
@@ -1254,8 +1258,13 @@ impl Default for GitConfig {
             commit_nudge_edits: default_commit_nudge_edits(),
             push_nudge_ahead: default_push_nudge_ahead(),
             commit_policy: CommitPolicy::default(),
+            commit_language: default_commit_language(),
         }
     }
+}
+
+fn default_commit_language() -> String {
+    commit_language::DEFAULT_COMMIT_LANGUAGE.to_string()
 }
 
 fn default_commit_nudge() -> bool {

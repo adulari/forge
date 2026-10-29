@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  joinWorkspacePath,
   parentWorkspacePath,
   replaceWorkspaceMention,
   workspaceBasename,
@@ -32,5 +33,12 @@ describe("workspace UI model", () => {
     );
     expect(workspaceMentionToken("docs/My Plan.md")).toBe("@{docs/My Plan.md}");
     expect(workspaceBasename("docs/My Plan.md")).toBe("My Plan.md");
+  });
+
+  it("joins a typed name onto the current directory", () => {
+    expect(joinWorkspacePath("src", "new.ts")).toBe("src/new.ts");
+    expect(joinWorkspacePath("", "new.ts")).toBe("new.ts");
+    expect(joinWorkspacePath("src/", " /deep/new.ts/ ")).toBe("src/deep/new.ts");
+    expect(joinWorkspacePath("src", "   ")).toBe("");
   });
 });

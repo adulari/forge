@@ -1,12 +1,15 @@
 use super::*;
 
-struct SessionGitContext {
+pub(super) struct SessionGitContext {
     dir: String,
     managed_worktree: bool,
-    busy: bool,
+    pub(super) busy: bool,
 }
 
-async fn session_git_context(state: &DaemonState, session: &str) -> Option<SessionGitContext> {
+pub(super) async fn session_git_context(
+    state: &DaemonState,
+    session: &str,
+) -> Option<SessionGitContext> {
     let (dir, managed_worktree, self_busy) = match state.registry.get(session).await {
         Some(handle) => (
             handle
