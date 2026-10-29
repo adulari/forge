@@ -6,13 +6,12 @@
 // macOS only), `tray.rs` (menu-bar extra, all desktops), `about.rs` (About panel). All three
 // are thin — they hold no daemon state and defer every real action to the webview.
 //
-// `Manager::get_webview_window` is used in the non-macOS setup hook; `menu.rs` and `about.rs`
-// bring their own imports.
+// `Manager` is needed on every platform: `Window::app_handle` in the window-event hook, plus
+// `get_webview_window` in the non-macOS setup hook. `menu.rs` and `about.rs` bring their own.
 use serde::Serialize;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use tauri::webview::{PageLoadEvent, PageLoadPayload};
-#[cfg(not(target_os = "macos"))]
 use tauri::Manager;
 use tauri::{RunEvent, WindowEvent};
 
