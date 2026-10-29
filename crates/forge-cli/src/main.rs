@@ -107,6 +107,7 @@ mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
 mod serve_history;
+mod serve_keybindings;
 mod serve_media;
 mod serve_onboarding;
 mod serve_recovery;

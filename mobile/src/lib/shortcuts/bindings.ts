@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 
 import { isTauri } from "../platform";
 import { syncGlobalQuickComposer } from "./globalChord";
+import { whenDisjoint } from "./when";
 
 export type AppShortcutAction =
   | "nav.fleet"
@@ -27,6 +28,18 @@ export type AppShortcutAction =
   | "workbench.agents"
   | "workbench.plan"
   | "workbench.files"
+  | "workbench.preview"
+  | "session.next"
+  | "session.prev"
+  | "session.recent"
+  | "session.close"
+  | "settings"
+  | "composer.effort"
+  | "composer.temper"
+  | "composer.model"
+  | "composer.plan"
+  | "sidebar.archive"
+  | "sidebar.rename"
   | "session.chat"
   | "session.tasks"
   | "session.agents"
@@ -34,7 +47,7 @@ export type AppShortcutAction =
   | "session.focusComposer"
   | "session.interrupt";
 
-export type AppShortcutGroup = "Navigation" | "Workbench" | "Session";
+export type AppShortcutGroup = "Navigation" | "Workbench" | "Session" | "Composer" | "Sidebar";
 
 export interface ShortcutBinding {
   key: string;
@@ -49,7 +62,25 @@ export interface AppShortcutDescriptor {
   description: string;
   group: AppShortcutGroup;
   defaultBinding: ShortcutBinding;
+  /** Focus-tag expression (`composerFocus && !terminalFocus`); the chord only fires, and only conflicts, inside it. */
+  when?: string;
 }
+
+/** A chord handled locally by a field or overlay: listed for reference, never rebound. */
+export interface DocShortcutRow {
+  label: string;
+  keys: string;
+  group: AppShortcutGroup;
+}
+
+export const DOC_SHORTCUTS: readonly DocShortcutRow[] = [
+  { label: "Send message", keys: "Enter", group: "Composer" },
+  { label: "New line", keys: "Shift+Enter", group: "Composer" },
+  { label: "Voice input", keys: "Hold the mic button", group: "Composer" },
+  { label: "Dismiss overlay or stop dictation", keys: "Esc", group: "Navigation" },
+  { label: "Move through palette results", keys: "Up / Down", group: "Navigation" },
+  { label: "Run palette result", keys: "Enter", group: "Navigation" },
+];
 
 const binding = (
   key: string,
@@ -84,6 +115,18 @@ export const APP_SHORTCUTS: readonly AppShortcutDescriptor[] = [
   { action: "workbench.agents", label: "Toggle Agents", description: "Show or hide the subagents of the focused session.", group: "Workbench", defaultBinding: binding("a", { mod: true, shift: true }) },
   { action: "workbench.plan", label: "Toggle Plan", description: "Show or hide the plan of the focused session.", group: "Workbench", defaultBinding: binding("l", { mod: true, shift: true }) },
   { action: "workbench.files", label: "Toggle Files", description: "Show or hide the workspace file browser.", group: "Workbench", defaultBinding: binding("f", { mod: true, shift: true }) },
+  { action: "workbench.preview", label: "Toggle Preview", description: "Show or hide the browser preview of the focused session.", group: "Workbench", defaultBinding: binding("b", { mod: true, shift: true }) },
+  { action: "settings", label: "Open app settings", description: "The standard preferences chord; opens app settings.", group: "Navigation", defaultBinding: binding(",", { mod: true }) },
+  { action: "session.next", label: "Next session", description: "Open the next session in the list.", group: "Session", defaultBinding: binding("]", { mod: true, shift: true }) },
+  { action: "session.prev", label: "Previous session", description: "Open the previous session in the list.", group: "Session", defaultBinding: binding("[", { mod: true, shift: true }) },
+  { action: "session.recent", label: "Recent session", description: "Cycle through recently used sessions. Hold the modifier and press again to go further back.", group: "Session", defaultBinding: binding("tab", { mod: true }) },
+  { action: "session.close", label: "Close session", description: "Close the focused pane, or leave the session when it is the only one.", group: "Session", defaultBinding: binding("w", { mod: true }), when: "hasSession && !composerFocus" },
+  { action: "composer.effort", label: "Change effort", description: "Open the reasoning-effort picker.", group: "Composer", defaultBinding: binding("e", { alt: true }), when: "composerFocus" },
+  { action: "composer.temper", label: "Change mode", description: "Open the operating-mode picker.", group: "Composer", defaultBinding: binding("t", { alt: true, shift: true }), when: "composerFocus" },
+  { action: "composer.model", label: "Change model", description: "Open the model picker.", group: "Composer", defaultBinding: binding("m", { alt: true }), when: "composerFocus" },
+  { action: "composer.plan", label: "Plan mode", description: "Start the draft with /plan.", group: "Composer", defaultBinding: binding("p", { alt: true }), when: "composerFocus" },
+  { action: "sidebar.archive", label: "Archive session", description: "Archive the session under focus in the sidebar.", group: "Sidebar", defaultBinding: binding("e", {}), when: "sidebarFocus" },
+  { action: "sidebar.rename", label: "Rename session", description: "Rename the session under focus in the sidebar.", group: "Sidebar", defaultBinding: binding("r", {}), when: "sidebarFocus" },
   { action: "session.chat", label: "Session: Chat", description: "Switch the current session to Chat.", group: "Session", defaultBinding: binding("c", { alt: true }) },
   { action: "session.tasks", label: "Session: Tasks", description: "Switch the current session to Tasks.", group: "Session", defaultBinding: binding("t", { alt: true }) },
   { action: "session.agents", label: "Session: Agents", description: "Switch the current session to Agents.", group: "Session", defaultBinding: binding("a", { alt: true }) },
@@ -96,7 +139,7 @@ const ACTIONS = new Set<AppShortcutAction>(APP_SHORTCUTS.map(({ action }) => act
 const DESCRIPTORS = new Map(APP_SHORTCUTS.map((descriptor) => [descriptor.action, descriptor]));
 const STORAGE_KEY = "forge.appShortcuts.v1";
 
-export type ShortcutOverrides = Partial<Record<AppShortcutAction, ShortcutBinding>>;
+export type ShortcutOverrides = Partial<Record<AppShortcutAction, ShortcutBinding>> & Record<string, ShortcutBinding>;
 
 interface ShortcutState {
   loaded: boolean;
@@ -205,9 +248,8 @@ export function parseShortcutOverrides(raw: string | null): ShortcutOverrides {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const valid: ShortcutOverrides = {};
     for (const [action, value] of Object.entries(parsed)) {
-      if (ACTIONS.has(action as AppShortcutAction) && isShortcutBinding(value)) {
-        valid[action as AppShortcutAction] = value;
-      }
+      // Actions a newer build added stay in the file, inert here, so an older client never erases them.
+      if (isShortcutBinding(value)) valid[action] = value;
     }
     return valid;
   } catch {
@@ -299,6 +341,12 @@ export async function resetAppShortcut(action: AppShortcutAction): Promise<void>
   await commitOverrides(overrides);
 }
 
+/** Adopt overrides read from the daemon's keybindings.json; unknown actions are kept inertly. */
+export async function adoptRemoteShortcuts(overrides: ShortcutOverrides): Promise<void> {
+  await ensureShortcutPreferencesLoaded();
+  await commitOverrides(overrides);
+}
+
 export async function resetAllAppShortcuts(): Promise<void> {
   await ensureShortcutPreferencesLoaded();
   await commitOverrides({});
@@ -369,9 +417,7 @@ const RESERVED_SHORTCUTS: readonly ReservedShortcut[] = [
   { id: "standard.copy", label: "standard Copy", binding: binding("c", { mod: true }) },
   { id: "standard.paste", label: "standard Paste", binding: binding("v", { mod: true }) },
   { id: "standard.selectAll", label: "standard Select All", binding: binding("a", { mod: true }) },
-  { id: "standard.close", label: "standard Close Window", binding: binding("w", { mod: true }) },
   { id: "standard.quit", label: "standard Quit", binding: binding("q", { mod: true }) },
-  { id: "standard.settings", label: "native Settings", binding: binding(",", { mod: true }) },
   { id: "standard.approve", label: "native Approve Waiting Decision", binding: binding("enter", { mod: true }) },
   { id: "standard.checkpoint", label: "native Create Checkpoint", binding: binding("s", { mod: true }) },
 ] as const;
@@ -388,8 +434,12 @@ export function findShortcutConflicts(
   overrides: ShortcutOverrides = state.overrides,
 ): ShortcutConflict[] {
   const signature = shortcutSignature(value);
+  const own = DESCRIPTORS.get(action)?.when;
   const app = APP_SHORTCUTS
-    .filter((descriptor) => descriptor.action !== action && shortcutSignature(getResolvedShortcut(descriptor.action, overrides)) === signature)
+    .filter((descriptor) =>
+      descriptor.action !== action
+      && shortcutSignature(getResolvedShortcut(descriptor.action, overrides)) === signature
+      && !whenDisjoint(own, descriptor.when))
     .map((descriptor) => ({ id: descriptor.action, label: descriptor.label, kind: "app" as const }));
   const reserved = RESERVED_SHORTCUTS
     .filter((item) => shortcutSignature(item.binding) === signature)
@@ -414,6 +464,7 @@ const NATIVE_MENU_ACTIONS: Partial<Record<AppShortcutAction, string>> = {
   "workbench.agents": "view:agents",
   "workbench.plan": "view:plan",
   "workbench.files": "view:files",
+  "workbench.preview": "view:browser-preview",
   "session.interrupt": "session:interrupt",
 };
 

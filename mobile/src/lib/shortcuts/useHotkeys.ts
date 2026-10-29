@@ -6,7 +6,7 @@ export type HotkeyHandler = () => void;
 export function useHotkey(
   _key: string,
   _handler: HotkeyHandler,
-  _options?: { meta?: boolean; alt?: boolean; shift?: boolean },
+  _options?: { meta?: boolean; alt?: boolean; shift?: boolean; when?: string },
 ): void {
   // no-op on native
 }

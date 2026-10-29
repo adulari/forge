@@ -32,6 +32,7 @@ mod hooks;
 mod install_notices;
 mod key_adoption;
 mod keybind_migration;
+mod keybindings_file;
 mod keybinds;
 mod progress_guard;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
@@ -64,6 +65,10 @@ pub use hard_stop::HardStop;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
 pub use install_notices::{install_notice_seen, mark_install_notice_seen, CLI_BRIDGE_TERMS};
+pub use keybindings_file::{
+    keybindings_path, overlay_tui, read_keybindings_file, write_app_overrides,
+    write_keybindings_file, KeybindingsFile,
+};
 pub use keybinds::{write_keybind, write_keybind_preset, KeyCombo, KeybindPreset, KeybindsConfig};
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
@@ -3368,6 +3373,7 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
             .extend(project_trust::user_rules_for(&cwd));
     }
     keybinds::normalize(&mut config.keybinds);
+    keybindings_file::overlay_user_file(&mut config.keybinds);
     resolve_system_prompt_overrides(&mut config)?;
     // Project-local `.forge/mcp.toml` is the dedicated home for MCP server declarations; when
     // present it sets the whole `[mcp]` section (overriding any `[mcp]` in config.toml). Keeping

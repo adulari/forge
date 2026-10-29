@@ -13,6 +13,7 @@ import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import {
   APP_SHORTCUTS,
+  DOC_SHORTCUTS,
   type AppShortcutAction,
   type AppShortcutDescriptor,
   type ShortcutBinding,
@@ -26,6 +27,7 @@ import {
   shortcutBindingFromEvent,
   useShortcutPreferences,
 } from "../lib/shortcuts";
+import { describeWhen } from "../lib/shortcuts/when";
 import { useGlobalChordStatus } from "../lib/shortcuts/globalChord";
 import { describeChordStatus } from "../lib/shortcuts/globalChordCore";
 import { isTauri } from "../lib/platform";
@@ -34,7 +36,7 @@ import { radii, space } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
 
-const GROUPS = ["Navigation", "Workbench", "Session"] as const;
+const GROUPS = ["Navigation", "Workbench", "Session", "Composer", "Sidebar"] as const;
 
 function ShortcutRow({
   descriptor,
@@ -71,6 +73,9 @@ function ShortcutRow({
             {isDefault ? <Text style={[type.meta, { color: tokens.ink4 }]}>default</Text> : null}
           </View>
           <Text style={[type.sub, { color: tokens.ink3 }]}>{descriptor.description}</Text>
+          {describeWhen(descriptor.when) ? (
+            <Text style={[type.meta, { color: tokens.ink4 }]}>{describeWhen(descriptor.when)}</Text>
+          ) : null}
           {conflicts.length > 0 ? (
             <Text style={[type.sub, { color: tokens.warn }]}>
               Also used by {conflicts.map(({ label }) => label).join(", ")}
@@ -110,6 +115,7 @@ export default function KeybindingsScreen() {
   const activeDescriptor = APP_SHORTCUTS.find(({ action }) => action === capturing) ?? null;
   const conflicts = capturing && draft ? findShortcutConflicts(capturing, draft, overrides) : [];
 
+  const needle = search.trim().toLocaleLowerCase();
   const filtered = useMemo(() => {
     const needle = search.trim().toLocaleLowerCase();
     if (!needle) return APP_SHORTCUTS;
@@ -183,7 +189,7 @@ export default function KeybindingsScreen() {
               <Text accessibilityRole="header" style={[type.title, { color: tokens.ink }]}>Keyboard shortcuts</Text>
             </View>
             <Text style={[type.sub, { color: tokens.ink3 }]}>
-              These bindings control the Forge desktop and browser app. Host TUI keybindings remain in config.toml.
+              These bindings control the Forge desktop and browser app. The same file feeds the terminal UI when the host daemon is connected.
             </Text>
             <Text style={[type.sub, { color: tokens.ink3 }]}>
               On macOS, Forge keeps editable native menu accelerators synchronized. Standard system shortcuts stay reserved and appear as conflicts.
@@ -214,7 +220,8 @@ export default function KeybindingsScreen() {
 
           {GROUPS.map((group) => {
             const rows = filtered.filter((descriptor) => descriptor.group === group);
-            if (rows.length === 0) return null;
+            const docs = needle ? [] : DOC_SHORTCUTS.filter((doc) => doc.group === group);
+            if (rows.length === 0 && docs.length === 0) return null;
             return (
               <View key={group}>
                 <SectionHeader>{group}</SectionHeader>
@@ -227,6 +234,14 @@ export default function KeybindingsScreen() {
                     onEdit={() => beginCapture(descriptor.action)}
                     onReset={() => resetOne(descriptor.action)}
                   />
+                ))}
+                {docs.map((doc) => (
+                  <View key={doc.label} style={[styles.row, styles.docRow, { borderBottomColor: tokens.hairline }]}>
+                    <Text style={[type.sub, { color: tokens.ink3, flex: 1 }]}>{doc.label}</Text>
+                    <View style={[styles.chord, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+                      <Text style={[type.monoMeta, styles.chordText, { color: tokens.ink3 }]}>{doc.keys}</Text>
+                    </View>
+                  </View>
                 ))}
               </View>
             );
@@ -299,6 +314,11 @@ const styles = StyleSheet.create({
   },
   resetAll: {
     flexShrink: 0,
+  },
+  docRow: {
+    minHeight: 44,
+    gap: space.space12,
+    paddingHorizontal: space.space12,
   },
   row: {
     minHeight: 62,

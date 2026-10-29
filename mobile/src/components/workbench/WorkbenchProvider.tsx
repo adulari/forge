@@ -32,6 +32,7 @@ import {
   type PaneWeights,
   type PresetName,
 } from "./layoutModel";
+import { adjacentSession, recentAt, touchRecent } from "./sessionRecency";
 import {
   INITIAL_WORKBENCH_STATE,
   createWorkbenchSurface,
@@ -69,6 +70,10 @@ export interface WorkbenchController {
   swapWithPrimary: (index: number) => void;
   swapPanes: (a: number, b: number) => void;
   openSession: (id: string, mode?: OpenMode) => void;
+  /** Open the next/previous session of the list in the focused pane, wrapping. */
+  stepSession: (delta: 1 | -1) => void;
+  /** Ctrl+Tab: each press goes one further back through recently used sessions until the modifier is released. */
+  cycleRecent: () => void;
   setPaneWeights: (key: keyof PaneWeights, weights: number[]) => void;
   setRightWidth: (width: number | null) => void;
   setBottomHeight: (height: number | null) => void;
@@ -258,6 +263,40 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     if (result.routeTo) openRoutedSession(result.routeTo);
   }, []);
 
+  const recent = useRef<string[]>([]);
+  const cycle = useRef<{ base: string[]; index: number } | null>(null);
+  useEffect(() => {
+    if (primaryId) recent.current = touchRecent(recent.current, primaryId);
+  }, [primaryId]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const release = (event: KeyboardEvent) => {
+      if (event.key === "Control" || event.key === "Meta") cycle.current = null;
+    };
+    window.addEventListener("keyup", release);
+    return () => window.removeEventListener("keyup", release);
+  }, []);
+
+  const stepSession = useCallback((delta: 1 | -1) => {
+    const { sessions: rows } = latest.current;
+    const focused = latest.current.layout.focus === 0
+      ? latest.current.primaryId
+      : (latest.current.layout.secondary[latest.current.layout.focus - 1] ?? latest.current.primaryId);
+    const next = adjacentSession((rows ?? []).map((row) => row.id), focused, delta);
+    if (next) openSession(next);
+  }, [openSession]);
+
+  const cycleRecent = useCallback(() => {
+    const { sessions: rows } = latest.current;
+    const known = new Set((rows ?? []).map((row) => row.id));
+    const run = cycle.current ?? { base: recent.current, index: 0 };
+    run.index += 1;
+    const next = recentAt(run.base, known, run.index);
+    if (!next) return;
+    cycle.current = run;
+    openSession(next);
+  }, [openSession]);
+
   const setPaneWeights = useCallback(
     (key: keyof PaneWeights, weights: number[]) => update((current) => ({ ...current, weights: { ...current.weights, [key]: weights } })),
     [update],
@@ -339,6 +378,8 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       swapWithPrimary: swapWithPrimaryAction,
       swapPanes,
       openSession,
+      stepSession,
+      cycleRecent,
       setPaneWeights,
       setRightWidth,
       setBottomHeight,
@@ -348,7 +389,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     [
       state, openSurface, toggleSurface, activateSurface, closeSurface, hidePlacement, reorderSurface,
       layout, primaryId, paneIds, focusedSessionId, addPaneAction, closePane, focusPaneAction,
-      cycleFocusAction, toggleMaximizeAction, swapWithPrimaryAction, swapPanes, openSession,
+      cycleFocusAction, toggleMaximizeAction, swapWithPrimaryAction, swapPanes, openSession, stepSession, cycleRecent,
       setPaneWeights, setRightWidth, setBottomHeight, applyPreset, resetLayout,
     ],
   );
