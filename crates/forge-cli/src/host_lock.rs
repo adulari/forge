@@ -79,7 +79,19 @@ mod tests {
             "names the holder: {text}"
         );
         drop(first);
-        acquire(dir.path()).expect("released on drop, so a new daemon can start");
+        // Another test thread may have forked a child while the lock was held; that child lets go
+        // of its copy of the descriptor when it execs, a moment later.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let again = loop {
+            match acquire(dir.path()) {
+                Ok(lock) => break lock,
+                Err(error) if std::time::Instant::now() >= deadline => {
+                    panic!("released on drop, so a new daemon can start: {error}")
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        drop(again);
     }
 
     #[test]
