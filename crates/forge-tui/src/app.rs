@@ -958,6 +958,8 @@ pub enum KeyKind {
     YankPop,
     /// Ctrl+_ — undo the last input edit.
     UndoEdit,
+    /// Alt+_ — redo an input edit that Ctrl+_ undid.
+    RedoEdit,
 }
 
 /// The result of feeding a keystroke to the input line.
@@ -1191,7 +1193,8 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::ExternalEditor
         | KeyKind::Yank
         | KeyKind::YankPop
-        | KeyKind::UndoEdit => InputOutcome::Editing,
+        | KeyKind::UndoEdit
+        | KeyKind::RedoEdit => InputOutcome::Editing,
     }
 }
 

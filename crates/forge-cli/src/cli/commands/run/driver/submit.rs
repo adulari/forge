@@ -8,6 +8,7 @@
 //! mobile upload race), overriding ambient state from an unrelated earlier `Attach`.
 
 use super::*;
+use crate::cli::commands::run::queue_edit;
 
 impl DriverState {
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
@@ -19,56 +20,41 @@ impl DriverState {
                 remote::RemoteInput::Prompt { .. }
                     | remote::RemoteInput::Steer { .. }
                     | remote::RemoteInput::FollowUp { .. }
+                    | remote::RemoteInput::Queue { .. }
             )
         {
             return Ok(());
         }
         match input {
             remote::RemoteInput::Prompt { text, attachments } => {
-                // A fresh prompt starts a fresh interaction — drop stale notices + copy payload.
-                self.notes.clear();
-                self.copy_text = None;
-
-                // A message-correlated attachment list (mobile upload race fix, mirrors
-                // `run_chat_tui`'s remote drain) is authoritative for THIS turn when non-empty:
-                // discard stale ambient state from an unrelated `Attach` up front (image
-                // attachment happens inside `resolve_prompt_attachments` regardless of dispatch
-                // branch, matching how it already applied ambiently); non-image mentions are
-                // threaded into `submit_line` and only actually prepended in its plain-prompt
-                // branch, exactly where the old ambient `pending_mentions` were.
-                let has_explicit_attachments = !attachments.is_empty();
-                if has_explicit_attachments {
-                    self.pending_mentions.clear();
+                self.handle_prompt(text, attachments, true).await?;
+            }
+            remote::RemoteInput::Queue { text, attachments } => {
+                self.handle_prompt(text, attachments, false).await?;
+            }
+            remote::RemoteInput::QueueMove { index, text, to } => {
+                if queue_edit::move_queued(&mut self.queued_prompts, &self.steer, index, &text, to)
+                {
+                    self.app.set_queued(&self.queued_prompts);
+                } else {
+                    push_remote_note(&mut self.notes, queue_edit::STALE_QUEUE_EDIT_NOTE);
                 }
-                let explicit_mentions = resolve_prompt_attachments(
-                    &self.session,
-                    &mut self.app,
-                    &mut self.notes,
-                    &self.cwd,
-                    attachments,
-                )
-                .await;
-
+            }
+            remote::RemoteInput::QueueSendNow { index, text } => {
                 if self.busy {
-                    let trimmed = text.trim();
-                    if trimmed.is_empty() {
-                        // nothing to queue
-                    } else if is_command_line(trimmed) {
-                        self.busy_command(text).await?;
+                    if queue_edit::move_queued(
+                        &mut self.queued_prompts,
+                        &self.steer,
+                        index,
+                        &text,
+                        0,
+                    ) {
+                        self.app.set_queued(&self.queued_prompts);
+                        Box::pin(self.handle_input(remote::RemoteInput::Interrupt)).await?;
                     } else {
-                        self.prompt_history.record(&text);
-                        queue_prompt(
-                            &mut self.queued_prompts,
-                            &self.steer,
-                            &mut self.app,
-                            text,
-                            Vec::new(),
-                        );
+                        push_remote_note(&mut self.notes, queue_edit::STALE_QUEUE_EDIT_NOTE);
                     }
-                    return Ok(());
                 }
-                self.submit_line(text, has_explicit_attachments.then_some(explicit_mentions))
-                    .await?;
             }
             remote::RemoteInput::Allow { yes, seq } => {
                 if !remote::prompt_seq_current(self.prompt_seq, seq) {
@@ -227,6 +213,62 @@ impl DriverState {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// A prompt typed by a remote client. Mid-turn a plain prompt is queued, and when `steer` is
+    /// set also offered to the running turn at its next step; `steer = false` only queues it.
+    async fn handle_prompt(
+        &mut self,
+        text: String,
+        attachments: Vec<remote::PromptAttachment>,
+        steer: bool,
+    ) -> Result<()> {
+        // A fresh prompt starts a fresh interaction — drop stale notices + copy payload.
+        self.notes.clear();
+        self.copy_text = None;
+
+        // A message-correlated attachment list (mobile upload race fix, mirrors
+        // `run_chat_tui`'s remote drain) is authoritative for THIS turn when non-empty:
+        // discard stale ambient state from an unrelated `Attach` up front (image
+        // attachment happens inside `resolve_prompt_attachments` regardless of dispatch
+        // branch, matching how it already applied ambiently); non-image mentions are
+        // threaded into `submit_line` and only actually prepended in its plain-prompt
+        // branch, exactly where the old ambient `pending_mentions` were.
+        let has_explicit_attachments = !attachments.is_empty();
+        if has_explicit_attachments {
+            self.pending_mentions.clear();
+        }
+        let explicit_mentions = resolve_prompt_attachments(
+            &self.session,
+            &mut self.app,
+            &mut self.notes,
+            &self.cwd,
+            attachments,
+        )
+        .await;
+
+        if self.busy {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                // nothing to queue
+            } else if is_command_line(trimmed) {
+                self.busy_command(text).await?;
+            } else {
+                self.prompt_history.record(&text);
+                queue_prompt(
+                    &mut self.queued_prompts,
+                    &self.steer,
+                    &mut self.app,
+                    text,
+                    Vec::new(),
+                    steer,
+                );
+            }
+            return Ok(());
+        }
+        self.submit_line(text, has_explicit_attachments.then_some(explicit_mentions))
+            .await?;
         Ok(())
     }
 

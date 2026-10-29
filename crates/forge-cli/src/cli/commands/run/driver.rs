@@ -346,6 +346,8 @@ struct DriverState {
     assay_lenses: Vec<forge_types::FindingCategory>,
     assay_scope: forge_types::AssayScope,
     queued_prompts: Vec<String>,
+    /// `[chat] follow_up`: whether Enter typed in an attached terminal mid-turn also steers.
+    follow_up: forge_config::chat::FollowUpMode,
     /// Mirror of `queued_prompts` the running turn drains at its next boundary (steering).
     steer: forge_core::steer::SteerInbox,
     /// Reconciles `queued_prompts` with what the running turn absorbed (busy_queue.rs).
@@ -449,7 +451,13 @@ async fn drive_session(
         }
     }
 
-    let auto_setup = forge_config::load_in(std::path::Path::new(&cwd))
+    let loaded_config = forge_config::load_in(std::path::Path::new(&cwd)).ok();
+    let follow_up = loaded_config
+        .as_ref()
+        .map(|config| config.chat.follow_up)
+        .unwrap_or_default();
+    let auto_setup = loaded_config
+        .as_ref()
         .map(|config| config.project.auto_initialize)
         .unwrap_or(false)
         && !forge_config::project_initialization(std::path::Path::new(&cwd)).initialized
@@ -478,6 +486,7 @@ async fn drive_session(
         assay_lenses: Vec::new(),
         assay_scope: forge_types::AssayScope::Repo,
         queued_prompts: Vec::new(),
+        follow_up,
         steer_tracker: SteerTracker::default(),
         prompt_history: forge_tui::PromptHistory::default(),
         last_prompt: None,
@@ -1154,6 +1163,7 @@ mod tests {
             assay_lenses: Vec::new(),
             assay_scope: forge_types::AssayScope::Repo,
             queued_prompts: Vec::new(),
+            follow_up: forge_config::chat::FollowUpMode::default(),
             steer_tracker: SteerTracker::default(),
             prompt_history: forge_tui::PromptHistory::default(),
             last_prompt: None,
@@ -1466,6 +1476,64 @@ mod tests {
         assert!(state.busy, "steer must not interrupt the running turn");
         assert!(state.turn_handle.is_some());
         state.turn_handle.take().unwrap().abort();
+    }
+
+    /// The app's "queue" send waits behind the turn like a follow-up, and can then be moved or
+    /// pulled to the head; each edit is addressed by the row the client saw.
+    #[tokio::test]
+    async fn queue_input_waits_unsteered_and_can_be_reordered_and_sent_now() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        for text in ["one", "two", "three"] {
+            state
+                .handle_input(remote::RemoteInput::Queue {
+                    text: text.into(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(state.queued_prompts, vec!["one", "two", "three"]);
+        assert!(state.steer.drain().is_empty(), "queue-only never steers");
+
+        state
+            .handle_input(remote::RemoteInput::QueueMove {
+                index: 2,
+                text: "three".into(),
+                to: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(state.queued_prompts, vec!["three", "one", "two"]);
+
+        state
+            .handle_input(remote::RemoteInput::QueueMove {
+                index: 0,
+                text: "stale".into(),
+                to: 2,
+            })
+            .await
+            .unwrap();
+        assert_eq!(state.queued_prompts, vec!["three", "one", "two"]);
+
+        state
+            .handle_input(remote::RemoteInput::QueueSendNow {
+                index: 2,
+                text: "two".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            state.queued_prompts,
+            vec!["three", "one"],
+            "the stopped turn handed the head ('two') to the next turn"
+        );
+        assert!(state.busy);
+        if let Some(handle) = state.turn_handle.take() {
+            handle.abort();
+        }
     }
 
     /// A fleet `follow_up` queues FIFO behind the running turn and is never offered to it at its

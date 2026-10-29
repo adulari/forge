@@ -1,11 +1,13 @@
 // DESIGN_SYSTEM.md §6 — timeline rows for user/assistant/tool (system) content: Markdown +
 // CodeBlock body for user/assistant; system rows (tool/diff-ish output) render compact mono
 // per the same materials CodeBlock uses, without a full Markdown pass over structured text.
+import { Sparkles } from "lucide-react-native";
 import React, { useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
+import { skillInvoked, useSkillCommands } from "../../lib/commands";
 import { isHarnessNudge } from "../../lib/harnessNudge";
 import { formatAnyHarnessNotice, isAnyHarnessNotice } from "../../lib/harnessNotice";
 import { isJobNotice } from "../../lib/jobNotice";
@@ -140,6 +142,21 @@ export function SpeakerTag({ speaker, model }: { speaker: "you" | "forge" | "nud
   );
 }
 
+/** Marks a sent message that invoked a skill (`/name args`). */
+function SkillInvocation({ text }: { text: string }) {
+  const tokens = useTokens();
+  const skills = useSkillCommands();
+  const skill = skillInvoked(text, skills.map((s) => s.name));
+  if (!skill) return null;
+  return (
+    <View style={[styles.skillBadge, { borderColor: tokens.border }]} accessibilityLabel={`skill ${skill.slice(1)}`}>
+      <Sparkles size={11} strokeWidth={1.75} color={tokens.accent} />
+      <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>skill</Text>
+      <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>{skill}</Text>
+    </View>
+  );
+}
+
 function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const tokens = useTokens();
   const prose = useChatProseStyle();
@@ -249,7 +266,10 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
             <Markdown content={parsed.answer} style={prose} />
           </>
         ) : (
-          <Markdown content={userText} style={prose} />
+          <>
+            {isUser ? <SkillInvocation text={userText} /> : null}
+            <Markdown content={userText} style={prose} />
+          </>
         )}
       </Pressable>
       </View>
@@ -280,5 +300,16 @@ const styles = StyleSheet.create({
   userBubble: { width: "100%", paddingHorizontal: space.space12, paddingVertical: space.space8, borderRadius: radii.radius8 },
   speaker: { flexDirection: "row", alignItems: "center", gap: space.space4, paddingBottom: space.space4 },
   speakerDot: { width: 4, height: 4, borderRadius: radii.radiusPill },
+  skillBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: space.space4,
+    borderWidth: StyleSheet.hairlineWidth * 2,
+    borderRadius: radii.radius4,
+    paddingHorizontal: space.space8,
+    paddingVertical: 1,
+    marginBottom: space.space4,
+  },
   speakerModel: { flexShrink: 1, fontFamily: monoFamily.regular },
 });

@@ -141,3 +141,20 @@ export interface SentAttachment {
    * whichever ambient upload happens to be pending when the next prompt is submitted. */
   path?: string;
 }
+
+/** A PDF is shown as a page tile rather than a generic file chip. */
+export function isPdfName(name: string): boolean {
+  return /\.pdf$/i.test(name);
+}
+
+/** The MIME type a dropped file claims, falling back to its extension (browsers leave `type`
+ * empty for some files). */
+export function pickedFromDroppedFile(file: File, uri: string): PickedFile {
+  const mimeType = file.type || (isPdfName(file.name) ? "application/pdf" : "application/octet-stream");
+  return { uri, name: file.name || "dropped-file", mimeType, image: mimeType.startsWith("image/"), file };
+}
+
+/** Files carried by a drag event; `[]` when the drag holds text or links. */
+export function filesFromDragEvent(e: DragEvent): File[] {
+  return e.dataTransfer?.types?.includes("Files") ? Array.from(e.dataTransfer.files ?? []) : [];
+}

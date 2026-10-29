@@ -9,3 +9,10 @@ export function modelChipLabel(model: string | null | undefined, pinned: boolean
   if (pinned === false) return `auto · ${shortModelLabel(model)}`;
   return compact ? shortModelLabel(model) : model;
 }
+
+/** The empty composer's placeholder names the model that will answer. */
+export function composerPlaceholder(model: string | null | undefined, compact = false): string {
+  if (!model || model === "—") return "message…";
+  const name = shortModelLabel(model);
+  return compact ? `Ask ${name} anything` : `Ask ${name} anything about this workspace`;
+}

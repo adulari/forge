@@ -10,7 +10,8 @@ import { Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
-import type { SentAttachment } from "./attach";
+import { isPdfName, type SentAttachment } from "./attach";
+import { PdfPage } from "./AttachmentTray";
 
 const THUMB = 72;
 
@@ -42,7 +43,7 @@ export function AttachmentRow({ attachments }: { attachments: SentAttachment[] }
               key={a.id}
               style={[styles.fileChip, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}
             >
-              <FileText size={14} strokeWidth={1.75} color={tokens.ink2} />
+              {isPdfName(a.name) ? <PdfPage size={28} /> : <FileText size={14} strokeWidth={1.75} color={tokens.ink2} />}
               <Text style={[type.meta, styles.fileName, { color: tokens.ink2 }]} numberOfLines={1}>
                 {a.name}
               </Text>
@@ -82,7 +83,7 @@ const styles = StyleSheet.create({
     gap: space.space4,
     paddingHorizontal: space.space8,
     paddingVertical: space.space4,
-    borderRadius: radii.radiusPill,
+    borderRadius: radii.radius8,
     borderWidth: StyleSheet.hairlineWidth,
     maxWidth: 220,
   },

@@ -113,7 +113,10 @@ const FIXED_KEYS: [(&str, &str); 20] = [
         "Ctrl+Y",
         "Paste the last cut (Alt+Y then cycles older cuts)",
     ),
-    ("Ctrl+_", "Undo the last edit to the prompt"),
+    (
+        "Ctrl+_",
+        "Undo the last edit to the prompt (Alt+_ redoes it)",
+    ),
     ("Ctrl+P", "Previous prompt in history (Ctrl+N next)"),
     ("Ctrl+G", "Edit the prompt in $VISUAL or $EDITOR"),
     (
