@@ -4,11 +4,15 @@
 // `ToastHost` fires it when the toast is shown while the window/tab isn't focused.
 //
 // - Tauri: `@tauri-apps/plugin-notification`, lazy-imported so web/native bundles never
-//   load it.
-// - Web (non-Tauri): the browser `Notification` API directly.
-// - Native: no-op — v1 has no local-notification story on iOS/Android (native APNs is a
-//   flagged backend gap, ARCHITECTURE.md §7).
+//   load it. The OS offers no click event on desktop, so a click there only brings the window up.
+// - Web (non-Tauri): the browser `Notification` API directly; a click focuses the tab and runs
+//   the caller's `onClick`.
+// - Native: no-op here — iOS and Android raise theirs through `lib/notices/localNotify`.
+// Text is stripped of control sequences and clipped (80 / 240) on the way out.
 import { getDesktopShellPrefs } from "./desktopShellPrefs";
+import { getNotifyPrefs } from "./notifyPrefs";
+import { clipNotification } from "./notifyPrefsCore";
+import { playAlertChime } from "./notifySound";
 import { isTauri, isWeb } from "./platform";
 
 export type NotifyPermission = "granted" | "denied" | "default" | "unsupported";
@@ -45,7 +49,7 @@ async function notifyTauri(title: string, body?: string): Promise<void> {
   if (granted) sendNotification({ title, body });
 }
 
-async function notifyWeb(title: string, body?: string): Promise<void> {
+async function notifyWeb(title: string, body?: string, onClick?: () => void): Promise<void> {
   if (typeof window === "undefined" || !("Notification" in window)) {
     lastPermission = "unsupported";
     return;
@@ -56,22 +60,39 @@ async function notifyWeb(title: string, body?: string): Promise<void> {
   }
   lastPermission = permission;
   if (permission === "granted") {
-    new Notification(title, { body });
+    // Sent silent: the chime (when the Sound setting is on) is played by the app, not the browser.
+    const shown = new Notification(title, { body, silent: true });
+    if (onClick) {
+      shown.onclick = () => {
+        window.focus();
+        shown.close();
+        onClick();
+      };
+    }
   }
 }
 
 /** Best-effort system notification. Never throws — callers don't need a try/catch.
  * Check `getNotifyPermission()` after a call if you need to know whether it actually
  * went out (e.g. to show a "notifications are blocked" hint in Settings). */
-export async function notify(title: string, body?: string, options?: { force?: boolean }): Promise<void> {
+export async function notify(
+  title: string,
+  body?: string,
+  options?: { force?: boolean; onClick?: () => void },
+): Promise<void> {
   try {
+    const clipped = clipNotification(title, body);
+    title = clipped.title;
+    body = clipped.body;
     if (isTauri) {
       // On by default; the Desktop settings page can switch background notifications off. A
       // test notification from that page (`force`) must still go out so the permission can be seen.
       if (!options?.force && !(await getDesktopShellPrefs()).notifyWhenBackground) return;
       await notifyTauri(title, body);
+      if ((await getNotifyPrefs()).sound) playAlertChime();
     } else if (isWeb) {
-      await notifyWeb(title, body);
+      await notifyWeb(title, body, options?.onClick);
+      if ((await getNotifyPrefs()).sound) playAlertChime();
     } else {
       lastPermission = "unsupported";
     }

@@ -42,12 +42,12 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-async function storeBaseUrl(baseUrl: string): Promise<void> {
+async function storeValue(key: string, value: string | boolean): Promise<void> {
   try {
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
-      tx.objectStore(STORE_NAME).put(baseUrl, BASE_URL_KEY);
+      tx.objectStore(STORE_NAME).put(value, key);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -55,6 +55,16 @@ async function storeBaseUrl(baseUrl: string): Promise<void> {
     // best-effort — sw.js falls back to opening the session (without
     // answering the prompt) if this write never landed
   }
+}
+
+function storeBaseUrl(baseUrl: string): Promise<void> {
+  return storeValue(BASE_URL_KEY, baseUrl);
+}
+
+/** "Hide notification text": sw.js reads this to show a generic notification instead of the
+ * pushed title and body. */
+export async function applyHideNotificationText(_baseUrl: string | null, hide: boolean): Promise<void> {
+  await storeValue("hideText", hide);
 }
 
 export function isPushSupported(): boolean {

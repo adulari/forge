@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { isTauri } from "../../lib/platform";
 import { notifySupported, notify } from "../../lib/notify";
-import { Toast, type ToastData, type ToastTone } from "./Toast";
+import { Toast, type ToastAction, type ToastData, type ToastTone } from "./Toast";
 
 // Only escalate to a system notification when the window is backgrounded — while Forge
 // is focused the in-app toast already did the job (ARCHITECTURE.md §6.1/§6.2).
@@ -65,6 +65,11 @@ export interface ShowToastOptions {
   tone?: ToastTone;
   /** ms before auto-dismiss. Default 3500 (§5.2 Signal). */
   duration?: number;
+  /** A button on the toast. Pressing it runs `onPress` and dismisses the toast. */
+  action?: ToastAction;
+  /** Skip the system notification a toast raises while the window is in the background, for
+   * callers that decide that themselves. Default true. */
+  system?: boolean;
 }
 
 interface ToastContextValue {
@@ -102,10 +107,10 @@ export function ToastHost({ children }: { children: React.ReactNode }) {
   const show = useCallback(
     (message: string, options?: ShowToastOptions) => {
       const id = `toast-${nextId++}`;
-      setToasts((prev) => [...prev, { id, message, tone: options?.tone }]);
+      setToasts((prev) => [...prev, { id, message, tone: options?.tone, action: options?.action }]);
       const timer = setTimeout(() => dismiss(id), options?.duration ?? AUTO_DISMISS_MS);
       timers.current.set(id, timer);
-      if (isBackgrounded() && notifySupported()) {
+      if (options?.system !== false && isBackgrounded() && notifySupported()) {
         void notify("Forge", message);
       }
       return id;

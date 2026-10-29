@@ -842,7 +842,8 @@ pub(crate) async fn run_chat_tui(
     let mut custom_widget_last_run: std::collections::HashMap<String, Instant> =
         std::collections::HashMap::new();
     let session_started = Instant::now();
-    let mut notifier = notify::Tracker::new(tui_config.notifications.clone());
+    let mut notifier = notify::Tracker::new(tui_config.notifications.clone())
+        .with_invite(!forge_config::install_notice_seen(notify::INVITE_NOTICE));
     let mut statusline_sched = statusline_command::Scheduler::default();
     // Only redraw when state actually changed: idle frames cost nothing and the whole
     // conversation isn't rebuilt 16×/sec for no reason.
@@ -4835,14 +4836,20 @@ pub(crate) async fn run_chat_tui(
                 });
             }
         }
-        if notifier.enabled() {
+        if notifier.watching() {
             let awaiting = app
                 .prompt
                 .as_deref()
                 .or(app.question_prompt.as_deref())
                 .or(app.form.as_ref().map(|_| "A question needs your answer"));
-            if let Some(alert) = notifier.observe(busy, awaiting, app.unfocused, Instant::now()) {
-                notifier.deliver(&alert);
+            let errors = app.errors_seen;
+            match notifier.observe(busy, awaiting, errors, app.unfocused, Instant::now()) {
+                Some(notify::Alert::Invite { secs }) => {
+                    forge_config::mark_install_notice_seen(notify::INVITE_NOTICE);
+                    app.note(&notify::Alert::invite_text(secs));
+                }
+                Some(alert) => notifier.deliver(&alert),
+                None => {}
             }
         }
         // Claude-Code-style `[statusline] command`: debounced, detached, result delivered through

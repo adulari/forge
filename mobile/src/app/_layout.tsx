@@ -34,6 +34,8 @@ import { ClaudeReconnectBanner } from "../components/onboarding/ClaudeReconnectB
 import { onboardingDismissed } from "../lib/onboarding/flow";
 import { NoticeBannerHost } from "../components/notices/NoticeBannerHost";
 import { NoticesWatcher } from "../components/notices/NoticesWatcher";
+import { EnableNotificationsPrompt } from "../components/notices/EnableNotificationsPrompt";
+import { VisibleSessionsPublisher } from "../components/notices/VisibleSessionsPublisher";
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
@@ -397,11 +399,13 @@ export default function RootLayout() {
                           <ClaudeReconnectBanner />
                           <DesktopOtaHost />
                           <WorkbenchProvider>
+                            <VisibleSessionsPublisher />
                             {/* Inside WorkbenchProvider: the palette opens files into the Files dock. */}
                             <PaletteHost>
                               <AppLock>
                                 <RootNavigator />
                                 <NoticeBannerHost />
+                                <EnableNotificationsPrompt />
                               </AppLock>
                               {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
                               <DesktopWindowChrome />

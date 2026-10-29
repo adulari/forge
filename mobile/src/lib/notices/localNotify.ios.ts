@@ -17,6 +17,10 @@ import type { LocalNotice } from "./localNotify";
 export type { LocalNotice, NoticeTapData, NotificationObserver } from "./localNotify";
 export { observeNotifications };
 
+export async function prepareNotificationChannels(): Promise<void> {
+  // iOS has no channels.
+}
+
 export async function presentLocal(notice: LocalNotice): Promise<boolean> {
   const permission = await Notifications.getPermissionsAsync();
   if (!permission.granted) return false;

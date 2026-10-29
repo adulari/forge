@@ -32,6 +32,7 @@ end-to-end encrypted bridge.
 | Older app build, or an unsigned sideload without the keychain group | Generic alert; the app replaces it with a local notification the next time it runs |
 | Blob damaged, wrong key, extension out of time | Generic alert (the extension never blocks or drops a push) |
 | Own APNs key or private relay | The text, in the alert itself |
+| Settings, Alerts, Hide notification text on | Generic "Forge: Open Forge to view an update." (the key is withdrawn from the daemon and re-registered when switched off) |
 
 ### Sealed alerts
 

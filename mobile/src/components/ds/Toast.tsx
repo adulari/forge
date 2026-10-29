@@ -15,13 +15,20 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { durations, easings } from "../../theme/motion";
 import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
+import { Button } from "./Button";
 
 export type ToastTone = "neutral" | "success" | "danger" | "warn";
+
+export interface ToastAction {
+  label: string;
+  onPress: () => void;
+}
 
 export interface ToastData {
   id: string;
   message: string;
   tone?: ToastTone;
+  action?: ToastAction;
 }
 
 export interface ToastProps {
@@ -102,6 +109,16 @@ export function Toast({ toast, onDismiss }: ToastProps) {
         }}
       >
         <Text style={[type.body, styles.message, { color: tokens.ink }]}>{toast.message}</Text>
+        {toast.action ? (
+          <Button
+            label={toast.action.label}
+            variant="secondary"
+            onPress={() => {
+              toast.action?.onPress();
+              dismiss();
+            }}
+          />
+        ) : null}
         <Pressable onPress={dismiss} accessibilityRole="button" accessibilityLabel="Dismiss notification" hitSlop={12}>
           <Text style={[type.bodyBold, { color: tokens.ink2 }]}>×</Text>
         </Pressable>

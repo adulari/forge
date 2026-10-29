@@ -4,18 +4,21 @@
 // replaces; Android must create a channel and may need to ask for permission first).
 import * as Notifications from "expo-notifications";
 
+import { clipNotification } from "../notifyPrefsCore";
 import type { LocalNotice, NoticeTapData, NotificationObserver } from "./localNotify";
 
 const MARKER = "forgeNotice";
 
 export async function scheduleNotice(notice: LocalNotice): Promise<void> {
+  const clipped = clipNotification(notice.title, notice.body);
   await Notifications.scheduleNotificationAsync({
     content: {
-      title: notice.title,
-      body: notice.body,
+      title: clipped.title,
+      body: clipped.body,
+      sound: notice.sound === true,
       data: { [MARKER]: true, serverId: notice.serverId, sessionId: notice.sessionId, seq: notice.seq, at: notice.at },
     },
-    trigger: null,
+    trigger: notice.channel ? { channelId: notice.channel } : null,
   });
 }
 

@@ -13,6 +13,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Attachment } from "../components/chat/attach";
+import { consumeComposerFocus, onComposerFocusRequest } from "./alertTargets";
 import { useAuth } from "./auth";
 import { useSessions } from "./queries";
 import { EMPTY_DRAFT, type DraftMap, withDraftAttachments, withDraftText } from "./sessionDrafts";
@@ -182,6 +183,13 @@ export function SessionProvider({
     () => setComposerFocusSignal((n) => n + 1),
     [],
   );
+  useEffect(() => {
+    const focusIfRequested = () => {
+      if (consumeComposerFocus(sessionId)) focusComposer();
+    };
+    focusIfRequested();
+    return onComposerFocusRequest(focusIfRequested);
+  }, [sessionId, focusComposer]);
 
   const live = useMemo<SessionLiveCtxValue>(
     () => ({ snapshot, snapshotTimedOut, connectionState }),

@@ -502,6 +502,8 @@ pub struct App {
     /// `Default` (false) means *focused* — terminals don't always emit an initial FocusGained.
     /// Drives a hollow/dim input cursor while another window is in front.
     pub unfocused: bool,
+    /// Turn errors seen so far; notifications compare it across a turn to tell failure from success.
+    pub errors_seen: u64,
     /// Blink phase for the input cursor: when true the block is suppressed this frame (the "off"
     /// half of the blink). Inverted sense so `Default` (false) shows the solid block. Toggled by
     /// the render loop ~every 530ms while focused.
@@ -1398,6 +1400,7 @@ impl App {
                 }
             }
             PresenterEvent::Error(msg) => {
+                self.errors_seen += 1;
                 let msg = sanitize_terminal_text(&msg);
                 let (_, body) = lines::notice::classify(&msg, NoticeKind::Err);
                 self.push_error(&body);

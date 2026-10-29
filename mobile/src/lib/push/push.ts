@@ -33,3 +33,9 @@ export async function disablePush(_baseUrl: string): Promise<PushSubscriptionSta
 export async function refreshPushRegistration(_activeBaseUrl: string | null): Promise<void> {
   // nothing to refresh
 }
+
+// Hiding the notification text is a sealed-key (iOS) or service-worker (web) matter; nowhere else
+// has a remote notification to redact.
+export async function applyHideNotificationText(_baseUrl: string | null, _hide: boolean): Promise<void> {
+  // nothing to redact
+}
