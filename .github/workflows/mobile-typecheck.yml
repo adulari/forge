@@ -84,6 +84,9 @@ jobs:
       - name: Test parity guard rejects drift
         working-directory: .
         run: python3 scripts/test-mobile-parity.py
+      - name: Check the tauri crate and @tauri-apps/api share a minor
+        working-directory: .
+        run: python3 scripts/ci/check-tauri-versions.py
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
