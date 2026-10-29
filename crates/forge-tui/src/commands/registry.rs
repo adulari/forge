@@ -219,8 +219,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "goal",
-        desc: "set a goal and break it into a tracked plan, optionally gated on checks and a budget",
-        usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",
+        desc: "set a goal and break it into a tracked plan, or steer it: pause, resume, clear, edit, status",
+        usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] | pause | resume | clear | status | edit <objective>",
     },
     Command {
         name: "pr",

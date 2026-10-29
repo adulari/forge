@@ -1044,6 +1044,41 @@ export function getSessionAgents(baseUrl: string, id: string): Promise<AgentInde
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/agents`);
 }
 
+export interface SpendTotals {
+  input_tokens: number;
+  /** Null when no call of the session reported a cache split. */
+  cached_input_tokens: number | null;
+  output_tokens: number;
+  calls: number;
+  /** Billed spend; zero for subscription and free routes. */
+  cost_usd: number;
+  /** The same work at list price; null when a model used has no tracked price. */
+  estimate_usd: number | null;
+}
+
+export interface SpendModelRow extends SpendTotals {
+  model: string;
+}
+
+export interface SpendSubagentRow extends SpendTotals {
+  session_id: string;
+  label: string;
+  model: string | null;
+}
+
+export interface SessionSpend {
+  session_id: string;
+  total: SpendTotals;
+  models: SpendModelRow[];
+  subagents: SpendSubagentRow[];
+}
+
+/** What one session spent, per model and per subagent. A host without the route answers an error,
+ * which the Spend dock treats as "no data" and stays hidden. */
+export function getSessionSpend(baseUrl: string, id: string): Promise<SessionSpend> {
+  return expectObject(request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/spend`), "spend");
+}
+
 export function getSessionDiff(baseUrl: string, id: string): Promise<SessionDiffResponse> {
   return expectObject(request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/diff`), "diff");
 }

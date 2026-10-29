@@ -331,8 +331,10 @@ pub struct RemoteUrl {
 pub const PROTOCOL_VERSION: u32 = 10;
 
 mod event_log;
+mod goal;
 use event_log::lock_event_log;
 pub use event_log::{EventLog, SnapshotFrame, EVENT_LOG_CAP};
+pub use goal::SnapGoal;
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
@@ -657,6 +659,9 @@ pub struct Snapshot {
     /// `None` when no `run_workflow` script has run this turn.
     #[serde(default)]
     pub workflow: Option<SnapWorkflow>,
+    /// The `/goal` run, live or ended (additive) — see [`SnapGoal`]. Absent until one starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<SnapGoal>,
     /// The AI-predicted next prompt (v8), if any — the page shows it as the composer's
     /// placeholder text (prefixed "suggested: "). `None` when there is none, or once dismissed
     /// by a fresh turn/session on the host.
@@ -733,6 +738,7 @@ impl Default for Snapshot {
             diff: None,
             plan: None,
             workflow: None,
+            goal: None,
             suggested_prompt: None,
             copy_text: None,
             prompt_seq: 0,

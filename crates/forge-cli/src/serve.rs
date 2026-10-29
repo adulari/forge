@@ -953,6 +953,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/changelog"), get(changelog_page))
         .merge(crate::serve_git::routes(&base))
         .merge(crate::serve_agents::routes(&base))
+        .merge(crate::serve_spend::routes(&base))
         // Workspace inspector/editor (serve_workspace.rs). Roots come only from the live session;
         // relative paths are canonicalized and confined before any filesystem operation.
         .route(

@@ -259,6 +259,31 @@ impl GoalState {
     }
 }
 
+impl GoalState {
+    /// A goal run starts: it registers with the app, and a resumed goal keeps the iteration,
+    /// token and time counters of the run it continues.
+    pub(crate) fn begin(
+        app: &mut forge_tui::App,
+        gen: u64,
+        goal: String,
+        gate_cmds: Vec<String>,
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+    ) -> Self {
+        let carry = app.goal_begin(&goal, &gate_cmds, max_tokens, max_minutes);
+        let mut state = Self::new(gen, goal, gate_cmds, max_tokens, max_minutes);
+        if let Some(carry) = carry {
+            state.iter = carry.iteration;
+            state.budget.tokens_used = carry.tokens_used;
+            let elapsed = Duration::from_secs(carry.elapsed_secs);
+            state.budget.started_at = Instant::now()
+                .checked_sub(elapsed)
+                .unwrap_or(state.budget.started_at);
+        }
+        state
+    }
+}
+
 /// Absolute iteration ceiling so a goal that never signals completion can't run forever.
 pub(crate) const GOAL_MAX_ITERS: usize = 200;
 

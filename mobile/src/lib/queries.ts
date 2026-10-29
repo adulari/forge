@@ -78,6 +78,8 @@ import {
   type SessionDiffResponse,
   getSessionDiff,
   getSessionAgents,
+  getSessionSpend,
+  type SessionSpend,
   type AgentIndexRow,
 
   type WorkspaceEntriesResponse,
@@ -166,6 +168,7 @@ function keys(baseUrl: string | null) {
     projectBrowse: (path?: string) => ["projects", "browse", baseUrl, path ?? "default"] as const,
     sessionTree: ["sessions", "tree", baseUrl] as const,
     sessionAgents: (sessionId: string) => ["sessions", "agents", baseUrl, sessionId] as const,
+    sessionSpend: (sessionId: string) => ["sessions", "spend", baseUrl, sessionId] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
     sessionSearch: (query?: string, limit?: number) =>
       query === undefined
@@ -815,6 +818,25 @@ export function useSessionAgents(sessionId: string | null, signal: string) {
   useEffect(() => {
     if (baseUrl == null || sessionId == null) return;
     void queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionAgents(sessionId) });
+  }, [signal, baseUrl, sessionId, queryClient]);
+  return query;
+}
+
+/** One session's spend per model and subagent. `signal` changes whenever the session's cost does,
+ * so the dock follows a turn without polling. */
+export function useSessionSpend(sessionId: string | null, signal: string) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  const query = useQuery<SessionSpend>({
+    queryKey: keys(baseUrl).sessionSpend(sessionId ?? ""),
+    queryFn: () => getSessionSpend(baseUrl as string, sessionId as string),
+    enabled: baseUrl != null && sessionId != null,
+    retry: false,
+    staleTime: 10_000,
+  });
+  useEffect(() => {
+    if (baseUrl == null || sessionId == null) return;
+    void queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionSpend(sessionId) });
   }, [signal, baseUrl, sessionId, queryClient]);
   return query;
 }

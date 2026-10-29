@@ -31,6 +31,8 @@ pub(crate) use ui_events::INTERRUPTED_NOTE;
 
 mod gates;
 pub(crate) use gates::*;
+mod goal_control;
+pub(crate) use goal_control::*;
 mod goal_headless;
 pub(crate) use goal_headless::*;
 mod goal_progress;
@@ -1946,7 +1948,7 @@ pub(crate) async fn run_chat_tui(
                         turn_gen += 1;
                         busy = false;
                         loop_state = None;
-                        goal_state = None;
+                        abandon_goal(&mut goal_state, &mut app);
                         pending = None;
                         pending_question = None;
                         app.prompt = None;
@@ -2051,7 +2053,7 @@ pub(crate) async fn run_chat_tui(
                             }));
                         } else {
                             loop_state = None;
-                            goal_state = None;
+                            abandon_goal(&mut goal_state, &mut app);
                             app.note("⏭ turn aborted — no prompt to retry");
                         }
                     } else {
@@ -2300,7 +2302,8 @@ pub(crate) async fn run_chat_tui(
                                 max_minutes,
                             } => {
                                 turn_gen += 1;
-                                goal_state = Some(GoalState::new(
+                                goal_state = Some(GoalState::begin(
+                                    &mut app,
                                     turn_gen,
                                     goal,
                                     gates,
@@ -3125,7 +3128,7 @@ pub(crate) async fn run_chat_tui(
                     while rx.try_recv().is_ok() {} // nothing more is coming; drop any leftover
                     busy = false;
                     loop_state = None; // a `/loop` in progress stops on interrupt
-                    goal_state = None; // a `/goal` in progress stops on interrupt
+                    abandon_goal(&mut goal_state, &mut app); // a `/goal` in progress stops on interrupt
                     pending = None;
                     pending_question = None;
                     app.prompt = None;
@@ -3634,7 +3637,8 @@ pub(crate) async fn run_chat_tui(
                                     max_minutes,
                                 } => {
                                     turn_gen += 1;
-                                    goal_state = Some(GoalState::new(
+                                    goal_state = Some(GoalState::begin(
+                                        &mut app,
                                         turn_gen,
                                         goal,
                                         gates,
@@ -4204,7 +4208,8 @@ pub(crate) async fn run_chat_tui(
                                     max_minutes,
                                 } => {
                                     turn_gen += 1;
-                                    goal_state = Some(GoalState::new(
+                                    goal_state = Some(GoalState::begin(
+                                        &mut app,
                                         turn_gen,
                                         goal,
                                         gates,
@@ -4420,7 +4425,7 @@ pub(crate) async fn run_chat_tui(
                             while rx.try_recv().is_ok() {}
                             busy = false;
                             loop_state = None;
-                            goal_state = None;
+                            abandon_goal(&mut goal_state, &mut app);
                             pending = None;
                             pending_question = None;
                             app.prompt = None;

@@ -299,6 +299,11 @@ pub(crate) async fn goal_outcome(
     use super::dispatch::DispatchOutcome;
     let text = objective.trim().to_string();
     if text.is_empty() {
+        if let Some(goal) = &app.goal {
+            let summary = goal.summary();
+            app.note(&summary);
+            return Ok(DispatchOutcome::Handled);
+        }
         app.note(
             "usage: /goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
              — sets the goal and breaks it into tasks",

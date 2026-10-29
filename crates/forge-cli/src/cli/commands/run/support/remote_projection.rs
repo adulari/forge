@@ -156,6 +156,7 @@ pub(crate) fn build_snapshot_frame(
             finished_ok: w.finished_ok,
             summary: w.summary,
         }),
+        goal: app.goal.as_ref().map(remote::SnapGoal::from),
         suggested_prompt: view.suggested_prompt,
         copy_text,
         prompt_seq,

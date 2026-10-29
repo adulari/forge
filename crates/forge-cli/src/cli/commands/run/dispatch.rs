@@ -648,6 +648,9 @@ and keep going."
             return gates::goal_outcome(session, app, objective, gates, max_tokens, max_minutes)
                 .await;
         }
+        CommandAction::GoalControl(control) => {
+            return goal_control_outcome(session, app, control).await;
+        }
         // `/pr [title]` — a one-liner over the deterministic `open_pr` tool, which pushes and
         // opens the PR with generated evidence + provenance (docs/features/open-pr.md).
         CommandAction::Pr(title) => {

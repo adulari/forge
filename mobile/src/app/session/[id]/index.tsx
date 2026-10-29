@@ -26,6 +26,7 @@ import {
 
 import type { SentAttachment } from "../../../components/chat/attach";
 import CardSlot from "../../../components/chat/CardSlot";
+import { ComposerDocks } from "../../../components/chat/ComposerDocks";
 import { Composer } from "../../../components/chat/Composer";
 import { MessageActionsMenu } from "../../../components/chat/MessageActionsMenu";
 import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
@@ -286,9 +287,9 @@ export function SessionChat() {
       const withPath = attachments
         .filter((a): a is SentAttachment & { path: string } => a.path != null)
         .map((a) => ({ path: a.path, image: a.image }));
-      // A side question's answer is a card, not a transcript row, so its text never gets a bubble
-      // that no history row would ever claim.
-      const sideQuestion = /^\/(btw|side)(\s|$)/i.test(text);
+      // A side question's answer is a card and a `/goal` is a banner, not transcript rows, so
+      // their text never gets a bubble that no history row would ever claim.
+      const sideQuestion = /^\/(btw|side|goal)(\s|$)/i.test(text);
       if (send({ kind: mode === "queue" ? "queue" : "prompt", text, attachments: withPath })) {
         if (!sideQuestion) setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
         return true;
@@ -894,6 +895,8 @@ export function SessionChat() {
         onPress={() => router.push(`/session/${sessionId}/agents`)}
         onOpenAgent={openSession}
       />
+
+      <ComposerDocks sessionId={sessionId} snapshot={snapshot} />
 
       {readOnly ? (
         // No input path at all reaches this session — never mount the interactive composer

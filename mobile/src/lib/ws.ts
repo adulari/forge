@@ -157,6 +157,28 @@ export interface FormAnswer {
   note?: string | null;
 }
 
+export type GoalPhase = "active" | "paused" | "budget_limit" | "complete" | "failed" | "cancelled";
+
+/** Additive: the `/goal` run as the host tracks it. Absent from an older host and before any goal
+ * starts; a client then falls back to the transient notes (see `lib/goalState.ts`). */
+export interface SnapshotGoal {
+  objective: string;
+  state: GoalPhase;
+  iteration: number;
+  tokens_used: number;
+  max_tokens: number | null;
+  max_minutes: number | null;
+  /** Run time as of `synced_at`; only an `active` goal keeps running past it. */
+  elapsed_secs: number;
+  /** Unix ms of the last update to the counters above. */
+  synced_at: number;
+  gates: string[];
+  /** Why a goal that did not complete stopped. */
+  reason: string | null;
+  /** A pause or clear that applies when the turn in flight ends. */
+  pending: "pause" | "clear" | null;
+}
+
 export interface Snapshot {
   protocol: number;
   session_id: string;
@@ -196,6 +218,7 @@ export interface Snapshot {
   subagents: SnapshotSubagent[];
   // v8.1 additive: active workflow-run state, null when no workflow is running.
   workflow?: SnapshotWorkflow | null;
+  goal?: SnapshotGoal | null;
   queued: string[];
   permission_prompt: string | null;
   question: string | null;

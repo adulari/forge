@@ -565,18 +565,22 @@ impl App {
     /// Refresh the goal and loop chips from the autonomous runs' iteration counts (`None` when
     /// that run is not active). The goal chip shows task progress once a plan exists.
     pub fn set_autonomy_chips(&mut self, goal_iter: Option<usize>, loop_iter: Option<usize>) {
-        self.goal_chip = goal_iter.map(|iter| {
-            if self.tasks.is_empty() {
-                format!("iteration {iter}")
-            } else {
-                let done = self
-                    .tasks
-                    .iter()
-                    .filter(|t| t.status == forge_types::TodoStatus::Done)
-                    .count();
-                format!("{done}/{}", self.tasks.len())
-            }
-        });
+        let done = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == forge_types::TodoStatus::Done)
+            .count();
+        let total = self.tasks.len();
+        self.goal_chip = match &self.goal {
+            Some(goal) => Some(goal.chip(done, total)),
+            None => goal_iter.map(|iter| {
+                if total == 0 {
+                    format!("iteration {iter}")
+                } else {
+                    format!("{done}/{total}")
+                }
+            }),
+        };
         self.loop_chip = loop_iter.map(|iter| format!("iteration {iter}"));
     }
 }
