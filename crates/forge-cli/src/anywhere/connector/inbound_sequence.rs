@@ -26,6 +26,28 @@ pub(super) fn validate_inbound_metadata(envelope: &Envelope, identity: &Identity
     Ok(())
 }
 
+/// An inbound envelope whose sequence this host already accepted. The relay redelivers queued
+/// envelopes after every reconnect, so failing the connection on one looped forever: the host
+/// reconnected, got the same envelope, and dropped again. Discard the envelope instead.
+#[derive(Debug)]
+pub(super) struct ReplayedSequence {
+    sender: String,
+    sequence: u64,
+    last: u64,
+}
+
+impl std::fmt::Display for ReplayedSequence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "replayed or out-of-order relay sequence {} from device {} (last accepted {})",
+            self.sequence, self.sender, self.last
+        )
+    }
+}
+
+impl std::error::Error for ReplayedSequence {}
+
 pub(super) fn accept_inbound_envelopes(
     store: &StateStore,
     sender_device_id: [u8; 16],
@@ -55,12 +77,17 @@ fn accept_inbound_sequence(
     sequence: u64,
 ) -> Result<()> {
     let namespace = format!("{}:{key_epoch}", hex::encode(sender_device_id));
-    if state
+    if let Some(&last) = state
         .accepted_sequences
         .get(&namespace)
-        .is_some_and(|last| sequence <= *last)
+        .filter(|last| sequence <= **last)
     {
-        bail!("replayed or out-of-order relay sequence");
+        return Err(ReplayedSequence {
+            sender: hex::encode(&sender_device_id[..4]),
+            sequence,
+            last,
+        }
+        .into());
     }
     state.accepted_sequences.insert(namespace, sequence);
     Ok(())
@@ -86,5 +113,18 @@ mod tests {
             path: dir.path().join("state.json"),
         };
         assert!(accept_inbound_envelopes(&reloaded, [0x77; 16], 3, Some(14), 16).is_err());
+    }
+
+    #[test]
+    fn a_replayed_sequence_is_a_typed_error_the_connector_can_discard() {
+        let dir = tempdir().unwrap();
+        let store = StateStore {
+            path: dir.path().join("state.json"),
+        };
+        accept_inbound_envelopes(&store, [0x42; 16], 1, None, 20).unwrap();
+        let error = accept_inbound_envelopes(&store, [0x42; 16], 1, None, 20).unwrap_err();
+        assert!(error.is::<ReplayedSequence>(), "{error:#}");
+        assert!(format!("{error}").contains("sequence 20 from device 42424242 (last accepted 20)"));
+        accept_inbound_envelopes(&store, [0x42; 16], 1, None, 21).unwrap();
     }
 }
