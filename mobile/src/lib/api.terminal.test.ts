@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { openTerminalSocket } from "./api";
+import { closeTerminal, openTerminalSocket } from "./api";
 
 const transportHarness = vi.hoisted(() => ({
   sockets: [] as unknown[],
@@ -97,5 +97,37 @@ describe("terminal API", () => {
       { kind: "close" },
     ]);
     expect(socket.closed).toBe(true);
+  });
+
+  it("hands the shell's exit code to the status handler and treats a missing one as null", () => {
+    const seen: [string, number | null][] = [];
+    openTerminalSocket("https://forge.test/token", "session-7", {
+      onOutput: () => undefined,
+      onStatus: (status, code) => seen.push([status, code]),
+    });
+    const socket = transportHarness.sockets[0] as MockSocket;
+    socket.onmessage?.({ data: '{"kind":"status","status":"running"}' } as MessageEvent);
+    socket.onmessage?.({ data: '{"kind":"status","status":"exited","exit_code":3}' } as MessageEvent);
+    socket.onmessage?.({ data: '{"kind":"status","status":"exited"}' } as MessageEvent);
+    socket.onmessage?.({ data: '{"kind":"status","status":"exited","exit_code":"x"}' } as MessageEvent);
+    expect(seen).toEqual([
+      ["running", null],
+      ["exited", 3],
+      ["exited", null],
+      ["exited", null],
+    ]);
+  });
+
+  it("closes a terminal by attaching, sending the close frame, then detaching", () => {
+    vi.useFakeTimers();
+    closeTerminal("https://forge.test/token", "session-7", "term-2");
+    const socket = transportHarness.sockets[0] as MockSocket;
+    expect(socket.url).toContain("terminal=term-2");
+    socket.readyState = 1;
+    socket.onopen?.();
+    expect(socket.sent.map((frame) => JSON.parse(frame))).toEqual([{ kind: "close" }]);
+    vi.advanceTimersByTime(500);
+    expect(socket.closed).toBe(true);
+    vi.useRealTimers();
   });
 });

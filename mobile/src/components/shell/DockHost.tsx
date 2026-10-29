@@ -7,15 +7,19 @@
 // Adding a dock is one registry entry plus the hotkey/menu wiring in app/_layout.tsx — nothing
 // else in this file changes.
 import { PanelRight, X } from "lucide-react-native";
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 
+import { closeTerminal } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
+import { useTerminalPreferences } from "../../lib/terminalPreferences";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
+import { hexToRgba, space } from "../../theme/tokens";
 import { formatCwd, type as typeScale } from "../../theme/typography";
 import { GalleryDock } from "../gallery/GalleryDock";
 import { GitReviewDock } from "../git/GitReviewDock";
 import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
+import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { EmptyState } from "../ds/EmptyState";
 import { WorkspaceDock } from "../workspace/WorkspaceDock";
 import {
@@ -34,14 +38,23 @@ import { useDragSource, useDropTarget, type DragPayload } from "./sessionDrag";
 import { SessionDock } from "./SessionDocks";
 import { TerminalDock } from "./TerminalDock";
 import { terminalTitle } from "./terminalModel";
+import { markTerminalClosed, tabsForSession, tabTerminalId } from "./terminalTabs";
+import { useTerminalActivity } from "./useTerminalActivity";
 import { UsageDock } from "./UsageDock";
 
 export type DockKind = WorkbenchSurfaceKind;
+
+/** What a terminal tab says about its shell when the person is not looking at it. */
+export interface TabSignal {
+  kind: "unseen" | "streaming" | "exited";
+  label: string;
+}
 
 function DockTab({
   tab,
   index,
   active,
+  signal,
   onActivate,
   onClose,
   onReorder,
@@ -49,6 +62,7 @@ function DockTab({
   tab: WorkbenchSurface;
   index: number;
   active: boolean;
+  signal?: TabSignal | null;
   onActivate?: (id: string) => void;
   onClose?: (id: string) => void;
   onReorder?: (from: number, to: number) => void;
@@ -81,6 +95,20 @@ function DockTab({
         <Text style={[typeScale.bodyBold, { color: active ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>
           {tab.title}
         </Text>
+        {signal?.kind === "streaming" ? (
+          <Text
+            accessibilityLabel="Printing output"
+            style={[typeScale.monoMeta, styles.liveBadge, { color: tokens.accent, backgroundColor: hexToRgba(tokens.accent, 0.12) }]}
+          >
+            live
+          </Text>
+        ) : signal?.kind === "unseen" ? (
+          <View accessibilityLabel="New output" style={[styles.unseenDot, { backgroundColor: tokens.accent }]} />
+        ) : signal?.kind === "exited" ? (
+          <Text numberOfLines={1} style={[typeScale.monoMeta, styles.exitLabel, { color: tokens.ink4 }]}>
+            {signal.label}
+          </Text>
+        ) : null}
       </Pressable>
       {onClose ? (
         <Pressable
@@ -100,6 +128,8 @@ export interface DockContext {
   sessionId: string | null;
   surface: WorkbenchSurface | null;
   openTerminal: (terminalId: string) => void;
+  /** Close the terminal tab whose shell exited on its own. */
+  closeFinishedTerminal: () => void;
 }
 
 interface DockDefinition {
@@ -128,11 +158,13 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
       sessionId && surface ? <BrowserPreviewDock sessionId={sessionId} surface={surface} /> : <NeedsSession what="its preview" />,
   },
   terminal: {
-    render: ({ sessionId, surface, openTerminal }) => (
+    render: ({ sessionId, surface, openTerminal, closeFinishedTerminal }) => (
       <TerminalDock
         sessionId={sessionId}
-        terminalId={surface?.resourceId ?? "term-1"}
+        terminalId={tabTerminalId(surface?.resourceId ?? null)}
         onOpenTerminal={openTerminal}
+        surfaceId={surface?.id ?? null}
+        onShellExit={closeFinishedTerminal}
       />
     ),
   },
@@ -195,6 +227,81 @@ export function DockHost({
   );
   const row = useSessionRow(surfaceDefinition.sessionScoped ? effectiveSessionId : null);
 
+  // Terminal tabs belong to the session they were opened for: the focused session shows its own
+  // plus the default one, and the daemon's list brings back any it still has running.
+  const isTerminal = kind === "terminal";
+  const shownTabs = useMemo(() => (isTerminal ? tabsForSession(tabs, sessionId) : tabs), [isTerminal, sessionId, tabs]);
+  const activeTerminalId = isTerminal ? tabTerminalId(surface?.resourceId ?? null) : null;
+  const terminalActivity = useTerminalActivity(
+    isTerminal ? effectiveSessionId : null,
+    activeTerminalId,
+    isTerminal && open && shownTabs.length > 1,
+  );
+  const { baseUrl } = useAuth();
+  const terminalPreferences = useTerminalPreferences();
+  const [closing, setClosing] = useState<WorkbenchSurface | null>(null);
+
+  useEffect(() => {
+    if (!isTerminal || !surface || !sessionId || surface.sessionId == null || surface.sessionId === sessionId) return;
+    const own = shownTabs.find((tab) => tab.kind === "terminal");
+    if (own) onActivateSurface?.(own.id);
+    else workbench.openSurface({ kind: "terminal" });
+  }, [isTerminal, onActivateSurface, sessionId, shownTabs, surface, workbench]);
+
+  const discardTerminal = useCallback(
+    (tab: WorkbenchSurface) => {
+      const owner = tab.sessionId ?? sessionId;
+      if (owner) {
+        const terminalId = tabTerminalId(tab.resourceId);
+        markTerminalClosed(owner, terminalId);
+        if (baseUrl) closeTerminal(baseUrl, owner, terminalId);
+      }
+      onCloseSurface?.(tab.id);
+    },
+    [baseUrl, onCloseSurface, sessionId],
+  );
+  const requestClose = useCallback(
+    (id: string) => {
+      const tab = shownTabs.find((candidate) => candidate.id === id);
+      if (!tab || tab.kind !== "terminal") {
+        onCloseSurface?.(id);
+        return;
+      }
+      const stillRunning = terminalActivity.exitCodeOf(tabTerminalId(tab.resourceId)) === undefined;
+      if (terminalPreferences.confirmClose && stillRunning) setClosing(tab);
+      else discardTerminal(tab);
+    },
+    [discardTerminal, onCloseSurface, shownTabs, terminalActivity, terminalPreferences.confirmClose],
+  );
+  const closeFinishedTerminal = useCallback(() => {
+    if (!surface) return;
+    const owner = surface.sessionId ?? sessionId;
+    if (owner) markTerminalClosed(owner, tabTerminalId(surface.resourceId));
+    onCloseSurface?.(surface.id);
+  }, [onCloseSurface, sessionId, surface]);
+  const signalFor = (tab: WorkbenchSurface): TabSignal | null => {
+    if (tab.kind !== "terminal" || tab.id === surface?.id) return null;
+    const id = tabTerminalId(tab.resourceId);
+    const code = terminalActivity.exitCodeOf(id);
+    if (code !== undefined) return { kind: "exited", label: code == null ? "ended" : `exit ${code}` };
+    if (terminalActivity.isStreaming(id)) return { kind: "streaming", label: "live" };
+    if (terminalActivity.isUnseen(id)) return { kind: "unseen", label: "new output" };
+    return null;
+  };
+  const closeConfirmation = (
+    <ConfirmDialog
+      visible={closing != null}
+      title={`Close ${closing?.title ?? "terminal"}?`}
+      message="Its shell is still running. Closing the tab stops it and any command it is running."
+      confirmLabel="Close terminal"
+      onConfirm={() => {
+        if (closing) discardTerminal(closing);
+        setClosing(null);
+      }}
+      onCancel={() => setClosing(null)}
+    />
+  );
+
   const bottom = surfaceDefinition.placement === "bottom";
   const storedSize = bottom ? workbench.layout.dock.bottom : workbench.layout.dock.right;
   const baseSize = storedSize ?? surfaceDefinition.defaultSize;
@@ -233,16 +340,17 @@ export function DockHost({
 
   const header = (compact: boolean) => (
     <View style={[styles.header, compact && styles.headerCompact, { borderBottomColor: tokens.border }]}>
-      {tabs.length > 1 ? (
+      {shownTabs.length > 1 ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabs} contentContainerStyle={styles.tabsContent}>
-          {tabs.map((tab, index) => (
+          {shownTabs.map((tab, index) => (
             <DockTab
               key={tab.id}
               tab={tab}
               index={index}
               active={tab.id === surface?.id}
+              signal={signalFor(tab)}
               onActivate={onActivateSurface}
-              onClose={onCloseSurface}
+              onClose={requestClose}
               onReorder={onReorderSurface}
             />
           ))}
@@ -255,7 +363,7 @@ export function DockHost({
       {row ? (
         // Which session this panel is showing — it follows the focused pane.
         <Text style={[typeScale.monoMeta, styles.followChip, { color: tokens.ink3 }]} numberOfLines={1}>
-          {tabs.length <= 1 ? formatCwd(row.cwd) : row.title || `session ${row.id.slice(0, 8)}`}
+          {shownTabs.length <= 1 ? formatCwd(row.cwd) : row.title || `session ${row.id.slice(0, 8)}`}
         </Text>
       ) : null}
       <View style={styles.headerSpacer} />
@@ -286,7 +394,8 @@ export function DockHost({
           onNudge={onNudge}
         />
         {header(true)}
-        <View style={styles.body}>{definition.render({ sessionId: effectiveSessionId, surface, openTerminal })}</View>
+        <View style={styles.body}>{definition.render({ sessionId: effectiveSessionId, surface, openTerminal, closeFinishedTerminal })}</View>
+        {closeConfirmation}
       </View>
     );
   }
@@ -304,7 +413,7 @@ export function DockHost({
         onNudge={onNudge}
       />
       {header(false)}
-      <View style={styles.body}>{definition.render({ sessionId: effectiveSessionId, surface, openTerminal })}</View>
+      <View style={styles.body}>{definition.render({ sessionId: effectiveSessionId, surface, openTerminal, closeFinishedTerminal })}</View>
     </View>
   );
 }
@@ -332,7 +441,10 @@ const styles = StyleSheet.create({
     paddingLeft: space.space8,
     borderBottomWidth: 2,
   },
-  tabLabel: { flexShrink: 1, justifyContent: "center", alignSelf: "stretch" },
+  tabLabel: { flexShrink: 1, flexDirection: "row", alignItems: "center", alignSelf: "stretch" },
+  unseenDot: { width: 6, height: 6, borderRadius: 3, marginLeft: space.space8, alignSelf: "center" },
+  liveBadge: { marginLeft: space.space8, paddingHorizontal: 4, borderRadius: 2, overflow: "hidden", alignSelf: "center" },
+  exitLabel: { marginLeft: space.space8, flexShrink: 0 },
   tabClose: { width: 20, height: 20, marginLeft: 2, alignItems: "center", justifyContent: "center" },
   headerSpacer: { flex: 1 },
   followChip: { flexShrink: 1, maxWidth: 140 },

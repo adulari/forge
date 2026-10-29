@@ -9,6 +9,7 @@ import { Segmented } from "../components/ds/Segmented";
 import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
+import { TerminalSettingsSection } from "../components/settings/TerminalSettingsSection";
 import { setFoldToolGroups, setWrapCodeBlocks, useAppearancePreferences } from "../lib/appearancePreferences";
 import { setDockPlacement, useDockPrefs } from "../lib/composerDocks";
 import { useTheme } from "../theme/ThemeProvider";
@@ -101,6 +102,8 @@ export default function AppearanceScreen() {
               Failed calls and calls still running stay listed under their summary.
             </Text>
           </View>
+
+          <TerminalSettingsSection />
 
           <View>
             <SectionHeader>Thread docks</SectionHeader>

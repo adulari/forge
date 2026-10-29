@@ -1339,17 +1339,21 @@ export interface TerminalSessionSummary {
   status: TerminalStatus;
   clients: number;
   updated_at_ms: number;
+  /** Output counter: it moves whenever the terminal prints or is cleared. Older daemons omit it. */
+  sequence?: number;
+  /** The shell's own exit code; absent while it runs and when it was killed. */
+  exit_code?: number | null;
 }
 
 type TerminalServerFrame =
-  | { kind: "status"; status: TerminalStatus }
+  | { kind: "status"; status: TerminalStatus; exitCode: number | null }
   | { kind: "cleared" };
 
 export interface TerminalSocketHandlers {
   /** Decoded pty output. UTF-8 is decoded in STREAMING mode, so a multi-byte glyph split across
    * two frames is reassembled instead of turning into replacement characters. */
   onOutput: (chunk: string) => void;
-  onStatus?: (status: TerminalStatus) => void;
+  onStatus?: (status: TerminalStatus, exitCode: number | null) => void;
   onClear?: () => void;
   onOpen?: () => void;
   onClose?: (event: { code: number; reason: string }) => void;
@@ -1376,6 +1380,27 @@ export function listTerminalSessions(
   sessionId: string,
 ): Promise<TerminalSessionSummary[]> {
   return request(baseUrl, `/api/terminals${qs({ session: sessionId })}`);
+}
+
+/** Discard a daemon-owned terminal and its history: attach just long enough to say so. */
+export function closeTerminal(baseUrl: string, sessionId: string, terminalId: string): void {
+  let socket: TerminalSocket | null = null;
+  try {
+    socket = openTerminalSocket(
+      baseUrl,
+      sessionId,
+      {
+        onOutput: () => undefined,
+        onOpen: () => {
+          socket?.kill();
+          setTimeout(() => socket?.close(), 400);
+        },
+      },
+      { terminalId },
+    );
+  } catch {
+    // An unroutable host has nothing to close.
+  }
 }
 
 /** Attach to a daemon-owned PTY in a session's directory. The process survives socket detach. */
@@ -1409,7 +1434,7 @@ export function openTerminalSocket(
     if (typeof data === "string") {
       const control = parseTerminalServerFrame(data);
       if (control?.kind === "status") {
-        handlers.onStatus?.(control.status);
+        handlers.onStatus?.(control.status, control.exitCode);
         return;
       }
       if (control?.kind === "cleared") {
@@ -1439,13 +1464,18 @@ export function openTerminalSocket(
 
 function parseTerminalServerFrame(value: string): TerminalServerFrame | null {
   try {
-    const frame = JSON.parse(value) as Partial<TerminalServerFrame>;
+    const frame = JSON.parse(value) as {
+      kind?: string;
+      status?: string;
+      exit_code?: unknown;
+    };
     if (frame.kind === "cleared") return { kind: "cleared" };
     if (
       frame.kind === "status"
       && (frame.status === "running" || frame.status === "exited")
     ) {
-      return { kind: "status", status: frame.status };
+      const exitCode = typeof frame.exit_code === "number" ? frame.exit_code : null;
+      return { kind: "status", status: frame.status, exitCode };
     }
   } catch {
     // A non-control text frame is a human-readable daemon error.

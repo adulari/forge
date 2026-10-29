@@ -53,6 +53,7 @@ pub mod quota_status;
 pub mod reporting;
 pub mod secret_health;
 pub mod secret_store;
+pub mod terminal;
 mod vision_fallback;
 mod workspace_state;
 pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
@@ -210,6 +211,9 @@ pub struct Config {
     /// Ceilings on what one daemon runs at once (`[host] max_active_sessions` and friends).
     #[serde(default)]
     pub host: host::HostConfig,
+    /// Which shell terminal tabs and the agent's shell tool use (`[terminal]`).
+    #[serde(default)]
+    pub terminal: terminal::TerminalConfig,
     /// The `run_code` tool on the direct path (`[codemode]`).
     #[serde(default)]
     pub codemode: codemode::CodemodeConfig,
@@ -2949,6 +2953,7 @@ impl Default for Config {
             preview: preview::PreviewConfig::default(),
             power: power::PowerConfig::default(),
             host: host::HostConfig::default(),
+            terminal: terminal::TerminalConfig::default(),
             codemode: codemode::CodemodeConfig::default(),
             pr: pr::PrConfig::default(),
             keybinds: KeybindsConfig::default(),

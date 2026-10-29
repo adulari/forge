@@ -58,3 +58,120 @@ export function terminalInputDelta(previous: string, next: string): string {
   if (previous.startsWith(next)) return TERMINAL_BACKSPACE.repeat(previous.length - next.length);
   return next;
 }
+
+/** A second Ctrl/Cmd+C inside this window after a copy interrupts instead of copying again. */
+export const COPY_INTERRUPT_WINDOW_MS = 500;
+
+export type CopyInterruptAction = "copy" | "interrupt" | "ignore";
+
+/**
+ * What Ctrl/Cmd+C does in the terminal. With text selected the first press copies it; pressing
+ * again within {@link COPY_INTERRUPT_WINDOW_MS} sends the interrupt anyway, so a stray selection
+ * never makes a running command impossible to stop. Without a selection Ctrl+C is the interrupt
+ * and Cmd+C (which has no terminal meaning) is left alone.
+ */
+export function copyOrInterrupt(input: {
+  meta: boolean;
+  hasSelection: boolean;
+  now: number;
+  lastCopyAt: number | null;
+}): CopyInterruptAction {
+  if (input.lastCopyAt != null && input.now - input.lastCopyAt <= COPY_INTERRUPT_WINDOW_MS) {
+    return "interrupt";
+  }
+  if (input.hasSelection) return "copy";
+  return input.meta ? "ignore" : "interrupt";
+}
+
+/** The character grid a pane of this pixel size holds, never smaller than a usable shell. */
+export function terminalGrid(input: {
+  width: number;
+  height: number;
+  charWidth: number;
+  lineHeight: number;
+  paddingX: number;
+  minCols?: number;
+  minRows?: number;
+}): { cols: number; rows: number } {
+  const cols = Math.floor((input.width - input.paddingX * 2) / Math.max(input.charWidth, 1));
+  const rows = Math.floor(input.height / Math.max(input.lineHeight, 1));
+  return { cols: Math.max(input.minCols ?? 20, cols), rows: Math.max(input.minRows ?? 4, rows) };
+}
+
+/** Lines above which a resize makes the daemon reflow enough output to be worth waiting out. */
+export const LARGE_BUFFER_LINES = 600;
+const RESIZE_DEBOUNCE_MS = 160;
+
+/** How long to hold a resize back: dragging a handle floods the pty only when the buffer is big. */
+export function resizeDelay(lineCount: number): number {
+  return lineCount >= LARGE_BUFFER_LINES ? RESIZE_DEBOUNCE_MS : 0;
+}
+
+/** The glyph advance a probe string of `chars` characters measured `width` wide, if it is sane. */
+export function measuredCharWidth(width: number, chars: number, fallback: number): number {
+  if (!Number.isFinite(width) || chars <= 0) return fallback;
+  const each = width / chars;
+  return each >= 3 && each <= 40 ? each : fallback;
+}
+
+export interface TerminalSummaryLike {
+  terminal_id: string;
+  status: "running" | "exited";
+  sequence?: number;
+  exit_code?: number | null;
+}
+
+export interface TerminalActivity {
+  /** Highest output counter the daemon has reported per terminal. */
+  latest: Record<string, number>;
+  /** The counter value at the last moment the person was looking at that terminal. */
+  seen: Record<string, number>;
+  /** Terminals whose counter moved since the previous report. */
+  streaming: Record<string, boolean>;
+}
+
+export const EMPTY_TERMINAL_ACTIVITY: TerminalActivity = { latest: {}, seen: {}, streaming: {} };
+
+/**
+ * Fold a fresh terminal list into the activity record. The terminal being looked at is always
+ * "seen"; one met for the first time is too, so output that predates this view is not news.
+ */
+export function advanceActivity(
+  previous: TerminalActivity,
+  summaries: readonly TerminalSummaryLike[],
+  activeId: string | null,
+): TerminalActivity {
+  const latest: Record<string, number> = {};
+  const seen: Record<string, number> = {};
+  const streaming: Record<string, boolean> = {};
+  for (const summary of summaries) {
+    const id = summary.terminal_id;
+    const sequence = summary.sequence ?? 0;
+    latest[id] = sequence;
+    streaming[id] = id in previous.latest && sequence > previous.latest[id] && summary.status === "running";
+    seen[id] = id === activeId || !(id in previous.seen) ? sequence : previous.seen[id];
+  }
+  return { latest, seen, streaming };
+}
+
+/** A background terminal that printed something since it was last looked at. */
+export function hasUnseenOutput(activity: TerminalActivity, id: string, activeId: string | null): boolean {
+  return id !== activeId && (activity.latest[id] ?? 0) > (activity.seen[id] ?? 0);
+}
+
+/** A shell that ended cleanly closes its own tab; any other ending keeps the tab to read and restart. */
+export function closesItselfOnExit(exitCode: number | null | undefined): boolean {
+  return exitCode === 0;
+}
+
+export function exitLabel(exitCode: number | null | undefined): string {
+  return exitCode == null ? "exited" : `exited (${exitCode})`;
+}
+
+/** The tab to select when `id` goes away: the one that slides into its place, else the one before. */
+export function neighbourTerminal(ids: readonly string[], id: string): string | null {
+  const index = ids.indexOf(id);
+  if (index === -1) return null;
+  const rest = ids.filter((candidate) => candidate !== id);
+  return rest[Math.min(index, rest.length - 1)] ?? null;
+}

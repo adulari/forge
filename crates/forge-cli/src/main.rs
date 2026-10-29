@@ -112,6 +112,7 @@ mod serve_recovery;
 mod serve_schedules;
 mod serve_spend;
 mod serve_terminal;
+mod serve_terminal_util;
 mod serve_update;
 mod serve_workspace;
 mod startup_trace;

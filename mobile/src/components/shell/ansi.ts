@@ -33,6 +33,8 @@ export interface AnsiStyle {
 export interface AnsiSpan {
   text: string;
   style: AnsiStyle;
+  /** Target of an OSC 8 hyperlink the program wrapped this text in. */
+  link?: string;
 }
 
 export interface AnsiLine {
@@ -81,6 +83,8 @@ export class AnsiScrollback {
    * emitting text, which is what makes progress bars and prompt redraws readable. */
   private col = 0;
   private style: AnsiStyle = DEFAULT_ANSI_STYLE;
+  /** The OSC 8 hyperlink currently open, applied to every span written until it is closed. */
+  private link: string | undefined;
   /** Trailing bytes of an escape sequence split across two socket frames. */
   private partial = "";
   private nextKey = 0;
@@ -94,6 +98,7 @@ export class AnsiScrollback {
     this.current = [];
     this.col = 0;
     this.partial = "";
+    this.link = undefined;
   }
 
   /** Completed lines plus the in-progress one (always present, so the prompt row renders). */
@@ -192,8 +197,12 @@ export class AnsiScrollback {
     // BEL or ST. Nothing here is renderable, so they are consumed whole.
     if (next === "]" || next === "P" || next === "^" || next === "_") {
       for (let i = start + 2; i < data.length; i += 1) {
-        if (data[i] === "\x07") return i - start + 1;
-        if (data[i] === ESC && data[i + 1] === "\\") return i - start + 2;
+        const bell = data[i] === "\x07";
+        const stringTerminator = data[i] === ESC && data[i + 1] === "\\";
+        if (bell || stringTerminator) {
+          if (next === "]") this.applyOsc(data.slice(start + 2, i));
+          return bell ? i - start + 1 : i - start + 2;
+        }
         if (data[i] === ESC && data[i + 1] === undefined) return -1;
       }
       return -1;
@@ -207,6 +216,13 @@ export class AnsiScrollback {
 
     // Everything else (`ESC =`, `ESC >`, `ESC 7`, `ESC M`, a lone ST) is two bytes.
     return 2;
+  }
+
+  /** `8;params;URI` opens a hyperlink and `8;;` closes it; every other OSC is not renderable. */
+  private applyOsc(body: string): void {
+    if (!body.startsWith("8;")) return;
+    const uri = body.slice(body.indexOf(";", 2) + 1);
+    this.link = uri === "" || !/^[a-z][a-z0-9+.-]*:/i.test(uri) ? undefined : uri;
   }
 
   private applyCsi(final: string, params: string): void {
@@ -315,7 +331,7 @@ export class AnsiScrollback {
         spans.push(span);
         remaining -= span.text.length;
       } else {
-        spans.push({ text: span.text.slice(0, remaining), style: span.style });
+        spans.push({ ...span, text: span.text.slice(0, remaining) });
         remaining = 0;
       }
     }
@@ -332,17 +348,17 @@ export class AnsiScrollback {
       }
       const take = Math.min(span.text.length, this.col - skipped);
       skipped += take;
-      if (take < span.text.length) tail.push({ text: span.text.slice(take), style: span.style });
+      if (take < span.text.length) tail.push({ ...span, text: span.text.slice(take) });
     }
     this.current = this.col > 0 ? [{ text: " ".repeat(this.col), style: DEFAULT_ANSI_STYLE }, ...tail] : tail;
   }
 
-  private appendSpan(text: string, style: AnsiStyle): void {
+  private appendSpan(text: string, style: AnsiStyle, link?: string): void {
     const last = this.current[this.current.length - 1];
     // `style` is replaced wholesale on every SGR, so reference equality is an exact test for
     // "same run" and keeps consecutive chunks from fragmenting into one span per frame.
-    if (last && last.style === style) last.text += text;
-    else this.current.push({ text, style });
+    if (last && last.style === style && last.link === link) last.text += text;
+    else this.current.push(link ? { text, style, link } : { text, style });
   }
 
   private writeText(text: string): void {
@@ -350,7 +366,7 @@ export class AnsiScrollback {
     const len = this.lineLength();
     if (this.col < len) this.truncate(this.col);
     else if (this.col > len) this.appendSpan(" ".repeat(this.col - len), DEFAULT_ANSI_STYLE);
-    this.appendSpan(text, this.style);
+    this.appendSpan(text, this.style, this.link);
     this.col += text.length;
   }
 

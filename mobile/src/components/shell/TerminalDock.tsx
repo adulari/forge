@@ -21,7 +21,6 @@ import {
   View,
   type LayoutChangeEvent,
   type NativeScrollEvent,
-  type TextStyle,
 } from "react-native";
 
 import {
@@ -33,31 +32,46 @@ import {
 } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { HOST_CAP_CLOSE_CODE, reportHostCap } from "../../lib/hostStatus";
+import { useTerminalPreferences, terminalLineHeight } from "../../lib/terminalPreferences";
 import { useTokens } from "../../theme/ThemeProvider";
-import { hexToRgba, space, type ColorTokens } from "../../theme/tokens";
+import { hexToRgba, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
-import { AnsiScrollback, type AnsiColor, type AnsiLine, type AnsiSpan } from "./ansi";
+import { useOptionalWorkbench } from "../workbench/WorkbenchProvider";
+import { AnsiScrollback, type AnsiLine } from "./ansi";
 import { ESCAPE_SKIP_PROPS } from "../../lib/escapeSkip";
+import { ansiPalette, TerminalLine } from "./TerminalLine";
+import { clearSelection, copyText, hasAnySelection, hasDom, selectedTextWithin } from "./terminalClipboard";
 import {
+  closesItselfOnExit,
   compareTerminalIds,
+  copyOrInterrupt,
+  exitLabel,
+  measuredCharWidth,
+  neighbourTerminal,
   nextTerminalId,
+  resizeDelay,
+  terminalGrid,
   terminalInputDelta,
   terminalTitle,
 } from "./terminalModel";
+import { terminalsToAdopt } from "./terminalTabs";
+import { useTerminalActivity } from "./useTerminalActivity";
+import { useTerminalLinkOpener } from "./useTerminalLinkOpener";
 
-/** Bounded scrollback — completed lines beyond this are dropped from the head. */
 const MAX_SCROLLBACK_LINES = 2000;
 /** Output is coalesced into at most one re-render per frame-ish interval. */
 const FLUSH_MS = 33;
-const FONT_SIZE = typeScale.codeSmall.fontSize as number;
-const LINE_HEIGHT = typeScale.codeSmall.lineHeight as number;
-/** Geist Mono advance width ≈ 0.6em. Measuring a glyph per layout pass would be exact but
- * needs a hidden text probe on every theme/zoom change; the ratio is within a column. */
-const CHAR_WIDTH = FONT_SIZE * 0.6;
+/** Geist Mono advance width is ≈ 0.6em; used until a hidden probe has measured the real glyph. */
+const ESTIMATED_CHAR_RATIO = 0.6;
+const PROBE_TEXT = "M".repeat(40);
+const PROBE_FALLBACK_MS = 400;
 const PADDING_H = 14;
-const MIN_COLS = 20;
-const MIN_ROWS = 4;
+/** A reattached full-screen program repaints on a size change, not on a repeated size. */
+const WIGGLE_DELAY_MS = 250;
+const WIGGLE_RESTORE_MS = 80;
+const COPIED_FLASH_MS = 1_200;
+const WHEEL_LINE_PX = 16;
 
 const CONTROL_KEYS: Record<string, string> = {
   Enter: "\r",
@@ -87,110 +101,6 @@ const COMPACT_KEYS = [
 ] as const;
 
 // ---------------------------------------------------------------------------
-// Colour resolution
-// ---------------------------------------------------------------------------
-
-interface AnsiPalette {
-  /** The 16 ANSI slots, in order. */
-  basic: string[];
-  /** Parsed rgb of each slot, for nearest-match on 256-colour/truecolour output. */
-  basicRgb: [number, number, number][];
-  fg: string;
-  bg: string;
-}
-
-function parseHex(hex: string): [number, number, number] {
-  const h = hex.replace("#", "");
-  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
-}
-
-/**
- * ANSI's 8+8 palette mapped onto Machined's semantic tokens. Machined has no magenta or cyan
- * ramp — rather than inventing hex outside tokens.ts, magenta reuses the ember ramp and cyan
- * reuses `info`; every other slot has an exact semantic counterpart. Bright variants are the
- * same hue at full ink, normal variants sit one step quieter.
- */
-function ansiPalette(tokens: ColorTokens): AnsiPalette {
-  const basic = [
-    tokens.ink4, // black
-    tokens.danger, // red
-    tokens.success, // green
-    tokens.warn, // yellow
-    tokens.info, // blue
-    tokens.ember.ember600, // magenta
-    tokens.info, // cyan
-    tokens.ink2, // white
-    tokens.ink3, // bright black
-    tokens.danger, // bright red
-    tokens.success, // bright green
-    tokens.warn, // bright yellow
-    tokens.info, // bright blue
-    tokens.ember.ember400, // bright magenta
-    tokens.info, // bright cyan
-    tokens.ink, // bright white
-  ];
-  return { basic, basicRgb: basic.map(parseHex), fg: tokens.ink, bg: tokens.bg0 };
-}
-
-function resolveColor(color: AnsiColor | null, palette: AnsiPalette): string | null {
-  if (color == null) return null;
-  if (color.kind === "basic") return palette.basic[color.index] ?? palette.fg;
-  // Truecolour and the 256-colour cube collapse to the nearest palette entry, so a build
-  // script that emits #00d7ff still lands on a token instead of an off-system hex.
-  let best = 0;
-  let bestDistance = Infinity;
-  for (let i = 0; i < palette.basicRgb.length; i += 1) {
-    const [r, g, b] = palette.basicRgb[i];
-    const distance = (r - color.r) ** 2 + (g - color.g) ** 2 + (b - color.b) ** 2;
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = i;
-    }
-  }
-  return palette.basic[best];
-}
-
-function spanStyle(span: AnsiSpan, palette: AnsiPalette): TextStyle {
-  const { style } = span;
-  const fg = resolveColor(style.fg, palette) ?? palette.fg;
-  const bg = resolveColor(style.bg, palette);
-  const out: TextStyle = { color: style.inverse ? palette.bg : fg };
-  if (style.inverse) out.backgroundColor = fg;
-  else if (bg) out.backgroundColor = bg;
-  if (style.bold) out.fontFamily = monoFamily.medium;
-  if (style.dim) out.opacity = 0.6;
-  if (style.italic) out.fontStyle = "italic";
-  if (style.underline) out.textDecorationLine = "underline";
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Rows
-// ---------------------------------------------------------------------------
-
-/** Memoised per line: every output chunk re-renders the list, but only the tail line changed. */
-const TerminalLine = React.memo(function TerminalLine({
-  line,
-  palette,
-  caretColor,
-}: {
-  line: AnsiLine;
-  palette: AnsiPalette;
-  caretColor: string | null;
-}) {
-  return (
-    <Text style={[styles.line, { color: palette.fg }]} selectable>
-      {line.spans.map((span, index) => (
-        <Text key={index} style={spanStyle(span, palette)}>
-          {span.text}
-        </Text>
-      ))}
-      {caretColor ? <Text style={{ backgroundColor: caretColor, color: caretColor }}> </Text> : null}
-    </Text>
-  );
-});
-
-// ---------------------------------------------------------------------------
 // Dock
 // ---------------------------------------------------------------------------
 
@@ -202,6 +112,10 @@ export interface TerminalDockProps {
   compact?: boolean;
   /** Desktop workbench callback used by the + control to open another resource tab. */
   onOpenTerminal?: (terminalId: string) => void;
+  /** The workbench tab showing this terminal, kept selected while other terminals' tabs are restored. */
+  surfaceId?: string | null;
+  /** The shell ended on its own with code 0: the host closes the tab. */
+  onShellExit?: () => void;
 }
 
 type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected";
@@ -213,14 +127,24 @@ export function TerminalDock({
   terminalId = "term-1",
   compact = false,
   onOpenTerminal,
+  surfaceId = null,
+  onShellExit,
 }: TerminalDockProps) {
   const tokens = useTokens();
   const { baseUrl } = useAuth();
   const palette = useMemo(() => ansiPalette(tokens), [tokens]);
+  const workbench = useOptionalWorkbench();
+  const preferences = useTerminalPreferences();
+  const fontSize = preferences.fontSize;
+  const lineHeight = terminalLineHeight(fontSize);
+  const openLink = useTerminalLinkOpener(sessionId);
 
   const bufferRef = useRef(new AnsiScrollback(MAX_SCROLLBACK_LINES));
   const socketRef = useRef<TerminalSocket | null>(null);
   const scrollRef = useRef<ScrollView | null>(null);
+  const dockRef = useRef<View | null>(null);
+  const lastCopyAtRef = useRef<number | null>(null);
+  const attachedBeforeRef = useRef(new Set<string>());
   const stickyRef = useRef(true);
   const inputRef = useRef<TextInput | null>(null);
   // The hidden capture input's own last known text — see terminalInputDelta for why this is
@@ -231,16 +155,41 @@ export function TerminalDock({
   const restartRef = useRef(false);
   const suppressReconnectRef = useRef(false);
   const terminalStatusRef = useRef<TerminalStatus>("running");
+  const cleanExitRef = useRef<() => void>(() => undefined);
 
   const [lines, setLines] = useState<AnsiLine[]>([]);
   const [focused, setFocused] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
   const [terminalStatus, setTerminalStatus] = useState<TerminalStatus>("running");
-  const [size, setSize] = useState<{ cols: number; rows: number } | null>(null);
+  const [exitCode, setExitCode] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [box, setBox] = useState<{ width: number; height: number } | null>(null);
+  const [charWidth, setCharWidth] = useState<number | null>(null);
   const [localTerminalId, setLocalTerminalId] = useState(terminalId);
   const [terminals, setTerminals] = useState<TerminalSessionSummary[]>([]);
   const [connectionGeneration, setConnectionGeneration] = useState(0);
   const effectiveTerminalId = compact ? localTerminalId : terminalId;
+  const activityView = useTerminalActivity(sessionId, effectiveTerminalId, compact);
+  const terminalsRef = useRef<TerminalSessionSummary[]>([]);
+  useEffect(() => {
+    terminalsRef.current = terminals;
+  }, [terminals]);
+
+  useEffect(() => {
+    if (charWidth != null) return;
+    const timer = setTimeout(() => setCharWidth(fontSize * ESTIMATED_CHAR_RATIO), PROBE_FALLBACK_MS);
+    return () => clearTimeout(timer);
+  }, [charWidth, fontSize]);
+
+  const size = useMemo(
+    () =>
+      box && charWidth != null
+        ? terminalGrid({ ...box, charWidth, lineHeight, paddingX: PADDING_H })
+        : null,
+    [box, charWidth, lineHeight],
+  );
+  const cols = size?.cols;
+  const rows = size?.rows;
 
   useEffect(() => {
     if (!compact) setLocalTerminalId(terminalId);
@@ -296,14 +245,23 @@ export function TerminalDock({
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
-    const cols = Math.max(MIN_COLS, Math.floor((width - PADDING_H * 2) / CHAR_WIDTH));
-    const rows = Math.max(MIN_ROWS, Math.floor(height / LINE_HEIGHT));
-    setSize((prev) => (prev && prev.cols === cols && prev.rows === rows ? prev : { cols, rows }));
+    setBox((previous) =>
+      previous && previous.width === width && previous.height === height ? previous : { width, height },
+    );
   }, []);
+
+  const onProbeLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      setCharWidth(
+        measuredCharWidth(event.nativeEvent.layout.width, PROBE_TEXT.length, fontSize * ESTIMATED_CHAR_RATIO),
+      );
+    },
+    [fontSize],
+  );
 
   // One attachment per terminal identity, opened once the pane has been measured so the PTY
   // starts at the right geometry. Closing this socket only detaches; the daemon owns the shell.
-  const measured = size != null;
+  const measured = cols != null;
   useEffect(() => {
     if (!baseUrl || !sessionId || !measured) return;
     suppressReconnectRef.current = false;
@@ -316,30 +274,60 @@ export function TerminalDock({
     let disposed = false;
     const restart = restartRef.current;
     restartRef.current = false;
+    terminalStatusRef.current = "running";
+    setTerminalStatus("running");
+    setExitCode(null);
+    const knownSequence =
+      terminalsRef.current.find((terminal) => terminal.terminal_id === effectiveTerminalId)?.sequence ?? 0;
+    const reattach = !restart && (attachedBeforeRef.current.has(effectiveTerminalId) || knownSequence > 0);
+    attachedBeforeRef.current.add(effectiveTerminalId);
+    let wiggleTimer: ReturnType<typeof setTimeout> | null = null;
+    let wiggleRestore: ReturnType<typeof setTimeout> | null = null;
     try {
       socket = openTerminalSocket(
         baseUrl,
         sessionId,
         {
           onOutput: (chunk) => {
+            if (disposed) return;
             buffer.write(chunk);
             scheduleFlush();
           },
-          onStatus: (nextStatus) => {
+          onStatus: (nextStatus, code) => {
+            if (disposed) return;
+            const wasRunning = terminalStatusRef.current === "running";
             terminalStatusRef.current = nextStatus;
             setTerminalStatus(nextStatus);
+            setExitCode(nextStatus === "exited" ? code : null);
             void refreshTerminals();
+            if (nextStatus === "exited" && wasRunning && closesItselfOnExit(code)) {
+              cleanExitRef.current();
+            }
           },
           onClear: () => {
+            if (disposed) return;
             buffer.clear();
             setLines(buffer.lines());
           },
           onOpen: () => {
+            if (disposed) return;
             connectedRef.current = true;
             setConnectionStatus("connected");
             void refreshTerminals();
+            if (reattach) {
+              // A full-screen agent redraws on a size change, not when the same size arrives
+              // again, so nudge the width by one column and put it back.
+              wiggleTimer = setTimeout(() => {
+                const current = sizeRef.current;
+                if (disposed || !current) return;
+                socket.resize(current.cols + 1, current.rows);
+                wiggleRestore = setTimeout(() => socket.resize(current.cols, current.rows), WIGGLE_RESTORE_MS);
+              }, WIGGLE_DELAY_MS);
+            }
           },
           onClose: (closed) => {
+            // A socket this effect already replaced must not speak for the new one.
+            if (disposed) return;
             if (closed.code === HOST_CAP_CLOSE_CODE) reportHostCap(closed.reason);
             connectedRef.current = false;
             setConnectionStatus("disconnected");
@@ -355,7 +343,9 @@ export function TerminalDock({
               );
             }
           },
-          onError: () => setConnectionStatus("disconnected"),
+          onError: () => {
+            if (!disposed) setConnectionStatus("disconnected");
+          },
         },
         {
           terminalId: effectiveTerminalId,
@@ -390,6 +380,8 @@ export function TerminalDock({
     return () => {
       disposed = true;
       clearTimeout(openDeadline);
+      if (wiggleTimer != null) clearTimeout(wiggleTimer);
+      if (wiggleRestore != null) clearTimeout(wiggleRestore);
       if (reconnectTimerRef.current != null) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -407,14 +399,46 @@ export function TerminalDock({
     sessionId,
   ]);
 
+  // A large buffer makes every intermediate size of a drag expensive for the shell to repaint,
+  // so a resize waits for the drag to settle.
   useEffect(() => {
-    if (size) socketRef.current?.resize(size.cols, size.rows);
-  }, [size]);
+    if (cols == null || rows == null) return;
+    const timer = setTimeout(
+      () => socketRef.current?.resize(cols, rows),
+      resizeDelay(bufferRef.current.lines().length),
+    );
+    return () => clearTimeout(timer);
+  }, [cols, rows]);
+
+  useEffect(() => {
+    if (compact || !workbench || !sessionId) return;
+    const missing = terminalsToAdopt(workbench.state.bottom.tabs, sessionId, terminals);
+    if (missing.length === 0) return;
+    for (const id of missing) {
+      workbench.openSurface({ kind: "terminal", sessionId, resourceId: id, title: terminalTitle(id) });
+    }
+    if (surfaceId) workbench.activateSurface("bottom", surfaceId);
+  }, [compact, sessionId, surfaceId, terminals, workbench]);
+
+  useEffect(() => {
+    if (!hasDom || preferences.scrollSpeed === 1) return;
+    const node = (scrollRef.current as unknown as { getScrollableNode?: () => HTMLElement } | null)?.getScrollableNode?.();
+    if (!node) return;
+    const speed = preferences.scrollSpeed;
+    const onWheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.deltaY === 0) return;
+      event.preventDefault();
+      const unit = event.deltaMode === 1 ? WHEEL_LINE_PX : 1;
+      node.scrollTop += event.deltaY * unit * speed;
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [preferences.scrollSpeed, sessionId]);
 
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    stickyRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - LINE_HEIGHT;
-  }, []);
+    stickyRef.current = contentOffset.y + layoutMeasurement.height >= contentSize.height - lineHeight;
+  }, [lineHeight]);
 
   const onContentSizeChange = useCallback(() => {
     if (stickyRef.current) scrollRef.current?.scrollToEnd({ animated: false });
@@ -450,6 +474,79 @@ export function TerminalDock({
     socketRef.current?.kill();
   }, []);
 
+  // A shell that ended with code 0 is done: discard it and move on. Any other ending stays on
+  // screen with its code and a Restart button.
+  const handleCleanExit = useCallback(() => {
+    if (compact) {
+      const next = neighbourTerminal(terminalIds, effectiveTerminalId);
+      if (!next) return;
+      socketRef.current?.kill();
+      setLocalTerminalId(next);
+      return;
+    }
+    socketRef.current?.kill();
+    onShellExit?.();
+  }, [compact, effectiveTerminalId, onShellExit, terminalIds]);
+  useEffect(() => {
+    cleanExitRef.current = handleCleanExit;
+  }, [handleCleanExit]);
+
+  // Ctrl/Cmd+C copies a selection; pressing it again within half a second interrupts anyway.
+  // Handled on the dock itself, in the capture phase, so it works whether the keyboard focus is
+  // in the hidden input or on the selected text.
+  useEffect(() => {
+    if (!hasDom) return;
+    const node = dockRef.current as unknown as HTMLElement | null;
+    if (!node?.addEventListener) return;
+    let flash: ReturnType<typeof setTimeout> | null = null;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "c") return;
+      const text = selectedTextWithin(node);
+      if (event.shiftKey) {
+        if (!text) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void copyText(text);
+        return;
+      }
+      const action = copyOrInterrupt({
+        meta: event.metaKey && !event.ctrlKey,
+        hasSelection: text !== "",
+        now: Date.now(),
+        lastCopyAt: lastCopyAtRef.current,
+      });
+      if (action === "ignore") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === "copy") {
+        lastCopyAtRef.current = Date.now();
+        void copyText(text).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          if (flash != null) clearTimeout(flash);
+          flash = setTimeout(() => setCopied(false), COPIED_FLASH_MS);
+        });
+        return;
+      }
+      lastCopyAtRef.current = null;
+      clearSelection();
+      socketRef.current?.send("\x03");
+      stickyRef.current = true;
+      inputRef.current?.focus();
+    };
+    node.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      node.removeEventListener("keydown", onKeyDown, true);
+      if (flash != null) clearTimeout(flash);
+    };
+  }, []);
+
+  const focusInput = useCallback(() => {
+    // Focusing the input would drop a selection the person just made to copy it.
+    if (hasAnySelection()) return;
+    inputRef.current?.focus();
+  }, []);
+
   const openNewTerminal = useCallback(() => {
     const next = nextTerminalId(terminalIds);
     if (!next) return;
@@ -465,6 +562,8 @@ export function TerminalDock({
       const native = event.nativeEvent as { key: string; ctrlKey?: boolean };
       const key = native.key;
       if (native.ctrlKey && key.length === 1) {
+        // Ctrl+C is the dock-level handler's (copy vs interrupt); on web it never gets here.
+        if (hasDom && key.toLowerCase() === "c") return;
         const code = key.toUpperCase().charCodeAt(0);
         if (code >= 64 && code <= 95) send(String.fromCharCode(code - 64));
         return;
@@ -508,6 +607,9 @@ export function TerminalDock({
       // over a long typing session. Correctness does not depend on this actually taking effect
       // before the next keystroke — terminalInputDelta handles either outcome.
       inputRef.current?.clear();
+      // A DOM input really is empty after clear(). Without this, the next keystroke of the same
+      // character ("ll", "//") reads as unchanged text and is dropped.
+      if (hasDom) lastNativeTextRef.current = "";
     },
     [send],
   );
@@ -526,7 +628,7 @@ export function TerminalDock({
   }
 
   return (
-    <View style={styles.dock}>
+    <View ref={dockRef} style={styles.dock}>
       {compact ? (
         <View style={[styles.tabs, { borderBottomColor: tokens.border }]}>
           <ScrollView
@@ -537,6 +639,8 @@ export function TerminalDock({
             {terminalIds.map((id) => {
               const summary = terminals.find((terminal) => terminal.terminal_id === id);
               const active = id === effectiveTerminalId;
+              const unseen = activityView.isUnseen(id);
+              const streaming = activityView.isStreaming(id);
               return (
                 <Pressable
                   key={id}
@@ -545,6 +649,7 @@ export function TerminalDock({
                   accessibilityState={{ selected: active }}
                   style={[
                     styles.tab,
+                    styles.tabRow,
                     {
                       borderBottomColor: active ? tokens.accent : "transparent",
                       backgroundColor: active ? hexToRgba(tokens.accent, 0.08) : "transparent",
@@ -553,8 +658,18 @@ export function TerminalDock({
                 >
                   <Text style={[typeScale.monoMeta, { color: active ? tokens.ink : tokens.ink3 }]}>
                     {terminalTitle(id)}
-                    {summary?.status === "exited" ? " · exited" : ""}
+                    {summary?.status === "exited" ? ` · ${exitLabel(summary.exit_code)}` : ""}
                   </Text>
+                  {streaming ? (
+                    <Text style={[typeScale.monoMeta, styles.liveBadge, { color: tokens.accent, backgroundColor: hexToRgba(tokens.accent, 0.12) }]}>
+                      live
+                    </Text>
+                  ) : unseen ? (
+                    <View
+                      accessibilityLabel="New output"
+                      style={[styles.unseenDot, { backgroundColor: tokens.accent }]}
+                    />
+                  ) : null}
                 </Pressable>
               );
             })}
@@ -570,7 +685,7 @@ export function TerminalDock({
           </Pressable>
         </View>
       ) : null}
-      <Pressable style={styles.body} onPress={() => inputRef.current?.focus()} accessibilityRole="none" {...ESCAPE_SKIP_PROPS}>
+      <Pressable style={styles.body} onPress={focusInput} accessibilityRole="none" {...ESCAPE_SKIP_PROPS}>
         <ScrollView
           ref={scrollRef}
           style={styles.scroll}
@@ -587,9 +702,44 @@ export function TerminalDock({
               line={line}
               palette={palette}
               caretColor={index === lines.length - 1 ? caretColor : null}
+              fontSize={fontSize}
+              lineHeight={lineHeight}
+              onOpenLink={openLink}
             />
           ))}
         </ScrollView>
+        <Text
+          pointerEvents="none"
+          numberOfLines={1}
+          onLayout={onProbeLayout}
+          style={[styles.probe, { fontSize, lineHeight, fontFamily: monoFamily.regular }]}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {PROBE_TEXT}
+        </Text>
+        {terminalStatus === "exited" ? (
+          <View style={[styles.exitBanner, { borderTopColor: tokens.border, backgroundColor: tokens.bg2 }]}>
+            <Text
+              style={[typeScale.monoMeta, styles.exitText, { color: exitCode ? tokens.danger : tokens.ink3 }]}
+              numberOfLines={2}
+            >
+              {exitCode == null ? "Process ended" : `Process exited with code ${exitCode}`}
+            </Text>
+            <Pressable
+              onPress={restart}
+              accessibilityRole="button"
+              accessibilityLabel="Restart terminal"
+              style={({ pressed }) => [
+                styles.restartButton,
+                { borderColor: tokens.accent, backgroundColor: hexToRgba(tokens.accent, pressed ? 0.22 : 0.1) },
+              ]}
+            >
+              <RotateCcw size={12} strokeWidth={1.75} color={tokens.accent} />
+              <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>Restart</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <TextInput
           ref={inputRef}
           // Deliberately uncontrolled (no `value` prop): a literal `value=""` fights Android's
@@ -651,8 +801,9 @@ export function TerminalDock({
       <View style={[styles.status, { borderTopColor: tokens.border }]}>
         <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]}>
           {connectionStatus}
-          {terminalStatus === "exited" ? " · exited" : ""}
+          {terminalStatus === "exited" ? ` · ${exitLabel(exitCode)}` : ""}
           {size ? ` · ${size.cols}×${size.rows}` : ""}
+          {copied ? " · copied" : ""}
         </Text>
         <View style={styles.statusActions}>
           {!compact && onOpenTerminal ? (
@@ -759,7 +910,28 @@ const styles = StyleSheet.create({
   body: { flex: 1 },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: PADDING_H, paddingVertical: space.space8 },
-  line: { fontFamily: monoFamily.regular, fontSize: FONT_SIZE, lineHeight: LINE_HEIGHT },
+  probe: { position: "absolute", left: 0, top: 0, opacity: 0 },
+  exitBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space12,
+    paddingHorizontal: PADDING_H,
+    paddingVertical: space.space8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  exitText: { flex: 1 },
+  restartButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    height: 26,
+    paddingHorizontal: space.space12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 3,
+  },
+  tabRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  unseenDot: { width: 6, height: 6, borderRadius: 3 },
+  liveBadge: { paddingHorizontal: 4, borderRadius: 2, overflow: "hidden" },
   // The input is a keystroke sink, never a visible field: the pty echoes what it accepts, so
   // rendering the draft locally would double every character.
   input: { position: "absolute", width: 1, height: 1, opacity: 0 },

@@ -195,9 +195,9 @@ pub async fn start(
         .try_clone()
         .map_err(|e| format!("clone log handle: {e}"))?;
 
-    let (shell, flag) = super::shell_invocation();
+    let (shell, leading_args) = super::shell_invocation();
     let mut cmd = Command::new(shell);
-    cmd.arg(flag)
+    cmd.args(leading_args)
         .arg(command)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
