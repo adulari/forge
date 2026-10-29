@@ -62,4 +62,11 @@ describe("(tabs) route registration", () => {
     expect(rootRoutes).toContain("floor.tsx");
     expect(rootRoutes).toContain("plans.tsx");
   });
+
+  // A window resize must not swap the navigator type: Slot's stack state reaches the tab view
+  // without preloadedRouteKeys and the screen throws.
+  it("renders the same navigator at every width outside iOS", () => {
+    expect(layoutSource).toMatch(/<StandardTabs barless=\{isExpanded\} \/>/);
+    expect(layoutSource).not.toMatch(/if \(isExpanded\) return <Slot \/>/);
+  });
 });

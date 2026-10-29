@@ -194,8 +194,8 @@ export function useFindAvailable(): boolean {
 }
 
 /** Spread onto a surface's root so a pointer press or focus inside it makes it the Find target.
- * DOM-only props; native ignores them. */
+ * react-native-web forwards onPointerDown and onFocus to the DOM but drops their Capture variants. */
 export function findFocusProps(id: FindTargetId): object {
   const mark = () => findController.markFocus(id);
-  return { onPointerDownCapture: mark, onFocusCapture: mark };
+  return { onPointerDown: mark, onFocus: mark };
 }

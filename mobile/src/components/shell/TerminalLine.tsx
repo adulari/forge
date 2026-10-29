@@ -3,9 +3,10 @@
 import React from "react";
 import { Platform, StyleSheet, Text, type TextStyle } from "react-native";
 
-import { type ColorTokens } from "../../theme/tokens";
+import { type ColorTokens, hexToRgba } from "../../theme/tokens";
 import { monoFamily } from "../../theme/typography";
 import { type AnsiColor, type AnsiLine, type AnsiSpan } from "./ansi";
+import { type LineHighlight, splitByHighlights } from "./terminalFind";
 import { detectTerminalLinks, type TerminalLinkTarget } from "./terminalLinks";
 
 export interface AnsiPalette {
@@ -16,6 +17,10 @@ export interface AnsiPalette {
   fg: string;
   bg: string;
   link: string;
+  /** Find matches: a wash for every hit, the solid accent for the one the bar is on. */
+  match: string;
+  matchActive: string;
+  matchActiveInk: string;
 }
 
 function parseHex(hex: string): [number, number, number] {
@@ -48,7 +53,11 @@ export function ansiPalette(tokens: ColorTokens): AnsiPalette {
     tokens.info, // bright cyan
     tokens.ink, // bright white
   ];
-  return { basic, basicRgb: basic.map(parseHex), fg: tokens.ink, bg: tokens.bg0, link: tokens.info };
+  return { basic, basicRgb: basic.map(parseHex), fg: tokens.ink, bg: tokens.bg0, link: tokens.info,
+    match: hexToRgba(tokens.accent, 0.3),
+    matchActive: tokens.accent,
+    matchActiveInk: tokens.bg0,
+  };
 }
 
 function resolveColor(color: AnsiColor | null, palette: AnsiPalette): string | null {
@@ -102,6 +111,26 @@ export interface TerminalLineProps {
   fontSize: number;
   lineHeight: number;
   onOpenLink: (target: TerminalLinkTarget) => void;
+  /** Matches on this line while Find is open on the terminal. */
+  highlights?: readonly LineHighlight[];
+  /** Attached to the line holding the active match so the dock can scroll to it. */
+  activeRef?: React.Ref<Text>;
+}
+
+function marked(text: string, offset: number, highlights: readonly LineHighlight[] | undefined, palette: AnsiPalette): React.ReactNode {
+  if (!highlights) return text;
+  return splitByHighlights(text, offset, highlights).map((piece, index) =>
+    piece.active === null ? (
+      piece.text
+    ) : (
+      <Text
+        key={index}
+        style={piece.active ? { backgroundColor: palette.matchActive, color: palette.matchActiveInk } : { backgroundColor: palette.match }}
+      >
+        {piece.text}
+      </Text>
+    ),
+  );
 }
 
 function LinkText({
@@ -111,7 +140,7 @@ function LinkText({
   palette,
   onOpenLink,
 }: {
-  text: string;
+  text: React.ReactNode;
   target: TerminalLinkTarget;
   base: TextStyle;
   palette: AnsiPalette;
@@ -137,33 +166,42 @@ export const TerminalLine = React.memo(function TerminalLine({
   fontSize,
   lineHeight,
   onOpenLink,
+  highlights,
+  activeRef,
 }: TerminalLineProps) {
+  let spanOffset = 0;
   return (
-    <Text style={[styles.line, { color: palette.fg, fontSize, lineHeight }]} selectable>
+    <Text ref={activeRef} style={[styles.line, { color: palette.fg, fontSize, lineHeight }]} selectable>
       {line.spans.map((span, index) => {
         const base = spanStyle(span, palette);
+        const offset = spanOffset;
+        spanOffset += span.text.length;
         const fromProgram = span.link ? osc8Target(span.link) : null;
         if (fromProgram) {
           return (
-            <LinkText key={index} text={span.text} target={fromProgram} base={base} palette={palette} onOpenLink={onOpenLink} />
+            <LinkText
+              key={index}
+              text={marked(span.text, offset, highlights, palette)}
+              target={fromProgram}
+              base={base}
+              palette={palette}
+              onOpenLink={onOpenLink}
+            />
           );
         }
+        let partOffset = offset;
         return (
           <Text key={index} style={base}>
-            {detectTerminalLinks(span.text).map((part, partIndex) =>
-              part.type === "link" ? (
-                <LinkText
-                  key={partIndex}
-                  text={part.text}
-                  target={part.target}
-                  base={base}
-                  palette={palette}
-                  onOpenLink={onOpenLink}
-                />
+            {detectTerminalLinks(span.text).map((part, partIndex) => {
+              const at = partOffset;
+              partOffset += part.text.length;
+              const content = marked(part.text, at, highlights, palette);
+              return part.type === "link" ? (
+                <LinkText key={partIndex} text={content} target={part.target} base={base} palette={palette} onOpenLink={onOpenLink} />
               ) : (
-                part.text
-              ),
-            )}
+                <React.Fragment key={partIndex}>{content}</React.Fragment>
+              );
+            })}
           </Text>
         );
       })}

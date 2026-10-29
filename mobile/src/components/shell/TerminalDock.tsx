@@ -40,6 +40,8 @@ import { EmptyState } from "../ds/EmptyState";
 import { useOptionalWorkbench } from "../workbench/WorkbenchProvider";
 import { AnsiScrollback, type AnsiLine } from "./ansi";
 import { ESCAPE_SKIP_PROPS } from "../../lib/escapeSkip";
+import { findFocusProps } from "../../lib/find/findController";
+import { FindBar } from "../find/FindBar";
 import { ansiPalette, TerminalLine } from "./TerminalLine";
 import { clearSelection, copyText, hasAnySelection, hasDom, selectedTextWithin } from "./terminalClipboard";
 import {
@@ -57,6 +59,7 @@ import {
 } from "./terminalModel";
 import { terminalsToAdopt } from "./terminalTabs";
 import { useTerminalActivity } from "./useTerminalActivity";
+import { useTerminalFind } from "./useTerminalFind";
 import { useTerminalLinkOpener } from "./useTerminalLinkOpener";
 
 const MAX_SCROLLBACK_LINES = 2000;
@@ -158,6 +161,13 @@ export function TerminalDock({
   const cleanExitRef = useRef<() => void>(() => undefined);
 
   const [lines, setLines] = useState<AnsiLine[]>([]);
+  const { highlights, activeKey, activeLineRef } = useTerminalFind({
+    buffer: bufferRef,
+    scroll: scrollRef,
+    input: inputRef,
+    sticky: stickyRef,
+    lineHeight,
+  });
   const [focused, setFocused] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("idle");
   const [terminalStatus, setTerminalStatus] = useState<TerminalStatus>("running");
@@ -559,8 +569,10 @@ export function TerminalDock({
       // RN's typed payload is `{ key }`; the web runtime forwards the DOM modifiers on the
       // same object, which is the only route to ctrl-combos through a TextInput. Where they
       // are absent the combo simply does not fire — the ^C button below is the guaranteed path.
-      const native = event.nativeEvent as { key: string; ctrlKey?: boolean };
+      const native = event.nativeEvent as { key: string; ctrlKey?: boolean; defaultPrevented?: boolean };
       const key = native.key;
+      // An app shortcut (Mod+F opens Find) claimed this combo before the shell could see it.
+      if (native.defaultPrevented) return;
       if (native.ctrlKey && key.length === 1) {
         // Ctrl+C is the dock-level handler's (copy vs interrupt); on web it never gets here.
         if (hasDom && key.toLowerCase() === "c") return;
@@ -628,7 +640,8 @@ export function TerminalDock({
   }
 
   return (
-    <View ref={dockRef} style={styles.dock}>
+    <View ref={dockRef} style={styles.dock} {...findFocusProps("terminal")}>
+      <FindBar targetId="terminal" />
       {compact ? (
         <View style={[styles.tabs, { borderBottomColor: tokens.border }]}>
           <ScrollView
@@ -705,6 +718,8 @@ export function TerminalDock({
               fontSize={fontSize}
               lineHeight={lineHeight}
               onOpenLink={openLink}
+              highlights={highlights.get(line.key)}
+              activeRef={line.key === activeKey ? activeLineRef : undefined}
             />
           ))}
         </ScrollView>

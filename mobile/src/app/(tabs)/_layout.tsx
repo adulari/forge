@@ -79,7 +79,7 @@ function IOSNativeTabs() {
   );
 }
 
-function StandardTabs() {
+function StandardTabs({ barless }: { barless: boolean }) {
   const tokens = useTokens();
   const { data: sessions } = useSessions();
   const waitingCount = sessions?.filter((session) => session.waiting).length ?? 0;
@@ -88,8 +88,10 @@ function StandardTabs() {
 
   return (
     <Tabs
+      tabBar={barless ? () => null : undefined}
       screenOptions={{
         headerShown: false,
+        freezeOnBlur: barless,
         tabBarStyle: {
           // Machined's tab-bar/footer band reads a shade darker than the card
           // background (`bg2`) — `bg0` is the closest existing token to the design's
@@ -137,7 +139,8 @@ export default function TabsLayout() {
 
   // Expanded layouts navigate by the persistent Fleet rail, not a tab bar. The swipe pager lives
   // in each tab route (see components/TabPager.tsx for why it cannot wrap the navigator).
-  if (isExpanded) return <Slot />;
-  if (Platform.OS === "ios") return <IOSNativeTabs />;
-  return <StandardTabs />;
+  if (Platform.OS === "ios") return isExpanded ? <Slot /> : <IOSNativeTabs />;
+  // One navigator for both widths: swapping a Slot (stack state) for Tabs on a window resize hands
+  // the tab view a stack state with no preloadedRouteKeys and the screen throws.
+  return <StandardTabs barless={isExpanded} />;
 }
