@@ -689,6 +689,13 @@ an explicit terminal close or session shutdown sends a bounded kill command, mar
 exited, and removes it from the registry. Reconnects reuse the same handle and replay its bounded
 history; a close never leaves an orphaned child behind.
 
+Two host-level rules also apply to terminals (see `docs/features/host-durability.md`). With
+`[host] max_terminals` set, a terminal that would exceed the host-wide ceiling is refused: the
+WebSocket upgrades and is closed at once with application code `4429` whose reason is the
+sentence the apps toast; terminals whose shell has exited do not count. And when the daemon shuts
+down, every attached terminal socket (like the session and fleet sockets) is closed with code
+`1001` and the reason `host restarting`, after running turns have finished.
+
 ## 2g'. The model catalog is the daemon's, not the last terminal's
 
 `GET /api/models` used to project one thing: the on-disk discovery cache
