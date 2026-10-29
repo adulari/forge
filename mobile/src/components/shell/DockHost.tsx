@@ -13,6 +13,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } fr
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { formatCwd, type as typeScale } from "../../theme/typography";
+import { GalleryDock } from "../gallery/GalleryDock";
 import { GitReviewDock } from "../git/GitReviewDock";
 import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
 import { EmptyState } from "../ds/EmptyState";
@@ -119,7 +120,7 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   },
   files: {
     render: ({ sessionId, surface }) => (
-      <WorkspaceDock sessionId={sessionId} resourceId={surface?.resourceId ?? null} />
+      <WorkspaceDock sessionId={sessionId} resourceId={surface?.resourceId ?? null} line={surface?.line ?? null} />
     ),
   },
   preview: {
@@ -138,6 +139,9 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   tasks: { render: ({ sessionId }) => <SessionDock kind="tasks" sessionId={sessionId} /> },
   agents: { render: ({ sessionId }) => <SessionDock kind="agents" sessionId={sessionId} /> },
   plan: { render: ({ sessionId }) => <SessionDock kind="plan" sessionId={sessionId} /> },
+  gallery: {
+    render: ({ sessionId }) => (sessionId ? <GalleryDock sessionId={sessionId} /> : <NeedsSession what="its images" />),
+  },
 };
 
 export interface DockHostProps {

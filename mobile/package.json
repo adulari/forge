@@ -42,6 +42,7 @@
     "expo-status-bar": "~57.0.1",
     "expo-system-ui": "~57.0.4",
     "expo-updates": "~57.0.26",
+    "katex": "0.16.22",
     "lucide-react-native": "^1.23.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",

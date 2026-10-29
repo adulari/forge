@@ -174,9 +174,21 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/chat/MathView.web.tsx",
+    "platform": "web",
+    "reason": "typeset TeX (KaTeX, lazy chunk) is web and desktop only; MathView.tsx shows the source on phones",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/components/chat/MessageRow.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/chat/PathChip.tsx",
+    "platform": "web",
+    "reason": "web chips are keyboard focusable and open on Enter or Space; native chips open on tap",
     "category": "capability"
   },
   {
@@ -201,6 +213,12 @@
     "file": "mobile/src/components/ds/IconButton.tsx",
     "platform": "web/native",
     "reason": "focus-visible ring is web-only; touch platforms must not keep a ring after a sheet closes",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/ds/ImageViewer.tsx",
+    "platform": "web/native",
+    "reason": "keyboard shortcuts, ctrl-wheel zoom and double-click zoom exist only on web and desktop; phones use the buttons and the pinch gesture",
     "category": "capability"
   },
   {
@@ -495,6 +513,12 @@
     "file": "mobile/src/lib/haptics.ts",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/imageActions.web.ts",
+    "platform": "web",
+    "reason": "image copy and save use the browser clipboard and a download link; imageActions.ts uses the share sheet and the native clipboard",
     "category": "capability"
   },
   {

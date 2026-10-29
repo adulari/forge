@@ -161,15 +161,9 @@ async fn session_root(state: &DaemonState, session: &str) -> Result<PathBuf, Wor
     if session.trim().is_empty() {
         return Err(WorkspaceFailure::bad("session is required"));
     }
-    let handle = state
-        .registry
-        .get(session)
+    let raw = crate::serve_git::session_dir(state, session)
         .await
         .ok_or_else(|| WorkspaceFailure::not_found("no such session"))?;
-    let raw = handle
-        .worktree
-        .clone()
-        .unwrap_or_else(|| handle.cwd.clone());
     let root = fs::canonicalize(&raw).map_err(|_| {
         WorkspaceFailure::not_found("session has no working directory on this host")
     })?;

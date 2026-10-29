@@ -99,6 +99,7 @@ mod serve_agents;
 mod serve_diagnostics;
 mod serve_dispatch;
 mod serve_git;
+mod serve_media;
 mod serve_onboarding;
 mod serve_schedules;
 mod serve_terminal;

@@ -47,6 +47,7 @@ export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: Workbench
   useCommand("workbench.agents", "view:agents", toggle("agents"));
   useCommand("workbench.plan", "view:plan", toggle("plan"));
   useCommand("workbench.files", "view:files", toggle("files"));
+  useDesktopMenuAction("view:gallery", toggle("gallery"));
   useDesktopMenuAction(
     "view:browser-preview",
     guard(() => {

@@ -254,6 +254,11 @@ export function SessionProvider({
 /** Stable slice only (see `SessionStableCtxValue`) — use this instead of `useSessionCtx()`
  * whenever a component never reads `snapshot`/`snapshotTimedOut`/`connectionState`, so it
  * doesn't re-render on every WS frame. */
+/** The session context, or null outside a session (markdown shown in What's New, a replay). */
+export function useOptionalSessionStable(): SessionStableCtxValue | null {
+  return useContext(SessionStableCtx);
+}
+
 export function useSessionStable(): SessionStableCtxValue {
   const ctx = useContext(SessionStableCtx);
   if (!ctx) throw new Error("useSessionStable must be used within a SessionProvider");

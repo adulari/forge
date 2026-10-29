@@ -291,4 +291,16 @@ describe("run-aware folding", () => {
     const group = foldToolGroups(entries, false)[0] as ToolGroupEntry;
     expect(collapsedCalls(group).map((c) => c.invocation.tool)).toEqual(["spawn_agents"]);
   });
+
+  it("keeps a screenshot call on screen when the group is folded", () => {
+    const shot = "screenshot written to /s/evidence/x/0001-browser.png (900 bytes; recorded as session evidence)";
+    const entries = [
+      entry("d", "read_file", '{"path":"c"}', "x"),
+      entry("c", "browser", '{"action":"screenshot"}', shot),
+      entry("b", "read_file", '{"path":"b"}', "x"),
+      entry("a", "read_file", '{"path":"a"}', "x"),
+    ];
+    const group = foldToolGroups(entries, false)[0] as ToolGroupEntry;
+    expect(collapsedCalls(group).map((c) => c.invocation.tool)).toEqual(["browser"]);
+  });
 });

@@ -9,160 +9,11 @@ import type { ColorTokens } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { useTheme } from "../../theme/ThemeProvider";
 import { safeExternalHref } from "../../lib/linkSafety";
-import { columnWidths, fitRow, opensTable, tableAlignments, tableCells, type TableAlign } from "../../lib/markdownTable";
+import { parseBlocks, type Block, type InlineNode } from "../../lib/markdownParse";
 import { CodeBlock } from "./CodeBlock";
-
-// ---------------------------------------------------------------------------
-// Block parsing
-// ---------------------------------------------------------------------------
-
-type Block =
-  | { kind: "heading"; level: number; text: string; inline: InlineNode[] }
-  | { kind: "paragraph"; text: string; inline: InlineNode[] }
-  | { kind: "list"; ordered: boolean; start: number; items: string[]; inlineItems: InlineNode[][] }
-  | { kind: "code"; language: string; code: string }
-  | { kind: "table"; header: InlineNode[][]; rows: InlineNode[][][]; aligns: (TableAlign | null)[]; widths: number[] };
-
-function fitAligns(aligns: (TableAlign | null)[], columns: number): (TableAlign | null)[] {
-  const out = aligns.slice(0, columns);
-  while (out.length < columns) out.push(null);
-  return out;
-}
-
-function parseBlocks(content: string): Block[] {
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
-  const blocks: Block[] = [];
-  let paragraphLines: string[] = [];
-  let listItems: string[] = [];
-  let listOrdered = false;
-  // A loose list ("1. a", blank line, "2. b") arrives as one list per item; numbering from the
-  // source's own first number keeps it 1, 2 instead of restarting at 1.
-  let listStart = 1;
-
-  const flushParagraph = () => {
-    if (paragraphLines.length) {
-      const text = paragraphLines.join("\n");
-      blocks.push({ kind: "paragraph", text, inline: parseInline(text) });
-      paragraphLines = [];
-    }
-  };
-  const flushList = () => {
-    if (listItems.length) {
-      blocks.push({ kind: "list", ordered: listOrdered, start: listStart, items: listItems, inlineItems: listItems.map(parseInline) });
-      listItems = [];
-    }
-  };
-
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-
-    const fence = /^```\s*([\w-]*)\s*$/.exec(line);
-    if (fence) {
-      flushParagraph();
-      flushList();
-      const language = fence[1] ?? "";
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-        codeLines.push(lines[i]);
-        i++;
-      }
-      i++; // skip closing fence
-      blocks.push({ kind: "code", language, code: codeLines.join("\n") });
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      flushParagraph();
-      flushList();
-      const text = heading[2].trim();
-      blocks.push({ kind: "heading", level: heading[1].length, text, inline: parseInline(text) });
-      i++;
-      continue;
-    }
-
-    if (opensTable(line, lines[i + 1])) {
-      flushParagraph();
-      flushList();
-      const header = tableCells(line);
-      const aligns = fitAligns(tableAlignments(lines[i + 1]), header.length);
-      const rawRows: string[][] = [];
-      i += 2;
-      while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
-        rawRows.push(fitRow(tableCells(lines[i]), header.length));
-        i++;
-      }
-      blocks.push({
-        kind: "table",
-        header: header.map(parseInline),
-        rows: rawRows.map((row) => row.map(parseInline)),
-        aligns,
-        widths: columnWidths([header, ...rawRows]),
-      });
-      continue;
-    }
-
-    const unordered = /^\s*[-*]\s+(.*)$/.exec(line);
-    const ordered = /^\s*(\d+)\.\s+(.*)$/.exec(line);
-    if (unordered || ordered) {
-      flushParagraph();
-      const nowOrdered = Boolean(ordered);
-      if (listItems.length && nowOrdered !== listOrdered) flushList();
-      if (!listItems.length) listStart = ordered ? Number(ordered[1]) : 1;
-      listOrdered = nowOrdered;
-      listItems.push(ordered ? ordered[2] : unordered![1]);
-      i++;
-      continue;
-    }
-
-    if (line.trim() === "") {
-      flushParagraph();
-      flushList();
-      i++;
-      continue;
-    }
-
-    flushList();
-    paragraphLines.push(line);
-    i++;
-  }
-  flushParagraph();
-  flushList();
-  return blocks;
-}
-
-// ---------------------------------------------------------------------------
-// Inline parsing: code, bold, italic, links.
-// ---------------------------------------------------------------------------
-
-type InlineNode =
-  | { type: "text"; text: string }
-  | { type: "bold"; text: string }
-  | { type: "italic"; text: string }
-  | { type: "code"; text: string }
-  | { type: "link"; text: string; href: string };
-
-const INLINE_RE = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*]+)\*|_([^_]+)_|\[([^\]]+)\]\(([^)]+)\)/g;
-
-function parseInline(text: string): InlineNode[] {
-  const nodes: InlineNode[] = [];
-  let lastIndex = 0;
-  INLINE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = INLINE_RE.exec(text))) {
-    if (match.index > lastIndex) nodes.push({ type: "text", text: text.slice(lastIndex, match.index) });
-    if (match[1] !== undefined) nodes.push({ type: "code", text: match[1] });
-    else if (match[2] !== undefined) nodes.push({ type: "bold", text: match[2] });
-    else if (match[3] !== undefined) nodes.push({ type: "italic", text: match[3] });
-    else if (match[4] !== undefined) nodes.push({ type: "italic", text: match[4] });
-    else if (match[5] !== undefined && match[6] !== undefined) nodes.push({ type: "link", text: match[5], href: match[6] });
-    lastIndex = INLINE_RE.lastIndex;
-  }
-  if (lastIndex < text.length) nodes.push({ type: "text", text: text.slice(lastIndex) });
-  return nodes;
-}
+import { MarkdownImage, MarkdownMediaProvider } from "./MarkdownMedia";
+import { MathView } from "./MathView";
+import { PathChip } from "./PathChip";
 
 function MarkdownLink({ href, tokens, children }: { href: string; tokens: ColorTokens; children: string }) {
   const linkStyle = { color: tokens.ink, textDecorationLine: "underline" as const };
@@ -221,6 +72,18 @@ function renderInline(nodes: InlineNode[], keyPrefix: string, tokens: ColorToken
             {node.text}
           </MarkdownLink>
         );
+      case "path":
+        return <PathChip key={key} pathRef={node.ref} text={node.text} />;
+      case "math":
+        return <MathView key={key} tex={node.tex} display={false} />;
+      case "image":
+        return /^[a-z][a-z0-9+.-]*:/i.test(node.src) ? (
+          <MarkdownLink key={key} href={node.src} tokens={tokens}>
+            {node.alt || node.src}
+          </MarkdownLink>
+        ) : (
+          <PathChip key={key} pathRef={{ path: node.src, line: null, column: null }} text={node.src} />
+        );
       case "text":
       default:
         return <Text key={key}>{node.text}</Text>;
@@ -241,6 +104,8 @@ function orderedMarkerWidth(last: number): number {
 export interface MarkdownProps {
   content: string;
   style?: StyleProp<TextStyle>;
+  /** Also turn `@path` mentions into chips: set for the user's own prompts. */
+  mentions?: boolean;
 }
 
 /** What a block renders from. A streamed reply re-parses on every frame; blocks whose text did
@@ -256,6 +121,10 @@ function blockSignature(block: Block): string {
       return `l${block.ordered ? "o" : "u"}${block.start}:${block.items.join("\n")}`;
     case "code":
       return `c${block.language}:${block.code}`;
+    case "math":
+      return `m:${block.tex}`;
+    case "image":
+      return `i:${block.src}:${block.alt}`;
     case "table":
       return `t:${JSON.stringify([block.header, block.rows, block.aligns])}`;
   }
@@ -286,6 +155,18 @@ function MarkdownBlockImpl({ block, blockKey: key, style }: MarkdownBlockProps) 
       return (
         <View key={key} style={styles.block}>
           <CodeBlock code={block.code} language={block.language} />
+        </View>
+      );
+    case "math":
+      return (
+        <View key={key} style={styles.block}>
+          <MathView tex={block.tex} display />
+        </View>
+      );
+    case "image":
+      return (
+        <View key={key} style={styles.block}>
+          <MarkdownImage alt={block.alt} src={block.src} />
         </View>
       );
     case "list":
@@ -363,14 +244,16 @@ const MarkdownBlock = React.memo(
   (prev, next) => prev.signature === next.signature && prev.style === next.style && prev.blockKey === next.blockKey,
 );
 
-export function Markdown({ content, style }: MarkdownProps) {
-  const blocks = React.useMemo(() => parseBlocks(content), [content]);
+export function Markdown({ content, style, mentions = false }: MarkdownProps) {
+  const blocks = React.useMemo(() => parseBlocks(content, mentions), [content, mentions]);
   return (
-    <View>
-      {blocks.map((block, idx) => (
-        <MarkdownBlock key={`b${idx}`} blockKey={`b${idx}`} block={block} signature={blockSignature(block)} style={style} />
-      ))}
-    </View>
+    <MarkdownMediaProvider>
+      <View>
+        {blocks.map((block, idx) => (
+          <MarkdownBlock key={`b${idx}`} blockKey={`b${idx}`} block={block} signature={blockSignature(block)} style={style} />
+        ))}
+      </View>
+    </MarkdownMediaProvider>
   );
 }
 

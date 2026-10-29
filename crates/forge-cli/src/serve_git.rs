@@ -322,7 +322,7 @@ async fn stored_session_dir(state: &DaemonState, session: &str) -> Option<(Strin
 /// agent is actually editing), otherwise its cwd. Falls back to the store for sessions that are
 /// not currently loaded, so the dock works for any session the chat can show. `None` = no such
 /// session.
-async fn session_dir(state: &DaemonState, session: &str) -> Option<String> {
+pub(crate) async fn session_dir(state: &DaemonState, session: &str) -> Option<String> {
     if let Some(handle) = state.registry.get(session).await {
         return Some(
             handle
