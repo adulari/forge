@@ -7,6 +7,14 @@ const OFFLINE_QUEUE_PREFIX = "forge.offlineQueue";
 export interface QueuedPrompt {
   text: string;
   attachments: { path: string; image: boolean }[];
+  /** Fixed when the prompt is composed; every send of this prompt carries it. Absent only on
+   * records stored before it existed. */
+  clientMsgId?: string;
+}
+
+export function newClientMsgId(): string {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `m${Date.now().toString(36)}-${rand}${Math.random().toString(36).slice(2, 6)}`;
 }
 
 /** Shared AsyncStorage key so a prompt queued by one screen (e.g. new-session.tsx seeding a
@@ -21,7 +29,7 @@ export function offlineQueueKey(baseUrl: string | null, sessionId: string): stri
  * Empty/whitespace-only text queues nothing (a session with no prompt is a normal blank chat). */
 export function buildInitialPromptQueue(text: string): QueuedPrompt[] {
   const trimmed = text.trim();
-  return trimmed ? [{ text: trimmed, attachments: [] }] : [];
+  return trimmed ? [{ text: trimmed, attachments: [], clientMsgId: newClientMsgId() }] : [];
 }
 
 /** Parse both current queue records and the legacy string-only representation. */
@@ -31,11 +39,12 @@ export function parseOfflineQueue(raw: string | null): QueuedPrompt[] {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.map((entry) => {
-      if (typeof entry === "string") return { text: entry, attachments: [] };
+      if (typeof entry === "string") return { text: entry, attachments: [], clientMsgId: newClientMsgId() };
       const value = entry as Partial<QueuedPrompt>;
       return {
         text: typeof value.text === "string" ? value.text : "",
         attachments: Array.isArray(value.attachments) ? value.attachments : [],
+        clientMsgId: typeof value.clientMsgId === "string" ? value.clientMsgId : newClientMsgId(),
       };
     });
   } catch {
@@ -45,5 +54,10 @@ export function parseOfflineQueue(raw: string | null): QueuedPrompt[] {
 
 /** Convert stored prompts to wire inputs without changing FIFO ordering. */
 export function queuedPromptInputs(queue: readonly QueuedPrompt[]): RemoteInput[] {
-  return queue.map(({ text, attachments }) => ({ kind: "prompt", text, attachments }));
+  return queue.map(({ text, attachments, clientMsgId }) => ({
+    kind: "prompt",
+    text,
+    attachments,
+    ...(clientMsgId ? { client_msg_id: clientMsgId } : {}),
+  }));
 }

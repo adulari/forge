@@ -72,11 +72,14 @@ impl SnapshotFrame {
     }
 }
 
+const SEEN_CLIENT_MSG_IDS_CAP: usize = 256;
+
 pub struct EventLog {
     ring: std::collections::VecDeque<(u64, Arc<SnapshotFrame>)>,
     cap: usize,
     max_bytes: usize,
     bytes: usize,
+    seen_client_msg_ids: std::collections::VecDeque<String>,
 }
 
 pub(super) fn lock_event_log(events: &Mutex<EventLog>) -> std::sync::MutexGuard<'_, EventLog> {
@@ -96,7 +99,27 @@ impl EventLog {
             cap,
             max_bytes,
             bytes: 0,
+            seen_client_msg_ids: std::collections::VecDeque::new(),
         }
+    }
+
+    /// `true` the first time a client-chosen prompt id is seen on this session, `false` for a
+    /// repeat. The log is the one structure every WS connection of a session already shares, so a
+    /// retry that arrives on a fresh connection after a dropped ack still finds the original id.
+    pub fn first_sighting(&mut self, client_msg_id: &str) -> bool {
+        if self
+            .seen_client_msg_ids
+            .iter()
+            .any(|id| id == client_msg_id)
+        {
+            return false;
+        }
+        if self.seen_client_msg_ids.len() >= SEEN_CLIENT_MSG_IDS_CAP {
+            self.seen_client_msg_ids.pop_front();
+        }
+        self.seen_client_msg_ids
+            .push_back(client_msg_id.to_string());
+        true
     }
 
     /// Record a broadcast frame, evicting the oldest beyond the count or byte cap (memory stays

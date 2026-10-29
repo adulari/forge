@@ -1535,6 +1535,50 @@ async fn ws_session(socket: WebSocket, state: Arc<ServerState>, since: u64) {
 
 const MAX_REPLAY_FRAMES: usize = 8;
 
+enum Forwarded {
+    Sent,
+    Duplicate,
+    Closed,
+    Rejected(serde_json::Error),
+}
+
+#[derive(serde::Deserialize)]
+struct ClientMsgIdProbe {
+    client_msg_id: Option<String>,
+}
+
+/// Parse one inbound frame and hand it to the render loop. A `prompt`/`queue` carrying a `client_msg_id`
+/// already seen on this session is a client retry after a lost acknowledgement: it is dropped so
+/// the prompt is queued exactly once. The field is optional; frames without it behave as before.
+async fn forward_remote_input(
+    events: &Mutex<EventLog>,
+    input_tx: &mpsc::Sender<RemoteInput>,
+    text: &str,
+) -> Forwarded {
+    let input = match serde_json::from_str::<RemoteInput>(text) {
+        Ok(input) => input,
+        Err(error) => return Forwarded::Rejected(error),
+    };
+    if matches!(
+        input,
+        RemoteInput::Prompt { .. } | RemoteInput::Queue { .. }
+    ) {
+        let id = serde_json::from_str::<ClientMsgIdProbe>(text)
+            .ok()
+            .and_then(|probe| probe.client_msg_id)
+            .filter(|id| !id.is_empty() && id.len() <= 128);
+        if let Some(id) = id {
+            if !lock_event_log(events).first_sighting(&id) {
+                return Forwarded::Duplicate;
+            }
+        }
+    }
+    match input_tx.send(input).await {
+        Ok(()) => Forwarded::Sent,
+        Err(_) => Forwarded::Closed,
+    }
+}
+
 /// The transport-independent body of one connected WebSocket client: replay-from-rev (or a
 /// full `resync` snapshot), then live-follow the watch channel out and parse [`RemoteInput`]s
 /// in. Shared verbatim between the in-chat single-session server ([`ws_session`]) and the
@@ -1705,6 +1749,7 @@ pub(crate) async fn pump_ws_draining(
     });
 
     // Receive inputs from the browser; forward each to the render loop's channel.
+    let dedupe_events = events.clone();
     let mut receive = tokio::spawn(async move {
         while let Some(Ok(msg)) = rx.next().await {
             let text = match msg {
@@ -1722,13 +1767,10 @@ pub(crate) async fn pump_ws_draining(
             if text.len() > MAX_INPUT_BYTES {
                 continue;
             }
-            match serde_json::from_str::<RemoteInput>(&text) {
-                Ok(input) => {
-                    if input_tx.send(input).await.is_err() {
-                        break; // render loop dropped the receiver (remote turned off)
-                    }
-                }
-                Err(error) => {
+            match forward_remote_input(&dedupe_events, &input_tx, &text).await {
+                Forwarded::Sent | Forwarded::Duplicate => {}
+                Forwarded::Closed => break, // render loop dropped the receiver (remote turned off)
+                Forwarded::Rejected(error) => {
                     let _ = note_tx.send(format!("input ignored: {error}"));
                 }
             }
@@ -2396,6 +2438,39 @@ mod tests {
         assert_eq!(named_key("Char:"), None);
         assert_eq!(named_key("Char:ab"), None, "exactly one char");
         assert_eq!(named_key(""), None);
+    }
+
+    #[tokio::test]
+    async fn retried_prompt_with_same_client_msg_id_is_queued_once() {
+        let events = Mutex::new(EventLog::new(8));
+        let (tx, mut rx) = mpsc::channel::<RemoteInput>(8);
+        let frame = r#"{"kind":"prompt","text":"ship it","client_msg_id":"m-1"}"#;
+        assert!(matches!(
+            forward_remote_input(&events, &tx, frame).await,
+            Forwarded::Sent
+        ));
+        assert!(matches!(
+            forward_remote_input(&events, &tx, frame).await,
+            Forwarded::Duplicate
+        ));
+        let other = r#"{"kind":"prompt","text":"ship it","client_msg_id":"m-2"}"#;
+        assert!(matches!(
+            forward_remote_input(&events, &tx, other).await,
+            Forwarded::Sent
+        ));
+        let bare = r#"{"kind":"prompt","text":"ship it"}"#;
+        for _ in 0..2 {
+            assert!(matches!(
+                forward_remote_input(&events, &tx, bare).await,
+                Forwarded::Sent
+            ));
+        }
+        drop(tx);
+        let mut queued = 0;
+        while rx.recv().await.is_some() {
+            queued += 1;
+        }
+        assert_eq!(queued, 4, "m-1 once, m-2 once, two id-less prompts");
     }
 
     #[test]
