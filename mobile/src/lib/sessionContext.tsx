@@ -15,6 +15,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import type { Attachment } from "../components/chat/attach";
 import { useAuth } from "./auth";
 import { useSessions } from "./queries";
+import { EMPTY_DRAFT, type DraftMap, withDraftAttachments, withDraftText } from "./sessionDrafts";
 import { type ConnectionState, type RemoteInput, type Snapshot, useSessionSocket } from "./ws";
 
 const REOPEN_WINDOW_MS = 60_000;
@@ -25,12 +26,6 @@ const MAX_REOPENS_PER_WINDOW = 3;
  * the Composer (see Composer.tsx's `commit`) — but never leaks into a wrong session if this
  * provider instance is ever handed a different `sessionId` without remounting. Deliberately
  * session-lifetime only (no AsyncStorage): a half-typed draft dying with the app is fine. */
-interface Draft {
-  text: string;
-  attachments: Attachment[];
-}
-
-const EMPTY_DRAFT: Draft = { text: "", attachments: [] };
 
 export type PendingAnswer = Extract<RemoteInput, { kind: "allow" | "answer" }>;
 
@@ -134,7 +129,7 @@ export function SessionProvider({
   }, [connectionState, stillListed, reopen]);
   const [headerHeight, setHeaderHeight] = useState(0);
   const [pendingAnswer, setPendingAnswer] = useState<PendingAnswer | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [drafts, setDrafts] = useState<DraftMap>({});
   const draft = drafts[sessionId] ?? EMPTY_DRAFT;
   const draftTextRef = useRef(draft.text);
   useEffect(() => {
@@ -159,18 +154,14 @@ export function SessionProvider({
 
   const setDraftText = useCallback(
     (text: string) => {
-      setDrafts((prev) => ({ ...prev, [sessionId]: { text, attachments: prev[sessionId]?.attachments ?? [] } }));
+      setDrafts((prev) => withDraftText(prev, sessionId, text));
     },
     [sessionId],
   );
 
   const setDraftAttachments = useCallback(
     (next: Attachment[] | ((prev: Attachment[]) => Attachment[])) => {
-      setDrafts((prev) => {
-        const current = prev[sessionId] ?? EMPTY_DRAFT;
-        const attachments = typeof next === "function" ? next(current.attachments) : next;
-        return { ...prev, [sessionId]: { text: current.text, attachments } };
-      });
+      setDrafts((prev) => withDraftAttachments(prev, sessionId, next));
     },
     [sessionId],
   );

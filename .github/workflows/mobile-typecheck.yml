@@ -117,6 +117,14 @@ jobs:
               || echo "::warning title=Expo SDK patch drift::installed Expo packages are behind the SDK's current patch versions; bump them in a PR that also plans a native build"
             EXPO_DOCTOR_SKIP_DEPENDENCY_VERSION_CHECK=1 npm run check
           fi
+      # A config plugin or app.config.ts change can break native project generation while every
+      # JS check stays green; that only surfaced at the next store build. Generating the Android
+      # project (gitignored, no install) is cheap and catches it in the PR. iOS is tracked in git,
+      # so it is left to Xcode Cloud. docs/architecture/versioning.md has the OTA rules.
+      - name: Guard native project generation
+        run: |
+          npx --no-install expo prebuild --no-install --platform android
+          rm -rf android
       - name: Export web app
         run: npx --no-install expo export -p web
         env:

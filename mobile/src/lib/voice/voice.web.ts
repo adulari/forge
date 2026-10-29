@@ -5,6 +5,7 @@
 // AudioWorklet needs its processor module served from a fetchable URL, which Metro's static web
 // export and the Tauri-bundled dist don't provide a clean seam for, and the deprecated-but-
 // universal ScriptProcessorNode works identically across Chrome/Safari/Firefox/WebKitGTK/WebView2.
+import { isMicDenied, MicDeniedError } from "./micAccess";
 import type { VoiceRecorder } from "./types";
 
 const TARGET_SAMPLE_RATE = 16000;
@@ -102,7 +103,11 @@ export const voice: VoiceRecorder = {
   },
 
   async start(onLevel) {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      throw isMicDenied(err) ? new MicDeniedError() : err;
+    }
     audioContext = new AudioContext();
     inputSampleRate = audioContext.sampleRate;
     source = audioContext.createMediaStreamSource(stream);

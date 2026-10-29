@@ -8,11 +8,19 @@
 // Feature-detected throughout: browsers without serviceWorker/PushManager/
 // Notification (older Safari, or a webview without these APIs) report
 // "unsupported" rather than throwing, so callers never need a try/catch.
+import { flushUnsubscribes, queueUnsubscribe, type OutboxStore } from "./pushOutbox";
 import { getPushKey, subscribePush as apiSubscribePush, unsubscribePush as apiUnsubscribePush } from "../api";
 
 export type PushSubscriptionState = "unsupported" | "subscribed" | "unsubscribed";
 
 const SW_URL = "/sw.js";
+
+const UNSUBSCRIBE_OUTBOX_KEY = "forge.pushUnsubscribeOutbox.v1";
+
+const outbox: OutboxStore = {
+  read: async () => localStorage.getItem(UNSUBSCRIBE_OUTBOX_KEY),
+  write: async (value) => localStorage.setItem(UNSUBSCRIBE_OUTBOX_KEY, value),
+};
 
 // sw.js can't reach `localStorage` (no synchronous storage in a service worker
 // context) or the app's own baseUrl state, so notificationclick needs its own
@@ -143,15 +151,17 @@ export async function disablePush(baseUrl: string): Promise<PushSubscriptionStat
     try {
       await apiUnsubscribePush(baseUrl, { endpoint });
     } catch {
-      // local unsubscribe already succeeded; the daemon will prune a stale
-      // endpoint on its next failed send regardless
+      // The local unsubscribe already succeeded; keep the request so the daemon hears about it
+      // on a later open instead of holding a dead endpoint until its next failed send.
+      await queueUnsubscribe(outbox, { baseUrl, body: { endpoint } }).catch(() => undefined);
     }
   }
 
   return "unsubscribed";
 }
 
-// Sealed-alert key refresh exists only on iOS (push.ios.ts); same signature everywhere.
+// Sealed-alert key refresh exists only on iOS (push.ios.ts); same signature everywhere. Here the
+// refresh only replays unsubscribes the daemon has not yet acknowledged.
 export async function refreshPushRegistration(_activeBaseUrl: string | null): Promise<void> {
-  // nothing to refresh
+  await flushUnsubscribes(outbox, (item) => apiUnsubscribePush(item.baseUrl, item.body)).catch(() => undefined);
 }

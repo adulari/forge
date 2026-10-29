@@ -16,6 +16,7 @@ import { tabularNums, type as typeScale } from "../../theme/typography";
 import { Markdown } from "../chat/Markdown";
 import { EmptyState } from "../ds/EmptyState";
 import { Sheet } from "../ds/Sheet";
+import { ReleaseHero } from "./ReleaseHero";
 
 const RELEASE_LIMIT = 12;
 
@@ -65,6 +66,7 @@ function ReleaseBlock({ release, latest }: { release: ChangelogRelease; latest: 
         ) : null}
       </Pressable>
 
+      {expanded ? <ReleaseHero release={release} /> : null}
       {expanded ? (
         groupBySection(release.entries).map((group) => (
           <View key={group.section} style={styles.group}>

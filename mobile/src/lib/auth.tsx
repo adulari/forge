@@ -18,6 +18,8 @@ import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
 import { applyServerIdentity, reconcileAnywhereHosts, repointMovedDaemons, selectActiveServerAfterSync, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
 import { detectForgeServe } from "./desktopServe";
+import { onRediscoverRequested } from "./hostDiscovery";
+import { readServers, writeServers, type KeyValueStore } from "./serverStoreJournal";
 export { parseConnectUrl, type ParsedConnectUrl } from "./connectUrl";
 export { type StoredServer } from "./serverTargets";
 
@@ -40,20 +42,10 @@ function makeServerId(): string {
   return `srv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function loadServers(): Promise<StoredServer[]> {
-  const raw = await getSecureItem(SERVERS_KEY);
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as StoredServer[]) : [];
-  } catch {
-    return [];
-  }
-}
+const serverStore: KeyValueStore = { get: getSecureItem, set: setSecureItem, delete: deleteSecureItem };
 
-async function saveServers(servers: StoredServer[]): Promise<void> {
-  await setSecureItem(SERVERS_KEY, JSON.stringify(servers));
-}
+const loadServers = (): Promise<StoredServer[]> => readServers(serverStore, SERVERS_KEY);
+const saveServers = (servers: StoredServer[]): Promise<void> => writeServers(serverStore, SERVERS_KEY, servers);
 
 interface AuthContextValue {
   baseUrl: string | null;
@@ -158,6 +150,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    return onRediscoverRequested(() => {
+      void enqueueMutation(serverMutationQueue, async () => {
+        const detected = await detectForgeServe();
+        const current = await loadServers();
+        const repointed = repointMovedDaemons(current, detected);
+        if (repointed === current) return;
+        const next = [...repointed];
+        await saveServers(next);
+        setServers(next);
+      }).catch(() => {
+        // discovery is best-effort; the socket keeps retrying the stored address regardless
+      });
+    });
   }, []);
 
   const addServer = useCallback(

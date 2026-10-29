@@ -256,6 +256,12 @@ pub(crate) enum Command {
     /// `--resume <id>` reattaches by id, `--continue` reattaches the most-recent session of this
     /// directory (`--all-dirs`: of any directory), and a bare `--resume` opens the interactive
     /// picker (TUI only).
+    ///
+    /// Permissions: a tool call the mode does not already allow is asked about on the terminal
+    /// (`y`, `a` for always, or no) only when stdin is a terminal. Piped, redirected or
+    /// `--permission-mode dontAsk` runs have no one to ask, so they deny the call (`--verbose`
+    /// prints "denying … non-interactive session") and answer an `ask_user` question with no
+    /// answer. For autonomous tool use pass `--mode accept-edits` or `--mode bypass`.
     Run {
         /// The prompt / task for the agent.
         prompt: Vec<String>,

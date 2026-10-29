@@ -9,7 +9,7 @@
 // single-question card, which answers the 1-based option number as a STRING.
 import { Check, ChevronLeft, ChevronRight, Send } from "lucide-react-native";
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { Button } from "../ds/Button";
@@ -18,11 +18,12 @@ import { IconButton } from "../ds/IconButton";
 import { Input } from "../ds/Input";
 import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
+import { nextSelection, optionIndexForKey } from "../../lib/questionKeys";
 import { type FormAnswer, type FormQuestion, type QuestionOption, type RemoteInput } from "../../lib/ws";
 import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
+import { monoFamily, type as typeScale } from "../../theme/typography";
 
 export interface QuestionCardProps {
   question: string;
@@ -146,14 +147,25 @@ function FormBody({
   const toggle = (label: string) => {
     if (locked) return;
     haptics.select();
-    if (q.multi) {
-      update({
-        selected: d.selected.includes(label) ? d.selected.filter((l) => l !== label) : [...d.selected, label],
-      });
-    } else {
-      update({ selected: [label], other: "" });
-    }
+    const selected = nextSelection(d.selected, label, q.multi);
+    update(q.multi ? { selected } : { selected, other: selected.length > 0 ? "" : d.other });
   };
+
+  useEffect(() => {
+    if (Platform.OS !== "web" || locked) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      const target = e.target;
+      if (target instanceof HTMLElement && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      const index = optionIndexForKey(e.key, q.options.length);
+      if (index == null) return;
+      e.preventDefault();
+      toggle(q.options[index].label);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locked, current, q, d.selected]);
 
   const next = () => {
     if (!last) {
@@ -216,10 +228,11 @@ function FormBody({
       {q.multi ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>choose all that apply</Text> : null}
       {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
 
-      {q.options.map((opt) => (
+      {q.options.map((opt, index) => (
         <OptionRow
           key={opt.label}
           option={opt}
+          hotkey={index < 9 ? index + 1 : null}
           multi={q.multi}
           selected={d.selected.includes(opt.label)}
           disabled={locked}
@@ -300,12 +313,14 @@ function FormBody({
 
 function OptionRow({
   option,
+  hotkey,
   multi,
   selected,
   disabled,
   onPress,
 }: {
   option: QuestionOption;
+  hotkey: number | null;
   multi: boolean;
   selected: boolean;
   disabled: boolean;
@@ -352,6 +367,9 @@ function OptionRow({
             <Text style={[typeScale.sub, { color: tokens.ink2 }, styles.optionDetail]}>{option.description}</Text>
           ) : null}
         </View>
+        {Platform.OS === "web" && hotkey != null && !disabled ? (
+          <Text style={[typeScale.monoMeta, { color: tokens.ink4, fontFamily: monoFamily.regular }]} accessibilityElementsHidden>{hotkey}</Text>
+        ) : null}
       </Pressable>
     </Animated.View>
   );

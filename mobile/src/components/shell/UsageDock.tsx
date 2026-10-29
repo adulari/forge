@@ -10,6 +10,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useSessions, useUsage } from "../../lib/queries";
 import { buildProviderBlocks, isSubscription, kindLabel, priceLabel, quotaSummary, quotaTiming, windowLabel, type ProviderBlock } from "../../lib/usageWindows";
+import { paceAnnotation } from "../../lib/usagePace";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { formatRelativeTime, tabularNums, type as typeScale } from "../../theme/typography";
@@ -38,8 +39,10 @@ function ProviderCard({ block, nowSec }: { block: ProviderBlock; nowSec: number 
         const pct = quota.fraction == null ? 0 : Math.max(0, Math.min(100, quota.fraction * 100));
         const barColor = quota.status === "exhausted" ? tokens.danger : usagePaceColor(pct, tokens);
         const detail = quotaSummary(quota, nowSec);
+        const pace = quota.seen ? paceAnnotation(quota, nowSec) : null;
+        const paceColor = pace?.tone === "danger" ? tokens.danger : tokens.warn;
         return (
-          <View key={quota.windowKind} style={styles.quotaBlock} accessibilityLabel={`${windowLabel(quota.windowKind)} ${detail}`}>
+          <View key={quota.windowKind} style={styles.quotaBlock} accessibilityLabel={`${windowLabel(quota.windowKind)} ${detail}${pace ? `, ${pace.text}` : ""}`}>
             <View style={styles.quotaHeadRow}>
               <Text style={[typeScale.sub, { color: tokens.ink2 }]} numberOfLines={1}>{windowLabel(quota.windowKind)}</Text>
               <Text style={[typeScale.monoMeta, tabularNums, { color: quota.seen ? tokens.ink2 : tokens.ink4 }]}>
@@ -52,6 +55,12 @@ function ProviderCard({ block, nowSec }: { block: ProviderBlock; nowSec: number 
             <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>
               {quota.seen ? quotaTiming(quota, nowSec) || "no reset time reported" : "not seen yet"}
             </Text>
+            {pace ? (
+              <View style={styles.paceRow}>
+                <View style={[styles.paceDot, { backgroundColor: paceColor }]} />
+                <Text style={[typeScale.monoMeta, tabularNums, { color: paceColor }]} numberOfLines={1}>{pace.text}</Text>
+              </View>
+            ) : null}
           </View>
         );
       })}
@@ -115,6 +124,8 @@ const styles = StyleSheet.create({
   quotaHeadRow: { flexDirection: "row", justifyContent: "space-between" },
   track: { height: 3, borderRadius: 2, overflow: "hidden" },
   fill: { height: "100%", borderRadius: 2 },
+  paceRow: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  paceDot: { width: 6, height: 6, borderRadius: 3 },
   connectCard: {
     borderWidth: 1,
     borderStyle: "dashed",

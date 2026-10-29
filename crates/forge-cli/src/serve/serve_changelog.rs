@@ -37,7 +37,23 @@ struct ChangelogRelease {
     version: String,
     /// `null` for `[Unreleased]`, which carries no date.
     date: Option<String>,
+    /// From an optional `<!-- headline: … -->` line under the release heading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headline: Option<String>,
+    /// From an optional `<!-- chips: A | B | C -->` line, at most [`MAX_CHIPS`] short labels.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    chips: Vec<String>,
     entries: Vec<ChangelogEntry>,
+}
+
+const MAX_CHIPS: usize = 4;
+
+/// The value of a `<!-- key: value -->` line, or `None` for any other line. The comment form keeps
+/// the metadata out of the rendered GitHub changelog while staying greppable.
+fn release_meta<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let inner = line.trim().strip_prefix("<!--")?.strip_suffix("-->")?;
+    let value = inner.trim().strip_prefix(key)?.strip_prefix(':')?.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 /// Parse the top `limit` `## [version] - date` sections. Continuation lines of a wrapped bullet are
@@ -70,6 +86,8 @@ fn parse_changelog(markdown: &str, limit: usize) -> Vec<ChangelogRelease> {
             current = (!version.eq_ignore_ascii_case("Unreleased")).then_some(ChangelogRelease {
                 version,
                 date,
+                headline: None,
+                chips: Vec::new(),
                 entries: Vec::new(),
             });
             section.clear();
@@ -82,6 +100,20 @@ fn parse_changelog(markdown: &str, limit: usize) -> Vec<ChangelogRelease> {
         let Some(release) = current.as_mut() else {
             continue;
         };
+        if let Some(headline) = release_meta(line, "headline") {
+            release.headline = Some(headline.to_string());
+            continue;
+        }
+        if let Some(chips) = release_meta(line, "chips") {
+            release.chips = chips
+                .split('|')
+                .map(str::trim)
+                .filter(|chip| !chip.is_empty())
+                .take(MAX_CHIPS)
+                .map(str::to_string)
+                .collect();
+            continue;
+        }
         if let Some(item) = line.strip_prefix("- ") {
             release.entries.push(ChangelogEntry {
                 section: section.clone(),
@@ -200,5 +232,51 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_release_carries_its_headline_and_chips() {
+        let markdown = "\
+## [3.0.0] - 2026-03-04
+<!-- headline: Threads that remember -->
+<!-- chips: Gallery | Palette |  | Goals | Docks | Extra -->
+
+### Added
+
+- **A thing.** With detail.
+
+## [2.9.0] - 2026-02-01
+
+### Fixed
+
+- A fix.
+";
+        let releases = parse_changelog(markdown, 5);
+        assert_eq!(
+            releases[0].headline.as_deref(),
+            Some("Threads that remember")
+        );
+        assert_eq!(
+            releases[0].chips,
+            vec!["Gallery", "Palette", "Goals", "Docks"],
+            "blank chips are dropped and the list is capped"
+        );
+        assert_eq!(
+            releases[0].entries.len(),
+            1,
+            "metadata lines are not bullets"
+        );
+        assert_eq!(releases[1].headline, None);
+        assert!(releases[1].chips.is_empty());
+        let json = serde_json::to_value(&releases[1]).unwrap();
+        assert!(json.get("headline").is_none() && json.get("chips").is_none());
+    }
+
+    #[test]
+    fn malformed_metadata_is_ignored() {
+        assert_eq!(release_meta("<!-- headline: -->", "headline"), None);
+        assert_eq!(release_meta("<!-- headliner: x -->", "headline"), None);
+        assert_eq!(release_meta("headline: x", "headline"), None);
+        assert_eq!(release_meta("  <!--headline:x-->", "headline"), Some("x"));
     }
 }
