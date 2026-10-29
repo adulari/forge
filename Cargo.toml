@@ -74,9 +74,9 @@ shell-words = "1"
 libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 pulldown-cmark = { version = "0.13", default-features = false }
-# default-fancy = bundled syntaxes/themes with the pure-Rust fancy-regex backend
-# (no oniguruma C dep → clean cross-compile, smaller footprint).
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+# Bundled syntaxes/themes with the pure-Rust fancy-regex backend (default-fancy minus the plist/yaml/html loaders, which Forge never calls)
+# (no oniguruma C dep: clean cross-compile, smaller footprint).
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 similar = "3"
 regex = "1"
 # Real BPE token counting for precise context accounting (not a chars/token estimate). Bundles the
@@ -90,7 +90,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 # file/image uploads on POST /api/upload. qrcode renders a scan-to-connect matrix into the TUI.
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio-tungstenite = "0.30"
-qrcode = "0.14"
+qrcode = { version = "0.14", default-features = false }
 # Cross-platform hardware probe (total RAM, CPU cores) to recommend a local-LLM size. default
 # off + only the components we read, to keep the dep light.
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }

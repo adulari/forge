@@ -24,7 +24,6 @@ forge-tui = { workspace = true }
 forge-cli = { package = "forge-agent", path = "../forge-cli" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
-clap = { workspace = true }
 clap_complete = "4"
 clap_mangen = "0.3"
 
