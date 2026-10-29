@@ -219,7 +219,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "goal",
-        desc: "set a goal and break it into a tracked plan, or steer it: pause, resume, clear, edit, status",
+        desc: "set a goal and track it as a plan, or steer it: pause, resume, edit, clear",
         usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] | pause | resume | clear | status | edit <objective>",
     },
     Command {
