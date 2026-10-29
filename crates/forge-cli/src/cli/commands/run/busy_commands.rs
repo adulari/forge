@@ -48,6 +48,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Voice
         | CommandAction::Stash(_)
         | CommandAction::Skills
+        | CommandAction::Theme(_)
         // Neither takes the session lock: git and the checks run on their own thread.
         | CommandAction::Diff(_)
         | CommandAction::Doctor

@@ -40,6 +40,7 @@ import { ListRow } from "../../components/ds/ListRow";
 import { Segmented } from "../../components/ds/Segmented";
 import { Screen } from "../../components/ds/Screen";
 import { HostPowerSection } from "../../components/settings/HostPowerSection";
+import { SettingsSearchField, SettingsSearchResults, useSettingsSearch } from "../../components/settings/SettingsSearch";
 import { NotificationPrefsSection } from "../../components/settings/NotificationPrefsSection";
 import { SectionHeader } from "../../components/ds/SectionHeader";
 import { BackLink } from "../../components/ds/BackLink";
@@ -164,11 +165,15 @@ export function SettingsNavRail({ active }: { active: string }) {
   const versionMeta = useVersionMeta(PROTOCOL_VERSION);
   const railActiveFill = hexToRgba(tokens.ink, 0.07);
   const railHoverFill = hexToRgba(tokens.ink, 0.04);
+  const search = useSettingsSearch();
+  const searching = search.query.trim().length > 0;
   return (
     <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border }]}>
       <BackLink label="Back" accessibilityLabel="Leave Settings" onPress={leaveSettings} />
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
-      {SETTINGS_NAV_ITEMS.filter((item) => item.key !== "desktop" || isTauri).map((item) => {
+      <SettingsSearchField {...search} onPick={() => search.setQuery("")} />
+      {searching ? <SettingsSearchResults query={search.query} hits={search.hits} onPick={() => search.setQuery("")} /> : null}
+      {searching ? null : SETTINGS_NAV_ITEMS.filter((item) => item.key !== "desktop" || isTauri).map((item) => {
         const selected = item.key === active;
         // Only the "anywhere" row ever carries a trailing badge — the entitlement summary
         // from the desktop rail comp (desktop.dc.html "Desktop Settings", line 106).
@@ -200,6 +205,16 @@ export function SettingsNavRail({ active }: { active: string }) {
       {versionMeta.split(" · ").map((segment) => (
         <Text key={segment} style={[type.monoMeta, tabularNums, railStyles.version, { color: tokens.ink4 }]}>{segment}</Text>
       ))}
+    </View>
+  );
+}
+
+function CompactSettingsSearch() {
+  const search = useSettingsSearch();
+  return (
+    <View style={{ gap: space.space8 }}>
+      <SettingsSearchField {...search} onPick={() => search.setQuery("")} />
+      <SettingsSearchResults query={search.query} hits={search.hits} onPick={() => search.setQuery("")} />
     </View>
   );
 }
@@ -329,6 +344,7 @@ function NavListRow({ label, meta, onPress, showSeparator = true }: { label: str
 
 export function SettingsScreen() {
   const tokens = useTokens();
+  const { isCompact } = useBreakpoint();
   const toast = useToast();
   const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, renameServer } = useAuth();
   const { account: anywhereAccount, signedIn: anywhereSignedIn } = useAnywhere();
@@ -564,6 +580,7 @@ export function SettingsScreen() {
     <SettingsShell active="general">
       <Screen scroll contentContainerStyle={styles.content}>
         <Text style={[type.title, styles.pageTitle, { color: tokens.ink }]}>Settings</Text>
+        {isCompact ? <CompactSettingsSearch /> : null}
 
         <View>
           <SectionHeader>Servers</SectionHeader>

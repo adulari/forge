@@ -109,6 +109,7 @@ mod effort;
 mod output_view;
 mod skill_invoke;
 mod subagents;
+mod theme_cmd;
 pub(crate) use btw::*;
 pub(crate) use busy_queue::{InterruptNext, SteerTracker};
 pub(crate) use catalog_dispatch::dispatch_catalog;

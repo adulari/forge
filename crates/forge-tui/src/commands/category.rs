@@ -9,7 +9,7 @@ pub fn command_category(name: &str) -> &'static str {
         | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" | "commit" | "diff" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" | "claude" => "Integrations",
-        "config" | "statusline" | "keys" | "help" | "init" | "remember" | "memories"
+        "config" | "theme" | "statusline" | "keys" | "help" | "init" | "remember" | "memories"
         | "permissions" | "add-dir" | "doctor" | "skills" => "Settings & help",
         "copy" | "quit" => "Utilities",
         _ => "More",

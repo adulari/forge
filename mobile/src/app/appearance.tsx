@@ -9,6 +9,7 @@ import { Segmented } from "../components/ds/Segmented";
 import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
+import { ThemePicker } from "../components/settings/ThemePicker";
 import { TerminalSettingsSection } from "../components/settings/TerminalSettingsSection";
 import { setFoldToolGroups, setWrapCodeBlocks, useAppearancePreferences } from "../lib/appearancePreferences";
 import { setDockPlacement, useDockPrefs } from "../lib/composerDocks";
@@ -62,6 +63,8 @@ export default function AppearanceScreen() {
               System follows the operating system without storing a resolved light or dark value.
             </Text>
           </View>
+
+          <ThemePicker />
 
           <View>
             <SectionHeader>Reading code</SectionHeader>

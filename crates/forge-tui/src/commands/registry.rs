@@ -258,6 +258,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/effort [low|medium|high|xhigh|whitehot] | /effort exact <level> | /effort exact off",
     },
     Command {
+        name: "theme",
+        desc: "switch the accent palette (forge, ocean, grove, rose) and save it",
+        usage: "/theme [forge|ocean|grove|rose]",
+    },
+    Command {
         name: "subagents",
         desc: "let subagents route off the model pin (free), or follow the pin (pinned)",
         usage: "/subagents [free|pinned]",

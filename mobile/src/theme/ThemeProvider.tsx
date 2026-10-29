@@ -4,12 +4,16 @@ import { StatusBar } from "expo-status-bar";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { Appearance, Platform, useColorScheme as useSystemColorScheme } from "react-native";
 
+import { applyPalette, parseThemeDocument, type ThemeDocument } from "./themeDocument";
+import { DEFAULT_THEME_ID, THEME_PRESETS } from "./themePresets";
 import { type ColorTokens, darkTokens, lightTokens } from "./tokens";
 
 export type ThemePreference = "light" | "dark" | "system";
 export type ThemeScheme = "light" | "dark";
 
 const STORAGE_KEY = "forge.theme";
+const THEME_DOC_KEY = "forge.themeDoc";
+const MAX_CUSTOM_THEMES = 12;
 
 interface ThemeContextValue {
   /** Resolved scheme (system preference already applied). */
@@ -18,6 +22,14 @@ interface ThemeContextValue {
   preference: ThemePreference;
   tokens: ColorTokens;
   setScheme: (pref: ThemePreference) => void;
+  /** "forge" (the built-in), a preset id, or `custom:<slug>`. */
+  themeId: string;
+  themes: ThemeDocument[];
+  activeDocument: ThemeDocument | null;
+  setThemeId: (id: string) => void;
+  /** Throws a readable Error when the text is not a valid theme. */
+  importTheme: (text: string) => ThemeDocument;
+  removeTheme: (id: string) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
@@ -26,14 +38,28 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const systemScheme = useSystemColorScheme();
   const [preference, setPreference] = useState<ThemePreference>("system");
   const [loaded, setLoaded] = useState(false);
+  const [themeId, setThemeIdState] = useState(DEFAULT_THEME_ID);
+  const [custom, setCustom] = useState<ThemeDocument[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    AsyncStorage.getItem(STORAGE_KEY)
-      .then((stored) => {
+    Promise.all([AsyncStorage.getItem(STORAGE_KEY), AsyncStorage.getItem(THEME_DOC_KEY)])
+      .then(([stored, themeDoc]) => {
         if (cancelled) return;
         if (stored === "light" || stored === "dark" || stored === "system") {
           setPreference(stored);
+        }
+        if (themeDoc) {
+          const parsed = JSON.parse(themeDoc) as { active?: unknown; custom?: unknown };
+          const docs = (Array.isArray(parsed.custom) ? parsed.custom : []).flatMap((entry) => {
+            try {
+              return [parseThemeDocument(JSON.stringify(entry))];
+            } catch {
+              return [];
+            }
+          });
+          setCustom(docs);
+          if (typeof parsed.active === "string") setThemeIdState(parsed.active);
         }
       })
       .catch(() => undefined)
@@ -50,8 +76,44 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     void AsyncStorage.setItem(STORAGE_KEY, pref).catch(() => undefined);
   }, []);
 
+  const persistTheme = useCallback((active: string, docs: ThemeDocument[]) => {
+    void AsyncStorage.setItem(THEME_DOC_KEY, JSON.stringify({ active, custom: docs })).catch(() => undefined);
+  }, []);
+
+  const themes = useMemo(() => [...THEME_PRESETS, ...custom], [custom]);
+  const activeDocument = themes.find((doc) => doc.id === themeId) ?? null;
+
+  const setThemeId = useCallback((id: string) => {
+    setThemeIdState(id);
+    persistTheme(id, custom);
+  }, [custom, persistTheme]);
+
+  const importTheme = useCallback((text: string) => {
+    const doc = parseThemeDocument(text);
+    if (THEME_PRESETS.some((preset) => preset.id === doc.id.slice("custom:".length))) {
+      doc.id = `${doc.id}-2`;
+    }
+    const next = [...custom.filter((existing) => existing.id !== doc.id), doc].slice(-MAX_CUSTOM_THEMES);
+    setCustom(next);
+    setThemeIdState(doc.id);
+    persistTheme(doc.id, next);
+    return doc;
+  }, [custom, persistTheme]);
+
+  const removeTheme = useCallback((id: string) => {
+    const next = custom.filter((doc) => doc.id !== id);
+    const active = themeId === id ? DEFAULT_THEME_ID : themeId;
+    setCustom(next);
+    setThemeIdState(active);
+    persistTheme(active, next);
+  }, [custom, themeId, persistTheme]);
+
   const scheme: ThemeScheme = preference === "system" ? (systemScheme === "light" ? "light" : "dark") : preference;
-  const tokens = scheme === "light" ? lightTokens : darkTokens;
+  const baseTokens = scheme === "light" ? lightTokens : darkTokens;
+  const tokens = useMemo(
+    () => (activeDocument ? applyPalette(baseTokens, activeDocument[scheme], scheme) : baseTokens),
+    [activeDocument, baseTokens, scheme],
+  );
 
   // Web/desktop chrome: `theme-color` paints the mobile-browser address bar and the
   // installed-PWA title bar, `color-scheme` is what makes the *browser's own* widgets —
@@ -80,8 +142,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [preference]);
 
   const value = useMemo<ThemeContextValue>(
-    () => ({ scheme, preference, tokens, setScheme }),
-    [scheme, preference, tokens, setScheme],
+    () => ({ scheme, preference, tokens, setScheme, themeId, themes, activeDocument, setThemeId, importTheme, removeTheme }),
+    [scheme, preference, tokens, setScheme, themeId, themes, activeDocument, setThemeId, importTheme, removeTheme],
   );
 
   // Hold rendering until the persisted preference has loaded so the app never

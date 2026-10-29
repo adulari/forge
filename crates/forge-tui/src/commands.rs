@@ -172,6 +172,8 @@ pub enum CommandAction {
     /// model pin — `/subagents free` / `/subagents pinned`. `None` = bare `/subagents`, which
     /// toggles and reports the resulting state.
     Subagents(Option<bool>),
+    /// `/theme [name]`: list the accent palettes, or switch to one and save it.
+    Theme(Option<String>),
     /// List the subagent types `spawn_agents` can use (`/agents`): built-ins plus agent files.
     Agents,
     /// Enter planning mode (`/plan <task>`): read-only investigation that proposes a plan.
@@ -438,6 +440,9 @@ pub fn parse_command(line: &str) -> CommandAction {
         "effort" => effort_args::parse_effort_arg(&arg),
         "subagents" | "subagent" => {
             CommandAction::Subagents(subagent_args::parse_subagents_arg(&arg))
+        }
+        "theme" | "palette" => {
+            CommandAction::Theme((!arg.is_empty()).then(|| arg.trim().to_lowercase()))
         }
         "agents" => CommandAction::Agents,
         "remember" => CommandAction::Remember(arg.to_string()),
