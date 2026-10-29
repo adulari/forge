@@ -1,4 +1,5 @@
 pub(crate) mod assay;
+pub(crate) mod backup;
 pub(crate) mod blame;
 pub(crate) mod browser;
 pub(crate) mod cc_transcript;
@@ -23,6 +24,7 @@ pub(crate) mod self_mcp;
 pub(crate) mod send;
 pub(crate) mod service;
 pub(crate) mod service_alert;
+pub(crate) mod service_logs;
 pub(crate) mod service_report;
 pub(crate) mod skill;
 pub(crate) mod stats;

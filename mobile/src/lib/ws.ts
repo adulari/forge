@@ -10,6 +10,13 @@ import { AppState, type AppStateStatus, Platform } from "react-native";
 import { createFrameCoalescer } from "./frameCoalescer";
 import { requestHostRediscovery } from "./hostDiscovery";
 import { accumulateStreaming, EMPTY_STREAMING, streamingDisplayText, type StreamingAccumulator } from "./streamingText";
+import {
+  clearHostRestarting,
+  HOST_GOING_AWAY_CODE,
+  isHostRestarting,
+  markHostRestarting,
+  HOST_RESTART_RETRY_MS,
+} from "./hostStatus";
 import { TWebSocket } from "./transport";
 import { backoffDelay, shouldRediscover } from "./wsBackoff";
 import { decideSnapshotRevision } from "./sessionReconciler";
@@ -424,6 +431,7 @@ export function useSessionSocket(
     ws.onopen = () => {
       if (generation !== socketGenerationRef.current) return;
       attemptRef.current = 0;
+      clearHostRestarting();
       setConnectionState("open");
       armLivenessWatchdog();
     };
@@ -477,8 +485,9 @@ export function useSessionSocket(
       // onclose follows; reconnect scheduled there.
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event?: { code?: number }) => {
       if (generation !== socketGenerationRef.current) return;
+      if (event?.code === HOST_GOING_AWAY_CODE) markHostRestarting();
       wsRef.current = null;
       if (closedRef.current || !shouldRunRef.current) return;
       if (resyncPendingRef.current) {
@@ -489,6 +498,13 @@ export function useSessionSocket(
         setConnectionState("reconnecting");
         clearReconnectTimer();
         reconnectTimerRef.current = setTimeout(connect, 0);
+        return;
+      }
+      // A host that said it is restarting is retried quickly and never escalates to "unreachable".
+      if (isHostRestarting()) {
+        setConnectionState("reconnecting");
+        clearReconnectTimer();
+        reconnectTimerRef.current = setTimeout(connect, HOST_RESTART_RETRY_MS);
         return;
       }
       setConnectionState(attemptRef.current >= UNREACHABLE_AFTER_ATTEMPTS ? "unreachable" : "reconnecting");

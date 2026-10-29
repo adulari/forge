@@ -363,9 +363,12 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                     .context("report task")?
             }
         }
-        Command::Update { check } => tokio::task::spawn_blocking(move || update::run(check))
-            .await
-            .context("update task")?,
+        Command::Update { check, rollback } => {
+            tokio::task::spawn_blocking(move || update::run_with(check, rollback))
+                .await
+                .context("update task")?
+        }
+        Command::Backup(args) => crate::cli::commands::backup::backup_cmd(args),
         Command::Auth {
             provider,
             remove,

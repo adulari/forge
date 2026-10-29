@@ -14,9 +14,10 @@ pub(crate) use cli::args::anywhere::ShareExpiry;
 pub(crate) use cli::args::mcp::McpTransportArg;
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
-    AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity,
-    GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat, PluginCmd, ProviderCmd,
-    QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd, VoiceOp,
+    AnywhereCmd, AssayCmd, AssayFormat, BackupArgs, BenchCmd, Cli, Command, ExportScope,
+    FailOnSeverity, GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat,
+    PluginCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd,
+    VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
@@ -37,7 +38,7 @@ pub(crate) use cli::commands::provider::provider_cmd;
 pub(crate) use cli::commands::queue::{queue_cmd, scoreboard_cmd};
 pub(crate) use cli::commands::replay::{
     fork_cmd, open_store, replay_cmd, replay_rerun_cmd, resolve_resume_mode, resolve_session,
-    sessions, tree_cmd, ResumeMode,
+    sessions, store_path, tree_cmd, ResumeMode,
 };
 pub(crate) use cli::commands::run::{
     build_session, chat, fmt_age, nl_cmd, run, session_title, DoneGuard,
@@ -77,6 +78,8 @@ mod doctor_health;
 mod doctor_providers;
 mod first_run;
 mod fleet_peers;
+mod host_caps;
+mod host_lock;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;
@@ -86,6 +89,7 @@ mod mcp_agent;
 mod mcp_serve;
 mod onboarding;
 mod open_pr_hooks;
+mod power;
 mod preview;
 mod push;
 mod push_tool;
@@ -98,9 +102,13 @@ mod serve;
 mod serve_agents;
 mod serve_diagnostics;
 mod serve_dispatch;
+mod serve_fleet_ws;
 mod serve_git;
+#[cfg(test)]
+mod serve_going_away;
 mod serve_media;
 mod serve_onboarding;
+mod serve_recovery;
 mod serve_schedules;
 mod serve_spend;
 mod serve_terminal;
@@ -113,6 +121,7 @@ mod update;
 mod update_auto;
 mod update_check;
 mod update_feed;
+mod update_rollback;
 mod update_state;
 mod voice;
 

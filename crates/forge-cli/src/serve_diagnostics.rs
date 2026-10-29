@@ -186,6 +186,59 @@ async fn database_check(state: &Arc<DaemonState>) -> DiagnosticCheck {
     }
 }
 
+/// Whether the store was recovered from damage recently, and how many pre-migration copies exist.
+fn store_recovery_check() -> Option<DiagnosticCheck> {
+    const NOTICE_SHOWN_SECS: i64 = 7 * 24 * 60 * 60;
+    let db = crate::store_path();
+    let notice = forge_store::db_safety::read_notice(&db)
+        .filter(|n| chrono::Utc::now().timestamp() - n.at < NOTICE_SHOWN_SECS);
+    let Some(notice) = notice else {
+        let copies = forge_store::db_safety::list_backups(&db).len();
+        return (copies > 0).then(|| {
+            DiagnosticCheck::ok(
+                "store_backups",
+                "Store backups",
+                format!("{copies} pre-migration copy(ies) kept next to the store"),
+            )
+        });
+    };
+    let outcome = match &notice.restored_from {
+        Some(from) => format!("Restored from {from}."),
+        None => "No backup could replace it, so the store started empty.".to_string(),
+    };
+    let kept = if notice.quarantined.is_empty() {
+        String::new()
+    } else {
+        format!(" The previous file is kept at {}.", notice.quarantined)
+    };
+    let detail = format!("{}. {outcome}{kept}", notice.reason);
+    Some(DiagnosticCheck::warn(
+        "store_recovery",
+        "Session store recovery",
+        detail,
+        "recent sessions may be missing; `forge backup list` shows the copies available",
+    ))
+}
+
+fn power_check() -> DiagnosticCheck {
+    let power = crate::power::status();
+    let mode = power.mode.wire_name();
+    if let Some(problem) = power.problem {
+        return DiagnosticCheck::warn(
+            "power",
+            "Keep awake",
+            format!("{mode}: could not hold a sleep inhibitor ({problem})"),
+            "install systemd/logind (Linux) or set [power] keep_awake = \"off\"",
+        );
+    }
+    let state = if power.held { "holding" } else { "idle" };
+    DiagnosticCheck::ok(
+        "power",
+        "Keep awake",
+        format!("{mode} ({state}, {})", power.backend),
+    )
+}
+
 pub(crate) async fn diagnostics(
     State(state): State<Arc<DaemonState>>,
 ) -> axum::Json<DiagnosticsResponse> {
@@ -225,6 +278,14 @@ pub(crate) async fn diagnostics(
             "run `forge doctor` on the host for the failing layer and an actionable fix",
         )
     });
+    checks.push(power_check());
+    if let Some(check) = tokio::task::spawn_blocking(store_recovery_check)
+        .await
+        .ok()
+        .flatten()
+    {
+        checks.push(check);
+    }
     checks.push(match probe.git_version {
         Some(version) => DiagnosticCheck::ok("git", "Git", version),
         None => DiagnosticCheck::warn(

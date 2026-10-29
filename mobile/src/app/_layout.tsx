@@ -19,6 +19,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { FleetWatcher } from "../components/fleet/FleetWatcher";
+import { HostRecoveryGate } from "../components/recovery/HostRecoveryGate";
 import { AppLock } from "../components/AppLock";
 import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { ReportingHost } from "../components/ReportingUi";
@@ -384,6 +385,7 @@ export default function RootLayout() {
                         <AnonymousTelemetry />
                         <ReportingHost />
                         <FleetWatcher />
+                        <HostRecoveryGate />
                         <NoticesWatcher />
                         {/* Inside the query provider because it reads the daemon's changelog, and above
                             the navigator so it is not tied to whichever tab happens to be open. */}

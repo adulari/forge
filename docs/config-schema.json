@@ -85,7 +85,30 @@
       "description": "Customizable statusline layout (left / center / right widget segments).",
       "additionalProperties": true
     },
-    "harness": { "$ref": "#/$defs/HarnessConfig" }
+    "harness": { "$ref": "#/$defs/HarnessConfig" },
+    "power": {
+      "type": "object",
+      "description": "Whether the host keeps itself awake while Forge works.",
+      "additionalProperties": false,
+      "properties": {
+        "keep_awake": {
+          "type": "string",
+          "enum": ["off", "while_working", "while_remote", "always"],
+          "default": "while_working",
+          "description": "When forge serve holds a sleep inhibitor: never, while a turn runs, while a turn runs or an app is connected, or always. The screen can still lock."
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "description": "Ceilings on what one daemon runs at once. 0 means no limit.",
+      "additionalProperties": false,
+      "properties": {
+        "max_active_sessions": { "type": "integer", "minimum": 0, "default": 0 },
+        "max_terminals": { "type": "integer", "minimum": 0, "default": 0 },
+        "max_helpers": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    }
   },
   "$defs": {
     "PermissionMode": {

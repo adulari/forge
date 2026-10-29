@@ -38,6 +38,8 @@ export interface StatusStripProps {
    * the right-hand cost/ctx cluster — Forge Anywhere's 7-variant status line is a distinct,
    * additive row that only appears once a real relay-hosted session supplies `strip`. */
   reconnecting?: boolean;
+  /** The host said it is restarting: reconnecting is expected and quick. */
+  hostRestarting?: boolean;
   /** Forge Anywhere — when set, the left mono line grows a `host · transport` prefix ahead
    * of `cwd · model` (design comp "AW Session Transport", line 548). Absent for ordinary
    * direct sessions, which keep today's `cwd · model` line unchanged. */
@@ -86,7 +88,7 @@ function StatusStripImpl(props: StatusStripProps) {
             {` · ${model}`}
           </Text>
           <View style={styles.right}>
-            {props.reconnecting ? <Text style={[typeScale.monoMeta, { color: tokens.warn }]} numberOfLines={1}>{"reconnecting… · "}</Text> : null}
+            {props.reconnecting ? <Text style={[typeScale.monoMeta, { color: tokens.warn }]} numberOfLines={1}>{props.hostRestarting ? "host restarting… · " : "reconnecting… · "}</Text> : null}
             <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]} numberOfLines={1}>{formatCost(props.costUsd)}</Text>
             {ctxPct != null ? (
               isCompact ? (

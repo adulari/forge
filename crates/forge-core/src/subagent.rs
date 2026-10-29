@@ -803,6 +803,7 @@ pub async fn orchestrate(
                 None => None,
             };
             let _permit = sem.acquire_owned().await;
+            let _host_slot = crate::host_limits::acquire_helper_slot().await;
             // Forward streamed text/reasoning as live progress for this child's UI row.
             let mut on_delta = |ev: StreamEvent| {
                 let snippet = match ev {

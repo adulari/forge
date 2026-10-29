@@ -449,6 +449,7 @@ async fn run_command_inner(
             )
         }
     };
+    crate::job_object::contain(&child);
     let pgid = child.id().map(|id| id as i32);
     let mut abort_guard = GroupKillOnDrop(pgid);
     let Some(stdout) = child.stdout.take() else {

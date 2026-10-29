@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -81,6 +81,8 @@ const FLEET_INVALIDATION_MIN_INTERVAL: std::time::Duration = std::time::Duration
 /// How long an archive waits for the driver task to wind down before letting go.
 const ARCHIVE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const DAEMON_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Time for the close frames to leave their sockets before the process exits.
+const GOING_AWAY_FLUSH: std::time::Duration = std::time::Duration::from_millis(300);
 const MAX_SESSION_SEARCH_QUERY_CHARS: usize = 256;
 const MAX_SESSION_SEARCH_RESULTS: usize = 100;
 const MAX_SESSION_TITLE_CHARS: usize = 120;
@@ -278,6 +280,7 @@ pub(crate) struct SessionRegistry {
     sessions: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>>,
     fleet_tx: tokio::sync::watch::Sender<u64>,
     draining: std::sync::atomic::AtomicBool,
+    pub(crate) signals: crate::serve_fleet_ws::HostSignals,
     /// Other machines, while Forge Anywhere is on (`crate::fleet_peers`).
     pub(crate) remote_hosts: std::sync::RwLock<Option<Arc<dyn crate::fleet_peers::RemoteHosts>>>,
 }
@@ -288,6 +291,7 @@ impl SessionRegistry {
             sessions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fleet_tx: tokio::sync::watch::channel(0).0,
             draining: std::sync::atomic::AtomicBool::new(false),
+            signals: crate::serve_fleet_ws::HostSignals::new(),
             remote_hosts: std::sync::RwLock::new(None),
         }
     }
@@ -609,13 +613,25 @@ pub(crate) async fn serve_cmd(
     // leaving the service looking healthy to watchdogs and clients.
     let config = forge_config::load().context("loading Forge configuration")?;
     let port = port.unwrap_or_else(|| config.remote.serve_port());
+    // A second daemon on this config dir stops here, before it touches the token or the store.
+    let _host_lock = crate::host_lock::acquire_for_config()?;
     let token = daemon_token(rotate_token)?;
     if rotate_token {
         println!("⚒ daemon token rotated — previously installed PWAs/links are now invalid");
     }
 
     crate::preview::reap_at_daemon_start(&config);
-    let store = Arc::new(crate::open_store()?);
+
+    // Bound before the store opens: if the store will not open, this port serves the recovery
+    // surface (`serve_recovery`) instead of the daemon simply being gone.
+    let (listener, addr) = crate::serve_recovery::bind(local || anywhere, port)?;
+
+    let cert_host = (!(local || anywhere))
+        .then(|| remote::lan_display_host(config.remote.host.as_deref(), addr));
+    let store = Arc::new(
+        crate::serve_recovery::open_store_or_recover(&listener, &format!("/{token}"), cert_host)
+            .await?,
+    );
     let registry = Arc::new(SessionRegistry::new());
     // Other machines for session messaging; answers nothing while Forge Anywhere is off.
     registry.set_remote_hosts(Some(Arc::new(crate::anywhere::peers::AnywhereHosts)));
@@ -687,6 +703,8 @@ pub(crate) async fn serve_cmd(
         anywhere_enable,
     });
     crate::push_tool::install_daemon_sink(crate::push_tool::channels_for(&state, true));
+    crate::power::start(registry.clone());
+    crate::host_caps::install_helper_limit();
     let app = daemon_router(state.clone());
 
     // Restore the fleet this daemon was hosting when it last stopped. Without this a restart comes
@@ -710,22 +728,8 @@ pub(crate) async fn serve_cmd(
     // failures must never prevent local Forge from starting or staying available.
     let anywhere_task = tokio::spawn(anywhere_supervisor(anywhere_rx, app.clone(), token.clone()));
 
-    // Bind + expose, mirroring `/remote`: LAN = 0.0.0.0 + self-signed HTTPS; local/anywhere =
-    // loopback plain HTTP (a tunnel terminates TLS at the provider).
-    let bind_ip: std::net::IpAddr = if local || anywhere {
-        std::net::Ipv4Addr::LOCALHOST.into()
-    } else {
-        std::net::Ipv4Addr::UNSPECIFIED.into()
-    };
-    let listener = std::net::TcpListener::bind((bind_ip, port)).with_context(|| {
-        format!(
-            "binding {bind_ip}:{port} — is another forge serve running? \
-             (`[remote] port` or --port picks a different one)"
-        )
-    })?;
-    let addr = listener.local_addr()?;
-    listener.set_nonblocking(true)?;
-
+    // LAN = 0.0.0.0 + self-signed HTTPS; local/anywhere = loopback plain HTTP (a tunnel
+    // terminates TLS at the provider). The socket was bound above.
     let mut tunnel_child = None;
     let url = if anywhere {
         let kind =
@@ -832,7 +836,7 @@ pub(crate) async fn serve_cmd(
     serve_result
 }
 
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         let mut terminate =
@@ -865,6 +869,10 @@ async fn drain_sessions(registry: &SessionRegistry, timeout: std::time::Duration
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
 
+    // Told only now: finishing turns have streamed their last frame, and the drivers (whose end
+    // would close each socket without a reason) are still up.
+    registry.signals.announce_going_away();
+
     for handle in &handles {
         if handle.snapshot_rx.borrow().snapshot.busy {
             handle.shutdown_for_daemon();
@@ -875,6 +883,7 @@ async fn drain_sessions(registry: &SessionRegistry, timeout: std::time::Duration
     for handle in handles {
         handle.join(ARCHIVE_JOIN_TIMEOUT).await;
     }
+    tokio::time::sleep(GOING_AWAY_FLUSH).await;
 }
 
 /// The daemon's full route table over `state.base` — extracted from [`serve_cmd`] so tests can
@@ -886,7 +895,10 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&base, get(page))
         .route(&format!("{base}/"), get(page))
         .route(&format!("{base}/ws"), get(ws_handler))
-        .route(&format!("{base}/ws/fleet"), get(fleet_ws_handler))
+        .route(
+            &format!("{base}/ws/fleet"),
+            get(crate::serve_fleet_ws::fleet_ws_handler),
+        )
         .route(
             &format!("{base}/api/sessions"),
             get(list_sessions).post(create_session),
@@ -1359,7 +1371,11 @@ impl StartSessionError {
         }
     }
 
-    fn coded(status: axum::http::StatusCode, code: &'static str, message: String) -> Self {
+    pub(crate) fn coded(
+        status: axum::http::StatusCode,
+        code: &'static str,
+        message: String,
+    ) -> Self {
         Self {
             status,
             code: Some(code),
@@ -1389,6 +1405,7 @@ pub(crate) async fn start_session(
             "daemon is draining for shutdown",
         ));
     }
+    crate::host_caps::admit_session(state, req.resume.as_deref()).await?;
     // Validate mode before creating a worktree or driver.
     let mode = match req.mode.as_deref() {
         Some(raw) => Some(
@@ -2750,45 +2767,19 @@ async fn ws_handler(
     let events = handle.events.clone();
     let input_tx = handle.input_tx.clone();
     let clients = handle.ws_clients.clone();
+    let going_away = Some(state.registry.signals.going_away_rx());
     ws.on_upgrade(move |socket| async move {
         let _attached = WsClientGuard::attach(clients);
-        remote::pump_ws(socket, snapshot_rx, events, input_tx, params.rev).await;
+        remote::pump_ws_draining(
+            socket,
+            snapshot_rx,
+            events,
+            input_tx,
+            params.rev,
+            going_away,
+        )
+        .await;
     })
-}
-
-async fn fleet_ws_handler(State(state): State<Arc<DaemonState>>, ws: WebSocketUpgrade) -> Response {
-    let fleet_rx = state.registry.subscribe_fleet();
-    ws.on_upgrade(move |socket| pump_fleet_ws(socket, fleet_rx))
-}
-
-async fn pump_fleet_ws(mut socket: WebSocket, mut fleet_rx: tokio::sync::watch::Receiver<u64>) {
-    let initial = *fleet_rx.borrow();
-    if socket
-        .send(WsMessage::Text(
-            serde_json::json!({ "kind": "fleet_changed", "revision": initial })
-                .to_string()
-                .into(),
-        ))
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
-    keepalive.tick().await;
-    loop {
-        tokio::select! {
-            changed = fleet_rx.changed() => {
-                if changed.is_err() { break; }
-                let revision = *fleet_rx.borrow_and_update();
-                let frame = serde_json::json!({ "kind": "fleet_changed", "revision": revision }).to_string();
-                if socket.send(WsMessage::Text(frame.into())).await.is_err() { break; }
-            }
-            _ = keepalive.tick() => {
-                if socket.send(WsMessage::Ping(Vec::new().into())).await.is_err() { break; }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

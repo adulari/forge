@@ -11,6 +11,13 @@ import { useAuth } from "../../lib/auth";
 import { TWebSocket } from "../../lib/transport";
 import { supportsFleetInvalidationSocket } from "../../lib/fleetTransport";
 import { useDesktopNativeSync } from "../../lib/desktopMenu";
+import {
+  clearHostRestarting,
+  HOST_GOING_AWAY_CODE,
+  isHostRestarting,
+  markHostRestarting,
+  onHostCap,
+} from "../../lib/hostStatus";
 
 const DEBOUNCE_MS = 1200;
 
@@ -23,6 +30,12 @@ export function FleetWatcher() {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
   const toast = useToast();
+  // A `[host]` ceiling refusing a session, terminal or helper is a notice, wherever it happened.
+  const toastRef = useRef(toast);
+  useEffect(() => {
+    toastRef.current = toast;
+  }, [toast]);
+  useEffect(() => onHostCap((message) => toastRef.current.show(message, { tone: "warn" })), []);
   const pathname = usePathname();
   const viewedId = /^\/session\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const previous = useRef<Map<string, SessionRow>>(new Map());
@@ -41,7 +54,13 @@ export function FleetWatcher() {
       const url = new URL(`${baseUrl}/ws/fleet`);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       socket = new TWebSocket(url.toString());
-      socket.onopen = () => { attempts = 0; };
+      socket.onopen = () => {
+        attempts = 0;
+        if (isHostRestarting()) {
+          clearHostRestarting();
+          void queryClient.invalidateQueries({ queryKey: ["sessions", baseUrl] });
+        }
+      };
       socket.onmessage = (event) => {
         try {
           const frame = JSON.parse(String(event.data)) as { kind?: unknown; revision?: unknown };
@@ -52,10 +71,14 @@ export function FleetWatcher() {
           // Ignore malformed invalidations; the recovery poll remains authoritative.
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event?: { code?: number }) => {
         socket = null;
         if (!active || AppState.currentState !== "active") return;
-        const delay = Math.min(15_000, 500 * 2 ** attempts++);
+        if (event?.code === HOST_GOING_AWAY_CODE) {
+          markHostRestarting();
+          toastRef.current.show("host restarting — reconnecting", { tone: "neutral" });
+        }
+        const delay = isHostRestarting() ? 1_000 : Math.min(15_000, 500 * 2 ** attempts++);
         reconnect = setTimeout(connect, delay);
       };
     };

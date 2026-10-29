@@ -218,6 +218,7 @@ pub async fn start(
             return Err(format!("failed to start (cwd {cwd}): {error}"));
         }
     };
+    crate::job_object::contain(&child);
     let Some(pid) = child.id() else {
         return Err("the job exited before its pid could be read".to_string());
     };
