@@ -35,6 +35,7 @@ import { ToolCallRow } from "../../../components/chat/ToolCallRow";
 import { ToolGroupRow } from "../../../components/chat/ToolGroupRow";
 import { TurnFooter } from "../../../components/chat/TurnFooter";
 import { useHistoryAutofill } from "../../../components/chat/useHistoryAutofill";
+import { useMessageJump } from "../../../components/chat/useMessageJump";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { buildTranscript, type ToolInvocation } from "../../../lib/toolRows";
 import { foldToolGroups, GroupMemo, type FoldedEntry, type ToolGroupEntry } from "../../../lib/toolGroups";
@@ -670,6 +671,7 @@ export function SessionChat() {
     historyRows.length,
   );
   const { onScrollNearEnd } = autofill;
+  const onScrollToIndexFailed = useMessageJump(sessionId, items, listRef, historyQuery);
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     onScrollNearEnd(e.nativeEvent);
     const awayFromLatest = e.nativeEvent.contentOffset.y > JUMP_THRESHOLD_PX;
@@ -807,6 +809,7 @@ export function SessionChat() {
           renderItem={renderItem}
           keyExtractor={keyExtractor}
           onScroll={onScroll}
+          onScrollToIndexFailed={onScrollToIndexFailed}
           onLayout={autofill.onLayout}
           onContentSizeChange={autofill.onContentSizeChange}
           scrollEventThrottle={32}

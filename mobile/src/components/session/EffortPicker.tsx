@@ -5,7 +5,7 @@
 // default.
 import { Flame } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
-import { Modal, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { RemoteInput } from "../../lib/ws";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
@@ -16,6 +16,7 @@ import { Button } from "../ds/Button";
 import { Chip } from "../ds/Chip";
 import { Sheet } from "../ds/Sheet";
 import { useToast } from "../ds/ToastHost";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "whitehot"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
@@ -199,14 +200,7 @@ function EffortPopover({ visible, onClose, children }: { visible: boolean; onClo
   const { scheme } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
 
-  useEffect(() => {
-    if (!visible || Platform.OS !== "web") return;
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [visible, onClose]);
+  useOverlayEscape(visible, onClose);
 
   if (!visible) return null;
 

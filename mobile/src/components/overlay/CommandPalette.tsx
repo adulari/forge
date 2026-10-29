@@ -1,7 +1,12 @@
 // DESIGN_SYSTEM.md §6 CommandPalette — Raycast-grade: centered 560pt (wide) / full-height
-// Sheet (mobile), one SearchField, grouped results (Sessions/Actions/Navigation), keyboard
-// nav + selection tick (web/desktop), ⌘K/Ctrl+K open. FEATURES.md §5 (jump to any session,
-// run slash commands in the attached session, fleet actions, local nav). BUILD_ORDER T4.2.
+// Sheet (mobile), one SearchField, category chips (All, Sessions, Commands, Files, Settings),
+// capped result sections, keyboard nav + ARIA combobox (web/desktop), ⌘K/Ctrl+K open. ⌘P opens
+// the same palette on the Sessions chip. FEATURES.md §5 (jump to any session, run slash commands
+// in the attached session, fleet actions, local nav). BUILD_ORDER T4.2.
+//
+// Where the parts live: ranking and section maths in lib/palette/, local entries in
+// usePaletteSources, search-backed entries (message hits, other hosts, files) in
+// usePaletteSearch, rows and chips in PaletteRows.
 //
 // The wide/centered variant gets its own Cast+Rise hybrid entrance (fade + 12px rise, 200ms) —
 // the compact variant reuses the shared `Sheet` (Anvil) since a full-height mobile sheet is
@@ -9,31 +14,11 @@
 //
 // Sending a slash command (`/plan` etc.) when a session is open: the palette is mounted at
 // the app root, outside any `SessionProvider`, so it has no handle to that session's live
-// socket. Rather than reach into `sessionContext.tsx` (owned by T3.1, risking a merge clash
-// with a parallel task), it opens its OWN short-lived `useSessionSocket` connection — the same
-// exported hook `lib/ws.ts` already offers, and the same "short-lived WS attach" idea
-// FEATURES.md/T4.3's DecisionPeek uses — sends the one prompt once it's open, then tears the
-// connection down. A 5s timeout guards against a session that never opens.
+// socket. It opens its OWN short-lived `useSessionSocket` connection — the same exported hook
+// `lib/ws.ts` already offers — sends the one prompt once it's open, then tears the connection
+// down. A 5s timeout guards against a session that never opens.
 import { router, usePathname } from "expo-router";
-import { openSession } from "../../lib/nav";
-import {
-  Archive,
-  BellDot,
-  Check,
-  Clock,
-  Eye,
-  Flame,
-  History,
-  MoonStar,
-  Plus,
-  QrCode,
-  Search,
-  Settings2,
-  LayoutPanelLeft,
-  Sparkles,
-  SunMedium,
-  Wand2,
-} from "lucide-react-native";
+import { Search } from "lucide-react-native";
 import React, {
   createContext,
   useCallback,
@@ -42,6 +27,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   ActivityIndicator,
@@ -53,7 +39,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  type TextStyle,
   useWindowDimensions,
   View,
 } from "react-native";
@@ -67,48 +52,62 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
-import { ApiError } from "../../lib/api";
-import { entitlementBadge, hostStateText } from "../../lib/anywhere/format";
-import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
-import { runDesktopMenuAction, type DesktopMenuId } from "../../lib/desktopMenu";
 import { haptics } from "../../lib/haptics";
+import { openSession } from "../../lib/nav";
+import { rankItems } from "../../lib/palette/fuzzy";
+import { getRecents, loadRecents, rememberRecent, subscribeRecents } from "../../lib/palette/recents";
 import {
-  useArchiveSession,
-  useCreateSession,
-  usePastSessions,
-  useSessions,
-  useSessionSearch,
-} from "../../lib/queries";
-import { formatShortcut, getResolvedShortcut, type AppShortcutAction, usePaletteHotkey, useShortcutLabel, useThreadSearchHotkey } from "../../lib/shortcuts";
+  FILES_EMPTY_COPY,
+  SECTION_LABELS,
+  buildSections,
+  cycleCategory,
+  isImeComposing,
+  moreRowId,
+  pageIndex,
+  selectableRows,
+  stepIndex,
+  type PaletteCategory,
+  type PaletteRow,
+  type PaletteSection,
+} from "../../lib/palette/sections";
+import { usePaletteHotkey, useThreadSearchHotkey } from "../../lib/shortcuts";
+import { useCreateSession, usePastSessions } from "../../lib/queries";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 import { useSessionSocket } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
-import { depthDark, depthLight, radii, space, type StatusDotState } from "../../theme/tokens";
-import { formatCwd, formatRelativeTime, monoFamily, type as typeScale } from "../../theme/typography";
+import { depthDark, depthLight, radii, space } from "../../theme/tokens";
+import { formatCwd, formatRelativeTime, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
-import { HostDot } from "../anywhere/HostDot";
 import { DecisionPeek } from "../cards/DecisionPeek";
-import { Badge } from "../ds/Badge";
 import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
-import { IconButton } from "../ds/IconButton";
-import { ListRow } from "../ds/ListRow";
 import { SearchField } from "../ds/SearchField";
 import { SectionHeader } from "../ds/SectionHeader";
 import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
+import { useActiveSessionId } from "../shell/activeSession";
 import { SchedulesPanel } from "../shell/SchedulesPanel";
 import { WhatsNewPanel } from "../shell/WhatsNewPanel";
+import { CategoryChips, KeyHint, MoreOption, PaletteOption } from "./PaletteRows";
+import { optionDomId, PALETTE_LISTBOX_ID, type PaletteItem, type PaletteMode } from "./paletteTypes";
+import { usePaletteSearch } from "./usePaletteSearch";
+import { usePaletteSources } from "./usePaletteSources";
 
-import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
-import { mergeCommandSources } from "../../lib/commandSources";
+export type { PaletteMode } from "./paletteTypes";
+
 const TRANSIENT_SEND_TIMEOUT_MS = 5000;
 // D/W Palette (docs/design/machined INVENTORY.md): centered panel 620-660px.
 const PANEL_WIDTH = 620;
-const ICON_SIZE = 18;
-const ICON_STROKE = 1.75;
+// Rows rendered in the commit that opens the palette (the panel shows ~10 at desktop height).
+const FIRST_PAINT_ROWS = 12;
+const NO_EXPANSION: ReadonlySet<PaletteSection> = new Set();
+// The files header carries a project and branch name, whose case is not ours to change.
+const LITERAL_HEADER = { textTransform: "none" } as const;
+// Marks the palette's DOM subtree so its own search <input> is not mistaken for "typing elsewhere".
+const PALETTE_ROOT_PROPS: object = Platform.OS === "web" ? { dataSet: { paletteRoot: "true" } } : {};
 
 /** D Palette footer breadcrumb (`Fleet · Inbox • · History · Settings`) — a clickable
  * tab-bar equivalent for wide layouts that have no tab bar of their own. */
@@ -119,57 +118,9 @@ const BREADCRUMB_ROUTES: { href: "/" | "/inbox" | "/history" | "/settings"; labe
   { href: "/settings", label: "Settings" },
 ];
 
-/** Prototype's mono keycap hint (`esc`, `⌘N`) — bordered, ink4, monoMeta. Web/desktop only;
- * keyboard hints have no meaning on a touch sheet. */
-function KeyHint({ label }: { label: string }) {
-  const tokens = useTokens();
-  return (
-    <View style={[styles.keyHint, { borderColor: tokens.border }]}>
-      <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{label}</Text>
-    </View>
-  );
-}
-
-function activeSessionIdFromPathname(pathname: string): string | null {
-  const match = /^\/session\/([^/]+)/.exec(pathname);
-  return match ? match[1] : null;
-}
-
-type PaletteGroupKey = "sessions" | "actions" | "anywhere" | "navigation";
-
-interface PaletteItem {
-  id: string;
-  group: PaletteGroupKey;
-  title: string;
-  subtitle?: string;
-  keywords?: string;
-  disabled?: boolean;
-  leading?: React.ReactNode;
-  trailing?: React.ReactNode;
-  /** Set when `trailing` renders its own interactive control (e.g. a trailing IconButton) — see ListRowProps.hasInteractiveTrailing. */
-  trailingInteractive?: boolean;
-  onSelect: () => void;
-}
-
-const GROUP_LABELS: Record<PaletteGroupKey, string> = {
-  sessions: "Sessions",
-  actions: "Actions",
-  anywhere: "Anywhere",
-  navigation: "Go to",
-};
-// Rows rendered in the commit that opens the palette (the panel shows ~10 at desktop height).
-const FIRST_PAINT_ROWS = 12;
-const GROUP_ORDER: PaletteGroupKey[] = ["sessions", "actions", "anywhere", "navigation"];
-
 // ---------------------------------------------------------------------------
 // PaletteHost / usePalette — open-state provider, mounted once at the app root.
 // ---------------------------------------------------------------------------
-
-/** `"search"` is the ⌘P thread-search mode (D Thread Search / M... — INVENTORY.md):
- * same panel chrome, but the result list is session/history matches only, with the
- * query term highlighted, instead of the default Sessions/Actions/Anywhere/Go-to
- * groups. */
-export type PaletteMode = "default" | "search";
 
 interface PaletteContextValue {
   isOpen: boolean;
@@ -219,44 +170,15 @@ export interface CommandPaletteProps {
   onClose: () => void;
 }
 
-interface WorkbenchPaletteEntry {
-  menu: DesktopMenuId;
-  title: string;
-  keywords: string;
-  shortcut?: AppShortcutAction;
+function activeSessionIdFromPathname(pathname: string): string | null {
+  const match = /^\/session\/([^/]+)/.exec(pathname);
+  return match ? match[1] : null;
 }
-
-const WORKBENCH_PALETTE_ENTRIES: readonly WorkbenchPaletteEntry[] = [
-  { menu: "view:split-pane", title: "Split pane", keywords: "split pane panes side by side multiple sessions column", shortcut: "workbench.split" },
-  { menu: "view:pane-close", title: "Close pane", keywords: "close pane unsplit", shortcut: "workbench.closePane" },
-  { menu: "view:pane-maximize", title: "Maximize pane", keywords: "maximize restore zoom pane focus", shortcut: "workbench.maximize" },
-  { menu: "view:pane-next", title: "Focus next pane", keywords: "next pane focus cycle", shortcut: "workbench.paneNext" },
-  { menu: "view:pane-prev", title: "Focus previous pane", keywords: "previous pane focus cycle", shortcut: "workbench.panePrev" },
-  { menu: "view:layout-focus", title: "Layout: Focus", keywords: "layout preset focus single one pane" },
-  { menu: "view:layout-side-by-side", title: "Layout: Side by side", keywords: "layout preset side by side two panes split" },
-  { menu: "view:layout-grid", title: "Layout: Grid 2 x 2", keywords: "layout preset grid four panes" },
-  { menu: "view:layout-review", title: "Layout: Review", keywords: "layout preset review git diff tasks" },
-  { menu: "view:layout-reset", title: "Reset layout", keywords: "reset layout default panes docks sizes" },
-  { menu: "view:sidebar", title: "Toggle sidebar", keywords: "sidebar rail collapse expand", shortcut: "shell.sidebar" },
-  { menu: "view:tasks", title: "Toggle Tasks panel", keywords: "tasks todo list dock panel right", shortcut: "workbench.tasks" },
-  { menu: "view:agents", title: "Toggle Agents panel", keywords: "agents subagents dock panel right", shortcut: "workbench.agents" },
-  { menu: "view:plan", title: "Toggle Plan panel", keywords: "plan steps dock panel right", shortcut: "workbench.plan" },
-  { menu: "view:files", title: "Toggle Files panel", keywords: "files workspace browser dock panel right", shortcut: "workbench.files" },
-  { menu: "view:git-review", title: "Toggle Git review", keywords: "git review diff changes dock panel right", shortcut: "workbench.gitReview" },
-  { menu: "view:terminal", title: "Toggle Terminal", keywords: "terminal shell dock bottom", shortcut: "workbench.terminal" },
-  { menu: "view:browser-preview", title: "Toggle Browser preview", keywords: "browser preview web dock panel right" },
-  { menu: "view:usage", title: "Toggle usage panel", keywords: "usage dock panel limits quota subscription spend right sidebar", shortcut: "shell.usage" },
-];
 
 export function CommandPalette({ visible, mode = "default", onClose }: CommandPaletteProps) {
   const tokens = useTokens();
-  const { scheme, setScheme } = useTheme();
+  const { scheme } = useTheme();
   const { isCompact } = useBreakpoint();
-  const newSessionHint = useShortcutLabel("session.new");
-  const fleetHint = useShortcutLabel("nav.fleet");
-  const inboxHint = useShortcutLabel("nav.inbox");
-  const historyHint = useShortcutLabel("nav.history");
-  const settingsHint = useShortcutLabel("nav.settings");
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const toast = useToast();
   const pathname = usePathname();
@@ -277,41 +199,35 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
     };
   }, []);
 
-  const { data: sessions } = useSessions();
-  const archiveSession = useArchiveSession();
-  const skillCommands = useSkillCommands();
-  const { signedIn: anywhereSignedIn, account: anywhereAccount } = useAnywhere();
-  const { hosts: anywhereHosts } = useAnywhereHosts();
-
   const [query, setQuery] = useState("");
+  const [category, setCategory] = useState<PaletteCategory>("all");
+  const [expanded, setExpanded] = useState<ReadonlySet<PaletteSection>>(NO_EXPANSION);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  // Ref to the SearchField's wrapping DOM node — lets the window keydown handler below tell
-  // "typing in the palette's own search box" apart from "typing in some other input", the same
-  // distinction Composer.tsx makes for its own TextInput at lines 419/460. SearchField/Input
-  // don't forward a ref to the underlying <input> (out of scope here), so this wraps one level
-  // up and uses `.contains()` instead of an identity check.
-  const searchFieldRef = useRef<React.ComponentRef<typeof View>>(null);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
   const [whatsNewVisible, setWhatsNewVisible] = useState(false);
   const [schedulesVisible, setSchedulesVisible] = useState(false);
 
-  const activeSessionId = useMemo(() => activeSessionIdFromPathname(pathname), [pathname]);
+  const routedSessionId = useMemo(() => activeSessionIdFromPathname(pathname), [pathname]);
+  const shellSessionId = useActiveSessionId();
+  const recents = useSyncExternalStore(subscribeRecents, getRecents, getRecents);
 
   // First paint renders only what fits on screen; the rest follows on the next tick. Mounting
-  // every row (each a Pressable + ListRow + icons) in the open-keystroke's own commit was
-  // two thirds of the time to a visible palette.
+  // every row in the open-keystroke's own commit was two thirds of the time to a visible palette.
   const [rowLimit, setRowLimit] = useState(FIRST_PAINT_ROWS);
 
-  // Reset search + keyboard selection on every fresh open.
+  // Reset search, category + keyboard selection on every fresh open.
   useEffect(() => {
     if (visible) {
+      void loadRecents();
       setQuery("");
+      setCategory(mode === "search" ? "sessions" : "all");
+      setExpanded(NO_EXPANSION);
       setSelectedIndex(0);
       setRowLimit(FIRST_PAINT_ROWS);
       const timer = setTimeout(() => setRowLimit(Number.POSITIVE_INFINITY), 80);
       return () => clearTimeout(timer);
     }
-  }, [visible]);
+  }, [visible, mode]);
 
   const close = onClose;
 
@@ -352,433 +268,162 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
 
   const runSlashCommand = useCallback(
     (cmd: string) => {
-      if (!activeSessionId) return;
+      if (!routedSessionId) return;
       close();
-      router.push(`/session/${activeSessionId}`);
-      setTransient({ sessionId: activeSessionId, text: cmd });
+      router.push(`/session/${routedSessionId}`);
+      setTransient({ sessionId: routedSessionId, text: cmd });
     },
-    [activeSessionId, close],
+    [routedSessionId, close],
   );
 
   // -------------------------------------------------------------------------
-  // Result groups
+  // Entries
   // -------------------------------------------------------------------------
+  const openWhatsNew = useCallback(() => setWhatsNewVisible(true), []);
+  const openSchedules = useCallback(() => setSchedulesVisible(true), []);
+  const { sessions, sessionItems, commandItems, settingsItems } = usePaletteSources({
+    close,
+    isCompact,
+    activeSessionId: routedSessionId,
+    recents,
+    openWhatsNew,
+    openSchedules,
+    peekDecision: setPeekSessionId,
+    runSlashCommand,
+  });
 
-  const sessionItems = useMemo<PaletteItem[]>(
-    () =>
-      (sessions ?? []).map((s) => {
-        const title = s.title || `session ${s.id.slice(0, 8)}`;
-        const state: StatusDotState = s.waiting ? "waiting" : s.busy ? "busy" : "idle";
-        return {
-          id: `session:${s.id}`,
-          group: "sessions",
-          title,
-          subtitle: s.cwd,
-          keywords: `${title} ${s.cwd} ${s.model}`,
-          leading: <StatusDot state={state} />,
-          trailing: s.waiting ? (
-            <View style={styles.trailingRow}>
-              <Badge label="NEEDS YOU" tone="danger" />
-              <IconButton
-                icon={<Eye size={16} strokeWidth={ICON_STROKE} color={tokens.ink3} />}
-                onPress={() => {
-                  close();
-                  setPeekSessionId(s.id);
-                }}
-                accessibilityLabel={`Review decision for ${title}`}
-              />
-            </View>
-          ) : undefined,
-          trailingInteractive: s.waiting,
-          onSelect: () => {
-            close();
-            openSession(s.id);
-          },
-        };
-      }),
-    [sessions, tokens, close],
-  );
+  const q = query.trim();
+  const searchSessionsEnabled = visible && (category === "all" || category === "sessions");
+  const searchFilesEnabled = visible && (category === "all" || category === "files");
+  const search = usePaletteSearch({
+    query,
+    visible,
+    searchSessionsEnabled,
+    searchFilesEnabled,
+    isCompact,
+    activeSessionId: shellSessionId,
+    sessions,
+    close,
+  });
 
-  const actionItems = useMemo<PaletteItem[]>(() => {
-    const items: PaletteItem[] = [
-      {
-        id: "action:new-session",
-        group: "actions",
-        title: "Forge a session",
-        keywords: "new session create start forge task",
-        leading: <Plus size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        trailing: !isCompact ? <KeyHint label={newSessionHint} /> : undefined,
-        onSelect: () => {
-          close();
-          router.push("/new-session");
-        },
-      },
-    ];
-
-    if (activeSessionId) {
-      items.push({
-        id: "action:archive-current",
-        group: "actions",
-        title: "Archive current session",
-        keywords: "archive stop hide current",
-        leading: <Archive size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        onSelect: () => {
-          const id = activeSessionId;
-          close();
-          archiveSession.mutate(id, {
-            onSuccess: () => {
-              haptics.allow();
-              toast.show("session archived");
-            },
-            onError: (err) => {
-              haptics.mergeConflict();
-              toast.show(err instanceof ApiError ? err.message : "archive failed", { tone: "danger" });
-            },
-          });
-        },
-      });
-    }
-
-    // The workbench (panes, docks, layouts) lives in the wide desktop shell only; Linux and
-    // Windows have no menu bar, so this is their menu-equivalent route to every entry, alongside
-    // the keyboard shortcut and the title-bar Layout menu. Each id dispatches the same action
-    // the macOS menu item does.
-    if (!isCompact) {
-      for (const entry of WORKBENCH_PALETTE_ENTRIES) {
-        items.push({
-          id: `action:${entry.menu}`,
-          group: "actions",
-          title: entry.title,
-          keywords: entry.keywords,
-          leading: <LayoutPanelLeft size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-          trailing: entry.shortcut ? <KeyHint label={formatShortcut(getResolvedShortcut(entry.shortcut))} /> : undefined,
-          onSelect: () => {
-            close();
-            runDesktopMenuAction(entry.menu);
-          },
-        });
-      }
-    }
-
-    items.push({
-      id: "action:theme-toggle",
-      group: "actions",
-      title: scheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
-      keywords: "theme dark light appearance",
-      leading:
-        scheme === "dark" ? (
-          <SunMedium size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />
-        ) : (
-          <MoonStar size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />
-        ),
-      onSelect: () => {
-        close();
-        setScheme(scheme === "dark" ? "light" : "dark");
-      },
-    });
-
-    items.push({
-      id: "action:whats-new",
-      group: "actions",
-      title: "What's New",
-      keywords: "whats new changelog release notes updates",
-      leading: <Sparkles size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-      onSelect: () => {
-        close();
-        setWhatsNewVisible(true);
-      },
-    });
-
-    items.push({
-      id: "action:schedules",
-      group: "actions",
-      title: "Schedules",
-      keywords: "schedules recurring cron scheduled runs",
-      leading: <Clock size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-      onSelect: () => {
-        close();
-        setSchedulesVisible(true);
-      },
-    });
-
-    const allCommands = mergeCommandSources(BUILTIN_COMMANDS, skillCommands);
-    for (const cmd of allCommands) {
-      items.push({
-        id: `action:cmd:${cmd.name}`,
-        group: "actions",
-        title: cmd.name,
-        subtitle: cmd.description ?? (activeSessionId ? "send to the current session" : "open a session first"),
-        keywords: cmd.description ? `${cmd.name} ${cmd.description}` : cmd.name,
-        disabled: !activeSessionId,
-        leading: <Wand2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        onSelect: () => runSlashCommand(cmd.name),
-      });
-    }
-
-    return items;
-  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact, newSessionHint]);
-
-  const navigationItems = useMemo<PaletteItem[]>(
-    () => [
-      {
-        id: "nav:fleet",
-        group: "navigation",
-        title: "Fleet",
-        trailing: !isCompact ? <KeyHint label={fleetHint} /> : undefined,
-        keywords: "fleet home sessions live",
-        leading: <Flame size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        onSelect: () => {
-          close();
-          router.push("/");
-        },
-      },
-      {
-        id: "nav:inbox",
-        group: "navigation",
-        title: "Inbox",
-        trailing: !isCompact ? <KeyHint label={inboxHint} /> : undefined,
-        keywords: "inbox waiting decisions needs you",
-        leading: <BellDot size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        onSelect: () => {
-          close();
-          router.push("/inbox");
-        },
-      },
-      {
-        id: "nav:history",
-        group: "navigation",
-        title: "History",
-        trailing: !isCompact ? <KeyHint label={historyHint} /> : undefined,
-        keywords: "history past archived",
-        leading: <History size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        onSelect: () => {
-          close();
-          router.push("/history");
-        },
-      },
-      {
-        id: "nav:settings",
-        group: "navigation",
-        title: "Settings",
-        trailing: !isCompact ? <KeyHint label={settingsHint} /> : undefined,
-        keywords: "settings preferences servers",
-        leading: <Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        onSelect: () => {
-          close();
-          router.push("/settings");
-        },
-      },
-    ],
-    [tokens, close, isCompact, fleetHint, inboxHint, historyHint, settingsHint],
-  );
-
-  // Forge Anywhere: gated entirely on `signedIn` — a signed-out user sees no "Anywhere"
-  // group at all (empty array below), zero behavioral change from today's palette.
-  const anywhereItems = useMemo<PaletteItem[]>(() => {
-    if (!anywhereSignedIn) return [];
-
-    const items: PaletteItem[] = anywhereHosts.map((host) => ({
-      id: `anywhere:host:${host.id}`,
-      group: "anywhere",
-      title: `Go to host: ${host.name}`,
-      keywords: `anywhere host ${host.name}`,
-      trailing: (
-        <View style={styles.trailingRow}>
-          <HostDot state={host.state} size={5} />
-          <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{hostStateText(host)}</Text>
-        </View>
-      ),
-      onSelect: () => {
-        close();
-        router.push(`/anywhere/host/${host.id}`);
-      },
-    }));
-
-    items.push({
-      id: "anywhere:pair",
-      group: "anywhere",
-      title: "Pair a new device…",
-      keywords: "anywhere pair device qr enroll",
-      leading: <QrCode size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-      onSelect: () => {
-        close();
-        router.push("/anywhere/pair");
-      },
-    });
-
-    items.push({
-      id: "anywhere:settings",
-      group: "anywhere",
-      title: "Anywhere settings",
-      keywords: "anywhere settings entitlement plan billing devices hosts storage",
-      leading: <Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-      trailing: anywhereAccount ? (
-        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{entitlementBadge(anywhereAccount).label.toLowerCase()}</Text>
-      ) : undefined,
-      onSelect: () => {
-        close();
-        router.push("/anywhere");
-      },
-    });
-
-    // Session-scoped Anywhere actions ("Hand off workspace…", "Create encrypted replay
-    // share…", "Switch transport: …") need to know the *active session's* host/transport/
-    // share state, not just which route is open — `activeSessionId` (above) only comes
-    // from the pathname, and the palette has no other session-context plumbing to source
-    // that from. Only the 3 global actions above are wired; contextual ones are deferred
-    // until the palette can query per-session Anywhere state.
-
-    return items;
-  }, [anywhereSignedIn, anywhereHosts, anywhereAccount, tokens, close]);
-
-  // -------------------------------------------------------------------------
-  // Thread search (⌘P) — two-or-more-character queries use the daemon's bounded
-  // global metadata/transcript search. Live sessions open directly; past sessions
-  // resume their original id so their durable transcript remains attached.
-  // -------------------------------------------------------------------------
+  // Past sessions only join the Sessions list before a search term narrows it; a term goes to the
+  // daemon's transcript search instead.
   const createSession = useCreateSession();
   const pastSessionsQuery = usePastSessions();
-  const pastRows = useMemo(() => pastSessionsQuery.data?.pages.flat() ?? [], [pastSessionsQuery.data]);
-  const globalSearch = useSessionSearch(mode === "search" ? query : "", 40);
-
-  const threadItems = useMemo<PaletteItem[]>(() => {
-    if (mode !== "search") return [];
-    if (query.trim().length >= 2) {
-      return (globalSearch.data ?? []).map((match) => {
-        const title = match.title || `session ${match.id.slice(0, 8)}`;
-        const age = formatRelativeTime(match.last_activity * 1000);
-        const excerpt = match.match_excerpt?.replace(/\s+/g, " ").trim();
-        return {
-          id: `thread:search:${match.id}`,
-          group: "sessions",
-          title,
-          subtitle: excerpt
-            ? `${formatCwd(match.cwd)} · ${age} — ${excerpt}`
-            : `${formatCwd(match.cwd)} · ${age}`,
-          keywords: `${match.id} ${title} ${match.cwd} ${excerpt ?? ""}`,
-          leading: <StatusDot state={match.running ? "idle" : "done"} />,
-          onSelect: () => {
-            close();
-            if (match.running) {
-              openSession(match.id);
-              return;
-            }
-            createSession.mutate(
-              { resume: match.id },
-              { onSuccess: (res) => openSession(res.id) },
-            );
-          },
-        };
-      });
-    }
-    const live: PaletteItem[] = (sessions ?? []).map((s) => {
-      const title = s.title || `session ${s.id.slice(0, 8)}`;
-      const state: StatusDotState = s.waiting ? "waiting" : s.busy ? "busy" : "idle";
-      const status = s.waiting ? "needs you" : s.busy ? "forging" : formatRelativeTime(s.last_activity * 1000);
-      return {
-        id: `thread:live:${s.id}`,
-        group: "sessions",
-        title,
-        subtitle: `${formatCwd(s.cwd)} · ${status}`,
-        keywords: `${title} ${s.cwd}`,
-        leading: <StatusDot state={state} />,
-        onSelect: () => {
-          close();
-          openSession(s.id);
-        },
-      };
-    });
-    const past: PaletteItem[] = pastRows.map((p) => {
+  const pastItems = useMemo<PaletteItem[]>(() => {
+    if (category !== "sessions" || q.length >= 2) return [];
+    return (pastSessionsQuery.data?.pages.flat() ?? []).map((p) => {
       const title = p.title || `session ${p.id.slice(0, 8)}`;
       const age = formatRelativeTime(p.last_activity * 1000);
       return {
-        id: `thread:past:${p.id}`,
-        group: "sessions",
+        id: `past:${p.id}`,
+        section: "sessions" as const,
         title,
         subtitle: p.preview ? `${formatCwd(p.cwd)} · ${age} — ${p.preview}` : `${formatCwd(p.cwd)} · ${age}`,
-        keywords: `${title} ${p.cwd} ${p.preview ?? ""}`,
+        keywords: p.cwd,
+        recency: p.last_activity,
         leading: <StatusDot state="done" />,
         onSelect: () => {
           close();
-          createSession.mutate(
-            { resume: p.id },
-            { onSuccess: (res) => openSession(res.id) },
-          );
+          createSession.mutate({ resume: p.id }, { onSuccess: (res) => openSession(res.id) });
         },
       };
     });
-    return [...live, ...past];
-  }, [mode, query, globalSearch.data, sessions, pastRows, close, createSession]);
+  }, [category, q, pastSessionsQuery.data, close, createSession]);
 
-  const allItems = useMemo(
-    () =>
-      mode === "search"
-        ? threadItems
-        : [...sessionItems, ...actionItems, ...anywhereItems, ...navigationItems],
-    [mode, threadItems, sessionItems, actionItems, anywhereItems, navigationItems],
-  );
+  const ranked = useMemo(() => {
+    const hitSessionIds = new Set(search.sessionHits.map((hit) => hit.sessionId).filter(Boolean));
+    const sessionPool = [
+      ...search.sessionHits,
+      ...sessionItems.filter((item) => !hitSessionIds.has(item.sessionId)),
+      ...pastItems,
+    ];
+    return rankItems([...sessionPool, ...commandItems, ...search.fileItems, ...settingsItems], q);
+  }, [search.sessionHits, search.fileItems, sessionItems, pastItems, commandItems, settingsItems, q]);
 
-  const q = query.trim().toLowerCase();
-  const filteredItems = useMemo(() => {
-    if (!q) return allItems;
-    return allItems.filter((item) =>
-      `${item.title} ${item.subtitle ?? ""} ${item.keywords ?? ""}`.toLowerCase().includes(q),
-    );
-  }, [allItems, q]);
+  const counts = useMemo(() => {
+    const bySection: Partial<Record<PaletteCategory, number>> = {};
+    for (const item of ranked) bySection[item.section] = (bySection[item.section] ?? 0) + 1;
+    return q ? { ...bySection, all: ranked.length } : {};
+  }, [ranked, q]);
 
-  const groupedItems = useMemo(
-    () => GROUP_ORDER.map((g) => ({ group: g, items: filteredItems.filter((i) => i.group === g) })),
-    [filteredItems],
-  );
-
-  // Keyboard nav only tracks enabled (selectable) rows.
-  const navigableItems = useMemo(() => filteredItems.filter((i) => !i.disabled), [filteredItems]);
-  const selectedId = navigableItems[selectedIndex]?.id;
+  const blocks = useMemo(() => buildSections(ranked, category, expanded), [ranked, category, expanded]);
+  const rows = useMemo(() => selectableRows(blocks), [blocks]);
 
   useEffect(() => {
-    setSelectedIndex((index) => Math.min(index, Math.max(0, navigableItems.length - 1)));
-  }, [navigableItems.length]);
+    setSelectedIndex(0);
+  }, [q, category]);
+  useEffect(() => {
+    setSelectedIndex((index) => Math.min(index, Math.max(0, rows.length - 1)));
+  }, [rows.length]);
+  const selectedRow = rows[selectedIndex];
+  const selectedId = selectedRow?.id;
+
+  const chooseCategory = useCallback((next: PaletteCategory) => {
+    setCategory(next);
+    setExpanded(NO_EXPANSION);
+  }, []);
+
+  const activate = useCallback(
+    (row: PaletteRow<PaletteItem> | undefined) => {
+      if (!row) return;
+      if (row.kind === "more") {
+        if (category === "all") chooseCategory(row.section);
+        else setExpanded((prev) => new Set(prev).add(row.section));
+        return;
+      }
+      if (row.item.section === "commands" || row.item.section === "settings") rememberRecent(row.item.id);
+      row.item.onSelect();
+    },
+    [category, chooseCategory],
+  );
 
   // -------------------------------------------------------------------------
+  // Keyboard (web/desktop). Escape belongs to the overlay stack, not to this handler.
+  // -------------------------------------------------------------------------
+  useOverlayEscape(visible && !isCompact, close);
+
   useEffect(() => {
     if (Platform.OS !== "web" || !visible) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (isImeComposing(e)) return;
+      if (e.key === "Tab" && e.ctrlKey) {
         e.preventDefault();
-        close();
+        chooseCategory(cycleCategory(category, e.shiftKey ? -1 : 1));
+        haptics.select();
         return;
       }
       const target = e.target as HTMLElement | null;
       // The autofocused SearchField is itself an <input> — without this exemption `isEditing`
       // is true the instant the palette opens, and Arrow/Enter never reach the branches below.
-      const searchNode = searchFieldRef.current as unknown as HTMLElement | null;
-      const withinSearchField = !!(target && searchNode?.contains(target));
+      const withinPalette = typeof target?.closest === "function" && target.closest("[data-palette-root]") != null;
       const isEditing =
-        !withinSearchField &&
+        !withinPalette &&
         (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable);
       if (isEditing) return;
-      if (e.key === "ArrowDown") {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedIndex((i) => (navigableItems.length ? (i + 1) % navigableItems.length : 0));
+        setSelectedIndex((i) => stepIndex(i, e.key === "ArrowDown" ? 1 : -1, rows.length));
         haptics.select();
-        return;
-      }
-      if (e.key === "ArrowUp") {
+      } else if (e.key === "PageDown" || e.key === "PageUp") {
         e.preventDefault();
-        setSelectedIndex((i) =>
-          navigableItems.length ? (i - 1 + navigableItems.length) % navigableItems.length : 0,
-        );
+        setSelectedIndex((i) => pageIndex(i, e.key === "PageDown" ? 1 : -1, rows.length));
         haptics.select();
-        return;
-      }
-      if (e.key === "Enter") {
+      } else if (e.key === "Enter") {
         e.preventDefault();
-        navigableItems[selectedIndex]?.onSelect();
+        activate(rows[selectedIndex]);
       }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [visible, navigableItems, selectedIndex, close]);
+    // Capture phase: react-native-web's TextInput stops keydown from bubbling past itself, so a
+    // bubble listener never sees a key typed in the search field.
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [visible, rows, selectedIndex, category, activate, chooseCategory]);
+
+  useEffect(() => {
+    if (Platform.OS !== "web" || !visible || !selectedId) return;
+    document.getElementById(optionDomId(selectedId))?.scrollIntoView({ block: "nearest" });
+  }, [visible, selectedId]);
 
   // -------------------------------------------------------------------------
   // Wide/centered variant: custom Cast+Rise hybrid entrance (fade + 12px rise, 200ms).
@@ -851,89 +496,166 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
   const panelWidth = Math.min(PANEL_WIDTH, windowWidth - space.space32 * 2);
   const panelMaxHeight = windowHeight * 0.7;
 
-  const hasResults = filteredItems.length > 0;
-  const isSearchMode = mode === "search";
-  const isSearching =
-    isSearchMode
-    && q.length >= 2
-    && (globalSearch.isDebouncing || globalSearch.isFetching);
-  const searchFailed = isSearchMode && q.length >= 2 && globalSearch.isError;
   const waitingBadge = (sessions ?? []).some((s) => s.waiting);
+  const sessionsInView = category === "all" || category === "sessions";
+  const filesInView = category === "all" || category === "files";
+  const searchPending = (sessionsInView && search.sessionPhase === "searching") || (filesInView && search.filesPhase === "searching");
+  const sessionsUnavailable = sessionsInView && (search.sessionPhase === "error" || search.sessionPhase === "indexing");
+  const filesBroken = category === "files" && search.filesPhase === "error";
+
+  const comboboxProps =
+    Platform.OS === "web"
+      ? ({
+          role: "combobox",
+          "aria-expanded": rows.length > 0,
+          "aria-controls": PALETTE_LISTBOX_ID,
+          "aria-autocomplete": "list",
+          "aria-activedescendant": selectedId ? optionDomId(selectedId) : undefined,
+        } as object)
+      : {};
+  const listboxProps =
+    Platform.OS === "web"
+      ? ({ nativeID: PALETTE_LISTBOX_ID, role: "listbox", "aria-label": "Results" } as object)
+      : {};
+
+  const resultLabel = rows.length === 1 ? "1 result" : `${rows.length} results`;
+
+  const statusLine = sessionsUnavailable ? (
+    <View style={styles.statusLine}>
+      {search.sessionPhase === "indexing" ? <ActivityIndicator size="small" color={tokens.accent} /> : null}
+      <Text style={[typeScale.monoMeta, styles.statusText, { color: tokens.ink3 }]} numberOfLines={1}>
+        {search.sessionPhase === "indexing" ? "Indexing session history…" : "Message search unavailable"}
+      </Text>
+      <Pressable onPress={search.retry} accessibilityRole="button" accessibilityLabel="Retry message search">
+        <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>Retry</Text>
+      </Pressable>
+    </View>
+  ) : searchPending && rows.length > 0 ? (
+    <View style={styles.statusLine}>
+      <ActivityIndicator size="small" color={tokens.accent} />
+      <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>
+        {search.remoteHostsSearching > 0 ? `Searching ${search.remoteHostsSearching + 1} hosts…` : "Searching…"}
+      </Text>
+    </View>
+  ) : null;
+
+  const emptyBody = (() => {
+    if (category === "files" && (search.filesEmpty === "no-session" || search.filesEmpty === "short-query")) {
+      return <EmptyState icon={Search} message={FILES_EMPTY_COPY[search.filesEmpty]} />;
+    }
+    if (filesBroken) {
+      return (
+        <EmptyState
+          icon={Search}
+          message="Couldn't search file names"
+          action={<Button label="Retry" variant="secondary" onPress={search.retry} />}
+        />
+      );
+    }
+    if (searchPending) {
+      return (
+        <View style={styles.searching}>
+          <ActivityIndicator color={tokens.accent} />
+          <Text style={[typeScale.sub, { color: tokens.ink3 }]}>
+            {category === "files" ? "Searching file names…" : "Searching every session…"}
+          </Text>
+        </View>
+      );
+    }
+    if (sessionsUnavailable) {
+      return (
+        <EmptyState
+          icon={Search}
+          message={search.sessionPhase === "indexing" ? "Indexing session history…" : (search.sessionError ?? "Message search unavailable")}
+          action={<Button label="Retry" variant="secondary" onPress={search.retry} />}
+        />
+      );
+    }
+    return <EmptyState icon={Search} message={category === "files" ? "No file names match" : "no matches for that search"} />;
+  })();
 
   let rowBudget = rowLimit;
   const body = (
-    <View style={[styles.body, { paddingTop: Math.max(12, insets.top) }]}>
+    <View style={[styles.body, { paddingTop: Math.max(12, insets.top) }]} {...PALETTE_ROOT_PROPS}>
       <View style={styles.searchWrap}>
-        <View style={styles.searchField} ref={searchFieldRef}>
+        <View style={styles.searchField}>
           <SearchField
             value={query}
             onChangeText={setQuery}
-            placeholder={isSearchMode ? "search sessions and history…" : "jump to a session, run a command…"}
+            placeholder={isCompact ? "Search or run a command…" : "jump to a session, run a command, find a file…"}
             showCancel={false}
             autoFocus={visible}
-            accessibilityLabel={isSearchMode ? "Thread search" : "Command palette search"}
+            accessibilityLabel="Command palette search"
+            {...comboboxProps}
           />
         </View>
-        {isSearchMode && q ? (
-          <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>
-            {filteredItems.length} match{filteredItems.length === 1 ? "" : "es"}
-          </Text>
-        ) : null}
         {!isCompact ? <KeyHint label="esc" /> : null}
       </View>
+      <CategoryChips active={category} counts={counts} onSelect={chooseCategory} />
+      {statusLine}
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={[styles.scrollContent, { paddingBottom: keyboardHeight + insets.bottom + space.space24 }]}
         keyboardShouldPersistTaps="handled"
       >
-        {hasResults ? (
-          isSearchMode ? (
-            filteredItems.slice(0, rowLimit).map((item) => (
-              <ThreadRow key={item.id} item={item} query={q} selected={item.id === selectedId} />
-            ))
-          ) : (
-            groupedItems.map(({ group, items }) => {
-              const shown = items.slice(0, Math.max(0, rowBudget));
+        {rows.length === 0 && category === "files" && search.filesEmpty === "idle" ? (
+          <SectionHeader style={LITERAL_HEADER}>{search.filesHeader}</SectionHeader>
+        ) : null}
+        {rows.length > 0 ? (
+          <View {...listboxProps}>
+            {blocks.map((block) => {
+              const shown = block.rows.slice(0, Math.max(0, rowBudget));
               rowBudget -= shown.length;
-              return shown.length > 0 ? (
-                <View key={group}>
-                  <SectionHeader>{GROUP_LABELS[group]}</SectionHeader>
-                  {shown.map((item) => (
-                    <PaletteRow key={item.id} item={item} selected={item.id === selectedId} />
-                  ))}
+              if (shown.length === 0) return null;
+              const label = block.section === "files" ? search.filesHeader : SECTION_LABELS[block.section];
+              return (
+                <View
+                  key={block.section}
+                  {...(Platform.OS === "web" ? ({ role: "group", "aria-label": label } as object) : {})}
+                >
+                  <SectionHeader style={block.section === "files" ? LITERAL_HEADER : undefined}>{label}</SectionHeader>
+                  {shown.map((row) => {
+                    const index = rows.findIndex((candidate) => candidate.id === row.id);
+                    if (row.kind === "more") {
+                      return (
+                        <MoreOption
+                          key={row.id}
+                          id={moreRowId(row.section)}
+                          hidden={row.hidden}
+                          label={SECTION_LABELS[row.section]}
+                          selected={row.id === selectedId}
+                          onPress={() => activate(row)}
+                          onHover={() => setSelectedIndex(index)}
+                        />
+                      );
+                    }
+                    return (
+                      <PaletteOption
+                        key={row.id}
+                        item={row.item}
+                        query={q}
+                        selected={row.id === selectedId}
+                        onActivate={() => activate(row)}
+                        onHover={() => index >= 0 && setSelectedIndex(index)}
+                      />
+                    );
+                  })}
                 </View>
-              ) : null;
-            })
-          )
-        ) : isSearching ? (
-          <View style={styles.searching}>
-            <ActivityIndicator color={tokens.accent} />
-            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Searching every session…</Text>
+              );
+            })}
           </View>
-        ) : searchFailed ? (
-          <EmptyState
-            icon={Search}
-            message={
-              globalSearch.error instanceof ApiError
-                ? globalSearch.error.message
-                : "couldn't search session history"
-            }
-            action={
-              <Button
-                label="Retry"
-                variant="secondary"
-                onPress={() => {
-                  void globalSearch.refetch();
-                }}
-              />
-            }
-          />
         ) : (
-          <EmptyState icon={Search} message={isSearchMode ? "no matching sessions" : "no matches for that search"} />
+          emptyBody
         )}
-        {!isCompact && hasResults ? (
+        {!isCompact && rows.length > 0 ? (
           <View style={[styles.footerRow, { borderTopColor: tokens.border }]}>
-            <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>↑↓ navigate · ↵ select</Text>
+            <Text
+              style={[typeScale.monoMeta, { color: tokens.ink4 }]}
+              role={Platform.OS === "web" ? "status" : undefined}
+              aria-live={Platform.OS === "web" ? "polite" : undefined}
+            >
+              {`${q ? `${resultLabel} · ` : ""}↑↓ navigate · ↵ select · ⌃⇥ category`}
+            </Text>
             <View style={styles.footerBreadcrumb}>
               {BREADCRUMB_ROUTES.map((r, i) => {
                 const active =
@@ -1018,6 +740,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
                 ]}
                 accessibilityViewIsModal
                 accessibilityLabel="Command palette"
+                {...(Platform.OS === "web" ? ({ role: "dialog", "aria-modal": true } as object) : {})}
               >
                 {body}
               </Animated.View>
@@ -1027,81 +750,6 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
       ) : null}
       {paletteReachablePanels}
     </>
-  );
-}
-
-/** Thread search's one required visual: the matched substring rendered in accent
- * color in place, inside an otherwise plain string. `ds/ListRow`'s `title`/`subtitle`
- * only take plain strings, so this mode uses its own row (below) instead of ListRow. */
-function HighlightText({ text, query, style }: { text: string; query: string; style: TextStyle | TextStyle[] }) {
-  const tokens = useTokens();
-  const idx = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1;
-  if (idx < 0) {
-    return (
-      <Text style={style} numberOfLines={1}>
-        {text}
-      </Text>
-    );
-  }
-  return (
-    <Text style={style} numberOfLines={1}>
-      {text.slice(0, idx)}
-      <Text style={{ color: tokens.accent }}>{text.slice(idx, idx + query.length)}</Text>
-      {text.slice(idx + query.length)}
-    </Text>
-  );
-}
-
-function ThreadRow({ item, query, selected }: { item: PaletteItem; query: string; selected: boolean }) {
-  const tokens = useTokens();
-  return (
-    <Pressable
-      onPress={item.disabled ? undefined : item.onSelect}
-      disabled={item.disabled}
-      accessibilityRole="button"
-      accessibilityLabel={item.subtitle ? `${item.title}, ${item.subtitle}` : item.title}
-      style={[styles.threadRow, { backgroundColor: selected ? tokens.selection : "transparent" }]}
-    >
-      {item.leading ? <View style={styles.threadLeading}>{item.leading}</View> : null}
-      <View style={styles.threadBody}>
-        <HighlightText text={item.title} query={query} style={[typeScale.body, { color: tokens.ink }]} />
-        {item.subtitle ? (
-          <HighlightText
-            text={item.subtitle}
-            query={query}
-            style={[typeScale.monoMeta, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
-          />
-        ) : null}
-      </View>
-    </Pressable>
-  );
-}
-
-function PaletteRow({ item, selected }: { item: PaletteItem; selected: boolean }) {
-  const tokens = useTokens();
-  const showTick = Platform.OS === "web" && selected && !item.disabled;
-
-  const trailing =
-    item.trailing || showTick ? (
-      <View style={styles.trailingRow}>
-        {item.trailing}
-        {showTick ? <Check size={16} strokeWidth={2} color={tokens.accent} /> : null}
-      </View>
-    ) : undefined;
-
-  return (
-    <View style={{ backgroundColor: showTick ? tokens.selection : "transparent" }}>
-      <ListRow
-        title={item.title}
-        subtitle={item.subtitle}
-        leading={item.leading}
-        trailing={trailing}
-        onPress={item.disabled ? undefined : item.onSelect}
-        disabled={item.disabled}
-        accessibilityLabel={item.subtitle ? `${item.title}, ${item.subtitle}` : item.title}
-        hasInteractiveTrailing={item.trailingInteractive}
-      />
-    </View>
   );
 }
 
@@ -1123,10 +771,16 @@ const styles = StyleSheet.create({
     gap: space.space8,
     paddingVertical: space.space32,
   },
-  trailingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  statusLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    paddingHorizontal: space.space16,
+    paddingBottom: space.space8,
+  },
+  statusText: { flexShrink: 1 },
   centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.space32 },
   centeredPanel: { overflow: "hidden" },
-  keyHint: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4, paddingHorizontal: space.space4, paddingVertical: 1 },
   footerRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1137,14 +791,4 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   footerBreadcrumb: { flexDirection: "row", alignItems: "center" },
-  threadRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.space8,
-    minHeight: 44,
-    paddingHorizontal: space.space16,
-    paddingVertical: space.space4,
-  },
-  threadLeading: { alignItems: "center", justifyContent: "center" },
-  threadBody: { flex: 1, gap: 2 },
 });

@@ -37,6 +37,7 @@ import { hexToRgba, space, type ColorTokens } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
 import { AnsiScrollback, type AnsiColor, type AnsiLine, type AnsiSpan } from "./ansi";
+import { ESCAPE_SKIP_PROPS } from "../../lib/escapeSkip";
 import {
   compareTerminalIds,
   nextTerminalId,
@@ -567,7 +568,7 @@ export function TerminalDock({
           </Pressable>
         </View>
       ) : null}
-      <Pressable style={styles.body} onPress={() => inputRef.current?.focus()} accessibilityRole="none">
+      <Pressable style={styles.body} onPress={() => inputRef.current?.focus()} accessibilityRole="none" {...ESCAPE_SKIP_PROPS}>
         <ScrollView
           ref={scrollRef}
           style={styles.scroll}

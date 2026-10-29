@@ -282,12 +282,6 @@
     "category": "behavior"
   },
   {
-    "file": "mobile/src/components/session/EffortPicker.tsx",
-    "platform": "web/native",
-    "reason": "shared surface contains platform-specific handling",
-    "category": "capability"
-  },
-  {
     "file": "mobile/src/components/session/ReplayView.tsx",
     "platform": "web/native",
     "reason": "shared surface contains platform-specific handling",
@@ -646,5 +640,23 @@
     "platform": "web/native",
     "reason": "declared platform behavior boundary; shared product rules must remain aligned",
     "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/overlay/PaletteRows.tsx",
+    "platform": "web",
+    "reason": "Palette options carry listbox/option ARIA attributes and hover selection on web only; native renders plain buttons.",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/escapeSkip.ts",
+    "platform": "web",
+    "reason": "The overlay Escape stack skips elements marked with a data attribute, which only exists on web.",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/useOverlayEscape.ts",
+    "platform": "web",
+    "reason": "Escape-key overlay stack registration is web and desktop only; native overlays close through hardware back or gestures.",
+    "category": "capability"
   }
 ]

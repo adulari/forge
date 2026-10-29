@@ -12,6 +12,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { depthDark, radii, shadowStyle, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { useToast } from "../ds/ToastHost";
+import { useOverlayEscape } from "../../lib/useOverlayEscape";
 
 export interface MessageActionsMenuProps {
   message: HistoryRow | null;
@@ -34,6 +35,7 @@ export function MessageActionsMenu({ message, anchor, onClose, onQuote, onEdit }
   const tokens = useTokens();
   const toast = useToast();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  useOverlayEscape(message != null && anchor != null, onClose);
   if (message == null || anchor == null) return null;
 
   const text = displayMessageText(message);
