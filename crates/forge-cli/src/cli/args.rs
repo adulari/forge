@@ -237,11 +237,10 @@ pub(crate) enum AssayCmd {
 #[path = "args/anywhere.rs"]
 pub(crate) mod anywhere;
 pub(crate) use anywhere::AnywhereCmd;
-#[path = "args/host.rs"]
-pub(crate) mod host;
-pub(crate) use host::{BackupArgs, LogsArgs};
 #[path = "args/claude_compat.rs"]
 pub(crate) mod claude_compat;
+#[path = "args/host.rs"]
+pub(crate) mod host;
 pub(crate) use claude_compat::ClaudeCompat;
 #[path = "args/session_flags.rs"]
 pub(crate) mod session_flags;
@@ -683,8 +682,7 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "check")]
         rollback: bool,
     },
-    /// Copy the session store to a safe place, list the copies Forge keeps, or restore one.
-    Backup(BackupArgs),
+    Backup(host::BackupArgs),
     /// Internal: run Forge's tool registry as an MCP server (spawned by the CLI bridge so
     /// claude/codex use Forge's tools under Forge's permission gate). Defaults to stdio; pass
     /// `--transport http --bind <addr>` to serve over streamable-HTTP for remote orchestration
@@ -1371,8 +1369,7 @@ pub(crate) enum ServiceCmd {
     Stop,
     /// Restart the installed service.
     Restart,
-    /// Show the daemon's recent log output (systemd journal, or the launchd log file).
-    Logs(LogsArgs),
+    Logs(host::LogsArgs),
     /// Emit the daemon-failure notification. Invoked by the unit's `OnFailure=`, not by hand.
     #[command(hide = true)]
     Alert,

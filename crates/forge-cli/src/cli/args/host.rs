@@ -2,7 +2,7 @@
 
 use clap::{Args, Subcommand};
 
-/// `forge backup` copies the store; with a subcommand it lists or restores backups instead.
+/// Copy the session store to a safe place, list the copies Forge keeps, or restore one.
 #[derive(Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub(crate) struct BackupArgs {
@@ -25,6 +25,7 @@ pub(crate) enum BackupCmd {
     },
 }
 
+/// Show the daemon's recent log output (systemd journal, or the launchd log file).
 #[derive(Args)]
 pub(crate) struct LogsArgs {
     /// How many recent lines to show.
