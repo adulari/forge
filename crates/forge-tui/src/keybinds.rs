@@ -122,6 +122,7 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
         "reload" => Some(KeyKind::ReloadConfig),
         "voice" => Some(KeyKind::ToggleVoice),
         "kill_line_forward" => Some(KeyKind::KillLineForward),
+        "stash" => Some(KeyKind::StashPrompt),
         _ => None,
     }
 }

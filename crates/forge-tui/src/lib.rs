@@ -49,6 +49,7 @@ pub mod perf;
 mod picker;
 mod print_presenter;
 mod prompt_history;
+mod stash_args;
 pub mod theme;
 pub use prompt_history::PromptHistory;
 mod refine_args;
@@ -86,8 +87,8 @@ pub use app_remote::{
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,
     Command, CommandAction, GoalControl, HeartbeatAction, Palette, PaletteEntry, Picker,
-    PickerKind, PickerRow, RefineAction, RemoteMode, SlashToken, StatuslineAction, WorkflowAction,
-    COMMANDS,
+    PickerKind, PickerRow, RefineAction, RemoteMode, SlashToken, StashOp, StatuslineAction,
+    WorkflowAction, COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{

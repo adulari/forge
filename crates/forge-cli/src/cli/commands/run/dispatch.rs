@@ -231,6 +231,11 @@ pub(crate) async fn dispatch_command(
             None => app.note("⌨ /help is host-only (a fullscreen reference viewer)"),
         },
         CommandAction::Status => super::status_cmd::run(app),
+        CommandAction::Fork(message) => {
+            return super::fork_cmd::fork(session, tui, app, message).await
+        }
+        CommandAction::Stash(op) => app.stash_command(op),
+        CommandAction::Skills => super::fork_cmd::skills(catalog, app),
         CommandAction::Quit => return Ok(DispatchOutcome::Quit),
         CommandAction::Claude => {
             // The switch itself runs after the TUI has restored the terminal (see `chat`).

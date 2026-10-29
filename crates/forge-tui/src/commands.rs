@@ -54,6 +54,7 @@ pub enum WorkflowAction {
 
 pub use crate::heartbeat_args::HeartbeatAction;
 pub use crate::refine_args::RefineAction;
+pub use crate::stash_args::StashOp;
 
 /// What the render loop must do when a command is accepted. forge-tui produces it; the binary
 /// (which owns the `Session`) executes it.
@@ -219,6 +220,12 @@ pub enum CommandAction {
     Doctor,
     /// Name this session (`/rename <title>`); empty shows the current name.
     Rename(String),
+    /// Branch this session at its latest message into a child and continue there (`/fork [message]`).
+    Fork(Option<String>),
+    /// Park or restore a draft (`/stash [push|pop|list|clear]`).
+    Stash(StashOp),
+    /// List the skills the model can load (`/skills`).
+    Skills,
     /// Report a problem to the maintainers (`/bug <what went wrong>`), after a preview.
     Bug(String),
     /// Not a known command — the binary shows `unknown command: X`.
@@ -399,7 +406,10 @@ pub fn parse_command(line: &str) -> CommandAction {
         "doctor" => CommandAction::Doctor,
         "rename" => CommandAction::Rename(arg),
         "bug" | "report" => CommandAction::Bug(arg),
-        "rewind" | "undo" | "u" => CommandAction::Undo,
+        "rewind" | "undo" | "u" | "timeline" => CommandAction::Undo,
+        "fork" | "branch" => CommandAction::Fork((!arg.is_empty()).then_some(arg)),
+        "stash" => CommandAction::Stash(StashOp::parse(&arg)),
+        "skills" => CommandAction::Skills,
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact((!arg.is_empty()).then_some(arg)),
@@ -1419,5 +1429,34 @@ mod tests {
         p.reset_to_base();
         assert_eq!(p.matches().len(), 0);
         assert_eq!(p.base_len(), 3);
+    }
+
+    #[test]
+    fn parses_fork_stash_skills_and_timeline() {
+        assert_eq!(parse_command("/fork"), CommandAction::Fork(None));
+        assert_eq!(
+            parse_command("/fork try the other approach"),
+            CommandAction::Fork(Some("try the other approach".into()))
+        );
+        assert_eq!(parse_command("/stash"), CommandAction::Stash(StashOp::Pop));
+        assert_eq!(
+            parse_command("/stash list"),
+            CommandAction::Stash(StashOp::List)
+        );
+        assert_eq!(parse_command("/skills"), CommandAction::Skills);
+        assert_eq!(parse_command("/timeline"), CommandAction::Undo);
+        assert_eq!(parse_command("/q"), CommandAction::Quit);
+    }
+
+    #[test]
+    fn at_picker_ranks_edited_files_first_among_equal_matches() {
+        let mut picker = AtPathPicker::default();
+        picker.open_with(
+            "lib",
+            vec!["a/lib.rs".into(), "b/lib.rs".into(), "c/lib.rs".into()],
+        );
+        picker.set_modified(["c/lib.rs".to_string()]);
+        let paths = picker.matches();
+        assert_eq!(paths[0], "c/lib.rs");
     }
 }

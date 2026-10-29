@@ -331,6 +331,9 @@ pub(crate) enum Command {
         /// First message, sent as soon as the session is up; the chat stays open afterwards.
         #[arg(value_name = "PROMPT")]
         prompt: Vec<String>,
+        /// First message as a flag (same as the trailing PROMPT, for launchers).
+        #[arg(long = "prompt", value_name = "TEXT", conflicts_with = "prompt")]
+        prompt_flag: Option<String>,
         /// Use the offline deterministic mock provider.
         #[arg(long)]
         mock: bool,
@@ -351,16 +354,13 @@ pub(crate) enum Command {
         /// Force plain line output instead of the interactive TUI.
         #[arg(long)]
         plain: bool,
-        /// Use the interactive TUI (this is already the default for `chat`; accepted for symmetry
-        /// with `forge run --tui`).
+        /// Use the interactive TUI (the default for `chat`; accepted for symmetry with `run`).
         #[arg(long, conflicts_with = "plain")]
         tui: bool,
-        /// Run the TUI inline in the terminal's native scrollback instead of full-screen.
-        /// Overrides the `[tui] fullscreen` config for this invocation.
+        /// Run the TUI inline in the terminal's scrollback; overrides `[tui] fullscreen`.
         #[arg(long, conflicts_with = "fullscreen")]
         inline: bool,
-        /// Force the full-screen (alternate-screen) TUI, overriding the config. This is the
-        /// default; use `--inline` to opt out.
+        /// Force the full-screen (alternate-screen) TUI, overriding the config (the default).
         #[arg(long)]
         fullscreen: bool,
         /// Pin a specific model or a comma-separated set (e.g. `openai::gpt-4o` or

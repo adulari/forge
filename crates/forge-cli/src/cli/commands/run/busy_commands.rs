@@ -46,6 +46,8 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Image(_)
         | CommandAction::Statusline(_)
         | CommandAction::Voice
+        | CommandAction::Stash(_)
+        | CommandAction::Skills
         // Neither takes the session lock: git and the checks run on their own thread.
         | CommandAction::Diff(_)
         | CommandAction::Doctor
@@ -96,6 +98,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         // Resume/Undo/Checkpoints pick a different point of the conversation to return to, which
         // is meaningless once the running turn has moved on; /claude and /quit end the process.
         CommandAction::Resume(_)
+        | CommandAction::Fork(_)
         | CommandAction::Undo
         | CommandAction::ListCheckpoints
         | CommandAction::Claude

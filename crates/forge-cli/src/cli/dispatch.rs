@@ -148,7 +148,8 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             mock,
         } => crate::api_serve::api_serve_cmd(host, port, api_key, mock).await,
         Command::Chat {
-            prompt,
+            mut prompt,
+            prompt_flag,
             mock,
             mode,
             r#continue,
@@ -163,6 +164,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             model,
         } => {
             crate::startup_trace::mark("dispatch chat");
+            prompt.extend(prompt_flag);
             crate::cli::commands::replay::share_store_handles();
             if !mock {
                 forge_config::warm_provider_secrets();

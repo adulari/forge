@@ -47,6 +47,7 @@ pub(crate) fn bare_command() -> Option<Command> {
     if bare_starts_chat(terminal, dumb_term, configured) {
         return Some(Command::Chat {
             prompt: Vec::new(),
+            prompt_flag: None,
             mock: false,
             mode: None,
             r#continue: false,

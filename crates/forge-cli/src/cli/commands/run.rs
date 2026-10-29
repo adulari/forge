@@ -84,6 +84,7 @@ pub(crate) use pickers::*;
 mod rewind_menu;
 pub(crate) use rewind_menu::*;
 mod dispatch;
+mod fork_cmd;
 mod heartbeat_cmd;
 mod mesh_overlay;
 mod model_switch;
