@@ -12,8 +12,11 @@ import { SectionHeader } from "../components/ds/SectionHeader";
 import { SearchField } from "../components/ds/SearchField";
 import { Segmented } from "../components/ds/Segmented";
 import { Switch } from "../components/ds/Switch";
+import { useLocalSearchParams } from "expo-router";
+
 import { type ConfigField } from "../lib/api";
 import { useConfig, useUpdateConfig } from "../lib/queries";
+import { groupConfigFields } from "../lib/settingsSearch";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
@@ -22,17 +25,7 @@ import { usePullRefresh } from "../lib/usePullRefresh";
 
 type Scope = "user" | "project";
 
-function grouped(fields: ConfigField[]) {
-  const result = new Map<string, ConfigField[]>();
-  for (const field of fields) {
-    const fieldsInGroup = result.get(field.group) ?? [];
-    fieldsInGroup.push(field);
-    result.set(field.group, fieldsInGroup);
-  }
-  return [...result.entries()];
-}
-
-function ConfigFieldRow({ field, scope, showSeparator }: { field: ConfigField; scope: Scope; showSeparator: boolean }) {
+function ConfigFieldRowBody({ field, scope, showSeparator }: { field: ConfigField; scope: Scope; showSeparator: boolean }) {
   const tokens = useTokens();
   const mutation = useUpdateConfig();
   const [draft, setDraft] = useState(field.value);
@@ -96,6 +89,11 @@ function ConfigFieldRow({ field, scope, showSeparator }: { field: ConfigField; s
   return <View style={fieldStyle}><Input label={field.label} value={draft} onChangeText={setDraft}  keyboardType={field.field_type === "int" || field.field_type === "float" ? "decimal-pad" : "default"} autoCapitalize="none" autoCorrect={false} error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text>{field.modified ? <Pressable onPress={() => save(undefined)} accessibilityRole="button" accessibilityLabel={`Reset ${field.label}`}><Text style={[styles.reset, { color: tokens.accent }]}>Reset to default ({field.default || "empty"})</Text></Pressable> : null}</View>;
 }
 
+function ConfigFieldRow(props: { field: ConfigField; scope: Scope; showSeparator: boolean; highlighted: boolean }) {
+  const tokens = useTokens();
+  return <View nativeID={`cfg-${props.field.key}`} style={props.highlighted ? { backgroundColor: tokens.selection } : undefined}><ConfigFieldRowBody field={props.field} scope={props.scope} showSeparator={props.showSeparator} /></View>;
+}
+
 /** Whether an enum's options fit one segmented row on a phone. Four long values ("default ·
  * accept-edits · bypass · plan") were cut to "ACCEPT-E…"; those get wrapping chips instead. */
 function segmentFits(options: readonly string[]): boolean {
@@ -112,7 +110,18 @@ function ConfigurationScreenBody() {
     const needle = search.trim().toLocaleLowerCase();
     return (query.data?.fields ?? []).filter((field) => !needle || `${field.label} ${field.key} ${field.group} ${field.help ?? ""}`.toLocaleLowerCase().includes(needle));
   }, [query.data?.fields, search]);
-  const groups = useMemo(() => grouped(fields), [fields]);
+  const groups = useMemo(() => groupConfigFields(fields), [fields]);
+  const { focus } = useLocalSearchParams<{ focus?: string }>();
+  const focusKey = typeof focus === "string" ? focus : undefined;
+  const [lit, setLit] = useState<string | undefined>(focusKey);
+  useEffect(() => {
+    if (!focusKey || !query.data) return;
+    setLit(focusKey);
+    setSearch("");
+    if (typeof document === "undefined") return;
+    const timer = setTimeout(() => document.getElementById(`cfg-${focusKey}`)?.scrollIntoView({ block: "center" }), 60);
+    return () => clearTimeout(timer);
+  }, [focusKey, query.data]);
 
   return <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
     <BackLink />
@@ -124,7 +133,7 @@ function ConfigurationScreenBody() {
     {query.isError ? <Text style={[type.body, { color: tokens.danger }]}>{`Could not load configuration: ${query.error?.message || "unknown error"}. Pull to retry.`}</Text> : null}
     {query.isLoading ? <Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text> : null}
     {!query.isLoading && !query.isError && fields.length === 0 ? <Text style={[type.body, { color: tokens.ink3 }]}>No settings match that search.</Text> : null}
-    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} />)}</View>)}
+    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} highlighted={field.key === lit} />)}</View>)}
   </Screen>;
 }
 

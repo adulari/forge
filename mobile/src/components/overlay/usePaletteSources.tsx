@@ -30,9 +30,10 @@ import { mergeCommandSources } from "../../lib/commandSources";
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
 import { openSession } from "../../lib/nav";
 import { SETTINGS_ENTRIES } from "../../lib/palette/settingsEntries";
+import { configHref, settingsIndex } from "../../lib/settingsSearch";
 import { recencyOf } from "../../lib/palette/recents";
 import { formatShortcut, getResolvedShortcut, type AppShortcutAction, useShortcutLabel } from "../../lib/shortcuts";
-import { useArchiveSession, useSessions } from "../../lib/queries";
+import { useArchiveSession, useConfig, useSessions } from "../../lib/queries";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { formatCwd, formatRelativeTime, type as typeScale } from "../../theme/typography";
@@ -356,7 +357,30 @@ export function usePaletteSources(options: PaletteSourceOptions) {
     [tokens, close, isCompact, settingsHint, recents],
   );
 
-  return { sessions, sessionItems, commandItems, settingsItems };
+  const configQuery = useConfig();
+  const settingFieldItems = useMemo<PaletteItem[]>(
+    () =>
+      settingsIndex(configQuery.data?.fields ?? [])
+        .filter((hit) => hit.kind === "field")
+        .map((hit) => ({
+          id: `settings:${hit.id}`,
+          section: "settings" as const,
+          title: hit.title,
+          subtitle: hit.subtitle,
+          keywords: hit.keywords,
+          recency: recencyOf(recents, `settings:${hit.id}`),
+          leading: <Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+          onSelect: () => {
+            close();
+            router.push(configHref(hit.focusKey));
+          },
+        })),
+    [configQuery.data?.fields, tokens, close, recents],
+  );
+
+  const allSettingsItems = useMemo(() => [...settingsItems, ...settingFieldItems], [settingsItems, settingFieldItems]);
+
+  return { sessions, sessionItems, commandItems, settingsItems: allSettingsItems };
 }
 
 const styles = StyleSheet.create({

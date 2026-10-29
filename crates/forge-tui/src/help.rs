@@ -58,8 +58,8 @@ const GROUP_ORDER: [&str; 5] = [
 
 fn command_group(name: &str) -> &'static str {
     match name {
-        "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline" | "status"
-        | "heartbeat" | "context" | "permissions" | "doctor" | "bug" => "Session",
+        "help" | "keys" | "config" | "theme" | "mode" | "thinking" | "effort" | "statusline"
+        | "status" | "heartbeat" | "context" | "permissions" | "doctor" | "bug" => "Session",
         "sessions" | "replay" | "resume" | "new" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" | "reground" | "refine" | "rewind" | "clear" | "export"
         | "btw" | "rename" | "cls" => "History",

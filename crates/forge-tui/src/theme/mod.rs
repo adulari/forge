@@ -10,6 +10,7 @@ pub mod backend;
 pub mod degrade;
 pub mod detect;
 pub mod glyphs;
+pub mod palettes;
 pub mod styles;
 pub mod tokens;
 
@@ -168,7 +169,42 @@ thread_local! {
 /// Resolve the theme from the process environment and `[tui]` config. Call once, before the
 /// first draw or the first scrollback insert. Later calls are ignored.
 pub fn init(config: &TuiConfig) -> Theme {
-    *GLOBAL.get_or_init(|| detect::resolve(&detect::process_env(), config))
+    let theme = *GLOBAL.get_or_init(|| detect::resolve(&detect::process_env(), config));
+    let _ = set_palette(&config.palette, &config.colors);
+    theme
+}
+
+static RUNTIME_PALETTE: std::sync::RwLock<Option<Palette>> = std::sync::RwLock::new(None);
+
+/// Switch the accent palette for the rest of the process. Returns the `[tui.colors]` entries that
+/// were ignored. Only truecolor terminals take a named palette or overrides.
+pub fn set_palette(
+    name: &str,
+    colors: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let base =
+        *GLOBAL.get_or_init(|| detect::resolve(&detect::process_env(), &TuiConfig::default()));
+    let name = name.trim().to_lowercase();
+    if !palettes::is_known(&name) {
+        return Err(format!(
+            "unknown palette {name:?}; choose one of {}",
+            palettes::NAMES.join(", ")
+        ));
+    }
+    if base.tier != ColorTier::TrueColor {
+        return if name == "forge" && colors.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err("named palettes need a truecolor terminal".to_string())
+        };
+    }
+    let named = palettes::named(&name, base.mode, base.palette)
+        .ok_or_else(|| format!("unknown palette {name:?}"))?;
+    let (palette, rejected) = palettes::with_overrides(named, colors);
+    if let Ok(mut slot) = RUNTIME_PALETTE.write() {
+        *slot = (palette != base.palette).then_some(palette);
+    }
+    Ok(rejected)
 }
 
 /// The active theme: a [`scoped`] override on this thread, else the initialised global. Without
@@ -179,7 +215,11 @@ pub fn t() -> Theme {
         return theme;
     }
     if let Some(theme) = GLOBAL.get() {
-        return *theme;
+        let mut theme = *theme;
+        if let Some(palette) = RUNTIME_PALETTE.read().ok().and_then(|slot| *slot) {
+            theme.palette = palette;
+        }
+        return theme;
     }
     #[cfg(test)]
     {

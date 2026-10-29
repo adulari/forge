@@ -1122,6 +1122,15 @@ pub struct TuiConfig {
     /// Code's `respondToBashCommands`). Default: true. False only adds the run to the context.
     #[serde(default = "default_true")]
     pub respond_to_bash: bool,
+    /// Named accent palette for truecolor terminals: `"forge"` (default), `"ocean"`, `"grove"` or
+    /// `"rose"`. `/theme <name>` switches it live and saves it here.
+    #[serde(default = "default_tui_palette")]
+    pub palette: String,
+    /// Per-role colour overrides on top of the palette, as `role = "#RRGGBB"`, e.g.
+    /// `brand = "#FF8A30"`. Roles: fg, fg_muted, fg_faint, line, brand, brand_hot, user, ok, warn,
+    /// err, surface, surface_raised. Truecolor terminals only.
+    #[serde(default)]
+    pub colors: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for TuiConfig {
@@ -1135,8 +1144,14 @@ impl Default for TuiConfig {
             reduce_motion: false,
             fold_tool_groups: true,
             respond_to_bash: true,
+            palette: default_tui_palette(),
+            colors: std::collections::BTreeMap::new(),
         }
     }
+}
+
+fn default_tui_palette() -> String {
+    "forge".to_string()
 }
 
 fn default_tui_auto() -> String {
