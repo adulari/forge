@@ -200,7 +200,7 @@ struct Identity {
 mod inbound_sequence;
 mod outbound_sequence;
 use inbound_sequence::{
-    accept_inbound_envelopes, validate_inbound_metadata, validate_inbound_routing,
+    accept_inbound_envelopes, validate_inbound_metadata, validate_inbound_routing, ReplayedSequence,
 };
 use outbound_sequence::reserve_outbound;
 
@@ -474,7 +474,10 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                             }
                         }
                         let handled = match handled {
-                            Err(error) if error.is::<UnknownSenderDevice>() => {
+                            Err(error)
+                                if error.is::<UnknownSenderDevice>()
+                                    || error.is::<ReplayedSequence>() =>
+                            {
                                 eprintln!("⚠ Forge Anywhere discarded an envelope: {error:#}");
                                 None
                             }
