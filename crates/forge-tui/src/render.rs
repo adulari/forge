@@ -139,6 +139,8 @@ struct Renderer {
     marker_pending: bool,
     /// The open link: its target and the text shown for it.
     link: Option<(String, String)>,
+    /// The open image's source: a terminal cannot show it, so the source is named after its alt text.
+    image: Option<String>,
 }
 
 impl Renderer {
@@ -397,6 +399,19 @@ impl Renderer {
                     }
                 }
             }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                self.image = Some(dest_url.to_string());
+                self.push_text("[image: ");
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some(src) = self.image.take() {
+                    self.push_text("]");
+                    if self.table.is_none() && !src.is_empty() {
+                        self.cur
+                            .push(Span::styled(format!(" ({src})"), styles::faint()));
+                    }
+                }
+            }
             Event::Start(Tag::Table(_)) => {
                 self.flush_line();
                 self.blank();
@@ -522,6 +537,14 @@ mod tests {
             ),
             f,
         )
+    }
+
+    #[test]
+    fn an_image_keeps_its_alt_text_and_names_its_source() {
+        let out = markdown_to_lines("See ![the cart](docs/cart.png) now.");
+        let t = text_of(&out);
+        assert!(t.contains("[image: the cart] (docs/cart.png)"), "{t}");
+        assert!(t.contains("See ") && t.contains(" now."), "{t}");
     }
 
     #[test]

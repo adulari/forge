@@ -92,6 +92,7 @@ export type DesktopMenuId =
   | "view:layout-reset"
   | "view:git-review"
   | "view:browser-preview"
+  | "view:gallery"
   | "view:appearance:light"
   | "view:appearance:dark"
   | "view:appearance:system"
@@ -242,6 +243,7 @@ function runDefault(id: string): void {
     case "view:terminal":
     case "view:git-review":
     case "view:browser-preview":
+    case "view:gallery":
     case "view:tasks":
     case "view:agents":
     case "view:plan":

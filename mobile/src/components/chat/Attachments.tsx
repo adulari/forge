@@ -1,16 +1,17 @@
-// Attachment rendering shared by MessageRow: image thumbnails (tap → full-size, since there's
-// no existing lightbox in the app to defer to) and file chips (name + icon) for non-images.
-// Used both for the optimistic "just sent" bubble (client-local `SentAttachment[]`, local
-// picker URI) and for `@path` mentions recovered from a persisted history row's content (see
-// MessageRow.tsx) — there the `uri` is a `GET /api/upload` URL instead of a local file URI.
+// Attachment rendering shared by MessageRow: image thumbnails (tap opens the shared image
+// viewer: zoom, copy, save) and file chips (name + icon) for non-images. Used both for the
+// optimistic "just sent" bubble (client-local `SentAttachment[]`, local picker URI) and for
+// `@path` mentions recovered from a persisted history row's content (see MessageRow.tsx): there
+// the `uri` is a `GET /api/upload` URL instead of a local file URI.
 import { FileText } from "lucide-react-native";
-import React, { useState } from "react";
-import { Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useMemo } from "react";
+import { Image, Pressable, StyleSheet, Text, View } from "react-native";
 
+import type { ViewerImage } from "../../lib/imageTypes";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
-import { useOverlayEscape } from "../../lib/useOverlayEscape";
+import { useImageViewer } from "../ds/ImageViewer";
 import { isPdfName, type SentAttachment } from "./attach";
 import { PdfPage } from "./AttachmentTray";
 
@@ -18,8 +19,11 @@ const THUMB = 72;
 
 export function AttachmentRow({ attachments }: { attachments: SentAttachment[] }) {
   const tokens = useTokens();
-  const [preview, setPreview] = useState<SentAttachment | null>(null);
-  useOverlayEscape(preview !== null, () => setPreview(null));
+  const gallery = useMemo(
+    () => attachments.filter((a) => a.image && a.uri).map((a): ViewerImage => ({ uri: a.uri as string, name: a.name })),
+    [attachments],
+  );
+  const viewer = useImageViewer(gallery);
 
   if (attachments.length === 0) return null;
 
@@ -30,7 +34,7 @@ export function AttachmentRow({ attachments }: { attachments: SentAttachment[] }
           a.image && a.uri ? (
             <Pressable
               key={a.id}
-              onPress={() => setPreview(a)}
+              onPress={() => viewer.open(gallery.findIndex((g) => g.uri === a.uri))}
               accessibilityRole="button"
               accessibilityLabel={`view image ${a.name}`}
             >
@@ -53,20 +57,7 @@ export function AttachmentRow({ attachments }: { attachments: SentAttachment[] }
           ),
         )}
       </View>
-
-      <Modal
-        visible={preview !== null}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setPreview(null)}
-      >
-        <View style={[styles.backdrop, { backgroundColor: tokens.overlayScrim }]} accessibilityViewIsModal>
-        <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreview(null)} accessibilityRole="button" accessibilityLabel="Close image preview" />
-        {preview?.uri ? (
-          <Image source={{ uri: preview.uri }} style={styles.full} resizeMode="contain" accessibilityLabel={`Preview of ${preview.name}`} />
-        ) : null}
-      </View>
-      </Modal>
+      {viewer.element}
     </>
   );
 }
@@ -90,6 +81,4 @@ const styles = StyleSheet.create({
     maxWidth: 220,
   },
   fileName: { flexShrink: 1 },
-  backdrop: { flex: 1, alignItems: "center", justifyContent: "center" },
-  full: { width: "100%", height: "100%" },
 });

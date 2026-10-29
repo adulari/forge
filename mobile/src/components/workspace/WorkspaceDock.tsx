@@ -59,6 +59,10 @@ import { joinWorkspacePath, parentWorkspacePath, workspaceBasename } from "./wor
 interface WorkspaceDockProps {
   sessionId: string | null;
   resourceId: string | null;
+  /** Line to land on when the file opens (a path chip in chat). */
+  line?: number | null;
+  /** A file to show first when nothing is pinned (the phone's Files screen, from a chip). */
+  initialPath?: string | null;
 }
 
 function formatBytes(bytes: number): string {
@@ -385,10 +389,12 @@ function WorkspaceBrowser({
 function WorkspaceEditor({
   sessionId,
   path,
+  line,
   onBack,
 }: {
   sessionId: string;
   path: string;
+  line: number | null;
   onBack?: () => void;
 }) {
   const tokens = useTokens();
@@ -399,6 +405,16 @@ function WorkspaceEditor({
   const [loadedHash, setLoadedHash] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const loadedHashRef = useRef<string | null>(null);
+  const inputRef = useRef<TextInput>(null);
+  const [landing, setLanding] = useState<{ start: number; end: number } | null>(null);
+
+  const loadedContent = file.data?.content ?? null;
+  useEffect(() => {
+    if (line == null || loadedContent == null) return;
+    const range = lineRange(loadedContent, line);
+    setLanding(range);
+    revealLine(inputRef.current, range, line);
+  }, [line, loadedContent, path]);
 
   const loadResponse = useCallback((response: WorkspaceFileResponse) => {
     setDraft(response.content);
@@ -466,6 +482,7 @@ function WorkspaceEditor({
           </Text>
           <Text style={[typeScale.meta, { color: tokens.ink4 }]}>
             {lineCount.toLocaleString()} lines · {draft.length.toLocaleString()} chars
+            {line != null ? ` · line ${line}` : ""}
             {dirty ? " · modified" : ""}
           </Text>
         </View>
@@ -490,7 +507,10 @@ function WorkspaceEditor({
         </View>
       ) : null}
       <TextInput
+        ref={inputRef}
         value={draft}
+        selection={landing ?? undefined}
+        onSelectionChange={() => setLanding(null)}
         onChangeText={(text) => {
           setDraft(text);
           setDirty(text !== file.data?.content);
@@ -516,10 +536,31 @@ function WorkspaceEditor({
   );
 }
 
-export function WorkspaceDock({ sessionId, resourceId }: WorkspaceDockProps) {
+const EDITOR_LINE_HEIGHT = 18;
+
+/** The character range of 1-based `line` in `text`, clamped to the last line. */
+export function lineRange(text: string, line: number): { start: number; end: number } {
+  const lines = text.split("\n");
+  const index = Math.min(Math.max(line, 1), lines.length) - 1;
+  let start = 0;
+  for (let i = 0; i < index; i++) start += lines[i].length + 1;
+  return { start, end: start + lines[index].length };
+}
+
+/** Select the line and scroll it into view. The textarea on web needs the scroll set by hand;
+ * on a phone the platform scrolls a controlled selection into view itself. */
+function revealLine(input: TextInput | null, range: { start: number; end: number }, line: number) {
+  const node = input as unknown as { scrollTop?: number; focus?: () => void; setSelectionRange?: (a: number, b: number) => void } | null;
+  if (!node || typeof node.scrollTop !== "number") return;
+  node.scrollTop = Math.max(0, (line - 4) * EDITOR_LINE_HEIGHT);
+  node.focus?.();
+  node.setSelectionRange?.(range.start, range.end);
+}
+
+export function WorkspaceDock({ sessionId, resourceId, line = null, initialPath = null }: WorkspaceDockProps) {
   const { isExpanded } = useBreakpoint();
   const workbench = useWorkbench();
-  const [localResource, setLocalResource] = useState<string | null>(null);
+  const [localResource, setLocalResource] = useState<string | null>(initialPath);
 
   if (!sessionId) {
     return <EmptyState icon={Folder} message="Open a session to browse its workspace." />;
@@ -542,6 +583,7 @@ export function WorkspaceDock({ sessionId, resourceId }: WorkspaceDockProps) {
     <WorkspaceEditor
       sessionId={sessionId}
       path={activeResource}
+      line={line}
       onBack={!resourceId ? () => setLocalResource(null) : undefined}
     />
   ) : (

@@ -268,7 +268,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : (
           <>
             {isUser ? <SkillInvocation text={userText} /> : null}
-            <Markdown content={userText} style={prose} />
+            <Markdown content={userText} style={prose} mentions={isUser} />
           </>
         )}
       </Pressable>

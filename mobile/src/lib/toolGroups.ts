@@ -9,6 +9,7 @@ import { commandSummary } from "./commandSummary";
 import { shortenPath } from "./pathDisplay";
 import { scriptCalls, scriptHeadline, WRAPPER_TOOL } from "./scriptCalls";
 import { isDecision } from "./decisionRecord";
+import { screenshotPathOf } from "./mediaApi";
 import { parseArgs, resultFailed, type ToolInvocation, type TranscriptEntry } from "./toolRows";
 
 export type CallStatus = "ok" | "failed" | "running";
@@ -558,14 +559,18 @@ function isDelegation(call: ToolGroupCall): boolean {
   return call.invocation.tool != null && DELEGATING.has(bareToolName(call.invocation.tool));
 }
 
+const SCREENSHOT_ROWS = 3;
+
 /** The calls a collapsed group keeps visible under its summary: its newest failures (once more
- * than one call finished; a lone failure is the summary itself), the calls still running, and any
- * call that started child agents, whose rows are the way into them. */
+ * than one call finished; a lone failure is the summary itself), the calls still running, any
+ * call that started child agents, whose rows are the way into them, and the newest screenshots,
+ * whose picture is the result. */
 export function collapsedCalls(group: ToolGroupEntry): ToolGroupCall[] {
   const { finished } = group.summary;
   const failed = finished > 1 ? group.calls.filter((c) => c.status === "failed").slice(-FAILED_ROWS) : [];
   const running = group.calls.filter((c) => c.status === "running").slice(0, RUNNING_ROWS);
   const delegated = group.calls.filter(isDelegation);
-  const shown = new Set([...failed, ...running, ...delegated]);
+  const screenshots = group.calls.filter((c) => screenshotPathOf(c.invocation.result) != null).slice(-SCREENSHOT_ROWS);
+  const shown = new Set([...failed, ...running, ...delegated, ...screenshots]);
   return group.calls.filter((c) => shown.has(c));
 }

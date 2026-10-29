@@ -9,7 +9,8 @@ export type WorkbenchSurfaceKind =
   | "terminal"
   | "tasks"
   | "agents"
-  | "plan";
+  | "plan"
+  | "gallery";
 
 export interface WorkbenchSurfaceDefinition {
   kind: WorkbenchSurfaceKind;
@@ -79,6 +80,13 @@ export const WORKBENCH_SURFACE_DEFINITIONS: Record<
     defaultSize: 340,
     sessionScoped: true,
   },
+  gallery: {
+    kind: "gallery",
+    title: "Gallery",
+    placement: "right",
+    defaultSize: 360,
+    sessionScoped: true,
+  },
 };
 
 /**
@@ -93,6 +101,9 @@ export interface WorkbenchSurface {
   sessionId: string | null;
   resourceId: string | null;
   title: string;
+  /** Where to land inside the resource (a file's line). Not part of the tab's identity, so opening
+   * the same file at another line moves the open tab instead of adding one. */
+  line: number | null;
 }
 
 export interface WorkbenchSurfaceInput {
@@ -100,6 +111,7 @@ export interface WorkbenchSurfaceInput {
   sessionId?: string | null;
   resourceId?: string | null;
   title?: string;
+  line?: number | null;
 }
 
 export interface WorkbenchLaneState {
@@ -142,6 +154,7 @@ export function createWorkbenchSurface(input: WorkbenchSurfaceInput): WorkbenchS
     sessionId,
     resourceId,
     title: input.title?.trim() || definition.title,
+    line: input.line ?? null,
   };
 }
 

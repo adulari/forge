@@ -356,6 +356,10 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   return <WorkbenchContext.Provider value={value}>{children}</WorkbenchContext.Provider>;
 }
 
+export function useOptionalWorkbench(): WorkbenchController | null {
+  return useContext(WorkbenchContext);
+}
+
 export function useWorkbench(): WorkbenchController {
   const controller = useContext(WorkbenchContext);
   if (!controller) {

@@ -27,6 +27,7 @@ mod reporting;
 #[cfg(test)]
 #[path = "../runtime_version.rs"]
 mod runtime_version;
+mod save_image;
 #[cfg(test)]
 mod security_config;
 mod serve_discovery;
@@ -219,6 +220,7 @@ pub fn run(process_start: Instant) {
             onboarding::onboarding_local_status,
             onboarding::install_forge_cli,
             onboarding::install_forge_service,
+            save_image::save_image,
             preview::preview_open,
             preview::preview_set_bounds,
             preview::preview_navigate,

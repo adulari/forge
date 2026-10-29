@@ -14,6 +14,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-nati
 import { agentsForInvocation, useAgentIndex } from "../../lib/agentLinks";
 import { isDecision } from "../../lib/decisionRecord";
 import { haptics } from "../../lib/haptics";
+import { screenshotPathOf } from "../../lib/mediaApi";
 import { callHeadline, callVerb, readableArgs } from "../../lib/toolLabels";
 import { callSeconds, formatArgs, resultFailed, type ToolInvocation } from "../../lib/toolRows";
 import { formatWorked } from "../../lib/turnFooter";
@@ -23,6 +24,7 @@ import { monoFamily, tabularNums, type } from "../../theme/typography";
 import { IconButton } from "../ds/IconButton";
 import { AgentChildRow } from "./AgentChildRow";
 import { DecisionRecord } from "./DecisionRecord";
+import { ScreenshotThumb } from "./ScreenshotThumb";
 
 const COLLAPSE_LINES = 12;
 const COPY_RESET_MS = 1200;
@@ -136,6 +138,7 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
   const resultBody = (result ?? "").trim();
   const hasDetail = argsBody.length > 0 || resultBody.length > 0;
   const seconds = callSeconds(invocation);
+  const screenshot = useMemo(() => screenshotPathOf(result), [result]);
 
   return (
     <View style={styles.row}>
@@ -177,6 +180,7 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
             <Text style={[type.meta, { color: tokens.danger }]}>failed</Text>
           ) : null}
         </Pressable>
+        {screenshot ? <ScreenshotThumb path={screenshot} /> : null}
         {children.length > 0 ? (
           <View style={styles.agentRows}>
             {children.map((child) => (
