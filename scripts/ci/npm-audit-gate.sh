@@ -45,6 +45,13 @@ major_locked=(
   # build config), babel-plugin-react-compiler and eslint-plugin-react-hooks; the app bundle never
   # imports zod. Recheck when Expo moves to zod 4.
   GHSA-mrhx-c7xc-m3w5=zod@4
+  # decode-uri-component: quadratic / exponential decoding of malformed percent-encoded input.
+  # Fixed only in 0.5.x (ESM-only); expo-router 57 (Expo SDK 57) depends on query-string 7, which
+  # requires decode-uri-component ^0.2.2. The only fix is expo-router 58, which needs SDK 58 (the
+  # Dependabot bump to it duplicates native modules). Exposure: the app decoding its own route and
+  # deep-link query strings on the client. Lapses once expo-router 58 is installed.
+  GHSA-qr28-fpjm-wq7f=expo-router@58
+  GHSA-vcc3-ghjq-m6fr=expo-router@58
 )
 
 audit_json=$(npm audit --omit=dev --json 2>/dev/null || true)
