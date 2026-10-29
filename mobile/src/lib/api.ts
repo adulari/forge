@@ -226,7 +226,23 @@ export interface UpdateMcpServerRequest { name: string; enabled: boolean; }
 /** `status` is git's porcelain letter for the bucket the row sits in: `M`/`A`/`D`/`R`/`C`/`T`/`U`
  * for tracked changes, `?` for untracked. A file edited after staging appears in BOTH buckets. */
 export interface GitFileRow { path: string; status: string; orig_path: string | null; adds: number; dels: number; binary: boolean; }
-export interface GitStatusResponse { root: string; branch: string; base_branch: string | null; staged: GitFileRow[]; unstaged: GitFileRow[]; untracked: GitFileRow[]; truncated: number; }
+export interface GitStatusResponse {
+  root: string;
+  branch: string;
+  base_branch: string | null;
+  staged: GitFileRow[];
+  unstaged: GitFileRow[];
+  untracked: GitFileRow[];
+  /** Paths with unresolved merge conflicts (absent from a daemon that predates the field). */
+  conflicted?: GitFileRow[];
+  truncated: number;
+  upstream?: string | null;
+  ahead?: number;
+  behind?: number;
+  /** `merge` / `rebase` / `cherry-pick` / `revert` while one is unfinished. */
+  operation?: string | null;
+  has_remote?: boolean;
+}
 export interface GitBranchRow {
   name: string;
   oid: string;
@@ -250,7 +266,18 @@ export interface GitCreateBranchRequest { session: string; name: string; }
 export interface GitBranchActionResponse { ok: boolean; branch: string; }
 /** Same shape as the WS snapshot's `DiffHunk` — the first character of each line is the gutter. */
 export interface GitDiffHunk { header: string; lines: string[]; }
-export interface GitDiffFile { path: string; kind: "created" | "modified" | "deleted" | "renamed"; orig_path: string | null; binary: boolean; adds: number; dels: number; hunks: GitDiffHunk[]; skipped_lines: number; }
+export interface GitDiffFile {
+  path: string;
+  kind: "created" | "modified" | "deleted" | "renamed";
+  orig_path: string | null;
+  binary: boolean;
+  adds: number;
+  dels: number;
+  hunks: GitDiffHunk[];
+  skipped_lines: number;
+  /** Every hunk line the file has, returned or not. Absent from a daemon that predates it. */
+  total_lines?: number;
+}
 export interface GitDiffResponse { root: string; staged: boolean; files: GitDiffFile[]; }
 export interface GitPathsRequest { session: string; paths: string[]; }
 export interface GitCommitRequest { session: string; message: string; }
@@ -956,11 +983,24 @@ export function getGitStatus(baseUrl: string, session: string): Promise<GitStatu
  * tree vs index (with an all-additions render for untracked files). */
 export function getGitDiff(
   baseUrl: string,
-  params: { session: string; path: string; staged?: boolean },
+  params: {
+    session: string;
+    path: string;
+    staged?: boolean;
+    /** Context lines around each change; the daemon's default of 3 when omitted. */
+    context?: number;
+    ignoreWhitespace?: boolean;
+  },
 ): Promise<GitDiffResponse> {
   return request(
     baseUrl,
-    `/api/git/diff${qs({ session: params.session, path: params.path, staged: params.staged ? "true" : "false" })}`,
+    `/api/git/diff${qs({
+      session: params.session,
+      path: params.path,
+      staged: params.staged ? "true" : "false",
+      context: params.context,
+      ignore_whitespace: params.ignoreWhitespace ? "true" : undefined,
+    })}`,
   );
 }
 

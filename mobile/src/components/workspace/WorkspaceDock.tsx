@@ -2,12 +2,16 @@ import {
   ArrowLeft,
   File,
   FileCode2,
+  FilePlus,
   Folder,
+  FolderPlus,
   Link,
+  Pencil,
   RefreshCw,
   Save,
   SearchX,
   TextSearch,
+  Trash2,
 } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -25,23 +29,32 @@ import {
   type WorkspaceFileResponse,
   type WorkspaceSearchMode,
 } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
+import {
+  useCreateWorkspaceEntry,
+  useDeleteWorkspaceEntry,
+  useRenameWorkspaceEntry,
+} from "../../lib/gitActions";
 import {
   useWorkspaceEntries,
   useWorkspaceFile,
   useWorkspaceSearch,
   useWriteWorkspaceFile,
 } from "../../lib/queries";
+import { supportsDirectDaemonEndpoints } from "../../lib/transport";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import { Button } from "../ds/Button";
+import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { EmptyState } from "../ds/EmptyState";
 import { IconButton } from "../ds/IconButton";
 import { SearchField } from "../ds/SearchField";
 import { useToast } from "../ds/ToastHost";
 import { useWorkbench } from "../workbench/WorkbenchProvider";
-import { parentWorkspacePath, workspaceBasename } from "./workspaceModel";
+import { WorkspaceNameSheet } from "./WorkspaceNameSheet";
+import { joinWorkspacePath, parentWorkspacePath, workspaceBasename } from "./workspaceModel";
 
 interface WorkspaceDockProps {
   sessionId: string | null;
@@ -57,36 +70,61 @@ function formatBytes(bytes: number): string {
 function WorkspaceEntryRow({
   entry,
   onOpen,
+  onRename,
+  onDelete,
 }: {
   entry: WorkspaceEntry;
   onOpen: (entry: WorkspaceEntry) => void;
+  /** `null` when the connection cannot mutate the workspace (Forge Anywhere relay). */
+  onRename: ((entry: WorkspaceEntry) => void) | null;
+  onDelete: ((entry: WorkspaceEntry) => void) | null;
 }) {
   const tokens = useTokens();
   const Icon = entry.kind === "directory" ? Folder : entry.kind === "symlink" ? Link : File;
   return (
-    <Pressable
-      onPress={() => onOpen(entry)}
-      disabled={entry.kind === "symlink"}
-      accessibilityRole="button"
-      accessibilityLabel={`${entry.kind} ${entry.path}`}
-      style={({ pressed }) => [
-        styles.entry,
-        { backgroundColor: pressed ? tokens.bg3 : "transparent" },
-        entry.kind === "symlink" && styles.disabled,
-      ]}
-    >
-      <Icon size={16} strokeWidth={1.75} color={entry.kind === "directory" ? tokens.accent : tokens.ink3} />
-      <Text style={[typeScale.body, styles.entryName, { color: tokens.ink }]} numberOfLines={1}>
-        {entry.name}
-      </Text>
-      {entry.kind === "file" ? (
-        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>
-          {formatBytes(entry.size)}
+    <View style={styles.entryRow}>
+      <Pressable
+        onPress={() => onOpen(entry)}
+        disabled={entry.kind === "symlink"}
+        accessibilityRole="button"
+        accessibilityLabel={`${entry.kind} ${entry.path}`}
+        style={({ pressed }) => [
+          styles.entry,
+          { backgroundColor: pressed ? tokens.bg3 : "transparent" },
+          entry.kind === "symlink" && styles.disabled,
+        ]}
+      >
+        <Icon size={16} strokeWidth={1.75} color={entry.kind === "directory" ? tokens.accent : tokens.ink3} />
+        <Text style={[typeScale.body, styles.entryName, { color: tokens.ink }]} numberOfLines={1}>
+          {entry.name}
         </Text>
+        {entry.kind === "file" ? (
+          <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>
+            {formatBytes(entry.size)}
+          </Text>
+        ) : null}
+      </Pressable>
+      {onRename ? (
+        <IconButton
+          icon={<Pencil size={14} color={tokens.ink3} />}
+          onPress={() => onRename(entry)}
+          accessibilityLabel={`Rename ${entry.path}`}
+          style={styles.compactButton}
+        />
       ) : null}
-    </Pressable>
+      {onDelete ? (
+        <IconButton
+          icon={<Trash2 size={14} color={tokens.ink3} />}
+          onPress={() => onDelete(entry)}
+          accessibilityLabel={`Delete ${entry.path}`}
+          style={styles.compactButton}
+        />
+      ) : null}
+    </View>
   );
 }
+
+type NamePrompt = { kind: "file" | "directory" } | { kind: "rename"; entry: WorkspaceEntry };
 
 function WorkspaceBrowser({
   sessionId,
@@ -103,6 +141,51 @@ function WorkspaceBrowser({
   const entries = useWorkspaceEntries(sessionId, path);
   const search = useWorkspaceSearch(sessionId, searchQuery, mode);
   const searching = searchQuery.trim().length > 0;
+  const { baseUrl } = useAuth();
+  const toast = useToast();
+  const canEdit = baseUrl != null && supportsDirectDaemonEndpoints(baseUrl);
+  const create = useCreateWorkspaceEntry();
+  const rename = useRenameWorkspaceEntry();
+  const remove = useDeleteWorkspaceEntry();
+  const [prompt, setPrompt] = useState<NamePrompt | null>(null);
+  const [deleting, setDeleting] = useState<WorkspaceEntry | null>(null);
+  const promptBusy = create.isPending || rename.isPending;
+  const promptError = (create.error ?? rename.error)?.message ?? null;
+
+  const closePrompt = () => {
+    setPrompt(null);
+    create.reset();
+    rename.reset();
+  };
+  const submitPrompt = async (value: string) => {
+    if (!prompt) return;
+    try {
+      if (prompt.kind === "rename") {
+        const target = joinWorkspacePath(parentWorkspacePath(prompt.entry.path), value);
+        const result = await rename.mutateAsync({ session: sessionId, from: prompt.entry.path, to: target });
+        toast.show(`Renamed to ${workspaceBasename(result.path)}`, { tone: "success" });
+      } else {
+        const target = joinWorkspacePath(path, value);
+        const result = await create.mutateAsync({ session: sessionId, path: target, kind: prompt.kind });
+        toast.show(`Created ${workspaceBasename(result.path)}`, { tone: "success" });
+        if (prompt.kind === "file") onOpenFile(result.path);
+      }
+      closePrompt();
+    } catch {
+      // The daemon's message renders under the field.
+    }
+  };
+  const confirmDelete = async () => {
+    const entry = deleting;
+    setDeleting(null);
+    if (!entry) return;
+    try {
+      await remove.mutateAsync({ session: sessionId, path: entry.path });
+      toast.show(`Deleted ${entry.name}`, { tone: "neutral" });
+    } catch (error) {
+      toast.show(error instanceof Error ? error.message : "Could not delete.", { tone: "danger" });
+    }
+  };
 
   const openEntry = (entry: WorkspaceEntry) => {
     if (entry.kind === "directory") setPath(entry.path);
@@ -112,8 +195,51 @@ function WorkspaceBrowser({
   const error = searching ? search.error : entries.error;
   const loading = searching ? search.isLoading : entries.isLoading;
 
+  const promptCopy =
+    prompt?.kind === "rename"
+      ? {
+          title: `Rename ${prompt.entry.name}`,
+          label: "New name",
+          initial: prompt.entry.name,
+          confirm: "Rename",
+          description: undefined,
+        }
+      : {
+          title: prompt?.kind === "directory" ? "New folder" : "New file",
+          label: prompt?.kind === "directory" ? "Folder name" : "File name",
+          initial: "",
+          confirm: "Create",
+          description: path ? `Created inside ${path}. Slashes create nested folders.` : "Created at the workspace root. Slashes create nested folders.",
+        };
+
   return (
     <View style={styles.root}>
+      <WorkspaceNameSheet
+        visible={prompt != null}
+        title={promptCopy.title}
+        description={promptCopy.description}
+        label={promptCopy.label}
+        initialValue={promptCopy.initial}
+        confirmLabel={promptCopy.confirm}
+        busy={promptBusy}
+        error={promptError}
+        onSubmit={(value) => void submitPrompt(value)}
+        onClose={closePrompt}
+      />
+      <ConfirmDialog
+        visible={deleting != null}
+        title={`Delete ${deleting?.name ?? ""}?`}
+        message={
+          deleting?.kind === "directory"
+            ? "The folder and everything in it is removed from disk. This cannot be undone."
+            : "The file is removed from disk. This cannot be undone."
+        }
+        confirmLabel="Delete"
+        destructive
+        loading={remove.isPending}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleting(null)}
+      />
       <View style={[styles.browserHeader, { borderBottomColor: tokens.border }]}>
         <View style={styles.pathRow}>
           <IconButton
@@ -126,6 +252,22 @@ function WorkspaceBrowser({
           <Text style={[typeScale.monoMeta, styles.path, { color: tokens.ink2 }]} numberOfLines={1}>
             {path || "workspace"}
           </Text>
+          {canEdit ? (
+            <>
+              <IconButton
+                icon={<FilePlus size={16} color={tokens.ink2} />}
+                onPress={() => setPrompt({ kind: "file" })}
+                accessibilityLabel="New file"
+                style={styles.compactButton}
+              />
+              <IconButton
+                icon={<FolderPlus size={16} color={tokens.ink2} />}
+                onPress={() => setPrompt({ kind: "directory" })}
+                accessibilityLabel="New folder"
+                style={styles.compactButton}
+              />
+            </>
+          ) : null}
         </View>
         <SearchField
           value={searchText}
@@ -218,7 +360,13 @@ function WorkspaceBrowser({
       ) : (
         <ScrollView contentContainerStyle={styles.list}>
           {(entries.data?.entries ?? []).map((entry) => (
-            <WorkspaceEntryRow key={entry.path} entry={entry} onOpen={openEntry} />
+            <WorkspaceEntryRow
+              key={entry.path}
+              entry={entry}
+              onOpen={openEntry}
+              onRename={canEdit ? (target) => setPrompt({ kind: "rename", entry: target }) : null}
+              onDelete={canEdit ? setDeleting : null}
+            />
           ))}
           {entries.data?.entries.length === 0 ? (
             <EmptyState icon={Folder} message="This directory is empty." />
@@ -423,7 +571,9 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   list: { paddingVertical: space.space8 },
+  entryRow: { flexDirection: "row", alignItems: "center", paddingRight: space.space8 },
   entry: {
+    flex: 1,
     minHeight: 36,
     flexDirection: "row",
     alignItems: "center",

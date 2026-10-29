@@ -3,6 +3,7 @@
 // never serves stale cross-server data from the persisted cache.
 import {
   type InfiniteData,
+  keepPreviousData,
   useInfiniteQuery,
   useMutation,
   useQueries,
@@ -188,8 +189,8 @@ function keys(baseUrl: string | null) {
     mcp: ["mcp", baseUrl] as const,
     gitStatus: (sessionId: string) => ["git", "status", baseUrl, sessionId] as const,
     gitBranches: (sessionId: string) => ["git", "branches", baseUrl, sessionId] as const,
-    gitDiff: (sessionId: string, path: string, staged: boolean) =>
-      ["git", "diff", baseUrl, sessionId, path, staged] as const,
+    gitDiff: (sessionId: string, path: string, staged: boolean, context = 0, ignoreWhitespace = false) =>
+      ["git", "diff", baseUrl, sessionId, path, staged, context, ignoreWhitespace] as const,
     sessionDiff: (sessionId: string) => ["sessions", "diff", baseUrl, sessionId] as const,
     workspaceEntries: (sessionId: string, path: string) =>
       ["workspace", "entries", baseUrl, sessionId, path] as const,
@@ -732,13 +733,34 @@ export function usePrefetchSessionPanels(sessionId: string | null, enabled: bool
   }, [enabled, baseUrl, sessionId, queryClient]);
 }
 
-export function useGitDiff(sessionId: string | null, path: string | null, staged = false) {
+export interface GitDiffView {
+  /** Context lines around each change; 0 = the daemon's default. */
+  context?: number;
+  ignoreWhitespace?: boolean;
+  /** False defers the request (a collapsed card fetches nothing). */
+  enabled?: boolean;
+}
+
+export function useGitDiff(
+  sessionId: string | null,
+  path: string | null,
+  staged = false,
+  view: GitDiffView = {},
+) {
   const { baseUrl } = useAuth();
+  const { context = 0, ignoreWhitespace = false, enabled = true } = view;
   return useQuery<GitDiffResponse>({
-    queryKey: keys(baseUrl).gitDiff(sessionId ?? "", path ?? "", staged),
+    queryKey: keys(baseUrl).gitDiff(sessionId ?? "", path ?? "", staged, context, ignoreWhitespace),
     queryFn: () =>
-      getGitDiff(baseUrl as string, { session: sessionId as string, path: path as string, staged }),
-    enabled: baseUrl != null && sessionId != null && path != null && path !== "",
+      getGitDiff(baseUrl as string, {
+        session: sessionId as string,
+        path: path as string,
+        staged,
+        context: context > 0 ? context : undefined,
+        ignoreWhitespace,
+      }),
+    enabled: enabled && baseUrl != null && sessionId != null && path != null && path !== "",
+    placeholderData: keepPreviousData,
   });
 }
 

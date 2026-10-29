@@ -1,12 +1,17 @@
 //! `forge serve`'s git review dock — the REST surface behind the Machined "review" screens.
 //!
 //! Routes (all token-scoped under `{base}`, registered in [`crate::serve::daemon_router`]):
-//! - `GET  /api/git/status?session=<id>`                    staged / unstaged / untracked rows
+//! - `GET  /api/git/status?session=<id>`                    staged / unstaged / untracked / conflicted rows,
+//!   plus the upstream, ahead/behind counts and any merge/rebase in progress
 //! - `GET  /api/git/branches?session=<id>&q=<query>`        local / remote refs + worktree owners
-//! - `GET  /api/git/diff?session=<id>&path=<p>&staged=<b>`  one file's unified-diff hunks
+//! - `GET  /api/git/diff?session=<id>&path=<p>&staged=<b>[&context=<n>][&ignore_whitespace=<b>]`
+//!   one file's unified-diff hunks
 //! - `POST /api/git/stage`   `{session, paths[]}`
 //! - `POST /api/git/unstage` `{session, paths[]}`
 //! - `POST /api/git/commit`  `{session, message}` → the new commit sha
+//! - `POST /api/git/commit-message` `{session, language?}` → a model-written message for the staged diff
+//! - `POST /api/git/{fetch,pull,push}` `{session, remote?}` (pull also `strategy`) → never forced
+//! - `POST /api/git/discard` `{session, paths[]}` → drop working-tree changes
 //! - `POST /api/git/switch`  `{session, branch}` → switch a clean shared workspace
 //! - `POST /api/git/branches` `{session, name}` → create + switch a clean shared workspace
 //! - `GET  /api/sessions/{id}/diff`                         a forked session's worktree vs its base
@@ -32,7 +37,7 @@ use crate::serve::{
 /// own repository.
 pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
     Router::new()
-        .route(&format!("{base}/api/git/status"), get(git_status))
+        .route(&format!("{base}/api/git/status"), get(status::git_status))
         .route(
             &format!("{base}/api/git/branches"),
             get(git_branches).post(git_create_branch),
@@ -42,10 +47,22 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/git/stage"), post(git_stage))
         .route(&format!("{base}/api/git/unstage"), post(git_unstage))
         .route(&format!("{base}/api/git/commit"), post(git_commit))
+        .route(
+            &format!("{base}/api/git/commit-message"),
+            post(message::git_commit_message),
+        )
+        .route(&format!("{base}/api/git/fetch"), post(sync::git_fetch))
+        .route(&format!("{base}/api/git/pull"), post(sync::git_pull))
+        .route(&format!("{base}/api/git/push"), post(sync::git_push))
+        .route(&format!("{base}/api/git/discard"), post(sync::git_discard))
 }
 
 mod branches;
 mod diff;
+mod message;
+mod status;
+mod sync;
+pub(crate) mod url;
 pub(crate) use branches::{git_branches, git_create_branch, git_switch_branch};
 use diff::{
     is_untracked, parse_unified_diff, parse_unified_diff_window, staged_rename_source,
@@ -59,6 +76,10 @@ const MAX_DIFF_LINES: usize = 4_000;
 /// Rows per status bucket. `git status` on a repo with a huge untracked tree must not turn into an
 /// unbounded response.
 const MAX_STATUS_ROWS: usize = 2_000;
+
+/// Most context lines a client may ask a diff to carry (`context=`); expanding a hunk to the
+/// whole file is the point, but a request must not be able to demand an unbounded `-U`.
+const MAX_CONTEXT_LINES: usize = 2_000;
 
 /// Largest untracked file rendered as an all-additions hunk (bigger ones report size only).
 const MAX_UNTRACKED_BYTES: u64 = 512 * 1024;
@@ -96,8 +117,21 @@ pub(crate) struct GitStatusResponse {
     staged: Vec<GitFileRow>,
     unstaged: Vec<GitFileRow>,
     untracked: Vec<GitFileRow>,
-    /// Rows dropped by [`MAX_STATUS_ROWS`], summed across the three buckets.
+    /// Paths with unresolved merge conflicts. They appear here only, never in `staged` or
+    /// `unstaged`, so a client cannot offer to commit or discard them by accident.
+    conflicted: Vec<GitFileRow>,
+    /// Rows dropped by [`MAX_STATUS_ROWS`], summed across the buckets.
     truncated: usize,
+    /// The branch's upstream (`origin/main`), when it has one.
+    upstream: Option<String>,
+    /// Commits the branch has that its upstream lacks / the other way round. Zero without an
+    /// upstream.
+    ahead: usize,
+    behind: usize,
+    /// `merge` / `rebase` / `cherry-pick` / `revert` while one is unfinished.
+    operation: Option<String>,
+    /// Whether the repository has any remote — whether push/pull/fetch can mean anything.
+    has_remote: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -213,6 +247,12 @@ pub(crate) struct GitDiffQuery {
     /// Hunk lines to return (default and maximum: the per-file cap).
     #[serde(default)]
     limit: Option<usize>,
+    /// Context lines around each change (`git diff -U<n>`); git's default of 3 when omitted.
+    #[serde(default)]
+    context: Option<usize>,
+    /// Ignore whitespace-only changes (`git diff -w`).
+    #[serde(default)]
+    ignore_whitespace: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -360,178 +400,6 @@ fn git_raw(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-// ---------------------------------------------------------------------------
-// Status
-// ---------------------------------------------------------------------------
-
-/// Parse `git status --porcelain=v1 -z`: `XY <path>\0`, with an extra NUL-separated ORIGIN path
-/// following a rename/copy record. NUL framing (not the default line framing) so paths containing
-/// spaces, quotes, or newlines survive verbatim.
-fn parse_status_z(raw: &str) -> Vec<(char, char, String, Option<String>)> {
-    let mut out = Vec::new();
-    let mut fields = raw.split('\0');
-    while let Some(record) = fields.next() {
-        if record.len() < 4 {
-            continue;
-        }
-        let mut chars = record.chars();
-        let (Some(x), Some(y)) = (chars.next(), chars.next()) else {
-            continue;
-        };
-        let path = record[3..].to_string();
-        let orig = if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
-            fields.next().map(str::to_string)
-        } else {
-            None
-        };
-        out.push((x, y, path, orig));
-    }
-    out
-}
-
-/// Parse `git diff --numstat -z` into `path → (adds, dels, binary)`.
-///
-/// Normal record: `adds\tdels\tpath\0`. Rename record: `adds\tdels\t\0old\0new\0` — the path field
-/// is empty and the two names follow, so the fields must be walked in order rather than split
-/// independently. Binary files report `-` for both counts.
-fn parse_numstat_z(raw: &str) -> std::collections::HashMap<String, (usize, usize, bool)> {
-    let mut out = std::collections::HashMap::new();
-    let mut fields = raw.split('\0');
-    while let Some(record) = fields.next() {
-        let record = record.trim_start_matches('\n');
-        if record.trim().is_empty() {
-            continue;
-        }
-        let mut parts = record.splitn(3, '\t');
-        let (Some(adds), Some(dels), Some(rest)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let binary = adds == "-" || dels == "-";
-        let adds = adds.parse::<usize>().unwrap_or(0);
-        let dels = dels.parse::<usize>().unwrap_or(0);
-        let path = if rest.is_empty() {
-            // Rename/copy: `\0old\0new\0` — the destination name is what status reports.
-            let _old = fields.next();
-            match fields.next() {
-                Some(new) => new.to_string(),
-                None => continue,
-            }
-        } else {
-            rest.to_string()
-        };
-        out.insert(path, (adds, dels, binary));
-    }
-    out
-}
-
-fn status_rows(
-    entries: &[(char, char, String, Option<String>)],
-    numstat: &std::collections::HashMap<String, (usize, usize, bool)>,
-    pick: impl Fn(char, char) -> Option<char>,
-    truncated: &mut usize,
-) -> Vec<GitFileRow> {
-    let mut rows = Vec::new();
-    for (x, y, path, orig) in entries {
-        let Some(letter) = pick(*x, *y) else { continue };
-        if rows.len() >= MAX_STATUS_ROWS {
-            *truncated += 1;
-            continue;
-        }
-        let (adds, dels, binary) = numstat.get(path).copied().unwrap_or((0, 0, false));
-        rows.push(GitFileRow {
-            path: path.clone(),
-            status: letter.to_string(),
-            orig_path: orig.clone(),
-            adds,
-            dels,
-            binary,
-        });
-    }
-    rows
-}
-
-/// `GET /api/git/status?session=<id>` — the review dock's file list, bucketed exactly as git sees
-/// it (a file edited after being staged legitimately appears in BOTH `staged` and `unstaged`).
-pub(crate) async fn git_status(
-    State(state): State<Arc<DaemonState>>,
-    Query(params): Query<GitSessionQuery>,
-) -> Response {
-    let Some(dir) = session_dir(&state, &params.session).await else {
-        return no_such_session();
-    };
-    let base_repo = worktree_repo_and_branch(&dir).map(|(repo, _)| repo);
-    let result = tokio::task::spawn_blocking(move || -> Result<GitStatusResponse, String> {
-        let root = repo_root_of(&dir)?;
-        let base_branch = base_repo.and_then(|repo| {
-            git_stdout(&repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()
-        });
-        let status = String::from_utf8_lossy(&git_raw(
-            &root,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        )?)
-        .into_owned();
-        let entries = parse_status_z(&status);
-        let unstaged_stat = parse_numstat_z(&String::from_utf8_lossy(&git_raw(
-            &root,
-            &["diff", "--numstat", "-z"],
-        )?));
-        let staged_stat = parse_numstat_z(&String::from_utf8_lossy(&git_raw(
-            &root,
-            &["diff", "--cached", "--numstat", "-z"],
-        )?));
-        let branch = git_stdout(&root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-        let mut truncated = 0usize;
-        let staged = status_rows(
-            &entries,
-            &staged_stat,
-            |x, _| (x != ' ' && x != '?').then_some(x),
-            &mut truncated,
-        );
-        let unstaged = status_rows(
-            &entries,
-            &unstaged_stat,
-            |_, y| (y != ' ' && y != '?').then_some(y),
-            &mut truncated,
-        );
-        // Untracked files have no numstat; count their lines so the row agrees with the diff
-        // route (it used to say +0 -0 for a 20,000-line file the diff showed as all additions).
-        let mut untracked_stat = std::collections::HashMap::new();
-        let mut budget: u64 = 16 * 1024 * 1024;
-        for (x, y, path, _) in &entries {
-            if *x == '?' && *y == '?' {
-                if let Some(counts) = untracked_counts(&root, path, &mut budget) {
-                    untracked_stat.insert(path.clone(), counts);
-                }
-            }
-        }
-        let untracked = status_rows(
-            &entries,
-            &untracked_stat,
-            |x, y| (x == '?' && y == '?').then_some('?'),
-            &mut truncated,
-        );
-        Ok(GitStatusResponse {
-            root: root.to_string_lossy().into_owned(),
-            branch,
-            base_branch,
-            staged,
-            unstaged,
-            untracked,
-            truncated,
-        })
-    })
-    .await;
-    match result {
-        Ok(Ok(response)) => json_response(&response),
-        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "git status failed",
-        ),
-    }
-}
-
 /// `GET /api/git/diff?session=<id>&path=<p>&staged=<bool>` — one file's hunks. `staged=true` reads
 /// the index against HEAD; `staged=false` reads the working tree against the index, and falls back
 /// to an all-additions render when the path is untracked (git has no diff for it).
@@ -555,6 +423,10 @@ pub(crate) async fn git_diff(
         None => None,
     };
     let (offset, limit) = (params.offset, params.limit.unwrap_or(MAX_DIFF_LINES));
+    let unified = params
+        .context
+        .map(|lines| format!("-U{}", lines.min(MAX_CONTEXT_LINES)));
+    let ignore_whitespace = params.ignore_whitespace;
     let result = tokio::task::spawn_blocking(move || -> Result<GitDiffResponse, String> {
         let root = repo_root_of(&dir)?;
         // A staged rename is only recognised when git sees BOTH names in the pathspec.
@@ -562,6 +434,12 @@ pub(crate) async fn git_diff(
         let mut args = vec!["-c", "core.quotePath=false", "diff"];
         if staged {
             args.push("--cached");
+        }
+        if let Some(unified) = unified.as_deref() {
+            args.push(unified);
+        }
+        if ignore_whitespace {
+            args.push("-w");
         }
         args.extend_from_slice(&["--find-renames", "--", rel.as_str()]);
         if let Some(orig) = orig.as_deref() {
@@ -791,8 +669,12 @@ pub(crate) async fn session_diff(
 }
 
 #[cfg(test)]
+mod status_tests;
+
+#[cfg(test)]
 mod tests {
     use super::branches::{is_forge_managed_worktree, parse_branch_rows, parse_worktree_branches};
+    use super::status::{parse_numstat_z, parse_status_z};
     use super::*;
 
     #[test]

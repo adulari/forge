@@ -48,6 +48,11 @@ cwd, never from a client-provided absolute path.
   and stops at 20,000 files or 64 MiB of searchable text.
 - Composer `@path` completion uses the same session-scoped search. Paths containing whitespace are
   inserted as `@{path with spaces}` and expanded relative to the correct session workspace.
+- New file, new folder, rename and delete (`POST /api/workspace/{create,rename,delete}`) use the same
+  confinement, and additionally check that the deepest existing ancestor of a new path resolves
+  inside the root, so a symlinked directory cannot carry an operation outside it. Create and rename
+  answer `409` instead of overwriting; delete refuses a folder that is itself a git repository and
+  removes a symlink as the link, never its target. Delete asks for confirmation in the app.
 - These filesystem endpoints are Direct-only today. Forge Anywhere intentionally does not bridge
   project files; the surface explains how to reconnect directly instead of retrying a disallowed
   route.
@@ -78,6 +83,45 @@ The Git surface includes a session-scoped branch/worktree picker backed by the d
 - Compact iOS/Android exposes the same Git dock under Review → Working tree; Turn remains available
   beside it for plan and per-turn diff artifacts. Expanded layouts can retain Git in the workbench.
 
+## Committing and syncing
+
+The Git dock does the whole commit flow without leaving the app:
+
+- The sparkle in the message well (`POST /api/git/commit-message`) asks a trivial-tier model for a
+  conventional-commit message from the staged diff. The prompt carries the diffstat, the last five
+  subjects for style, and a bounded patch (lockfiles are named but not shown, each file and the
+  whole are capped). It only fills the well; nothing is committed. The language comes from
+  `[git] commit_language` (default `English`), which a repository's `.forge/config.toml` can
+  override. `--mock` daemons answer with a deterministic subject instead of calling a model.
+- The commit button is split: it runs whichever of "Commit" and "Commit & push" was used last
+  (remembered per device), the caret picks the other, and Ctrl/Cmd+Enter in the message well runs
+  the remembered one. Commit & push commits first; a failed push leaves the commit in place and
+  says so.
+- Fetch, pull and push (`POST /api/git/{fetch,pull,push}`) sit above the file list with the
+  upstream's ahead/behind counts. Push never forces and sets the upstream on a branch that has
+  none. Pull is `--ff-only`; when git refuses, the dock offers one tap to pull with a merge.
+  Network commands run without a TTY (a credential prompt fails instead of hanging), under a
+  120 second timeout, and `pull` refuses while the session is mid-turn.
+- Any remote a request names must be one the repository already has or an `https`, `http`,
+  `ssh` or `git` URL (or scp-style `user@host:path`). `ext::`/`fd::`/`<helper>::` URLs, `file:`
+  URLs, bare paths and values starting with `-` are rejected, and the commands run with
+  `GIT_ALLOW_PROTOCOL` limited to those transports so a URL already in the repository's config
+  cannot reach the others. The validator (`serve_git/url.rs`) is shared by anything else that
+  accepts a clone or remote URL.
+- Unstaged and untracked rows have a discard action (and the groups a "discard all") behind a
+  confirmation: tracked files return to the index version and untracked files are deleted.
+  Staged changes are untouched; unstage first. Discard refuses while the session is mid-turn.
+- Paths with unresolved merge conflicts are listed in their own CONFLICTS group (never in staged
+  or unstaged), with the unfinished merge/rebase named, and "Resolve with Forge" starts a turn on
+  the session that resolves them, stages the result, and does not commit.
+- The diff column is one scroll of collapsible file cards: a card per staged/unstaged/untracked
+  file, opened lazily (the first few small ones start open; "expand all" opens up to 40). Picking
+  a file in the list opens and scrolls to its card. Lines are syntax-coloured for the languages
+  the chat's code blocks know, a hunk header widens the context by 20 lines (`context=` on
+  `GET /api/git/diff`), "hide whitespace" passes `ignore_whitespace`, and a capped file (4,000
+  hunk lines) says how many lines it left out. The staged/unstaged/untracked groups collapse.
+- The mutating routes are Direct-only; over Forge Anywhere the dock stays read-only.
+
 ## Diff review annotations
 
 Working-tree, staged, turn, and fork diffs use the same review model:
@@ -88,8 +132,8 @@ Working-tree, staged, turn, and fork diffs use the same review model:
 - Tapping a line starts an old/new-side range; tapping another line on that side extends it.
   Selection is explicit in split and unified modes and can be cleared without creating feedback.
 - A review annotation records repository path, old/new range, staged/working-tree/turn/fork source,
-  selected line context, exact patch fingerprint, and the operator's comment. Markers only restore
-  against that fingerprint, so a later shifted diff cannot display feedback on the wrong line.
+  selected line context, a fingerprint of the changed lines, and the operator's comment. Markers
+  only restore against that fingerprint (so widening the context keeps them), so a later shifted diff cannot display feedback on the wrong line.
 - Pending annotations live for the session, appear as removable composer chips, and are formatted
   as readable line-addressed context only after the next prompt is successfully sent or queued.
 - The compact Review tab remains marked while annotations are pending. Turn and working-tree views

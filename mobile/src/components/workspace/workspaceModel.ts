@@ -34,3 +34,11 @@ export function replaceWorkspaceMention(
 ): string {
   return `${text.slice(0, mention.start)}${workspaceMentionToken(path)} `;
 }
+
+/** `name` inside `directory` ("" = the workspace root). Leading/trailing slashes in the typed name
+ * are dropped; the daemon still validates the result. */
+export function joinWorkspacePath(directory: string, name: string): string {
+  const cleaned = name.trim().replace(/^\/+|\/+$/g, "");
+  if (!cleaned) return "";
+  return directory ? `${directory.replace(/\/+$/, "")}/${cleaned}` : cleaned;
+}

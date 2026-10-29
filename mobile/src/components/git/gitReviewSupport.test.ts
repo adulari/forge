@@ -1,6 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { classifyGitStatusError, isGitReviewReadOnly, isGitReviewSupported } from "./gitReviewSupport";
+import {
+  aheadBehindLabel,
+  classifyGitStatusError,
+  conflictResolutionPrompt,
+  discardMessage,
+  isCommitChord,
+  isGitReviewReadOnly,
+  isGitReviewSupported,
+  isNotFastForward,
+  parseCommitAction,
+} from "./gitReviewSupport";
 
 // `lib/transport/index.ts` imports `../platform` (which imports `react-native` for `Platform.OS`)
 // and re-exports `anywhereCredentialStore`, which imports `expo-secure-store` — both mocked the
@@ -70,5 +80,51 @@ describe("classifyGitStatusError", () => {
     expect(classifyGitStatusError({ message: "session has no working directory on this host" }, null).kind).toBe(
       "not-repo",
     );
+  });
+});
+
+describe("commit and sync helpers", () => {
+  it("remembers only the two known actions", () => {
+    expect(parseCommitAction("commit-push")).toBe("commit-push");
+    expect(parseCommitAction("commit")).toBe("commit");
+    expect(parseCommitAction(null)).toBe("commit");
+    expect(parseCommitAction("amend")).toBe("commit");
+  });
+
+  it("recognises the commit chord but not a bare Enter", () => {
+    expect(isCommitChord({ key: "Enter", ctrlKey: true })).toBe(true);
+    expect(isCommitChord({ key: "Enter", metaKey: true })).toBe(true);
+    expect(isCommitChord({ key: "Enter" })).toBe(false);
+    expect(isCommitChord({ key: "a", ctrlKey: true })).toBe(false);
+  });
+
+  it("spots a refused fast-forward", () => {
+    expect(isNotFastForward("fatal: Not possible to fast-forward, aborting.")).toBe(true);
+    expect(isNotFastForward("hint: Diverging branches can't be fast-forwarded")).toBe(true);
+    expect(isNotFastForward("fatal: unable to access remote")).toBe(false);
+  });
+
+  it("builds the conflict prompt with the files and the guard rails", () => {
+    const prompt = conflictResolutionPrompt(["a.rs", "b/c.ts"], "merge");
+    expect(prompt).toContain("A merge is in progress");
+    expect(prompt).toContain("- a.rs\n- b/c.ts");
+    expect(prompt).toContain("do not commit or push");
+    expect(conflictResolutionPrompt(["a.rs"], null)).toContain("These files have merge conflicts:");
+  });
+
+  it("labels ahead/behind", () => {
+    expect(aheadBehindLabel(2, 0)).toBe("↑2");
+    expect(aheadBehindLabel(0, 3)).toBe("↓3");
+    expect(aheadBehindLabel(1, 1)).toBe("↑1 ↓1");
+    expect(aheadBehindLabel(0, 0)).toBe("");
+  });
+
+  it("words the discard confirmation by count and by what happens to the files", () => {
+    expect(discardMessage(["a.rs"], "tracked").title).toBe("Discard changes?");
+    expect(discardMessage(["a.rs"], "tracked").message).toContain("staged or committed version");
+    expect(discardMessage(["a.rs"], "untracked").title).toBe("Delete this file?");
+    expect(discardMessage(["a.rs"], "untracked").message).toContain("deleted from disk");
+    expect(discardMessage(["a", "b", "c"], "tracked").title).toBe("Discard 3 files?");
+    expect(discardMessage(["a", "b"], "untracked").title).toBe("Delete 2 files?");
   });
 });
