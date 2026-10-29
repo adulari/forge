@@ -1,4 +1,4 @@
-import { type AppShortcutAction, useShortcutBinding } from "./bindings";
+import { type AppShortcutAction, APP_SHORTCUTS, useShortcutBinding } from "./bindings";
 import { type HotkeyHandler, useHotkey } from "./useHotkeys";
 
 /**
@@ -11,6 +11,7 @@ export function useAppShortcut(action: AppShortcutAction, handler: HotkeyHandler
     meta: binding.mod,
     alt: binding.alt,
     shift: binding.shift,
+    when: APP_SHORTCUTS.find((d) => d.action === action)?.when,
   });
 }
 

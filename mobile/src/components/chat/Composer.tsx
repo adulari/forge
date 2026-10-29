@@ -25,6 +25,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
+import { useAppShortcut } from "../../lib/shortcuts";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { EMPTY_EDITS, type EditStack, recordEdit, redoEdit, undoEdit } from "../../lib/composerUndo";
 import { clearDraft, clearDraftAttachments, getDraft, getDraftAttachments, setDraft, setDraftAttachments } from "../../lib/drafts";
@@ -407,6 +408,11 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
       toast.show("not sent — reconnect and try again", { tone: "danger" });
     }
   };
+
+  useAppShortcut("composer.effort", () => setEffortVisible(true));
+  useAppShortcut("composer.temper", openModePicker);
+  useAppShortcut("composer.model", openModelPicker);
+  useAppShortcut("composer.plan", () => insertCommand("/plan "));
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
   // draft (the daemon hasn't refreshed it yet) — `suppressedSuggestion` (SessionContext, set in
@@ -1044,6 +1050,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
             ) : null}
             <TextInput
               ref={inputRef}
+              {...(Platform.OS === "web" ? ({ dataSet: { focusZone: "composer" } } as object) : null)}
               value={Platform.OS === "web" ? text : nativeText}
               onChangeText={(next) => {
                 recordComposerInput();

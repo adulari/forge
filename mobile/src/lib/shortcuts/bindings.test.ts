@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  APP_SHORTCUTS,
   findShortcutConflicts,
   formatShortcut,
   getDefaultShortcut,
@@ -49,13 +50,14 @@ describe("app shortcut bindings", () => {
     })).toBeNull();
   });
 
-  it("drops unknown or malformed persisted overrides", () => {
+  it("keeps unknown actions inertly and drops malformed values", () => {
     expect(parseShortcutOverrides(JSON.stringify({
       "nav.fleet": { key: "9", mod: false, alt: true, shift: false },
-      "nav.unknown": { key: "x", mod: true, alt: false, shift: false },
+      "future.action": { key: "x", mod: true, alt: false, shift: false },
       "nav.inbox": { key: "2", mod: "yes", alt: true, shift: false },
     }))).toEqual({
       "nav.fleet": { key: "9", mod: false, alt: true, shift: false },
+      "future.action": { key: "x", mod: true, alt: false, shift: false },
     });
     expect(parseShortcutOverrides("{bad json")).toEqual({});
   });
@@ -96,5 +98,26 @@ describe("app shortcut bindings", () => {
     const find = getDefaultShortcut("find");
     expect(find).toEqual({ key: "f", mod: true, alt: false, shift: false });
     expect(findShortcutConflicts("find", find)).toEqual([]);
+  });
+
+  it("ships every default chord free of conflicts", () => {
+    for (const { action } of APP_SHORTCUTS) {
+      expect(findShortcutConflicts(action, getDefaultShortcut(action)), action).toEqual([]);
+    }
+  });
+
+  it("binds the new session and workbench chords", () => {
+    expect(getDefaultShortcut("session.next")).toEqual({ key: "]", mod: true, alt: false, shift: true });
+    expect(getDefaultShortcut("session.recent")).toEqual({ key: "tab", mod: true, alt: false, shift: false });
+    expect(getDefaultShortcut("workbench.preview")).toEqual({ key: "b", mod: true, alt: false, shift: true });
+    expect(getDefaultShortcut("settings")).toEqual({ key: ",", mod: true, alt: false, shift: false });
+  });
+
+  it("lets disjoint focus scopes share one chord but still flags overlapping ones", () => {
+    const p = { key: "p", mod: false, alt: false, shift: false };
+    const overrides = { "composer.plan": p, "sidebar.rename": p, "nav.fleet": p };
+    const conflicts = findShortcutConflicts("sidebar.rename", p, overrides).map(({ id }) => id);
+    expect(conflicts).not.toContain("composer.plan");
+    expect(conflicts).toContain("nav.fleet");
   });
 });

@@ -1133,6 +1133,23 @@ export function writeWorkspaceFile(
 }
 
 // ---------------------------------------------------------------------------
+// Keybindings (crates/forge-cli/src/serve_keybindings.rs)
+// ---------------------------------------------------------------------------
+
+export interface KeybindingsFile {
+  app: Record<string, unknown>;
+  tui: Record<string, unknown>;
+}
+
+export function getKeybindings(baseUrl: string): Promise<KeybindingsFile> {
+  return request(baseUrl, "/api/keybindings");
+}
+
+export function putKeybindings(baseUrl: string, app: Record<string, unknown>): Promise<KeybindingsFile> {
+  return request(baseUrl, "/api/keybindings", { method: "PUT", body: JSON.stringify({ app }) });
+}
+
+// ---------------------------------------------------------------------------
 // Schedules
 // ---------------------------------------------------------------------------
 

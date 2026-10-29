@@ -8,6 +8,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 
+- **Keyboard shortcuts cover sessions, the composer and the sidebar, and one `keybindings.json` now feeds the app and the TUI.** New chords: next/previous session (Mod+Shift+]/[), Ctrl+Tab through the most recent sessions, close session (Mod+W), app settings (Mod+,), Toggle Preview (Mod+Shift+B), composer-only effort/mode/model/plan (Alt+E, Alt+Shift+T, Alt+M, Alt+P) and sidebar-row archive/rename. Entries carry a focus scope (`composerFocus`, `sidebarFocus`, `hasSession`), so scopes that cannot overlap may share a chord without a conflict warning. The daemon serves the file at `/api/keybindings`; the app syncs its overrides through it, the TUI layers its `tui` section over `[keybinds.binds]`, and bindings from a newer build are kept intact. Settings lists the locally handled chords as read-only rows.
 - **The browser tool gains a `batch` action, and `eval` and cookie reads are now opt-in.** `batch` takes a `steps` array of ordinary browser calls, runs them in order, stops at the first failure and returns one compact report plus a single final page snapshot. `eval`, `replay` and `cookies` now return a refusal that names `[browser] allow_eval` or `[browser] allow_cookie_access`, both default false, until the user enables them.
 
 ### Security

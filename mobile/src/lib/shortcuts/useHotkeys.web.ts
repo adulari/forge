@@ -4,6 +4,8 @@
 import { useEffect } from "react";
 
 import { normalizeShortcutKey } from "./bindings";
+import { currentFocusTags } from "./focusContext";
+import { evaluateWhen } from "./when";
 
 export type HotkeyHandler = () => void;
 
@@ -12,6 +14,7 @@ interface HotkeyEntry {
   meta: boolean;
   alt: boolean;
   shift: boolean;
+  when?: string;
   handler: HotkeyHandler;
 }
 
@@ -33,7 +36,9 @@ function ensureListener(): void {
     const shift = e.shiftKey;
     const key = normalizeShortcutKey(e.key);
     if (!key) return;
+    const tags = currentFocusTags();
     for (const entry of registry) {
+      if (entry.when && !evaluateWhen(entry.when, tags)) continue;
       if (entry.meta !== meta || entry.alt !== alt || entry.shift !== shift || entry.key !== key) continue;
       // A Mod/Alt combo always fires even while a text field is focused (that's the
       // point of global app shortcuts); an unmodified or Shift-only key never does.
@@ -55,19 +60,20 @@ function ensureListener(): void {
 export function useHotkey(
   key: string,
   handler: HotkeyHandler,
-  options?: { meta?: boolean; alt?: boolean; shift?: boolean },
+  options?: { meta?: boolean; alt?: boolean; shift?: boolean; when?: string },
 ): void {
   const meta = options?.meta ?? (options?.alt || options?.shift ? false : true);
   const alt = options?.alt ?? false;
   const shift = options?.shift ?? false;
+  const when = options?.when;
   useEffect(() => {
     ensureListener();
     const normalizedKey = normalizeShortcutKey(key);
     if (!normalizedKey) return;
-    const entry: HotkeyEntry = { key: normalizedKey, meta, alt, shift, handler };
+    const entry: HotkeyEntry = { key: normalizedKey, meta, alt, shift, when, handler };
     registry.add(entry);
     return () => {
       registry.delete(entry);
     };
-  }, [key, meta, alt, shift, handler]);
+  }, [key, meta, alt, shift, when, handler]);
 }

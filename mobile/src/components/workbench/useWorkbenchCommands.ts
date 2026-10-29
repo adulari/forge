@@ -2,7 +2,13 @@
 // as a persisted keyboard shortcut and as a menu id (`useDesktopMenuAction`), so the macOS menu
 // bar, the title-bar Layout menu, the command palette and the keyboard all run the same code.
 // Inert while `enabled` is false (compact windows, where none of this chrome renders).
+import { router } from "expo-router";
+
+import { useEffect } from "react";
+
 import { useAppShortcut, type AppShortcutAction } from "../../lib/shortcuts";
+import { useKeybindingsSync } from "../../lib/shortcuts/useKeybindingsSync";
+import { publishFocusTag } from "../../lib/shortcuts/focusContext";
 import { useDesktopMenuAction, type DesktopMenuId } from "../../lib/desktopMenu";
 import type { PresetName } from "./layoutModel";
 import type { WorkbenchSurfaceKind } from "./model";
@@ -32,6 +38,12 @@ export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: Workbench
     });
   const { layout, focusedSessionId } = workbench;
   const total = 1 + layout.secondary.length;
+  useKeybindingsSync();
+  const hasSession = focusedSessionId != null;
+  useEffect(() => {
+    publishFocusTag("hasSession", hasSession);
+    return () => publishFocusTag("hasSession", false);
+  }, [hasSession]);
 
   useCommand("workbench.split", "view:split-pane", guard(() => workbench.addPane()));
   useCommand("workbench.closePane", "view:pane-close", guard(() => {
@@ -47,13 +59,18 @@ export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: Workbench
   useCommand("workbench.agents", "view:agents", toggle("agents"));
   useCommand("workbench.plan", "view:plan", toggle("plan"));
   useCommand("workbench.files", "view:files", toggle("files"));
+  useCommand("workbench.preview", "view:browser-preview", guard(() => {
+    if (focusedSessionId) workbench.toggleSurface({ kind: "preview", sessionId: focusedSessionId });
+  }));
+  useAppShortcut("session.next", guard(() => workbench.stepSession(1)));
+  useAppShortcut("session.prev", guard(() => workbench.stepSession(-1)));
+  useAppShortcut("session.recent", guard(() => workbench.cycleRecent()));
+  useAppShortcut("settings", () => router.push("/settings"));
+  useAppShortcut("session.close", guard(() => {
+    if (total > 1) workbench.closePane(layout.focus);
+    else if (focusedSessionId) router.replace("/");
+  }));
   useDesktopMenuAction("view:gallery", toggle("gallery"));
-  useDesktopMenuAction(
-    "view:browser-preview",
-    guard(() => {
-      if (focusedSessionId) workbench.toggleSurface({ kind: "preview", sessionId: focusedSessionId });
-    }),
-  );
 
   useDesktopMenuAction("view:layout-focus", preset("focus", true));
   useDesktopMenuAction("view:layout-side-by-side", preset("side-by-side", false));

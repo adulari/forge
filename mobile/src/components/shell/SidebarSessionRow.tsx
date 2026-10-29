@@ -10,6 +10,7 @@ import { Platform, Pressable, StyleSheet, Text, TextInput, View, type GestureRes
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { providerFamily, providerFamilyLabel, providerIdOf } from "../../lib/providerFamily";
+import { getResolvedShortcut, shortcutBindingFromEvent, shortcutBindingsEqual } from "../../lib/shortcuts/bindings";
 import { useArchiveSession, useCreateSession, useDeleteSession, usePrefetchSessionHistory, useRenameSession } from "../../lib/queries";
 import { diffLabel, failedTurn, projectRoot, sessionStateWord } from "../../lib/sidebarModel";
 import { requestSessionPrewarm } from "../../lib/sessionPrewarm";
@@ -190,10 +191,22 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
       event.preventDefault();
       startRename();
     };
+    node.setAttribute("data-focus-zone", "sidebar");
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "F2" && event.target === node) {
+      if (event.target !== node) return;
+      if (event.key === "F2") {
         event.preventDefault();
         startRename();
+        return;
+      }
+      const chord = shortcutBindingFromEvent(event);
+      if (!chord) return;
+      if (shortcutBindingsEqual(chord, getResolvedShortcut("sidebar.rename"))) {
+        event.preventDefault();
+        startRename();
+      } else if (!terminal && shortcutBindingsEqual(chord, getResolvedShortcut("sidebar.archive"))) {
+        event.preventDefault();
+        setConfirm("archive");
       }
     };
     node.addEventListener("dblclick", onDoubleClick);
@@ -202,7 +215,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
       node.removeEventListener("dblclick", onDoubleClick);
       node.removeEventListener("keydown", onKeyDown);
     };
-  }, [startRename]);
+  }, [startRename, terminal]);
 
   const metric =
     state === "busy" ? formatCost(row.cost_usd) : formatRelativeTime(row.last_activity * 1000);

@@ -983,6 +983,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
             get(crate::serve_workspace::workspace_search),
         )
         .merge(crate::serve_workspace::edit_routes(&base))
+        .merge(crate::serve_keybindings::routes(&base))
         // Schedule registry (serve_schedules.rs) — the same rows + OS timers `forge schedule` owns.
         .route(
             &format!("{base}/api/schedules"),
