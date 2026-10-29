@@ -151,6 +151,7 @@ import {
 } from "../../modules/live-activity";
 import { historyPageSize } from "./historyPaging";
 import { formatCwd } from "../theme/typography";
+import { usageRefetchInterval, useDesktopShellPrefs } from "./desktopShellPrefs";
 
 // FleetWatcher receives immediate daemon invalidations over /ws/fleet. This slow poll is only a
 // recovery net for proxies/platforms that cannot keep a WebSocket alive.
@@ -976,11 +977,12 @@ export function useUpdateConfig() {
 export function useUsage(sessionId?: string | null) {
   const { baseUrl } = useAuth();
   const isFocused = useIsFocused();
+  const { usageRefreshMinutes } = useDesktopShellPrefs();
   return useQuery<UsageResponse>({
     queryKey: ["usage", baseUrl, sessionId ?? null],
     queryFn: () => getUsage(baseUrl as string, sessionId ?? undefined),
     enabled: baseUrl != null,
-    refetchInterval: isFocused ? 30000 : false,
+    refetchInterval: isFocused ? usageRefetchInterval(sessionId, usageRefreshMinutes) : false,
     refetchOnWindowFocus: true,
   });
 }

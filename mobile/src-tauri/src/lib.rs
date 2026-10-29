@@ -18,6 +18,7 @@ use tauri::{RunEvent, WindowEvent};
 
 mod about;
 mod auto_update;
+mod desktop_shell;
 mod menu;
 mod onboarding;
 mod ota;
@@ -169,6 +170,11 @@ pub fn run(process_start: Instant) {
     perf_mark(|timeline| timeline.process_start_ms = Some(0.0));
     perf_mark(|timeline| timeline.builder_start_ms = Some(perf_elapsed_ms()));
     let mut builder = tauri::Builder::default();
+    // Registered first: the single-instance plugin must see a second launch before any other
+    // plugin has started doing work in it.
+    builder = builder.plugin(desktop_shell::single_instance_plugin());
+    builder = builder.plugin(desktop_shell::global_shortcut_plugin());
+    builder = builder.plugin(desktop_shell::autostart_plugin());
     builder = builder.plugin(tauri_plugin_notification::init());
     perf_mark(|timeline| timeline.plugin_notification_ms = Some(perf_elapsed_ms()));
     builder = builder.plugin(tauri_plugin_opener::init());
@@ -184,6 +190,8 @@ pub fn run(process_start: Instant) {
     builder = builder.plugin(tauri_plugin_process::init());
     perf_mark(|timeline| timeline.plugin_process_ms = Some(perf_elapsed_ms()));
     builder = builder.manage(about::AboutState::default());
+    builder = builder.manage(desktop_shell::Handoff::default());
+    builder = builder.manage(desktop_shell::RegisteredChord::default());
     let mut context = tauri::generate_context!();
     let ota = ota::install_into(&mut context);
     builder = builder.manage(ota.clone());
@@ -222,6 +230,12 @@ pub fn run(process_start: Instant) {
             preview::preview_close,
             tray::set_tray_summary,
             tray::tray_open_main,
+            desktop_shell::desktop_shell_ready,
+            desktop_shell::quick_composer_register,
+            desktop_shell::quick_composer_unregister,
+            desktop_shell::launch_settings,
+            desktop_shell::set_launch_at_login,
+            desktop_shell::set_start_minimized,
             menu::set_menu_accelerators,
             about::set_about_info,
             about::open_about_window,
@@ -282,6 +296,8 @@ pub fn run(process_start: Instant) {
                 eprintln!("forge: tray unavailable: {error}");
             }
 
+            desktop_shell::setup(app.handle(), tray::is_installed());
+
             auto_update::start(app.handle().clone());
             ota.spawn(app.handle().clone());
 
@@ -301,6 +317,9 @@ pub fn run(process_start: Instant) {
         .on_window_event(|window, event| {
             if window.label() != "main" || !tray::is_installed() {
                 return;
+            }
+            if let WindowEvent::ThemeChanged(theme) = event {
+                tray::apply_theme(window.app_handle(), *theme);
             }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();

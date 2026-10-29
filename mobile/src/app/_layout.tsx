@@ -24,6 +24,7 @@ import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { ReportingHost } from "../components/ReportingUi";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
+import { StartupWatchdog } from "../components/StartupWatchdog";
 import { DesktopOtaHost } from "../components/DesktopOtaHost";
 import { UpdateNotice } from "../components/UpdateNotice";
 import { OperationalNotice } from "../components/OperationalNotice";
@@ -56,6 +57,7 @@ import { rememberPendingRoute } from "../lib/pendingRoute";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
 import { rememberShellRoute } from "../lib/nav";
+import { markStartupComplete } from "../lib/startupState";
 import { checkDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { dumpDesktopPerformanceSnapshot, markDesktopInteractive, markFirstPaint, markReactMountEnd, markReactMountStart, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor } from "../lib/performance";
@@ -116,7 +118,7 @@ function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
   const [perfFixtureEnabled, setPerfFixtureEnabled] = useState(false);
   const tokens = useTokens();
-  const { isExpanded } = useBreakpoint();
+  const { isExpanded, isNarrowDesktop } = useBreakpoint();
 
   useLayoutEffect(() => {
     markReactMountEnd();
@@ -154,7 +156,11 @@ function RootNavigator() {
   // rail component (see ds/MasterDetail.tsx's `railWidth` prop). Registering the
   // hotkeys unconditionally is harmless — the chrome they toggle only ever renders
   // below, gated on `isPaired && isExpanded`.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [storedSidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // A narrowed desktop window shows the sidebar as the rail; the toggle then opens it as a
+  // transient panel (not persisted) that closes again on navigation.
+  const [narrowSidebarOpen, setNarrowSidebarOpen] = useState(false);
+  const sidebarCollapsed = isNarrowDesktop ? !narrowSidebarOpen : storedSidebarCollapsed;
   const [quickComposerOpen, setQuickComposerOpen] = useState(false);
   const sidebarWidth = useShellPrefs().sidebarWidth;
   const workbench = useWorkbench();
@@ -174,11 +180,18 @@ function RootNavigator() {
   }, []);
 
   const applySidebarCollapsed = (next: boolean) => {
+    if (isNarrowDesktop) {
+      setNarrowSidebarOpen(!next);
+      return;
+    }
     setSidebarCollapsed(next);
     void AsyncStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next)).catch(() => undefined);
   };
   const toggleSidebarCollapsed = () => applySidebarCollapsed(!sidebarCollapsed);
   const toggleUsageDock = () => workbench.toggleSurface({ kind: "usage" });
+  useEffect(() => {
+    setNarrowSidebarOpen(false);
+  }, [pathname]);
   useSidebarCollapseHotkey(toggleSidebarCollapsed);
   useUsageDockHotkey(toggleUsageDock);
   useQuickComposerHotkey(() => setQuickComposerOpen(true));
@@ -191,6 +204,7 @@ function RootNavigator() {
   useEffect(() => {
     if (!isLoading) {
       requestAnimationFrame(() => {
+        markStartupComplete();
         markDesktopInteractive();
         markFirstPaint();
         SplashScreen.hideAsync().catch(() => {
@@ -223,6 +237,7 @@ function RootNavigator() {
         <Stack.Screen name="hooks" />
         <Stack.Screen name="providers" />
         <Stack.Screen name="appearance" />
+        <Stack.Screen name="desktop" />
           <Stack.Screen name="keybindings" />
           <Stack.Screen name="diagnostics" />
         <Stack.Screen name="perf-fixture" />
@@ -358,6 +373,7 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <ErrorBoundary>
+          <StartupWatchdog />
           <ThemeProvider>
             <AuthProvider>
               <RealAnywhereProvider>

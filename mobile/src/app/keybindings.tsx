@@ -26,6 +26,9 @@ import {
   shortcutBindingFromEvent,
   useShortcutPreferences,
 } from "../lib/shortcuts";
+import { useGlobalChordStatus } from "../lib/shortcuts/globalChord";
+import { describeChordStatus } from "../lib/shortcuts/globalChordCore";
+import { isTauri } from "../lib/platform";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
@@ -49,6 +52,8 @@ function ShortcutRow({
   const tokens = useTokens();
   const conflicts = findShortcutConflicts(descriptor.action, binding);
   const isDefault = isDefaultShortcut(descriptor.action, binding);
+  const chord = useGlobalChordStatus();
+  const chordNote = isTauri && descriptor.action === "shell.quickComposer" ? describeChordStatus(chord) : null;
   return (
     <View style={[styles.row, { borderBottomColor: tokens.hairline }]}>
       <Pressable
@@ -69,6 +74,14 @@ function ShortcutRow({
           {conflicts.length > 0 ? (
             <Text style={[type.sub, { color: tokens.warn }]}>
               Also used by {conflicts.map(({ label }) => label).join(", ")}
+            </Text>
+          ) : null}
+          {chordNote ? (
+            <Text
+              accessibilityRole={chordNote.tone === "warn" ? "alert" : undefined}
+              style={[type.sub, { color: chordNote.tone === "warn" ? tokens.warn : tokens.ink3 }]}
+            >
+              {chordNote.text}
             </Text>
           ) : null}
         </View>

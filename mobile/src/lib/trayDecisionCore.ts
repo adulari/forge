@@ -91,3 +91,21 @@ export async function answerTrayDecision(
     return "failed";
   }
 }
+
+export interface TrayOrderRow {
+  id: string;
+  waiting: boolean;
+  busy: boolean;
+  last_activity: number;
+}
+
+/** The tray is a glance at what needs you and what is moving, then what was touched last. The
+ * fleet list itself orders idle rows by creation time, which would leave a thread you just
+ * answered below one you created a week ago. */
+export function trayRowOrder<T extends TrayOrderRow>(rows: readonly T[]): T[] {
+  const rank = (row: T) => (row.waiting ? 0 : row.busy ? 1 : 2);
+  return rows
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => rank(a.row) - rank(b.row) || b.row.last_activity - a.row.last_activity || a.index - b.index)
+    .map(({ row }) => row);
+}
