@@ -29,13 +29,23 @@ leaves the previous row on screen; it never blocks drawing.
 enabled = false        # off by default
 desktop = true         # notify-send (Linux) / osascript (macOS)
 bell = true            # terminal BEL
+sound = false          # true = the system alert sound; "/path/to/ding.wav" = play that file
+on_done = true         # a turn finished (after min_turn_secs)
+on_input = true        # a permission prompt or ask_user question is waiting
+on_error = true        # a turn ended in an error (any duration)
 min_turn_secs = 15     # a finished turn only notifies if it ran this long
 when_focused = false   # also notify while the terminal has focus
 ```
 
-Fires when a turn finishes (after `min_turn_secs`) and when a permission prompt or `ask_user`
-question appears. By default only while the terminal is unfocused; set `when_focused = true` for
-terminals/tmux setups that do not report focus events.
+Fires when a turn finishes (after `min_turn_secs`), fails, and when a permission prompt or
+`ask_user` question appears; `on_done`, `on_input` and `on_error` switch each kind off. By default
+only while the terminal is unfocused; set `when_focused = true` for terminals/tmux setups that do
+not report focus events. A file `sound` is played with `afplay` (macOS) or `paplay`/`aplay`
+(Linux). Notification text is stripped of escape sequences and control characters and cut to 80
+characters for the title and 240 for the body, because it can echo a shell command.
+
+While notifications are off, the first turn that runs 30 seconds or more adds one line offering
+to turn them on (`/config`, Notifications). It appears once per installation.
 
 ## Reply language
 

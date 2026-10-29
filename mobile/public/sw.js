@@ -21,6 +21,7 @@
 const DB_NAME = "forge-push";
 const STORE_NAME = "kv";
 const BASE_URL_KEY = "baseUrl";
+const HIDE_TEXT_KEY = "hideText";
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -33,18 +34,22 @@ function openDb() {
   });
 }
 
-async function getStoredBaseUrl() {
+async function getStored(key) {
   try {
     const db = await openDb();
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readonly");
-      const req = tx.objectStore(STORE_NAME).get(BASE_URL_KEY);
+      const req = tx.objectStore(STORE_NAME).get(key);
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => reject(req.error);
     });
   } catch {
     return null;
   }
+}
+
+function getStoredBaseUrl() {
+  return getStored(BASE_URL_KEY);
 }
 
 self.addEventListener("install", () => {
@@ -64,8 +69,6 @@ self.addEventListener("push", (event) => {
   }
 
   const kind = payload.kind || "done";
-  const title = payload.title || "Forge";
-  const body = payload.body || "";
   const session = payload.session || "";
   const seq = typeof payload.seq === "number" ? payload.seq : 0;
 
@@ -78,13 +81,19 @@ self.addEventListener("push", (event) => {
       : [];
 
   event.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      tag: session || undefined,
-      renotify: true,
-      data: { kind, session, seq },
-      actions,
-    }),
+    (async () => {
+      // "Hide notification text" is mirrored into IndexedDB by the app (no localStorage here).
+      const hidden = (await getStored(HIDE_TEXT_KEY)) === true;
+      const title = hidden ? "Forge" : payload.title || "Forge";
+      const body = hidden ? "A session needs you." : payload.body || "";
+      await self.registration.showNotification(title.slice(0, 80), {
+        body: body.slice(0, 240),
+        tag: session || undefined,
+        renotify: true,
+        data: { kind, session, seq },
+        actions,
+      });
+    })(),
   );
 });
 
@@ -107,6 +116,14 @@ async function focusOrOpenSession(sessionId) {
   const path = sessionId ? `/session/${sessionId}` : "/";
   const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
 
+  // A running app routes to the session itself (and focuses its composer) instead of reloading.
+  for (const client of windows) {
+    if ("focus" in client && sessionId) {
+      await client.focus();
+      client.postMessage({ type: "forge:open-session", session: sessionId });
+      return undefined;
+    }
+  }
   for (const client of windows) {
     if (new URL(client.url).pathname === path && "focus" in client) {
       return client.focus();

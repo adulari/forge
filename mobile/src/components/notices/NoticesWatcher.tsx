@@ -6,13 +6,23 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useCallback, useEffect, useRef } from "react";
 import { AppState } from "react-native";
 
+import { getVisibleSessionIds } from "../../lib/alertTargets";
 import { haptics } from "../../lib/haptics";
 import { isUnseen, osCopy, sessionIdOf, type Notice } from "../../lib/notices/core";
 import {
   dismissGenericPushes,
   observeNotifications,
+  prepareNotificationChannels,
   presentLocal,
 } from "../../lib/notices/localNotify";
+import { getNotifyPrefs } from "../../lib/notifyPrefs";
+import {
+  categoryForPriority,
+  channelForPriority,
+  isDuplicateAlert,
+  rememberAlert,
+  routeAlert,
+} from "../../lib/notifyPrefsCore";
 import {
   forgetNoticeHost,
   getNoticesSnapshot,
@@ -21,6 +31,7 @@ import {
 } from "../../lib/notices/store";
 import { useAuth } from "../../lib/auth";
 import { refreshPushRegistration } from "../../lib/push";
+import { openSessionFromAlert } from "../../lib/openSessionFromAlert";
 import { isTauri, isWeb } from "../../lib/platform";
 import { isAppBackgrounded } from "../ds/ToastHost";
 import { useOpenNotice } from "./useOpenNotice";
@@ -48,6 +59,7 @@ export function NoticesWatcher() {
   const serversRef = useRef(servers);
   const activeRef = useRef(activeServerId);
   const openRef = useRef(open);
+  const shownAt = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     serversRef.current = servers;
     activeRef.current = activeServerId;
@@ -57,16 +69,41 @@ export function NoticesWatcher() {
   /** Resolves to how many real-text OS notifications it raised. */
   const announce = useCallback(async (serverId: string, fresh: Notice[]): Promise<number> => {
     if (fresh.length === 0) return 0;
-    showBanner({ serverId, notices: fresh });
-    if (!inBackground()) {
+    const prefs = await getNotifyPrefs();
+    const backgrounded = inBackground();
+    const now = Date.now();
+    const wanted = fresh.filter((notice) => {
+      const route = routeAlert({
+        category: categoryForPriority(notice.priority),
+        prefs,
+        sessionId: sessionIdOf(notice),
+        visibleSessionIds: getVisibleSessionIds(),
+        backgrounded,
+      });
+      if (!route.toast && !route.os) return false;
+      const key = `${serverId}:${notice.title}:${notice.message}`;
+      if (isDuplicateAlert(shownAt.current, key, now)) return false;
+      rememberAlert(shownAt.current, key, now);
+      return true;
+    });
+    if (wanted.length === 0) return 0;
+    showBanner({ serverId, notices: wanted });
+    if (!backgrounded) {
       haptics.select();
       return 0;
     }
-    const locked = await appLockOn();
+    const locked = prefs.hideText || (await appLockOn());
     const raised = await Promise.all(
-      fresh.slice(0, MAX_OS_NOTICES).map((notice) =>
-        presentLocal({ ...osCopy(notice, locked), serverId, sessionId: sessionIdOf(notice), seq: notice.seq, at: notice.at })
-          .catch(() => false),
+      wanted.slice(0, MAX_OS_NOTICES).map((notice) =>
+        presentLocal({
+          ...osCopy(notice, locked),
+          serverId,
+          sessionId: sessionIdOf(notice),
+          seq: notice.seq,
+          at: notice.at,
+          channel: channelForPriority(notice.priority),
+          sound: prefs.sound,
+        }).catch(() => false),
       ),
     );
     return locked ? 0 : raised.filter(Boolean).length;
@@ -87,6 +124,10 @@ export function NoticesWatcher() {
   );
 
   const serverKey = servers.map((s) => `${s.id}|${s.baseUrl}`).join(",");
+
+  useEffect(() => {
+    void prepareNotificationChannels().catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (isLoading) return;
@@ -130,7 +171,14 @@ export function NoticesWatcher() {
 
   useEffect(() => {
     if (isLoading) return;
-    return observeNotifications({
+    const onWorkerMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; session?: unknown } | null;
+      if (data?.type === "forge:open-session" && typeof data.session === "string") openSessionFromAlert(data.session);
+    };
+    if (isWeb && typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", onWorkerMessage);
+    }
+    const stopObserving = observeNotifications({
       onGeneric: (kind) => {
         void (async () => {
           await syncServers();
@@ -159,6 +207,12 @@ export function NoticesWatcher() {
         });
       },
     });
+    return () => {
+      stopObserving();
+      if (isWeb && typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+        navigator.serviceWorker.removeEventListener("message", onWorkerMessage);
+      }
+    };
   }, [isLoading, syncServers]);
 
   return null;

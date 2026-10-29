@@ -1,10 +1,23 @@
 import { AppState, type AppStateStatus } from "react-native";
 import { useEffect, useRef } from "react";
-import { usePathname } from "expo-router";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { useToast } from "../ds/ToastHost";
+import { isAppBackgrounded, useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
+import { getVisibleSessionIds } from "../../lib/alertTargets";
+import { notify } from "../../lib/notify";
+import { getNotifyPrefs } from "../../lib/notifyPrefs";
+import {
+  alertCopy,
+  detectFleetAlerts,
+  isDuplicateAlert,
+  rememberAlert,
+  routeAlert,
+  type FleetAlert,
+} from "../../lib/notifyPrefsCore";
+import { playAlertChime } from "../../lib/notifySound";
+import { openSessionFromAlert } from "../../lib/openSessionFromAlert";
+import { isTauri, isWeb } from "../../lib/platform";
 import { useSessions } from "../../lib/queries";
 import type { SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
@@ -20,6 +33,10 @@ import {
 } from "../../lib/hostStatus";
 
 const DEBOUNCE_MS = 1200;
+const ALERT_TOAST_MS = 6000;
+const MAX_ALERT_TOASTS = 3;
+
+const TONE = { done: "success", attention: "warn", error: "danger" } as const;
 
 export function FleetWatcher() {
   // The Tauri tray + native Appearance switch need the same fleet state this component already
@@ -36,9 +53,9 @@ export function FleetWatcher() {
     toastRef.current = toast;
   }, [toast]);
   useEffect(() => onHostCap((message) => toastRef.current.show(message, { tone: "warn" })), []);
-  const pathname = usePathname();
-  const viewedId = /^\/session\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const previous = useRef<Map<string, SessionRow>>(new Map());
+  const queued = useRef<Map<string, FleetAlert>>(new Map());
+  const shownAt = useRef<Map<string, number>>(new Map());
   const foreground = useRef(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -115,25 +132,61 @@ export function FleetWatcher() {
 
   useEffect(() => {
     if (!data || !foreground.current) return;
-    const next = new Map(data.map((row) => [row.id, row]));
     const old = previous.current;
-    if (old.size > 0) {
-      const waiting = data.some((row) => row.id !== viewedId && row.waiting && !old.get(row.id)?.waiting);
-      const finished = data.some((row) => row.id !== viewedId && !row.busy && old.get(row.id)?.busy);
-      if ((waiting || finished) && !timer.current) {
-        timer.current = setTimeout(() => {
-          timer.current = null;
-          if (waiting) {
-            toast.show("another session needs your attention", { tone: "warn" });
-          } else {
-            toast.show("another session finished", { tone: "success" });
-          }
-          haptics.select();
-        }, DEBOUNCE_MS);
+    previous.current = new Map(data.map((row) => [row.id, row]));
+    if (old.size === 0) return;
+    for (const alert of detectFleetAlerts(old, data)) queued.current.set(`${alert.sessionId}:${alert.category}`, alert);
+    if (queued.current.size === 0 || timer.current) return;
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      const batch = [...queued.current.values()];
+      queued.current.clear();
+      void raiseAlerts(batch);
+    }, DEBOUNCE_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  async function raiseAlerts(batch: FleetAlert[]) {
+    const prefs = await getNotifyPrefs();
+    const now = Date.now();
+    const backgrounded = (isWeb || isTauri) && isAppBackgrounded();
+    const toasts: FleetAlert[] = [];
+    let sounded = false;
+    for (const alert of batch) {
+      const route = routeAlert({
+        category: alert.category,
+        prefs,
+        sessionId: alert.sessionId,
+        visibleSessionIds: getVisibleSessionIds(),
+        backgrounded,
+      });
+      const key = `${alert.sessionId}:${alert.category}`;
+      if (!route.toast && !route.os) continue;
+      if (isDuplicateAlert(shownAt.current, key, now)) continue;
+      rememberAlert(shownAt.current, key, now);
+      if (route.toast) toasts.push(alert);
+      if (route.os) {
+        const copy = alertCopy(alert, prefs.hideText);
+        void notify(copy.title, copy.body, { onClick: () => openSessionFromAlert(alert.sessionId) });
       }
     }
-    previous.current = next;
-  }, [data, toast, viewedId]);
+    for (const alert of toasts.slice(0, MAX_ALERT_TOASTS)) {
+      toast.show(alertCopy(alert, false).toast, {
+        tone: TONE[alert.category],
+        duration: ALERT_TOAST_MS,
+        system: false,
+        action: { label: "Open", onPress: () => openSessionFromAlert(alert.sessionId) },
+      });
+      sounded = true;
+    }
+    if (toasts.length > MAX_ALERT_TOASTS) {
+      toast.show(`${toasts.length - MAX_ALERT_TOASTS} more sessions need a look`, { tone: "neutral", system: false });
+    }
+    if (sounded) {
+      haptics.select();
+      if (prefs.sound) playAlertChime();
+    }
+  }
 
   return null;
 }

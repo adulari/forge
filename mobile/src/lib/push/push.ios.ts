@@ -23,6 +23,7 @@ import {
   publicKeys,
   type PushKeys,
 } from "./pushE2e";
+import { NOTIFY_PREFS_KEY, parseNotifyPrefs } from "../notifyPrefsCore";
 import { subscribePush as apiSubscribePush, unsubscribePush as apiUnsubscribePush } from "../api";
 import { flushUnsubscribes, queueUnsubscribe, type OutboxStore } from "./pushOutbox";
 import { pushRegistrationDue, withRegistration, withoutRegistration, type RegistrationLedger } from "./pushRegistrations";
@@ -56,6 +57,9 @@ async function devicePushKeys(): Promise<PushKeys | null> {
     // With the app lock on, OS surfaces stay generic (docs/features/push-notification-tool.md), so
     // no key is registered and the daemon sends the generic alert. Toggling the lock re-registers.
     if ((await AsyncStorage.getItem(APP_LOCK_KEY)) === "true") return null;
+    // "Hide notification text" is the same choice made on demand: no key, so the daemon sends the
+    // generic alert and nothing readable ever leaves the app.
+    if (parseNotifyPrefs(await AsyncStorage.getItem(NOTIFY_PREFS_KEY)).hideText) return null;
     const key = await loadOrCreateDeviceKey({
       load: () => SecureStore.getItemAsync(PUSH_KEY_NAME, KEY_OPTIONS),
       save: (value) => SecureStore.setItemAsync(PUSH_KEY_NAME, value, KEY_OPTIONS),
@@ -197,4 +201,10 @@ export async function refreshPushRegistration(activeBaseUrl: string | null): Pro
   } catch {
     // Offline or the daemon predates sealed alerts; try again on the next open.
   }
+}
+
+/** Re-register without (or with) the sealed-alert key, so the daemon sends the generic alert while
+ * the text is hidden. The preference must already be stored: registration reads it. */
+export async function applyHideNotificationText(baseUrl: string | null, _hide: boolean): Promise<void> {
+  await refreshPushRegistration(baseUrl);
 }

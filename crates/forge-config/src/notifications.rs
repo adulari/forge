@@ -3,6 +3,45 @@
 
 use serde::{Deserialize, Serialize};
 
+/// `sound = false` (silent), `sound = true` (the platform's default alert sound) or
+/// `sound = "/path/to/file"` (played with `afplay`, `paplay` or `aplay`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(from = "SoundRepr", into = "SoundRepr")]
+pub enum NotifySound {
+    #[default]
+    Off,
+    Default,
+    File(String),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum SoundRepr {
+    Flag(bool),
+    Path(String),
+}
+
+impl From<SoundRepr> for NotifySound {
+    fn from(repr: SoundRepr) -> Self {
+        match repr {
+            SoundRepr::Flag(true) => Self::Default,
+            SoundRepr::Flag(false) => Self::Off,
+            SoundRepr::Path(path) if path.trim().is_empty() => Self::Off,
+            SoundRepr::Path(path) => Self::File(path),
+        }
+    }
+}
+
+impl From<NotifySound> for SoundRepr {
+    fn from(sound: NotifySound) -> Self {
+        match sound {
+            NotifySound::Off => Self::Flag(false),
+            NotifySound::Default => Self::Flag(true),
+            NotifySound::File(path) => Self::Path(path),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NotificationsConfig {
@@ -12,6 +51,14 @@ pub struct NotificationsConfig {
     pub desktop: bool,
     /// Ring the terminal bell (BEL), which most terminals turn into a taskbar/tab flag.
     pub bell: bool,
+    /// Play a sound with each alert. Silent by default.
+    pub sound: NotifySound,
+    /// Alert when a long turn finishes.
+    pub on_done: bool,
+    /// Alert when Forge waits on a permission or a question.
+    pub on_input: bool,
+    /// Alert when a turn ends in an error.
+    pub on_error: bool,
     /// A finished turn only notifies when it ran at least this many seconds.
     pub min_turn_secs: u64,
     /// Notify even while the terminal has focus. Off: only when the window is unfocused. Terminals
@@ -25,6 +72,10 @@ impl Default for NotificationsConfig {
             enabled: false,
             desktop: true,
             bell: true,
+            sound: NotifySound::Off,
+            on_done: true,
+            on_input: true,
+            on_error: true,
             min_turn_secs: 15,
             when_focused: false,
         }
@@ -48,5 +99,39 @@ mod tests {
             toml::from_str("enabled = true\nmin_turn_secs = 60\nbell = false").unwrap();
         assert!(cfg.enabled && cfg.desktop && !cfg.bell);
         assert_eq!(cfg.min_turn_secs, 60);
+        assert!(cfg.on_done && cfg.on_input && cfg.on_error);
+    }
+
+    #[test]
+    fn sound_accepts_a_flag_or_a_path() {
+        let parse = |toml_text: &str| {
+            toml::from_str::<NotificationsConfig>(toml_text)
+                .unwrap()
+                .sound
+        };
+        assert_eq!(parse(""), NotifySound::Off);
+        assert_eq!(parse("sound = false"), NotifySound::Off);
+        assert_eq!(parse("sound = true"), NotifySound::Default);
+        assert_eq!(
+            parse("sound = \"/tmp/ding.wav\""),
+            NotifySound::File("/tmp/ding.wav".into())
+        );
+        assert_eq!(parse("sound = \"  \""), NotifySound::Off);
+    }
+
+    #[test]
+    fn sound_round_trips_through_toml() {
+        let cfg = NotificationsConfig {
+            sound: NotifySound::File("/tmp/ding.wav".into()),
+            ..Default::default()
+        };
+        let text = toml::to_string(&cfg).unwrap();
+        assert_eq!(toml::from_str::<NotificationsConfig>(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn per_event_flags_turn_one_kind_off() {
+        let cfg: NotificationsConfig = toml::from_str("on_error = false").unwrap();
+        assert!(cfg.on_done && cfg.on_input && !cfg.on_error);
     }
 }

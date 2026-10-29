@@ -225,8 +225,11 @@ pub(crate) fn desktop_command(
     body: &str,
     priority: Priority,
 ) -> Option<(&'static str, Vec<String>)> {
+    use crate::cli::commands::run::notify::{osascript_source, sanitize};
+    let (title, body) = (sanitize(title, 80), sanitize(body, 240));
+    let (title, body) = (title.as_str(), body.as_str());
     if cfg!(target_os = "macos") {
-        let source = crate::cli::commands::run::notify::osascript_source(title, body);
+        let source = osascript_source(title, body, false);
         Some(("osascript", vec!["-e".into(), source]))
     } else if cfg!(target_os = "linux") {
         let urgency = match priority {

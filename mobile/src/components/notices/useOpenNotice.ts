@@ -1,6 +1,7 @@
 import { router } from "expo-router";
 import { useCallback } from "react";
 
+import { requestComposerFocus } from "../../lib/alertTargets";
 import { useAuth } from "../../lib/auth";
 import { markNoticesSeen } from "../../lib/notices/store";
 import { sessionIdOf, type Notice } from "../../lib/notices/core";
@@ -13,6 +14,7 @@ export function useOpenNotice() {
       if (notice) markNoticesSeen(serverId, notice);
       if (serverId !== activeServerId) setActive(serverId);
       const sessionId = notice ? sessionIdOf(notice) : null;
+      if (sessionId) requestComposerFocus(sessionId);
       router.push(sessionId ? `/session/${sessionId}` : "/notices");
     },
     [activeServerId, setActive],
