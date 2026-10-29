@@ -9,6 +9,11 @@ All notable changes to Forge are documented here. The format follows
 ### Added
 
 - **The terminal gains /fork, /stash, /skills and /timeline, and `forge chat --prompt`.** `/fork [message]` branches the live session at its latest message into a child, continues there and sends the message as the child's first turn, leaving the parent untouched. Ctrl+X (the `stash` keybind) parks the half-written draft and, on an empty composer, brings the newest one back; `/stash [push|pop|list|clear]` does the same by command. `/skills` lists the skills the model can load with scope and description, `/timeline` opens the past-message picker (the `/rewind` picker), `@` file completion ranks files with uncommitted edits first among equal matches, and `forge chat --prompt TEXT` sends a first message from a launcher.
+
+## [2.25.0] - 2026-10-29
+
+### Added
+
 - **Find works in the terminal.** Mod+F with the terminal focused (or Find in terminal from the session menu) searches the retained scrollback, highlights every match, scrolls to the active one as you step with Enter and Shift+Enter, and Esc closes the bar and returns the keyboard to the shell.
 - **Notifications are quiet, targeted and click-through.** Settings, Alerts switches Session finished, Needs attention and Failed on or off, chooses between a toast plus system notification ("Always") or system notifications only while Forge is in the background, and adds a Sound chime. A session shown in any split pane no longer raises a toast; the toast lasts 6 seconds with an Open button, and Open or a clicked notification goes to the session with the composer focused (the desktop shell can only bring the window forward, as the OS reports no click). Failed turns now alert, and a repeat of the same alert inside 15 seconds is dropped. **Hide notification text** makes every notification say only that a session needs you: it withdraws the sealed-alert key on iOS so the daemon sends the generic alert, and makes the web service worker show generic text. Android gets two channels, Needs attention (high priority, heads-up) and Status (low), replacing the single "Forge sessions" one, and an installed iPhone web app asks once, on launch, whether to enable notifications. Notification titles are cut to 80 characters and bodies to 240 with escape sequences removed, including the daemon's `push_notification` desktop channel.
 - **The terminal notifications gain a sound, per-event switches and a first-run invitation.** `[notifications]` accepts `sound = false | true | "/path/to/file"` (the system sound, or a file played with `afplay`, `paplay` or `aplay`) and `on_done`, `on_input` and `on_error` flags; a turn that ends in an error now notifies whatever its duration. With notifications off, the first turn of 30 seconds or more adds one line offering to turn them on, once per installation.
@@ -5392,7 +5397,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.24.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.25.0...HEAD
+[2.25.0]: https://github.com/Adulari/forge/compare/v2.24.1...v2.25.0
 [2.24.1]: https://github.com/Adulari/forge/compare/v2.24.0...v2.24.1
 [2.24.0]: https://github.com/Adulari/forge/compare/v2.23.6...v2.24.0
 [2.23.6]: https://github.com/Adulari/forge/compare/v2.23.5...v2.23.6
