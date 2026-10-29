@@ -130,7 +130,7 @@ mod tests {
             let alt = press(KeyCode::Char(c), KeyModifiers::ALT);
             assert_ne!(alt, Some(KeyKind::Char(c)), "Alt+{c}");
         }
-        for c in ['b', 'x', 'q', 'v', 's', 'z', 'l'] {
+        for c in ['b', 'q', 'v', 's', 'z', 'l'] {
             assert_eq!(ctrl_char(c), None, "Ctrl+{c} is unbound by default");
         }
     }

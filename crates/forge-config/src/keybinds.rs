@@ -101,6 +101,7 @@ impl Default for KeybindsConfig {
         // terminal event, never as a Ctrl+V keystroke) — see voice.md.
         binds.insert("voice".into(), bind("v", true, false, false));
         binds.insert("kill_line_forward".into(), bind("k", false, true, false));
+        binds.insert("stash".into(), bind("x", true, false, false));
         Self {
             preset: KeybindPreset::Forge,
             binds,
@@ -230,7 +231,7 @@ mod tests {
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 27);
+        assert_eq!(kb.binds.len(), 28);
         assert_eq!(kb.preset, KeybindPreset::Forge);
         assert_eq!(kb.binds["interrupt"], combo("c", true, false, false));
         assert_eq!(kb.binds["copy_last"], combo("c", true, false, true));
@@ -246,7 +247,7 @@ mod tests {
     fn partial_keybind_override_deep_merges_over_defaults() {
         let kb = load("[keybinds.binds.toggle_reasoning]\nkey = \"x\"\nctrl = true\n");
         assert_eq!(kb.binds["toggle_reasoning"].key, "x");
-        assert_eq!(kb.binds.len(), 27);
+        assert_eq!(kb.binds.len(), 28);
         assert_eq!(kb.binds["interrupt"].key, "c");
         assert_eq!(kb.binds["help"].key, "f1");
     }
@@ -291,13 +292,13 @@ mod tests {
         assert_eq!(kb.binds["temper_cycle"], combo("m", false, true, false));
         assert_eq!(
             taken.len(),
-            27,
+            28,
             "the preset moves actions, it never drops one"
         );
         let mut unique = taken.clone();
         unique.sort_by_key(|c| (c.key.clone(), c.ctrl, c.alt, c.shift));
         unique.dedup();
-        assert_eq!(unique.len(), 27, "no two actions share a chord: {kb:?}");
+        assert_eq!(unique.len(), 28, "no two actions share a chord: {kb:?}");
     }
 
     #[test]

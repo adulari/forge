@@ -82,7 +82,10 @@ impl AtPathPicker {
             .iter()
             .filter_map(|f| at_score(f, &query).map(|s| (s, f.len(), f)))
             .collect();
-        scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        scored.sort_by(|a, b| {
+            let (a_edit, b_edit) = (self.modified.contains(a.2), self.modified.contains(b.2));
+            a.0.cmp(&b.0).then(b_edit.cmp(&a_edit)).then(a.1.cmp(&b.1))
+        });
         scored
             .into_iter()
             .map(|(_, _, f)| AtEntry {

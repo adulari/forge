@@ -168,6 +168,26 @@ pub const COMMANDS: &[Command] = &[
         usage: "/rewind",
     },
     Command {
+        name: "fork",
+        desc: "branch this session into a child at its latest message and continue there",
+        usage: "/fork [message]",
+    },
+    Command {
+        name: "timeline",
+        desc: "pick a past message to jump back to (same picker as /rewind)",
+        usage: "/timeline",
+    },
+    Command {
+        name: "stash",
+        desc: "park the draft (Ctrl+X) and bring it back later: pop, list, clear",
+        usage: "/stash [push|pop|list|clear]",
+    },
+    Command {
+        name: "skills",
+        desc: "list the skills the model can load, with scope and description",
+        usage: "/skills",
+    },
+    Command {
         name: "checkpoint",
         desc: "save a named checkpoint here",
         usage: "/checkpoint [name]",

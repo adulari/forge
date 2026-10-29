@@ -315,6 +315,12 @@ fn chat_takes_a_first_prompt() {
     ));
     let cli = Cli::try_parse_from(["forge", "chat"]).unwrap();
     assert!(matches!(cli.command.unwrap(), Command::Chat { ref prompt, .. } if prompt.is_empty()));
+    let cli = Cli::try_parse_from(["forge", "chat", "--prompt", "hi there"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Chat { ref prompt, prompt_flag: Some(ref p), .. } if prompt.is_empty() && p == "hi there"
+    ));
+    assert!(Cli::try_parse_from(["forge", "chat", "--prompt", "a", "b"]).is_err());
 }
 
 #[test]

@@ -107,6 +107,10 @@ impl App {
                 self.yank();
                 return InputOutcome::Editing;
             }
+            KeyKind::StashPrompt => {
+                self.stash_toggle();
+                return InputOutcome::Editing;
+            }
             KeyKind::YankPop => {
                 self.yank_pop();
                 return InputOutcome::Editing;

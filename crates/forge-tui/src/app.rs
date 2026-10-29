@@ -271,6 +271,8 @@ pub struct App {
     pub input_cursor: usize,
     /// Kill ring and undo history of the input line (`App::edit_key`).
     pub input_edit: InputEditState,
+    /// Drafts parked with the stash key or `/stash`, oldest first.
+    pub stash: Vec<String>,
     /// An AI-predicted next prompt (`SuggestionReady`), shown as dim ghost text when `input` is
     /// empty and idle; Tab moves it into `input` (editable, never auto-sent). Cleared at the start
     /// of every new turn (`on_turn_start`) and on session switch (`clear_transcript`) so a stale
@@ -954,6 +956,9 @@ pub enum KeyKind {
     Redraw,
     /// Hot-reload config without restarting.
     ReloadConfig,
+    /// Park the draft on the stash, or bring the newest stashed draft back when the composer is
+    /// empty (default Ctrl+X; Ctrl+S under the `claude-code` preset).
+    StashPrompt,
     /// Ctrl+V (configurable) — open the `/voice` recording overlay, same as typing `/voice`.
     ToggleVoice,
     /// Ctrl+D — delete the character under the cursor; on an empty prompt, quit (see `App::ctrl_d`).
@@ -1198,6 +1203,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::CompactSession
         | KeyKind::Redraw
         | KeyKind::ReloadConfig
+        | KeyKind::StashPrompt
         | KeyKind::ToggleVoice
         | KeyKind::ExternalEditor
         | KeyKind::Yank
@@ -3566,6 +3572,7 @@ mod input_edit;
 pub use input_edit::InputEditState;
 mod harness_notice;
 mod job_notice;
+mod stash;
 pub use deferred::{Deferred, DeferredInbox};
 mod output_view;
 mod render;
