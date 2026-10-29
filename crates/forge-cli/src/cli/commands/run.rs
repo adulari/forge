@@ -5297,6 +5297,7 @@ mod tests {
             tool_name: None,
             tool_phase: None,
             nudge: false,
+            stats: forge_store::RowStats::default(),
         };
         let epoch = Some(1_000);
 
@@ -5366,6 +5367,7 @@ mod tests {
                 tool_name: None,
                 tool_phase: None,
                 nudge: true,
+                stats: forge_store::RowStats::default(),
             },
             epoch,
         );
@@ -5398,6 +5400,7 @@ mod tests {
                 tool_name: Some("read_file".into()),
                 tool_phase: Some(forge_store::ToolPhase::Result),
                 nudge: false,
+                stats: forge_store::RowStats::default(),
             },
             epoch,
         );
@@ -5419,6 +5422,7 @@ mod tests {
                 tool_name: Some("read_file".into()),
                 tool_phase: Some(forge_store::ToolPhase::Call),
                 nudge: false,
+                stats: forge_store::RowStats::default(),
             },
             epoch,
         );
@@ -5438,6 +5442,7 @@ mod tests {
                 tool_name: None,
                 tool_phase: Some(forge_store::ToolPhase::Result),
                 nudge: false,
+                stats: forge_store::RowStats::default(),
             },
             epoch,
         );

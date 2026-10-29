@@ -5,14 +5,17 @@
 //
 // Pure: `summarize`/`summaryText` turn calls into the sentence, `foldToolGroups` turns a
 // newest-first transcript into entries + groups. Rendering lives in components/chat/ToolGroupRow.
-import { friendlyCommand, shortenPath } from "./pathDisplay";
+import { commandSummary } from "./commandSummary";
+import { shortenPath } from "./pathDisplay";
 import { scriptCalls, scriptHeadline, WRAPPER_TOOL } from "./scriptCalls";
+import { isDecision } from "./decisionRecord";
 import { parseArgs, resultFailed, type ToolInvocation, type TranscriptEntry } from "./toolRows";
 
 export type CallStatus = "ok" | "failed" | "running";
 
-/** What one call did to a file, when the caller knows (the TUI's attached diff). History rows
- * carry no diff, so the app leaves it unset and the summary has no `(+a −d)`. */
+/** What one call did to a file, when the caller knows (the TUI's attached diff, or the line
+ * counts a current daemon puts on an edit call's history row). Left unset otherwise, and the
+ * summary then has no `(+a −d)`. */
 export interface CallDiff {
   kind: "created" | "modified" | "deleted";
   path?: string;
@@ -137,7 +140,7 @@ function bySubject(c: Category): boolean {
 
 /** A string field of a call's args. The store caps long values with a trailing `…`, which
  * leaves the JSON unparsable, so a field that precedes the cut is still read from the text. */
-function field(args: string, keys: string[]): string | null {
+export function field(args: string, keys: string[]): string | null {
   const parsed = parseArgs(args);
   for (const key of keys) {
     let value: unknown = parsed?.[key];
@@ -160,7 +163,7 @@ function oneline(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-function displayPath(path: string, cwd: string | null): string {
+export function displayPath(path: string, cwd: string | null): string {
   if (cwd) {
     const base = cwd.endsWith("/") ? cwd : `${cwd}/`;
     if (path.startsWith(base) && path.length > base.length) return path.slice(base.length);
@@ -183,7 +186,7 @@ export function headline(name: string, args: string): string {
           first = list.length === 1 ? list[0] : `${list[0]} (+${list.length - 1} more)`;
         }
       }
-      return first ? friendlyCommand(first) : "";
+      return first ? commandSummary(first) : "";
     case "read_file":
     case "write_file":
     case "edit_file":
@@ -447,6 +450,12 @@ export interface ToolGroupEntry {
 
 export type FoldedEntry = TranscriptEntry | ToolGroupEntry;
 
+/** What an edit call changed, when the daemon counted it. Unset for history from an older host. */
+export function invocationDiff(invocation: ToolInvocation): CallDiff | undefined {
+  if (invocation.adds == null || invocation.dels == null) return undefined;
+  return { kind: "modified", adds: invocation.adds, dels: invocation.dels };
+}
+
 export function invocationStatus(invocation: ToolInvocation, live: boolean): CallStatus {
   if (invocation.result === null) return live ? "running" : "ok";
   return resultFailed(invocation.result) ? "failed" : "ok";
@@ -463,7 +472,13 @@ export class GroupMemo {
     if (prev && sameCalls(prev.calls, calls)) return prev;
     this.builds += 1;
     const summary = summarize(
-      calls.map((c) => ({ name: c.invocation.tool ?? "tool", args: c.invocation.args, status: c.status, result: c.invocation.result })),
+      calls.map((c) => ({
+        name: c.invocation.tool ?? "tool",
+        args: c.invocation.args,
+        status: c.status,
+        result: c.invocation.result,
+        diff: invocationDiff(c.invocation),
+      })),
     );
     const group: ToolGroupEntry = { kind: "toolGroup", key, calls, summary, text: summaryText(summary) };
     this.groups.set(key, group);
@@ -485,12 +500,18 @@ function sameCalls(a: ToolGroupCall[], b: ToolGroupCall[]): boolean {
       x.status !== y.status ||
       x.invocation.tool !== y.invocation.tool ||
       x.invocation.args !== y.invocation.args ||
-      x.invocation.result !== y.invocation.result
+      x.invocation.result !== y.invocation.result ||
+      x.invocation.adds !== y.invocation.adds ||
+      x.invocation.dels !== y.invocation.dels
     ) {
       return false;
     }
   }
   return true;
+}
+
+function isGroupable(entry: TranscriptEntry): boolean {
+  return entry.kind === "tool" && !isDecision(entry.invocation);
 }
 
 /**
@@ -509,14 +530,14 @@ export function foldToolGroups(
   let i = 0;
   while (i < entries.length) {
     const entry = entries[i];
-    if (entry.kind !== "tool") {
+    if (entry.kind !== "tool" || isDecision(entry.invocation)) {
       out.push(entry);
       i += 1;
       continue;
     }
     const newest = i === 0;
     let j = i;
-    while (j < entries.length && entries[j].kind === "tool") j += 1;
+    while (j < entries.length && isGroupable(entries[j])) j += 1;
     const calls: ToolGroupCall[] = [];
     for (let k = j - 1; k >= i; k--) {
       const e = entries[k] as Extract<TranscriptEntry, { kind: "tool" }>;
@@ -531,12 +552,20 @@ export function foldToolGroups(
   return out;
 }
 
+const DELEGATING = new Set(["spawn_agents", "run_workflow", "workflow"]);
+
+function isDelegation(call: ToolGroupCall): boolean {
+  return call.invocation.tool != null && DELEGATING.has(bareToolName(call.invocation.tool));
+}
+
 /** The calls a collapsed group keeps visible under its summary: its newest failures (once more
- * than one call finished; a lone failure is the summary itself) and the calls still running. */
+ * than one call finished; a lone failure is the summary itself), the calls still running, and any
+ * call that started child agents, whose rows are the way into them. */
 export function collapsedCalls(group: ToolGroupEntry): ToolGroupCall[] {
   const { finished } = group.summary;
   const failed = finished > 1 ? group.calls.filter((c) => c.status === "failed").slice(-FAILED_ROWS) : [];
   const running = group.calls.filter((c) => c.status === "running").slice(0, RUNNING_ROWS);
-  const shown = new Set([...failed, ...running]);
+  const delegated = group.calls.filter(isDelegation);
+  const shown = new Set([...failed, ...running, ...delegated]);
   return group.calls.filter((c) => shown.has(c));
 }

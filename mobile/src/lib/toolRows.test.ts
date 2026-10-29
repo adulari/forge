@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { HistoryRow } from "./api";
 import {
+  callSeconds,
   buildTranscript,
   formatArgs,
   resultFailed,
@@ -176,5 +177,35 @@ describe("buildTranscript", () => {
   it("never drops a genuinely blank user turn (the filter is assistant-only)", () => {
     const rows = [row({ seq: 1, role: "user", kind: "user", content: "" })];
     expect(buildTranscript(rows)).toHaveLength(1);
+  });
+});
+
+describe("what an edit call and its reply carry", () => {
+  it("keeps the daemon's line counts, the reply's usage and the time the call took", () => {
+    const out = buildTranscript([
+      row({ seq: 3, role: "tool", kind: "tool", tool: "edit_file", tool_phase: "result", content: "ok", created_at: 107 }),
+      row({
+        seq: 2,
+        role: "tool",
+        kind: "tool",
+        tool: "edit_file",
+        tool_phase: "call",
+        content: '{"path":"a.rs"}',
+        created_at: 100,
+        adds: 4,
+        dels: 1,
+        input_tokens: 900,
+        output_tokens: 40,
+        cost_usd: 0.02,
+      }),
+    ]);
+    const inv = out[0].kind === "tool" ? out[0].invocation : null;
+    expect(inv).toMatchObject({ adds: 4, dels: 1, usage: { inputTokens: 900, outputTokens: 40, costUsd: 0.02 } });
+    expect(callSeconds(inv!)).toBe(7);
+  });
+
+  it("has no duration for a call that has not answered", () => {
+    expect(callSeconds({ at: 5, resultAt: null })).toBeNull();
+    expect(callSeconds({ at: 5, resultAt: 4 })).toBe(0);
   });
 });

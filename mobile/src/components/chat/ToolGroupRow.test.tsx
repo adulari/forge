@@ -41,6 +41,7 @@ vi.mock("../../theme/ThemeProvider", () => ({
 }));
 vi.mock("./ToolCallRow", () => ({
   ToolCallRow: ({ invocation }: { invocation: { args: string } }) => React.createElement("card", null, invocation.args),
+  ChangeStat: ({ adds, dels }: { adds: number; dels: number }) => React.createElement("stat", null, `+${adds} -${dels}`),
 }));
 
 let seq = 0;
@@ -50,7 +51,7 @@ const tool = (name: string, args: string, result: string | null): TranscriptEntr
 };
 // Newest first, as the chat list holds them.
 const group = (entries: TranscriptEntry[], live = false) => foldToolGroups([...entries].reverse(), live)[0] as ToolGroupEntry;
-const render = (g: ToolGroupEntry, expanded: boolean, onToggle = vi.fn()) =>
+const render = (g: ToolGroupEntry, expanded: boolean | undefined, onToggle = vi.fn()) =>
   renderToStaticMarkup(React.createElement(ToolGroupRow, { group: g, expanded, onToggle }));
 
 beforeEach(() => {
@@ -91,7 +92,7 @@ describe("ToolGroupRow", () => {
     const g = group(calls);
     render(g, false, onToggle);
     (pressables[0].onPress as () => void)();
-    expect(onToggle).toHaveBeenCalledWith(g.key);
+    expect(onToggle).toHaveBeenCalledWith(g.key, true);
   });
 
   it("spins while a call runs and shows the call in flight under it", () => {
@@ -101,6 +102,38 @@ describe("ToolGroupRow", () => {
     expect(html).toContain("Read a.rs");
     expect(html).toContain("cargo test");
     expect(groupAccessibilityLabel(g)).toBe("Read a.rs, 1 running");
+  });
+
+  it("opens on its own while a call runs and folds once the run is done", () => {
+    const running = group([tool("read_file", '{"path":"a.rs"}', "ok"), tool("read_file", '{"path":"b.rs"}', "ok"), tool("shell", '{"command":"cargo test"}', null)], true);
+    expect(render(running, undefined).match(/<card>/g)).toHaveLength(3);
+    expect(pressables[0].accessibilityState).toEqual({ expanded: true });
+    pressables.length = 0;
+    const done = group([tool("read_file", '{"path":"a.rs"}', "ok"), tool("read_file", '{"path":"b.rs"}', "ok")]);
+    expect(render(done, undefined)).not.toContain("<card>");
+    expect(pressables[0].accessibilityState).toEqual({ expanded: false });
+  });
+
+  it("keeps a running group closed when the person closed it", () => {
+    const running = group([tool("read_file", '{"path":"a.rs"}', "ok"), tool("read_file", '{"path":"b.rs"}', "ok"), tool("shell", '{"command":"cargo test"}', null)], true);
+    const onToggle = vi.fn();
+    render(running, false, onToggle);
+    expect(pressables[0].accessibilityState).toEqual({ expanded: false });
+    (pressables[0].onPress as () => void)();
+    expect(onToggle).toHaveBeenCalledWith(running.key, true);
+  });
+
+  it("folds repeated edits to one file into one row with the combined counter", () => {
+    const edit = (path: string, adds: number, dels: number): TranscriptEntry => {
+      const e = tool("edit_file", JSON.stringify({ path }), "ok");
+      if (e.kind === "tool") Object.assign(e.invocation, { adds, dels });
+      return e;
+    };
+    const g = group([edit("src/a.ts", 3, 1), edit("src/a.ts", 2, 0), edit("src/a.ts", 1, 1), tool("read_file", '{"path":"b.rs"}', "ok")]);
+    const html = render(g, true);
+    expect(html).toContain("×3");
+    expect(html).toContain("+6 -2");
+    expect(html.match(/<card>/g)).toHaveLength(1);
   });
 
   it("shows the first call alone until it finishes", () => {

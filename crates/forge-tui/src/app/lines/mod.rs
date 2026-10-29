@@ -2,6 +2,7 @@
 
 pub(crate) mod agents;
 pub(crate) mod banner;
+pub(crate) mod decision;
 pub(crate) mod notice;
 pub(crate) mod plan;
 pub(crate) mod rail;

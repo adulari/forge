@@ -90,6 +90,13 @@ export function summarizeToolLine(rawLine: string | undefined): string {
   return target ? `${name} ${target}` : name;
 }
 
+/** Whole seconds a call took, from the one-second timestamps of its call and result rows. Null
+ * while it is still running or when either row carried no time. */
+export function callSeconds(invocation: Pick<ToolInvocation, "at" | "resultAt">): number | null {
+  if (invocation.at == null || invocation.resultAt == null) return null;
+  return Math.max(0, invocation.resultAt - invocation.at);
+}
+
 /** A tool result that reports a failure. A PERSISTED result row carries no outcome flag
  * (remote.rs `tool_phase` doc), so this reads the shapes the daemon itself writes: a failed call
  * is stored as `error: …` (tool_dispatch.rs), a live summary line opens with `✗`, a policy denial as `permission denied …`, and a
@@ -116,6 +123,22 @@ export interface ToolInvocation {
    * delegating call (`spawn_agents`, a workflow) started. Absent from a row the store gave no time. */
   at?: number;
   resultAt?: number | null;
+  /** Lines an edit call added and removed, as the daemon counted them from the full arguments. */
+  adds?: number;
+  dels?: number;
+  /** The reply that made this call, when the daemon attached its usage to the call row. */
+  usage?: ReplyUsage;
+}
+
+export interface ReplyUsage {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+export function replyUsage(row: Pick<HistoryRow, "input_tokens" | "output_tokens" | "cost_usd">): ReplyUsage | undefined {
+  if (row.input_tokens == null && row.output_tokens == null && row.cost_usd == null) return undefined;
+  return { inputTokens: row.input_tokens ?? 0, outputTokens: row.output_tokens ?? 0, costUsd: row.cost_usd ?? 0 };
 }
 
 export type TranscriptEntry =
@@ -169,7 +192,16 @@ export function buildTranscript(rowsNewestFirst: HistoryRow[]): TranscriptEntry[
       out.push({
         kind: "tool",
         key: `t${row.seq}-${n++}`,
-        invocation: { seq: row.seq, tool: row.tool ?? null, args: row.content, result: null, at: row.created_at },
+        invocation: {
+          seq: row.seq,
+          tool: row.tool ?? null,
+          args: row.content,
+          result: null,
+          at: row.created_at,
+          adds: row.adds,
+          dels: row.dels,
+          usage: replyUsage(row),
+        },
       });
       const queue = awaiting.get(name) ?? [];
       queue.push(out.length - 1);

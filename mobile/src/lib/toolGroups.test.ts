@@ -248,3 +248,47 @@ describe("foldToolGroups", () => {
     expect(second[0].text).toBe("Ran cargo test");
   });
 });
+
+describe("run-aware folding", () => {
+  const entry = (key: string, tool: string, args: string, result: string | null, extra: object = {}): TranscriptEntry => ({
+    kind: "tool",
+    key,
+    invocation: { seq: 1, tool, args, result, ...extra },
+  });
+
+  it("keeps an answered question out of the group around it", () => {
+    const entries = [
+      entry("c", "shell", '{"command":"ls"}', "a"),
+      entry("b", "ask_user", '{"question":"Go?"}', "Yes"),
+      entry("a", "read_file", '{"path":"x"}', "x"),
+    ];
+    const folded = foldToolGroups(entries, false);
+    expect(folded.map((e) => e.kind)).toEqual(["toolGroup", "tool", "toolGroup"]);
+  });
+
+  it("sums the daemon's line counts into the edit summary", () => {
+    const entries = [
+      entry("b", "edit_file", '{"path":"src/a.ts"}', "ok", { adds: 5, dels: 2 }),
+      entry("a", "edit_file", '{"path":"src/a.ts"}', "ok", { adds: 3, dels: 0 }),
+    ];
+    const group = foldToolGroups(entries, false)[0] as ToolGroupEntry;
+    expect(group.text).toBe("Edited src/a.ts (+8 −2)");
+  });
+
+  it("titles a shell call by what it does, not by its wrapper", () => {
+    const entries = [entry("a", "shell", JSON.stringify({ command: "bash -lc 'cd /r && sed -n \"1,20p\" src/a.ts'" }), "x")];
+    const group = foldToolGroups(entries, false)[0] as ToolGroupEntry;
+    expect(group.text).toContain("View");
+  });
+
+  it("keeps a call that started agents on screen when the group is folded", () => {
+    const entries = [
+      entry("d", "read_file", '{"path":"c"}', "x"),
+      entry("c", "spawn_agents", '{"agents":[{}]}', "done"),
+      entry("b", "read_file", '{"path":"b"}', "x"),
+      entry("a", "read_file", '{"path":"a"}', "x"),
+    ];
+    const group = foldToolGroups(entries, false)[0] as ToolGroupEntry;
+    expect(collapsedCalls(group).map((c) => c.invocation.tool)).toEqual(["spawn_agents"]);
+  });
+});

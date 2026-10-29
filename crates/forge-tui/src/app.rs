@@ -6,7 +6,7 @@
 //! shell drains and pushes into the terminal's native scrollback (`insert_before`). The
 //! line builders and `render_live` are free of terminal I/O so they stay TestBackend-able.
 
-use crate::theme::styles::{self, NoticeKind, RailKind};
+use crate::theme::styles::{self, NoticeKind};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
@@ -2331,18 +2331,8 @@ impl App {
         self.prompt = None;
         self.question_prompt = None;
         for (i, q) in form.questions.iter().enumerate() {
-            self.flush.push(lines::rail::text_row(
-                RailKind::User,
-                &q.text,
-                styles::user().bold(),
-            ));
-            let (text, style) = match answers.and_then(|a| a.get(i)) {
-                Some(a) if !a.is_empty() => (a.summary(), styles::ok()),
-                Some(_) => ("(no answer)".to_string(), styles::muted()),
-                None => ("(dismissed)".to_string(), styles::muted()),
-            };
-            self.flush
-                .push(lines::rail::text_row(RailKind::User, &text, style));
+            let answer = answers.and_then(|a| a.get(i));
+            self.flush.extend(lines::decision::decision_rows(q, answer));
         }
     }
 

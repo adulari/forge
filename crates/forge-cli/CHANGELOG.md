@@ -6,6 +6,23 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A finished turn closes with what it took: "Worked for 23s · 4.1k tokens · $0.04".** The desktop, web and phone chat print it as a faint line under each completed turn, summed from the usage the daemon now attaches to every model reply in `GET /api/history` (`input_tokens`, `output_tokens`, `cost_usd`, absent when a reply was not billed), so it survives a reload and covers turns from before this release. The newest turn's line waits until the session is idle.
+- **An answered question stays in the transcript as a decision record.** The chat shows the header chip and the question, the chosen label in bold and its description under it (a form shows one block per question, with any note), read back from the stored `ask_user` call and answer. The terminal prints the same two faint rows under the turn instead of a loud, bold block, with the picked option's description beside the answer.
+- **Edit rows say how much they changed.** History edit-call rows carry the lines added and removed (`adds`, `dels`), counted by the daemon from the call's full arguments, so an edit row in the apps shows `+12 −3`, a call that took two seconds or more shows its duration, and a folded group's summary reads "Edited src/a.ts (+8 −2)". Repeated edits to one file inside an opened group fold into one row, "Edit src/a.ts ×3 +12 −4", that lists the individual edits when tapped.
+- **Each subagent a call started gets its own row under the call.** A `spawn_agents` or workflow row lists every child with its status, task, model chip and cost, opens the child's transcript on tap, and stays visible when its tool group is folded.
+
+### Changed
+
+- **A tool group opens by itself while a call in it is running and folds once the run is done.** Your own tap still wins: a group you closed stays closed.
+- **Shell rows are titled by what they do.** The `bash -lc '…'` wrapper and a leading `cd dir &&` are dropped, and `sed -n 'a,bp' file` reads "View file a-b". File paths in tool rows keep their end (`…/deep/dir/name.rs`) instead of losing the file name.
+- **A very long reply stops re-laying out all of its Markdown on every frame while it streams.** Past 16,000 characters only the newest part keeps Markdown layout, the older part shows as plain text, and the whole reply renders as Markdown once the turn settles.
+
+### Fixed
+
+- **A long edit call no longer loses the name of its file in the chat.** The stored call arguments are capped at 200 characters and were written alphabetically, so a big `new`/`old` pair pushed `path` past the cap and the row showed no file; identifying keys (`path`, `command`, `pattern`, …) now come first, and an `ask_user` form is kept whole.
+
 ## [2.24.1] - 2026-10-28
 
 ### Added

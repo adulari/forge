@@ -585,6 +585,44 @@ fn question_form_renders_tabs_checkboxes_other_and_note_rows() {
 }
 
 #[test]
+fn an_answered_question_leaves_a_faint_two_row_record() {
+    let mut app = App::default();
+    let opt = |l: &str, d: &str| QChoice {
+        label: l.into(),
+        description: d.into(),
+    };
+    app.open_form(vec![forge_types::Question {
+        header: "Database".into(),
+        ..forge_types::Question::single(
+            "Which database should sessions use?",
+            &[opt("Postgres", "recommended"), opt("SQLite", "single file")],
+            true,
+        )
+    }]);
+    app.form_key(KeyKind::Char('1'));
+    app.form_key(KeyKind::Enter);
+    let rows: Vec<String> = app
+        .drain_flush()
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows[0].contains("Database") && rows[0].contains("Which database should sessions use?"),
+        "{rows:?}"
+    );
+    assert!(
+        rows[1].contains("Postgres") && rows[1].contains("recommended"),
+        "the chosen label and its description sit on the second row: {rows:?}"
+    );
+}
+
+#[test]
 fn command_palette_renders_filtered_commands() {
     let mut app = App::default();
     app.palette.open_with("");

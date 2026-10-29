@@ -355,7 +355,10 @@ impl Store {
                            )
                          ORDER BY c.seq DESC LIMIT 1
                     ) END,
-                    CASE WHEN ?4 = 1 THEN m.tool_calls_json END
+                    CASE WHEN ?4 = 1 THEN m.tool_calls_json END,
+                    CASE WHEN m.role = 'assistant' THEN (SELECT SUM(u.input_tokens) FROM usage u WHERE u.message_id = m.id) END,
+                    CASE WHEN m.role = 'assistant' THEN (SELECT SUM(u.output_tokens) FROM usage u WHERE u.message_id = m.id) END,
+                    CASE WHEN m.role = 'assistant' THEN (SELECT SUM(u.cost_usd) FROM usage u WHERE u.message_id = m.id) END
              FROM message m
              WHERE m.session_id = ?1
                AND (?2 IS NULL OR m.seq < ?2)
@@ -381,6 +384,12 @@ impl Store {
                 let nudge: bool = row.get(7)?;
                 let carrier_json: Option<String> = row.get(8)?;
                 let own_calls_json: Option<String> = row.get(9)?;
+                let usage = RowStats {
+                    input_tokens: row.get(10)?,
+                    output_tokens: row.get(11)?,
+                    cost_usd: row.get(12)?,
+                    ..RowStats::default()
+                };
                 let role = parse_role_with_diagnostic(session_id, Some(seq), &role);
                 Ok((
                     HistoryRow {
@@ -395,6 +404,7 @@ impl Store {
                         }),
                         tool_phase: (role == Role::Tool).then_some(ToolPhase::Result),
                         nudge,
+                        stats: usage,
                     },
                     own_calls_json,
                 ))
@@ -411,12 +421,18 @@ impl Store {
             // its own prose last: reversed by the client, that reads prose → call 1 → call 2.
             if let Some(json) = own_calls_json.as_deref() {
                 for call in parse_tool_calls(json).into_iter().rev() {
+                    let stats =
+                        RowStats::lines(history_stats::call_line_counts(&call.name, &call.args));
                     out.push(HistoryRow {
                         seq: row.seq,
                         // A call is tool activity, like the result it precedes — the carrier's
                         // `assistant` role belongs to its prose row, not to the calls.
                         role: Role::Tool,
-                        content: tool_call_args_summary(&call.args),
+                        content: if history_stats::is_question_form(&call.name) {
+                            history_stats::form_args(&call.args)
+                        } else {
+                            tool_call_args_summary(&call.args)
+                        },
                         // Only a provider round-trip has a model; the persisted result rows this
                         // sits next to carry none either.
                         model: None,
@@ -427,6 +443,7 @@ impl Store {
                         // A synthesized tool-call row is machine activity, never something the
                         // person or the harness "said" — never a nudge.
                         nudge: false,
+                        stats,
                     });
                 }
             }
@@ -436,6 +453,15 @@ impl Store {
             // own row must not.
             if !row.content.trim().is_empty() {
                 out.push(row);
+            } else if row.stats != RowStats::default() {
+                // The reply's cost must be counted once, so it rides the first of its call rows.
+                if let Some(first_call) = out.last_mut().filter(|r| r.seq == row.seq) {
+                    first_call.stats = RowStats {
+                        adds: first_call.stats.adds,
+                        dels: first_call.stats.dels,
+                        ..row.stats
+                    };
+                }
             }
         }
         Ok(out)

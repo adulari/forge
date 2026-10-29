@@ -12,14 +12,17 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { agentsForInvocation, useAgentIndex } from "../../lib/agentLinks";
+import { isDecision } from "../../lib/decisionRecord";
 import { haptics } from "../../lib/haptics";
-import { openSession } from "../../lib/nav";
 import { callHeadline, callVerb, readableArgs } from "../../lib/toolLabels";
-import { formatArgs, resultFailed, type ToolInvocation } from "../../lib/toolRows";
+import { callSeconds, formatArgs, resultFailed, type ToolInvocation } from "../../lib/toolRows";
+import { formatWorked } from "../../lib/turnFooter";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
-import { monoFamily, type } from "../../theme/typography";
+import { monoFamily, tabularNums, type } from "../../theme/typography";
 import { IconButton } from "../ds/IconButton";
+import { AgentChildRow } from "./AgentChildRow";
+import { DecisionRecord } from "./DecisionRecord";
 
 const COLLAPSE_LINES = 12;
 const COPY_RESET_MS = 1200;
@@ -99,6 +102,21 @@ export function DetailBlock({ label, text }: { label: string; text: string }) {
   );
 }
 
+/** Calls shorter than this read as "0–1s" at the store's one-second resolution, so show nothing. */
+const MIN_SHOWN_SECONDS = 2;
+
+export function ChangeStat({ adds, dels }: { adds: number | null | undefined; dels: number | null | undefined }) {
+  const tokens = useTokens();
+  if (adds == null || dels == null || (adds === 0 && dels === 0)) return null;
+  return (
+    <Text style={[type.monoMeta, styles.stat]} accessibilityLabel={`${adds} added, ${dels} removed`}>
+      {adds > 0 ? <Text style={{ color: tokens.success }}>{`+${adds}`}</Text> : null}
+      {adds > 0 && dels > 0 ? " " : null}
+      {dels > 0 ? <Text style={{ color: tokens.danger }}>{`−${dels}`}</Text> : null}
+    </Text>
+  );
+}
+
 function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
   const tokens = useTokens();
   const [open, setOpen] = useState(false);
@@ -117,6 +135,7 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
   const children = useMemo(() => agentsForInvocation(invocation, agentIndex), [invocation, agentIndex]);
   const resultBody = (result ?? "").trim();
   const hasDetail = argsBody.length > 0 || resultBody.length > 0;
+  const seconds = callSeconds(invocation);
 
   return (
     <View style={styles.row}>
@@ -148,6 +167,10 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
           >
             {target}
           </Text>
+          <ChangeStat adds={invocation.adds} dels={invocation.dels} />
+          {seconds != null && seconds >= MIN_SHOWN_SECONDS ? (
+            <Text style={[type.monoMeta, tabularNums, styles.duration, { color: tokens.ink4 }]}>{formatWorked(seconds)}</Text>
+          ) : null}
           {pending ? (
             <ActivityIndicator size="small" color={tokens.ink4} style={styles.spinner} />
           ) : failed ? (
@@ -155,21 +178,9 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
           ) : null}
         </Pressable>
         {children.length > 0 ? (
-          <View style={styles.agentLinks}>
+          <View style={styles.agentRows}>
             {children.map((child) => (
-              <Pressable
-                key={child.session_id}
-                onPress={() => openSession(child.session_id)}
-                accessibilityRole="button"
-                accessibilityLabel={`Open ${child.agent} transcript`}
-                style={[styles.agentChip, { backgroundColor: tokens.bg3 }]}
-                hitSlop={6}
-              >
-                <Text style={[type.monoMeta, { color: tokens.ink2 }]} numberOfLines={1}>
-                  {child.agent}
-                </Text>
-                <ChevronRight size={12} strokeWidth={1.75} color={tokens.ink3} />
-              </Pressable>
+              <AgentChildRow key={child.session_id} child={child} />
             ))}
           </View>
         ) : null}
@@ -197,7 +208,12 @@ function ToolCallRowImpl({ invocation }: ToolCallRowProps) {
   );
 }
 
-export const ToolCallRow = React.memo(ToolCallRowImpl);
+function ToolCallRowSwitch({ invocation }: ToolCallRowProps) {
+  if (isDecision(invocation)) return <DecisionRecord invocation={invocation} />;
+  return <ToolCallRowImpl invocation={invocation} />;
+}
+
+export const ToolCallRow = React.memo(ToolCallRowSwitch);
 
 const styles = StyleSheet.create({
   // Indented one gutter step past a message row so tool activity reads as subordinate to the
@@ -214,8 +230,9 @@ const styles = StyleSheet.create({
     paddingVertical: space.space4,
     minHeight: 30,
   },
-  agentLinks: { flexDirection: "row", flexWrap: "wrap", gap: space.space4, paddingHorizontal: space.space8, paddingBottom: space.space4 },
-  agentChip: { flexDirection: "row", alignItems: "center", gap: space.space4, height: 24, paddingHorizontal: space.space8, borderRadius: radii.radiusPill },
+  agentRows: { paddingLeft: space.space16, paddingBottom: space.space4 },
+  stat: { flexShrink: 0 },
+  duration: { flexShrink: 0 },
   chevronSlot: { width: 13, height: 13 },
   name: { flexShrink: 0, minWidth: 40 },
   target: { flex: 1, minWidth: 0 },

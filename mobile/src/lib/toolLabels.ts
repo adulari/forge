@@ -2,9 +2,10 @@
 // was about (the command, the path), after the TUI's tool cards (crates/forge-tui/src/app/
 // tool_cards.rs `verb`/`headline`). The raw tool name and argument blob stay in the expanded
 // details; a row that says only "run_code" tells the reader nothing.
+import { headEllipsis } from "../components/review/pathTruncate";
 import { tildify } from "./pathDisplay";
 import { scriptCalls, scriptHeadline, scriptSource, scriptVerb } from "./scriptCalls";
-import { bareToolName, headline } from "./toolGroups";
+import { bareToolName, displayPath, field, headline } from "./toolGroups";
 import { parseArgs, summarizeToolArgs } from "./toolRows";
 
 const VERBS: Record<string, string> = {
@@ -29,6 +30,10 @@ const VERBS: Record<string, string> = {
   update_tasks: "Tasks",
   run_code: "Script",
 };
+
+const PATH_TOOLS = new Set(["read_file", "write_file", "edit_file", "multi_edit", "append_file", "list_dir", "notebook_edit"]);
+// A path keeps its tail: the filename is what a reader scans for, and head-truncation never cuts it.
+const PATH_MAX = 40;
 
 /** The inner tool a `tool_call{name, arguments}` wrapper reached; the wrapper's own name is
  * internal and never shown. */
@@ -63,6 +68,10 @@ export function callHeadline(name: string | null, args: string, result: string |
     const innerArgs = parseArgs(args)?.arguments;
     const text = typeof innerArgs === "string" ? innerArgs : JSON.stringify(innerArgs ?? {});
     return VERBS[inner] ? callHeadline(inner, text, result) : "";
+  }
+  if (PATH_TOOLS.has(tool)) {
+    const path = field(args, ["path", "file_path", "notebook_path"]);
+    if (path) return headEllipsis(tildify(displayPath(path, field(args, ["cwd"]))), PATH_MAX);
   }
   return headline(tool, args) || summarizeToolArgs(args, 80);
 }
