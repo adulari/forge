@@ -52,6 +52,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Changed
 
+- Release builds compile fewer crates: unused dependencies are gone, syntect, qrcode and rcgen drop features Forge never calls, and tokio's test clock is only built for tests. A CI-style release build is about 14% faster.
 - **A tool group opens by itself while a call in it is running and folds once the run is done.** Your own tap still wins: a group you closed stays closed.
 - **Shell rows are titled by what they do.** The `bash -lc '…'` wrapper and a leading `cd dir &&` are dropped, and `sed -n 'a,bp' file` reads "View file a-b". File paths in tool rows keep their end (`…/deep/dir/name.rs`) instead of losing the file name.
 - **A very long reply stops re-laying out all of its Markdown on every frame while it streams.** Past 16,000 characters only the newest part keeps Markdown layout, the older part shows as plain text, and the whole reply renders as Markdown once the turn settles.

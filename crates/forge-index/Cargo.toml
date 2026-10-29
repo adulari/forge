@@ -12,7 +12,6 @@ description = "Lattice — native tree-sitter code-intelligence graph persisted 
 name = "forge_index"
 
 [dependencies]
-forge-types = { workspace = true }
 forge-store = { workspace = true }
 forge-config = { workspace = true }
 thiserror = { workspace = true }

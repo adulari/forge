@@ -13,4 +13,3 @@ name = "forge_skills"
 
 [dependencies]
 forge-types = { workspace = true }
-tracing = { workspace = true }
