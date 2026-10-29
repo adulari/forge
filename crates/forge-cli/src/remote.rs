@@ -1536,6 +1536,44 @@ pub(crate) async fn pump_ws(
     input_tx: mpsc::Sender<RemoteInput>,
     since: u64,
 ) {
+    pump_ws_draining(socket, snapshot_rx, events, input_tx, since, None).await;
+}
+
+/// The close frame a daemon sends when it is about to restart: code 1001 ("going away") with a
+/// reason clients show as "host restarting" rather than treating the drop as an outage.
+pub(crate) fn host_restarting_close() -> Message {
+    Message::Close(Some(axum::extract::ws::CloseFrame {
+        code: 1001,
+        reason: "host restarting".into(),
+    }))
+}
+
+/// Resolves when the daemon announces it is going away (or its sender is gone).
+pub(crate) async fn wait_going_away(rx: &mut watch::Receiver<bool>) {
+    let _ = rx.wait_for(|gone| *gone).await;
+}
+
+/// Resolves when `going_away` flips to `true`; never resolves without one.
+async fn host_going_away(going_away: &mut Option<watch::Receiver<bool>>) {
+    match going_away {
+        Some(rx) => {
+            if rx.wait_for(|gone| *gone).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// [`pump_ws`] that also announces a daemon shutdown to the client with a 1001 close frame.
+pub(crate) async fn pump_ws_draining(
+    socket: WebSocket,
+    snapshot_rx: watch::Receiver<Arc<SnapshotFrame>>,
+    events: Arc<std::sync::Mutex<EventLog>>,
+    input_tx: mpsc::Sender<RemoteInput>,
+    since: u64,
+    mut going_away: Option<watch::Receiver<bool>>,
+) {
     use futures::stream::StreamExt;
     use futures::SinkExt;
 
@@ -1612,6 +1650,10 @@ pub(crate) async fn pump_ws(
             tokio::select! {
                 changed = snap.changed() => {
                     if changed.is_err() {
+                        // The driver ended. If the daemon announced it is going away first, say so.
+                        if going_away.as_ref().is_some_and(|rx| *rx.borrow()) {
+                            let _ = tx.send(host_restarting_close()).await;
+                        }
                         break;
                     }
                     // `watch` coalesces: if multiple broadcasts landed between ticks, this
@@ -1628,6 +1670,10 @@ pub(crate) async fn pump_ws(
                     if tx.send(Message::Text(r#"{"keepalive":true}"#.into())).await.is_err() {
                         break;
                     }
+                }
+                _ = host_going_away(&mut going_away) => {
+                    let _ = tx.send(host_restarting_close()).await;
+                    break;
                 }
                 Some(reason) = note_rx.recv() => {
                     // Carries `keepalive` so every existing client skips it as a control frame;

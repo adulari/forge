@@ -26,6 +26,7 @@ mod device;
 mod discovery_tools;
 pub mod evidence;
 pub mod fs_write;
+mod job_object;
 mod lattice_tool;
 mod open_pr;
 mod proxy;

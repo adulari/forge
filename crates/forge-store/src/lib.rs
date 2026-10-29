@@ -16,6 +16,7 @@ mod busy;
 mod checkpoint_store;
 mod child_view_store;
 mod codemode_store;
+pub mod db_safety;
 mod detached_child_store;
 mod dispatch_store;
 mod duel_store;
@@ -1427,9 +1428,20 @@ fn restrict_db_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_db_permissions(_path: &Path) {}
 
+/// A copy to roll back to if the migration this open is about to run goes wrong. Failing to take
+/// it (a full disk, a read-only directory) must not stop the store opening, so it only warns.
+fn keep_pre_migration_copy(path: &Path) {
+    match db_safety::backup_before_migration(path) {
+        Ok(Some(copy)) => tracing::info!("kept a pre-migration copy at {}", copy.display()),
+        Ok(None) => {}
+        Err(error) => tracing::warn!("could not keep a pre-migration copy of the store: {error}"),
+    }
+}
+
 impl Store {
     /// Open (creating if needed) a database file and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        keep_pre_migration_copy(path.as_ref());
         restrict_db_permissions(path.as_ref());
         Self::build(ConnSource::File(path.as_ref().to_path_buf()), FILE_POOL_MAX)
     }
@@ -1456,6 +1468,7 @@ impl Store {
                 }
             }
         }
+        keep_pre_migration_copy(path);
         restrict_db_permissions(path);
         let store = Self::build(ConnSource::File(path.to_path_buf()), SHARED_POOL_MAX)?;
         let key = std::fs::canonicalize(path).unwrap_or(key);

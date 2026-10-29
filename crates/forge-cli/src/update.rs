@@ -107,6 +107,31 @@ fn classify_path(raw_path: &str, in_cargo_home: bool) -> InstallMethod {
 /// place; for brew/cargo, print the correct upgrade command. With `check_only`, just report whether a
 /// newer release exists without changing anything.
 pub fn run(check_only: bool) -> Result<()> {
+    run_with(check_only, false)
+}
+
+/// `forge update --rollback`: put back the build the last update replaced.
+fn rollback() -> Result<()> {
+    let method = detect_install_method();
+    if let Some(cmd) = method.upgrade_command() {
+        anyhow::bail!(
+            "forge was installed via {} and is rolled back with that tool, not by swapping the \
+             binary; to install an older release use: {cmd}",
+            method.wire_name()
+        );
+    }
+    let exe = crate::update_auto::swap_target();
+    let version = crate::update_rollback::rollback(&exe)?;
+    println!("✔ rolled back to {version}");
+    println!("  restart forge to use it. `forge update --rollback` again undoes this.");
+    Ok(())
+}
+
+/// [`run`] with the rollback switch (the `--rollback` flag).
+pub fn run_with(check_only: bool, rollback_requested: bool) -> Result<()> {
+    if rollback_requested {
+        return rollback();
+    }
     if check_only {
         return match latest_release_tag()? {
             Some(tag) if crate::update_check::is_newer(&tag, CURRENT) => {
@@ -160,7 +185,11 @@ fn release_list_builder() -> self_update::backends::github::ReleaseListBuilder {
 /// never a downgrade). `FORGE_UPDATE_TARGET` points the swap at another file (tests); progress
 /// is only drawn on request, since a bar would corrupt a full-screen TUI.
 pub fn apply_in_place(show_progress: bool) -> Result<Option<String>> {
-    apply_to(swap_target_override(), show_progress)
+    let live = crate::update_auto::swap_target();
+    let stashed = crate::update_rollback::stash(&live);
+    let result = apply_to(swap_target_override(), show_progress);
+    crate::update_rollback::settle(&live, stashed, matches!(result, Ok(Some(_))));
+    result
 }
 
 /// `FORGE_UPDATE_TARGET`: replace this file instead of the running binary (tests).

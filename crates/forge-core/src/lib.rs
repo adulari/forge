@@ -172,6 +172,7 @@ pub use session_lifecycle::UNCLEAN_EXIT_NOTICE;
 mod session_restore;
 mod session_rewind;
 pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};
+pub mod host_limits;
 pub mod session_slash_controls;
 mod session_usage_detail;
 mod session_virtual_tools;

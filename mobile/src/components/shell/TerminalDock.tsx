@@ -32,6 +32,7 @@ import {
   type TerminalStatus,
 } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
+import { HOST_CAP_CLOSE_CODE, reportHostCap } from "../../lib/hostStatus";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space, type ColorTokens } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
@@ -338,7 +339,8 @@ export function TerminalDock({
             setConnectionStatus("connected");
             void refreshTerminals();
           },
-          onClose: () => {
+          onClose: (closed) => {
+            if (closed.code === HOST_CAP_CLOSE_CODE) reportHostCap(closed.reason);
             connectedRef.current = false;
             setConnectionStatus("disconnected");
             void refreshTerminals();

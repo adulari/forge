@@ -66,6 +66,7 @@ import { useAnywhere } from "../../../lib/anywhere/store";
 import { useAuth } from "../../../lib/auth";
 import { useDesktopMenuAction } from "../../../lib/desktopMenu";
 import { assessCompatibility } from "../../../lib/diagnostics";
+import { useHostRestarting } from "../../../lib/hostStatus";
 import { goBackOr, openSession } from "../../../lib/nav";
 import { useAppShortcut } from "../../../lib/shortcuts";
 import { useHistory, usePrefetchSessionPanels, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
@@ -331,6 +332,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
         : null;
   const publicExposure = (snapshot?.exposure ?? "").startsWith("public");
   const reconnecting = connectionState === "reconnecting";
+  const hostRestarting = useHostRestarting();
   // "Unreachable" is only honest when the daemon itself is gone. If the fleet list still
   // answers but no longer contains this session, the session ENDED (archived/discarded) —
   // scary "can't reach forge serve" for a normally-ended session reads as an outage. The
@@ -511,6 +513,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             cwd={snapshot?.cwd ?? sessionId}
             worktree={snapshot?.worktree ?? null}
             reconnecting={reconnecting && !sessionEnded}
+            hostRestarting={hostRestarting}
             // Real sessions run Direct today — there's no relay-hosted session state yet, so
             // `strip` stays unset rather than fabricating one of the 7 Anywhere conditions.
             // A future relay-hosted session sets `transport: "anywhere"` and a real `strip`.
@@ -586,7 +589,10 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
         ) : null}
         {/* A soft reconnect blip renders inline in the StatusStrip meta line (calmer than a
             full-width banner); only the hard unreachable state still earns a Banner. */}
-        {unreachable ? (
+        {hostRestarting && wsDown && !sessionEnded ? (
+          <Banner tone="neutral" compact message="host restarting — this session is safe and will reconnect on its own" />
+        ) : null}
+        {unreachable && !hostRestarting ? (
           <Banner
             tone="danger"
             compact

@@ -9,6 +9,7 @@
 // wire (UI_RULES.md #4).
 
 import { parseNoticesResponse, type NoticesResponse } from "./notices/core";
+import { noteHostResponse } from "./hostStatus";
 import { tFetch, TWebSocket } from "./transport";
 import type { DaemonUpdateInfo } from "./updateBanner";
 
@@ -719,6 +720,7 @@ export async function request<T>(
       } catch {
         // no body
       }
+      noteHostResponse(baseUrl, res.status, body);
       throw new ApiError(res.status, body?.error ?? `request failed (${res.status})`, body);
     }
 
@@ -1244,6 +1246,49 @@ export function applyDaemonUpdate(baseUrl: string): Promise<DaemonUpdateResult> 
  * `list_notices`. */
 export async function getNotices(baseUrl: string, after = 0): Promise<NoticesResponse> {
   return parseNoticesResponse(await request<unknown>(baseUrl, `/api/notices?after=${Math.max(0, Math.floor(after))}`));
+}
+
+export interface RecoveryBackup {
+  name: string;
+  /** The schema version this copy was taken before migrating to. */
+  before_version: number;
+  bytes: number;
+  modified: number;
+}
+
+/** What a daemon whose session store will not open reports about it. */
+export interface RecoveryStatus {
+  error: string;
+  schema_version: number;
+  data_dir: string;
+  backups: RecoveryBackup[];
+  can_open_folder: boolean;
+}
+
+export interface RecoveryOutcome {
+  ok: boolean;
+  message: string;
+}
+
+export function getRecovery(baseUrl: string): Promise<RecoveryStatus> {
+  return expectObject(request(baseUrl, "/api/recovery"), "recovery");
+}
+
+export function retryRecovery(baseUrl: string): Promise<RecoveryOutcome> {
+  return request(baseUrl, "/api/recovery/retry", { method: "POST" }, 60_000);
+}
+
+export function restoreRecoveryBackup(baseUrl: string, backup: string): Promise<RecoveryOutcome> {
+  return request(
+    baseUrl,
+    "/api/recovery/restore",
+    { method: "POST", body: JSON.stringify({ backup }) },
+    60_000,
+  );
+}
+
+export function openRecoveryFolder(baseUrl: string): Promise<RecoveryOutcome> {
+  return request(baseUrl, "/api/recovery/open-folder", { method: "POST" });
 }
 
 /** Bounded aggregate diagnostics; deliberately excludes secrets, paths, prompts, and logs. */

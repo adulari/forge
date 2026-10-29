@@ -226,6 +226,7 @@ fn replace_file(file: &Path, dest: &Path) -> Result<()> {
     let incoming = dest.with_file_name(format!(".forge-new-{pid}{}", exe_suffix()));
     let outgoing = dest.with_file_name(format!(".forge-old-{pid}{}", exe_suffix()));
     std::fs::copy(file, &incoming).context("copying the staged build next to the install")?;
+    crate::update_rollback::keep_previous(dest);
     let moved = self_update::Move::from_source(&incoming)
         .replace_using_temp(&outgoing)
         .to_dest(dest);
@@ -457,7 +458,12 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, ["forge", "staged"], "no temp files: {names:?}");
+        assert_eq!(
+            names,
+            ["forge", "forge.prev", "staged"],
+            "only the previous build is kept beside the install: {names:?}"
+        );
+        assert_eq!(std::fs::read(dir.join("forge.prev")).unwrap(), b"old");
         assert!(replace_file(&dir.join("missing"), &installed).is_err());
         assert_eq!(
             std::fs::read(&installed).unwrap(),

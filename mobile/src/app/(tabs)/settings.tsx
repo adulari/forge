@@ -39,6 +39,7 @@ import { Input } from "../../components/ds/Input";
 import { ListRow } from "../../components/ds/ListRow";
 import { Segmented } from "../../components/ds/Segmented";
 import { Screen } from "../../components/ds/Screen";
+import { HostPowerSection } from "../../components/settings/HostPowerSection";
 import { SectionHeader } from "../../components/ds/SectionHeader";
 import { BackLink } from "../../components/ds/BackLink";
 import { leaveSettings } from "../../lib/nav";
@@ -644,6 +645,8 @@ export function SettingsScreen() {
           <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} />
           <NavListRow label="Workflows" onPress={() => router.push("/workflows")} showSeparator={false} />
         </View>
+
+        <HostPowerSection />
 
         <View>
           <SectionHeader>Preferences</SectionHeader>

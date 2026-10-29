@@ -330,6 +330,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/components/recovery/HostRecoveryGate.tsx",
+    "platform": "desktop/web",
+    "reason": "opening the daemon's data folder only makes sense in the desktop shell, and the screen sits below its window chrome",
+    "category": "behavior"
+  },
+  {
     "file": "mobile/src/components/review/DiffCard.tsx",
     "platform": "web/native",
     "reason": "Android's TextView ignores ellipsize on selectable text, so the diff path is selectable everywhere except Android",

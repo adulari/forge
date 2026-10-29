@@ -43,6 +43,7 @@ pub(crate) fn service_cmd(cmd: ServiceCmd) -> Result<()> {
         ServiceCmd::Start => control_cmd(ServiceControl::Start),
         ServiceCmd::Stop => control_cmd(ServiceControl::Stop),
         ServiceCmd::Restart => control_cmd(ServiceControl::Restart),
+        ServiceCmd::Logs(args) => super::service_logs::logs_cmd(args.lines, args.follow),
         ServiceCmd::Alert => super::service_alert::alert_cmd(),
     }
 }
@@ -408,7 +409,12 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          # makes it `failed`, which is at least visible. Transient failures still retry forever,\n\
          # which is what the network-resilience drop-in wants.\nRestartPreventExitStatus=78\n\
          # An agent-owned compiler or language server may be the kernel's OOM victim. Keep the\n\
-         # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\n\
+         # daemon and its recoverable session metadata alive in that case.\nOOMPolicy=continue\n\
+         # Hardening that costs an agent nothing it needs: nothing it runs can gain privileges\n\
+         # (no setuid escalation), /usr, /boot and /etc are read-only to it, and it cannot switch\n\
+         # its execution domain or create setuid files. Loosen with a drop-in if a workflow\n\
+         # needs sudo or system writes.\nNoNewPrivileges=true\nProtectSystem=full\n\
+         LockPersonality=true\nRestrictSUIDSGID=true\n\n\
          [Install]\nWantedBy=default.target\n",
         env!("CARGO_PKG_VERSION"),
         super::service_alert::ALERT_UNIT_NAME,
@@ -564,6 +570,13 @@ fn render_launchd_plist(forge_exe: &str, exposure: Exposure, port: u16) -> Strin
     out.push_str(&args_xml);
     out.push_str("    </array>\n");
     out.push_str("    <key>RunAtLoad</key>\n    <true/>\n");
+    if let Some(log) = super::service_logs::launchd_log_path() {
+        let log = xml_escape(&log.display().to_string());
+        out.push_str(&format!(
+            "    <key>StandardOutPath</key>\n    <string>{log}</string>\n    \
+             <key>StandardErrorPath</key>\n    <string>{log}</string>\n"
+        ));
+    }
     // Restart on crash only (not on a clean/successful exit) — the daemon-supervision analog of
     // systemd's Restart=on-failure.
     out.push_str(
@@ -802,6 +815,25 @@ mod tests {
             "an OOM-selected agent child must not stop the daemon"
         );
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    /// The directives only count under `[Service]`, and each one is a hardening the agent can live
+    /// with: no privilege gain, a read-only system, no personality switch, no setuid files.
+    #[test]
+    fn the_systemd_unit_is_hardened_under_the_service_section() {
+        let unit = render_systemd_service("/usr/local/bin/forge", Exposure::Local, 7420);
+        let service = &unit[unit.find("[Service]").unwrap()..unit.find("[Install]").unwrap()];
+        for directive in [
+            "NoNewPrivileges=true",
+            "ProtectSystem=full",
+            "LockPersonality=true",
+            "RestrictSUIDSGID=true",
+        ] {
+            assert!(
+                service.contains(directive),
+                "{directive} missing from [Service]"
+            );
+        }
     }
 
     /// `OnFailure=` is a [Unit] directive. systemd SILENTLY ignores it under [Service] — no

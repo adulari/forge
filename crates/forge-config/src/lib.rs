@@ -36,11 +36,13 @@ mod keybinds;
 mod progress_guard;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
 pub mod commit_language;
+pub mod host;
 mod lsp_diagnostics;
 pub mod mcp;
 pub mod notifications;
 pub mod oauth;
 mod paths;
+pub mod power;
 pub mod pr;
 pub mod preview;
 pub mod privacy;
@@ -202,6 +204,12 @@ pub struct Config {
     /// Public preview URLs for agent-started dev servers (`shell_job` expose).
     #[serde(default)]
     pub preview: preview::PreviewConfig,
+    /// Whether the host keeps itself awake while Forge works (`[power] keep_awake`).
+    #[serde(default)]
+    pub power: power::PowerConfig,
+    /// Ceilings on what one daemon runs at once (`[host] max_active_sessions` and friends).
+    #[serde(default)]
+    pub host: host::HostConfig,
     /// The `run_code` tool on the direct path (`[codemode]`).
     #[serde(default)]
     pub codemode: codemode::CodemodeConfig,
@@ -2939,6 +2947,8 @@ impl Default for Config {
             browser: browser::BrowserConfig::default(),
             chat: chat::ChatConfig::default(),
             preview: preview::PreviewConfig::default(),
+            power: power::PowerConfig::default(),
+            host: host::HostConfig::default(),
             codemode: codemode::CodemodeConfig::default(),
             pr: pr::PrConfig::default(),
             keybinds: KeybindsConfig::default(),

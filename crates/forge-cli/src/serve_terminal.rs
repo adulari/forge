@@ -220,6 +220,7 @@ impl TerminalRegistry {
         Self::default()
     }
 
+    #[cfg(test)]
     async fn ensure(
         &self,
         key: TerminalKey,
@@ -227,20 +228,44 @@ impl TerminalRegistry {
         cols: u16,
         rows: u16,
     ) -> Result<Arc<TerminalHandle>, String> {
+        self.ensure_within(key, cwd, cols, rows, 0)
+            .await
+            .map_err(|refusal| match refusal {
+                Refusal::HostCap(message) | Refusal::Other(message) => message,
+            })
+    }
+
+    /// [`Self::ensure`] under the host-wide `[host] max_terminals` ceiling (`0` = none). Terminals
+    /// whose shell has exited do not count against it.
+    async fn ensure_within(
+        &self,
+        key: TerminalKey,
+        cwd: String,
+        cols: u16,
+        rows: u16,
+        host_limit: u32,
+    ) -> Result<Arc<TerminalHandle>, Refusal> {
         let mut terminals = self.terminals.lock().await;
         if let Some(existing) = terminals.get(&key) {
             return Ok(existing.clone());
+        }
+        let open = terminals
+            .values()
+            .filter(|handle| handle.status() != TerminalStatus::Exited)
+            .count();
+        if let Some(message) = crate::host_caps::terminals_refusal(open, host_limit) {
+            return Err(Refusal::HostCap(message));
         }
         let count = terminals
             .keys()
             .filter(|candidate| candidate.session_id == key.session_id)
             .count();
         if count >= MAX_TERMINALS_PER_SESSION {
-            return Err(format!(
+            return Err(Refusal::Other(format!(
                 "a session may have at most {MAX_TERMINALS_PER_SESSION} terminals"
-            ));
+            )));
         }
-        let handle = spawn_terminal(key.clone(), cwd, cols, rows)?;
+        let handle = spawn_terminal(key.clone(), cwd, cols, rows).map_err(Refusal::Other)?;
         terminals.insert(key, handle.clone());
         Ok(handle)
     }
@@ -520,12 +545,37 @@ pub(crate) async fn terminal_ws(
     if params.restart {
         state.terminals.close(&key).await;
     }
-    let terminal = match state.terminals.ensure(key.clone(), cwd, cols, rows).await {
+    let terminal = match state
+        .terminals
+        .ensure_within(
+            key.clone(),
+            cwd,
+            cols,
+            rows,
+            crate::host_caps::terminal_limit(),
+        )
+        .await
+    {
         Ok(terminal) => terminal,
-        Err(error) => return err_response(axum::http::StatusCode::BAD_REQUEST, &error),
+        Err(Refusal::HostCap(message)) => {
+            // A refused upgrade carries no body a browser socket can read, so accept it and
+            // close at once with an application code the client turns into a notice.
+            return ws.on_upgrade(move |mut socket| async move {
+                let _ = socket
+                    .send(WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                        code: crate::host_caps::TERMINAL_CLOSE_CODE,
+                        reason: message.into(),
+                    })))
+                    .await;
+            });
+        }
+        Err(Refusal::Other(error)) => {
+            return err_response(axum::http::StatusCode::BAD_REQUEST, &error)
+        }
     };
     let registry = state.terminals.clone();
-    ws.on_upgrade(move |socket| attach_terminal(socket, terminal, registry, key))
+    let going_away = state.registry.signals.going_away_rx();
+    ws.on_upgrade(move |socket| attach_terminal(socket, terminal, registry, key, going_away))
 }
 
 struct TerminalClientGuard(Arc<TerminalHandle>);
@@ -565,11 +615,18 @@ async fn send_history(socket: &mut WebSocket, handle: &TerminalHandle) -> Option
     Some(sequence)
 }
 
+/// Why [`TerminalRegistry::ensure_within`] would not open another terminal.
+enum Refusal {
+    HostCap(String),
+    Other(String),
+}
+
 async fn attach_terminal(
     mut socket: WebSocket,
     terminal: Arc<TerminalHandle>,
     registry: Arc<TerminalRegistry>,
     key: TerminalKey,
+    mut going_away: tokio::sync::watch::Receiver<bool>,
 ) {
     let _client = TerminalClientGuard::new(terminal.clone());
     let mut events = terminal.events.subscribe();
@@ -630,6 +687,10 @@ async fn attach_terminal(
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
+            }
+            _ = crate::remote::wait_going_away(&mut going_away) => {
+                let _ = socket.send(crate::remote::host_restarting_close()).await;
+                return;
             }
             incoming = socket.recv() => {
                 match incoming {

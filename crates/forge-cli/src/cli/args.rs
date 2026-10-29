@@ -239,6 +239,8 @@ pub(crate) mod anywhere;
 pub(crate) use anywhere::AnywhereCmd;
 #[path = "args/claude_compat.rs"]
 pub(crate) mod claude_compat;
+#[path = "args/host.rs"]
+pub(crate) mod host;
 pub(crate) use claude_compat::ClaudeCompat;
 #[path = "args/session_flags.rs"]
 pub(crate) mod session_flags;
@@ -675,7 +677,12 @@ pub(crate) enum Command {
         /// Only check whether a newer release exists; download/replace nothing.
         #[arg(long)]
         check: bool,
+        /// Put back the build the last update replaced (a standalone install keeps it beside the
+        /// binary as `forge.prev`). Running it again undoes the rollback.
+        #[arg(long, conflicts_with = "check")]
+        rollback: bool,
     },
+    Backup(host::BackupArgs),
     /// Internal: run Forge's tool registry as an MCP server (spawned by the CLI bridge so
     /// claude/codex use Forge's tools under Forge's permission gate). Defaults to stdio; pass
     /// `--transport http --bind <addr>` to serve over streamable-HTTP for remote orchestration
@@ -1362,6 +1369,7 @@ pub(crate) enum ServiceCmd {
     Stop,
     /// Restart the installed service.
     Restart,
+    Logs(host::LogsArgs),
     /// Emit the daemon-failure notification. Invoked by the unit's `OnFailure=`, not by hand.
     #[command(hide = true)]
     Alert,

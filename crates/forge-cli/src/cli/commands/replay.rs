@@ -69,6 +69,21 @@ fn restrict_data_dir(dir: &Path) {
     let _ = dir;
 }
 
+/// The file `open_store` resolves to, without opening it: the same `FORGE_DB`, data-dir and
+/// legacy-fallback order.
+pub(crate) fn store_path() -> std::path::PathBuf {
+    if let Ok(custom) = std::env::var("FORGE_DB") {
+        return std::path::PathBuf::from(custom);
+    }
+    #[cfg(test)]
+    return test_store_path();
+    #[cfg(not(test))]
+    match forge_config::data_dir() {
+        Some(dir) => dir.join(default_store_file_name()),
+        None => std::path::PathBuf::from(".forge/forge.db"),
+    }
+}
+
 pub(crate) fn open_store() -> Result<Store> {
     if SHARE_STORE_HANDLES.load(std::sync::atomic::Ordering::Relaxed) {
         open_store_with(|path| Store::open_shared(path))
