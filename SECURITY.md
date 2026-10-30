@@ -57,4 +57,25 @@ Forge handles credentials, so a few notes on the security model:
 - Forge transmits your code and keys only to the model/provider endpoints you configure, plus
   (opt-in) a GitHub release check that sends no data.
 
+## Remote access (`forge serve`)
+
+The daemon's owner token (`serve-token`) is the full-control credential. Paired devices instead
+hold their own token (`forge serve pair`), stored hashed in `serve-clients.json`, with scopes
+`view`, `prompt`, `approve`, `terminal`, `workspace-write` and `manage-providers`. The `viewer`
+preset holds `view` only. The local CLI (`forge attach`, `forge board`, `forge send`) reads the
+owner token from the config directory and therefore runs with owner scope. Every mutation,
+approval, refusal and WebSocket open is appended to `remote-audit.jsonl` in the data directory
+(client id, route, session, decision; never a token).
+
+| Threat | Mitigation | Residual risk |
+| --- | --- | --- |
+| A lost or shared phone | `forge serve clients revoke ID` or Revoke in Remote access; the token dies at once and open sockets are cut within seconds | The owner token cannot be revoked per device; `forge serve --rotate-token` replaces it |
+| A leaked pairing link | Links expire unused after `--ttl` (default 10 minutes, at most 24 hours) | Anyone who opens it first becomes the device; pair on a trusted network |
+| A read-only device acting | Scopes are checked before routing and on each WebSocket input; refusals are typed (`scope_denied`) and audited | Scopes are coarse: `prompt` lets an agent run whatever its own permission mode allows |
+| DNS rebinding to a local daemon | Requests whose `Host` is not an IP, loopback or single-label name, `*.local`, `*.ts.net`, a known tunnel domain, the configured tunnel host or `[remote] allowed_hosts` are refused | A custom public hostname must be added to `allowed_hosts` |
+| Spoofed client address | `X-Forwarded-For` is trusted only from loopback or `[remote] trusted_proxies`, and only feeds the audit log | The address is informational, never an access decision |
+| The token in a WebSocket URL (history, proxy logs) | `POST /api/ws-ticket` issues a 30 second single-use ticket usable as `/ws?ticket=...` | Clients that still put the token in the path keep that exposure |
+| The legacy control page leaking the owner token | `/`, `/app.js`, `/manifest.webmanifest`, `/sw.js` and device management are owner-only | None known |
+| Audit log tampering | The log is append-only from the daemon and 0600 | A local user with the same account can edit it |
+
 If you find a gap in any of the above, that's exactly the kind of report we want.

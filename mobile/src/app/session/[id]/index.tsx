@@ -74,6 +74,7 @@ import { type FollowUpMode } from "../../../lib/followUp";
 import { useFollowUpSetting } from "../../../lib/useFollowUpSetting";
 import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessionAgents, useSessions } from "../../../lib/queries";
+import { useConnectionAccess } from "../../../lib/queriesAccess";
 import { parseReasoning } from "../../../lib/reasoning";
 import { AgentIndexProvider } from "../../../lib/agentLinks";
 import { openSession } from "../../../lib/nav";
@@ -151,7 +152,11 @@ export function SessionChat() {
   const agentIndex = useSessionAgents(snapshot?.parent ? null : sessionId, agentsSignal).data ?? NO_AGENTS;
   const sessionsQuery = useSessions();
   const parentSession = snapshot?.parent ?? null;
-  const readOnly = parentSession != null || (sessionsQuery.data?.find((row) => row.id === sessionId)?.read_only ?? false);
+  const connectionAccess = useConnectionAccess();
+  const readOnly =
+    parentSession != null ||
+    connectionAccess.viewOnly ||
+    (sessionsQuery.data?.find((row) => row.id === sessionId)?.read_only ?? false);
   const [selectedMessage, setSelectedMessage] = useState<HistoryRow | null>(null);
   // Pointer-driven opens (right-click / hover ⋯) carry an anchor → compact popover menu;
   // long-press carries none → bottom sheet. Web-only distinction, native never sends one.
@@ -988,7 +993,11 @@ export function SessionChat() {
         // command/prompt/interrupt/kill path" contract, not just cosmetic.
         <View style={styles.readOnlyBar} accessibilityRole="text">
           <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>
-            {parentSession != null ? "subagent — view only, it works for its parent session" : "read-only — running in a terminal, view only"}
+            {parentSession != null
+              ? "subagent — view only, it works for its parent session"
+              : connectionAccess.viewOnly
+                ? "This connection can view but not change"
+                : "read-only — running in a terminal, view only"}
           </Text>
         </View>
       ) : (

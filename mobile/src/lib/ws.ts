@@ -17,6 +17,7 @@ import {
   markHostRestarting,
   HOST_RESTART_RETRY_MS,
 } from "./hostStatus";
+import { reportInputError } from "./scopeDenied";
 import { TWebSocket } from "./transport";
 import { backoffDelay, shouldRediscover } from "./wsBackoff";
 import { decideSnapshotRevision } from "./sessionReconciler";
@@ -467,6 +468,7 @@ export function useSessionSocket(
       // Keepalive heartbeats are expected wire traffic, not malformed snapshots — ack
       // liveness silently instead of warning on every one.
       if (data != null && typeof data === "object" && "keepalive" in (data as object)) {
+        reportInputError((data as { input_error?: unknown }).input_error);
         return;
       }
       if (!isValidSnapshotFrame(data)) {
