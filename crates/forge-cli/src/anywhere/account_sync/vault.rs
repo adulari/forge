@@ -63,10 +63,6 @@ impl Vault {
         Ok(Self { epochs, current })
     }
 
-    pub fn current_epoch(&self) -> u32 {
-        self.current
-    }
-
     /// Ids and hashes use the oldest epoch this device holds. Rotating the Account Data Key must
     /// not rename every record, so the derivation input stays put while sealing moves forward.
     fn id_key(&self) -> [u8; 32] {

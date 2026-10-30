@@ -369,6 +369,31 @@ fn status_widgets_drop_in_priority_order_and_a_marker_counts_them() {
 }
 
 #[test]
+fn the_anywhere_sync_widget_shows_health_and_hides_when_sync_is_off() {
+    use forge_config::account_sync::SyncBadge;
+    let mut app = routed(located());
+    app.statusline_config.left = vec![forge_config::StatuslineWidget::AnywhereSync];
+    let badge = |pending, conflicts, error| {
+        Some(SyncBadge {
+            updated_at_ms: 0,
+            pending,
+            conflicts,
+            error,
+        })
+    };
+    assert!(!screen_rows(&app, 100, 24).pop().unwrap().contains("sync"));
+    app.anywhere_sync = badge(0, 0, false);
+    assert!(screen_rows(&app, 100, 24).pop().unwrap().contains("sync ✓"));
+    app.anywhere_sync = badge(2, 0, false);
+    assert!(screen_rows(&app, 100, 24)
+        .pop()
+        .unwrap()
+        .contains("sync 2↑"));
+    app.anywhere_sync = badge(0, 1, false);
+    assert!(screen_rows(&app, 100, 24).pop().unwrap().contains("sync !"));
+}
+
+#[test]
 fn every_status_widget_renders_in_the_status_line_or_in_status() {
     use forge_config::StatuslineWidget as W;
     let mut app = routed(located());

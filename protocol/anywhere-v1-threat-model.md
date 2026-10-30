@@ -4,8 +4,30 @@
 
 Forge Anywhere protects session content, prompts, responses, tool data, workspace capsules, synced
 settings, and replay shares from the managed service, R2, network observers, and database/backup
-readers. Device private keys, recovery entropy, the Account Data Key, provider credentials, and the
-local daemon token remain client-side.
+readers. Device private keys, recovery entropy, the Account Data Key, and the local daemon token
+remain client-side. Provider credentials stay client-side too, with one deliberate exception below.
+
+### Account sync of credentials (explicit per-device opt-in)
+
+A device that turns on `[anywhere.account_sync] keys` uploads its provider API keys, search keys, the
+long-lived Claude token and static MCP secrets inside the same signed, AEAD-sealed sync envelope as
+every other record. Each key value is sealed a second time under `HKDF(data key, "forge-vault-v1")`
+for its epoch, bound to the record id, so a client that only renders sync history cannot display it.
+Record ids are `HMAC-SHA256(HKDF(data key, "forge-account-sync-id-v1"), "<category>/<item>")`, so the
+service sees neither a slot name nor whether a record is a key or a theme.
+
+- The toggle is per device, off by default, and can only be changed on the machine itself or over a
+  direct connection. The Anywhere bridge refuses it, as it refuses writing the same config key.
+- Rotating OAuth logins (Codex, xAI, MCP OAuth) never sync: refresh tokens are single use, so a copy
+  would sign both machines out. Only a presence marker travels and the receiving device is prompted
+  to sign in.
+- Environment-variable keys are never uploaded, and phones and controllers never receive secrets.
+- Revocation rotates the Account Data Key but cannot recall ciphertext a revoked device already
+  downloaded. Keys synced before the revocation must be rotated at their providers; `forge anywhere
+  devices --revoke` re-seals this device's keys under the new epoch and lists their labels.
+- The Account Data Key epochs and device private keys now live in the secret store (OS keyring, then
+  the encrypted fallback file) rather than the plaintext `state.json`, so synced secrets are not
+  protected more weakly than local ones.
 
 The service is trusted for availability, entitlement decisions, routing, quota accounting, expiry,
 and metadata integrity. It is not trusted with plaintext. GitHub and Paddle establish identity and

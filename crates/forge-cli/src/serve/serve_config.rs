@@ -178,3 +178,38 @@ mod tests {
         assert_eq!(setting_kind(forge_config::SettingKind::List).0, "list");
     }
 }
+
+#[cfg(test)]
+mod account_sync_guard_tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+
+    fn request(key: &str) -> Json<UpdateConfigRequest> {
+        Json(
+            serde_json::from_value(serde_json::json!({
+                "key": key, "value": "true", "scope": "user"
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_keys_switch_is_refused_when_the_request_came_over_the_bridge() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forge-anywhere-bridge", HeaderValue::from_static("1"));
+        let response = update_config(headers, request("anywhere.account_sync.keys")).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("direct_only"));
+    }
+
+    #[test]
+    fn only_the_bridge_listener_stamp_marks_a_request_as_bridged() {
+        let mut headers = HeaderMap::new();
+        assert!(!crate::serve_account_sync::from_bridge(&headers));
+        headers.insert("x-forge-anywhere-bridge", HeaderValue::from_static("1"));
+        assert!(crate::serve_account_sync::from_bridge(&headers));
+    }
+}

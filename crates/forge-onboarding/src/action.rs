@@ -113,6 +113,11 @@ pub enum Action {
     SetNotifications {
         enabled: bool,
     },
+    /// Turn one `[anywhere.account_sync]` category on or off for this device.
+    SetAccountSync {
+        category: String,
+        enabled: bool,
+    },
     SetTheme {
         /// `auto`, `dark` or `light`.
         theme: String,
@@ -210,6 +215,7 @@ impl Action {
             Action::SetBehavior { .. } => "Saving safety and cost settings".into(),
             Action::SetKeybindPreset { .. } => "Saving key bindings".into(),
             Action::SetNotifications { .. } => "Saving notification settings".into(),
+            Action::SetAccountSync { .. } => "Saving Anywhere sync settings".into(),
             Action::SetTheme { .. } => "Saving the theme".into(),
             Action::SetLocalModel { .. } => "Saving the local model".into(),
             Action::SetReporting { .. } => "Saving the error report setting".into(),
@@ -383,6 +389,9 @@ fn run_in_process(
         } => local_actions::set_behavior(permission, credit_mode),
         Action::SetKeybindPreset { preset } => local_actions::set_keybind_preset(preset),
         Action::SetNotifications { enabled } => local_actions::set_notifications(*enabled),
+        Action::SetAccountSync { category, enabled } => {
+            local_actions::set_account_sync(category, *enabled)
+        }
         Action::SetTheme { theme } => local_actions::set_theme(theme),
         Action::SetLocalModel { tag, autostart } => local_actions::set_local_model(tag, *autostart),
         Action::SetReporting { mode } => crate::reporting::set_mode(mode)

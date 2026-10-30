@@ -224,7 +224,9 @@ async fn upload_batch() -> Result<()> {
     // Account sync reads what the passes above materialized and journals what changed locally;
     // the extra drain gets those records out now instead of a cycle later.
     let account_sync_config = config.anywhere.account_sync.clone();
-    if account_sync_config.any_enabled() {
+    if !account_sync_config.any_enabled() {
+        forge_config::account_sync::clear_sync_badge();
+    } else {
         match super::account_sync::run_cycle(&store, &state, &account_sync_config).await {
             Ok(()) => {
                 let started = std::time::Instant::now();

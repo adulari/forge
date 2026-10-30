@@ -133,6 +133,31 @@ impl App {
 
     /// Re-read the location at most every two seconds. True when what the statusline shows changed.
     pub fn refresh_git_location(&mut self, now: Instant) -> bool {
+        let sync_changed = self.refresh_anywhere_sync(now);
+        self.refresh_git_location_inner(now) || sync_changed
+    }
+
+    fn refresh_anywhere_sync(&mut self, now: Instant) -> bool {
+        if self
+            .anywhere_sync_checked_at
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(5))
+        {
+            return false;
+        }
+        self.anywhere_sync_checked_at = Some(now);
+        let wall_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let badge = forge_config::account_sync::read_sync_badge(wall_ms);
+        let changed = badge.map(|b| (b.pending, b.conflicts, b.error))
+            != self
+                .anywhere_sync
+                .map(|b| (b.pending, b.conflicts, b.error));
+        self.anywhere_sync = badge;
+        changed
+    }
+
+    fn refresh_git_location_inner(&mut self, now: Instant) -> bool {
         let Some(workspace) = &self.git_workspace else {
             return false;
         };

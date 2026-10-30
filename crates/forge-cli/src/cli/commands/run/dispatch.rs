@@ -1066,6 +1066,7 @@ and keep going."
                     forge_config::StatuslineWidget::QuotaOpencodeGo => "quota_opencode_go".into(),
                     forge_config::StatuslineWidget::QuotaPace => "quota_pace".into(),
                     forge_config::StatuslineWidget::McpStatus => "mcp_status".into(),
+                    forge_config::StatuslineWidget::AnywhereSync => "anywhere_sync".into(),
                     forge_config::StatuslineWidget::Custom {
                         text,
                         shell: Some(cmd),
@@ -1114,12 +1115,13 @@ and keep going."
                         }
                         "quota_pace" | "pace" => forge_config::StatuslineWidget::QuotaPace,
                         "mcp_status" | "mcp" => forge_config::StatuslineWidget::McpStatus,
+                        "anywhere_sync" | "sync" => forge_config::StatuslineWidget::AnywhereSync,
                         other => {
                             app.note(&format!(
                                 "⚠ unknown widget '{other}' — use: model, tier, session_cost, \
                                  effort, mode, turn_elapsed, tokens_in, tokens_out, \
                                  session_tokens, git_branch, repo_name, quota_claude, \
-                                 quota_codex, quota_opencode_go, quota_pace, mcp_status \
+                                 quota_codex, quota_opencode_go, quota_pace, mcp_status, anywhere_sync \
                                  (custom/shell widgets are \
                                  edited directly in the config file — see `/statusline edit`)"
                             ));

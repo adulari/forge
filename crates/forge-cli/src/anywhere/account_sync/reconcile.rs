@@ -73,6 +73,7 @@ pub(crate) async fn run_cycle(
     config: &forge_config::AccountSyncConfig,
 ) -> Result<()> {
     if !config.any_enabled() {
+        forge_config::account_sync::clear_sync_badge();
         return Ok(());
     }
     let vault = Vault::from_state(state)?;
@@ -94,10 +95,22 @@ pub(crate) async fn run_cycle(
             first_error.get_or_insert(format!("{}: {error:#}", category.label()));
         }
     }
+    let conflicts = store
+        .account_sync_items(None)?
+        .iter()
+        .filter(|row| row.status == "conflict")
+        .count();
+    forge_config::account_sync::write_sync_badge(&forge_config::account_sync::SyncBadge {
+        updated_at_ms: now_ms(),
+        pending: store.pending_account_sync_uploads()?,
+        conflicts,
+        error: first_error.is_some(),
+    });
     super::record_cycle(first_error);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     category: Category,
     id: &str,
@@ -121,7 +134,7 @@ fn row(
     }
 }
 
-fn build_payload(ctx: &Ctx, id: &str, local: &LocalItem) -> Result<Payload> {
+pub(super) fn build_payload(ctx: &Ctx, id: &str, local: &LocalItem) -> Result<Payload> {
     let hash = ctx.vault.content_hash(&local.canonical());
     let (value, sealed) = match &local.body {
         Body::Plain(value) => (Some(value.clone()), None),

@@ -214,7 +214,6 @@ fn skills(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
                     modified_ms(&path),
                 )),
                 Ok(None) => skips.push(Skip {
-                    category: Category::Skills,
                     label,
                     reason: "larger than 4 MB".into(),
                 }),
@@ -319,14 +318,12 @@ fn settings(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
             }
             for key in blocked {
                 skips.push(Skip {
-                    category: Category::Settings,
                     label: format!("setting: {key}"),
                     reason: "holds a shell command, kept on this machine".into(),
                 });
             }
         }
         Err(_) => skips.push(Skip {
-            category: Category::Settings,
             label: "config.toml".into(),
             reason: "could not be read".into(),
         }),
@@ -365,11 +362,7 @@ fn mcp(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
     for server in user_mcp().servers {
         let label = format!("mcp: {}", server.name);
         if let Some(reason) = embedded_secret(&server) {
-            skips.push(Skip {
-                category: Category::Mcp,
-                label,
-                reason,
-            });
+            skips.push(Skip { label, reason });
             continue;
         }
         if let Ok(value) = serde_json::to_value(&server) {
@@ -427,7 +420,6 @@ fn instructions(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
         )],
         Ok(None) => {
             skips.push(Skip {
-                category: Category::Instructions,
                 label: "instructions: AGENTS.md".into(),
                 reason: "larger than 4 MB".into(),
             });

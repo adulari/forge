@@ -151,6 +151,44 @@ pub fn set_account_sync_flag(category: &str, enabled: bool) -> Result<(), Config
     toml_write::save_doc(&path, &doc)
 }
 
+/// What the statusline `anywhere_sync` widget shows, written by the sync loop after each cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SyncBadge {
+    pub updated_at_ms: u64,
+    pub pending: usize,
+    pub conflicts: usize,
+    pub error: bool,
+}
+
+const BADGE_STALE_MS: u64 = 120_000;
+
+fn badge_path() -> Option<std::path::PathBuf> {
+    crate::data_dir().map(|dir| dir.join("anywhere").join("account-sync-badge.json"))
+}
+
+pub fn write_sync_badge(badge: &SyncBadge) {
+    if let (Some(path), Ok(json)) = (badge_path(), serde_json::to_vec(badge)) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = crate::write_atomic(path, json);
+    }
+}
+
+pub fn clear_sync_badge() {
+    if let Some(path) = badge_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The current badge, or `None` when account sync is off, the daemon has stopped updating it, or
+/// the file is unreadable.
+pub fn read_sync_badge(now_ms: u64) -> Option<SyncBadge> {
+    let raw = std::fs::read(badge_path()?).ok()?;
+    let badge: SyncBadge = serde_json::from_slice(&raw).ok()?;
+    (now_ms.saturating_sub(badge.updated_at_ms) <= BADGE_STALE_MS).then_some(badge)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

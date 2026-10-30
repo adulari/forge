@@ -10,7 +10,7 @@ use forge_provider::DispatchProvider;
 use forge_store::Store;
 use forge_types::TaskTier;
 
-pub(crate) use cli::args::anywhere::ShareExpiry;
+pub(crate) use cli::args::anywhere::{ShareExpiry, SyncCmd};
 pub(crate) use cli::args::host::BackupArgs;
 pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;

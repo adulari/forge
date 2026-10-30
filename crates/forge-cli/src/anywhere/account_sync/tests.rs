@@ -371,3 +371,39 @@ fn hostile_item_names_cannot_escape_the_config_directory() {
     let dir = tempfile::tempdir().unwrap();
     assert!(super::files::write_bundle(&dir.path().join("skill"), &value, false).is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_device_reseals_keys_under_the_new_epoch_and_lists_labels_only() {
+    let _lock = crate::serve::tests::FORGE_DB_LOCK.lock().await;
+    let env = Env::save();
+    let mut a = machine(0xA1);
+    env.enter(&a);
+    forge_config::store_secret("openai", SECRET).unwrap();
+    let config = forge_config::AccountSyncConfig {
+        keys: true,
+        ..Default::default()
+    };
+    run_cycle(&a.store, &a.state, &config).await.unwrap();
+    let epoch_of = |a: &Machine| {
+        let record = a.store.portable_sync_records("user_setting").unwrap();
+        record
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<super::Payload>(&r.payload).ok())
+            .find_map(|p| p.sealed.map(|s| s.epoch))
+    };
+    assert_eq!(epoch_of(&a), Some(1));
+
+    let new_key = URL_SAFE_NO_PAD.encode([0x55; 32]);
+    a.state.data_key_epochs = [
+        (1, URL_SAFE_NO_PAD.encode([0x44; 32])),
+        (2, new_key.clone()),
+    ]
+    .into();
+    a.state.account_data_key = Some(new_key);
+    a.state.key_epoch = Some(2);
+    forge_config::account_sync::set_account_sync_flag("keys", true).unwrap();
+    let labels = super::rotate::reseal_keys(&a.store, &a.state).unwrap();
+    assert!(labels.iter().any(|l| l.contains("Openai")), "{labels:?}");
+    assert!(labels.iter().all(|l| !l.contains(SECRET)));
+    assert_eq!(epoch_of(&a), Some(2));
+}

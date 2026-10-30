@@ -2836,6 +2836,8 @@ pub enum StatuslineWidget {
     QuotaPace,
     /// MCP server count "⌬ N mcp" (only when servers are connected)
     McpStatus,
+    /// Account-sync health "sync ✓" / "sync 2↑" / "sync !" (hidden while Anywhere account sync is off)
+    AnywhereSync,
     /// Tier bracket only "[tier]"
     Tier,
     /// Current project/repo directory name "⚑ repo"

@@ -30,7 +30,7 @@ pub(crate) mod account_sync;
 mod approval_key;
 mod connector;
 mod display;
-use display::{configured_host_name, display_timestamp};
+use display::{configured_host_name, display_timestamp, human_bytes};
 mod handoff;
 mod jobs;
 pub(crate) mod peers;
@@ -371,6 +371,7 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
         }
         AnywhereCmd::Jobs => jobs::resume_pending().await,
         AnywhereCmd::Devices { revoke } => devices(revoke.as_deref()).await,
+        AnywhereCmd::Sync { cmd } => account_sync::cli::sync_cmd(cmd).await,
         AnywhereCmd::Disable => disable().await,
         AnywhereCmd::Logout => logout().await,
     }
@@ -1398,6 +1399,7 @@ async fn status() -> Result<()> {
         "Connector link: {}",
         link_status_text(current_link_health()?)
     );
+    println!("{}", account_sync::cli::summary_line());
     if !state.is_logged_in() {
         return Ok(());
     }
@@ -1431,13 +1433,14 @@ pub(crate) fn tui_status_summary() -> Result<String> {
         _ => "not enrolled".to_string(),
     };
     Ok(format!(
-        "Forge Anywhere: {account} · connector {} · sync {}",
+        "Forge Anywhere: {account} · connector {} · sync {} · {}",
         if config.anywhere.enabled {
             "active"
         } else {
             "inactive"
         },
         if config.anywhere.sync { "on" } else { "off" },
+        account_sync::cli::summary_line().to_lowercase(),
     ))
 }
 
@@ -1837,6 +1840,7 @@ async fn revoke_device(
         Ok(())
     })?;
     println!("Revoked device {target_device_id} and rotated encrypted data to epoch {new_epoch}.");
+    account_sync::rotate::after_revoke(state, target_is_local);
     Ok(())
 }
 
@@ -2334,16 +2338,6 @@ fn whole_second_ms(ms: u64) -> u64 {
 
 fn idempotency_key() -> String {
     hex::encode(rand::random::<[u8; 16]>())
-}
-
-fn human_bytes(bytes: u64) -> String {
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const MIB: u64 = 1024 * 1024;
-    if bytes >= GIB {
-        format!("{:.2} GiB", bytes as f64 / GIB as f64)
-    } else {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    }
 }
 
 #[cfg(test)]

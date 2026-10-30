@@ -13,8 +13,10 @@ use serde_json::Value;
 
 mod apply;
 mod catalog;
+pub(crate) mod cli;
 mod files;
 mod reconcile;
+pub(crate) mod rotate;
 mod status;
 mod vault;
 
@@ -124,7 +126,6 @@ impl LocalItem {
 /// An item the catalog could not offer for sync, with a reason a person can act on.
 #[derive(Debug, Clone)]
 pub(crate) struct Skip {
-    pub category: Category,
     pub label: String,
     pub reason: String,
 }

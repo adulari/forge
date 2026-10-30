@@ -118,6 +118,8 @@ pub struct Ui {
     pub notifications: bool,
     pub theme: usize,
     pub prefs_row: usize,
+    pub anywhere_sync: [bool; 5],
+    pub anywhere_sync_row: usize,
     pub reporting: usize,
     pub reporting_details: bool,
     pub local_autostart: bool,
