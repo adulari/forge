@@ -181,6 +181,21 @@ impl Tool for OpenPrTool {
     }
 }
 
+/// Create the PR for `workspace`'s checked-out branch with the same refusals, push, evidence and
+/// provenance the model-facing tool applies. For daemon routes where a person, not the model,
+/// composed the title and body.
+pub async fn create_pr_in(workspace: &Path, args: &Value) -> Result<String, String> {
+    let args = Args::parse(args).map_err(|e| e.to_string())?;
+    let ctx = Ctx {
+        git: PathBuf::from("git"),
+        gh: PathBuf::from("gh"),
+        settings: settings(),
+        session: None,
+        ledger: None,
+    };
+    open_pr(&ctx, workspace, &args).await
+}
+
 struct Ctx {
     git: PathBuf,
     gh: PathBuf,

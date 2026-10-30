@@ -55,6 +55,19 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/git/pull"), post(sync::git_pull))
         .route(&format!("{base}/api/git/push"), post(sync::git_push))
         .route(&format!("{base}/api/git/discard"), post(sync::git_discard))
+        .merge(crate::serve_pr::routes(base))
+        .merge(crate::serve_actions::routes(base))
+}
+
+/// Parse a multi-file unified diff (a pull request's patch) into the rows `GET /api/git/diff` uses.
+/// `drop_unchanged` removes modified files left with no added or removed lines (a
+/// whitespace-only change that was folded to context).
+pub(crate) fn parse_patch(raw: &str, drop_unchanged: bool) -> Vec<GitDiffFile> {
+    let mut files = parse_unified_diff(raw);
+    if drop_unchanged {
+        files.retain(|f| f.binary || f.kind != "modified" || f.adds + f.dels > 0);
+    }
+    files
 }
 
 mod branches;
@@ -332,6 +345,25 @@ pub(crate) async fn session_dir(state: &DaemonState, session: &str) -> Option<St
         );
     }
     stored_session_dir(state, session).await.map(|(dir, _)| dir)
+}
+
+/// A session's repository root, or the HTTP failure a route should answer with.
+pub(crate) async fn session_repo_root(
+    state: &DaemonState,
+    session: &str,
+) -> Result<PathBuf, (axum::http::StatusCode, String)> {
+    let Some(dir) = session_dir(state, session).await else {
+        return Err((axum::http::StatusCode::NOT_FOUND, "no such session".into()));
+    };
+    tokio::task::spawn_blocking(move || repo_root_of(&dir))
+        .await
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "git failed".to_string(),
+            )
+        })?
+        .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))
 }
 
 /// Resolve the enclosing repository root of a session's directory. This is the ONLY way a route

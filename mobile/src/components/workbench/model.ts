@@ -10,7 +10,8 @@ export type WorkbenchSurfaceKind =
   | "tasks"
   | "agents"
   | "plan"
-  | "gallery";
+  | "gallery"
+  | "actions";
 
 export interface WorkbenchSurfaceDefinition {
   kind: WorkbenchSurfaceKind;
@@ -85,6 +86,13 @@ export const WORKBENCH_SURFACE_DEFINITIONS: Record<
     title: "Gallery",
     placement: "right",
     defaultSize: 360,
+    sessionScoped: true,
+  },
+  actions: {
+    kind: "actions",
+    title: "Actions",
+    placement: "right",
+    defaultSize: 400,
     sessionScoped: true,
   },
 };

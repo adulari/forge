@@ -71,6 +71,7 @@ export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: Workbench
     else if (focusedSessionId) router.replace("/");
   }));
   useDesktopMenuAction("view:gallery", toggle("gallery"));
+  useDesktopMenuAction("view:actions", toggle("actions"));
 
   useDesktopMenuAction("view:layout-focus", preset("focus", true));
   useDesktopMenuAction("view:layout-side-by-side", preset("side-by-side", false));

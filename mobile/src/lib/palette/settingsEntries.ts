@@ -16,7 +16,8 @@ export type SettingsHref =
   | "/skills"
   | "/hooks"
   | "/session-tree"
-  | "/workflows";
+  | "/workflows"
+  | "/prs";
 
 export interface SettingsEntry {
   href: SettingsHref;
@@ -41,5 +42,6 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
   { href: "/skills", title: "Skills", subtitle: "Installed skills and commands", keywords: "skills commands slash catalog" },
   { href: "/hooks", title: "Hooks", subtitle: "Pre and post tool hooks", keywords: "hooks shell pre post tool" },
   { href: "/session-tree", title: "Session tree", subtitle: "Parent and child sessions", keywords: "tree subagents children fork" },
+  { href: "/prs", title: "Pull requests", subtitle: "Open PRs across projects", keywords: "pull requests prs github review merge checks" },
   { href: "/workflows", title: "Workflows", subtitle: "Workflow runs", keywords: "workflows runs graph" },
 ];

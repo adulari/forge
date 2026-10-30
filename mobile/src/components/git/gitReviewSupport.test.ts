@@ -86,7 +86,8 @@ describe("classifyGitStatusError", () => {
 describe("commit and sync helpers", () => {
   it("remembers only the two known actions", () => {
     expect(parseCommitAction("commit-push")).toBe("commit-push");
-    expect(parseCommitAction("commit")).toBe("commit");
+    expect(parseCommitAction("commit-push-pr")).toBe("commit-push-pr");
+expect(parseCommitAction("commit")).toBe("commit");
     expect(parseCommitAction(null)).toBe("commit");
     expect(parseCommitAction("amend")).toBe("commit");
   });

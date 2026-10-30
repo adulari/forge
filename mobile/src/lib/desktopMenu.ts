@@ -93,6 +93,7 @@ export type DesktopMenuId =
   | "view:git-review"
   | "view:browser-preview"
   | "view:gallery"
+  | "view:actions"
   | "view:appearance:light"
   | "view:appearance:dark"
   | "view:appearance:system"
@@ -244,6 +245,7 @@ function runDefault(id: string): void {
     case "view:git-review":
     case "view:browser-preview":
     case "view:gallery":
+    case "view:actions":
     case "view:tasks":
     case "view:agents":
     case "view:plan":

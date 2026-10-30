@@ -42,6 +42,8 @@ export interface GitCommitBoxProps {
   result: GitCommitResponse | null;
   /** Set once the last commit's push landed ("origin"). */
   pushedTo: string | null;
+  /** Opens the pull request sheet for work that is already committed. */
+  onOpenPullRequest?: () => void;
 }
 
 const SHORT_SHA = 7;
@@ -92,6 +94,7 @@ export function GitCommitBox({
   error,
   result,
   pushedTo,
+  onOpenPullRequest,
 }: GitCommitBoxProps) {
   const tokens = useTokens();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -224,7 +227,7 @@ export function GitCommitBox({
       </View>
       {menuOpen ? (
         <View style={[styles.menu, { backgroundColor: tokens.bg2, borderColor: tokens.border, borderRadius: radii.radius4 }]}>
-          {(["commit", "commit-push"] as const).map((option) => (
+          {(["commit", "commit-push", "commit-push-pr"] as const).map((option) => (
             <MenuItem
               key={option}
               option={option}
@@ -241,6 +244,16 @@ export function GitCommitBox({
 
       {blockedReason && !busy ? (
         <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{blockedReason}</Text>
+      ) : null}
+      {onOpenPullRequest && canPush && stagedCount === 0 && !busy ? (
+        <Pressable
+          onPress={onOpenPullRequest}
+          accessibilityRole="button"
+          accessibilityLabel="Create or view the pull request for this branch"
+          hitSlop={6}
+        >
+          <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>pull request for this branch</Text>
+        </Pressable>
       ) : null}
       {error ? <Text style={[typeScale.monoMeta, { color: tokens.danger }]}>{error.message}</Text> : null}
       {result && !error ? (

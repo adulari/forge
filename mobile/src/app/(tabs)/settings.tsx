@@ -130,7 +130,7 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows";
+type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows" | "/prs";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
@@ -150,6 +150,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "hooks", label: "Hooks", href: "/hooks" },
   { key: "session-tree", label: "Session tree", href: "/session-tree" },
   { key: "workflows", label: "Workflows", href: "/workflows" },
+  { key: "prs", label: "Pull requests", href: "/prs" },
 ];
 
 // react-native-web adds `hovered`/`focused` to Pressable's state; RN's type only has `pressed`.
@@ -661,7 +662,8 @@ export function SettingsScreen() {
           <NavListRow label="Skills" meta={skillsCountLabel} onPress={() => router.push("/skills")} />
           <NavListRow label="Hooks" meta={hooksCountLabel} onPress={() => router.push("/hooks")} />
           <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} />
-          <NavListRow label="Workflows" onPress={() => router.push("/workflows")} showSeparator={false} />
+          <NavListRow label="Workflows" onPress={() => router.push("/workflows")} />
+          <NavListRow label="Pull requests" onPress={() => router.push("/prs")} showSeparator={false} />
         </View>
 
         <HostPowerSection />

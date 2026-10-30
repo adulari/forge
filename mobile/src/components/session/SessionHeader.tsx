@@ -66,6 +66,8 @@ export interface SessionHeaderProps {
   onSelfMcp: () => void;
   onCheckpoint: () => void;
   onPullRequest: () => void;
+  /** The branch's pull request chip; renders nothing when there is none. */
+  prChip?: React.ReactNode;
   onMemory: () => void;
   onLattice: () => void;
   onManageLifecycle: () => void;
@@ -112,6 +114,7 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
         <StatusDot state={props.state} />
         <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
         {props.socketChip ? <SocketChip model={props.socketChip} compact={!isExpanded} /> : null}
+        {props.prChip}
         {isPublic ? <Text style={[typeScale.meta, { color: tokens.danger }]}>public</Text> : null}
         {isExpanded && props.onToggleFiles ? (
           <IconButton

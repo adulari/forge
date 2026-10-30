@@ -54,6 +54,7 @@ import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
 import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
 
 
+import { PrChip } from "../../../components/pr/PrChip";
 import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
 
 
@@ -481,6 +482,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             onSelfMcp={onSelfMcp}
             onCheckpoint={onCheckpoint}
             onPullRequest={onPullRequest}
+            prChip={<PrChip sessionId={sessionId} onPress={onPullRequest} />}
             onMemory={onMemory}
             onLattice={onLattice}
             onManageLifecycle={onManageLifecycle}
@@ -556,7 +558,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
         <OnFirstOpen visible={checkpointVisible}><CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
 
 
-        <OnFirstOpen visible={pullRequestVisible}><PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
+        <OnFirstOpen visible={pullRequestVisible}><PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} sessionId={sessionId} send={sendWithFeedback} /></OnFirstOpen>
 
 
         <OnFirstOpen visible={memoryVisible}><MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
