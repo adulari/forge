@@ -37,6 +37,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
+import { PullRequestSheet } from "../session/PullRequestSheet";
 import { Segmented } from "../ds/Segmented";
 import { EmptyState } from "../ds/EmptyState";
 import { useToast } from "../ds/ToastHost";
@@ -69,6 +70,7 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
   const [pushedTo, setPushedTo] = useState<string | null>(null);
   const [commitAction, setCommitAction] = useCommitAction();
   const [stackedView, setStackedView] = useState<StackedView>("files");
+  const [prVisible, setPrVisible] = useState(false);
 
   // Every row here comes from `/api/git/*`. The bridge carries the READING routes (git_status,
   // git_branches, git_diff), so reviewing works on every transport; it deliberately does not carry
@@ -123,10 +125,11 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
       return;
     }
     setMessage("");
-    if (action === "commit-push") {
+    if (action === "commit-push" || action === "commit-push-pr") {
       try {
         const pushed = await push.mutateAsync({ session: sessionId });
         setPushedTo(pushed.remote ?? "remote");
+        if (action === "commit-push-pr") setPrVisible(true);
       } catch {
         // The push error renders under the commit result; the commit itself stands.
       }
@@ -280,6 +283,7 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
             error={commit.error ?? push.error}
             result={commit.data ?? null}
             pushedTo={pushedTo}
+            onOpenPullRequest={() => setPrVisible(true)}
           />
         ) : null}
       </View>
@@ -305,6 +309,7 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
         onConfirm={() => void confirmDiscard()}
         onCancel={() => setPendingDiscard(null)}
       />
+      <PullRequestSheet visible={prVisible} onClose={() => setPrVisible(false)} sessionId={sessionId} />
       <ConflictResolver
         sessionId={sessionId}
         request={resolving}

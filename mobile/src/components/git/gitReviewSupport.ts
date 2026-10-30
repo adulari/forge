@@ -52,15 +52,16 @@ export function classifyGitStatusError(
 }
 
 /** Where the commit button's "last used" action is remembered. */
-export type CommitAction = "commit" | "commit-push";
+export type CommitAction = "commit" | "commit-push" | "commit-push-pr";
 
 export const COMMIT_ACTION_LABEL: Record<CommitAction, string> = {
   commit: "Commit",
   "commit-push": "Commit & push",
+  "commit-push-pr": "Push & create PR",
 };
 
 export function parseCommitAction(stored: string | null): CommitAction {
-  return stored === "commit-push" ? "commit-push" : "commit";
+  return stored === "commit-push" || stored === "commit-push-pr" ? stored : "commit";
 }
 
 /** The Ctrl/Cmd+Enter chord, from a web key event's fields. Plain Enter must keep inserting a
