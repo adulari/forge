@@ -5,12 +5,12 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::response::Response;
 
-use super::{err_response, json_response, DaemonState};
+use crate::serve::{err_response, json_response, DaemonState};
 
 const MAX_DAYS: i64 = 400;
 
 #[derive(serde::Deserialize)]
-pub(super) struct ActivityParams {
+pub(crate) struct ActivityParams {
     days: Option<i64>,
     #[serde(rename = "tzOffset")]
     tz_offset: Option<i64>,
@@ -24,7 +24,7 @@ struct ActivityResponse {
     days: Vec<forge_store::DayUsage>,
 }
 
-pub(super) async fn usage_activity_page(
+pub(crate) async fn page(
     State(state): State<Arc<DaemonState>>,
     Query(params): Query<ActivityParams>,
 ) -> Response {

@@ -7,6 +7,9 @@ use axum::response::Response;
 
 use super::{err_response, json_response, DaemonState};
 
+#[path = "serve_usage_activity.rs"]
+pub(crate) mod activity;
+
 #[derive(serde::Deserialize)]
 pub(super) struct UsageParams {
     session: Option<String>,

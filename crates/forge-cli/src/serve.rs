@@ -1034,10 +1034,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
             get(crate::serve_terminal::terminal_list),
         )
         .route(&format!("{base}/api/usage"), get(usage_page))
-        .route(
-            &format!("{base}/api/usage/activity"),
-            get(serve_usage_activity::usage_activity_page),
-        )
+        .route(&format!("{base}/api/usage/activity"), get(activity::page))
         .route(&format!("{base}/api/hooks"), get(hooks_page))
         .route(&format!("{base}/api/workflows"), get(workflows_page))
         .route(&format!("{base}/api/models"), models_route())
@@ -1243,7 +1240,6 @@ mod serve_projects;
 mod serve_providers;
 mod serve_session_meta;
 mod serve_usage;
-mod serve_usage_activity;
 mod serve_workflows;
 mod serve_ws;
 use serve_assets::*;
