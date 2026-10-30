@@ -26,7 +26,9 @@ pub use input::{input_box_height, input_cursor_up};
 pub(crate) use live::prompt_owns_screen;
 pub use live::render_live;
 pub(crate) use overlays::{cost_cell, mesh_pace_suffix};
-pub use overlays::{render_btw_overlay, render_mesh_overlay, render_usage_overlay};
+pub use overlays::{
+    render_btw_overlay, render_mesh_overlay, render_session_delete_overlay, render_usage_overlay,
+};
 pub(crate) use panels::needs_phase_header;
 pub(crate) use status_line::render_statusline;
 pub(crate) use status_widgets::{

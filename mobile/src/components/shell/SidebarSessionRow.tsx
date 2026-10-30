@@ -144,7 +144,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
     }
   };
 
-  const lifecycleReason = terminal ? "runs in a terminal" : undefined;
+  const lifecycleReason = terminal ? "open in a terminal: run /delete there, or close the chat first" : undefined;
   const menuEntries: MenuEntry[] = [
     { kind: "item", id: "open", label: "Open", onPress: () => open("focused") },
     {

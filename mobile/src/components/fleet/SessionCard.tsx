@@ -141,7 +141,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const notDaemonHosted = row.terminal ?? row.read_only ?? false;
   const openActions = useCallback(() => {
     if (notDaemonHosted) {
-      toast.show("running in a terminal — this daemon owns no lifecycle for it", { tone: "neutral" });
+      toast.show("running in a terminal — run /delete in that chat to remove it, or close the chat and do it here", { tone: "neutral" });
       return;
     }
     closeSwipe();

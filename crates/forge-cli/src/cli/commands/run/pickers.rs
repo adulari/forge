@@ -118,9 +118,9 @@ pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Res
     app.picker.open_with(
         forge_tui::PickerKind::Sessions,
         if app.show_archived {
-            "resume a session · Tab active · Del archive/unarchive"
+            "resume a session · Tab active · Del archive/unarchive · Ctrl+W delete"
         } else {
-            "resume a session · Tab archived · Del archive · type to search titles and messages"
+            "resume a session · Tab archived · Del archive · Ctrl+W delete · type to search titles and messages"
         },
         rows,
     );

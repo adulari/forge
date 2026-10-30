@@ -87,6 +87,14 @@ async fn body_message(resp: reqwest::Response) -> String {
     error_message(&resp.text().await.unwrap_or_default())
 }
 
+/// The daemon's `{"error": "…"}` sentence untruncated.
+fn full_error(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["error"].as_str().map(str::to_string))
+        .unwrap_or_else(|| body.trim().to_string())
+}
+
 pub(crate) fn error_message(body: &str) -> String {
     let parsed = serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -292,6 +300,29 @@ pub(crate) async fn post_action(
     let _ = refresh.send(());
 }
 
+/// `DELETE /api/sessions/{id}`: permanent. A refusal (running, open in a terminal, owns a
+/// worktree) comes back as the daemon's own sentence, which the toast shows whole.
+pub(crate) async fn delete_action(
+    http: reqwest::Client,
+    url: String,
+    ok: String,
+    ev: mpsc::UnboundedSender<Ev>,
+    refresh: mpsc::UnboundedSender<()>,
+) {
+    let result = match http.delete(&url).send().await {
+        Err(e) => Err(format!("the daemon did not answer: {}", e.without_url())),
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        // Whole sentence, not `error_message`'s toast-sized clip: it is shown in a dialog.
+        Ok(resp) => Err(full_error(&resp.text().await.unwrap_or_default())),
+    };
+    let toast = match result {
+        Ok(()) => BoardEvent::Toast(ToastLevel::Ok, ok),
+        Err(why) => BoardEvent::DeleteRefused(why),
+    };
+    let _ = ev.send(Ev::Board(toast));
+    let _ = refresh.send(());
+}
+
 /// `POST /api/sessions` for a brand-new session. The prompt cannot ride along — the daemon takes
 /// prompts over the session's own socket — so the created id comes back to the render loop, which
 /// holds the text until that socket opens.
@@ -352,6 +383,14 @@ async fn post(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delete_refusal_keeps_its_whole_sentence() {
+        let long = "this session is open in a forge chat terminal on a-long-host-name; run /delete in that terminal, or close the chat and delete it here";
+        let body = serde_json::json!({ "error": long }).to_string();
+        assert_eq!(full_error(&body), long);
+        assert!(error_message(&body).chars().count() < long.chars().count());
+    }
 
     #[test]
     fn every_route_is_scoped_by_the_daemon_token() {

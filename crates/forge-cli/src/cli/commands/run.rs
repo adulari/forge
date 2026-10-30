@@ -22,6 +22,7 @@ mod bang;
 use bang::{route_bang, spawn_bang, BangRoute, BANG_BUSY_NOTE, BANG_EMPTY_NOTE};
 pub(crate) mod claude_flags;
 mod commit_prompt;
+mod delete_flow;
 mod dispatch_checks;
 mod exit_hint;
 mod ui_events;
@@ -1491,6 +1492,67 @@ pub(crate) async fn run_chat_tui(
                 }
             }
 
+            // The permanent-delete confirmation is the top-most modal: it needs the typed id.
+            if app.session_delete.is_some() {
+                let outcome = app
+                    .session_delete
+                    .as_mut()
+                    .map_or(forge_tui::DeleteKeyOutcome::Nothing, |d| d.handle_key(key));
+                match outcome {
+                    forge_tui::DeleteKeyOutcome::Nothing => {}
+                    forge_tui::DeleteKeyOutcome::Cancel => app.session_delete = None,
+                    forge_tui::DeleteKeyOutcome::Confirm => {
+                        let dialog = app.session_delete.clone().unwrap_or_default();
+                        let store = match slash_commands::session_store(&session, &app.session_id) {
+                            Some((store, _)) => Some(store),
+                            None => crate::open_store().ok().map(std::sync::Arc::new),
+                        };
+                        match store {
+                            None => app.note("⚠ could not open the session store"),
+                            Some(store) => {
+                                if let Some(refusal) = delete_flow::precheck(&store, &dialog).await
+                                {
+                                    delete_flow::show_refusal(&mut app, &refusal);
+                                } else if dialog.current || dialog.id == app.session_id {
+                                    let mut dialog = dialog;
+                                    dialog.current = true;
+                                    app.picker.close();
+                                    if busy {
+                                        abort_turn_before_quit(
+                                            &mut turn_handle,
+                                            &mut pending,
+                                            &mut pending_question,
+                                            &mut app,
+                                        );
+                                        busy = false;
+                                        turn_gen += 1;
+                                        queued_prompts.clear();
+                                        app.apply(forge_tui::PresenterEvent::AssistantDone);
+                                        app.apply(forge_tui::PresenterEvent::Done {
+                                            final_text: String::new(),
+                                            stop_reason: forge_types::StopReason::Interrupted,
+                                        });
+                                    }
+                                    delete_flow::delete_current(
+                                        &mut app, &session, &mut tui, &dialog,
+                                    )
+                                    .await;
+                                } else if delete_flow::delete_other(&mut app, &store, &dialog).await
+                                {
+                                    let query = app.picker.query.clone();
+                                    app.picker.close();
+                                    if let Err(error) = open_sessions_picker(&mut app, &query) {
+                                        app.note(&format!("⚠ could not list sessions: {error:#}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                dirty = true;
+                continue;
+            }
+
             // The workflow view is modal while open: ↑↓ move the row selection, Enter zooms into
             // the selected agent's transcript (Esc steps back out), Esc/q background the view —
             // the script keeps running and the one-line status band takes over above the input.
@@ -2663,6 +2725,23 @@ pub(crate) async fn run_chat_tui(
                         app.show_archived = !app.show_archived;
                         if let Err(error) = open_sessions_picker(&mut app, &query) {
                             app.note(&format!("⚠ could not list sessions: {error:#}"));
+                        }
+                    }
+                    KeyKind::DeleteWordBack
+                        if app.picker.kind == Some(forge_tui::PickerKind::Sessions) =>
+                    {
+                        if let Some(row) = app.picker.selected_row().cloned() {
+                            if !row.id.starts_with("observe:") {
+                                match crate::open_store().map(std::sync::Arc::new) {
+                                    Ok(store) => {
+                                        let current = row.id == app.session_id;
+                                        delete_flow::open(&mut app, &store, &row.id, current).await;
+                                    }
+                                    Err(error) => {
+                                        app.note(&format!("⚠ could not open the store: {error:#}"));
+                                    }
+                                }
+                            }
                         }
                     }
                     KeyKind::DeleteForward

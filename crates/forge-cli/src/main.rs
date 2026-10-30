@@ -46,6 +46,7 @@ pub(crate) use cli::commands::run::{
 pub(crate) use cli::commands::schedule::schedule_cmd;
 pub(crate) use cli::commands::self_mcp::self_mcp_cmd;
 pub(crate) use cli::commands::service::service_cmd;
+pub(crate) use cli::commands::sessions_delete::sessions_delete_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 pub(crate) use cli::commands::stats::stats_cmd;
 pub(crate) use cli::commands::tour::tour_cmd;
@@ -127,6 +128,7 @@ mod serve_terminal;
 mod serve_terminal_util;
 mod serve_update;
 mod serve_workspace;
+mod session_delete;
 mod startup_trace;
 mod telemetry;
 mod terminal_owner;

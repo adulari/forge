@@ -201,7 +201,11 @@ export function SessionLifecycleSheet({
       },
       onError: (error) => {
         setConfirmDelete(false);
-        toast.show(errorMessage(error, "could not delete session."), { tone: "danger" });
+        const blocked = error instanceof ApiError && error.status === 409;
+        toast.show(errorMessage(error, "could not delete session."), {
+          tone: "danger",
+          duration: blocked ? 9000 : undefined,
+        });
       },
     });
   };

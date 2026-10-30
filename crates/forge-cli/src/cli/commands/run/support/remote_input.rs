@@ -25,6 +25,7 @@ pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
         || app.mesh_overlay.open
         || app.at_picker.open
         || app.picker.open
+        || app.session_delete.is_some()
 }
 
 /// A remote overlay verb, decoded from [`remote::RemoteInput`] by the drain.

@@ -12,6 +12,7 @@ use crate::surface::{self, SurfaceTone};
 
 use super::keys::HELP;
 use super::state::{BoardApp, ComposerMode};
+use super::types::ConfirmKind;
 use super::widgets::{clip_cells, wrap, Fit};
 
 /// The one-line composer: label in the frame, the text with a real cursor, the send/cancel hint.
@@ -79,7 +80,11 @@ pub(super) fn draw_confirm(app: &BoardApp, frame: &mut Frame, area: Rect) {
         frame,
         rect,
         surface::title(clip_cells(&c.title, 60), tone),
-        Some(surface::hint("Enter yes · Esc no")),
+        Some(surface::hint(if c.kind == ConfirmKind::Refusal {
+            "Enter or Esc close"
+        } else {
+            "Enter yes · Esc no"
+        })),
         tone,
     );
     let lines: Vec<Line> = body

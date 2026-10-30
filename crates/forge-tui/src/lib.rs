@@ -29,6 +29,8 @@ mod app_btw;
 mod app_remote;
 pub use app_btw::BtwOverlay;
 pub mod anywhere_menu;
+mod session_delete;
+pub use session_delete::{DeleteKeyOutcome, SessionDeleteDialog};
 mod arg_parse;
 pub mod board;
 mod commands;

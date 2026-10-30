@@ -291,83 +291,10 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Permanently delete a persisted session, its subagent descendants, and session-scoped
-    /// artifacts. Queue history is retained but detached from the deleted session.
-    ///
-    /// The daemon owns the running/worktree safety checks; the store still refuses frozen
-    /// Anywhere handoffs anywhere in the tree so a lifecycle command cannot invalidate an
-    /// in-flight transfer.
+    /// Permanently delete a persisted session and everything keyed to it; see
+    /// [`Store::delete_session_report`]. Returns whether a session was removed.
     pub fn delete_session(&self, session_id: &str) -> Result<bool> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction()?;
-        let session_ids = {
-            let mut stmt = tx.prepare(
-                "WITH RECURSIVE session_tree(id) AS (
-                     SELECT id FROM session WHERE id = ?1
-                     UNION ALL
-                     SELECT child.id
-                     FROM session child
-                     JOIN session_tree parent ON child.parent_session_id = parent.id
-                 )
-                 SELECT id FROM session_tree",
-            )?;
-            let rows = stmt.query_map([session_id], |row| row.get::<_, String>(0))?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        if session_ids.is_empty() {
-            return Ok(false);
-        }
-        for id in &session_ids {
-            let blocked: bool = tx.query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM anywhere_handoff_session_state WHERE session_id=?1
-                 )",
-                [id],
-                |row| row.get(0),
-            )?;
-            if blocked {
-                return Err(StoreError::InvalidValue(
-                    "session tree is frozen by an Anywhere handoff".into(),
-                ));
-            }
-        }
-        for id in &session_ids {
-            // These older operational tables intentionally have no foreign key. Do not leave
-            // session-scoped credentials/telemetry behind after a permanent deletion.
-            tx.execute(
-                "DELETE FROM live_activity_token WHERE session_id = ?1",
-                [id],
-            )?;
-            tx.execute("DELETE FROM mesh_outcome WHERE session_id = ?1", [id])?;
-            // Queue rows are user-visible execution history, not owned session artifacts.
-            tx.execute(
-                "UPDATE queue_task SET session_id = NULL WHERE session_id = ?1",
-                [id],
-            )?;
-        }
-        for id in session_ids.iter().rev() {
-            // Only sessions other devices could hold (journaled or adopted from sync) need a
-            // tombstone; the journal call is itself a no-op while sync is off.
-            let synced: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sync_journal WHERE record_kind = 'session' AND stable_id = ?1)
-                     OR EXISTS(SELECT 1 FROM anywhere_sync_materialized
-                               WHERE record_kind = 'session' AND stable_id = ?1)",
-                [id],
-                |row| row.get(0),
-            )?;
-            if synced {
-                crate::append_sync_revision(
-                    &tx,
-                    "session",
-                    id,
-                    crate::SyncJournalOperation::Tombstone,
-                    &[],
-                )?;
-            }
-            tx.execute("DELETE FROM session WHERE id = ?1", [id])?;
-        }
-        tx.commit()?;
-        Ok(true)
+        Ok(self.delete_session_report(session_id)?.is_some())
     }
 
     /// Record the isolated worktree a daemon session runs in (`forge serve` with `worktree:true`).

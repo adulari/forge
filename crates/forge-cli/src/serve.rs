@@ -2033,43 +2033,17 @@ async fn delete_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    if let Some(refusal) = reject_if_open_in_terminal(&state, &id, "deleted").await {
-        return refusal;
-    }
-    if state.registry.get(&id).await.is_some() {
-        return err_response(
-            axum::http::StatusCode::CONFLICT,
-            "stop or archive the running session before deleting it",
-        );
-    }
-    let worktree = match state.store.session_worktree(&id) {
-        Ok(worktree) => worktree,
-        Err(error) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("reading session failed: {error}"),
-            );
-        }
-    };
-    if worktree
-        .as_deref()
-        .is_some_and(|path| std::path::Path::new(path).exists())
-    {
-        return err_response(
-            axum::http::StatusCode::CONFLICT,
-            "session still owns a worktree; resume it and merge or discard that worktree first",
-        );
-    }
-    match state.store.delete_session(&id) {
-        Ok(true) => {
+    let running = state.registry.get(&id).await.is_some();
+    match crate::session_delete::delete_local(&state.store, &id, running).await {
+        Ok(done) => {
             state.terminals.close_session(&id).await;
-            json_response(&serde_json::json!({ "ok": true }))
+            json_response(&serde_json::json!({
+                "ok": true,
+                "sessions": done.sessions,
+                "wal_truncated": done.wal_truncated,
+            }))
         }
-        Ok(false) => err_response(axum::http::StatusCode::NOT_FOUND, "no such session"),
-        Err(error) => err_response(
-            axum::http::StatusCode::CONFLICT,
-            &format!("deleting session failed: {error}"),
-        ),
+        Err(refusal) => err_response(refusal.status(), &refusal.full()),
     }
 }
 
