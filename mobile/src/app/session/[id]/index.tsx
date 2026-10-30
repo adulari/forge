@@ -67,7 +67,7 @@ import { type HistoryRow } from "../../../lib/api";
 import { answerAlreadyShown, historyHasRealContentSince, shouldRetryEmptyHistory } from "../../../lib/historyMerge";
 import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
 import { reconcilePendingMessages, unqueuedPendingMessages } from "../../../lib/sessionReconciler";
-import { OFFLINE_QUEUE_CAP, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
+import { OFFLINE_QUEUE_CAP, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { collapsePrompts } from "../../../lib/promptRecall";
 import { type FollowUpMode } from "../../../lib/followUp";
 import { useFollowUpSetting } from "../../../lib/useFollowUpSetting";
@@ -305,7 +305,8 @@ export function SessionChat() {
       // A side question's answer is a card and a `/goal` is a banner, not transcript rows, so
       // their text never gets a bubble that no history row would ever claim.
       const sideQuestion = /^\/(btw|side|goal)(\s|$)/i.test(text);
-      if (send({ kind: mode === "queue" ? "queue" : "prompt", text, attachments: withPath })) {
+      const clientMsgId = newClientMsgId();
+      if (send({ kind: mode === "queue" ? "queue" : "prompt", text, attachments: withPath, client_msg_id: clientMsgId })) {
         returnToLatestRef.current();
         if (!sideQuestion) setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
         return true;
@@ -318,7 +319,7 @@ export function SessionChat() {
         return false;
       }
       setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
-      setOfflineQueue((prev) => [...prev, { text, attachments: withPath }]);
+      setOfflineQueue((prev) => [...prev, { text, attachments: withPath, clientMsgId }]);
       return true;
     },
     [offlineQueue.length, send, toast],

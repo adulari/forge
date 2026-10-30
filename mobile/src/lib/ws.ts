@@ -280,10 +280,13 @@ export type RemoteInput =
        * field; the server treats a missing/empty list as "fall back to the old ambient
        * upload-then-prompt sequence". */
       attachments?: { path: string; image: boolean }[];
+      /** Idempotency key chosen once at compose time and reused on every retry/flush; a daemon
+       * that already queued this id drops the repeat. Older daemons ignore the unknown field. */
+      client_msg_id?: string;
     }
   // "Queue, don't steer": waits behind the running turn and is never offered to it. Needs a
   // daemon with `chat.follow_up` (see lib/followUp.ts); an older one would drop the frame.
-  | { kind: "queue"; text: string; attachments?: { path: string; image: boolean }[] }
+  | { kind: "queue"; text: string; attachments?: { path: string; image: boolean }[]; client_msg_id?: string }
   // Reorders / promotes one server-queued prompt; index+text echo Snapshot.queued like dequeue.
   | { kind: "queue_move"; index: number; text: string; to: number }
   | { kind: "queue_send_now"; index: number; text: string }
