@@ -1256,12 +1256,6 @@ pub(crate) fn insert_sync_journal_row_with_base(
             | "agent"
             | "workflow"
             | "file"
-            // harness_store.rs journals under this kind for every /refine edit and rollback. It
-            // was missing here, so with Anywhere sync ENABLED the whitelist rejected the row, the
-            // `?` propagated, and the whole IMMEDIATE transaction rolled back — the Continual
-            // Harness was inoperable. Tests did not catch it because the sync-enabled gate returns
-            // early when sync is off, which is the default in tests.
-            | "harness_entry"
     ) {
         return Err(StoreError::InvalidValue(
             "record kind is not eligible for Anywhere sync".into(),
@@ -1326,6 +1320,8 @@ pub(crate) fn insert_sync_journal_row_with_base(
     }
 }
 
+const LOCAL_ONLY_SYNC_KINDS: [&str; 2] = ["harness_entry", "harness_refinement"];
+
 /// Append the next immutable snapshot for a local record inside the caller's transaction.
 pub(crate) fn append_sync_revision(
     conn: &Connection,
@@ -1334,6 +1330,12 @@ pub(crate) fn append_sync_revision(
     operation: SyncJournalOperation,
     payload: &[u8],
 ) -> Result<()> {
+    // Continual-harness rows are local learnings and the service accepts neither kind. Journaling
+    // them used to jam the strictly ordered outbox (`harness_entry`) or roll the whole write back
+    // (`harness_refinement`) whenever sync was on, so they are not journaled at all.
+    if LOCAL_ONLY_SYNC_KINDS.contains(&record_kind) {
+        return Ok(());
+    }
     let enabled = conn
         .query_row(
             "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",

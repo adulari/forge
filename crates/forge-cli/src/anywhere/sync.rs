@@ -407,6 +407,12 @@ async fn upload_entry(
     access_token: &str,
     entry: &SyncJournalEntry,
 ) -> Result<()> {
+    // Rows journaled by an older build for a kind the service does not accept (continual-harness
+    // learnings) can never upload; leaving them first in the strict-order outbox blocked everything
+    // behind them forever.
+    if record_kind(&entry.record_kind).is_err() {
+        return skip_ineligible(store, entry);
+    }
     let prepared = match store.sync_upload_envelope(entry.id)? {
         Some(prepared) => prepared,
         None => prepare_envelope(store, state_store, entry)?,
@@ -552,6 +558,15 @@ fn skip_oversized(store: &Store, entry: &SyncJournalEntry, envelope_len: usize) 
         entry.stable_id,
         envelope_len as f64 / (1024.0 * 1024.0),
         MAX_SYNC_UPLOAD_ENVELOPE_BYTES / (1024 * 1024)
+    );
+    store.mark_sync_journal_uploaded(&[entry.id], (now_ms() / 1_000) as i64)?;
+    Ok(())
+}
+
+fn skip_ineligible(store: &Store, entry: &SyncJournalEntry) -> Result<()> {
+    tracing::warn!(
+        record_kind = %entry.record_kind,
+        "skipping a sync journal row whose kind cannot be uploaded"
     );
     store.mark_sync_journal_uploaded(&[entry.id], (now_ms() / 1_000) as i64)?;
     Ok(())
@@ -751,6 +766,13 @@ mod tests {
             vec!["later.md".to_string()],
             "the record behind the skipped one must become reachable"
         );
+    }
+
+    #[test]
+    fn harness_kinds_are_not_uploadable_so_legacy_rows_are_skipped() {
+        assert!(record_kind("harness_entry").is_err());
+        assert!(record_kind("harness_refinement").is_err());
+        assert!(record_kind("user_setting").is_ok());
     }
 
     #[test]
