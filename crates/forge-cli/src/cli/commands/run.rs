@@ -51,6 +51,7 @@ pub(crate) use session::*;
 mod mcp_overlay;
 mod one_shot;
 mod one_shot_hooks;
+pub(crate) mod session_mcp_off;
 pub(crate) use one_shot::*;
 pub(crate) mod print_run;
 mod stream_input;

@@ -1016,6 +1016,7 @@ and keep going."
                     if enable {
                         let exe = forge_types::self_exe::forge_executable();
                         let server = forge_config::McpServerConfig {
+                            disabled_tools: Vec::new(),
                             name: "forge".to_string(),
                             transport: forge_config::McpTransport::Stdio {
                                 command: exe.to_string_lossy().into_owned(),

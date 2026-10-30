@@ -81,6 +81,17 @@ pub(crate) enum McpCmd {
         #[arg(long)]
         cwd: Option<std::path::PathBuf>,
     },
+    /// Copy Forge's enabled MCP servers into Claude Code's (`~/.claude.json`) and Codex's
+    /// (`~/.codex/config.toml`) configs. Other entries are kept and secret values are never
+    /// written: tokens are referenced by environment variable name.
+    Sync {
+        /// Comma-separated targets: `claude`, `codex`.
+        #[arg(long, value_delimiter = ',', required = true)]
+        to: Vec<McpSyncTarget>,
+        /// Show what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Show the full discovered tool list for one connected server.
     Tools {
         /// Server name (as declared in `.forge/mcp.toml`).
@@ -111,6 +122,12 @@ pub(crate) enum McpCmd {
         #[arg(long)]
         account: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum, Debug)]
+pub(crate) enum McpSyncTarget {
+    Claude,
+    Codex,
 }
 
 #[derive(Clone, ValueEnum, Debug)]

@@ -222,7 +222,8 @@ pub(crate) fn required(method: &Method, path: &str) -> Need {
     if path.starts_with("/api/providers")
         || path.starts_with("/api/onboarding")
         || path == "/api/anywhere/enable"
-        || (!read && matches!(path, "/api/update" | "/api/config" | "/api/mcp"))
+        || (!read
+            && (matches!(path, "/api/update" | "/api/config") || path.starts_with("/api/mcp")))
     {
         return Need::Scope(Scope::ManageProviders);
     }

@@ -131,6 +131,7 @@ fn server_from(
         bail!("server '{name}': needs `command` (stdio) or `url` (http/sse)");
     };
     Ok(McpServerConfig {
+        disabled_tools: Vec::new(),
         name: name.to_string(),
         transport,
         auth: None,
@@ -207,6 +208,7 @@ mod tests {
 
     fn named(name: &str) -> McpServerConfig {
         McpServerConfig {
+            disabled_tools: Vec::new(),
             name: name.to_string(),
             transport: McpTransport::Http {
                 url: "https://x".into(),

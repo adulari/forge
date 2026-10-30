@@ -12,7 +12,7 @@ use forge_types::TaskTier;
 
 pub(crate) use cli::args::anywhere::ShareExpiry;
 pub(crate) use cli::args::host::BackupArgs;
-pub(crate) use cli::args::mcp::McpTransportArg;
+pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
     AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity,

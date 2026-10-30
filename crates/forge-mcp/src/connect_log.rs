@@ -79,6 +79,7 @@ for line in sys.stdin:
     print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}), flush=True)
 "#;
         forge_config::McpServerConfig {
+            disabled_tools: Vec::new(),
             name: "flaky".into(),
             transport: forge_config::McpTransport::Stdio {
                 command: "sh".into(),

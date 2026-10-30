@@ -41,6 +41,7 @@ pub mod commit_language;
 pub mod host;
 mod lsp_diagnostics;
 pub mod mcp;
+pub mod mcp_sync;
 pub mod notifications;
 pub mod oauth;
 mod paths;

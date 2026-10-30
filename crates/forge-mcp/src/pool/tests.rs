@@ -42,6 +42,7 @@ fn rig(connect_ms: u64, fail: bool) -> Rig {
 
 fn server(name: &str, transport: McpTransport, shared: Option<bool>) -> McpServerConfig {
     McpServerConfig {
+        disabled_tools: Vec::new(),
         name: name.into(),
         transport,
         auth: None,

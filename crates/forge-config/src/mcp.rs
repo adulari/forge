@@ -69,9 +69,22 @@ impl McpConfig {
         self.allow.servers.is_empty() || self.allow.servers.iter().any(|s| s == name)
     }
 
+    /// Is this qualified tool switched off through its server's `disabled_tools`?
+    pub fn tool_disabled(&self, qualified: &str) -> bool {
+        self.servers.iter().any(|server| {
+            qualified
+                .strip_prefix(server.name.as_str())
+                .and_then(|rest| rest.strip_prefix("__"))
+                .is_some_and(|raw| server.disabled_tools.iter().any(|d| d == raw))
+        })
+    }
+
     /// Is this qualified tool (`server__tool`) permitted? Empty `allow.tools` = every tool of an
     /// allowed server. Otherwise the qualified name must be listed explicitly.
     pub fn tool_allowed(&self, qualified: &str) -> bool {
+        if self.tool_disabled(qualified) {
+            return false;
+        }
         self.allow.tools.is_empty() || self.allow.tools.iter().any(|t| t == qualified)
     }
 
@@ -113,6 +126,10 @@ pub struct McpServerConfig {
     /// started it). Set `shared = true` on a stdio server that is stateless, to run one child.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared: Option<bool>,
+    /// Raw tool names (without the `<server>__` prefix) hidden from the model and refused at call
+    /// time. Lets a noisy or dangerous tool be switched off without dropping the whole server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
 }
 
 /// One extra secret env var for a stdio server: the child-env var name + the keyring slot the
@@ -427,6 +444,7 @@ fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServer
         return;
     };
     out.servers.push(McpServerConfig {
+        disabled_tools: Vec::new(),
         name: name.to_string(),
         transport,
         auth,
@@ -700,6 +718,26 @@ pub fn write_mcp_toml(path: &Path, config: &McpConfig) -> Result<(), ConfigError
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabled_tools_hide_only_that_servers_named_tool() {
+        let config = McpConfig {
+            servers: vec![
+            toml::from_str(
+                "name = \"a\"\ndisabled_tools = [\"rm\"]\n[transport]\ntype = \"stdio\"\ncommand = \"x\"\n",
+            )
+            .unwrap(),
+            toml::from_str("name = \"b\"\n[transport]\ntype = \"stdio\"\ncommand = \"x\"\n").unwrap(),
+            ],
+            ..McpConfig::default()
+        };
+        assert!(!config.tool_allowed("a__rm"));
+        assert!(config.tool_allowed("a__ls"));
+        assert!(config.tool_allowed("b__rm"));
+        let round: McpServerConfig =
+            toml::from_str(&toml::to_string(&config.servers[0]).unwrap()).unwrap();
+        assert_eq!(round.disabled_tools, ["rm"]);
+    }
+
     use super::*;
 
     #[test]
@@ -748,6 +786,7 @@ mod tests {
         let c = McpConfig {
             servers: vec![
                 McpServerConfig {
+                    disabled_tools: Vec::new(),
                     name: "a".into(),
                     transport: stdio(),
                     auth: None,
@@ -756,6 +795,7 @@ mod tests {
                     shared: None,
                 },
                 McpServerConfig {
+                    disabled_tools: Vec::new(),
                     name: "a".into(),
                     transport: stdio(),
                     auth: None,
