@@ -1019,6 +1019,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         )
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
+        .merge(crate::serve_skills::routes(&base))
         .merge(crate::serve_access::routes(&base))
         .merge(crate::serve_lifecycle::routes(&base))
         .merge(crate::serve_schedules::routes(&base))
@@ -1034,7 +1035,6 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/usage"), get(usage_page))
         .route(&format!("{base}/api/hooks"), get(hooks_page))
-        .route(&format!("{base}/api/skills"), get(skills_page))
         .route(&format!("{base}/api/workflows"), get(workflows_page))
         .route(&format!("{base}/api/models"), models_route())
         .route(&format!("{base}/api/plans"), get(plans_page))
@@ -3313,44 +3313,6 @@ fn guess_content_type(path: &str) -> &'static str {
         "txt" | "md" => "text/plain; charset=utf-8",
         "json" => "application/json",
         _ => "application/octet-stream",
-    }
-}
-
-#[derive(serde::Serialize)]
-struct SkillRow {
-    name: String,
-    description: String,
-    scope: String,
-    tier: Option<String>,
-    resources: usize,
-}
-
-async fn skills_page() -> Response {
-    let rows = tokio::task::spawn_blocking(|| {
-        let catalog = forge_skills::Catalog::load(&forge_config::command_sources());
-        let mut skills: Vec<SkillRow> = catalog
-            .all_skills()
-            .into_iter()
-            .map(|skill| SkillRow {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                scope: skill.scope.label().to_string(),
-                tier: skill
-                    .tier
-                    .map(|tier| format!("{tier:?}").to_ascii_lowercase()),
-                resources: skill.resources.len(),
-            })
-            .collect();
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        skills
-    })
-    .await;
-    match rows {
-        Ok(rows) => json_response(&rows),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read skills catalog",
-        ),
     }
 }
 

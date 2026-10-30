@@ -652,6 +652,7 @@ pub(super) fn expand_one_shot_slash(
                     name = meta.name
                 );
             }
+            forge_config::skill_usage::record_skill_use(&meta.name);
             let skill = forge_skills::Skill::load(&meta);
             for w in &skill.warnings {
                 eprintln!("⚠ {w}");

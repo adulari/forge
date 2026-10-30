@@ -101,7 +101,7 @@ export interface UpdateConfigRequest {
   scope: "user" | "project";
 }
 
-export interface SkillRow { name: string; description: string; scope: "builtin" | "user" | "project"; tier: string | null; resources: number; }
+export interface SkillRow { name: string; description: string; scope: "builtin" | "user" | "project"; tier: string | null; resources: number; uses: number; pack: string | null; }
 
 /** A declared workflow parameter (`meta.args`). `arg_type` is the author's free-form type word —
  * the wire field is not called `type` because that is a Rust keyword. */
@@ -918,8 +918,8 @@ export function discardSession(
   });
 }
 
-export function getSkills(baseUrl: string): Promise<SkillRow[]> {
-  return expectArray(request(baseUrl, "/api/skills"), "skills");
+export function getSkills(baseUrl: string, session?: string | null): Promise<SkillRow[]> {
+  return expectArray(request(baseUrl, `/api/skills${session ? `?session=${encodeURIComponent(session)}` : ""}`), "skills");
 }
 
 export function getWorkflows(baseUrl: string, session?: string): Promise<WorkflowRow[]> {

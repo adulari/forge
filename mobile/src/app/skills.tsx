@@ -13,10 +13,14 @@
 // contract, so the detail shows description + resources + scope + tier only, with a note
 // that full guidance is applied in-session (see report).
 import * as Clipboard from "expo-clipboard";
-import { ChevronDown, Sparkles } from "lucide-react-native";
+import { ChevronDown, Sparkles, Store } from "lucide-react-native";
 import React, { useMemo, useState } from "react";
+import { useLocalSearchParams } from "expo-router";
 import { Pressable, RefreshControl, StyleSheet, Text, View, type ViewStyle } from "react-native";
 
+import { MarketplaceSheet } from "../components/skills/MarketplaceSheet";
+import { SkillInvokeForm } from "../components/skills/SkillInvokeForm";
+import { SkillsManagePanel } from "../components/skills/SkillsManagePanel";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
 import { Button } from "../components/ds/Button";
@@ -80,16 +84,16 @@ function SlashPill({ name }: { name: string }) {
   );
 }
 
-function ResourcesMeta({ resources }: { resources: number }) {
+function ResourcesMeta({ resources, uses }: { resources: number; uses: number }) {
   const tokens = useTokens();
   return (
     <Text style={[type.monoMeta, { color: tokens.ink4 }]}>
-      {`${resources} linked resource${resources === 1 ? "" : "s"}`}
+      {`${resources} linked resource${resources === 1 ? "" : "s"} · used ${uses}x`}
     </Text>
   );
 }
 
-function SkillRowItem({ skill, expanded, onToggle, showSeparator }: { skill: SkillRow; expanded: boolean; onToggle: () => void; showSeparator: boolean }) {
+function SkillRowItem({ skill, expanded, onToggle, showSeparator, session, showInvoke }: { skill: SkillRow; expanded: boolean; onToggle: () => void; showSeparator: boolean; session?: string | null; showInvoke: boolean }) {
   const tokens = useTokens();
   const cardStyle: ViewStyle = expanded
     ? { backgroundColor: tokens.bg2, borderColor: tokens.border, borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius16, paddingHorizontal: space.space16 }
@@ -123,17 +127,18 @@ function SkillRowItem({ skill, expanded, onToggle, showSeparator }: { skill: Ski
               <Text style={[type.meta, { color: tokens.ink2 }]}>{skill.tier}</Text>
             </View>
           ) : null}
-          <ResourcesMeta resources={skill.resources} />
+          <ResourcesMeta resources={skill.resources} uses={skill.uses} />
           <Text style={[type.monoMeta, { color: tokens.ink4 }]}>Full guidance is applied in-session — not synced here.</Text>
+          {showInvoke ? <SkillInvokeForm name={skill.name} session={session} /> : null}
         </View>
       ) : (
-        <ResourcesMeta resources={skill.resources} />
+        <ResourcesMeta resources={skill.resources} uses={skill.uses} />
       )}
     </View>
   );
 }
 
-function DetailPane({ skill }: { skill: SkillRow | null }) {
+function DetailPane({ skill, session }: { skill: SkillRow | null; session?: string | null }) {
   const tokens = useTokens();
   if (!skill) {
     return (
@@ -158,8 +163,9 @@ function DetailPane({ skill }: { skill: SkillRow | null }) {
           <Text style={[type.meta, { color: tokens.ink2 }]}>{skill.tier}</Text>
         </View>
       ) : null}
-      <ResourcesMeta resources={skill.resources} />
+      <ResourcesMeta resources={skill.resources} uses={skill.uses} />
       <Text style={[type.monoMeta, { color: tokens.ink4 }]}>Full guidance is applied in-session — not synced to this view.</Text>
+      <SkillInvokeForm name={skill.name} session={session} />
     </View>
   );
 }
@@ -179,7 +185,9 @@ function SkillRowSkeleton() {
 function SkillsScreenBody() {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
-  const query = useSkills();
+  const { session } = useLocalSearchParams<{ session?: string }>();
+  const [marketOpen, setMarketOpen] = useState(false);
+  const query = useSkills(session);
   const pull = usePullRefresh(query.refetch);
   const [search, setSearch] = useState("");
   const [activeName, setActiveName] = useState<string | null>(null);
@@ -235,6 +243,8 @@ function SkillsScreenBody() {
                 expanded={isExpanded ? selected?.name === skill.name : activeName === skill.name}
                 onToggle={() => onRowToggle(skill.name)}
                 showSeparator={index < rows.length - 1}
+                session={session}
+                showInvoke={!isExpanded}
               />
             ))}
           </View>
@@ -245,14 +255,19 @@ function SkillsScreenBody() {
   return (
     <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
       <BackLink />
-      <Text style={[type.title, { color: tokens.ink }]}>Skills</Text>
+      <View style={styles.titleRow}>
+        <Text style={[type.title, styles.titleText, { color: tokens.ink }]}>Skills</Text>
+        <Button label="Marketplace" variant="secondary" icon={<Store size={14} color={tokens.ink2} />} onPress={() => setMarketOpen(true)} accessibilityLabel="Open the skills marketplace" />
+      </View>
       <Text style={[type.sub, { color: tokens.ink3 }]}>Reusable Forge methodologies available to every session.</Text>
+      <SkillsManagePanel session={session} />
+      <MarketplaceSheet visible={marketOpen} onClose={() => setMarketOpen(false)} session={session} />
       <SearchField value={search} onChangeText={setSearch} placeholder="Search skills" accessibilityLabel="Search skills" />
       {isExpanded && filtered.length > 0 ? (
         <View style={styles.twoCol}>
           <View style={styles.colMain}>{listContent}</View>
           <View style={styles.colSide}>
-            <DetailPane skill={selected} />
+            <DetailPane skill={selected} session={session} />
           </View>
         </View>
       ) : (
@@ -274,6 +289,8 @@ export default function SkillsScreen() {
 
 const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
+  titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.space12 },
+  titleText: { flex: 1 },
   twoCol: { flexDirection: "row", gap: space.space32, alignItems: "flex-start" },
   colMain: { flex: 1, minWidth: 0 },
   colSide: { flex: 1, minWidth: 0 },

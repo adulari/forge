@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 mod registry;
 pub(crate) use registry::{
     add_marketplace_at, installed_path, load_installed_at, load_marketplaces_at, marketplaces_path,
-    record_installed_at, remove_marketplace_at, remove_plugin, skills_dir, InstalledEntry,
-    Marketplaces,
+    record_installed_at, remove_marketplace_at, remove_plugin, remove_plugin_at, skills_dir,
+    InstalledEntry, MarketplaceEntry, Marketplaces,
 };
 
 /// A private-repo / authenticated token, if the user exported one.
@@ -219,7 +219,13 @@ fn pick_root(clone: &Path, subdir: Option<&str>) -> Result<PathBuf> {
                 "invalid package subdirectory '{sub}': must be a relative path with no '..' components"
             );
         }
-        return Ok(clone.join(sub_path));
+        let direct = clone.join(sub_path);
+        let nested = clone.join("skills").join(sub_path);
+        return Ok(if !direct.exists() && nested.exists() {
+            nested
+        } else {
+            direct
+        });
     }
     let skills = clone.join("skills");
     Ok(if skills.is_dir() {
@@ -227,6 +233,23 @@ fn pick_root(clone: &Path, subdir: Option<&str>) -> Result<PathBuf> {
     } else {
         clone.to_path_buf()
     })
+}
+
+/// [`pick_root`], but a marketplace entry that is itself one skill (a directory holding `SKILL.md`)
+/// is staged as the only child of a scratch directory so `install_from` installs just that skill.
+fn stage_root(clone: &Path, subdir: Option<&str>) -> Result<(PathBuf, Option<TempDir>)> {
+    let root = pick_root(clone, subdir)?;
+    if subdir.is_some() && root.join("SKILL.md").is_file() {
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stage =
+            TempDir(std::env::temp_dir().join(format!("forge-stage-{}", forge_types::new_id())));
+        crate::cli::commands::import::copy_dir(&root, &stage.0.join(&name))?;
+        return Ok((stage.0.clone(), Some(stage)));
+    }
+    Ok((root, None))
 }
 
 /// Install every skill found in `root` (top-level `*.md` files and any directory containing a
@@ -305,17 +328,12 @@ fn report_skipped(skipped: &[String]) {
 }
 
 /// Packs may carry more than skills; only skills are installed, so say what was left out.
-fn report_unsupported_components(repo: &Path) {
-    let ignored: Vec<&str> = ["hooks", "agents", "commands", ".mcp.json"]
+fn unsupported_components(repo: &Path) -> Vec<String> {
+    ["hooks", "agents", "commands", ".mcp.json"]
         .into_iter()
         .filter(|c| repo.join(c).exists())
-        .collect();
-    if !ignored.is_empty() {
-        eprintln!(
-            "  ! not installed (only skills are): {}",
-            ignored.join(", ")
-        );
-    }
+        .map(str::to_string)
+        .collect()
 }
 
 /// Normalize every `.md` under a freshly-copied skill directory in place.
@@ -327,28 +345,30 @@ fn normalize_in_place(dir: &Path) {
 // Public install / update entry points
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) -> Result<()> {
-    let registry = load_marketplaces_at(&marketplaces_path()?)?;
-    let resolved = resolve(pkg, marketplace_flag.as_deref(), &registry)?;
-    let token = github_token();
-    let skills_dir = skills_dir()?;
+pub(crate) struct InstallReport {
+    pub(crate) name: String,
+    pub(crate) installed: Vec<String>,
+    pub(crate) skipped: Vec<String>,
+    pub(crate) ignored_components: Vec<String>,
+}
 
-    println!(
-        "fetching {} (git clone{})…",
-        resolved.name,
-        resolved
-            .git_ref
-            .as_deref()
-            .map(|r| format!(" @{r}"))
-            .unwrap_or_default()
-    );
+/// Fetch `pkg` and install its skills into `skills_dir`, recording the pack in `lock_path`.
+pub(crate) async fn install_pack_to(
+    pkg: &str,
+    marketplace_flag: Option<&str>,
+    registry: &Marketplaces,
+    skills_dir: &Path,
+    lock_path: &Path,
+) -> Result<InstallReport> {
+    let resolved = resolve(pkg, marketplace_flag, registry)?;
+    let token = github_token();
     let clone = git_clone(
         &resolved.clone_target,
         resolved.git_ref.as_deref(),
         token.as_deref(),
     )
     .await?;
-    let root = pick_root(&clone.0, resolved.subdir.as_deref())?;
+    let (root, _stage) = stage_root(&clone.0, resolved.subdir.as_deref())?;
     if !root.exists() {
         anyhow::bail!(
             "package path '{}' not found in {}",
@@ -357,16 +377,15 @@ pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) 
         );
     }
     let mut skipped = Vec::new();
-    let installed = install_from(&root, &skills_dir, None, &mut skipped)?;
+    let installed = install_from(&root, skills_dir, None, &mut skipped)?;
     if installed.is_empty() {
         anyhow::bail!(
             "no skills found in {} (looked for *.md files and SKILL.md directories)",
             resolved.name
         );
     }
-
     record_installed_at(
-        &installed_path()?,
+        lock_path,
         &resolved.name,
         InstalledEntry {
             source: resolved.clone_target.clone(),
@@ -376,16 +395,88 @@ pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) 
             files: installed.clone(),
         },
     )?;
+    Ok(InstallReport {
+        name: resolved.name,
+        installed,
+        skipped,
+        ignored_components: unsupported_components(&clone.0),
+    })
+}
 
+/// One skill package a marketplace offers: a top-level directory holding a `SKILL.md`, or a
+/// frontmatter `*.md` file.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct AvailablePackage {
+    pub(crate) name: String,
+    pub(crate) description: String,
+}
+
+pub(crate) async fn list_available(
+    source: &str,
+    git_ref: Option<&str>,
+) -> Result<Vec<AvailablePackage>> {
+    let token = github_token();
+    let clone = git_clone(source, git_ref, token.as_deref()).await?;
+    let root = pick_root(&clone.0, None)?;
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&root)?.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let skill_file = if path.is_dir() {
+            path.join("SKILL.md")
+        } else if name.ends_with(".md") && name != "README.md" && name != "SKILL.md" {
+            path.clone()
+        } else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read_to_string(&skill_file) else {
+            continue;
+        };
+        if !raw.trim_start().starts_with("---") {
+            continue;
+        }
+        let description = raw
+            .lines()
+            .skip(1)
+            .take_while(|l| l.trim() != "---")
+            .find_map(|l| l.strip_prefix("description:"))
+            .map(|d| d.trim().trim_matches('"').trim_matches('\'').to_string())
+            .unwrap_or_default();
+        out.push(AvailablePackage {
+            name: name.trim_end_matches(".md").to_string(),
+            description,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) -> Result<()> {
+    let registry = load_marketplaces_at(&marketplaces_path()?)?;
+    let skills_dir = skills_dir()?;
+    println!("fetching {pkg} (git clone)…");
+    let report = install_pack_to(
+        pkg,
+        marketplace_flag.as_deref(),
+        &registry,
+        &skills_dir,
+        &installed_path()?,
+    )
+    .await?;
     println!(
         "✓ installed '{}' ({} skill(s)) into {}",
-        resolved.name,
-        installed.len(),
+        report.name,
+        report.installed.len(),
         skills_dir.display()
     );
-    report_skipped(&skipped);
-    report_unsupported_components(&clone.0);
-    println!("  update later with: forge plugin update {}", resolved.name);
+    report_skipped(&report.skipped);
+    if !report.ignored_components.is_empty() {
+        eprintln!(
+            "  ! not installed (only skills are): {}",
+            report.ignored_components.join(", ")
+        );
+    }
+    println!("  update later with: forge plugin update {}", report.name);
     Ok(())
 }
 
@@ -424,7 +515,7 @@ pub(crate) async fn update_installed(name: Option<&str>) -> Result<()> {
                 continue;
             }
         };
-        let root = match pick_root(&clone.0, entry.subdir.as_deref()) {
+        let (root, _stage) = match stage_root(&clone.0, entry.subdir.as_deref()) {
             Ok(root) => root,
             Err(e) => {
                 eprintln!("  ✖ {name}: {e}");
