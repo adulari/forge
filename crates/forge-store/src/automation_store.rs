@@ -28,8 +28,9 @@ impl Store {
     pub fn list_schedules(&self) -> Result<Vec<Schedule>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, task, cwd, mode, model, cron, enabled, created_at, last_run \
-             FROM schedule ORDER BY created_at",
+            "SELECT id, task, cwd, mode, model, cron, enabled, created_at, last_run, \
+             tz, max_runtime_secs, max_iterations, retries, backoff_secs, misfire, \
+             stop_on_error, stop_when FROM schedule ORDER BY created_at",
         )?;
         let rows = stmt
             .query_map([], |r| {
@@ -43,10 +44,58 @@ impl Store {
                     enabled: r.get::<_, i64>(6)? != 0,
                     created_at: r.get(7)?,
                     last_run: r.get(8)?,
+                    policy: SchedulePolicy {
+                        tz: r.get(9)?,
+                        max_runtime_secs: r.get(10)?,
+                        max_iterations: r.get(11)?,
+                        retries: r.get(12)?,
+                        backoff_secs: r.get(13)?,
+                        misfire: r.get(14)?,
+                        stop_on_error: r.get::<_, i64>(15)? != 0,
+                        stop_when: r.get(16)?,
+                    },
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Replace a schedule's policy columns.
+    pub fn set_schedule_policy(&self, id: &str, policy: &SchedulePolicy) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "UPDATE schedule SET tz = ?1, max_runtime_secs = ?2, max_iterations = ?3, \
+             retries = ?4, backoff_secs = ?5, misfire = ?6, stop_on_error = ?7, stop_when = ?8 \
+             WHERE id = ?9",
+            rusqlite::params![
+                policy.tz,
+                policy.max_runtime_secs,
+                policy.max_iterations,
+                policy.retries,
+                policy.backoff_secs,
+                policy.misfire,
+                i64::from(policy.stop_on_error),
+                policy.stop_when,
+                id
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Rewrite a schedule's task, location, model and spec in place (the `edit` path).
+    pub fn update_schedule(
+        &self,
+        id: &str,
+        task: &str,
+        cwd: &str,
+        mode: Option<&str>,
+        model: Option<&str>,
+        cron: &str,
+    ) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "UPDATE schedule SET task = ?1, cwd = ?2, mode = ?3, model = ?4, cron = ?5 WHERE id = ?6",
+            rusqlite::params![task, cwd, mode, model, cron, id],
+        )?;
+        Ok(n > 0)
     }
 
     /// Schedule ids whose id starts with `prefix` (git-style prefix resolution, mirrors

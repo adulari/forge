@@ -311,8 +311,33 @@ CREATE TABLE IF NOT EXISTS schedule (
     cron       TEXT NOT NULL,
     enabled    INTEGER NOT NULL DEFAULT 1,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-    last_run   INTEGER
+    last_run   INTEGER,
+    tz               TEXT,
+    max_runtime_secs INTEGER,
+    max_iterations   INTEGER,
+    retries          INTEGER NOT NULL DEFAULT 0,
+    backoff_secs     INTEGER NOT NULL DEFAULT 60,
+    misfire          TEXT NOT NULL DEFAULT 'run',
+    stop_on_error    INTEGER NOT NULL DEFAULT 0,
+    stop_when        TEXT
 );
+
+-- One row per tick of a `schedule` (timer, Run now, or a retry). Also created in migration_0047.
+CREATE TABLE IF NOT EXISTS schedule_run (
+    id          TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES schedule(id) ON DELETE CASCADE,
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER,
+    status      TEXT NOT NULL,
+    trigger     TEXT NOT NULL DEFAULT 'timer',
+    attempt     INTEGER NOT NULL DEFAULT 1,
+    session_id  TEXT,
+    pid         INTEGER,
+    summary     TEXT,
+    error       TEXT,
+    read        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_run_schedule ON schedule_run(schedule_id, started_at);
 
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome

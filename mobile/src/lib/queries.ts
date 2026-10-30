@@ -96,8 +96,13 @@ import {
 
   type ScheduleRow,
   type CreateScheduleRequest,
+  type ScheduleRun,
   getSchedules,
+  getScheduleRuns,
   createSchedule,
+  updateSchedule,
+  runScheduleNow,
+  markScheduleRunRead,
   pauseSchedule,
   resumeSchedule,
   deleteSchedule,
@@ -212,6 +217,7 @@ function keys(baseUrl: string | null) {
       limit: number,
     ) => ["workspace", "search", baseUrl, sessionId, mode, query, limit] as const,
     schedules: ["schedules", baseUrl] as const,
+    scheduleRuns: ["schedule-runs", baseUrl] as const,
     changelog: (limit?: number) => ["changelog", baseUrl, limit ?? null] as const,
     diagnostics: ["diagnostics", baseUrl] as const,
     daemonUpdate: ["daemon-update", baseUrl] as const,
@@ -935,12 +941,61 @@ export function useWriteWorkspaceFile() {
 // Schedules
 // ---------------------------------------------------------------------------
 
+/** Polls while a tick is running so its row flips to ok / failed without a manual refresh. */
 export function useSchedules() {
   const { baseUrl } = useAuth();
   return useQuery<ScheduleRow[]>({
     queryKey: keys(baseUrl).schedules,
     queryFn: () => getSchedules(baseUrl as string),
     enabled: baseUrl != null,
+    refetchInterval: (query) =>
+      query.state.data?.some((row) => row.latest_run?.status === "running") ? 3_000 : 30_000,
+  });
+}
+
+export function useScheduleRuns(scheduleId?: string, enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery<ScheduleRun[]>({
+    queryKey: [...keys(baseUrl).scheduleRuns, scheduleId ?? "all"],
+    queryFn: () => getScheduleRuns(baseUrl as string, scheduleId, 100),
+    enabled: baseUrl != null && enabled,
+    refetchInterval: 10_000,
+  });
+}
+
+export function useMarkScheduleRunRead() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string | null) => markScheduleRunRead(baseUrl as string, id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).scheduleRuns }),
+  });
+}
+
+export function useUpdateSchedule() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: CreateScheduleRequest }) =>
+      updateSchedule(baseUrl as string, id, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).schedules }),
+  });
+}
+
+export function useRunScheduleNow() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => runScheduleNow(baseUrl as string, id),
+    onSuccess: () => {
+      // The tick writes its `running` row a moment after it starts.
+      for (const delay of [800, 2_500]) {
+        setTimeout(() => {
+          void queryClient.invalidateQueries({ queryKey: keys(baseUrl).schedules });
+          void queryClient.invalidateQueries({ queryKey: keys(baseUrl).scheduleRuns });
+        }, delay);
+      }
+    },
   });
 }
 

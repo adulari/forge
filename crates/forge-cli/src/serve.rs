@@ -1003,24 +1003,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_keybindings::routes(&base))
         .merge(crate::serve_access::routes(&base))
         .merge(crate::serve_lifecycle::routes(&base))
-        // Schedule registry (serve_schedules.rs) — the same rows + OS timers `forge schedule` owns.
-        .route(
-            &format!("{base}/api/schedules"),
-            get(crate::serve_schedules::list_schedules)
-                .post(crate::serve_schedules::create_schedule),
-        )
-        .route(
-            &format!("{base}/api/schedules/{{id}}/pause"),
-            post(crate::serve_schedules::pause_schedule),
-        )
-        .route(
-            &format!("{base}/api/schedules/{{id}}/resume"),
-            post(crate::serve_schedules::resume_schedule),
-        )
-        .route(
-            &format!("{base}/api/schedules/{{id}}/delete"),
-            post(crate::serve_schedules::delete_schedule),
-        )
+        .merge(crate::serve_schedules::routes(&base))
         // Terminal dock (serve_terminal.rs): a real PTY in the session's directory, gated by the
         // same daemon token as every other route and granted no additional privilege.
         .route(

@@ -17,6 +17,7 @@ mod m0044_session_host_state;
 mod m0045_queued_prompts;
 mod m0046_usage_api_calls;
 mod m0047_session_lifecycle;
+mod m0048_schedule_runs;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
@@ -34,50 +35,10 @@ use m0044_session_host_state::migration_0044;
 use m0045_queued_prompts::migration_0045;
 use m0046_usage_api_calls::migration_0046;
 use m0047_session_lifecycle::migration_0047;
+use m0048_schedule_runs::migration_0048;
 mod usage;
+pub(super) use usage::migrate_subscription_usage;
 use usage::migration_0030;
-
-/// Migrate `subscription_usage` from its old single-column PK to the composite
-/// `(provider, window_kind)` PK. Safe to call on any DB version: a no-op when the table
-/// doesn't exist yet (schema will create it correctly) or already has the composite key.
-pub(super) fn migrate_subscription_usage(conn: &Connection) -> rusqlite::Result<()> {
-    let exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='subscription_usage'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if exists == 0 {
-        return Ok(()); // table not yet created; schema will handle it
-    }
-    let pk_cols: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('subscription_usage') WHERE pk > 0",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if pk_cols >= 2 {
-        return Ok(()); // already on composite PK
-    }
-    // Old single-column PK — recreate with composite key.
-    // subscription_usage is a transient cache; data loss on migration is acceptable.
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS subscription_usage_new;
-         CREATE TABLE subscription_usage_new (
-             provider    TEXT NOT NULL,
-             window_kind TEXT NOT NULL,
-             status      TEXT NOT NULL,
-             resets_at   INTEGER,
-             fraction    REAL,
-             updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-             PRIMARY KEY (provider, window_kind)
-         );
-         DROP TABLE subscription_usage;
-         ALTER TABLE subscription_usage_new RENAME TO subscription_usage;",
-    )
-}
 
 /// Run `ALTER TABLE ADD COLUMN`, treating an "already present" error as success but surfacing any
 /// OTHER failure. Replaces the old `let _ = conn.execute(...)` that swallowed every error, so a
@@ -729,6 +690,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0045,
     migration_0046,
     migration_0047,
+    migration_0048,
 ];
 
 /// Migration #31: give existing stores the `model_pricing.cache_read_per_1k` column.

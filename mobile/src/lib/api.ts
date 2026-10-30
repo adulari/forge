@@ -306,9 +306,13 @@ export interface WorkspaceWriteRequest { session: string; path: string; content:
 
 /** `cron` is the stored spec verbatim (`every:1800` / `daily:09:00` / `cron:<expr>`);
  * `spec_label` is the human rendering `forge schedule list` prints. */
-export interface ScheduleRow { id: string; task: string; cwd: string; mode: string | null; model: string | null; cron: string; spec_label: string; enabled: boolean; created_at: number; last_run: number | null; }
+export type ScheduleRunStatus = "running" | "ok" | "failed" | "interrupted" | "skipped";
+/** One tick of a schedule. `session_id` links to the Fleet session the tick created. */
+export interface ScheduleRun { id: string; schedule_id: string; started_at: number; finished_at: number | null; status: ScheduleRunStatus; trigger: "timer" | "manual"; attempt: number; session_id: string | null; summary: string | null; error: string | null; read: boolean; }
+export interface SchedulePolicyFields { tz: string | null; max_runtime_secs: number | null; max_iterations: number | null; retries: number; backoff_secs: number; misfire: "run" | "skip"; stop_on_error: boolean; stop_when: string | null; }
+export interface ScheduleRow extends SchedulePolicyFields { id: string; task: string; cwd: string; mode: string | null; model: string | null; cron: string; spec_label: string; enabled: boolean; created_at: number; last_run: number | null; latest_run: ScheduleRun | null; }
 /** Exactly one of `every` / `at` / `cron` must be set. */
-export interface CreateScheduleRequest { task: string; cwd?: string; every?: string; at?: string; cron?: string; mode?: string; model?: string; }
+export interface CreateScheduleRequest { task: string; cwd?: string; every?: string; at?: string; cron?: string; mode?: string; model?: string; tz?: string; max_runtime_secs?: number; max_iterations?: number; retries?: number; backoff_secs?: number; misfire?: "run" | "skip"; stop_on_error?: boolean; stop_when?: string; }
 export interface DeleteScheduleResponse { ok: true; deleted: true; }
 
 // --- What's New (`GET /api/changelog`) ---
@@ -1194,6 +1198,23 @@ export function getSchedules(baseUrl: string): Promise<ScheduleRow[]> {
 
 export function createSchedule(baseUrl: string, body: CreateScheduleRequest): Promise<ScheduleRow> {
   return request(baseUrl, "/api/schedules", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function updateSchedule(baseUrl: string, id: string, body: CreateScheduleRequest): Promise<ScheduleRow> {
+  return request(baseUrl, `/api/schedules/${encodeURIComponent(id)}/update`, { method: "POST", body: JSON.stringify(body) });
+}
+
+export function runScheduleNow(baseUrl: string, id: string): Promise<{ ok: true; started: true }> {
+  return request(baseUrl, `/api/schedules/${encodeURIComponent(id)}/run`, { method: "POST" });
+}
+
+export function getScheduleRuns(baseUrl: string, scheduleId?: string, limit?: number): Promise<ScheduleRun[]> {
+  return request(baseUrl, `/api/schedule-runs${qs({ schedule_id: scheduleId, limit })}`);
+}
+
+export function markScheduleRunRead(baseUrl: string, id: string | null): Promise<{ ok: true; changed: number }> {
+  const path = id === null ? "/api/schedule-runs/read-all" : `/api/schedule-runs/${encodeURIComponent(id)}/read`;
+  return request(baseUrl, path, { method: "POST" });
 }
 
 export function pauseSchedule(baseUrl: string, id: string): Promise<ScheduleRow> {
