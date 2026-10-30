@@ -399,6 +399,11 @@ fn connecting_claude_is_one_action_with_the_url_shown_and_a_code_typed_back_mask
         }],
         JobState::Running,
     );
+    assert!(
+        s.entry.is_none(),
+        "the page's keys keep working until the code is wanted"
+    );
+    press(&mut s, KeyCode::Enter);
     assert_eq!(s.entry.as_ref().unwrap().target, SecretTarget::JobCode(5));
     type_text(&mut s, "CODE-FROM-BROWSER");
     assert!(
@@ -459,6 +464,118 @@ fn the_sign_in_page_fits_80x24_and_offers_the_qr_on_demand() {
     press(&mut s, KeyCode::Char('v'));
     assert!(s.sign_in.as_ref().unwrap().qr);
     assert!(text(&s, 80, 24).contains('█'));
+}
+
+const CLAUDE_URL: &str = "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=ggyp0-bc8nZj3BxEEhvyhGq-sNI00PD9NNGDQ7c5yCU&code_challenge_method=S256&state=rfqXDL-weMT7TvTE0bhcsqV81PbaD5E5s0ijwClgKE8";
+
+fn claude_sign_in_over_ssh() -> Screen {
+    let mut s = screen_with(machine(Some(Login::SignedIn), true), PlanMode::Resume);
+    s.can_open_browser = false;
+    s.rich_glyphs = true;
+    go_to_step(&mut s, StepId::Models);
+    s.job_started(5, Purpose::ConnectClaude, "Connecting Claude Code".into());
+    let code = || JobEvent::Prompt {
+        job: 5,
+        prompt: forge_onboarding::PromptKind::Code {
+            label: "Paste the code from your browser".into(),
+        },
+        message: "Paste code here if prompted >".into(),
+    };
+    finish(
+        &mut s,
+        5,
+        vec![
+            JobEvent::Prompt {
+                job: 5,
+                prompt: forge_onboarding::PromptKind::OpenUrl {
+                    url: CLAUDE_URL.into(),
+                },
+                message: "Open this page to sign in.".into(),
+            },
+            code(),
+            code(),
+        ],
+        JobState::Running,
+    );
+    s
+}
+
+#[test]
+fn over_ssh_the_link_is_copied_not_opened_and_a_paste_lands_in_the_code_field() {
+    let mut s = claude_sign_in_over_ssh();
+    let shown = text(&s, 200, 40);
+    assert!(shown.contains("press c to copy"), "{shown}");
+    assert!(
+        !shown.contains("Open the page"),
+        "no browser over SSH:\n{shown}"
+    );
+    assert!(shown.contains("Paste code"), "{shown}");
+    assert!(press(&mut s, KeyCode::Char('o')).is_empty());
+    assert_eq!(
+        press(&mut s, KeyCode::Char('c')),
+        [Effect::Copy(CLAUDE_URL.into())]
+    );
+    assert_eq!(
+        s.log
+            .iter()
+            .filter(|l| l.contains("Paste code here"))
+            .count(),
+        1,
+        "a redrawn prompt line is logged once"
+    );
+    s.paste("abc#DEF-123\n");
+    assert_eq!(s.entry.as_ref().unwrap().buf, "abc#DEF-123");
+    finish(&mut s, 5, vec![], JobState::Running);
+    assert_eq!(
+        press(&mut s, KeyCode::Enter),
+        [Effect::Input {
+            job: 5,
+            text: "abc#DEF-123".into()
+        }]
+    );
+}
+
+#[test]
+fn the_code_field_is_never_pushed_off_screen_by_the_qr_code() {
+    let mut s = claude_sign_in_over_ssh();
+    press(&mut s, KeyCode::Enter);
+    press(&mut s, KeyCode::Esc);
+    assert!(s.entry.is_none() && s.sign_in.as_ref().unwrap().code.is_some());
+    press(&mut s, KeyCode::Char('v'));
+    press(&mut s, KeyCode::Char('p'));
+    let rows = draw(&s, 200, 40);
+    let joined = rows.join("\n");
+    assert!(
+        joined.contains("Paste the code from your browser"),
+        "{joined}"
+    );
+}
+
+#[test]
+fn the_qr_view_shrinks_a_real_claude_link_to_fit_the_window() {
+    let is_qr = |c: char| matches!(c, '█' | '▀' | '▄') || ('\u{1FB00}'..='\u{1FB3B}').contains(&c);
+    let mut s = claude_sign_in_over_ssh();
+    press(&mut s, KeyCode::Char('v'));
+    for (w, h, sextants) in [(200, 40, false), (120, 30, true)] {
+        let rows = draw(&s, w, h);
+        let joined = rows.join("\n");
+        assert!(
+            !joined.contains("needs a bigger window"),
+            "{w}x{h}:\n{joined}"
+        );
+        let qr: Vec<usize> = (0..rows.len())
+            .filter(|&i| rows[i].chars().skip(30).any(is_qr))
+            .collect();
+        assert!(qr.len() > 15, "{w}x{h}:\n{joined}");
+        assert!(
+            *qr.last().unwrap() < h as usize - 2,
+            "the QR ends above the footer at {w}x{h}:\n{joined}"
+        );
+        let uses_sextants = joined
+            .chars()
+            .any(|c| ('\u{1FB00}'..='\u{1FB3B}').contains(&c));
+        assert_eq!(uses_sextants, sextants, "{w}x{h}:\n{joined}");
+    }
 }
 
 #[test]
