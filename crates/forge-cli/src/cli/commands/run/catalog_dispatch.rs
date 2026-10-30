@@ -79,6 +79,7 @@ pub(crate) async fn dispatch_catalog(
             let Some(context) = expansion_gate(session, app, line, meta.scope).await else {
                 return Ok(DispatchOutcome::Handled);
             };
+            forge_config::skill_usage::record_skill_use(&meta.name);
             let skill = forge_skills::Skill::load(&meta);
             for w in &skill.warnings {
                 app.note(&format!("⚠ {w}"));

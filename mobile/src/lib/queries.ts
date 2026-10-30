@@ -514,7 +514,7 @@ export function useLiveHistoryRefresh(
 }
 
 export function useSessionTree() { const { baseUrl } = useAuth(); return useQuery<SessionTreeRow[]>({ queryKey: keys(baseUrl).sessionTree, queryFn: () => getSessionTree(baseUrl as string), enabled: baseUrl != null }); }
-export function useSkills() { const { baseUrl } = useAuth(); return useQuery<SkillRow[]>({ queryKey: keys(baseUrl).skills, queryFn: () => getSkills(baseUrl as string), enabled: baseUrl != null }); }
+export function useSkills(session?: string | null) { const { baseUrl } = useAuth(); return useQuery<SkillRow[]>({ queryKey: [...keys(baseUrl).skills, session ?? null], queryFn: () => getSkills(baseUrl as string, session), enabled: baseUrl != null }); }
 export function useWorkflows(sessionId?: string) { const { baseUrl } = useAuth(); return useQuery<WorkflowRow[]>({ queryKey: keys(baseUrl).workflows(sessionId), queryFn: () => getWorkflows(baseUrl as string, sessionId), enabled: baseUrl != null }); }
 export function useHooks() { const { baseUrl } = useAuth(); return useQuery<HookRow[]>({ queryKey: keys(baseUrl).hooks, queryFn: () => getHooks(baseUrl as string), enabled: baseUrl != null }); }
 export function useModels() {

@@ -23,6 +23,7 @@ mod commit_policy;
 mod compact_model;
 mod config_diagnostics;
 pub mod setting_sources;
+pub mod skill_usage;
 mod system_prompt_overrides;
 use system_prompt_overrides::resolve_system_prompt_overrides;
 pub mod goal;

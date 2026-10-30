@@ -310,6 +310,7 @@ impl Session {
             .trim();
         let (result, ok) = match self.load_skill_for_model(name) {
             Some((guidance, grant)) => {
+                forge_config::skill_usage::record_skill_use(name);
                 // The skill's `allowed-tools`/`disallowed-tools` hold for the rest of this turn.
                 let granted = grant.describe();
                 self.extend_turn_grant(grant);
