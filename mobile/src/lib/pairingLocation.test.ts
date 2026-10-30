@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readPairingFromLocation, stripPairingFromLocation } from "./pairingLocation";
 
 vi.mock("react-native", () => ({ Platform: { OS: "web" } }));
-
-import { readPairingFromLocation, stripPairingFromLocation } from "./pairingLocation";
 
 function stubWindow(hash: string, search = "") {
   const replaceState = vi.fn();
