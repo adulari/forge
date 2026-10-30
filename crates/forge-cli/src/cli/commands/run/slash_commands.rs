@@ -142,7 +142,7 @@ async fn rename(session: &SharedSession, app: &mut App, title: &str) {
 }
 
 /// The session's store and id without waiting for the session lock.
-fn session_store(
+pub(super) fn session_store(
     session: &SharedSession,
     live_id: &str,
 ) -> Option<(Arc<forge_store::Store>, String)> {

@@ -103,6 +103,8 @@ pub enum BoardAction {
     Interrupt(String),
     /// `POST /api/sessions/{id}/archive`.
     Archive(String),
+    /// `DELETE /api/sessions/{id}`: permanent.
+    Delete(String),
     /// `POST /api/sessions/{id}/mode` with this canonical mode key.
     SetMode(String, String),
     /// `POST /api/sessions {resume:<id>, cwd}`.

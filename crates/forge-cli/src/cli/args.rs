@@ -518,7 +518,8 @@ pub(crate) enum Command {
         mock: bool,
     },
     /// List past sessions (newest first). Archived sessions are hidden unless asked for; resuming
-    /// one (`forge chat --resume <id>`) or `--unarchive <id>` brings it back.
+    /// one (`forge chat --resume <id>`) or `--unarchive <id>` brings it back. `--delete <id>`
+    /// removes one for good.
     Sessions {
         /// List only archived sessions.
         #[arg(long, conflicts_with = "all")]
@@ -529,6 +530,21 @@ pub(crate) enum Command {
         /// Un-archive this session (id or unique prefix) so it shows in the normal list again.
         #[arg(long, value_name = "ID", conflicts_with_all = ["archived", "all"])]
         unarchive: Option<String>,
+        /// PERMANENTLY delete this session (id or unique prefix): its messages, tool records,
+        /// subagent sessions, usage and snapshots, and its copy on synced devices. Shows what goes
+        /// and asks you to type the short id first. Refuses a session that is open in a terminal,
+        /// running in the daemon, or still owns a worktree, and says what to do instead. The
+        /// database is scrubbed (secure_delete + WAL truncate), not just unlinked.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["archived", "all", "unarchive"])]
+        delete: Option<String>,
+        /// With --delete: skip the confirmation prompt.
+        #[arg(long, requires = "delete")]
+        yes: bool,
+        /// With --delete: also VACUUM the database file afterwards so it shrinks. Needs the daemon
+        /// stopped and no `forge chat` open (it takes exclusive access); the delete itself is
+        /// already scrubbed without it.
+        #[arg(long, requires = "delete")]
+        compact_db: bool,
     },
     /// Replay a past session from the record: one id prints its turn-by-turn transcript
     /// (model, tokens, cost, time per turn); two ids diff their summaries.

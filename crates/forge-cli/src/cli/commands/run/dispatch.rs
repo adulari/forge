@@ -235,6 +235,15 @@ pub(crate) async fn dispatch_command(
             return super::fork_cmd::fork(session, tui, app, message).await
         }
         CommandAction::Stash(op) => app.stash_command(op),
+        CommandAction::Delete if tui.is_none() => app
+            .note("⚠ /delete runs in a terminal chat; in the app use Delete from the session menu"),
+        CommandAction::Delete => {
+            let found = super::slash_commands::session_store(session, &app.session_id);
+            match found {
+                Some((store, id)) => super::delete_flow::open(app, &store, &id, true).await,
+                None => app.note("not ready yet; try /delete again in a moment"),
+            }
+        }
         CommandAction::Skills => super::fork_cmd::skills(catalog, app),
         CommandAction::Quit => return Ok(DispatchOutcome::Quit),
         CommandAction::Claude => {

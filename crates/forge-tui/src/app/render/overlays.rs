@@ -7,6 +7,8 @@ pub use btw::render_btw_overlay;
 pub use usage::render_usage_overlay;
 mod mesh;
 pub use mesh::render_mesh_overlay;
+mod session_delete;
+pub use session_delete::render_session_delete_overlay;
 
 /// Honest cost label for a per-model row. A flat-rate subscription bridge (Claude Code / Codex
 /// CLI) genuinely costs $0 per call, so it reads "subscription". A priced model shows its dollar

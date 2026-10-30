@@ -77,6 +77,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/done",
     },
     Command {
+        name: "delete",
+        desc: "delete this session permanently (type its id to confirm)",
+        usage: "/delete",
+    },
+    Command {
         name: "archived",
         desc: "list archived sessions, or restore one without resuming it",
         usage: "/archived [restore <id>]",

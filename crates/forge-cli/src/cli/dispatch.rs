@@ -209,7 +209,13 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             archived,
             all,
             unarchive,
-        } => sessions(archived, all, unarchive.as_deref()),
+            delete,
+            yes,
+            compact_db,
+        } => match delete {
+            Some(id) => sessions_delete_cmd(&id, yes, compact_db).await,
+            None => sessions(archived, all, unarchive.as_deref()),
+        },
         Command::Replay {
             ids,
             json,

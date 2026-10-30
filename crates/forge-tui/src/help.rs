@@ -62,7 +62,7 @@ fn command_group(name: &str) -> &'static str {
         | "status" | "heartbeat" | "context" | "permissions" | "doctor" | "bug" => "Session",
         "sessions" | "replay" | "resume" | "new" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" | "reground" | "refine" | "rewind" | "clear" | "export"
-        | "btw" | "rename" | "star" | "done" | "archived" | "cls" => "History",
+        | "btw" | "rename" | "star" | "done" | "delete" | "archived" | "cls" => "History",
         "model" | "models" | "usage" | "mesh" | "duel" | "subagents" => "Models & routing",
         "plan" | "execute" | "goal" | "pr" | "loop" | "workflow" | "assay" | "lattice"
         | "commit" | "dispatch" | "diff" => "Work",

@@ -54,6 +54,8 @@ mod provenance_store;
 mod quota_store;
 mod schema;
 mod session_catalog_store;
+mod session_delete_store;
+pub use session_delete_store::{DeleteTarget, SessionDeletePreview, SessionDeleteReport};
 mod session_import_store;
 mod session_lifecycle_store;
 mod session_route_store;

@@ -21,6 +21,7 @@ mod panels;
 mod queue_band;
 mod readability;
 mod remote;
+mod session_delete;
 mod state;
 mod transcript;
 mod trust_hint;

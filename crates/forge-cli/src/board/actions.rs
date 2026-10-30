@@ -9,7 +9,7 @@
 use forge_tui::board::{BoardAction, BoardEvent, ToastLevel};
 use tokio::sync::mpsc;
 
-use super::client::{api_url, create_session, fetch_detail, post_action};
+use super::client::{api_url, create_session, delete_action, fetch_detail, post_action};
 use super::dispatch_client as dc;
 use super::sockets::SocketPool;
 use super::{short_id, Ev};
@@ -50,6 +50,15 @@ pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
             serde_json::json!({}),
             format!("archived {}", short_id(&id)),
         ),
+        BoardAction::Delete(id) => {
+            tokio::spawn(delete_action(
+                host.http.clone(),
+                api_url(host.base, host.token, &format!("api/sessions/{id}")),
+                format!("deleted {} permanently", short_id(&id)),
+                host.ev.clone(),
+                host.refresh.clone(),
+            ));
+        }
         BoardAction::SetMode(id, mode) => host.post(
             &format!("api/sessions/{id}/mode"),
             serde_json::json!({ "mode": mode }),

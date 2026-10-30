@@ -175,7 +175,10 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
             render_preview(frame, main, app);
         }
         surface::dim_backdrop(frame, main);
-        popups::render_picker(frame, main, app);
+        // The delete confirmation takes the picker's place so two frames never overlap.
+        if app.session_delete.is_none() {
+            popups::render_picker(frame, main, app);
+        }
     } else if app.fullscreen {
         render_transcript_area(frame, main, app);
     } else {
@@ -214,6 +217,7 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     render_usage_overlay(frame, app);
     render_mesh_overlay(frame, app);
     render_btw_overlay(frame, app);
+    render_session_delete_overlay(frame, app);
     render_voice_overlay(frame, app);
     crate::config_editor::render_config_overlay(frame, &app.config_editor);
     // A modal never covers the header or the composer: it gets the rows between them.

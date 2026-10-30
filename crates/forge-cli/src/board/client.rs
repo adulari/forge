@@ -292,6 +292,28 @@ pub(crate) async fn post_action(
     let _ = refresh.send(());
 }
 
+/// `DELETE /api/sessions/{id}`: permanent. A refusal (running, open in a terminal, owns a
+/// worktree) comes back as the daemon's own sentence, which the toast shows whole.
+pub(crate) async fn delete_action(
+    http: reqwest::Client,
+    url: String,
+    ok: String,
+    ev: mpsc::UnboundedSender<Ev>,
+    refresh: mpsc::UnboundedSender<()>,
+) {
+    let result = match http.delete(&url).send().await {
+        Err(e) => Err(format!("the daemon did not answer: {}", e.without_url())),
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => Err(body_message(resp).await),
+    };
+    let toast = match result {
+        Ok(()) => BoardEvent::Toast(ToastLevel::Ok, ok),
+        Err(why) => BoardEvent::Toast(ToastLevel::Error, truncate(&why, TOAST_MAX_CHARS)),
+    };
+    let _ = ev.send(Ev::Board(toast));
+    let _ = refresh.send(());
+}
+
 /// `POST /api/sessions` for a brand-new session. The prompt cannot ride along — the daemon takes
 /// prompts over the session's own socket — so the created id comes back to the render loop, which
 /// holds the text until that socket opens.

@@ -400,6 +400,8 @@ pub struct App {
     pub usage_overlay: UsageOverlay,
     /// The `/btw` answer card (`app_btw.rs`); `None` when no side question is on screen.
     pub btw: Option<crate::app_btw::BtwOverlay>,
+    /// The permanent-delete confirmation for a session (`/delete`, Ctrl+D in the sessions picker).
+    pub session_delete: Option<crate::session_delete::SessionDeleteDialog>,
     /// Question of a `/btw` card dismissed before its answer came back; that late answer is
     /// dropped instead of reopening a card that would swallow the next Esc.
     pub(crate) btw_dismissed: Option<String>,

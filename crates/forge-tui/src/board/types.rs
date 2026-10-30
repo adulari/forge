@@ -191,6 +191,8 @@ impl Composer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
     Archive(String),
+    /// Permanently delete a session (and its subagent sessions).
+    Delete(String),
     /// Cancel a proposed dispatch, or the not-yet-started rest of a running one.
     CancelDispatch(String),
     /// Merge every succeeded worker of this dispatch, in index order.

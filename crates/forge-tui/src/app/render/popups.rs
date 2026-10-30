@@ -278,6 +278,9 @@ fn picker_view(app: &App) -> View {
     if p.kind == Some(PickerKind::Sessions) {
         footer.insert(1, hint("Del", "archive"));
     }
+    if p.kind == Some(PickerKind::Sessions) {
+        footer.insert(2, hint("^W", "delete"));
+    }
     footer.push(hint(
         "Esc",
         if p.kind == Some(PickerKind::RewindAction) {

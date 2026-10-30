@@ -35,6 +35,7 @@ pub const HELP: &[(&str, &str)] = &[
         "cycle the mode: default → accept-edits → bypass → plan",
     ),
     ("x", "archive (asks first)"),
+    ("Del", "delete permanently (asks first)"),
     ("r", "resume a Done session"),
     ("N / W", "new session here / in a fresh worktree"),
     (
@@ -323,6 +324,7 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
         }
         KeyCode::Char('i') => return app.interrupt_selected(),
         KeyCode::Char('x') => app.request_archive(),
+        KeyCode::Delete => app.request_delete(),
         KeyCode::Char('r') => return app.resume_selected(),
         KeyCode::Char('R') => {
             app.detail_requested.clear();

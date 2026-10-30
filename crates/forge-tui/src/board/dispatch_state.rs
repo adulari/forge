@@ -396,6 +396,7 @@ impl BoardApp {
             ConfirmKind::Merge(id) => (BoardAction::Merge(id), "merging…"),
             ConfirmKind::Discard(id) => (BoardAction::Discard(id), "discarding…"),
             ConfirmKind::Archive(id) => (BoardAction::Archive(id), "archiving…"),
+            ConfirmKind::Delete(id) => (BoardAction::Delete(id), "deleting…"),
         };
         self.toast(ToastLevel::Info, toast);
         vec![action]

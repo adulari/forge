@@ -226,6 +226,8 @@ pub enum CommandAction {
     Rename(String),
     /// Star or unstar this session (`/star`).
     Star,
+    /// Permanently delete this session after an explicit confirmation (`/delete`).
+    Delete,
     /// Mark this session done, or reopen it (`/done`).
     Done,
     /// List archived sessions, or `restore <id>` one (`/archived [restore <id>]`).
@@ -416,6 +418,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "doctor" => CommandAction::Doctor,
         "rename" => CommandAction::Rename(arg),
         "star" => CommandAction::Star,
+        "delete" => CommandAction::Delete,
         "done" => CommandAction::Done,
         "archived" => CommandAction::Archived(arg),
         "bug" | "report" => CommandAction::Bug(arg),
@@ -1162,6 +1165,7 @@ mod tests {
             CommandAction::Rename("auth refactor".into())
         );
         assert_eq!(parse_command("/star"), CommandAction::Star);
+        assert_eq!(parse_command("/delete"), CommandAction::Delete);
         assert_eq!(parse_command("/done"), CommandAction::Done);
         assert_eq!(
             parse_command("/archived restore ab12"),

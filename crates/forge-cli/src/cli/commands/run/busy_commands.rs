@@ -55,6 +55,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         // Writes the title through the session's detached store handle, never the session lock.
         | CommandAction::Rename(_)
         | CommandAction::Star
+        | CommandAction::Delete
         | CommandAction::Done
         | CommandAction::Archived(_) => Immediate,
         CommandAction::Dispatch(_)

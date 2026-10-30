@@ -1426,6 +1426,21 @@ fn enter_on_the_confirm_archives() {
 }
 
 #[test]
+fn del_asks_first_and_only_enter_deletes_permanently() {
+    let mut a = app_with_selected("s1");
+    handle_key(&mut a, key(KeyCode::Delete));
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(confirm.kind, ConfirmKind::Delete("s1".into()));
+    assert!(confirm.body.contains("permanently") && confirm.body.contains("subagent"));
+    assert!(confirm.body.contains("synced devices") && confirm.body.contains("cannot be undone"));
+    let out = handle_key(&mut a, key(KeyCode::Esc));
+    assert!(out.is_empty() && a.confirm.is_none());
+    handle_key(&mut a, key(KeyCode::Delete));
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert_eq!(out, vec![BoardAction::Delete("s1".into())]);
+}
+
+#[test]
 fn esc_on_the_confirm_does_nothing() {
     let mut a = app_with_selected("s1");
     handle_key(&mut a, key(KeyCode::Char('x')));

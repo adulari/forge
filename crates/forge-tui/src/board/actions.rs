@@ -89,6 +89,30 @@ impl BoardApp {
         self.focus = Focus::Confirm;
     }
 
+    pub(crate) fn request_delete(&mut self) {
+        let Some(c) = self.selected_card() else {
+            return;
+        };
+        if c.terminal {
+            self.toast(
+                ToastLevel::Info,
+                "open in a terminal: run /delete in that chat, or close it and delete from here",
+            );
+            return;
+        }
+        self.confirm = Some(Confirm {
+            kind: ConfirmKind::Delete(c.id.clone()),
+            title: "Delete this session forever?".into(),
+            body: format!(
+                "{} is deleted permanently: its messages, tool records and snapshots, every \
+                 subagent session under it, and its copy on your synced devices. This cannot \
+                 be undone. A running session or one with a worktree is refused.",
+                c.display_title()
+            ),
+        });
+        self.focus = Focus::Confirm;
+    }
+
     pub(crate) fn resolve_confirm(&mut self, yes: bool) -> Vec<BoardAction> {
         let Some(c) = self.confirm.take() else {
             return Vec::new();
