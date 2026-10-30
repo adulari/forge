@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Button } from "../components/ds/Button";
 import { Chip } from "../components/ds/Chip";
 import { Input } from "../components/ds/Input";
@@ -124,9 +124,7 @@ function ConfigurationScreenBody() {
   }, [focusKey, query.data]);
 
   return <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-    <BackLink />
-    <Text style={[type.title, { color: tokens.ink }]}>Configuration</Text>
-    <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Choose where edits are saved.</Text>
+    <PageHeader title="Configuration" subtitle="Tune Forge’s effective settings. Choose where edits are saved." />
     <Segmented options={[{ value: "user", label: "Save everywhere" }, { value: "project", label: "Save in project" }]} value={scope} onChange={(value) => setScope(value as Scope)} />
     <SearchField value={search} onChangeText={setSearch} placeholder="Search settings" accessibilityLabel="Search settings" />
     <Text style={[type.sub, { color: tokens.ink4 }]}>Saved settings apply to new Forge sessions. Restart forge serve to reload daemon-wide behavior.</Text>

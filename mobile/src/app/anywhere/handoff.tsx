@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Badge } from "../../components/ds/Badge";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
@@ -49,8 +49,7 @@ export default function AnywhereHandoffScreen() {
   const refresh = () => run(async (service, token) => { const next = await capsuleStatus(service, token, capsuleId); setStatus(next); setOutcome(handoffOutcome(next)); });
   const cancel = () => run(async (service, token) => { const next = await cancelCapsule(service, token, capsuleId); setStatus(next); setOutcome(handoffOutcome(next)); });
   return <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
-    <BackLink label="Anywhere" /><Text style={[type.title, { color: tokens.ink }]}>Workspace handoff</Text>
-    <Text style={[type.sub, { color: tokens.ink2 }]}>A host creates the encrypted capsule only at an idle checkpoint. The destination must acknowledge import before the service transfers the session lease.</Text>
+    <PageHeader title="Workspace handoff" subtitle="A host creates the encrypted capsule only at an idle checkpoint. The destination must acknowledge import before the service transfers the session lease." backLabel="Anywhere" />
     {error ? <Banner tone="danger" message={error} /> : null}
     <Card padded={false}>{anywhere.hosts.map((host, index) => <ListRow key={host.id} title={host.name} subtitle={host.id === source ? "source host" : host.id === destination ? "destination host" : "Tap once for source, twice for destination"} trailing={host.id === source ? <Badge label="source" tone="neutral" /> : host.id === destination ? <Badge label="destination" tone="accent" /> : null} onPress={() => { if (!source || source === host.id) { setSource(host.id); if (destination === host.id) setDestination(""); } else setDestination(host.id); }} showSeparator={index !== anywhere.hosts.length - 1} />)}</Card>
     <Button label="Find pending capsules" variant="secondary" loading={busy} disabled={!destination || source === destination} onPress={() => void find()} fullWidth />

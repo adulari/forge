@@ -11,7 +11,7 @@ import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persi
 import { QueryClient } from "@tanstack/react-query";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import { useFonts } from "expo-font";
-import { Redirect, Stack, usePathname } from "expo-router";
+import { DefaultTheme, Redirect, Stack, ThemeProvider as NavThemeProvider, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
@@ -124,6 +124,16 @@ function RootNavigator() {
   const [perfFixtureEnabled, setPerfFixtureEnabled] = useState(false);
   const tokens = useTokens();
   const { isExpanded, isNarrowDesktop } = useBreakpoint();
+  // The navigator's scene wrapper paints the react-navigation theme background, which is
+  // light by default and sat above `contentStyle` — any transparent surface on a route
+  // (the settings rail) showed it as a white slab in dark mode.
+  const navTheme = useMemo(
+    () => ({
+      ...DefaultTheme,
+      colors: { ...DefaultTheme.colors, background: tokens.bg0, card: tokens.bg1, border: tokens.border, text: tokens.ink, primary: tokens.accent },
+    }),
+    [tokens],
+  );
 
   useLayoutEffect(() => {
     markReactMountEnd();
@@ -290,7 +300,7 @@ function RootNavigator() {
   );
 
   return (
-    <>
+    <NavThemeProvider value={navTheme}>
       {isPaired && isExpanded ? (
         <>
           {isWeb && !isTauri ? (
@@ -324,7 +334,7 @@ function RootNavigator() {
       {perfFixtureEnabled && pathname !== "/perf-fixture" ? <Redirect href="/perf-fixture" /> : null}
       {isPaired && openOnboarding && !perfFixtureEnabled ? <Redirect href="/onboarding" /> : null}
       {!isPaired && !UNPAIRED_ROUTES.test(pathname) ? <RedirectToConnect from={pathname} /> : null}
-    </>
+    </NavThemeProvider>
   );
 }
 

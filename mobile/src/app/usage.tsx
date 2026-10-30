@@ -1,11 +1,11 @@
 import { Cpu, Eye, EyeOff } from "lucide-react-native";
+import { PageHeader } from "../components/ds/PageHeader";
 import React, { memo, useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { UsageRing } from "../components/shell/UsageRing";
 import { Badge } from "../components/ds/Badge";
-import { BackLink } from "../components/ds/BackLink";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
 import { BoundedList } from "../components/ds/BoundedList";
@@ -137,9 +137,7 @@ function UsageScreenBody() {
   const totalTokens = (selected?.combined.inputTokens ?? 0) + (selected?.combined.outputTokens ?? 0);
   const header = useMemo(() => (
     <View style={styles.header}>
-      <BackLink />
-      <Text style={[type.title, { color: tokens.ink }]}>Usage</Text>
-      <Text style={[styles.subtitle, { color: tokens.ink3 }]}>A clear read on your Forge consumption.</Text>
+      <PageHeader title="Usage" subtitle="A clear read on your Forge consumption." />
       <Segmented options={[{ value: "overview", label: "Overview" }, { value: "activity", label: "Activity" }]} value={view} onChange={setView} />
       {view === "activity" ? <ActivityTab rows={activity.data?.days} loading={activity.isLoading} failed={activity.isError} /> : null}
       {view === "overview" ? <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} /> : null}

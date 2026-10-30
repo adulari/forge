@@ -1,7 +1,7 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
@@ -40,13 +40,7 @@ export default function AppearanceScreen() {
     <DesktopDrillDown>
       <SettingsShell active="appearance">
         <Screen scroll contentContainerStyle={styles.content}>
-          <View style={styles.header}>
-            <BackLink />
-            <Text accessibilityRole="header" style={[type.title, { color: tokens.ink }]}>Appearance</Text>
-            <Text style={[type.sub, { color: tokens.ink3 }]}>
-              Display preferences apply immediately and stay on this device.
-            </Text>
-          </View>
+          <PageHeader title="Appearance" subtitle="Display preferences apply immediately and stay on this device." />
 
           <View>
             <SectionHeader>Theme</SectionHeader>

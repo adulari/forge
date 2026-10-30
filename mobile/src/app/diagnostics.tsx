@@ -3,7 +3,7 @@ import * as Updates from "expo-updates";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Badge, type BadgeTone } from "../components/ds/Badge";
 import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
@@ -197,16 +197,10 @@ export default function DiagnosticsScreen() {
     <DesktopDrillDown>
       <SettingsShell active="diagnostics">
         <Screen scroll contentContainerStyle={styles.content}>
-          <View style={styles.header}>
-            <BackLink />
-            <Text accessibilityRole="header" style={[type.title, { color: tokens.ink }]}>
-              Diagnostics & updates
-            </Text>
-            <Text style={[type.sub, { color: tokens.ink3 }]}>
-              A bounded operational view. Forge never includes tokens, credentials, paths, prompts,
-              environment values, or log contents here.
-            </Text>
-          </View>
+          <PageHeader
+            title="Diagnostics & updates"
+            subtitle="A bounded operational view. Forge never includes tokens, credentials, paths, prompts, environment values, or log contents here."
+          />
 
           {query.isLoading ? <ActivityIndicator color={tokens.ink3} /> : null}
           {oldDaemon ? (
@@ -483,9 +477,6 @@ export default function DiagnosticsScreen() {
 
 const styles = StyleSheet.create({
   content: {
-    width: "100%",
-    maxWidth: 760,
-    alignSelf: "center",
     gap: space.space24,
     paddingHorizontal: space.space16,
     paddingTop: space.space24,

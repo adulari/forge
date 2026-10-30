@@ -8,7 +8,7 @@ import { ActivityIndicator, RefreshControl, StyleSheet, Text, View } from "react
 import { PrDetailView } from "../components/pr/PrDetailView";
 import { checksLabel, checksTone, projectReps } from "../components/pr/prModel";
 import { toneColor } from "../components/pr/PrChip";
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Badge } from "../components/ds/Badge";
 import { Chip } from "../components/ds/Chip";
 import { EmptyState } from "../components/ds/EmptyState";
@@ -80,8 +80,7 @@ function PrsBody() {
       refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />}
       contentContainerStyle={styles.content}
     >
-      <BackLink />
-      <Text style={[typeScale.title, { color: tokens.ink }]}>Pull requests</Text>
+      <PageHeader title="Pull requests" subtitle="Pull requests across the projects on this host." />
       <View style={styles.chips}>
         {STATES.map((s) => (
           <Chip key={s.value} label={s.label} size="compact" selected={state === s.value} onPress={() => setState(s.value)} />
@@ -139,7 +138,7 @@ export default function PrsScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12, width: "100%", maxWidth: 1000, alignSelf: "center" },
+  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   chips: { flexDirection: "row", gap: space.space8, flexWrap: "wrap" },
   loading: { padding: space.space32 },
   group: { gap: space.space4 },

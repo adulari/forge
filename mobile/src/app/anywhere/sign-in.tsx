@@ -6,6 +6,7 @@
 // signInPoll — this is real GitHub authentication, so it must not pretend to
 // succeed against simulated data. index.tsx's own signed-out flow is untouched;
 // this route is a restyled, dedicated entry point for the same real flow.
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import { Redirect, router } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import { RefreshCw } from "lucide-react-native";
@@ -185,7 +186,7 @@ export default function AnywhereSignInScreen() {
 
 const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space48 },
-  shell: { width: "100%", maxWidth: 640, alignSelf: "center" },
+  shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" },
   title: { marginTop: space.space12 },
   measure: { maxWidth: 560 },
   centerStep: { minHeight: 160, alignItems: "center", justifyContent: "center", gap: space.space12, marginTop: space.space24 },

@@ -7,8 +7,7 @@ import React, { useEffect } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 
-import { SettingsShell } from "../(tabs)/settings";
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Banner, type BannerTone } from "../../components/ds/Banner";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
@@ -96,12 +95,9 @@ export default function AnywhereStorageScreen() {
   const bannerInfo = storage ? storageBannerInfo(storage.state, storage.usedBytes, storage.quotaBytes) : null;
 
   return (
-    <SettingsShell active="anywhere">
+    <>
       <Screen scroll contentContainerStyle={styles.content}>
-        <View style={styles.headerRow}>
-          <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
-          <Text style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>Encrypted storage</Text>
-        </View>
+        <PageHeader title="Encrypted storage" backLabel="Anywhere" onBack={() => goBackOr("/anywhere")} />
 
         {loading || !storage ? (
           <View style={styles.skeletonWrap}>
@@ -156,7 +152,7 @@ export default function AnywhereStorageScreen() {
 
       </Screen>
 
-    </SettingsShell>
+    </>
   );
 }
 

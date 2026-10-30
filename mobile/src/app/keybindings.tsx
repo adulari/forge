@@ -1,8 +1,8 @@
-import { Keyboard, RotateCcw } from "lucide-react-native";
+import { RotateCcw } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Button } from "../components/ds/Button";
 import { IconButton } from "../components/ds/IconButton";
 import { Screen } from "../components/ds/Screen";
@@ -182,24 +182,16 @@ export default function KeybindingsScreen() {
     <DesktopDrillDown>
       <SettingsShell active="keybindings">
         <Screen scroll contentContainerStyle={styles.content}>
-          <View style={styles.header}>
-            <BackLink />
-            <View style={styles.titleRow}>
-              <Keyboard size={22} strokeWidth={1.75} color={tokens.accent} />
-              <Text accessibilityRole="header" style={[type.title, { color: tokens.ink }]}>Keyboard shortcuts</Text>
-            </View>
-            <Text style={[type.sub, { color: tokens.ink3 }]}>
-              These bindings control the Forge desktop and browser app. The same file feeds the terminal UI when the host daemon is connected.
-            </Text>
-            <Text style={[type.sub, { color: tokens.ink3 }]}>
-              On macOS, Forge keeps editable native menu accelerators synchronized. Standard system shortcuts stay reserved and appear as conflicts.
-            </Text>
+          <PageHeader
+            title="Keyboard shortcuts"
+            subtitle="These bindings control the Forge desktop and browser app. The same file feeds the terminal UI when the host daemon is connected. On macOS, Forge keeps editable native menu accelerators synchronized; standard system shortcuts stay reserved and appear as conflicts."
+          >
             {Platform.OS !== "web" ? (
               <Text style={[type.sub, { color: tokens.warn }]}>
                 Shortcut capture is available on desktop and web; mobile keeps touch controls unchanged.
               </Text>
             ) : null}
-          </View>
+          </PageHeader>
 
           <View style={styles.tools}>
             <SearchField

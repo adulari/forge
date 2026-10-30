@@ -19,7 +19,7 @@ import React, { useCallback, useState } from "react";
 import { ActivityIndicator, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Input } from "../components/ds/Input";
@@ -249,14 +249,11 @@ function WorkflowsScreenBody() {
       refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />}
       contentContainerStyle={styles.content}
     >
-      <BackLink />
-      <View style={styles.headerRow}>
-        <Text style={[typeScale.title, { color: tokens.ink }]}>Workflows</Text>
-        <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>.forge/workflows/</Text>
-      </View>
-      <Text style={[typeScale.sub, { color: tokens.ink3 }]}>
-        Saved multi-agent runs. Running one starts a new session with the run as its first prompt.
-      </Text>
+      <PageHeader
+        title="Workflows"
+        titleMeta={<Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>.forge/workflows/</Text>}
+        subtitle="Saved multi-agent runs. Running one starts a new session with the run as its first prompt."
+      />
 
       {query.isLoading ? (
         <View style={styles.loading}>
@@ -298,7 +295,7 @@ export default function WorkflowsScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space8, width: "100%", maxWidth: 1000, alignSelf: "center" },
+  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space8 },
   headerRow: { flexDirection: "row", alignItems: "baseline", gap: space.space8 },
   loading: { alignItems: "center", justifyContent: "center", padding: space.space32, gap: space.space12 },
   grid: { marginTop: space.space12, gap: space.space16 },

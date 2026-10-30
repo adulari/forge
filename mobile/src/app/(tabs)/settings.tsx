@@ -30,7 +30,6 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Platform, Pressable, StyleSheet, Text, View, type PressableStateCallbackType } from "react-native";
 import Animated from "react-native-reanimated";
 
-import { EntitlementBadge } from "../../components/anywhere/EntitlementBadge";
 import { Badge, type BadgeTone } from "../../components/ds/Badge";
 import { Button } from "../../components/ds/Button";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
@@ -50,6 +49,7 @@ import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
 import { syncHubMeta } from "../../lib/accountSync";
 import { entitlementBadge } from "../../lib/anywhere/format";
+import { PageWidthContext } from "../../components/ds/pageWidth";
 import { useVersionMeta } from "../../lib/appVersion";
 import { useAnywhere } from "../../lib/anywhere/store";
 import { biometricLabel, biometricLabelDefault } from "../../lib/biometricLabel";
@@ -173,7 +173,7 @@ export function SettingsNavRail({ active }: { active: string }) {
   const search = useSettingsSearch();
   const searching = search.query.trim().length > 0;
   return (
-    <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border }]}>
+    <View style={[railStyles.rail, { width: isWeb ? 186 : 196, borderRightColor: tokens.border, backgroundColor: tokens.bg1 }]}>
       <BackLink label="Back" accessibilityLabel="Leave Settings" onPress={leaveSettings} />
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
       <SettingsSearchField {...search} onPick={() => search.setQuery("")} />
@@ -200,7 +200,7 @@ export function SettingsNavRail({ active }: { active: string }) {
               <Text style={[type.bodyBold, railStyles.itemLabel, { color: selected ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
                 {item.label}
               </Text>
-              {showEntitlement && account ? <EntitlementBadge account={account} /> : null}
+              {showEntitlement && account ? <EntitlementDot account={account} /> : null}
             </View>
           </Pressable>
         );
@@ -212,6 +212,16 @@ export function SettingsNavRail({ active }: { active: string }) {
       ))}
     </View>
   );
+}
+
+/** The 154px rail row cannot hold "Forge Anywhere" beside a full pill (it truncated the
+ * label to "Forge A…"), so the rail carries only the tone as a dot; the pill text lives
+ * on the Anywhere page itself and in the row's accessibility label. */
+function EntitlementDot({ account }: { account: Parameters<typeof entitlementBadge>[0] }) {
+  const tokens = useTokens();
+  const { label, tone } = entitlementBadge(account);
+  const color = tone === "success" ? tokens.success : tone === "warn" ? tokens.warn : tone === "danger" ? tokens.danger : tokens.ink4;
+  return <View accessibilityLabel={label} style={[railStyles.entitlementDot, { backgroundColor: color }]} />;
 }
 
 function CompactSettingsSearch() {
@@ -227,11 +237,14 @@ function CompactSettingsSearch() {
 /** Wraps a settings sub-page with the desktop nav rail at `expanded`; a no-op elsewhere. */
 export function SettingsShell({ active, children }: { active: string; children: React.ReactNode }) {
   const { isExpanded } = useBreakpoint();
-  if (!isExpanded) return <>{children}</>;
+  const tokens = useTokens();
+  if (!isExpanded) return <PageWidthContext.Provider value>{children}</PageWidthContext.Provider>;
   return (
-    <View style={railStyles.shellRow}>
+    <View style={[railStyles.shellRow, { backgroundColor: tokens.bg0 }]}>
       <SettingsNavRail active={active} />
-      <View style={railStyles.pane}>{children}</View>
+      <View style={railStyles.pane}>
+        <PageWidthContext.Provider value>{children}</PageWidthContext.Provider>
+      </View>
     </View>
   );
 }
@@ -975,6 +988,7 @@ const railStyles = StyleSheet.create({
   item: { minHeight: 27, paddingHorizontal: space.space8, borderRadius: radii.radius4, justifyContent: "center" },
   itemRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   itemLabel: { flex: 1 },
+  entitlementDot: { width: 6, height: 6, borderRadius: 3 },
   flexFill: { flex: 1 },
   version: { paddingHorizontal: space.space8 },
   pane: { flex: 1, minWidth: 0 },

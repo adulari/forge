@@ -1,4 +1,5 @@
 import * as Clipboard from "expo-clipboard";
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import * as DocumentPicker from "expo-document-picker";
 import { File as ExpoFile } from "expo-file-system";
 import { router } from "expo-router";
@@ -12,6 +13,7 @@ import {
   Laptop,
   RefreshCw,
   ShieldCheck,
+  Smartphone,
   X,
 } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -19,17 +21,19 @@ import { ActivityIndicator, Platform, Pressable, Share, StyleSheet, Text, View }
 import Svg, { Path } from "react-native-svg";
 
 import { BackLink } from "../../components/ds/BackLink";
+import { Badge } from "../../components/ds/Badge";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
 import { Input } from "../../components/ds/Input";
 import { Screen } from "../../components/ds/Screen";
+import { useClockSeconds } from "../../components/ds/relativeClock";
 import { Stepper, type StepperStep } from "../../components/ds/Stepper";
 import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere, type AnywherePendingApproval } from "../../lib/AnywhereProvider";
+import { describeDevices, STALE_AFTER_DAYS } from "../../lib/anywhere/deviceList";
 import { formatBytes, formatStorageUsage } from "../../lib/anywhere/format";
 import { hostFleetSummary, hostStatusText } from "../../lib/anywhereHostPresence";
 import { syncHubMeta, syncNeedsAttention, syncPillModel } from "../../lib/accountSync";
-import { useAuth } from "../../lib/auth";
 import { useAccountSync } from "../../lib/queries";
 import { goBackOr } from "../../lib/nav";
 import { isTauri } from "../../lib/platform";
@@ -37,13 +41,14 @@ import { MAX_ACTIVE_HOSTS } from "../../lib/anywhere/types";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
-import { SettingsShell } from "../(tabs)/settings";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 
 const LOCAL_NOTE = "Direct and LAN connections keep working if Forge Anywhere is unavailable.";
 
 const SEALED_ENVELOPE_NOTE =
-  "who can read your data — only your paired devices. The relay routes sealed envelopes: sizes, timestamps, kinds. Never contents.";
+  "Only your paired devices can read your data. The relay routes sealed envelopes — sizes, timestamps and kinds, never contents.";
+
+const DEVICE_PREVIEW_COUNT = 5;
 
 /** `TRIAL · 9D` — only rendered while the account is actually trialing; every other
  * entitlement state (active/grace/read-only/suspended/not-started) shows no badge
@@ -62,7 +67,6 @@ function pushStatusLabel(status: string): string {
 export default function AnywhereScreen() {
   const anywhere = useAnywhere();
   const tokens = useTokens();
-  const { isPaired } = useAuth();
 
   const screen = (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.screen}>
@@ -73,9 +77,7 @@ export default function AnywhereScreen() {
       </View>
     </Screen>
   );
-  // Listed in the Settings rail, so it keeps the rail like every other entry there; before
-  // pairing (Connect deep-links here) there is no Settings to return to, same as Legal.
-  return isPaired ? <SettingsShell active="anywhere">{screen}</SettingsShell> : screen;
+  return screen;
 }
 
 function SetupFlow() {
@@ -463,86 +465,134 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
           />
           <HubRow label="Account" value={login ? `@${login} · github` : "github"} onPress={() => router.push("/anywhere/account")} last />
         </View>
-        <Text style={[typeScale.monoMeta, styles.sealedNote, { color: tokens.ink3 }]}>{SEALED_ENVELOPE_NOTE}</Text>
+        <PrivacyNote />
       </>
     );
   }
 
-  const pct = anywhere.account && anywhere.account.storage_limit_bytes > 0
-    ? Math.round((anywhere.account.storage_used_bytes / anywhere.account.storage_limit_bytes) * 100)
-    : 0;
-
   return (
-    <View style={styles.desktopPane}>
-      <Text style={[typeScale.section, { color: tokens.ink3 }]}>{`HOSTS · ${anywhere.hosts.length} OF ${MAX_ACTIVE_HOSTS}`}</Text>
-      <View style={styles.desktopHostList}>
-        {anywhere.hosts.map((host) => (
-          <Pressable
+    <>
+      <Section title="Hosts" meta={`${anywhere.hosts.length} of ${MAX_ACTIVE_HOSTS}`}>
+        {anywhere.hosts.map((host, index) => (
+          <ListLine
             key={host.id}
+            icon={<View style={[styles.statusDot, { backgroundColor: host.online === true ? tokens.success : tokens.ink4 }]} />}
+            title={host.name}
+            sub={hostStatusText(host)}
+            last={index === anywhere.hosts.length - 1}
             onPress={() => router.push({ pathname: "/anywhere/host/[id]", params: { id: host.id } })}
-            accessibilityRole="button"
-            style={({ pressed }) => [styles.desktopRow, { borderColor: tokens.border, backgroundColor: tokens.bg2, opacity: pressed ? 0.7 : 1 }]}
-          >
-            <View style={[styles.desktopDot, { backgroundColor: host.online === true ? tokens.success : tokens.ink4 }]} />
-            <Text style={[typeScale.bodyBold, styles.desktopRowLabel, { color: tokens.ink }]} numberOfLines={1}>{host.name}</Text>
-            <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]} numberOfLines={1}>{hostStatusText(host)}</Text>
-            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>Details</Text>
-          </Pressable>
+          />
         ))}
         {!anywhere.hosts.length ? <HostEmpty /> : null}
-      </View>
+      </Section>
 
-      <View style={styles.desktopColumns}>
-        <View style={styles.desktopColumn}>
-          <Text style={[typeScale.section, { color: tokens.ink3 }]}>{`DEVICES · ${anywhere.devices.length}`}</Text>
-          {anywhere.devices.map((device) => (
-            <View key={device.id} style={[styles.desktopRow, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
-              <Text style={[typeScale.sub, styles.desktopRowLabel, { color: tokens.ink }]} numberOfLines={1}>{device.name}</Text>
-              <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]} numberOfLines={1}>
-                {device.last_seen_at ? new Date(device.last_seen_at).toLocaleDateString() : "enrolled"}
-              </Text>
-            </View>
-          ))}
-          <View style={styles.desktopActionRow}>
-            <Button label="Pair device" variant="secondary" onPress={() => router.push("/anywhere/pair")} />
-            <Button label="Devices…" variant="ghost" onPress={() => router.push("/anywhere/devices")} />
-          </View>
-        </View>
+      <DevicesSection anywhere={anywhere} />
 
-        <View style={styles.desktopColumn}>
-          <Text style={[typeScale.section, { color: tokens.ink3 }]}>STORAGE · BILLING · ACCOUNT</Text>
-          <Pressable onPress={() => router.push("/anywhere/sync")} accessibilityRole="button" accessibilityLabel="Sync across machines" style={[styles.desktopCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
-            <View style={styles.desktopCardRow}>
-              <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Sync across machines</Text>
-              <Text style={[typeScale.monoMeta, { color: syncAttention ? tokens.warn : tokens.ink }]}>{syncMeta}</Text>
-            </View>
-          </Pressable>
-          <Pressable onPress={() => router.push("/anywhere/storage")} style={[styles.desktopCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
-            <View style={styles.desktopCardRow}>
-              <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Encrypted storage</Text>
-              <Text style={[typeScale.monoMeta, { color: tokens.ink }]}>
-                {anywhere.account ? `${formatBytes(anywhere.account.storage_used_bytes)} / ${formatBytes(anywhere.account.storage_limit_bytes)}` : "—"}
-              </Text>
-            </View>
-            <View style={[styles.desktopGaugeTrack, { backgroundColor: tokens.border }]}>
-              <View style={[styles.desktopGaugeFill, { width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: tokens.ink2 }]} />
-            </View>
-          </Pressable>
-          <Pressable onPress={() => router.push("/anywhere/billing")} style={[styles.desktopCard, trialBadge ? { borderColor: hexToRgba(tokens.warn, 0.3) } : { borderColor: tokens.border }, { backgroundColor: tokens.bg2 }]}>
-            <View style={styles.desktopCardRow}>
-              <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{`Billing — ${trialBadge ?? anywhere.account?.entitlement ?? "—"}`}</Text>
-            </View>
-          </Pressable>
-          <View style={[styles.desktopCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
-            <Text style={[typeScale.sub, { color: tokens.ink2 }]}>{login ? `@${login} · GitHub` : "GitHub"}</Text>
-            <View style={styles.desktopActionRow}>
-              <Pressable onPress={() => router.push("/anywhere/account")}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Account…</Text></Pressable>
-              <Pressable onPress={() => router.push("/anywhere/account")}><Text style={[typeScale.meta, { color: tokens.danger }]}>Delete…</Text></Pressable>
-            </View>
-          </View>
+      <Section title="Sync and billing">
+        <ListLine
+          title="Sync across machines"
+          trailingText={syncMeta}
+          trailingColor={syncAttention ? tokens.warn : undefined}
+          dotColor={syncDot}
+          onPress={() => router.push("/anywhere/sync")}
+        />
+        <ListLine
+          title="Billing"
+          trailingText={trialBadge ?? anywhere.account?.entitlement ?? "—"}
+          trailingColor={trialBadge ? tokens.warn : undefined}
+          onPress={() => router.push("/anywhere/billing")}
+        />
+        <ListLine title="Account" trailingText={login ? `@${login} · GitHub` : "GitHub"} last onPress={() => router.push("/anywhere/account")} />
+      </Section>
+      <PrivacyNote />
+    </>
+  );
+}
+
+/** One row language for every list on this page: 58px, hairline separators, no card chrome. */
+function ListLine({ icon, title, titleTag, sub, trailingText, trailingColor, dotColor, last, onPress }: {
+  icon?: React.ReactNode;
+  title: string;
+  titleTag?: string;
+  sub?: string;
+  trailingText?: string;
+  trailingColor?: string;
+  dotColor?: string;
+  last?: boolean;
+  onPress?: () => void;
+}) {
+  const tokens = useTokens();
+  const body = (
+    <>
+      {icon}
+      <View style={styles.resourceCopy}>
+        <View style={styles.lineTitleRow}>
+          <Text style={[typeScale.bodyBold, styles.lineTitle, { color: tokens.ink }]} numberOfLines={1}>{title}</Text>
+          {titleTag ? <Badge label={titleTag} tone="accent" /> : null}
         </View>
+        {sub ? <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{sub}</Text> : null}
       </View>
-      <Text style={[typeScale.monoMeta, styles.sealedNote, { color: tokens.ink3 }]}>{SEALED_ENVELOPE_NOTE}</Text>
+      {dotColor ? <View style={[styles.statusDot, { backgroundColor: dotColor }]} /> : null}
+      {trailingText ? <Text style={[typeScale.meta, tabularNums, { color: trailingColor ?? tokens.ink3 }]} numberOfLines={1}>{trailingText}</Text> : null}
+      {onPress ? <ChevronRight size={15} strokeWidth={1.75} color={tokens.ink4} /> : null}
+    </>
+  );
+  const rowStyle = [styles.resourceRow, last ? styles.resourceRowLast : { borderBottomColor: tokens.hairline }];
+  if (!onPress) return <View style={rowStyle}>{body}</View>;
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={title} style={({ pressed }) => [...rowStyle, { opacity: pressed ? 0.7 : 1 }]}>
+      {body}
+    </Pressable>
+  );
+}
+
+function DevicesSection({ anywhere }: { anywhere: ReturnType<typeof useAnywhere> }) {
+  const tokens = useTokens();
+  const nowSeconds = useClockSeconds();
+  const rows = useMemo(
+    () => describeDevices(anywhere.devices, anywhere.credentials?.deviceIdHex, nowSeconds * 1000),
+    [anywhere.devices, anywhere.credentials?.deviceIdHex, nowSeconds],
+  );
+  const staleCount = rows.filter((row) => row.stale).length;
+  const shown = rows.slice(0, DEVICE_PREVIEW_COUNT);
+  const hidden = rows.length - shown.length;
+  return (
+    <Section title="Devices" meta={`${rows.length} paired`}>
+      {staleCount > 0 ? (
+        <Banner
+          tone="warn"
+          message={`${staleCount} ${staleCount === 1 ? "device hasn't" : "devices haven't"} connected in ${STALE_AFTER_DAYS}+ days. Revoke enrollments you no longer use.`}
+          actionLabel="Review"
+          onAction={() => router.push("/anywhere/devices")}
+          style={styles.flushBanner}
+        />
+      ) : null}
+      {shown.map((row, index) => (
+        <ListLine
+          key={row.id}
+          icon={row.kind === "phone" ? <Smartphone size={18} color={tokens.ink3} /> : <Laptop size={18} color={tokens.ink3} />}
+          title={row.name}
+          titleTag={row.isThisDevice ? "THIS DEVICE" : undefined}
+          sub={`${row.lastSeen} · ${row.enrolled}`}
+          last={index === shown.length - 1 && hidden === 0}
+        />
+      ))}
+      {hidden > 0 ? <ListLine title={`Show all ${rows.length} devices`} last onPress={() => router.push("/anywhere/devices")} /> : null}
+      {!rows.length ? <EmptyLine icon={<ShieldCheck size={18} color={tokens.ink3} />} text="No devices enrolled yet." /> : null}
+      <View style={styles.actionRow}>
+        <Button label="Pair a device" variant="secondary" onPress={() => router.push("/anywhere/pair")} />
+        <Button label="Manage devices" variant="secondary" onPress={() => router.push("/anywhere/devices")} />
+      </View>
+    </Section>
+  );
+}
+
+function PrivacyNote() {
+  const tokens = useTokens();
+  return (
+    <View style={styles.privacyNote}>
+      <ShieldCheck size={16} color={tokens.ink3} />
+      <Text style={[typeScale.sub, styles.promiseText, { color: tokens.ink3 }]}>{SEALED_ENVELOPE_NOTE}</Text>
     </View>
   );
 }
@@ -587,9 +637,9 @@ function HostEmpty() {
   return <EmptyLine icon={<Laptop size={18} color={tokens.ink3} />} text="Use Forge Desktop on a computer to activate your first host. Mobile remains a secure controller." />;
 }
 
-function Section({ title, meta, children }: { title: string; meta: string; children: React.ReactNode }) {
+function Section({ title, meta, children }: { title: string; meta?: string; children: React.ReactNode }) {
   const tokens = useTokens();
-  return <View style={styles.section}><View style={styles.sectionHeader}><Text style={[typeScale.headingBold, { color: tokens.ink }]}>{title}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{meta}</Text></View><View style={[styles.sectionBody, { borderTopColor: tokens.border }]}>{children}</View></View>;
+  return <View style={styles.section}><View style={styles.sectionHeader}><Text style={[typeScale.headingBold, { color: tokens.ink }]}>{title}</Text>{meta ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{meta}</Text> : null}</View><View style={[styles.sectionBody, { borderTopColor: tokens.border }]}>{children}</View></View>;
 }
 
 function PromiseLine({ icon, text }: { icon: React.ReactNode; text: string }) { const tokens = useTokens(); return <View style={styles.promise}>{icon}<Text style={[typeScale.sub, styles.promiseText, { color: tokens.ink2 }]}>{text}</Text></View>; }
@@ -618,7 +668,7 @@ function GithubMark({ size, color }: { size: number; color: string }) {
 
 const styles = StyleSheet.create({
   screen: { paddingTop: space.space12, paddingBottom: space.space48 },
-  shell: { width: "100%", maxWidth: 760, alignSelf: "center" },
+  shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" },
   flow: { marginTop: space.space12 },
   titleBlock: { flexDirection: "row", gap: space.space12, alignItems: "flex-start" },
   brandMark: { width: 44, height: 44, borderRadius: radii.radius12, alignItems: "center", justifyContent: "center" },
@@ -661,19 +711,11 @@ const styles = StyleSheet.create({
   hubCard: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius8, overflow: "hidden" },
   hubRow: { minHeight: 50, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12 },
   hubRowLabel: { flex: 1 },
-  sealedNote: { lineHeight: 17, fontFamily: monoFamily.regular },
-  desktopPane: { gap: space.space12 },
-  desktopHostList: { gap: space.space4 },
-  desktopColumns: { flexDirection: "row", gap: space.space20 },
-  desktopColumn: { flex: 1, gap: space.space4 },
-  desktopRow: { minHeight: 40, flexDirection: "row", alignItems: "center", gap: space.space8, borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4, paddingHorizontal: space.space12 },
-  desktopRowLabel: { flex: 1 },
-  desktopDot: { width: 5, height: 5, borderRadius: 3 },
-  desktopActionRow: { flexDirection: "row", gap: space.space8, marginTop: space.space4 },
-  desktopCard: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4, padding: space.space12, gap: space.space4 },
-  desktopCardRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: space.space8 },
-  desktopGaugeTrack: { height: 3, borderRadius: 2, overflow: "hidden" },
-  desktopGaugeFill: { height: "100%", borderRadius: 2 },
+  privacyNote: { flexDirection: "row", alignItems: "flex-start", gap: space.space8 },
+  statusDot: { width: 6, height: 6, borderRadius: 3 },
+  lineTitleRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  lineTitle: { flexShrink: 1 },
+  resourceRowLast: { borderBottomWidth: 0 },
   section: { gap: space.space8 },
   sectionHeader: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: space.space12 },
   sectionBody: { borderTopWidth: 1, paddingTop: space.space4 },

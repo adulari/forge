@@ -13,7 +13,7 @@ import React, { useMemo, useState } from "react";
 import { RefreshControl, StyleSheet, Text, View, type ViewStyle } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
@@ -116,7 +116,6 @@ function HookRowSkeleton() {
 }
 
 function HooksScreenBody() {
-  const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
   const query = useHooks();
   const pull = usePullRefresh(query.refetch);
@@ -151,10 +150,8 @@ function HooksScreenBody() {
     );
 
   return (
-    <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-      <BackLink />
-      <Text style={[type.title, { color: tokens.ink }]}>Hooks</Text>
-      <Text style={[type.sub, { color: tokens.ink3 }]}>Automations on session and tool events.</Text>
+    <Screen scroll wide refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
+      <PageHeader title="Hooks" subtitle="Automations on session and tool events." />
       <SearchField value={search} onChangeText={setSearch} placeholder="Search hooks" accessibilityLabel="Search hooks" />
       {isExpanded ? (
         <View style={styles.twoCol}>

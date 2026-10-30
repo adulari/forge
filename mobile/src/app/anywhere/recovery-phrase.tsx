@@ -1,11 +1,12 @@
 import * as DocumentPicker from "expo-document-picker";
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import { File as ExpoFile } from "expo-file-system";
 import { Redirect } from "expo-router";
 import { Check, KeyRound, Laptop, Pencil, Plus, ShieldAlert, ShieldCheck, Smartphone, Trash2 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
 import { Input } from "../../components/ds/Input";
@@ -79,9 +80,7 @@ export default function RecoveryCenterScreen() {
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.screen}>
       <View style={styles.shell}>
-        <BackLink label="Forge Anywhere" />
-        <Text accessibilityRole="header" style={[typeScale.title, styles.title, { color: tokens.ink }]}>Recovery Center</Text>
-        <Text style={[typeScale.body, styles.subtitle, { color: tokens.ink2 }]}>Check how you can regain access and remove devices without making recovery words part of normal sign-in.</Text>
+        <PageHeader title="Recovery Center" subtitle="Check how you can regain access and remove devices without making recovery words part of normal sign-in." backLabel="Anywhere" />
 
         <View style={styles.health}>
           <HealthRow icon={anywhere.credentials?.recoveryKitVerified ? <ShieldCheck size={19} color={tokens.success} /> : <ShieldAlert size={19} color={tokens.warn} />} title="Recovery Kit" value={anywhere.credentials?.recoveryKitVerified ? "Verified on this device" : "Not checked on this device"} />
@@ -135,7 +134,7 @@ function HealthRow({ icon, title, value }: { icon: React.ReactNode; title: strin
 
 const styles = StyleSheet.create({
   screen: { paddingTop: space.space12, paddingBottom: space.space48 },
-  shell: { width: "100%", maxWidth: 720, alignSelf: "center" },
+  shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" },
   title: { marginTop: space.space8 },
   subtitle: { marginTop: space.space4, maxWidth: 620 },
   health: { marginTop: space.space24 },

@@ -7,7 +7,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { QrCode } from "../components/QrCode";
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
 import { ConfirmDialog } from "../components/ds/ConfirmDialog";
@@ -126,10 +126,7 @@ function RemoteAccessBody() {
 
   return (
     <Screen scroll contentContainerStyle={styles.content}>
-      <BackLink />
-      <Text accessibilityRole="header" style={[typeScale.title, { color: tokens.ink }]}>
-        Remote access
-      </Text>
+      <PageHeader title="Remote access" subtitle="Pair phones and other controllers with this host." />
 
       {!direct ? (
         <EmptyState icon={Radio} message="Remote access is managed on the host. Connect to it directly to pair or revoke devices." />
@@ -254,7 +251,7 @@ export default function RemoteAccessScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12, width: "100%", maxWidth: 760, alignSelf: "center" },
+  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   statusRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   panel: { borderWidth: 1, borderRadius: radii.radius8, padding: space.space16, gap: space.space12 },
   row: { flexDirection: "row", alignItems: "center", gap: space.space8, flexWrap: "wrap" },

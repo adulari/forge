@@ -7,13 +7,13 @@
 // uses) for any forked node with a worktree; "Diff" opens `GET /api/sessions/{id}/diff` (the
 // fork's worktree against its merge-base, uncommitted edits included) in a sheet, rendered by
 // the shared read-only DiffCard.
+import { PageHeader } from "../components/ds/PageHeader";
 import { router } from "expo-router";
 import { ExternalLink, FileDiff, GitBranch, GitMerge } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
-import { BackLink } from "../components/ds/BackLink";
 import { Button } from "../components/ds/Button";
 import { Card } from "../components/ds/Card";
 import { ConfirmDialog } from "../components/ds/ConfirmDialog";
@@ -182,15 +182,14 @@ function SessionTreeScreenBody() {
 
   return (
     <DesktopDrillDown>
-      <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-        <BackLink />
+      <Screen scroll wide refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
+        <PageHeader
+          title="Session tree"
+          titleMeta={<Text style={[styles.mono, styles.headerName, { color: tokens.ink3 }]} numberOfLines={1}>{headerName}</Text>}
+          subtitle="Forks branch from any turn — the original keeps running."
+        />
         <View style={[styles.columns, isCompact ? styles.columnsStacked : styles.columnsRow]}>
           <View style={styles.treeCol}>
-            <View style={styles.heading}>
-              <Text style={[typeScale.title, styles.headingTitle, { color: tokens.ink }]}>Session tree</Text>
-              <Text style={[styles.mono, styles.headerName, { color: tokens.ink3 }]} numberOfLines={1}>{headerName}</Text>
-            </View>
-            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Forks branch from any turn — the original keeps running.</Text>
 
             {query.isLoading ? (
               <View style={styles.loading}><ActivityIndicator color={tokens.accent} /><Text style={[typeScale.sub, { color: tokens.ink3 }]}>Loading session ancestry…</Text></View>
@@ -412,7 +411,7 @@ function DetailRow({ label, value, tokens, valueColor, last = false }: { label: 
 }
 
 const styles = StyleSheet.create({
-  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12, width: "100%", maxWidth: 1000, alignSelf: "center" },
+  content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   columns: { gap: space.space24 },
   columnsStacked: { flexDirection: "column" },
   columnsRow: { flexDirection: "row", alignItems: "flex-start" },

@@ -15,6 +15,7 @@ import { type Edge, SafeAreaView } from "react-native-safe-area-context";
 import { useTokens } from "../../theme/ThemeProvider";
 import { gutter } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+import { PAGE_MAX_WIDTH, PAGE_WIDE_MAX_WIDTH, usePageWidthCap } from "./pageWidth";
 
 export interface ScreenProps {
   children: React.ReactNode;
@@ -25,6 +26,8 @@ export interface ScreenProps {
    * block) — RN's `KeyboardAvoidingView` docs call for this explicitly on iOS "padding" mode;
    * it is not inferred from layout automatically. Defaults to 8 (bare screen, nothing above). */
   keyboardVerticalOffset?: number;
+  /** Two-column pages opt into the wider Settings column. */
+  wide?: boolean;
   edges?: Edge[];
   refreshControl?: ScrollViewProps["refreshControl"];
   contentContainerStyle?: ViewStyle;
@@ -41,6 +44,7 @@ export function Screen({
   children,
   scroll = false,
   keyboardAvoiding = false,
+  wide = false,
   keyboardVerticalOffset = Platform.OS === "ios" ? 8 : 0,
   edges = ["top", "left", "right", "bottom"],
   refreshControl,
@@ -50,18 +54,20 @@ export function Screen({
   const tokens = useTokens();
   const { isCompact } = useBreakpoint();
   const paddingHorizontal = isCompact ? gutter.compact : gutter.medium;
+  const capped = usePageWidthCap();
+  const column: ViewStyle | undefined = capped ? { width: "100%", maxWidth: wide ? PAGE_WIDE_MAX_WIDTH : PAGE_MAX_WIDTH, alignSelf: "center" } : undefined;
 
   const content = scroll ? (
     <ScrollView
       style={[styles.flex, Platform.OS === "web" && (webScrollContain as object)]}
-      contentContainerStyle={[{ paddingHorizontal }, contentContainerStyle]}
+      contentContainerStyle={[{ paddingHorizontal }, column, contentContainerStyle]}
       keyboardShouldPersistTaps="handled"
       refreshControl={refreshControl}
     >
       {children}
     </ScrollView>
   ) : (
-    <View style={[styles.flex, { paddingHorizontal }, contentContainerStyle]}>{children}</View>
+    <View style={[styles.flex, { paddingHorizontal }, column, contentContainerStyle]}>{children}</View>
   );
 
   return (

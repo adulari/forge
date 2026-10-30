@@ -7,18 +7,16 @@
 // appeared here.
 import { ListTodo } from "lucide-react-native";
 import { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { StyleSheet, View } from "react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
 import { useAnywhere } from "../../lib/AnywhereProvider";
 import type { PendingRemoteJob } from "../../lib/anywhereJobs";
 import { goBackOr } from "../../lib/nav";
-import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
-import { type } from "../../theme/typography";
 
 function jobState(job: PendingRemoteJob, nowMs: number): string {
   if (job.result?.status === "success") return "ran on the host";
@@ -34,7 +32,6 @@ function queuedAt(ms: number): string {
 }
 
 export default function AnywhereJobsScreen() {
-  const tokens = useTokens();
   const anywhere = useAnywhere();
   const [now] = useState(() => Date.now());
   const hostName = (id: string) => anywhere.hosts.find((host) => host.id === id)?.name ?? `host ${id.slice(0, 8)}`;
@@ -42,11 +39,7 @@ export default function AnywhereJobsScreen() {
 
   return (
     <Screen scroll contentContainerStyle={styles.content}>
-      <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
-      <Text style={[type.title, { color: tokens.ink }]}>Remote jobs</Text>
-      <Text style={[type.sub, { color: tokens.ink3 }]}>
-        Sessions you started while a host was offline. The host runs each one when it reconnects.
-      </Text>
+      <PageHeader title="Remote jobs" subtitle="Sessions you started while a host was offline. The host runs each one when it reconnects." backLabel="Anywhere" onBack={() => goBackOr("/anywhere")} />
       {jobs.length === 0 ? (
         <EmptyState icon={ListTodo} message="Nothing queued. Starting a session on an offline host queues it here." />
       ) : (

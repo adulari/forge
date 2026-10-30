@@ -22,7 +22,7 @@ import { MarketplaceSheet } from "../components/skills/MarketplaceSheet";
 import { SkillInvokeForm } from "../components/skills/SkillInvokeForm";
 import { SkillsManagePanel } from "../components/skills/SkillsManagePanel";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
@@ -253,13 +253,12 @@ function SkillsScreenBody() {
     );
 
   return (
-    <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-      <BackLink />
-      <View style={styles.titleRow}>
-        <Text style={[type.title, styles.titleText, { color: tokens.ink }]}>Skills</Text>
-        <Button label="Marketplace" variant="secondary" icon={<Store size={14} color={tokens.ink2} />} onPress={() => setMarketOpen(true)} accessibilityLabel="Open the skills marketplace" />
-      </View>
-      <Text style={[type.sub, { color: tokens.ink3 }]}>Reusable Forge methodologies available to every session.</Text>
+    <Screen scroll wide refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
+      <PageHeader
+        title="Skills"
+        subtitle="Reusable Forge methodologies available to every session."
+        trailing={<Button label="Marketplace" variant="secondary" icon={<Store size={14} color={tokens.ink2} />} onPress={() => setMarketOpen(true)} accessibilityLabel="Open the skills marketplace" />}
+      />
       <SkillsManagePanel session={session} />
       <MarketplaceSheet visible={marketOpen} onClose={() => setMarketOpen(false)} session={session} />
       <SearchField value={search} onChangeText={setSearch} placeholder="Search skills" accessibilityLabel="Search skills" />
