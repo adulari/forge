@@ -5,7 +5,8 @@
 // App Store reviewer with no daemon running — explains what Forge is with a bundled,
 // no-network "how it works" note before any pairing UI. QR scan is the primary path
 // (native camera / web "scan on your phone" hint via the `QRScan.native`/`.web` Metro
-// split); a mono URL field covers paste + manual entry; `?url=` deep links prefill it.
+// split); the "other ways" sheet covers paste, a photo of the code and manual entry; `?url=` deep links and
+// `#token=` page loads go to the same confirm card (sanitised host, cleartext warning) before connecting.
 import { router, useLocalSearchParams } from "expo-router";
 import { Flame, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -16,13 +17,18 @@ import { EntitlementBadge } from "../components/anywhere/EntitlementBadge";
 import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
 import { IconButton } from "../components/ds/IconButton";
-import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
 import { StatusDot } from "../components/ds/StatusDot";
 import { useToast } from "../components/ds/ToastHost";
+import { ConfirmTargetCard } from "../components/pairing/ConfirmTargetCard";
+import { InstallHint } from "../components/pairing/InstallHint";
+import { NearbyHosts } from "../components/pairing/NearbyHosts";
+import { OtherWaysSheet, type ManualPrefill } from "../components/pairing/OtherWaysSheet";
 import { QRScan } from "../components/pairing/QRScan";
 import { useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
+import { describeConnectTarget, type ConnectTarget } from "../lib/connectUrl";
+import { readPairingFromLocation, stripPairingFromLocation } from "../lib/pairingLocation";
 import {
   detectForgeServe,
   resolveDesktopConnection,
@@ -45,8 +51,10 @@ import { useBreakpoint } from "../theme/useBreakpoint";
 // ARCHITECTURE §3) — this is not app-fixable, so it must always be shown in full.
 const STATE_COPY: Record<Exclude<ConnectTestState, "idle" | "testing" | "ok">, string> = {
   "bad-token": "pairing invalid — re-scan the qr code or re-copy the connect url from `forge serve`.",
+  "cert-changed":
+    "this server's certificate changed since it was paired, so it may be a different machine. if you replaced it on purpose, re-pair: run `forge serve pair` on the host and scan the new code.",
   unreachable:
-    "server unreachable — is `forge serve` running? default `--lan` uses a self-signed certificate that native networking, browsers, and Tauri's WebView all reject. use `--anywhere` for a public tunnel with real TLS, or `--local` plus Tailscale/VPN to reach it directly.",
+    "server unreachable — is `forge serve` running and on the same network? a link from `forge serve` pins its self-signed certificate on desktop; on phones use `--tailscale` or `--tunnel` for a certificate every device trusts, or `--local` plus a VPN.",
   "server-error": "the server returned an error — check the `forge serve` logs on the host.",
 };
 
@@ -109,23 +117,44 @@ export default function ConnectScreen() {
   // the active connection out from under the user (see attemptConnect below).
   const canClose = router.canGoBack();
 
-  const [url, setUrl] = useState("");
+  const [otherOpen, setOtherOpen] = useState(false);
+  const [prefill, setPrefill] = useState<ManualPrefill | null>(null);
+  const [confirm, setConfirm] = useState<{ candidate: string; target: ConnectTarget } | null>(null);
   const [scanEnabled, setScanEnabled] = useState(false);
   const [testState, setTestState] = useState<ConnectTestState>("idle");
   const [formatError, setFormatError] = useState<string | null>(null);
+
+  const busy = testState === "testing";
+
+  const requestConnect = useCallback((candidate: string) => {
+    setOtherOpen(false);
+    setTestState("idle");
+    const parsed = parseConnectUrl(candidate);
+    if (!parsed) {
+      setConfirm(null);
+      setFormatError(
+        "that doesn't look like a forge connect url — paste it exactly as `forge serve` printed it, or scan its qr code.",
+      );
+      return;
+    }
+    setFormatError(null);
+    setConfirm({ candidate, target: describeConnectTarget(parsed) });
+  }, []);
 
   useEffect(() => {
     const raw = params.url;
     if (typeof raw !== "string" || raw.length === 0) return;
     if (lastAppliedUrl.current === raw) return;
     lastAppliedUrl.current = raw;
-    setUrl(decodeParam(raw));
-    // A fresh deep link supersedes whatever the previous attempt on this screen left behind.
-    setTestState("idle");
-    setFormatError(null);
-  }, [params.url]);
+    requestConnect(decodeParam(raw));
+  }, [params.url, requestConnect]);
 
-  const busy = testState === "testing";
+  useEffect(() => {
+    const fromLocation = readPairingFromLocation();
+    if (!fromLocation) return;
+    stripPairingFromLocation();
+    requestConnect(fromLocation);
+  }, [requestConnect]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)/settings"), []);
 
@@ -144,7 +173,7 @@ export default function ConnectScreen() {
       setTestState("testing");
       let result: ConnectTestState;
       try {
-        result = await testConnection(parsed.baseUrl);
+        result = await testConnection(parsed.baseUrl, parsed.fingerprint);
       } catch {
         result = "unreachable";
       }
@@ -159,6 +188,7 @@ export default function ConnectScreen() {
           const added = await addServer(candidate, { setActive: !additional });
           if (attempt !== attemptRef.current) return;
           haptics.pairSuccess();
+          stripPairingFromLocation();
           if (additional) {
             toast.show(`added ${added.name}`, { tone: "success" });
             goBackOr("/(tabs)/settings");
@@ -211,7 +241,7 @@ export default function ConnectScreen() {
                   kind: "start-failed",
                   message:
                     plan.message ??
-                    "forge serve didn't come up within 15s — check the terminal it prints to, or paste the connect url manually below.",
+                    "forge serve didn't come up within 15s — check the terminal it prints to, or use other ways to connect.",
                 },
           );
       }
@@ -242,7 +272,7 @@ export default function ConnectScreen() {
       setDesktopState({
         kind: "start-failed",
         message:
-          "forge serve didn't come up within 15s — check the terminal it prints to, or paste the connect url manually below.",
+          "forge serve didn't come up within 15s — check the terminal it prints to, or use other ways to connect.",
       });
       return;
     }
@@ -250,15 +280,19 @@ export default function ConnectScreen() {
     void attemptConnect(found.base_url);
   }, [attemptConnect]);
 
-  const onScanned = useCallback(
-    (data: string) => {
-      setUrl(data);
-      attemptConnect(data);
-    },
-    [attemptConnect],
-  );
+  const onScanned = useCallback((data: string) => requestConnect(data), [requestConnect]);
 
-  const onConnectPress = () => attemptConnect(url);
+  const onConfirm = useCallback(() => {
+    if (!confirm) return;
+    const { candidate } = confirm;
+    setConfirm(null);
+    void attemptConnect(candidate);
+  }, [confirm, attemptConnect]);
+
+  const onCancelConfirm = useCallback(() => {
+    setConfirm(null);
+    setScanEnabled(false);
+  }, []);
 
   return (
     <Screen
@@ -341,50 +375,47 @@ export default function ConnectScreen() {
         </View>
       ) : null}
 
-      <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>
-        {/* D/M Connect: "Scan QR code" is the primary CTA (not a text link) — the camera-off
-            privacy note ("Camera stays off until you choose to scan.") already renders inside
-            QRScan itself while `enabled` is false, so it isn't duplicated here. */}
-        <Button
-          label={scanEnabled ? "Stop scanning" : "Scan QR code"}
-          variant={scanEnabled ? "secondary" : "primary"}
-          onPress={() => setScanEnabled((enabled) => !enabled)}
-          fullWidth
-          accessibilityLabel={scanEnabled ? "Stop scanning" : "Scan QR code"}
-        />
-        <QRScan onScanned={onScanned} enabled={scanEnabled} paused={busy} />
-      </View>
+      {confirm ? (
+        <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>
+          <ConfirmTargetCard target={confirm.target} busy={busy} onConnect={onConfirm} onCancel={onCancelConfirm} />
+        </View>
+      ) : (
+        <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>
+          <Button
+            label={scanEnabled ? "Stop scanning" : "Scan pairing code"}
+            variant={scanEnabled ? "secondary" : "primary"}
+            onPress={() => setScanEnabled((enabled) => !enabled)}
+            fullWidth
+            accessibilityLabel={scanEnabled ? "Stop scanning" : "Scan pairing code"}
+          />
+          <QRScan onScanned={onScanned} enabled={scanEnabled} paused={busy} />
+          <Button
+            label="Other ways to connect"
+            variant="ghost"
+            onPress={() => setOtherOpen(true)}
+            disabled={busy}
+            fullWidth
+            accessibilityLabel="Other ways to connect"
+          />
+          {formatError ? <Banner tone="danger" message={formatError} /> : null}
+        </View>
+      )}
 
-      <View style={[styles.urlBlock, !isCompact && styles.urlBlockWide]}>
-        <Input
-          label="Connect URL"
-          mono
-          value={url}
-          onChangeText={(t) => {
-            setUrl(t.trimStart());
-            setFormatError(null);
-            setTestState("idle");
-          }}
-          placeholder="connect://host:7420/<token>"
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="go"
-          editable={!busy}
-          onSubmitEditing={onConnectPress}
-          error={formatError ?? undefined}
-        />
-        <Button
-          label={busy ? "Connecting…" : "Connect"}
-          onPress={onConnectPress}
-          loading={busy}
-          disabled={busy || url.trim().length === 0}
-          fullWidth
-          style={styles.connectButton}
-        />
-      </View>
+      <NearbyHosts
+        onPick={(host) => {
+          setPrefill({ host: host.host, port: String(host.port), fingerprint: host.fingerprint ?? undefined });
+          setOtherOpen(true);
+        }}
+      />
+
+      <OtherWaysSheet visible={otherOpen} onClose={() => setOtherOpen(false)} onSubmit={requestConnect} prefill={prefill} />
+
+      <InstallHint />
 
       {testState !== "idle" && testState !== "testing" && testState !== "ok" ? (
-        <Banner tone="danger" message={STATE_COPY[testState]} />
+        <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>
+          <Banner tone="danger" message={STATE_COPY[testState]} />
+        </View>
       ) : null}
 
       {testState === "ok" ? (
@@ -488,9 +519,6 @@ const styles = StyleSheet.create({
   autoBlock: { gap: space.space8, maxWidth: 480, width: "100%" },
   qrWrap: { alignItems: "center", gap: space.space12, width: "100%" },
   qrWrapWide: { maxWidth: 480 },
-  urlBlock: { gap: space.space4, width: "100%" },
-  urlBlockWide: { maxWidth: 480 },
-  connectButton: { marginTop: space.space8 },
   successText: { textAlign: "center" },
   anywhereSection: { gap: space.space4, maxWidth: 480, width: "100%" },
   anywhereDescription: { marginBottom: space.space4 },

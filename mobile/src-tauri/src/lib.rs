@@ -19,8 +19,10 @@ mod about;
 mod auto_update;
 mod desktop_shell;
 mod menu;
+mod nearby;
 mod onboarding;
 mod ota;
+mod pinned;
 mod preview;
 mod reporting;
 #[cfg(test)]
@@ -208,6 +210,9 @@ pub fn run(process_start: Instant) {
             ota::ota_reset,
             auto_update::desktop_update_policy,
             serve_discovery::detect_forge_serve,
+            pinned::pinned_probe,
+            pinned::pinned_proxy,
+            nearby::nearby_hosts,
             serve_discovery::forge_binary_available,
             serve_discovery::start_forge_serve,
             serve_discovery::system_host_name,

@@ -115,6 +115,7 @@ mod serve_keybindings;
 mod serve_lifecycle;
 mod serve_media;
 mod serve_onboarding;
+mod serve_pairing;
 mod serve_pr;
 mod serve_pr_watch;
 mod serve_recovery;

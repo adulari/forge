@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseConnectUrl } from "./connectUrl";
+import { composeManualLink, describeConnectTarget, normalizeFingerprint, parseConnectUrl } from "./connectUrl";
 
 describe("Forge server URLs", () => {
   it("normalizes connect links and preserves token-scoped paths", () => {
@@ -17,5 +17,60 @@ describe("Forge server URLs", () => {
   it("rejects unsafe schemes and malformed credentials", () => {
     expect(parseConnectUrl("javascript://forge/aabbccddeeff0011")).toBeNull();
     expect(parseConnectUrl("https://forge.example/not-a-token")).toBeNull();
+  });
+});
+
+describe("pairing link with a pinned certificate", () => {
+  const token = "a".repeat(32);
+  const hex = "ab".repeat(32);
+
+  it("parses the fragment form and keeps the pin", () => {
+    const parsed = parseConnectUrl(`https://192.168.1.5:7420/#token=${token}&fp=sha256:${hex}`);
+    expect(parsed).toEqual({
+      baseUrl: `https://192.168.1.5:7420/${token}`,
+      token,
+      host: "192.168.1.5:7420",
+      fingerprint: `sha256:${hex}`,
+    });
+  });
+
+  it("still parses the path form, without a pin", () => {
+    const parsed = parseConnectUrl(`https://box.ts.net/${token}`);
+    expect(parsed?.fingerprint).toBeUndefined();
+    expect(parsed?.baseUrl).toBe(`https://box.ts.net/${token}`);
+  });
+
+  it("accepts colon-separated uppercase fingerprints", () => {
+    const colon = hex.toUpperCase().match(/../g)!.join(":");
+    expect(normalizeFingerprint(colon)).toBe(`sha256:${hex}`);
+  });
+
+  it("rejects a malformed pin instead of silently dropping it", () => {
+    expect(parseConnectUrl(`https://h:7420/#token=${token}&fp=sha256:zz`)).toBeNull();
+    expect(parseConnectUrl(`https://h:7420/#token=short`)).toBeNull();
+  });
+
+  it("describes the target from the parsed host", () => {
+    const plain = parseConnectUrl(`http://192.168.1.5:7420/${token}`)!;
+    expect(describeConnectTarget(plain)).toMatchObject({ cleartext: true, private: true, lookalike: false, pinned: false });
+    const lookalike = parseConnectUrl(`https://xn--forge-9ua.example/${token}`)!;
+    expect(describeConnectTarget(lookalike).lookalike).toBe(true);
+    const pinned = parseConnectUrl(`https://10.0.0.2:7420/#token=${token}&fp=sha256:${hex}`)!;
+    expect(describeConnectTarget(pinned).pinned).toBe(true);
+  });
+});
+
+describe("manual pairing link", () => {
+  const token = "c".repeat(32);
+
+  it("builds a link the parser accepts, with the nearby pin", () => {
+    const fp = `sha256:${"ef".repeat(32)}`;
+    const link = composeManualLink(" https://192.168.1.20/ ", "7420", token, fp);
+    expect(parseConnectUrl(link ?? "")).toMatchObject({ host: "192.168.1.20:7420", token, fingerprint: fp });
+  });
+
+  it("needs a host and a token", () => {
+    expect(composeManualLink("", "7420", token)).toBeNull();
+    expect(composeManualLink("host", "7420", " ")).toBeNull();
   });
 });

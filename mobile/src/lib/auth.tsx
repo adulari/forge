@@ -18,6 +18,7 @@ import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
 import { applyServerIdentity, reconcileAnywhereHosts, repointMovedDaemons, selectActiveServerAfterSync, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
 import { detectForgeServe } from "./desktopServe";
+import { probePin, registerPin } from "./pinnedLan";
 import { onRediscoverRequested } from "./hostDiscovery";
 import { readServers, writeServers, type KeyValueStore } from "./serverStoreJournal";
 export { parseConnectUrl, type ParsedConnectUrl } from "./connectUrl";
@@ -34,6 +35,7 @@ export type ConnectTestState =
   | "testing"
   | "ok"
   | "bad-token"
+  | "cert-changed"
   | "unreachable"
   | "server-error";
 
@@ -66,7 +68,7 @@ interface AuthContextValue {
   pair: (connectUrl: string) => Promise<void>;
   /** @deprecated legacy single-server alias for `removeServer(activeServerId)`. */
   forget: () => Promise<void>;
-  testConnection: (candidateBaseUrl?: string) => Promise<ConnectTestState>;
+  testConnection: (candidateBaseUrl?: string, fingerprint?: string) => Promise<ConnectTestState>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -133,6 +135,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (cancelled) return;
         const resolvedActive =
           active && list.some((s) => s.id === active) ? active : (list[0]?.id ?? null);
+        for (const server of list) void registerPin(server.baseUrl, server.fingerprint);
         setServers(list);
         setActiveServerId(resolvedActive);
       } catch (err) {
@@ -182,7 +185,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         token: parsed.token,
         host: parsed.host,
         addedAt: Date.now(),
+        ...(parsed.fingerprint ? { fingerprint: parsed.fingerprint } : {}),
       };
+      await registerPin(server.baseUrl, server.fingerprint);
       try {
         server = applyServerIdentity(server, await getIdentity(parsed.baseUrl));
       } catch {
@@ -297,9 +302,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const testConnection = useCallback(
-    async (candidateBaseUrl?: string): Promise<ConnectTestState> => {
+    async (candidateBaseUrl?: string, fingerprint?: string): Promise<ConnectTestState> => {
       const target = candidateBaseUrl ?? activeServer?.baseUrl;
       if (!target) return "unreachable";
+      const pin = fingerprint ?? (candidateBaseUrl ? undefined : activeServer?.fingerprint);
+      if (pin && isTauri) {
+        const pinned = await probePin(target, pin);
+        if (pinned === "mismatch") return "cert-changed";
+        if (pinned === "match") await registerPin(target, pin);
+      }
       try {
         await probeConnection(target);
         return "ok";

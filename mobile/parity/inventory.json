@@ -772,5 +772,53 @@
     "platform": "desktop",
     "reason": "the desktop app keeps the expanded workbench layout at medium window widths; web and phones keep the 1024 threshold",
     "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/fleet/OfflineHosts.tsx",
+    "platform": "desktop",
+    "reason": "Certificate-changed check runs only in the Tauri shell, which owns pinning.",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/pairing/ConfirmTargetCard.tsx",
+    "platform": "android",
+    "reason": "Android adds a local-network permission note for LAN hosts.",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/pairing/InstallHint.web.tsx",
+    "platform": "web",
+    "reason": "PWA install button and iOS Add-to-Home-Screen hint exist only in the browser.",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/pairing/NearbyHosts.tsx",
+    "platform": "desktop",
+    "reason": "Nearby mDNS hosts come from the Tauri shell; native pinning and Nearby need a later native build.",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/pairingLocation.ts",
+    "platform": "web",
+    "reason": "Reads and strips the pairing token in the browser address bar.",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/pinnedLan.test.ts",
+    "platform": "desktop",
+    "reason": "Exercises the Tauri-only pinned-proxy routing.",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/pinnedLan.ts",
+    "platform": "desktop",
+    "reason": "Certificate pinning for --lan daemons goes through the Tauri shell; iOS and Android need a native module.",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/qrImage.web.ts",
+    "platform": "web",
+    "reason": "Decoding a QR from a photo uses the browser BarcodeDetector and a file picker.",
+    "category": "capability"
   }
 ]

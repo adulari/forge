@@ -330,6 +330,11 @@ pub struct RemoteConfig {
     /// (`ngrok http --domain=<hostname> <port>`, needs a domain reserved on the ngrok account).
     #[serde(default)]
     pub tunnel_hostname: Option<String>,
+    /// An externally managed HTTPS origin that reaches this daemon (a reverse proxy, a Tailscale
+    /// Funnel, a fixed domain). When set, pairing links and QR codes point here instead of the
+    /// LAN address, and the daemon expects the proxy to terminate a trusted certificate.
+    #[serde(default)]
+    pub public_url: Option<String>,
     /// Directories the remote project browser may enumerate. Paths are canonicalized at daemon
     /// startup; missing/unreadable entries are ignored. The daemon working directory is always
     /// included even when this list is empty. Use this to expose a parent such as `~/Projects`
@@ -394,6 +399,7 @@ impl Default for RemoteConfig {
             port: None,
             tunnel_name: None,
             tunnel_hostname: None,
+            public_url: None,
             project_roots: Vec::new(),
             publish_local_runs: default_true(),
             publish_local_sessions: default_true(),

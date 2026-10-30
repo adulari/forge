@@ -277,8 +277,12 @@ pub(crate) async fn open_store_or_recover(
     let (transport, tls) = match cert_host {
         None => (Transport::Plain, None),
         Some(host) => {
-            let cert = crate::remote::generate_self_signed(vec![host, "localhost".to_string()])
-                .map_err(|e| anyhow::anyhow!("self-signed cert generation failed: {e}"))?;
+            let dir = forge_config::config_dir()
+                .ok_or_else(|| anyhow::anyhow!("no config directory on this platform"))?;
+            let cert = crate::serve_pairing::load_or_create_cert(
+                &dir,
+                vec![host, "localhost".to_string()],
+            )?;
             (Transport::Tls, Some((cert.cert_pem, cert.key_pem)))
         }
     };
