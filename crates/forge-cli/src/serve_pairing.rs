@@ -221,6 +221,43 @@ pub(crate) fn tailscale_serve(port: u16) -> Result<String> {
     Ok(format!("https://{dns_name}"))
 }
 
+pub(crate) fn lan_cert(cert_host: Option<&str>) -> Result<Option<SelfSignedCert>> {
+    let Some(host) = cert_host else {
+        return Ok(None);
+    };
+    let dir = forge_config::config_dir().context("no config directory on this platform")?;
+    load_or_create_cert(&dir, vec![host.to_string(), "localhost".to_string()]).map(Some)
+}
+
+/// Link printed and shown as the QR: Tailscale origin, then `[remote] public_url`, then the
+/// pinned LAN link, then the plain URL.
+pub(crate) fn connect_link(
+    tailscale: bool,
+    port: u16,
+    public_url: Option<&str>,
+    lan_origin: &str,
+    token: &str,
+    lan_fingerprint: Option<&str>,
+    fallback: &str,
+) -> String {
+    if tailscale {
+        match tailscale_serve(port) {
+            Ok(origin) => {
+                println!("  tailscale: serving {origin} (trusted certificate)");
+                return pairing_link(&origin, token, None);
+            }
+            Err(e) => eprintln!("⚠ --tailscale: {e:#}"),
+        }
+    }
+    if let Some(public) = public_url.filter(|u| !u.trim().is_empty()) {
+        return pairing_link(public, token, None);
+    }
+    match lan_fingerprint {
+        Some(fp) => pairing_link(lan_origin, token, Some(fp)),
+        None => fallback.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

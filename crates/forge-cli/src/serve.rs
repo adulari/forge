@@ -630,16 +630,7 @@ pub(crate) async fn serve_cmd(
 
     let cert_host = (!(local || anywhere))
         .then(|| remote::lan_display_host(config.remote.host.as_deref(), addr));
-    let lan_cert = match &cert_host {
-        Some(host) => {
-            let dir = forge_config::config_dir().context("no config directory on this platform")?;
-            Some(crate::serve_pairing::load_or_create_cert(
-                &dir,
-                vec![host.clone(), "localhost".to_string()],
-            )?)
-        }
-        None => None,
-    };
+    let lan_cert = crate::serve_pairing::lan_cert(cert_host.as_deref())?;
     let store = Arc::new(
         crate::serve_recovery::open_store_or_recover(&listener, &format!("/{token}"), cert_host)
             .await?,
@@ -746,7 +737,6 @@ pub(crate) async fn serve_cmd(
     // terminates TLS at the provider). The socket was bound above.
     let mut tunnel_child = None;
     let lan_fingerprint = lan_cert.as_ref().map(|c| c.fingerprint.clone());
-    let mut link_override: Option<String> = None;
     let url = if anywhere {
         let kind =
             remote::resolve_tunnel_kind(&config.remote).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -769,36 +759,16 @@ pub(crate) async fn serve_cmd(
         let host = remote::lan_display_host(config.remote.host.as_deref(), addr);
         format!("https://{host}:{}/{token}", addr.port())
     };
-    if tailscale && !(local || anywhere) {
-        match crate::serve_pairing::tailscale_serve(addr.port()) {
-            Ok(origin) => {
-                println!("  tailscale: serving {origin} (trusted certificate)");
-                link_override = Some(crate::serve_pairing::pairing_link(&origin, &token, None));
-            }
-            Err(e) => eprintln!("⚠ --tailscale: {e:#}"),
-        }
-    }
-    if link_override.is_none() {
-        if let Some(public) = config
-            .remote
-            .public_url
-            .as_deref()
-            .filter(|u| !u.trim().is_empty())
-        {
-            link_override = Some(crate::serve_pairing::pairing_link(public, &token, None));
-        }
-    }
-    let connect_link = link_override.unwrap_or_else(|| match &lan_fingerprint {
-        Some(fp) => {
-            let host = remote::lan_display_host(config.remote.host.as_deref(), addr);
-            crate::serve_pairing::pairing_link(
-                &format!("https://{host}:{}", addr.port()),
-                &token,
-                Some(fp),
-            )
-        }
-        None => url.clone(),
-    });
+    let lan_base = remote::lan_display_host(config.remote.host.as_deref(), addr);
+    let connect_link = crate::serve_pairing::connect_link(
+        tailscale && !(local || anywhere),
+        addr.port(),
+        config.remote.public_url.as_deref(),
+        &format!("https://{lan_base}:{}", addr.port()),
+        &token,
+        lan_fingerprint.as_deref(),
+        &url,
+    );
     let _advertisement = lan_fingerprint.as_deref().and_then(|fp| {
         crate::serve_pairing::advertise(addr.port(), &crate::serve_pairing::host_id(), fp)
     });
