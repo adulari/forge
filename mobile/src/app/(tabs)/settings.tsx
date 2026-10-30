@@ -73,6 +73,7 @@ import {
 } from "../../lib/anonymousTelemetry";
 import { REPORTING_MODES, setReportingMode, useReporting, type ReportingMode } from "../../lib/reporting";
 import { ReportProblemSheet, WhatGetsSentSheet } from "../../components/ReportingUi";
+import { ActivityCard } from "../../components/usage/ActivityCard";
 import { useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { catalogModels } from "../../lib/modelCatalog";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
@@ -653,6 +654,7 @@ export function SettingsScreen() {
 
         <View>
           <SectionHeader>Forge</SectionHeader>
+          <ActivityCard />
           <NavListRow label="Forge Anywhere" meta={anywhereMetaLabel} onPress={() => router.push("/anywhere")} />
           <NavListRow label="Usage" meta={usageWeekLabel} onPress={() => router.push("/usage")} />
           <NavListRow label="Providers & accounts" meta={providersConfiguredLabel} onPress={() => router.push("/providers")} />

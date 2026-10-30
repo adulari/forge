@@ -1,6 +1,6 @@
-import { Cpu } from "lucide-react-native";
+import { Cpu, Eye, EyeOff } from "lucide-react-native";
 import React, { memo, useCallback, useMemo, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { UsageRing } from "../components/shell/UsageRing";
@@ -12,7 +12,10 @@ import { BoundedList } from "../components/ds/BoundedList";
 import { Segmented } from "../components/ds/Segmented";
 import { useSessions, useUsage } from "../lib/queries";
 import { buildProviderBlocks, isModelScopedWindow, isSubscription, quotaAccount, kindLabel, priceLabel, quotaSummary, quotaTiming, windowLabel, windowShortLabel, type DisplayQuota, type ProviderBlock } from "../lib/usageWindows";
-import { paceAnnotation } from "../lib/usagePace";
+import { paceAnnotation, projectedFraction } from "../lib/usagePace";
+import { ActivityTab } from "../components/usage/ActivityTab";
+import { setProviderHidden, useHiddenProviders } from "../lib/usageHiddenProviders";
+import { useUsageActivity } from "../lib/useUsageActivity";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
@@ -35,7 +38,7 @@ function pacingAnnotation(quota: DisplayQuota): { text: string; over: boolean } 
   return { text: pacing.summary, over: pacing.overPace && !pacing.usedNominalFallback };
 }
 
-const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: { item: ProviderBlock; showSeparator: boolean; nowSec: number }) {
+const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec, hidden }: { item: ProviderBlock; showSeparator: boolean; nowSec: number; hidden: boolean }) {
   const tokens = useTokens();
   const price = priceLabel(item);
   const billed = price.startsWith("$");
@@ -45,6 +48,9 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
         <Text style={[styles.providerName, { color: tokens.ink }]} numberOfLines={1}>{item.provider}</Text>
         <Badge label={kindLabel(item.kind)} tone={kindTone(item.kind) as never} lowercase />
         <Text style={[styles.price, tabularNums, { color: billed ? tokens.success : tokens.ink3 }]}>{price}</Text>
+        <Pressable onPress={() => void setProviderHidden(item.provider, !hidden)} style={styles.hideBtn} accessibilityRole="button" accessibilityLabel={hidden ? `Show ${item.provider}` : `Hide ${item.provider}`}>
+          {hidden ? <EyeOff size={14} color={tokens.ink4} /> : <Eye size={14} color={tokens.ink4} />}
+        </Pressable>
       </View>
       {item.usage ? (
         <Text style={[styles.detail, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>
@@ -56,12 +62,16 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
         const right = quotaSummary(quota, nowSec);
         const pace = paceAnnotation(quota, nowSec);
         const pacing = pacingAnnotation(quota);
+        const projected = projectedFraction(quota, nowSec);
+        const ghostFrom = Math.min(100, Math.max(0, (quota.fraction ?? 0) * 100));
+        const ghostTo = projected == null ? 0 : Math.min(100, projected * 100);
         return (
           <View key={quota.windowKind}>
             <View style={styles.quota} accessibilityLabel={`${windowLabel(quota.windowKind)} window ${right}`}>
               <Text style={[styles.quotaLabel, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{windowShortLabel(quota.windowKind)}</Text>
               <View style={[styles.track, { backgroundColor: tokens.border }]}>
-                <View style={[styles.fill, { width: `${Math.min(100, Math.max(0, (quota.fraction ?? 0) * 100))}%`, backgroundColor: barColor }]} />
+                {ghostTo > ghostFrom ? <View testID="usage-ghost" style={[styles.ghost, { left: `${ghostFrom}%`, width: `${ghostTo - ghostFrom}%`, backgroundColor: barColor }]} /> : null}
+                <View style={[styles.fill, { width: `${ghostFrom}%`, backgroundColor: barColor }]} />
               </View>
               <Text style={[styles.quotaPct, tabularNums, { color: quota.seen ? tokens.ink2 : tokens.ink4, fontFamily: monoFamily.regular }]} numberOfLines={1}>{quota.fraction == null ? "unknown" : `${Math.round(quota.fraction * 100)}%`}</Text>
             </View>
@@ -89,6 +99,10 @@ const ProviderRow = memo(function ProviderRow({ item, showSeparator, nowSec }: {
 function UsageScreenBody() {
   const tokens = useTokens();
   const [window, setWindow] = useState<"week" | "session">("week");
+  const [view, setView] = useState<"overview" | "activity">("overview");
+  const [showHidden, setShowHidden] = useState(false);
+  const hiddenProviders = useHiddenProviders();
+  const activity = useUsageActivity();
   const { data: sessions } = useSessions();
   const sessionId = sessions?.find((session) => session.busy)?.id ?? sessions?.[0]?.id;
   const query = useUsage(sessionId);
@@ -104,8 +118,10 @@ function UsageScreenBody() {
   // Merge token usage + quota windows into one provider list: a provider with a live quota
   // window but zero recorded tokens (fresh daemon, subscription bridges) still gets a block —
   // previously the quota data was invisible until usage.providers had entries.
-  const providers = useMemo(() => buildProviderBlocks(selected?.providers, quotaRows), [selected?.providers, quotaRows]);
-  const renderItem = useCallback(({ item, index }: { item: ProviderBlock; index: number }) => <ProviderRow item={item} showSeparator={index < providers.length - 1} nowSec={nowSec} />, [providers.length, nowSec]);
+  const allProviders = useMemo(() => buildProviderBlocks(selected?.providers, quotaRows), [selected?.providers, quotaRows]);
+  const providers = useMemo(() => (showHidden ? allProviders : allProviders.filter((item) => !hiddenProviders.includes(item.provider))), [allProviders, hiddenProviders, showHidden]);
+  const hiddenCount = allProviders.length - allProviders.filter((item) => !hiddenProviders.includes(item.provider)).length;
+  const renderItem = useCallback(({ item, index }: { item: ProviderBlock; index: number }) => <ProviderRow item={item} showSeparator={index < providers.length - 1} nowSec={nowSec} hidden={hiddenProviders.includes(item.provider)} />, [providers.length, nowSec, hiddenProviders]);
   const keyExtractor = useCallback((item: ProviderBlock) => `${item.kind}:${item.provider}`, []);
   // The binding constraint, not an average: the fullest subscription window is what
   // actually gates the next turn.
@@ -124,8 +140,10 @@ function UsageScreenBody() {
       <BackLink />
       <Text style={[type.title, { color: tokens.ink }]}>Usage</Text>
       <Text style={[styles.subtitle, { color: tokens.ink3 }]}>A clear read on your Forge consumption.</Text>
-      <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} />
-      {!isLoading && !isError && selected ? <View style={styles.hero}>
+      <Segmented options={[{ value: "overview", label: "Overview" }, { value: "activity", label: "Activity" }]} value={view} onChange={setView} />
+      {view === "activity" ? <ActivityTab rows={activity.data?.days} loading={activity.isLoading} failed={activity.isError} /> : null}
+      {view === "overview" ? <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} /> : null}
+      {view === "overview" && !isLoading && !isError && selected ? <View style={styles.hero}>
         {/* D/M Settings Usage ring (4px stroke, r=18 in a 44 viewBox) — reuses the shell's
             shared UsageRing (components/shell/UsageRing.tsx) rather than a second local
             SVG-ring implementation, so this page's ring and the shell's per-provider rings
@@ -146,17 +164,18 @@ function UsageScreenBody() {
           </Text>
         </View>
       </View> : null}
-      {isLoading ? <Text style={[styles.empty, { color: tokens.ink3 }]}>Loading usage…</Text> : null}
-      {isError ? <Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text> : null}
-      {window === "session" && !selected && !isLoading && !isError ? <Text style={[styles.empty, { color: tokens.ink2 }]}>No session usage is available yet. Start or open a session to see its activity.</Text> : null}
-      {providers.length > 0 ? <Text style={[type.section, styles.providersLabel, { color: tokens.ink4 }]}>providers</Text> : null}
+      {view === "overview" && isLoading ? <Text style={[styles.empty, { color: tokens.ink3 }]}>Loading usage…</Text> : null}
+      {view === "overview" && isError ? <Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text> : null}
+      {view === "overview" && window === "session" && !selected && !isLoading && !isError ? <Text style={[styles.empty, { color: tokens.ink2 }]}>No session usage is available yet. Start or open a session to see its activity.</Text> : null}
+      {view === "overview" && providers.length > 0 ? <Text style={[type.section, styles.providersLabel, { color: tokens.ink4 }]}>providers</Text> : null}
+      {view === "overview" && hiddenCount > 0 ? <Pressable onPress={() => setShowHidden((value) => !value)} accessibilityRole="button"><Text style={[type.monoMeta, { color: tokens.ink3 }]}>{showHidden ? "Hide hidden providers" : `${hiddenCount} hidden · show`}</Text></Pressable> : null}
     </View>
-  ), [apiCostUsd, combinedSubscriptionPercent, fullest, sessionTitle, hasMeteredApi, isError, isLoading, providers.length, selected, tokens, totalTokens, usageLabel, window]);
-  const empty = isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
+  ), [activity.data?.days, activity.isError, activity.isLoading, hiddenCount, showHidden, view, apiCostUsd, combinedSubscriptionPercent, fullest, sessionTitle, hasMeteredApi, isError, isLoading, providers.length, selected, tokens, totalTokens, usageLabel, window]);
+  const empty = isLoading || view === "activity" ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
 
   return (
     <Screen scroll={false} contentContainerStyle={styles.screen}>
-      <BoundedList data={providers} renderItem={renderItem} keyExtractor={keyExtractor} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={pull.refreshing} onRefresh={pull.onRefresh} contentContainerStyle={styles.content} />
+      <BoundedList data={view === "activity" ? [] : providers} renderItem={renderItem} keyExtractor={keyExtractor} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={pull.refreshing} onRefresh={pull.onRefresh} contentContainerStyle={styles.content} />
     </Screen>
   );
 }
@@ -194,6 +213,8 @@ const styles = StyleSheet.create({
   quotaTiming: { paddingLeft: 48, marginTop: 2 },
   track: { flex: 1, height: 3, borderRadius: 2, overflow: "hidden" },
   fill: { height: "100%", borderRadius: 2 },
+  ghost: { position: "absolute", top: 0, bottom: 0, opacity: 0.3 },
+  hideBtn: { padding: space.space4 },
   paceRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: 3, paddingLeft: 48 },
   paceDot: { width: 5, height: 5, borderRadius: 2.5 },
   empty: { fontSize: 15, lineHeight: 21 },

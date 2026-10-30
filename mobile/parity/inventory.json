@@ -708,6 +708,12 @@
     "category": "behavior"
   },
   {
+    "file": "mobile/src/lib/usageShareCard.web.ts",
+    "platform": "web",
+    "reason": "web draws the share card on a canvas and downloads a PNG; native shares the text summary",
+    "category": "capability"
+  },
+  {
     "file": "mobile/src/lib/useFinePointer.ts",
     "platform": "web",
     "reason": "hover affordances (the prompt rail) need a precise pointer; read from matchMedia on web and always absent on a phone",

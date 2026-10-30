@@ -29,6 +29,7 @@ pub(crate) mod service_report;
 pub(crate) mod skill;
 pub(crate) mod stats;
 mod stats_codemode;
+mod stats_poster;
 pub(crate) mod switch;
 #[cfg(test)]
 mod tests;

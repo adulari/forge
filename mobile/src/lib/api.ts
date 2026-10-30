@@ -331,6 +331,8 @@ export interface UsageResponse {
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
   quota: UsageQuota[];
 }
+export interface UsageActivityDay { day: string; provider: string; inputTokens: number; outputTokens: number; costUsd: number; calls: number }
+export interface UsageActivityResponse { utcOffsetSecs: number; sinceEpoch: number; days: UsageActivityDay[] }
 export interface UsageTotals { inputTokens: number; cachedInputTokens: number; outputTokens: number; costUsd: number }
 export interface UsageProvider extends UsageTotals { provider: string; kind: "bridge" | "oauth" | "api" }
 export interface UsageQuota {
@@ -1252,6 +1254,10 @@ export function deleteSchedule(baseUrl: string, id: string): Promise<DeleteSched
 
 export function getChangelog(baseUrl: string, limit?: number): Promise<ChangelogRelease[]> {
   return request(baseUrl, `/api/changelog${qs({ limit })}`);
+}
+
+export function getUsageActivity(baseUrl: string, days = 365, tzOffsetSecs = -new Date().getTimezoneOffset() * 60): Promise<UsageActivityResponse> {
+  return request(baseUrl, `/api/usage/activity${qs({ days, tzOffset: tzOffsetSecs })}`);
 }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {

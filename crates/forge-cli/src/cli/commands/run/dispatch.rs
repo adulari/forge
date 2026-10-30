@@ -827,6 +827,15 @@ and keep going."
         }
         // `/export [path]` — render THIS session's transcript to one self-contained HTML file.
         CommandAction::Export(path_arg) => return export_cmd(session, path_arg, app).await,
+        CommandAction::Stats(days) => {
+            let text = match crate::open_store().and_then(|store| {
+                super::super::stats_poster::run(&store, days.unwrap_or(365), None)
+            }) {
+                Ok(text) => text,
+                Err(error) => format!("stats unavailable: {error}"),
+            };
+            emit_text(tui, app, &text);
+        }
         CommandAction::Usage => {
             // Open immediately with fast session data; bridge stats load in background.
             let (
