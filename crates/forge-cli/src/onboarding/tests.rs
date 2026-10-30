@@ -20,10 +20,10 @@ fn the_suggested_local_model_fits_the_machine_and_stays_under_32b() {
 
 #[test]
 fn the_automatic_trigger_is_a_no_op_under_mock_and_after_its_first_attempt() {
-    assert!(!maybe_open(true).unwrap());
+    assert!(!maybe_open(true, false).unwrap());
     AUTO_ATTEMPTED.store(true, Ordering::SeqCst);
     assert!(
-        !maybe_open(false).unwrap(),
+        !maybe_open(false, false).unwrap(),
         "already attempted in this process"
     );
     AUTO_ATTEMPTED.store(false, Ordering::SeqCst);

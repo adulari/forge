@@ -41,13 +41,15 @@ pub(crate) fn setup(invoked_as: &str) -> Result<()> {
 
 /// The automatic trigger, for every entry point that is about to start a session. A no-op off a
 /// terminal, under `--mock`, with `FORGE_NO_SETUP`, once it ran in this process, and whenever
-/// the state file says everything is current.
-pub(crate) fn maybe_open(mock: bool) -> Result<bool> {
+/// the state file says everything is current. Resuming an existing session never opens the full
+/// flow (it would sit in front of the work being resumed); the reconnect card still applies.
+pub(crate) fn maybe_open(mock: bool, resuming: bool) -> Result<bool> {
     if mock || AUTO_ATTEMPTED.swap(true, Ordering::SeqCst) {
         return Ok(false);
     }
     let host: Arc<dyn Host> = Arc::new(CliHost);
     match start(host, Surface::Tui, false) {
+        Start::Run(_) if resuming => reconnect_card()?,
         Start::Run(session) => {
             let outcome = runner::run(*session, true, false)?;
             print_closing(&outcome, false);
