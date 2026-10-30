@@ -53,6 +53,25 @@ Prevention lives in the code too: a `debug_assertions` build resolves to `forge-
 than the release store, so `cargo run` and `target/debug/forge` are isolated by default. Treat that
 as a backstop, not a reason to drop the rules above — a release-profile build ignores it.
 
+## Every feature gets a UI on every surface
+
+Any user-facing capability — a CLI subcommand, a slash command, a config switch, a status
+readout — ships with a real UI on all three surfaces in the same change or a linked follow-up
+landed before release:
+
+- **TUI**: an interactive overlay or menu (navigable with arrows/Enter/Esc, searchable when the
+  list is long, live status, confirmations for destructive actions), not only a slash command that
+  prints text. A command may open the UI; it must not be the only way in.
+- **Desktop and web**: a page or panel reachable from Settings or the relevant screen, plus the
+  command palette.
+- **Mobile**: the same page at phone width. A feature that is meaningless on a phone (for example
+  storing secrets on a controller-only device) still gets a read-only view that says why.
+
+A surface may be skipped only for a specific, written reason (in the PR body and, when lasting,
+in the feature's doc), such as a capability the platform cannot offer. "Can be done from the CLI"
+is not a reason. Match the existing design system on each surface (`crates/forge-tui/src/theme`,
+`mobile/src/components/ds`) and verify each UI live before merging.
+
 ## Conventions
 
 - Keep changes focused and explicit; comments should explain why rather than restate code.
