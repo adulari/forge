@@ -6,10 +6,18 @@ import {
   classifyAccountSyncError,
   syncHubMeta,
   syncNeedsAttention,
+  syncPillModel,
   toggleLockReason,
   withCategoryEnabled,
 } from "./accountSync";
-import { ApiError, type AccountSyncCategory, type AccountSyncStatus } from "./api";
+import type { AccountSyncCategory, AccountSyncStatus } from "./api";
+
+const ApiError = class extends Error {
+  name = "ApiError";
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+};
 
 const NOW = 1_800_000_000_000;
 const category = (patch: Partial<AccountSyncCategory> = {}): AccountSyncCategory => ({
@@ -70,5 +78,23 @@ describe("misc", () => {
     expect(syncNeedsAttention(status([category()], { last_error: "x" }))).toBe(false);
     const next = withCategoryEnabled(status([category()]), "skills", true);
     expect(next.categories[0].enabled).toBe(true);
+  });
+});
+
+describe("syncPillModel", () => {
+  const on = (patch: Partial<AccountSyncCategory> = {}) => category({ enabled: true, ...patch });
+  it("hides when signed out or unknown", () => {
+    expect(syncPillModel(undefined)).toBeNull();
+    expect(syncPillModel(status([on()], { signed_in: false }))).toBeNull();
+  });
+  it("covers every state in priority order", () => {
+    expect(syncPillModel(status([category()]))?.label).toBe("Sync off");
+    expect(syncPillModel(status([on()]), NOW)).toMatchObject({ label: "Synced", tone: "success" });
+    expect(syncPillModel(status([on()]), NOW)?.description).toContain("2m ago");
+    expect(syncPillModel(status([on({ pending: 2 }), on({ id: "mcp", pending: 1 })]))).toMatchObject({ label: "3 pending", tone: "neutral" });
+    expect(syncPillModel(status([on({ conflicts: [{ item: "a", detail: "b" }] })]))).toMatchObject({ label: "1 conflict", tone: "warn" });
+    expect(syncPillModel(status([on()], { sign_ins: [{ provider: "codex", label: "Codex", command: "x" }] }))).toMatchObject({ label: "Sign in needed", tone: "warn" });
+    expect(syncPillModel(status([on({ conflicts: [{ item: "a", detail: "b" }] })], { last_error: "offline" }))).toMatchObject({ label: "Sync error", tone: "danger" });
+    expect(syncPillModel(status([category({ pending: 4 })]))?.label).toBe("Sync off");
   });
 });

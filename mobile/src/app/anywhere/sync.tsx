@@ -19,6 +19,8 @@ import {
   ageLabel,
   categoryStatusLine,
   classifyAccountSyncError,
+  syncHubMeta,
+  syncPillModel,
   toggleLockReason,
 } from "../../lib/accountSync";
 import type { AccountSyncCategory } from "../../lib/api";
@@ -55,6 +57,7 @@ export default function AnywhereSyncScreen() {
     );
   };
 
+  const pill = syncPillModel(status);
   const problem = query.isError ? classifyAccountSyncError(query.error) : null;
 
   return (
@@ -63,6 +66,12 @@ export default function AnywhereSyncScreen() {
         <View style={styles.column}>
           <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
           <Text style={[typeScale.title, { color: tokens.ink }]}>Sync across machines</Text>
+          {pill ? (
+            <View style={styles.statusLine} accessibilityLabel={pill.description}>
+              <View style={[styles.statusDot, { backgroundColor: pill.tone === "success" ? tokens.success : pill.tone === "warn" ? tokens.warn : pill.tone === "danger" ? tokens.danger : tokens.ink4 }]} />
+              <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{syncHubMeta(status)}</Text>
+            </View>
+          ) : null}
           <Text style={[typeScale.sub, { color: tokens.ink2 }]}>{EXPLAINER}</Text>
 
           {query.isLoading ? <Skeleton height={220} /> : null}
@@ -265,6 +274,8 @@ function CategoryRow({
 const styles = StyleSheet.create({
   content: { paddingTop: space.space24, paddingBottom: space.space32 },
   column: { gap: space.space16, width: "100%", maxWidth: 720 },
+  statusLine: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  statusDot: { width: 6, height: 6, borderRadius: 3 },
   sectionNote: { paddingHorizontal: space.space4, paddingBottom: space.space8 },
   categoryTop: { flexDirection: "row", alignItems: "center", gap: space.space12, paddingHorizontal: space.space16, paddingVertical: space.space12 },
   categoryCopy: { flex: 1, gap: 2 },

@@ -293,7 +293,7 @@ export function useApplyDaemonUpdate() {
 }
 
 /** Account-sync status. An older daemon answers 404 and a signed-out one still answers 200, so
- * neither retries; while any category is on, status is re-read often enough to show progress. */
+ * neither retries; while any category is on, status is re-read every 30s (the title-bar pill shares this query; background tabs pause). */
 export function useAccountSync(enabled = true) {
   const { baseUrl } = useAuth();
   return useQuery<AccountSyncStatus>({
@@ -302,7 +302,7 @@ export function useAccountSync(enabled = true) {
     enabled: enabled && baseUrl != null,
     staleTime: 10_000,
     refetchInterval: (query) =>
-      query.state.data?.categories.some((category) => category.enabled) ? 15_000 : 60_000,
+      query.state.data?.categories.some((category) => category.enabled) ? 30_000 : 60_000,
     retry: false,
   });
 }

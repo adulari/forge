@@ -1,13 +1,23 @@
-import { ApiError, type AccountSyncCategory, type AccountSyncStatus } from "./api";
-import { formatRelativeTime } from "../theme/typography";
+import type { AccountSyncCategory, AccountSyncStatus } from "./api";
+
+function formatRelativeTime(fromMs: number, nowMs: number): string {
+  const seconds = Math.max(0, Math.round((nowMs - fromMs) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
 
 export type AccountSyncProblem = "old-daemon" | "unreachable" | "error";
 
 /** A 404 from a reachable daemon means it predates account sync. */
 export function classifyAccountSyncError(error: unknown): { kind: AccountSyncProblem; message: string } {
-  if (error instanceof ApiError) {
-    if (error.status === 404) return { kind: "old-daemon", message: "Update Forge on this machine to use sync." };
-    if (error.status === 0) return { kind: "unreachable", message: error.message };
+  if (error instanceof Error && error.name === "ApiError" && typeof (error as { status?: unknown }).status === "number") {
+    const { status } = error as Error & { status: number };
+    if (status === 404) return { kind: "old-daemon", message: "Update Forge on this machine to use sync." };
+    if (status === 0) return { kind: "unreachable", message: error.message };
     return { kind: "error", message: error.message };
   }
   return { kind: "error", message: error instanceof Error ? error.message : "Sync status could not be read." };
@@ -67,4 +77,36 @@ export function syncNeedsAttention(status: AccountSyncStatus | undefined): boole
 /** Replace one category's switch in a status snapshot (used for optimistic display). */
 export function withCategoryEnabled(status: AccountSyncStatus, id: string, enabled: boolean): AccountSyncStatus {
   return { ...status, categories: status.categories.map((category) => (category.id === id ? { ...category, enabled } : category)) };
+}
+
+export type SyncPillTone = "muted" | "success" | "neutral" | "warn" | "danger";
+
+export interface SyncPillModel {
+  label: string;
+  tone: SyncPillTone;
+  /** Full sentence for the tooltip and screen readers. */
+  description: string;
+}
+
+/** The title-bar pill: null (hidden) unless this machine is signed in to Anywhere. */
+export function syncPillModel(status: AccountSyncStatus | undefined, nowMs = Date.now()): SyncPillModel | null {
+  if (!status || !status.signed_in) return null;
+  const enabled = status.categories.filter((category) => category.enabled);
+  const conflicts = enabled.reduce((sum, category) => sum + category.conflicts.length, 0);
+  const pending = enabled.reduce((sum, category) => sum + category.pending, 0);
+  const synced = `Last sync ${ageLabel(status.last_sync_at, nowMs)}`;
+  if (status.last_error && enabled.length > 0) {
+    return { label: "Sync error", tone: "danger", description: `Sync error: ${status.last_error}` };
+  }
+  if (conflicts > 0) {
+    return { label: `${conflicts} ${conflicts === 1 ? "conflict" : "conflicts"}`, tone: "warn", description: `${conflicts} sync conflicts to review. ${synced}` };
+  }
+  if (status.sign_ins.length > 0) {
+    return { label: "Sign in needed", tone: "warn", description: `Sign in to ${status.sign_ins.map((s) => s.label).join(", ")} on this machine` };
+  }
+  if (enabled.length === 0) return { label: "Sync off", tone: "muted", description: "Sync across machines is off on this machine" };
+  if (pending > 0) {
+    return { label: `${pending} pending`, tone: "neutral", description: `${pending} local changes waiting to sync. ${synced}` };
+  }
+  return { label: "Synced", tone: "success", description: `All enabled categories are in sync. ${synced}` };
 }

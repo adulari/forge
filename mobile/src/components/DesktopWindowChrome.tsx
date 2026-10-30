@@ -15,6 +15,7 @@ import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions, type Vie
 
 import { getSessions } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { SyncStatusPill } from "./anywhere/SyncStatusPill";
 import { LayoutControl } from "./shell/LayoutMenu";
 import { RAILLESS_ROUTES } from "./shell/railless";
 import { isMacOS, isTauri } from "../lib/platform";
@@ -122,6 +123,10 @@ export function DesktopWindowChrome() {
       ) : null}
 
       <View style={styles.spacer} />
+
+      <WebView dataSet={{ tauriDragRegion: "false" }}>
+        <SyncStatusPill />
+      </WebView>
 
       {activeServer ? (
         <WebView dataSet={{ tauriDragRegion: "false" }}>
