@@ -79,7 +79,7 @@ use crate::remote;
 const FLEET_INVALIDATION_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How long an archive waits for the driver task to wind down before letting go.
-const ARCHIVE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const ARCHIVE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const DAEMON_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Time for the close frames to leave their sockets before the process exits.
 const GOING_AWAY_FLUSH: std::time::Duration = std::time::Duration::from_millis(300);
@@ -722,6 +722,7 @@ pub(crate) async fn serve_cmd(
         crate::serve_dispatch::run_supervisor(supervised).await;
     });
     crate::serve_update::start_auto(&state.registry);
+    crate::serve_lifecycle::start(&state, config.sessions.clone());
 
     // Forge Anywhere gets a private loopback copy of the SAME router. The public LAN/local/tunnel
     // listener below is unchanged, while the connector never needs to upload the daemon token or
@@ -943,7 +944,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         )
         .route(
             &format!("{base}/api/sessions/{{id}}/archive"),
-            post(archive_session),
+            post(crate::serve_lifecycle::archive_session),
         )
         .route(
             &format!("{base}/api/sessions/{{id}}/merge"),
@@ -1001,6 +1002,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
         .merge(crate::serve_access::routes(&base))
+        .merge(crate::serve_lifecycle::routes(&base))
         // Schedule registry (serve_schedules.rs) — the same rows + OS timers `forge schedule` owns.
         .route(
             &format!("{base}/api/schedules"),
@@ -1810,8 +1812,6 @@ async fn fork_session(
     }
 }
 
-/// `POST /api/sessions/{id}/archive` — stop the driver, snapshot a worktree's uncommitted
-/// edits onto its branch (never silently lose work), and hide the session from lists.
 /// Sessions restored on one restart. A daemon that had been running for weeks can have a long tail
 /// of live sessions, and resurrecting all of them would spend startup rebuilding transcripts nobody
 /// is watching. The most recently active ones are the ones a client is waiting to see.
@@ -1890,67 +1890,6 @@ fn is_permanent_restore_failure(status: axum::http::StatusCode) -> bool {
         status,
         axum::http::StatusCode::NOT_FOUND | axum::http::StatusCode::GONE
     )
-}
-
-async fn archive_session(
-    State(state): State<Arc<DaemonState>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    if let Some(refusal) = reject_if_open_in_terminal(&state, &id, "archived").await {
-        return refusal;
-    }
-    let handle = state.registry.remove(&id).await;
-    let worktree = if let Some(handle) = &handle {
-        handle.worktree.clone()
-    } else {
-        match state.store.session_worktree(&id) {
-            Ok(worktree) => worktree,
-            Err(error) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("reading session failed: {error}"),
-                );
-            }
-        }
-    };
-    if handle.is_none() {
-        match state.store.session_exists(&id) {
-            Ok(true) => {}
-            Ok(false) => {
-                return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
-            }
-            Err(error) => {
-                return err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("reading session failed: {error}"),
-                );
-            }
-        }
-    }
-    state.terminals.close_session(&id).await;
-    // Archiving is an explicit "done with this" — drop it from the fleet a restart would restore.
-    let _ = state.store.set_session_daemon_live(&id, false);
-    if let Some(handle) = handle {
-        handle.shutdown();
-        handle.join(ARCHIVE_JOIN_TIMEOUT).await;
-    }
-    if let Some(wt) = worktree {
-        // Best-effort snapshot: uncommitted edits land on the session's branch so nothing is
-        // lost; the worktree + branch stay in place for a manual review/merge.
-        if let Err(error) = forge_core::worktree::commit_worktree(std::path::Path::new(&wt)) {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("snapshotting the session worktree failed: {error}"),
-            );
-        }
-    }
-    if let Err(error) = state.store.archive_session(&id) {
-        return err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("archiving session failed: {error}"),
-        );
-    }
-    json_response(&serde_json::json!({ "ok": true }))
 }
 
 #[derive(serde::Deserialize)]
@@ -2089,6 +2028,8 @@ struct PastSessionRow {
     created_at: i64,
     /// First user message — a one-line hint of what the session was about.
     preview: Option<String>,
+    starred: bool,
+    done_at: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2209,14 +2150,20 @@ async fn past_sessions(
         if let Ok(local) = store.local_live_sessions() {
             running.extend(local.into_iter().map(|row| row.id));
         }
-        store
+        let page: Vec<_> = store
             .list_sessions_for_resume()
             .unwrap_or_default()
             .into_iter()
             .filter(|s| !running.contains(&s.id))
             .filter(|s| before.is_none_or(|b| s.last_activity < b))
             .take(limit)
+            .collect();
+        let ids: Vec<String> = page.iter().map(|s| s.id.clone()).collect();
+        let lifecycle = store.session_lifecycle(&ids).unwrap_or_default();
+        page.into_iter()
             .map(|s| PastSessionRow {
+                starred: lifecycle.get(&s.id).is_some_and(|l| l.0),
+                done_at: lifecycle.get(&s.id).and_then(|l| l.1),
                 // A saved title wins; an untitled session (most of them — only the daemon
                 // driver, the rename route, and subagents ever write `session.title`) falls
                 // back to its opening prompt instead of showing nothing, the same fallback the
@@ -2695,7 +2642,7 @@ struct WsParams {
 /// (a delete lost the whole history and the TUI then re-created a stub with only what it sent
 /// afterwards). Gated the same way the WS input path is, but only when the daemon is not itself
 /// driving the session.
-async fn reject_if_open_in_terminal(
+pub(crate) async fn reject_if_open_in_terminal(
     state: &DaemonState,
     session_id: &str,
     verb: &str,

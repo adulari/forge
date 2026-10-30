@@ -4,7 +4,8 @@ pub fn command_category(name: &str) -> &'static str {
         "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
         "sessions" | "resume" | "replay" | "rewind" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" | "status" | "reground" | "refine" | "clear" | "btw"
-        | "export" | "context" | "rename" | "cls" | "fork" | "stash" | "timeline" => "Session",
+        | "export" | "star" | "done" | "archived" | "context" | "rename" | "cls" | "fork"
+        | "stash" | "timeline" => "Session",
         "model" | "models" | "mode" | "effort" | "subagents" | "agents" | "thinking" | "mesh"
         | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" | "commit" | "diff" => "Review & ship",

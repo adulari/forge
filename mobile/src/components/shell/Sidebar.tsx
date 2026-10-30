@@ -7,7 +7,7 @@
 // (components/fleet/DesktopDrillDown.tsx).
 import { router, usePathname } from "expo-router";
 import { ArrowUpDown, Plus, Search } from "lucide-react-native";
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
@@ -28,7 +28,7 @@ import {
   toggleGroupCollapsed,
   useShellPrefs,
 } from "../../lib/shellPrefs";
-import { buildProjectGroups, filterByWorkspace, projectName, walkNodes } from "../../lib/sidebarModel";
+import { buildProjectGroups, filterByWorkspace, projectName, sortSessions, splitDone, walkNodes } from "../../lib/sidebarModel";
 import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -100,7 +100,10 @@ export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarP
   const fleet = useScopedFleet();
   const workspaceProjects = activeWorkspaceProjects(prefs);
   const rows = useMemo(() => filterByWorkspace(fleet.rows, workspaceProjects), [fleet.rows, workspaceProjects]);
-  const groups = useMemo(() => buildProjectGroups(rows, prefs.sort), [rows, prefs.sort]);
+  const split = useMemo(() => splitDone(rows), [rows]);
+  const groups = useMemo(() => buildProjectGroups(split.active, prefs.sort), [split.active, prefs.sort]);
+  const doneRows = useMemo(() => sortSessions(split.done, prefs.sort), [split.done, prefs.sort]);
+  const [doneOpen, setDoneOpen] = useState(false);
   const allProjectNames = useMemo(
     () => [...new Set(fleet.rows.map((entry) => projectName(entry.row.cwd)))].sort(),
     [fleet.rows],
@@ -220,6 +223,40 @@ export function Sidebar({ onCollapse, onToggleDock, dockOpen = false }: SidebarP
             );
           })
         )}
+
+        {doneRows.length > 0 ? (
+          <View>
+            <Pressable
+              onPress={() => setDoneOpen((open) => !open)}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: doneOpen }}
+              accessibilityLabel={`Done, ${doneRows.length} sessions, ${doneOpen ? "collapse" : "expand"}`}
+            >
+              <GroupLabel label={`${doneOpen ? "▾" : "▸"} DONE`} count={doneRows.length} />
+            </Pressable>
+            {doneOpen
+              ? doneRows.map((entry) => (
+                  <ServerScope key={entry.row.id} serverId={entry.serverId}>
+                    <SidebarSessionRow
+                      row={entry.row}
+                      serverId={entry.serverId}
+                      depth={0}
+                      showDiff={false}
+                      selected={entry.row.id === selectedSessionId}
+                      paneNumber={paneNumbers.get(entry.row.id) ?? null}
+                      paneFocused={paneNumbers.get(entry.row.id) === workbench.layout.focus + 1}
+                      paneTotal={paneTotal}
+                      onOpen={workbench.openSession}
+                      onClosePane={(id) => {
+                        const index = workbench.paneIds.indexOf(id);
+                        if (index >= 0) workbench.closePane(index);
+                      }}
+                    />
+                  </ServerScope>
+                ))
+              : null}
+          </View>
+        ) : null}
 
         {anywhereSignedIn && anywhereHosts.length > 0 ? (
           <View>

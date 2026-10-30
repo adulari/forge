@@ -32,6 +32,10 @@ pub(super) struct SessionMetaFields {
     pub(super) diff_removed: Option<u32>,
     /// The checked-out branch, `None` outside a git checkout or on a detached HEAD.
     pub(super) branch: Option<String>,
+    /// Pinned to the top of every list.
+    pub(super) starred: bool,
+    /// Unix seconds the session was marked done, `None` while it is not.
+    pub(super) done_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,11 +146,14 @@ fn figures_for(cwd: &str) -> Option<GitFigures> {
 pub(super) async fn annotate(store: &std::sync::Arc<Store>, rows: &mut [SessionRow]) {
     let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let lookup = store.clone();
-    let parents = tokio::task::spawn_blocking(move || lookup.session_parents(&ids))
-        .await
-        .ok()
-        .and_then(std::result::Result::ok)
-        .unwrap_or_default();
+    let (parents, lifecycle) = tokio::task::spawn_blocking(move || {
+        (
+            lookup.session_parents(&ids).unwrap_or_default(),
+            lookup.session_lifecycle(&ids).unwrap_or_default(),
+        )
+    })
+    .await
+    .unwrap_or_default();
     for row in rows {
         let figures = figures_for(&row.cwd);
         row.meta = SessionMetaFields {
@@ -155,6 +162,8 @@ pub(super) async fn annotate(store: &std::sync::Arc<Store>, rows: &mut [SessionR
             diff_added: figures.as_ref().map(|f| f.added),
             diff_removed: figures.as_ref().map(|f| f.removed),
             branch: figures.and_then(|f| f.branch),
+            starred: lifecycle.get(&row.id).is_some_and(|l| l.0),
+            done_at: lifecycle.get(&row.id).and_then(|l| l.1),
         };
     }
 }

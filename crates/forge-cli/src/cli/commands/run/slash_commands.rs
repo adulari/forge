@@ -13,6 +13,7 @@ use forge_tui::{App, CommandAction, Deferred};
 mod context;
 mod diff;
 mod doctor;
+mod lifecycle;
 mod permissions;
 
 type SharedSession = Arc<tokio::sync::Mutex<Session>>;
@@ -41,6 +42,9 @@ pub(super) async fn dispatch(action: CommandAction, session: &SharedSession, app
         CommandAction::Doctor => doctor::start(app),
         CommandAction::Bug(text) => crate::reporting::bug_card(app, &text),
         CommandAction::Rename(title) => rename(session, app, &title).await,
+        CommandAction::Star => lifecycle::toggle(session, app, lifecycle::Flag::Star),
+        CommandAction::Done => lifecycle::toggle(session, app, lifecycle::Flag::Done),
+        CommandAction::Archived(arg) => lifecycle::archived(session, app, &arg),
         // `dispatch_command` routes only the actions above here.
         _ => {}
     }

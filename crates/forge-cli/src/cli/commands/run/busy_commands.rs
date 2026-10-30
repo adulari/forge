@@ -53,7 +53,10 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Diff(_)
         | CommandAction::Doctor
         // Writes the title through the session's detached store handle, never the session lock.
-        | CommandAction::Rename(_) => Immediate,
+        | CommandAction::Rename(_)
+        | CommandAction::Star
+        | CommandAction::Done
+        | CommandAction::Archived(_) => Immediate,
         CommandAction::Dispatch(_)
         | CommandAction::PinModel(_)
         | CommandAction::ListModels

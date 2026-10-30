@@ -3,6 +3,7 @@
 use super::*;
 
 mod apply;
+mod m0032_m0033_session_columns;
 mod m0034_routing_index;
 mod m0035_dispatch;
 mod m0037_fk_indexes;
@@ -15,9 +16,11 @@ mod m0043_bench_solve;
 mod m0044_session_host_state;
 mod m0045_queued_prompts;
 mod m0046_usage_api_calls;
+mod m0047_session_lifecycle;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
+use m0032_m0033_session_columns::{migration_0032, migration_0033};
 use m0034_routing_index::migration_0034;
 use m0035_dispatch::migration_0035;
 use m0037_fk_indexes::migration_0037;
@@ -30,6 +33,7 @@ use m0043_bench_solve::migration_0043;
 use m0044_session_host_state::migration_0044;
 use m0045_queued_prompts::migration_0045;
 use m0046_usage_api_calls::migration_0046;
+use m0047_session_lifecycle::migration_0047;
 mod usage;
 use usage::migration_0030;
 
@@ -724,37 +728,8 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0044,
     migration_0045,
     migration_0046,
+    migration_0047,
 ];
-
-/// Migration #33: whether a session has released its subagents from the active model pin.
-///
-/// `mesh.subagents.inherit_pin` is a config-file default, so the only way to let one pinned
-/// session fan out onto other models was to edit the config and restart. `/subagents free` sets
-/// this per session instead; like the model and effort pins it lived nowhere durable, so a daemon
-/// restart or a resume would silently drag the children back onto the parent's pin. NULL = follow
-/// the config default.
-fn migration_0033(conn: &Connection) -> rusqlite::Result<()> {
-    add_column_if_missing(
-        conn,
-        "ALTER TABLE session ADD COLUMN subagent_pin_free INTEGER",
-    )
-}
-
-/// Migration #32: the loopback control endpoint a terminal-local session publishes for the daemon.
-///
-/// Terminal sessions have been visible in the fleet since [`migration_0026`], but only as
-/// read-only rows: there was no way for the phone or desktop app to answer a permission prompt
-/// raised on the laptop. A terminal chat now opens a token-gated control channel on loopback and
-/// records its URL here; `forge serve` proxies an app's WebSocket to whatever this column holds.
-///
-/// Cleared on clean exit, and — like the rest of the presence row — only trusted while
-/// `local_last_seen` is fresh, so a killed terminal's dead port is never handed to a client.
-fn migration_0032(conn: &Connection) -> rusqlite::Result<()> {
-    add_column_if_missing(
-        conn,
-        "ALTER TABLE session ADD COLUMN local_control_url TEXT",
-    )
-}
 
 /// Migration #31: give existing stores the `model_pricing.cache_read_per_1k` column.
 ///
