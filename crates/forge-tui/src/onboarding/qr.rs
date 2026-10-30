@@ -2,7 +2,10 @@
 //! filled cells, so the code scans inverted on a dark background and normally on a light one, and
 //! the terminal background around it is the quiet zone.
 
-use qrcode::{Color, EcLevel, QrCode};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use qrcode::{Color as Module, EcLevel, QrCode};
 
 pub(crate) enum Qr {
     Fits(Vec<String>),
@@ -17,8 +20,7 @@ pub(crate) enum Qr {
 /// two per cell) first, then sextants (six per cell) where the terminal draws them itself.
 /// `None` when the payload cannot be encoded at all.
 pub(crate) fn fitted(payload: &str, rows: usize, cols: usize, sextants: bool) -> Option<Qr> {
-    // Low error correction: the code is on a screen, not a printed label, and it saves rows.
-    let code = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::L).ok()?;
+    let code = grid(payload)?;
     let half = render(&code, 1, 2, half_glyph);
     if half.len() <= rows && width(&half) <= cols {
         return Some(Qr::Fits(half));
@@ -44,11 +46,49 @@ fn width(lines: &[String]) -> usize {
     lines.first().map_or(0, |l| l.chars().count())
 }
 
+/// The module grid of a payload, row-major.
+struct Grid {
+    size: usize,
+    dark: Vec<bool>,
+}
+
+thread_local! {
+    /// Encoding is the expensive part and the screen redraws many times a second; the link is the
+    /// same for the whole sign-in.
+    static LAST: RefCell<Option<(String, Option<Rc<Grid>>)>> = const { RefCell::new(None) };
+}
+
+fn grid(payload: &str) -> Option<Rc<Grid>> {
+    LAST.with(|last| {
+        let mut last = last.borrow_mut();
+        if let Some((cached, grid)) = last.as_ref() {
+            if cached == payload {
+                return grid.clone();
+            }
+        }
+        // Low error correction: the code is on a screen, not a printed label, and it saves rows.
+        let grid = QrCode::with_error_correction_level(payload.as_bytes(), EcLevel::L)
+            .ok()
+            .map(|code| {
+                Rc::new(Grid {
+                    size: code.width(),
+                    dark: code
+                        .to_colors()
+                        .into_iter()
+                        .map(|c| c == Module::Dark)
+                        .collect(),
+                })
+            });
+        *last = Some((payload.to_string(), grid.clone()));
+        grid
+    })
+}
+
 /// One character per `cw` x `ch` block of modules; `glyph` gets the dark bits row-major from the
 /// top-left.
-fn render(code: &QrCode, cw: usize, ch: usize, glyph: fn(u8) -> char) -> Vec<String> {
-    let size = code.width();
-    let dark = |x: usize, y: usize| x < size && y < size && code[(x, y)] == Color::Dark;
+fn render(code: &Grid, cw: usize, ch: usize, glyph: fn(u8) -> char) -> Vec<String> {
+    let size = code.size;
+    let dark = |x: usize, y: usize| x < size && y < size && code.dark[y * size + x];
     (0..size)
         .step_by(ch)
         .map(|y| {

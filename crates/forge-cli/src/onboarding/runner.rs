@@ -48,6 +48,7 @@ fn event_loop(session: Session, launches_session: bool, card: bool) -> Result<Ou
     screen.rich_glyphs = draws_sextants();
     let mut detecting: Option<Receiver<Machine>> = None;
     let mut effects = screen.opening_effects();
+    let mut links: Vec<onboarding::LinkRow> = Vec::new();
 
     loop {
         while !effects.is_empty() {
@@ -79,9 +80,16 @@ fn event_loop(session: Session, launches_session: bool, card: bool) -> Result<Ou
             }
         }
         let frame = terminal.draw(|f| onboarding::render(f, &screen))?;
-        if let Some(url) = screen.sign_in.as_ref().and_then(|s| s.url.as_deref()) {
-            let rows = onboarding::link_rows(frame.buffer, url);
-            write_links(&rows, url)?;
+        // ratatui only redraws changed cells, so a hyperlink written once stays until its rows move.
+        match screen.sign_in.as_ref().and_then(|s| s.url.as_deref()) {
+            Some(url) => {
+                let rows = onboarding::link_rows(frame.buffer, url);
+                if rows != links {
+                    write_links(&rows, url)?;
+                    links = rows;
+                }
+            }
+            None => links.clear(),
         }
 
         if event::poll(Duration::from_millis(60))? {
@@ -90,7 +98,10 @@ fn event_loop(session: Session, launches_session: bool, card: bool) -> Result<Ou
                     effects.extend(screen.key(key));
                 }
                 Event::Paste(text) => effects.extend(screen.paste(&text)),
-                Event::Resize(..) => terminal.clear()?,
+                Event::Resize(..) => {
+                    terminal.clear()?;
+                    links.clear();
+                }
                 _ => {}
             }
         } else {
