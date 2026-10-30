@@ -98,7 +98,7 @@ pub(super) fn spawn() -> tokio::task::JoinHandle<()> {
         let mut retry_delay = SYNC_INTERVAL;
         let mut last_error = String::new();
         loop {
-            tokio::time::sleep(wait_before_next).await;
+            super::account_sync::wait_for_sync_request(wait_before_next).await;
             let outcome = upload_batch().await.map_err(|error| format!("{error:#}"));
             if let Some(line) = sync_report(&last_error, outcome.as_ref().err(), retry_delay) {
                 eprintln!("{line}");
@@ -220,6 +220,33 @@ async fn upload_batch() -> Result<()> {
     }
     if conflicts > 0 {
         eprintln!("⚠ Forge Anywhere staged {conflicts} conflict(s) without changing local data");
+    }
+    // Account sync reads what the passes above materialized and journals what changed locally;
+    // the extra drain gets those records out now instead of a cycle later.
+    let account_sync_config = config.anywhere.account_sync.clone();
+    if account_sync_config.any_enabled() {
+        match super::account_sync::run_cycle(&store, &state, &account_sync_config).await {
+            Ok(()) => {
+                let started = std::time::Instant::now();
+                while let Ok(entries) = store.pending_sync_journal(BATCH_SIZE) {
+                    if entries.is_empty() || started.elapsed() >= DRAIN_BUDGET {
+                        break;
+                    }
+                    for entry in entries {
+                        upload_entry(
+                            &store,
+                            &state_store,
+                            &http,
+                            &service_url,
+                            &access_token,
+                            &entry,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            Err(error) => super::account_sync::record_cycle(Some(format!("{error:#}"))),
+        }
     }
     // Acknowledged outbox revisions and already-materialized downloads otherwise retain duplicate
     // payloads forever. Keep this bounded so a long-lived daemon amortizes old cleanup without a

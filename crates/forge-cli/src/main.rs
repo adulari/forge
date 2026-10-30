@@ -100,6 +100,7 @@ mod report_args;
 mod reporting;
 mod serve;
 mod serve_access;
+mod serve_account_sync;
 mod serve_actions;
 mod serve_agents;
 mod serve_clients;

@@ -57,6 +57,9 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::Changelog => exact(Method::GET, "/api/changelog"),
         RouteId::ListNotices => exact(Method::GET, "/api/notices"),
         RouteId::Identity => exact(Method::GET, "/api/identity"),
+        RouteId::AccountSyncStatus => exact(Method::GET, "/api/anywhere/sync"),
+        RouteId::AccountSyncUpdate => exact(Method::PUT, "/api/anywhere/sync"),
+        RouteId::AccountSyncNow => exact(Method::POST, "/api/anywhere/sync/now"),
         RouteId::SessionDiff | RouteId::SessionAgents => {
             let id = single_path_parameter(request)?;
             let leaf = if request.route == RouteId::SessionDiff {
@@ -260,7 +263,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 14] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 17] = [
             (
                 RouteId::WorkspaceEntries,
                 "GET",
@@ -311,6 +314,27 @@ mod tests {
                 "/api/changelog",
             ),
             (RouteId::Identity, "GET", &[], Method::GET, "/api/identity"),
+            (
+                RouteId::AccountSyncStatus,
+                "GET",
+                &[],
+                Method::GET,
+                "/api/anywhere/sync",
+            ),
+            (
+                RouteId::AccountSyncUpdate,
+                "PUT",
+                &[],
+                Method::PUT,
+                "/api/anywhere/sync",
+            ),
+            (
+                RouteId::AccountSyncNow,
+                "POST",
+                &[],
+                Method::POST,
+                "/api/anywhere/sync/now",
+            ),
             (
                 RouteId::ListNotices,
                 "GET",

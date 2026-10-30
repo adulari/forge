@@ -26,6 +26,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{AnywhereCmd, ShareExpiry};
 
+pub(crate) mod account_sync;
 mod approval_key;
 mod connector;
 mod display;

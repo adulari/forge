@@ -69,7 +69,15 @@ pub(super) async fn config_page() -> Response {
     }
 }
 
-pub(super) async fn update_config(Json(request): Json<UpdateConfigRequest>) -> Response {
+pub(super) async fn update_config(
+    headers: axum::http::HeaderMap,
+    Json(request): Json<UpdateConfigRequest>,
+) -> Response {
+    if request.key == "anywhere.account_sync.keys"
+        && crate::serve_account_sync::from_bridge(&headers)
+    {
+        return crate::serve_account_sync::keys_toggle_refused();
+    }
     let result = tokio::task::spawn_blocking(move || {
         let _mutation = mutation_lock()
             .lock()
