@@ -359,7 +359,12 @@ worktree, or permission mode are never imported.
 
 `user_setting`, `command`, `skill`, `agent`, and `workflow` are mutable portable records. Clients
 store them outside ordinary configuration and secret storage, validate them before use, and reject
-credential-bearing settings. A `file` stable ID is a logical name, not a host path. Clients first
+credential-bearing settings. Account sync (`docs/features/anywhere-account-sync.md`) is the one
+producer: it writes `user_setting` records whose id is an HMAC and whose JSON payload carries
+`"schema": "forge-account-sync-v1"`, plus `skill`, `command` and `agent` bundles. Credential sync is
+an explicit per-device opt-in; its key values are sealed again under a per-epoch vault sub-key,
+rotating OAuth tokens never sync, and revocation does not recall old ciphertext, so keys must be
+rotated at the provider. History renderers skip any record with that schema marker. A `file` stable ID is a logical name, not a host path. Clients first
 materialize file bytes into a content-addressed local cache. When the current content hash differs
 from an upsert's authenticated `base_hash`, they retain the incoming bytes as a visible conflict
 copy rather than overwriting either revision. Workspace files remain ineligible outside an explicit

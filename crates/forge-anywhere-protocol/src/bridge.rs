@@ -83,6 +83,13 @@ pub enum RouteId {
     /// alert, so the app reads the real text here, inside the end-to-end encrypted bridge.
     ListNotices,
     Identity,
+    /// Account-sync status (`GET /api/anywhere/sync`). Read-only.
+    AccountSyncStatus,
+    /// Toggle one account-sync category (`PUT /api/anywhere/sync`). The host refuses `keys`: that
+    /// category is switched on the machine itself, never over the bridge.
+    AccountSyncUpdate,
+    /// Run an account-sync cycle now (`POST /api/anywhere/sync/now`).
+    AccountSyncNow,
     WebSocket,
     TerminalWebSocket,
 }

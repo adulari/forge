@@ -10,7 +10,7 @@ use forge_provider::DispatchProvider;
 use forge_store::Store;
 use forge_types::TaskTier;
 
-pub(crate) use cli::args::anywhere::ShareExpiry;
+pub(crate) use cli::args::anywhere::{ShareExpiry, SyncCmd};
 pub(crate) use cli::args::host::BackupArgs;
 pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
@@ -100,6 +100,7 @@ mod report_args;
 mod reporting;
 mod serve;
 mod serve_access;
+mod serve_account_sync;
 mod serve_actions;
 mod serve_agents;
 mod serve_clients;

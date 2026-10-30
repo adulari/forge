@@ -1022,6 +1022,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
         .merge(crate::serve_skills::routes(&base))
+        .merge(crate::serve_account_sync::routes(&base))
         .merge(crate::serve_access::routes(&base))
         .merge(crate::serve_lifecycle::routes(&base))
         .merge(crate::serve_schedules::routes(&base))
@@ -1189,7 +1190,9 @@ async fn anywhere_supervisor(
                 return;
             }
         };
-        let bridge_app = app.clone();
+        let bridge_app = app.clone().layer(axum::middleware::from_fn(
+            crate::serve_account_sync::mark_bridge_origin,
+        ));
         let _bridge = AbortTask(tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, bridge_app).await {
                 eprintln!(
@@ -3468,6 +3471,10 @@ async fn history_page(
 // ---------------------------------------------------------------------------
 // What's New (`GET /api/changelog`)
 // ---------------------------------------------------------------------------
+
+pub(crate) fn config_mutation_lock() -> &'static std::sync::Mutex<()> {
+    serve_config::mutation_lock()
+}
 
 pub(crate) fn json_response<T: serde::Serialize>(value: &T) -> Response {
     (

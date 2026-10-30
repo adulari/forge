@@ -75,6 +75,31 @@ pub(crate) const CREDITS: [Credit; 3] = [
 
 pub(crate) const THEMES: [&str; 3] = ["auto", "dark", "light"];
 
+/// Account-sync categories offered once signed in: `(config key, label, what it carries)`.
+pub(crate) const SYNC_CATEGORIES: [(&str, &str, &str); 5] = [
+    (
+        "keys",
+        "Keys & tokens",
+        "API keys, encrypted; logins never copy",
+    ),
+    (
+        "skills",
+        "Skills & agents",
+        "your skills, commands and agents",
+    ),
+    (
+        "settings",
+        "Settings",
+        "theme, statusline, notifications, keybindings",
+    ),
+    (
+        "mcp",
+        "MCP servers",
+        "server definitions; local commands apply where installed",
+    ),
+    ("instructions", "Instructions", "your user-level AGENTS.md"),
+];
+
 pub(crate) struct ReportMode {
     pub key: &'static str,
     pub label: &'static str,
@@ -394,11 +419,38 @@ impl Screen {
     }
 
     pub(crate) fn anywhere_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let signed_in = self.session.machine.anywhere.signed_in;
         match key.code {
+            KeyCode::Up | KeyCode::Char('k') if signed_in => {
+                self.ui.anywhere_sync_row =
+                    (self.ui.anywhere_sync_row + SYNC_CATEGORIES.len() - 1) % SYNC_CATEGORIES.len();
+                Vec::new()
+            }
+            KeyCode::Down | KeyCode::Char('j') if signed_in => {
+                self.ui.anywhere_sync_row = (self.ui.anywhere_sync_row + 1) % SYNC_CATEGORIES.len();
+                Vec::new()
+            }
+            KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right if signed_in => {
+                let row = self.ui.anywhere_sync_row;
+                self.ui.anywhere_sync[row] = !self.ui.anywhere_sync[row];
+                Vec::new()
+            }
             KeyCode::Char('s') => self.skip_step(),
             KeyCode::Enter => {
-                if self.session.machine.anywhere.signed_in {
-                    return self.advance();
+                if signed_in {
+                    let mut effects = self.advance();
+                    for (i, (id, _, _)) in SYNC_CATEGORIES.iter().enumerate() {
+                        if self.ui.anywhere_sync[i] {
+                            effects.push(Effect::Run {
+                                action: Action::SetAccountSync {
+                                    category: (*id).to_string(),
+                                    enabled: true,
+                                },
+                                purpose: Purpose::Setting,
+                            });
+                        }
+                    }
+                    return effects;
                 }
                 vec![Effect::Terminal {
                     action: Action::AnywhereSetup,

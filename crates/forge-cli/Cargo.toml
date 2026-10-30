@@ -94,6 +94,8 @@ mdns-sd = { version = "0.21", default-features = false }
 # a PKCS8 PEM-encoded EC private key.
 p256 = { version = "0.14", features = ["ecdh", "pem", "pkcs8"] }
 hkdf = "0.13"
+hmac = "0.13"
+chacha20poly1305.workspace = true
 sha2 = "0.11"
 aes-gcm = "0.11"
 sysinfo = { workspace = true }

@@ -451,6 +451,25 @@ pub(crate) async fn list_available(
     Ok(out)
 }
 
+/// Quietly installs a pack another device uses (account sync). Resolution goes through the
+/// marketplaces already synced onto this machine.
+pub(crate) async fn install_synced_pack(pkg: &str, marketplace: Option<&str>) -> Result<()> {
+    let registry = load_marketplaces_at(&marketplaces_path()?)?;
+    install_pack_to(
+        pkg,
+        marketplace,
+        &registry,
+        &skills_dir()?,
+        &installed_path()?,
+    )
+    .await
+    .map(|_| ())
+}
+
+pub(crate) fn registry_has_pack(lock: &Path, name: &str) -> bool {
+    load_installed_at(lock).is_ok_and(|l| l.skills.contains_key(name))
+}
+
 pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) -> Result<()> {
     let registry = load_marketplaces_at(&marketplaces_path()?)?;
     let skills_dir = skills_dir()?;

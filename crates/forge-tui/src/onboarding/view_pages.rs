@@ -460,6 +460,27 @@ fn anywhere(s: &Screen, width: usize) -> Vec<Line<'static>> {
             "Not set up. Skipping is fine.".into()
         },
     ));
+    if s.session.machine.anywhere.signed_in {
+        out.push(Line::from(""));
+        out.push(Line::from(Span::styled(
+            "Sync to your other devices (per device, all off by default):",
+            styles::muted(),
+        )));
+        for (i, (_, label, desc)) in super::pages::SYNC_CATEGORIES.iter().enumerate() {
+            out.push(selectable(
+                vec![
+                    Span::styled(padded(label, 17), styles::fg().bold()),
+                    Span::styled(
+                        padded(if s.ui.anywhere_sync[i] { "on" } else { "off" }, 5),
+                        styles::ok().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(truncate(desc, width.saturating_sub(24)), styles::muted()),
+                ],
+                i == s.ui.anywhere_sync_row,
+                width,
+            ));
+        }
+    }
     out
 }
 

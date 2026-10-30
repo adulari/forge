@@ -22,3 +22,13 @@ pub(super) fn configured_host_name() -> String {
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(super::default_host_name)
 }
+
+pub(super) fn human_bytes(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    }
+}

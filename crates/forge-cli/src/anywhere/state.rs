@@ -235,6 +235,40 @@ impl CommandStateStore {
 }
 
 #[derive(Serialize, Deserialize, Default)]
+struct KeyBlob {
+    signing_private_key: Option<String>,
+    exchange_private_key: Option<String>,
+    account_data_key: Option<String>,
+    #[serde(default)]
+    data_key_epochs: BTreeMap<u32, String>,
+}
+
+impl KeyBlob {
+    fn from_state(state: &LocalState) -> Self {
+        Self {
+            signing_private_key: state.signing_private_key.clone(),
+            exchange_private_key: state.exchange_private_key.clone(),
+            account_data_key: state.account_data_key.clone(),
+            data_key_epochs: state.data_key_epochs.clone(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.signing_private_key.is_none()
+            && self.exchange_private_key.is_none()
+            && self.account_data_key.is_none()
+            && self.data_key_epochs.is_empty()
+    }
+
+    fn apply(self, state: &mut LocalState) {
+        state.signing_private_key = self.signing_private_key;
+        state.exchange_private_key = self.exchange_private_key;
+        state.account_data_key = self.account_data_key;
+        state.data_key_epochs = self.data_key_epochs;
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub(crate) struct LocalState {
     pub(crate) version: u8,
     pub(crate) account_id: Option<String>,
@@ -331,6 +365,10 @@ pub(crate) enum CommandJournalState {
 }
 
 impl LocalState {
+    fn has_key_material(&self) -> bool {
+        !KeyBlob::from_state(self).is_empty()
+    }
+
     pub(crate) fn is_logged_in(&self) -> bool {
         self.refresh_token.is_some()
     }
@@ -395,10 +433,48 @@ impl StateStore {
                 state.version
             );
         }
+        if !state.has_key_material() {
+            if let Some(blob) = self.load_key_blob() {
+                blob.apply(&mut state);
+            }
+        }
         if let (Some(epoch), Some(key)) = (state.key_epoch, state.account_data_key.clone()) {
             state.data_key_epochs.entry(epoch).or_insert(key);
         }
         Ok(state)
+    }
+
+    fn key_slot(&self) -> String {
+        let digest = Sha256::digest(self.path.to_string_lossy().as_bytes());
+        format!("anywhere-keys:{}", hex::encode(&digest[..8]))
+    }
+
+    fn load_key_blob(&self) -> Option<KeyBlob> {
+        let raw = forge_config::load_secret(&self.key_slot())?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    /// Moves the Account Data Key epochs and the device private keys out of the plaintext state
+    /// file into the secret store (OS keyring first, encrypted file second). Idempotent, and a
+    /// no-op for a state file that no longer holds them. Falls back to leaving them in the file.
+    pub(crate) fn migrate_keys_to_secret_store(&self) -> Result<()> {
+        if !self.path.exists() {
+            return Ok(());
+        }
+        self.with_exclusive_lock(|| {
+            let state = self.load()?;
+            if state.has_key_material() && self.file_holds_keys()? {
+                self.save(&state)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn file_holds_keys(&self) -> Result<bool> {
+        let text = std::fs::read_to_string(&self.path).context("read Forge Anywhere state")?;
+        let on_disk: LocalState =
+            serde_json::from_str(&text).context("parse Forge Anywhere state")?;
+        Ok(on_disk.has_key_material())
     }
 
     pub(crate) fn save(&self, state: &LocalState) -> Result<()> {
@@ -421,6 +497,8 @@ impl StateStore {
         let mut file = options
             .open(&temp)
             .context("create temporary Forge Anywhere state")?;
+        let stripped = self.strip_secret_keys(state);
+        let state = stripped.as_ref().unwrap_or(state);
         let bytes = serde_json::to_vec_pretty(state).context("serialize Forge Anywhere state")?;
         file.write_all(&bytes)
             .context("write Forge Anywhere state")?;
@@ -431,6 +509,32 @@ impl StateStore {
         guard.disarm();
         set_owner_file_permissions(&self.path)?;
         sync_directory(parent).context("sync Forge Anywhere state directory")
+    }
+
+    /// Stores the key material in the secret store and returns a copy of `state` without it, or
+    /// `None` when the keys must stay in the file (nothing to move, or the store is unavailable).
+    fn strip_secret_keys(&self, state: &LocalState) -> Option<LocalState> {
+        let blob = KeyBlob::from_state(state);
+        if blob.is_empty() {
+            return None;
+        }
+        let slot = self.key_slot();
+        let raw = serde_json::to_string(&blob).ok()?;
+        let stored = forge_config::store_secret(&slot, &raw).is_ok()
+            && forge_config::load_secret(&slot).as_deref() == Some(raw.as_str());
+        if !stored {
+            tracing::warn!(
+                "secret store unavailable; Anywhere device keys stay in the owner-only state file"
+            );
+            return None;
+        }
+        Some(LocalState {
+            signing_private_key: None,
+            exchange_private_key: None,
+            account_data_key: None,
+            data_key_epochs: BTreeMap::new(),
+            ..state.clone()
+        })
     }
 
     pub(crate) fn update<F>(&self, update: F) -> Result<LocalState>
@@ -527,6 +631,77 @@ pub(crate) fn set_owner_directory_permissions(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keyed_state() -> LocalState {
+        LocalState {
+            version: STATE_VERSION,
+            account_id: Some("acct".into()),
+            signing_private_key: Some("signing-secret".into()),
+            exchange_private_key: Some("exchange-secret".into()),
+            account_data_key: Some("data-key-two".into()),
+            key_epoch: Some(2),
+            data_key_epochs: BTreeMap::from([
+                (1, "data-key-one".into()),
+                (2, "data-key-two".into()),
+            ]),
+            ..LocalState::default()
+        }
+    }
+
+    #[test]
+    fn keys_leave_the_state_file_but_load_back_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore {
+            path: dir.path().join("anywhere/state.json"),
+        };
+        store.save(&keyed_state()).unwrap();
+        let on_disk = std::fs::read_to_string(&store.path).unwrap();
+        for secret in [
+            "signing-secret",
+            "exchange-secret",
+            "data-key-one",
+            "data-key-two",
+        ] {
+            assert!(!on_disk.contains(secret), "{secret} leaked into state.json");
+        }
+        assert!(on_disk.contains("acct"));
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded.signing_private_key.as_deref(),
+            Some("signing-secret")
+        );
+        assert_eq!(loaded.data_key_epochs.len(), 2);
+        assert_eq!(loaded.key_epoch, Some(2));
+    }
+
+    #[test]
+    fn the_old_plaintext_layout_still_loads_and_migrates_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StateStore {
+            path: dir.path().join("anywhere/state.json"),
+        };
+        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
+        std::fs::write(&store.path, serde_json::to_vec(&keyed_state()).unwrap()).unwrap();
+        assert_eq!(
+            store.load().unwrap().exchange_private_key.as_deref(),
+            Some("exchange-secret"),
+            "the legacy layout must stay readable before migration"
+        );
+        store.migrate_keys_to_secret_store().unwrap();
+        assert!(!std::fs::read_to_string(&store.path)
+            .unwrap()
+            .contains("exchange-secret"));
+        store.migrate_keys_to_secret_store().unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded.exchange_private_key.as_deref(),
+            Some("exchange-secret")
+        );
+        assert_eq!(
+            loaded.data_key_epochs.get(&1).map(String::as_str),
+            Some("data-key-one")
+        );
+    }
 
     #[test]
     fn remove_on_drop_cleans_up_unless_disarmed() {

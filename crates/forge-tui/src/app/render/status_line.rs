@@ -286,6 +286,22 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
             };
             vec![Item::left(Class::Extras, vec![Span::styled(text, style)])]
         }
+        W::AnywhereSync => {
+            let Some(badge) = app.anywhere_sync else {
+                return Vec::new();
+            };
+            let (text, style) = if badge.error || badge.conflicts > 0 {
+                ("sync !".to_string(), styles::warn())
+            } else if badge.pending > 0 {
+                (
+                    format!("sync {}{}", badge.pending, glyphs.up),
+                    styles::muted(),
+                )
+            } else {
+                (format!("sync {}", glyphs.ok), styles::muted())
+            };
+            vec![Item::left(Class::Extras, vec![Span::styled(text, style)])]
+        }
         W::McpStatus => {
             if app.mcp_count == 0 {
                 return Vec::new();

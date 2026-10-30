@@ -86,10 +86,33 @@ pub(crate) enum AnywhereCmd {
         #[arg(long, value_name = "DEVICE")]
         revoke: Option<String>,
     },
+    /// Sync keys, skills, settings, MCP servers and instructions across your devices.
+    Sync {
+        #[command(subcommand)]
+        cmd: Option<SyncCmd>,
+    },
     /// Revoke this host and stop its managed connector. Local Forge is unchanged.
     Disable,
     /// Revoke local account tokens while preserving local Forge and encrypted history.
     Logout,
+}
+
+/// `forge anywhere sync` actions. Every category is per device and off until switched on here.
+#[derive(Subcommand)]
+pub(crate) enum SyncCmd {
+    /// Show what syncs, what is pending, conflicts, skipped items and sign-ins to redo.
+    Status,
+    /// Start syncing a category on this device: keys, skills, settings, mcp, instructions.
+    Enable {
+        category: String,
+        /// Skip the confirmation for keys (they upload credentials, end-to-end encrypted).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop syncing a category on this device. Already-synced local data is left in place.
+    Disable { category: String },
+    /// Ask the running daemon to run a sync cycle now.
+    Now,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]

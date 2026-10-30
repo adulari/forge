@@ -426,6 +426,10 @@ pub struct App {
     pub(crate) git_checked_at: Option<std::time::Instant>,
     /// Number of connected MCP servers (from the last `McpStatus` event). Shown by `McpStatus` widget.
     pub mcp_count: usize,
+    /// Account-sync health read from the daemon's badge file, if sync is on. Shown by the
+    /// `AnywhereSync` widget; `None` hides it.
+    pub anywhere_sync: Option<forge_config::account_sync::SyncBadge>,
+    pub(crate) anywhere_sync_checked_at: Option<std::time::Instant>,
     /// The subscription window currently projected closest to exhaustion (from the latest
     /// `QuotaPace` event), if any history-derived projection is available yet. Shown by the
     /// `QuotaPace` statusline widget; `None` degrades that widget to render nothing (no panic,

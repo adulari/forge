@@ -37,6 +37,7 @@ mod keybindings_file;
 mod keybinds;
 mod progress_guard;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
+pub mod account_sync;
 pub mod commit_language;
 pub mod host;
 mod lsp_diagnostics;
@@ -421,13 +422,57 @@ pub struct AnywhereConfig {
     /// Stable user-facing name for this host. The service still assigns an opaque host ID.
     #[serde(default)]
     pub host_name: Option<String>,
-    /// Upload eligible encrypted journal records. Provider credentials and local-only records are
-    /// excluded regardless of this setting.
+    /// Upload eligible encrypted journal records (sessions, memory). Credentials are never part of
+    /// this stream; they travel only through `account_sync.keys`, which is off until this device
+    /// opts in.
     #[serde(default = "default_true")]
     pub sync: bool,
     /// Alternate service origin for local development. Release builds ignore this field.
     #[serde(default)]
     pub service_url: Option<String>,
+    /// Which parts of this machine's setup follow the account to the user's other devices. Every
+    /// category is per device and off by default.
+    #[serde(default)]
+    pub account_sync: AccountSyncConfig,
+}
+
+/// `[anywhere.account_sync]`: per-device opt-ins for syncing setup across the account's machines.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountSyncConfig {
+    /// Provider API keys and static MCP secrets. Rotating OAuth logins never sync, only a marker.
+    #[serde(default)]
+    pub keys: bool,
+    /// User skills, commands, agents and installed skill packs.
+    #[serde(default)]
+    pub skills: bool,
+    /// Portable preferences (theme, statusline, notifications, permission rules) and keybindings.
+    #[serde(default)]
+    pub settings: bool,
+    /// MCP server definitions from `mcp.toml`.
+    #[serde(default)]
+    pub mcp: bool,
+    /// The user-level `AGENTS.md`.
+    #[serde(default)]
+    pub instructions: bool,
+}
+
+impl AccountSyncConfig {
+    pub const CATEGORIES: [&'static str; 5] = ["keys", "skills", "settings", "mcp", "instructions"];
+
+    pub fn enabled(&self, category: &str) -> bool {
+        match category {
+            "keys" => self.keys,
+            "skills" => self.skills,
+            "settings" => self.settings,
+            "mcp" => self.mcp,
+            "instructions" => self.instructions,
+            _ => false,
+        }
+    }
+
+    pub fn any_enabled(&self) -> bool {
+        Self::CATEGORIES.iter().any(|c| self.enabled(c))
+    }
 }
 
 impl Default for AnywhereConfig {
@@ -437,6 +482,7 @@ impl Default for AnywhereConfig {
             host_name: None,
             sync: true,
             service_url: None,
+            account_sync: AccountSyncConfig::default(),
         }
     }
 }
@@ -456,7 +502,13 @@ impl AnywhereConfig {
 /// silently dropped by Figment/serde — the field just keeps its default, with no error and no
 /// warning — so `[anywhere] nabled = true` left the connector disabled with `forge anywhere
 /// doctor` reporting only "connector: not configured", no pointer at the real cause (#5).
-const ANYWHERE_KNOWN_KEYS: &[&str] = &["enabled", "host_name", "sync", "service_url"];
+const ANYWHERE_KNOWN_KEYS: &[&str] = &[
+    "enabled",
+    "host_name",
+    "sync",
+    "service_url",
+    "account_sync",
+];
 
 /// Unrecognized keys in `raw_toml`'s `[anywhere]` table, each paired with the closest known key
 /// when the two are close enough (edit distance <= 2) to be a plausible typo.
@@ -2784,6 +2836,8 @@ pub enum StatuslineWidget {
     QuotaPace,
     /// MCP server count "⌬ N mcp" (only when servers are connected)
     McpStatus,
+    /// Account-sync health "sync ✓" / "sync 2↑" / "sync !" (hidden while Anywhere account sync is off)
+    AnywhereSync,
     /// Tier bracket only "[tier]"
     Tier,
     /// Current project/repo directory name "⚑ repo"

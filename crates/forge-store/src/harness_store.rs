@@ -941,4 +941,23 @@ mod tests {
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].summary, "third");
     }
+
+    #[test]
+    fn harness_edits_succeed_with_sync_on_and_are_not_journaled() {
+        let s = store();
+        s.set_sync_journal_enabled(true).unwrap();
+        let created = s
+            .apply_harness_edits(
+                "global",
+                "sess1",
+                "manual",
+                "create",
+                "because",
+                "outcome",
+                vec![create_edit("skill", "title", "v1 content")],
+            )
+            .expect("a refinement must not roll back when sync is enabled");
+        s.rollback_harness_refinement(&created.id, "sess1").unwrap();
+        assert!(s.pending_sync_journal(100).unwrap().is_empty());
+    }
 }

@@ -103,6 +103,17 @@ pub(crate) fn set_notifications(enabled: bool) -> Result<Success, String> {
     ))
 }
 
+pub(crate) fn set_account_sync(category: &str, enabled: bool) -> Result<Success, String> {
+    if !forge_config::AccountSyncConfig::CATEGORIES.contains(&category) {
+        return Err(format!("{category} is not a sync category."));
+    }
+    set_user_value(
+        &format!("anywhere.account_sync.{category}"),
+        if enabled { "true" } else { "false" },
+    )?;
+    Ok(Success::with("Sync setting saved.", ActionResult::Changed))
+}
+
 pub(crate) fn set_theme(theme: &str) -> Result<Success, String> {
     if !matches!(theme, "auto" | "dark" | "light") {
         return Err(format!("{theme} is not a theme."));

@@ -9,6 +9,7 @@ use forge_types::{Role, TaskTier, ToolCall, Usage, Visibility};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
 
+mod account_sync_store;
 mod assay_store;
 mod automation_store;
 mod bench_solve_store;
@@ -69,6 +70,7 @@ mod usage_attribution;
 mod usage_prefix_store;
 mod usage_store;
 
+pub use account_sync_store::AccountSyncItem;
 pub use bench_solve_store::{BenchSolveRun, BenchSolveTotals};
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
 pub use child_view_store::{ChildIndexRow, ChildSessionInfo};
@@ -96,7 +98,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 48;
+const SCHEMA_VERSION: i64 = 49;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -1256,12 +1258,6 @@ pub(crate) fn insert_sync_journal_row_with_base(
             | "agent"
             | "workflow"
             | "file"
-            // harness_store.rs journals under this kind for every /refine edit and rollback. It
-            // was missing here, so with Anywhere sync ENABLED the whitelist rejected the row, the
-            // `?` propagated, and the whole IMMEDIATE transaction rolled back — the Continual
-            // Harness was inoperable. Tests did not catch it because the sync-enabled gate returns
-            // early when sync is off, which is the default in tests.
-            | "harness_entry"
     ) {
         return Err(StoreError::InvalidValue(
             "record kind is not eligible for Anywhere sync".into(),
@@ -1326,6 +1322,8 @@ pub(crate) fn insert_sync_journal_row_with_base(
     }
 }
 
+const LOCAL_ONLY_SYNC_KINDS: [&str; 2] = ["harness_entry", "harness_refinement"];
+
 /// Append the next immutable snapshot for a local record inside the caller's transaction.
 pub(crate) fn append_sync_revision(
     conn: &Connection,
@@ -1334,6 +1332,12 @@ pub(crate) fn append_sync_revision(
     operation: SyncJournalOperation,
     payload: &[u8],
 ) -> Result<()> {
+    // Continual-harness rows are local learnings and the service accepts neither kind. Journaling
+    // them used to jam the strictly ordered outbox (`harness_entry`) or roll the whole write back
+    // (`harness_refinement`) whenever sync was on, so they are not journaled at all.
+    if LOCAL_ONLY_SYNC_KINDS.contains(&record_kind) {
+        return Ok(());
+    }
     let enabled = conn
         .query_row(
             "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",

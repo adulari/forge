@@ -339,6 +339,19 @@ CREATE TABLE IF NOT EXISTS schedule_run (
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_run_schedule ON schedule_run(schedule_id, started_at);
 
+CREATE TABLE IF NOT EXISTS anywhere_account_sync_item (
+    category     TEXT NOT NULL,
+    item_id      TEXT NOT NULL,
+    item         TEXT NOT NULL DEFAULT '',
+    label        TEXT NOT NULL DEFAULT '',
+    local_hash   TEXT NOT NULL DEFAULT '',
+    remote_clock INTEGER NOT NULL DEFAULT 0,
+    applied_at   INTEGER NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'synced',
+    detail       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (category, item_id)
+);
+
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome
 -- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES
