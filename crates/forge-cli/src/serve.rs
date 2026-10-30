@@ -1034,6 +1034,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
             get(crate::serve_terminal::terminal_list),
         )
         .route(&format!("{base}/api/usage"), get(usage_page))
+        .route(&format!("{base}/api/usage/activity"), get(activity::page))
         .route(&format!("{base}/api/hooks"), get(hooks_page))
         .route(&format!("{base}/api/workflows"), get(workflows_page))
         .route(&format!("{base}/api/models"), models_route())

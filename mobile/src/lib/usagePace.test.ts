@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { paceAnnotation } from "./usagePace";
+import { paceAnnotation, projectedFraction } from "./usagePace";
 import type { DisplayQuota } from "./usageWindows";
 
 const HOUR = 3600;
@@ -41,5 +41,19 @@ describe("paceAnnotation", () => {
     expect(paceAnnotation(quota({ windowKind: "secondary" }), 1_000_000)).toBeNull();
     expect(paceAnnotation(quota({ fraction: 0 }), 1_000_000)).toBeNull();
     expect(paceAnnotation(quota({ resetsAt: 1_000_000 - 1 }), 1_000_000)).toBeNull();
+  });
+});
+
+describe("projectedFraction", () => {
+  it("is the same extrapolation the caption words", () => {
+    const quota = { windowKind: "weekly", status: "warning", fraction: 0.4, resetsAt: 1000 + 7 * 24 * 3600 * 0.5, seen: true } as never;
+    const projected = projectedFraction(quota, 1000);
+    expect(projected).toBeCloseTo(0.8, 5);
+    expect(paceAnnotation(quota, 1000)?.text).toBe(`≈${Math.round((projected ?? 0) * 100)}% by reset`);
+  });
+
+  it("refuses to project the first sliver of a window or an unknown reset", () => {
+    expect(projectedFraction({ windowKind: "weekly", status: "ok", fraction: 0.2, resetsAt: 1000 + 7 * 24 * 3600 - 60, seen: true } as never, 1000)).toBeNull();
+    expect(projectedFraction({ windowKind: "weekly", status: "ok", fraction: 0.2, resetsAt: null, seen: true } as never, 1000)).toBeNull();
   });
 });

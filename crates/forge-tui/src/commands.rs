@@ -142,6 +142,8 @@ pub enum CommandAction {
     Export(Option<String>),
     /// Open the usage overlay showing API spend + token breakdown (`/usage`).
     Usage,
+    /// Print the lifetime activity poster (`/stats [days]`).
+    Stats(Option<u32>),
     /// Exit the TUI and resume this conversation in Claude Code (`/claude`).
     Claude,
     /// Open the mesh routing inspector; optional prompt to trace (`/mesh [task]`).
@@ -476,6 +478,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         }
         "cls" => CommandAction::ClearScreen,
         "usage" => CommandAction::Usage,
+        "stats" => CommandAction::Stats(arg.split_whitespace().next().and_then(|d| d.parse().ok())),
         "status" => CommandAction::Status,
         "mesh" => CommandAction::Mesh((!arg.is_empty()).then_some(arg)),
         "remote" | "rc" => {

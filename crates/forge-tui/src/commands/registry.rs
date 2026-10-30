@@ -308,6 +308,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/cls",
     },
     Command {
+        name: "stats",
+        desc: "lifetime activity poster: 52-week heatmap, streaks, busiest providers",
+        usage: "/stats [days]",
+    },
+    Command {
         name: "usage",
         desc: "show API spend + token usage across providers",
         usage: "/usage",

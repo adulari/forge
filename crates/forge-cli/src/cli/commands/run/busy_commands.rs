@@ -78,6 +78,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Replay(_, _)
         | CommandAction::Export(_)
         | CommandAction::Usage
+        | CommandAction::Stats(_)
         | CommandAction::Mesh(_)
         | CommandAction::Init
         | CommandAction::SetEffort(_)

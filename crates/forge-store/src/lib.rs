@@ -64,6 +64,7 @@ mod sync_journal;
 mod sync_store;
 mod task_store;
 mod transcript_read_store;
+mod usage_activity_store;
 mod usage_attribution;
 mod usage_prefix_store;
 mod usage_store;
@@ -88,6 +89,7 @@ pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use transcript_read_store::HistoryFilter;
+pub use usage_activity_store::{streaks, ActivityStreaks, DayUsage};
 pub use usage_prefix_store::{CacheModelStats, UsagePrefix};
 pub use usage_store::ModelUsageRow;
 

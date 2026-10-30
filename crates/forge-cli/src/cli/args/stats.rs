@@ -24,4 +24,13 @@ pub(crate) enum StatsCmd {
         #[arg(long, default_value_t = 30)]
         days: u32,
     },
+    /// Lifetime activity poster: a 52-week heatmap, streaks and the busiest providers.
+    Poster {
+        /// Look back this many days (at most 400).
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+        /// Only this provider (the account name the Usage page shows, e.g. `claude-cli`).
+        #[arg(long)]
+        provider: Option<String>,
+    },
 }

@@ -4,13 +4,14 @@
 // renders as its provider list — this is a docked re-flow of that data, not a
 // second source of truth.
 import { router } from "expo-router";
-import { Cpu } from "lucide-react-native";
+import { Cpu, EyeOff } from "lucide-react-native";
 import React, { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useSessions, useUsage } from "../../lib/queries";
 import { buildProviderBlocks, isSubscription, kindLabel, priceLabel, quotaSummary, quotaTiming, windowLabel, type ProviderBlock } from "../../lib/usageWindows";
-import { paceAnnotation } from "../../lib/usagePace";
+import { paceAnnotation, projectedFraction } from "../../lib/usagePace";
+import { setProviderHidden, useHiddenProviders } from "../../lib/usageHiddenProviders";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { formatRelativeTime, tabularNums, type as typeScale } from "../../theme/typography";
@@ -31,6 +32,9 @@ function ProviderCard({ block, nowSec }: { block: ProviderBlock; nowSec: number 
           {block.provider}
         </Text>
         <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{kindLabel(block.kind)}</Text>
+        <Pressable onPress={() => void setProviderHidden(block.provider, true)} accessibilityRole="button" accessibilityLabel={`Hide ${block.provider}`} hitSlop={8}>
+          <EyeOff size={13} color={tokens.ink4} />
+        </Pressable>
       </View>
       <Text style={[typeScale.monoMeta, tabularNums, { color: billed ? tokens.success : tokens.ink3 }]}>
         {billed ? `${price} (7d)` : price === "Included" ? "Included with plan" : price}
@@ -40,6 +44,8 @@ function ProviderCard({ block, nowSec }: { block: ProviderBlock; nowSec: number 
         const barColor = quota.status === "exhausted" ? tokens.danger : usagePaceColor(pct, tokens);
         const detail = quotaSummary(quota, nowSec);
         const pace = quota.seen ? paceAnnotation(quota, nowSec) : null;
+        const projected = quota.seen ? projectedFraction(quota, nowSec) : null;
+        const ghostTo = projected == null ? 0 : Math.min(100, projected * 100);
         const paceColor = pace?.tone === "danger" ? tokens.danger : tokens.warn;
         return (
           <View key={quota.windowKind} style={styles.quotaBlock} accessibilityLabel={`${windowLabel(quota.windowKind)} ${detail}${pace ? `, ${pace.text}` : ""}`}>
@@ -50,6 +56,7 @@ function ProviderCard({ block, nowSec }: { block: ProviderBlock; nowSec: number 
               </Text>
             </View>
             <View style={[styles.track, { backgroundColor: tokens.border }]}>
+              {ghostTo > pct ? <View testID="usage-ghost" style={[styles.ghost, { left: `${pct}%`, width: `${ghostTo - pct}%`, backgroundColor: barColor }]} /> : null}
               <View style={[styles.fill, { width: `${pct}%`, backgroundColor: barColor }]} />
             </View>
             <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>
@@ -81,7 +88,9 @@ export function UsageDock() {
   const week = query.data?.week;
   const quotaRows = query.data?.quota;
 
-  const blocks = useMemo(() => buildProviderBlocks(week?.providers, quotaRows), [week, quotaRows]);
+  const hiddenProviders = useHiddenProviders();
+  const allBlocks = useMemo(() => buildProviderBlocks(week?.providers, quotaRows), [week, quotaRows]);
+  const blocks = useMemo(() => allBlocks.filter((block) => !hiddenProviders.includes(block.provider)), [allBlocks, hiddenProviders]);
   const nowSec = query.dataUpdatedAt / 1000;
 
   return (
@@ -105,6 +114,11 @@ export function UsageDock() {
         </Pressable>
       </View>
       <View style={[styles.footer, { borderTopColor: tokens.border }]}>
+        {allBlocks.length > blocks.length ? (
+          <Pressable onPress={() => allBlocks.forEach((block) => void setProviderHidden(block.provider, false))} accessibilityRole="button">
+            <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{allBlocks.length - blocks.length} hidden · show all</Text>
+          </Pressable>
+        ) : null}
         <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4 }]}>
           {query.dataUpdatedAt ? `Updated ${formatRelativeTime(query.dataUpdatedAt)} ago` : "—"}
         </Text>
@@ -124,6 +138,7 @@ const styles = StyleSheet.create({
   quotaHeadRow: { flexDirection: "row", justifyContent: "space-between" },
   track: { height: 3, borderRadius: 2, overflow: "hidden" },
   fill: { height: "100%", borderRadius: 2 },
+  ghost: { position: "absolute", top: 0, bottom: 0, opacity: 0.3 },
   paceRow: { flexDirection: "row", alignItems: "center", gap: space.space4 },
   paceDot: { width: 6, height: 6, borderRadius: 3 },
   connectCard: {

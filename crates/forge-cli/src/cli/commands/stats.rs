@@ -10,6 +10,14 @@ pub(crate) fn stats_cmd(cmd: StatsCmd) -> Result<()> {
     let (session, days, codemode) = match cmd {
         StatsCmd::Cache { session, days } => (session, days, false),
         StatsCmd::Codemode { session, days } => (session, days, true),
+        StatsCmd::Poster { days, provider } => {
+            let store = open_store()?;
+            print!(
+                "{}",
+                super::stats_poster::run(&store, days, provider.as_deref())?
+            );
+            return Ok(());
+        }
     };
     let store = open_store()?;
     let session = match session.as_deref() {

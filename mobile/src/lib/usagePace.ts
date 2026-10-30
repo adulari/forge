@@ -17,6 +17,21 @@ export const WINDOW_DURATION_SEC: Record<string, number> = {
 // projected once this share of the window has elapsed.
 const MIN_ELAPSED_SHARE = 0.05;
 
+/**
+ * Where the window will stand at reset if the burn rate so far holds (0..1+, uncapped above 1),
+ * or null when there is nothing honest to project. The same linear extrapolation `paceAnnotation`
+ * words, so the ghost tick on a bar and the caption under it cannot disagree.
+ */
+export function projectedFraction(quota: DisplayQuota, nowSec: number): number | null {
+  const duration = WINDOW_DURATION_SEC[quota.windowKind];
+  if (!duration || quota.fraction == null || quota.resetsAt == null) return null;
+  const remainingSec = quota.resetsAt - nowSec;
+  const elapsedSec = duration - remainingSec;
+  if (remainingSec <= 0 || elapsedSec <= 0 || quota.fraction <= 0) return null;
+  if (elapsedSec < duration * MIN_ELAPSED_SHARE) return null;
+  return (quota.fraction / elapsedSec) * duration;
+}
+
 export interface PaceAnnotation {
   text: string;
   tone: "warn" | "danger";
