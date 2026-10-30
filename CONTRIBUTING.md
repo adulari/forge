@@ -123,6 +123,7 @@ directory.
 
 ## Code standards
 
+- Every user-facing feature gets a UI in the TUI, desktop/web and mobile apps, not only a command. See "Every feature gets a UI on every surface" in `AGENTS.md`.
 - Comments explain **why**, not what. No comments where the code is self-evident; no docstrings on
   trivial functions.
 - Prefer explicit over clever.
