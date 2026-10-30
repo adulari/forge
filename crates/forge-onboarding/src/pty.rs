@@ -168,6 +168,8 @@ fn find_urls(text: &str) -> Vec<String> {
     out
 }
 
+const ENTER_DELAY: Duration = Duration::from_millis(300);
+
 pub(crate) struct PtySpec<'a> {
     pub program: &'a str,
     pub args: &'a [String],
@@ -248,6 +250,7 @@ pub(crate) fn run_pty(job: &JobHandle, spec: PtySpec<'_>) -> Result<PtyRun, Stri
         }
     };
 
+    let mut enter_at: Option<Instant> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(bytes) => handle_scans(scanner.feed(&bytes), &mut token),
@@ -256,7 +259,15 @@ pub(crate) fn run_pty(job: &JobHandle, spec: PtySpec<'_>) -> Result<PtyRun, Stri
         }
         if let Some(text) = job.try_input() {
             job.add_secret(text.clone());
-            let _ = writer.write_all(format!("{text}\r").as_bytes());
+            let _ = writer.write_all(text.as_bytes());
+            let _ = writer.flush();
+            enter_at = Some(Instant::now() + ENTER_DELAY);
+        }
+        // Enter goes in its own write, after a pause: Ink (Claude Code's UI) reads a multi-byte chunk
+        // as pasted text, so a trailing "\r" in the same chunk never submits the field.
+        if enter_at.is_some_and(|at| Instant::now() >= at) {
+            enter_at = None;
+            let _ = writer.write_all(b"\r");
             let _ = writer.flush();
         }
         if job.cancelled() || started.elapsed() > spec.timeout {

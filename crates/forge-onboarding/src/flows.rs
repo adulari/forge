@@ -241,6 +241,55 @@ mod tests {
         forge_config::secret_store::delete(forge_config::CLAUDE_OAUTH_TOKEN_SLOT).unwrap();
     }
 
+    /// Claude Code's input box (Ink) reads raw chunks and treats a multi-byte chunk as pasted
+    /// text: only a chunk that is exactly Enter submits. A code and "\r" in one write never does.
+    #[test]
+    fn a_typed_code_submits_in_an_ink_style_input_that_reads_raw_chunks() {
+        let f = fixture();
+        fake_claude(
+            &f,
+            &format!(
+                "echo 'visit https://claude.ai/oauth/authorize?state=ink'\n\
+                 stty raw -echo\n\
+                 printf 'Paste code here if prompted > '\n\
+                 code=''\n\
+                 while :; do\n\
+                   chunk=$(dd bs=4096 count=1 2>/dev/null)\n\
+                   [ -z \"$chunk\" ] && exit 0\n\
+                   [ \"$chunk\" = \"$(printf '\\r')\" ] && break\n\
+                   code=\"$code$chunk\"\n\
+                 done\n\
+                 stty sane\n\
+                 printf '\\r\\nreceived %s chars\\r\\n' \"${{#code}}\"\n\
+                 echo '{TOKEN}'"
+            ),
+        );
+        let jobs = Jobs::new();
+        let id = jobs.run(crate::Action::ConnectClaude, Arc::new(NoHost));
+        let start = Instant::now();
+        while !jobs.poll(id, 0).unwrap().events.iter().any(|e| {
+            matches!(
+                e,
+                JobEvent::Prompt {
+                    prompt: PromptKind::Code { .. },
+                    ..
+                }
+            )
+        }) {
+            assert!(start.elapsed() < Duration::from_secs(10), "no code prompt");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(jobs.send_input(id, "CODE#STATE-123"));
+        let poll = run_to_end(&jobs, id);
+        let json = serde_json::to_string(&poll).unwrap();
+        assert!(
+            json.contains("received 14 chars"),
+            "the code was not submitted: {json}"
+        );
+        assert_eq!(forge_config::claude_oauth_token().as_deref(), Some(TOKEN));
+        forge_config::secret_store::delete(forge_config::CLAUDE_OAUTH_TOKEN_SLOT).unwrap();
+    }
+
     #[test]
     fn a_missing_claude_is_a_plain_failure() {
         let _f = fixture();
