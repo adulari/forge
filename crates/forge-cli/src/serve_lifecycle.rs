@@ -199,7 +199,9 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, config: &SessionsConfig, now
         let last = handle
             .last_activity
             .load(std::sync::atomic::Ordering::Relaxed);
-        if !idle_unload_due(last, handle.created_at, now, config.idle_unload_minutes) {
+        if crate::serve_pr_watch::is_watching(&handle.session_id)
+            || !idle_unload_due(last, handle.created_at, now, config.idle_unload_minutes)
+        {
             continue;
         }
         let Some(handle) = state.registry.remove(&handle.session_id).await else {

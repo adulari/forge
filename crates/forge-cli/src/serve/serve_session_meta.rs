@@ -36,6 +36,8 @@ pub(super) struct SessionMetaFields {
     pub(super) starred: bool,
     /// Unix seconds the session was marked done, `None` while it is not.
     pub(super) done_at: Option<i64>,
+    /// `fix` / `merge` while PR Watch is armed on this session.
+    pub(super) pr_watch: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +166,7 @@ pub(super) async fn annotate(store: &std::sync::Arc<Store>, rows: &mut [SessionR
             branch: figures.and_then(|f| f.branch),
             starred: lifecycle.get(&row.id).is_some_and(|l| l.0),
             done_at: lifecycle.get(&row.id).and_then(|l| l.1),
+            pr_watch: crate::serve_pr_watch::mode_of(&row.id),
         };
     }
 }

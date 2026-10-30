@@ -19,6 +19,7 @@ import { TabStrip } from "../ds/TabStrip";
 import { useToast } from "../ds/ToastHost";
 import { toneColor } from "./PrChip";
 import { PrFileCard } from "./PrFileCard";
+import { PrWatchPanel } from "./PrWatchPanel";
 import { checksLabel, checksTone, mergeGate } from "./prModel";
 
 type Tab = "summary" | "changes" | "checks";
@@ -89,6 +90,8 @@ function SummaryTab({ sessionId, detail }: { sessionId: string; detail: PrDetail
       ) : (
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>No description.</Text>
       )}
+
+      {pr.state === "open" ? <PrWatchPanel sessionId={sessionId} /> : null}
 
       {pr.state === "open" ? (
         <View style={[styles.panel, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>

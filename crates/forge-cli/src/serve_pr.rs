@@ -44,6 +44,7 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/pr/create"), post(pr_create))
         .route(&format!("{base}/api/pr/comment"), post(pr_comment))
         .route(&format!("{base}/api/pr/merge"), post(pr_merge))
+        .merge(crate::serve_pr_watch::routes(base))
 }
 
 fn http_fail((status, message): (axum::http::StatusCode, String)) -> Response {
@@ -464,18 +465,18 @@ async fn comment_in(gh: &Gh, root: &Path, number: u64, body: &str) -> Result<(),
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MergeRequest {
-    session: String,
-    number: u64,
-    head_sha: String,
+pub(crate) struct MergeRequest {
+    pub(crate) session: String,
+    pub(crate) number: u64,
+    pub(crate) head_sha: String,
     #[serde(default)]
-    method: Option<String>,
+    pub(crate) method: Option<String>,
     #[serde(default)]
-    delete_branch: bool,
+    pub(crate) delete_branch: bool,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
-struct MergeResponse {
+pub(crate) struct MergeResponse {
     ok: bool,
     /// `pulled` | `fetched` | `skipped`
     sync: &'static str,
@@ -496,7 +497,11 @@ async fn pr_merge(
     }
 }
 
-async fn merge_in(gh: &Gh, root: &Path, request: &MergeRequest) -> Result<MergeResponse, GhError> {
+pub(crate) async fn merge_in(
+    gh: &Gh,
+    root: &Path,
+    request: &MergeRequest,
+) -> Result<MergeResponse, GhError> {
     if !valid_sha(&request.head_sha) {
         return Err(GhError::Failed(
             "head_sha is required: the commit the reviewer saw".into(),

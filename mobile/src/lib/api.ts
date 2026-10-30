@@ -401,6 +401,8 @@ export interface SessionRow {
   starred?: boolean;
   /** Unix seconds the session was marked done; absent or null while it is not. Additive. */
   done_at?: number | null;
+  /** `fix` or `merge` while PR Watch is armed on the session. Additive. */
+  pr_watch?: "fix" | "merge" | null;
 }
 
 export interface PastSessionRow {

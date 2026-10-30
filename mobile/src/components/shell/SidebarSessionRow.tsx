@@ -252,7 +252,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
         onHoverIn={() => warmSession(row.id)}
         onPressIn={() => void prefetchHistory(row.id)}
         accessibilityRole="button"
-        accessibilityLabel={`${title}, ${sessionStateWord(row)}, ${family}${diff ? `, ${diff} lines` : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}${depth > 0 ? ", fork" : ""}${row.starred ? ", starred" : ""}${row.done_at != null ? ", done" : ""}`}
+        accessibilityLabel={`${title}, ${sessionStateWord(row)}, ${family}${diff ? `, ${diff} lines` : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}${depth > 0 ? ", fork" : ""}${row.starred ? ", starred" : ""}${row.done_at != null ? ", done" : ""}${row.pr_watch ? ", watching its pull request" : ""}`}
         accessibilityHint="Opens in the focused pane. Right-click or double-click for more, or drag onto a pane."
         style={[
           styles.row,
@@ -288,6 +288,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
           <View accessibilityRole="image" accessibilityLabel="last turn failed" style={[styles.failedDot, { backgroundColor: tokens.danger }]} />
         ) : null}
         {row.starred ? <Text accessibilityElementsHidden style={[typeScale.monoMeta, { color: tokens.accent }]}>★</Text> : null}
+        {row.pr_watch ? <Text accessibilityElementsHidden style={[typeScale.monoMeta, { color: tokens.accent }]}>◉</Text> : null}
         {row.worktree ? <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>⑂</Text> : null}
         {diff ? (
           <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]} numberOfLines={1}>
