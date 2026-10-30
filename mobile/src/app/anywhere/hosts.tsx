@@ -3,12 +3,13 @@
 // the real AnywhereHost only reports online vs. last-heartbeat, so this renders the
 // two states it actually has rather than inventing busy/stale/revoked distinctions
 // no backend field backs yet.
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import { router } from "expo-router";
 import { ChevronRight } from "lucide-react-native";
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Screen } from "../../components/ds/Screen";
 import { useAnywhere } from "../../lib/AnywhereProvider";
 import { hostStatusText } from "../../lib/anywhereHostPresence";
@@ -26,17 +27,12 @@ export default function AnywhereHostsScreen() {
   return (
     <Screen scroll contentContainerStyle={styles.content}>
       <View style={styles.shell}>
-        <View style={styles.header}>
-          <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
-          <View style={styles.headerRow}>
-            <Text accessibilityRole="header" style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>
-              Hosts
-            </Text>
-            <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>
-              {`${anywhere.hosts.length} of ${MAX_ACTIVE_HOSTS} active`}
-            </Text>
-          </View>
-        </View>
+        <PageHeader
+          title="Hosts"
+          subtitle={`${anywhere.hosts.length} of ${MAX_ACTIVE_HOSTS} active slots.`}
+          backLabel="Anywhere"
+          onBack={() => router.replace("/anywhere")}
+        />
 
         <View style={styles.list}>
           {anywhere.hosts.map((host) => (
@@ -79,7 +75,7 @@ export default function AnywhereHostsScreen() {
 const styles = StyleSheet.create({
   command: { fontFamily: "monospace", fontVariant: [] },
   content: { paddingTop: space.space12, paddingBottom: space.space48 },
-  shell: { width: "100%", maxWidth: 680, alignSelf: "center" },
+  shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" },
   header: { gap: space.space8, marginBottom: space.space4 },
   headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   headerTitle: { flex: 1 },

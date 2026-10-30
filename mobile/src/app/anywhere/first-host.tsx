@@ -1,4 +1,5 @@
 import { Redirect, router } from "expo-router";
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import { Check, Laptop, ShieldCheck } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
@@ -106,7 +107,7 @@ export default function FirstHostScreen() {
 }
 
 const styles = StyleSheet.create({
-  screen: { paddingTop: space.space12, paddingBottom: space.space48 }, shell: { width: "100%", maxWidth: 640, alignSelf: "center" }, title: { marginTop: space.space12 }, subtitle: { marginTop: space.space4 },
+  screen: { paddingTop: space.space12, paddingBottom: space.space48 }, shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" }, title: { marginTop: space.space12 }, subtitle: { marginTop: space.space4 },
   header: { flexDirection: "row", alignItems: "center", gap: space.space12, marginTop: space.space12 }, icon: { width: 46, height: 46, borderRadius: radii.radius12, alignItems: "center", justifyContent: "center" }, headerCopy: { flex: 1 },
   form: { marginTop: space.space24, gap: space.space12 }, promise: { flexDirection: "row", alignItems: "flex-start", gap: space.space8 }, promiseCopy: { flex: 1 }, action: { marginTop: space.space4 },
   safety: { borderWidth: 1, borderRadius: radii.radius12, padding: space.space16, gap: space.space8 }, safetyHeader: { flexDirection: "row", alignItems: "center", gap: space.space8 }, code: { fontFamily: monoFamily.bold, fontSize: 27, lineHeight: 35, letterSpacing: 2.2 },

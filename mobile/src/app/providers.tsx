@@ -5,17 +5,16 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react-native";
+import { PageHeader } from "../components/ds/PageHeader";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Pressable,
   RefreshControl,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 
-import { BackLink } from "../components/ds/BackLink";
 import { Badge, type BadgeTone } from "../components/ds/Badge";
 import { Button } from "../components/ds/Button";
 import { ConfirmDialog } from "../components/ds/ConfirmDialog";
@@ -676,34 +675,21 @@ function ProvidersScreenBody() {
       }
       contentContainerStyle={styles.content}
     >
-      <View style={styles.headerRow}>
-        <BackLink />
-        <View style={styles.flexFill} />
-        {direct ? (
+      <PageHeader
+        title="Providers & accounts"
+        subtitle="Credentials, subscription accounts, endpoints, and routing availability on this Forge host."
+        trailing={direct ? (
           <>
-            <Pressable
+            <Button
+              label={providers.some((provider) => provider.kind === "azure") ? "Azure" : "Add Azure"}
+              variant="secondary"
               onPress={() => setAzureSheet({ visible: true, provider: providers.find((provider) => provider.kind === "azure") ?? null })}
-              accessibilityRole="button"
               accessibilityLabel="Add or edit Azure OpenAI"
-            >
-              <Text style={[styles.add, { color: tokens.accent }]}>
-                {providers.some((provider) => provider.kind === "azure") ? "Azure" : "+ Azure"}
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setCustomSheet({ visible: true, provider: null })}
-              accessibilityRole="button"
-              accessibilityLabel="Add custom provider"
-            >
-              <Text style={[styles.add, { color: tokens.accent }]}>+ Endpoint</Text>
-            </Pressable>
+            />
+            <Button label="Add endpoint" variant="secondary" onPress={() => setCustomSheet({ visible: true, provider: null })} accessibilityLabel="Add custom provider" />
           </>
         ) : null}
-      </View>
-      <Text style={[type.title, { color: tokens.ink }]}>Providers &amp; accounts</Text>
-      <Text style={[type.sub, { color: tokens.ink3 }]}>
-        Credentials, subscription accounts, endpoints, and routing availability on this Forge host.
-      </Text>
+      />
 
       {!direct ? (
         <View style={[styles.directBanner, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>

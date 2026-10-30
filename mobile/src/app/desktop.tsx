@@ -2,7 +2,7 @@ import { router } from "expo-router";
 import React, { useCallback, useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
@@ -72,13 +72,7 @@ export default function DesktopScreen() {
     <DesktopDrillDown>
       <SettingsShell active="desktop">
         <Screen scroll contentContainerStyle={styles.content}>
-          <View style={styles.header}>
-            <BackLink />
-            <Text accessibilityRole="header" style={[type.title, { color: tokens.ink }]}>Desktop</Text>
-            <Text style={[type.sub, { color: tokens.ink3 }]}>
-              How Forge behaves as an app on this computer. These stay on this device.
-            </Text>
-          </View>
+          <PageHeader title="Desktop" subtitle="How Forge behaves as an app on this computer. These stay on this device." />
 
           {!isTauri ? (
             <Text style={[type.sub, { color: tokens.ink3 }]}>These settings belong to the Forge desktop app.</Text>

@@ -2,11 +2,15 @@
 // desktop.dc.html "D AW Settings" devices column lines 1009-1013). Real device list
 // and revoke-with-key-rotation flow — same `anywhere.revokeDevice` used by
 // recovery-phrase.tsx's Recovery Center, just given its own dedicated list here.
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import { Laptop, Smartphone, Trash2 } from "lucide-react-native";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { Badge } from "../../components/ds/Badge";
+import { useClockSeconds } from "../../components/ds/relativeClock";
+import { describeDevices } from "../../lib/anywhere/deviceList";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
 import { Input } from "../../components/ds/Input";
@@ -18,24 +22,6 @@ import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { goBackOr } from "../../lib/nav";
 
-function isPhoneLike(name: string): boolean {
-  return /phone|android/i.test(name);
-}
-
-function relativeLabel(iso: string | null): string {
-  if (!iso) return "enrolled";
-  const ms = Date.parse(iso);
-  if (Number.isNaN(ms)) return "enrolled";
-  const deltaSec = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (deltaSec < 60) return `${deltaSec}s`;
-  const deltaMin = Math.round(deltaSec / 60);
-  if (deltaMin < 60) return `${deltaMin}m`;
-  const deltaHour = Math.round(deltaMin / 60);
-  if (deltaHour < 24) return `${deltaHour}h`;
-  const deltaDay = Math.round(deltaHour / 24);
-  return `${deltaDay}d`;
-}
-
 export default function AnywhereDevicesScreen() {
   const anywhere = useAnywhere();
   const tokens = useTokens();
@@ -43,6 +29,11 @@ export default function AnywhereDevicesScreen() {
   const [target, setTarget] = useState<string | null>(null);
   const [phrase, setPhrase] = useState("");
   const [busy, setBusy] = useState(false);
+  const nowSeconds = useClockSeconds();
+  const deviceRows = useMemo(
+    () => describeDevices(anywhere.devices, anywhere.credentials?.deviceIdHex, nowSeconds * 1000),
+    [anywhere.devices, anywhere.credentials?.deviceIdHex, nowSeconds],
+  );
 
   const revoke = useCallback(async () => {
     if (!target || !phrase.trim()) return;
@@ -64,53 +55,41 @@ export default function AnywhereDevicesScreen() {
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
-        <View style={styles.header}>
-          <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
-          <View style={styles.headerRow}>
-            <Text accessibilityRole="header" style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>
-              Devices
-            </Text>
+        <PageHeader
+          title="Devices"
+          subtitle={`${deviceRows.length} paired. Revoke enrollments you no longer use; the account key is rotated so they cannot read new data.`}
+          backLabel="Anywhere"
+          onBack={() => goBackOr("/anywhere")}
+        />
 
-          </View>
-        </View>
 
         <View style={[styles.list, { borderTopColor: tokens.border }]}>
-          {anywhere.devices.map((device) => {
-            const current = device.id === anywhere.credentials?.deviceIdHex;
-            return (
-              <View key={device.id} style={[styles.row, { borderBottomColor: tokens.hairline }]}>
-                {isPhoneLike(device.name) ? (
-                  <Smartphone size={18} color={tokens.ink3} />
-                ) : (
-                  <Laptop size={18} color={tokens.ink3} />
-                )}
-                <View style={styles.rowCopy}>
-                  <View style={styles.nameLine}>
-                    <Text style={[typeScale.body, { color: tokens.ink }]} numberOfLines={1}>
-                      {device.name}
-                    </Text>
-                    {current ? (
-                      <Text style={[typeScale.meta, styles.thisDeviceTag, { color: tokens.ink3 }]}>THIS DEVICE</Text>
-                    ) : null}
-                  </View>
+          {deviceRows.map((device) => (
+            <View key={device.id} style={[styles.row, { borderBottomColor: tokens.hairline }]}>
+              {device.kind === "phone" ? <Smartphone size={18} color={tokens.ink3} /> : <Laptop size={18} color={tokens.ink3} />}
+              <View style={styles.rowCopy}>
+                <View style={styles.nameLine}>
+                  <Text style={[typeScale.bodyBold, styles.deviceName, { color: tokens.ink }]} numberOfLines={1}>{device.name}</Text>
+                  {device.isThisDevice ? <Badge label="THIS DEVICE" tone="accent" /> : null}
+                  {device.stale ? <Badge label="INACTIVE" tone="warn" /> : null}
                 </View>
-                <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{relativeLabel(device.last_seen_at)}</Text>
-                {!current ? (
-                  <Pressable
-                    onPress={() => {
-                      setTarget(device.id);
-                      setPhrase("");
-                    }}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Revoke ${device.name}`}
-                    hitSlop={8}
-                  >
-                    <Trash2 size={16} color={tokens.danger} />
-                  </Pressable>
-                ) : null}
+                <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{`${device.lastSeen} · ${device.enrolled}`}</Text>
               </View>
-            );
-          })}
+              {!device.isThisDevice ? (
+                <Pressable
+                  onPress={() => {
+                    setTarget(device.id);
+                    setPhrase("");
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Revoke ${device.name}, ${device.enrolled.toLowerCase()}`}
+                  hitSlop={8}
+                >
+                  <Trash2 size={16} color={tokens.danger} />
+                </Pressable>
+              ) : null}
+            </View>
+          ))}
           {!anywhere.devices.length ? (
             <Text style={[typeScale.sub, styles.empty, { color: tokens.ink3 }]}>No devices enrolled yet.</Text>
           ) : null}
@@ -118,7 +97,7 @@ export default function AnywhereDevicesScreen() {
 
         {target ? (
           <View style={[styles.revokePanel, { backgroundColor: tokens.bg2, borderColor: tokens.borderStrong }]}>
-            <Text style={[typeScale.headingBold, { color: tokens.ink }]}>Confirm device revocation</Text>
+            <Text style={[typeScale.headingBold, { color: tokens.ink }]}>{`Revoke ${deviceRows.find((row) => row.id === target)?.name ?? "device"}?`}</Text>
             <Text style={[typeScale.sub, { color: tokens.ink2 }]}>
               Enter your recovery phrase. Forge rotates the account key atomically before the device is removed.
             </Text>
@@ -156,7 +135,7 @@ export default function AnywhereDevicesScreen() {
 
 const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space48 },
-  shell: { width: "100%", maxWidth: 680, alignSelf: "center" },
+  shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" },
   header: { gap: space.space8, marginBottom: space.space4 },
   headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   headerTitle: { flex: 1 },
@@ -164,7 +143,7 @@ const styles = StyleSheet.create({
   row: { minHeight: 60, flexDirection: "row", alignItems: "center", gap: space.space12, borderBottomWidth: StyleSheet.hairlineWidth },
   rowCopy: { flex: 1, gap: 2 },
   nameLine: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  thisDeviceTag: { fontWeight: "600" },
+  deviceName: { flexShrink: 1 },
   empty: { paddingVertical: space.space16 },
   revokePanel: { marginTop: space.space16, borderWidth: 1, borderRadius: radii.radius12, padding: space.space16, gap: space.space12 },
   actions: { flexDirection: "row", gap: space.space8 },

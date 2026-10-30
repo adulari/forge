@@ -9,12 +9,13 @@
 // disable the action, this exports what the client genuinely holds — the account,
 // subscription, host, device and passkey metadata already on screen — and says exactly
 // that in the row caption. No session content and no key material leave the device.
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import { Redirect } from "expo-router";
 import { Trash2 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { Platform, Pressable, Share, StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
@@ -105,12 +106,12 @@ export default function AnywhereAccountScreen() {
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
-        <View style={styles.header}>
-          <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
-          <Text accessibilityRole="header" style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>
-            {`Account${anywhere.credentials?.githubLogin ? ` · @${anywhere.credentials.githubLogin}` : ""}`}
-          </Text>
-        </View>
+        <PageHeader
+          title="Account"
+          subtitle={anywhere.credentials?.githubLogin ? `Signed in as @${anywhere.credentials.githubLogin} with GitHub.` : undefined}
+          backLabel="Anywhere"
+          onBack={() => goBackOr("/anywhere")}
+        />
 
         {pendingReset ? (
           <Banner
@@ -218,7 +219,7 @@ export default function AnywhereAccountScreen() {
 
 const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space48 },
-  shell: { width: "100%", maxWidth: 640, alignSelf: "center" },
+  shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" },
   header: { gap: space.space4, marginBottom: space.space16 },
   headerTitle: { marginTop: space.space4 },
   row: {

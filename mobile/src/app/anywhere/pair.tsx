@@ -3,6 +3,7 @@
 // prints its challenge, this screen reads it, shows the safety code both sides must
 // match, and signs the account-key wrap through AnywhereProvider.approvePairing.
 // The challenge is never listed by the service, so it has to arrive by scan or paste.
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import * as Clipboard from "expo-clipboard";
 import { router } from "expo-router";
 import { Check, ScanLine, X } from "lucide-react-native";
@@ -101,7 +102,7 @@ export default function AnywherePairScreen() {
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.shell}>
         <BackLink label="Devices" onPress={() => router.replace("/anywhere/devices")} />
-        <Text accessibilityRole="header" style={[typeScale.headingBold, styles.title, { color: tokens.ink }]}>
+        <Text accessibilityRole="header" style={[typeScale.title, styles.title, { color: tokens.ink }]}>
           Approve new device
         </Text>
 
@@ -215,7 +216,7 @@ function DetailRow({ label, value, mono }: { label: string; value: string; mono?
 
 const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space48 },
-  shell: { width: "100%", maxWidth: 640, alignSelf: "center" },
+  shell: { width: "100%", maxWidth: PAGE_MAX_WIDTH, alignSelf: "center" },
   title: { marginTop: space.space12 },
   banner: { marginTop: space.space12 },
   form: { marginTop: space.space20, gap: space.space12 },

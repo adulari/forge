@@ -20,7 +20,7 @@ import { Check, ChevronDown, ClipboardList, Send } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 import { Pressable, RefreshControl, StyleSheet, Text, View, type ViewStyle } from "react-native";
 
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Button } from "../components/ds/Button";
 import { Card } from "../components/ds/Card";
 import { EmptyState } from "../components/ds/EmptyState";
@@ -315,11 +315,7 @@ function PlansScreenBody() {
 
   return (
     <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-      <BackLink />
-      <View style={styles.titleRow}>
-        <Text style={[type.title, styles.title, { color: tokens.ink }]}>Plans</Text>
-        {awaitingLabel ? <Text style={[type.monoMeta, tabularNums, { color: tokens.ink3 }]}>{awaitingLabel}</Text> : null}
-      </View>
+      <PageHeader title="Plans" trailing={awaitingLabel ? <Text style={[type.monoMeta, tabularNums, { color: tokens.ink3 }]}>{awaitingLabel}</Text> : null} />
       {content}
     </Screen>
   );

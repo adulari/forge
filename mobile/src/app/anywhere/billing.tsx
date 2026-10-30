@@ -4,7 +4,7 @@ import { Check } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Button } from "../../components/ds/Button";
 import { Screen } from "../../components/ds/Screen";
 import { useToast } from "../../components/ds/ToastHost";
@@ -119,14 +119,7 @@ export default function AnywhereBillingScreen() {
 
   return (
     <Screen scroll contentContainerStyle={styles.content}>
-      <View style={styles.header}>
-        <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
-        <View style={styles.headerRow}>
-          <Text style={[type.headingBold, styles.headerTitle, { color: tokens.ink }]}>Billing</Text>
-          <EntitlementBadge account={account} />
-        </View>
-      </View>
-      <Text style={[type.sub, styles.summary, { color: tokens.ink2 }]}>{summaryLine(account)}</Text>
+      <PageHeader title="Billing" titleMeta={<EntitlementBadge account={account} />} subtitle={summaryLine(account)} backLabel="Anywhere" onBack={() => router.replace("/anywhere")} />
 
       <View style={styles.section}>
         <Text style={[type.section, { color: tokens.ink4 }]}>choose a plan</Text>

@@ -7,12 +7,12 @@
 // the first PATCH comes back — the row is then latched read-only for the rest of the session with
 // the daemon's own explanation, instead of leaving a toggle that can only ever fail.
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import { RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { AddMcpServerSheet } from "../components/mcp/AddMcpServerSheet";
 import { Badge } from "../components/ds/Badge";
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
@@ -27,7 +27,7 @@ import { McpProbeSheet } from "../components/mcp/McpProbeSheet";
 import { McpServerItem } from "../components/mcp/McpServerItem";
 import { ConfirmDialog } from "../components/ds/ConfirmDialog";
 import { SectionHeader } from "../components/ds/SectionHeader";
-import { Plug, RefreshCw } from "lucide-react-native";
+import { Plug, Plus, RefreshCw } from "lucide-react-native";
 import { IconButton } from "../components/ds/IconButton";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
@@ -141,14 +141,14 @@ function McpScreenBody() {
   };
 
   return <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-    <View style={styles.headerRow}>
-      <BackLink />
-      <View style={styles.flexFill} />
-      {direct ? <IconButton icon={<RefreshCw size={18} strokeWidth={1.75} color={tokens.ink2} />} onPress={() => runReload()} disabled={reload.isPending} accessibilityLabel={reload.isPending ? "Checking MCP servers" : "Reload MCP servers"} /> : null}
-      {direct ? <Pressable onPress={() => setAdding(true)} accessibilityRole="button" style={styles.addButton}><Text style={[styles.add, { color: tokens.accent }]}>+ Add</Text></Pressable> : null}
-    </View>
-    <Text style={[type.title, { color: tokens.ink }]}>MCP servers</Text>
-    <Text style={[type.sub, { color: tokens.ink3 }]}>External tools available to Forge. Secrets remain on the host.</Text>
+    <PageHeader
+      title="MCP servers"
+      subtitle="External tools available to Forge. Secrets remain on the host."
+      trailing={direct ? <>
+        <IconButton icon={<RefreshCw size={18} strokeWidth={1.75} color={tokens.ink2} />} onPress={() => runReload()} disabled={reload.isPending} accessibilityLabel={reload.isPending ? "Checking MCP servers" : "Reload MCP servers"} />
+        <Button label="Add" variant="secondary" icon={<Plus size={14} color={tokens.ink2} />} onPress={() => setAdding(true)} accessibilityLabel="Add an MCP server" />
+      </> : null}
+    />
     {query.isLoading ? (
       <View>
         {[0, 1, 2].map((i) => (

@@ -2,7 +2,7 @@ import { AlertTriangle, RefreshCw, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Badge } from "../../components/ds/Badge";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
@@ -36,9 +36,7 @@ export default function AnywhereHistoryScreen() {
   const clear = async () => { if (!credentials) return; await clearOfflineHistory(credentials); setEntries([]); };
 
   return <Screen scroll contentContainerStyle={styles.content}>
-    <BackLink label="Anywhere" />
-    <Text style={[type.title, { color: tokens.ink }]}>Offline encrypted history</Text>
-    <Text style={[type.sub, { color: tokens.ink2 }]}>Objects are signature-checked, decrypted in memory, then cached as device-bound ciphertext. Provider credentials and host-only data are excluded upstream.</Text>
+    <PageHeader title="Offline encrypted history" subtitle="Objects are signature-checked, decrypted in memory, then cached as device-bound ciphertext. Provider credentials and host-only data are excluded upstream." backLabel="Anywhere" />
     {error ? <Banner tone="danger" message={error} /> : null}
     <View style={styles.actions}><Button label="Refresh" loading={busy} icon={<RefreshCw size={18} color={tokens.ink} />} variant="secondary" onPress={() => void refresh()} style={styles.grow} /><Button label="Clear offline" icon={<Trash2 size={18} color={tokens.danger} />} variant="ghost" onPress={() => void clear()} style={styles.grow} /></View>
     {entries.length === 0 ? <Card><Text style={[type.sub, { color: tokens.ink3 }]}>No decrypted records are cached on this device.</Text></Card> : entries.map((entry) => <Card key={`${entry.cursor}-${entry.record.stable_id}`} style={styles.card}>

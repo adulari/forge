@@ -1,11 +1,11 @@
 import * as Clipboard from "expo-clipboard";
+import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
 import { router } from "expo-router";
 import { ChevronDown, ChevronRight, Copy, Lock, RefreshCw } from "lucide-react-native";
 import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { SettingsShell } from "../(tabs)/settings";
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Badge } from "../../components/ds/Badge";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
@@ -61,18 +61,17 @@ export default function AnywhereSyncScreen() {
   const problem = query.isError ? classifyAccountSyncError(query.error) : null;
 
   return (
-    <SettingsShell active="anywhere-sync">
+    <>
       <Screen scroll contentContainerStyle={styles.content}>
         <View style={styles.column}>
-          <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
-          <Text style={[typeScale.title, { color: tokens.ink }]}>Sync across machines</Text>
-          {pill ? (
-            <View style={styles.statusLine} accessibilityLabel={pill.description}>
-              <View style={[styles.statusDot, { backgroundColor: pill.tone === "success" ? tokens.success : pill.tone === "warn" ? tokens.warn : pill.tone === "danger" ? tokens.danger : tokens.ink4 }]} />
-              <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{syncHubMeta(status)}</Text>
-            </View>
-          ) : null}
-          <Text style={[typeScale.sub, { color: tokens.ink2 }]}>{EXPLAINER}</Text>
+          <PageHeader title="Sync across machines" subtitle={EXPLAINER} backLabel="Anywhere" onBack={() => router.replace("/anywhere")}>
+            {pill ? (
+              <View style={styles.statusLine} accessibilityLabel={pill.description}>
+                <View style={[styles.statusDot, { backgroundColor: pill.tone === "success" ? tokens.success : pill.tone === "warn" ? tokens.warn : pill.tone === "danger" ? tokens.danger : tokens.ink4 }]} />
+                <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{syncHubMeta(status)}</Text>
+              </View>
+            ) : null}
+          </PageHeader>
 
           {query.isLoading ? <Skeleton height={220} /> : null}
 
@@ -190,7 +189,7 @@ export default function AnywhereSyncScreen() {
           ) : null}
         </View>
       </Screen>
-    </SettingsShell>
+    </>
   );
 }
 
@@ -273,7 +272,7 @@ function CategoryRow({
 
 const styles = StyleSheet.create({
   content: { paddingTop: space.space24, paddingBottom: space.space32 },
-  column: { gap: space.space16, width: "100%", maxWidth: 720 },
+  column: { gap: space.space16, width: "100%", maxWidth: PAGE_MAX_WIDTH },
   statusLine: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   statusDot: { width: 6, height: 6, borderRadius: 3 },
   sectionNote: { paddingHorizontal: space.space4, paddingBottom: space.space8 },

@@ -15,7 +15,7 @@ import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 import { Flame } from "lucide-react-native";
 
-import { BackLink } from "../../components/ds/BackLink";
+import { PageHeader } from "../../components/ds/PageHeader";
 import { Screen } from "../../components/ds/Screen";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
@@ -124,10 +124,7 @@ export default function AnywhereNotificationsScreen() {
 
   return (
     <Screen scroll contentContainerStyle={styles.content}>
-      <View style={styles.header}>
-        <BackLink label="Anywhere" onPress={() => router.replace("/anywhere")} />
-        <Text style={[type.headingBold, { color: tokens.ink }]}>Notifications</Text>
-      </View>
+      <PageHeader title="Notifications" backLabel="Anywhere" onBack={() => router.replace("/anywhere")} />
 
       <View style={styles.toggleSection}>
         <View style={styles.toggleRow}>

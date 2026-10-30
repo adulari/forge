@@ -1,7 +1,7 @@
 import { useCallback } from "react";
-import { Linking, StyleSheet, Text, View } from "react-native";
+import { Linking, StyleSheet, View } from "react-native";
 
-import { BackLink } from "../components/ds/BackLink";
+import { PageHeader } from "../components/ds/PageHeader";
 import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
@@ -9,9 +9,7 @@ import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { useAuth } from "../lib/auth";
 import { goBackOr } from "../lib/nav";
-import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
-import { type } from "../theme/typography";
 import { SettingsShell } from "./(tabs)/settings";
 
 const LINKS = {
@@ -22,7 +20,6 @@ const LINKS = {
 } as const;
 
 export default function LegalScreen() {
-  const tokens = useTokens();
   const toast = useToast();
   const { isPaired } = useAuth();
   const open = useCallback((url: string) => {
@@ -33,19 +30,12 @@ export default function LegalScreen() {
 
   const screen = (
     <Screen scroll contentContainerStyle={styles.content}>
-      <View style={styles.header}>
-        <BackLink
-          label={isPaired ? "Settings" : "Connect"}
-          onPress={() => goBackOr(isPaired ? "/settings" : "/connect")}
-        />
-        <Text accessibilityRole="header" style={[type.title, { color: tokens.ink }]}>
-          Legal & support
-        </Text>
-        <Text style={[type.sub, { color: tokens.ink3 }]}>
-          Forge is open source. These links open in your browser and are available before
-          contacting support or submitting diagnostics.
-        </Text>
-      </View>
+      <PageHeader
+        title="Legal & support"
+        subtitle="Forge is open source. These links open in your browser and are available before contacting support or submitting diagnostics."
+        backLabel={isPaired ? "Settings" : "Connect"}
+        onBack={() => goBackOr(isPaired ? "/settings" : "/connect")}
+      />
       <View>
         <SectionHeader>Documents</SectionHeader>
         <ListRow
@@ -86,9 +76,6 @@ export default function LegalScreen() {
 
 const styles = StyleSheet.create({
   content: {
-    width: "100%",
-    maxWidth: 720,
-    alignSelf: "center",
     gap: space.space24,
     paddingHorizontal: space.space16,
     paddingTop: space.space24,
