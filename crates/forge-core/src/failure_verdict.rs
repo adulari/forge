@@ -21,6 +21,7 @@ pub(crate) fn classify_attempt_failure(error: &forge_provider::ProviderError) ->
         forge_provider::ProviderError::Capability(_)
         | forge_provider::ProviderError::NoModelAccess(_)
         | forge_provider::ProviderError::Request(_) => AttemptFailure::Capability,
+        forge_provider::ProviderError::Overloaded { .. } => AttemptFailure::Down,
         forge_provider::ProviderError::Unavailable(message) => {
             let message = message.to_ascii_lowercase();
             if [
