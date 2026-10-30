@@ -1441,6 +1441,18 @@ fn del_asks_first_and_only_enter_deletes_permanently() {
 }
 
 #[test]
+fn a_refused_delete_shows_the_whole_reason_in_a_dialog() {
+    let mut a = app_with_selected("s1");
+    let why = "this session is open in a forge chat terminal on ssu-dev; run /delete in that terminal, or close the chat and delete it here";
+    a.apply(BoardEvent::DeleteRefused(why.into()));
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(confirm.kind, ConfirmKind::Refusal);
+    assert_eq!(confirm.body, why);
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(out.is_empty() && a.confirm.is_none());
+}
+
+#[test]
 fn esc_on_the_confirm_does_nothing() {
     let mut a = app_with_selected("s1");
     handle_key(&mut a, key(KeyCode::Char('x')));

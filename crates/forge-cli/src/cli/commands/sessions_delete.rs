@@ -63,8 +63,9 @@ pub(crate) async fn sessions_delete_cmd(prefix: &str, yes: bool, compact_db: boo
         println!("database file compacted (VACUUM): no trace of the session is left in it");
     } else {
         println!(
-            "note: SQLite can leave fragments in pages it rebalanced; for a byte-level guarantee \
-             run with --compact-db (daemon and chats closed)"
+            "note: rows are scrubbed where SQLite allows, but it can leave fragments in pages it \
+             rewrote earlier. `forge sessions --delete <id> --compact-db` (daemon and chats \
+             closed) removes every trace"
         );
     }
     Ok(())

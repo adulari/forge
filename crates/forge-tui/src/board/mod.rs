@@ -82,6 +82,8 @@ pub enum BoardEvent {
     History(String, Vec<HistoryRow>),
     /// Feedback about an action the host performed, or a failure worth showing.
     Toast(ToastLevel, String),
+    /// A delete the daemon refused: its full sentence, shown as a dialog (a toast clips it).
+    DeleteRefused(String),
     /// Daemon connectivity.
     Connection(ConnState),
     /// ~10 Hz: advances animation, ages, toast expiry.

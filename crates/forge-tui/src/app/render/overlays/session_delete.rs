@@ -77,6 +77,16 @@ pub fn render_session_delete_overlay(f: &mut Frame, app: &App) {
         .saturating_add(2 + crate::overlays::pad_y(area.height) * 2)
         .min(area.height);
     let card = crate::overlays::card_area(area, width, height);
+    // Opaque across the full width of the card's rows, margins included: otherwise the
+    // transcript's gutter and the ends of its lines show through beside the frame.
+    f.render_widget(
+        ratatui::widgets::Clear,
+        Rect {
+            x: area.x,
+            width: area.width,
+            ..card
+        },
+    );
     let refused = d.refusal.is_some();
     let tone = if refused {
         surface::SurfaceTone::Warning

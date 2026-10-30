@@ -204,22 +204,26 @@ pub(crate) fn dialog_for(
     current: bool,
     refusal: Option<&Refusal>,
 ) -> forge_tui::SessionDeleteDialog {
-    let mut facts = vec![format!(
-        "{} turn(s), {} message(s) and {} tool record(s)",
-        preview.turns, preview.messages, preview.tool_calls
-    )];
+    let mut facts = Vec::new();
+    let count = |n: i64, what: &str| (n > 0).then(|| format!("{n} {what}"));
+    facts.extend(count(preview.turns, "turn(s) of conversation"));
+    facts.extend(count(preview.messages, "message(s)"));
+    facts.extend(count(preview.tool_calls, "tool record(s)"));
     if preview.children > 0 {
         facts.push(format!("{} subagent session(s)", preview.children));
     }
-    facts.push("its usage, routing, task and rewind-snapshot records".into());
-    if preview.synced {
-        facts.push("its copy on your other synced devices".into());
+    let folders = session_state_dirs(&preview.targets).len();
+    if folders > 0 {
+        facts.push(format!("{folders} rewind-snapshot / evidence folder(s)"));
     }
-    facts.push("its database rows, overwritten rather than just unlinked".into());
+    if preview.synced {
+        facts.push("its copy on your other synced devices (deleted there too)".into());
+    }
+    facts.push(SCRUB_NOTE.into());
     let mut kept = Vec::new();
     if preview.memories_kept > 0 {
         kept.push(format!(
-            "{} saved memory item(s) from it (/memory removes them)",
+            "{} saved memor(ies) distilled from it are KEPT (/memory deletes them)",
             preview.memories_kept
         ));
     }
@@ -240,6 +244,9 @@ pub(crate) fn dialog_for(
     }
 }
 
+/// Honest scrub wording shared by the dialog and the CLI.
+pub(crate) const SCRUB_NOTE: &str = "its rows, scrubbed where SQLite allows; `forge sessions --delete <id> --compact-db` (Forge closed) removes every trace";
+
 /// Per-session directories under a workspace's state folder: shadow snapshots for rewind, and tool
 /// evidence. Bridge turns write nothing session-keyed besides these (see docs/features).
 const SESSION_STATE_KINDS: &[&str] = &["checkpoints", "evidence"];
@@ -248,9 +255,9 @@ fn safe_component(id: &str) -> bool {
     !id.is_empty() && !id.contains(['/', '\\']) && id != "." && id != ".."
 }
 
-/// Remove the on-disk state keyed to each deleted session. Returns how many directories went.
-pub(crate) fn remove_session_files(targets: &[DeleteTarget]) -> usize {
-    let mut removed = 0;
+/// The existing per-session state folders of the deleted tree.
+pub(crate) fn session_state_dirs(targets: &[DeleteTarget]) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
     for target in targets.iter().filter(|t| safe_component(&t.id)) {
         let workspaces = std::iter::once(target.cwd.as_str()).chain(target.worktree.as_deref());
         for workspace in workspaces {
@@ -261,14 +268,22 @@ pub(crate) fn remove_session_files(targets: &[DeleteTarget]) -> usize {
                     forge_config::legacy_state_subdir(workspace, kind),
                 ] {
                     let dir = base.join(&target.id);
-                    if dir.is_dir() && std::fs::remove_dir_all(&dir).is_ok() {
-                        removed += 1;
+                    if dir.is_dir() && !dirs.contains(&dir) {
+                        dirs.push(dir);
                     }
                 }
             }
         }
     }
-    removed
+    dirs
+}
+
+/// Remove the on-disk state keyed to each deleted session. Returns how many directories went.
+pub(crate) fn remove_session_files(targets: &[DeleteTarget]) -> usize {
+    session_state_dirs(targets)
+        .into_iter()
+        .filter(|dir| std::fs::remove_dir_all(dir).is_ok())
+        .count()
 }
 
 #[cfg(test)]
@@ -353,5 +368,30 @@ mod tests {
         assert!(!safe_component("../etc"));
         assert!(!safe_component(""));
         assert!(safe_component("0198abcd"));
+    }
+
+    #[test]
+    fn dialog_lists_only_nonzero_scope_and_says_what_is_kept() {
+        let preview = SessionDeletePreview {
+            id: "0123456789".into(),
+            title: None,
+            turns: 2,
+            messages: 5,
+            tool_calls: 0,
+            children: 0,
+            worktree: None,
+            synced: true,
+            frozen: false,
+            memories_kept: 3,
+            targets: Vec::new(),
+        };
+        let d = dialog_for(&preview, false, None);
+        let facts = d.facts.join("\n");
+        assert!(facts.contains("2 turn(s)") && facts.contains("5 message(s)"));
+        assert!(!facts.contains("tool record") && !facts.contains("subagent"));
+        assert!(!facts.contains("folder(s)"));
+        assert!(facts.contains("deleted there too"));
+        assert!(facts.contains("removes every trace") && !facts.contains("overwritten"));
+        assert!(d.kept[0].contains("3 saved memor") && d.kept[0].contains("KEPT"));
     }
 }

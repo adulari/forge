@@ -159,6 +159,14 @@ impl BoardApp {
                 self.history.insert(id, rows);
             }
             BoardEvent::Toast(level, text) => self.toast(level, text),
+            BoardEvent::DeleteRefused(text) => {
+                self.confirm = Some(Confirm {
+                    kind: ConfirmKind::Refusal,
+                    title: "Cannot delete this session".into(),
+                    body: text,
+                });
+                self.focus = Focus::Confirm;
+            }
             BoardEvent::Connection(state) => {
                 if let ConnState::Offline(msg) = &state {
                     if self.connection != state {

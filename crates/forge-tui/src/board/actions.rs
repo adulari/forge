@@ -93,13 +93,6 @@ impl BoardApp {
         let Some(c) = self.selected_card() else {
             return;
         };
-        if c.terminal {
-            self.toast(
-                ToastLevel::Info,
-                "open in a terminal: run /delete in that chat, or close it and delete from here",
-            );
-            return;
-        }
         self.confirm = Some(Confirm {
             kind: ConfirmKind::Delete(c.id.clone()),
             title: "Delete this session forever?".into(),
@@ -122,7 +115,7 @@ impl BoardApp {
         } else {
             Focus::Board
         };
-        if !yes {
+        if !yes || c.kind == ConfirmKind::Refusal {
             return Vec::new();
         }
         self.resolve_dispatch_confirm(c.kind)

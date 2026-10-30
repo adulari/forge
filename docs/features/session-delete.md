@@ -12,7 +12,7 @@ checks, in `crates/forge-cli/src/session_delete.rs`, and the same store call,
 | CLI | `forge sessions --delete <id-or-prefix> [--yes] [--compact-db]` |
 | Chat TUI, this session | `/delete`: lists what goes, then you type the session's short id |
 | Chat TUI, any session | sessions picker (`/sessions`, `/resume`, `forge chat --resume`): Ctrl+W (Alt+Backspace) on a row |
-| Board | Del on a card, then confirm; the daemon's refusal appears as the toast |
+| Board | Del on a card, then confirm; the daemon's refusal appears whole in a dialog |
 | Apps | session menu, Delete permanently |
 
 The CLI is a flag, not a `delete` subcommand, because `forge sessions` already takes `--unarchive`
@@ -68,6 +68,11 @@ it back.
 - Unlinked files are not shredded. Only the database is scrubbed.
 
 ## Scrubbing the database
+
+Every surface says the same thing: the rows are scrubbed where SQLite allows, and
+`forge sessions --delete <id> --compact-db` (with Forge closed) removes every trace. The
+confirmation lists only what applies (turns, messages, tool records, subagent sessions,
+snapshot and evidence folders, the synced-device copy) and says memories are kept.
 
 SQLite does not erase deleted rows: their pages go to a free list with the text intact, and the
 write-ahead log keeps older page images. So the delete runs with `PRAGMA secure_delete = ON`

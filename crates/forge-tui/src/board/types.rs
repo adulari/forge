@@ -193,6 +193,8 @@ pub enum ConfirmKind {
     Archive(String),
     /// Permanently delete a session (and its subagent sessions).
     Delete(String),
+    /// A refusal to show whole (the daemon said why a delete cannot happen). No action.
+    Refusal,
     /// Cancel a proposed dispatch, or the not-yet-started rest of a running one.
     CancelDispatch(String),
     /// Merge every succeeded worker of this dispatch, in index order.
@@ -204,7 +206,7 @@ pub enum ConfirmKind {
 impl ConfirmKind {
     /// Irreversible — drawn in the danger tone instead of the warning tone.
     pub fn is_danger(&self) -> bool {
-        matches!(self, Self::Discard(_))
+        matches!(self, Self::Discard(_) | Self::Delete(_))
     }
 }
 
