@@ -27,6 +27,7 @@ const DEFAULT_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_RESULTS: usize = 100;
 
 mod edit;
+mod locate;
 pub(crate) use edit::routes as edit_routes;
 
 #[derive(Debug)]
@@ -136,6 +137,10 @@ pub(crate) struct WorkspaceFileResponse {
     modified_ms: Option<u64>,
     hash: String,
     extension: Option<String>,
+    /// A file outside the workspace, opened because the session's transcript names it. Saving it
+    /// is refused, so the editor shows it read-only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    read_only: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -307,7 +312,64 @@ fn read_file(root: &Path, raw_path: &str) -> Result<WorkspaceFileResponse, Works
         extension: path
             .extension()
             .map(|extension| extension.to_string_lossy().into_owned()),
+        read_only: false,
     })
+}
+
+/// A file outside the workspace that the session's transcript names, under the same size and
+/// text limits as a workspace file.
+fn read_outside(path: &Path) -> Result<WorkspaceFileResponse, WorkspaceFailure> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| WorkspaceFailure::bad("file has no parent directory"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| WorkspaceFailure::bad("path does not name a file"))?
+        .to_string_lossy()
+        .into_owned();
+    let mut response = read_file(parent, &name)?;
+    response.root = parent.to_string_lossy().into_owned();
+    response.path = path.to_string_lossy().into_owned();
+    response.read_only = true;
+    Ok(response)
+}
+
+/// `read_file`, falling back to where the chat most likely meant (see [`locate`]) when the path
+/// is not at `<root>/<path>`.
+fn read_file_or_locate(
+    store: &forge_store::Store,
+    session: &str,
+    root: &Path,
+    raw_path: &str,
+) -> Result<WorkspaceFileResponse, WorkspaceFailure> {
+    let error = match read_file(root, raw_path) {
+        Ok(response) => return Ok(response),
+        Err(error)
+            if matches!(
+                error.status,
+                StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST
+            ) =>
+        {
+            error
+        }
+        Err(error) => return Err(error),
+    };
+    let messages = store.load_messages_uncompacted(session).unwrap_or_default();
+    let texts = locate::transcript_texts(&messages);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match locate::locate(root, raw_path, texts.into_iter(), home.as_deref()) {
+        Some(locate::Located::Inside(relative)) => read_file(root, &relative),
+        Some(locate::Located::Outside(path)) => read_outside(&path),
+        None if error.status == StatusCode::NOT_FOUND
+            || Path::new(raw_path.trim()).is_absolute() =>
+        {
+            Err(WorkspaceFailure::not_found(format!(
+                "{} is not in this workspace, and this session never named a file at that path",
+                raw_path.trim()
+            )))
+        }
+        None => Err(error),
+    }
 }
 
 fn directory_entries(
@@ -597,7 +659,12 @@ pub(crate) async fn workspace_file(
         Ok(root) => root,
         Err(error) => return failure_response(error),
     };
-    match tokio::task::spawn_blocking(move || read_file(&root, &params.path)).await {
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || {
+        read_file_or_locate(&store, &params.session, &root, &params.path)
+    })
+    .await
+    {
         Ok(Ok(response)) => json_response(&response),
         Ok(Err(error)) => failure_response(error),
         Err(error) => failure_response(WorkspaceFailure::internal(error)),
