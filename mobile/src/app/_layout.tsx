@@ -39,6 +39,7 @@ import { VisibleSessionsPublisher } from "../components/notices/VisibleSessionsP
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
+import { ScopeDeniedToast } from "../components/ScopeDeniedToast";
 import { useActiveSessionId } from "../components/shell/activeSession";
 import { DockHost } from "../components/shell/DockHost";
 import { IconRail } from "../components/shell/IconRail";
@@ -397,6 +398,7 @@ export default function RootLayout() {
                             `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                         <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
                           <OperationalNotice />
+                          <ScopeDeniedToast />
                           <ClaudeReconnectBanner />
                           <DesktopOtaHost />
                           <FindHotkey />

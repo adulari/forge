@@ -369,10 +369,9 @@ pub(crate) enum Command {
         #[arg(long)]
         model: Option<String>,
     },
-    /// Run the headless multi-session daemon: host any number of concurrent sessions,
-    /// driveable from a phone/browser at a STABLE origin (fixed port + persisted token, so the
-    /// installed PWA survives forever). Sessions keep running when every client disconnects;
-    /// create/attach/archive them from the page. See docs/features/remote-control.md.
+    /// Run the headless multi-session daemon: any number of concurrent sessions, driveable from a
+    /// phone/browser at a STABLE origin (fixed port + persisted token). Sessions keep running when
+    /// every client disconnects. `pair`/`clients` manage devices; docs/features/remote-control.md.
     Serve {
         /// Bind loopback only (control from this machine, plain HTTP).
         #[arg(long, conflicts_with_all = ["tunnel", "anywhere"])]
@@ -386,8 +385,7 @@ pub(crate) enum Command {
         /// Deprecated alias for `--tunnel`; managed Forge Anywhere uses `forge anywhere`.
         #[arg(long, hide = true, conflicts_with_all = ["local", "lan", "tunnel"])]
         anywhere: bool,
-        /// Listen port. Defaults to `[remote] port` from config, else 7420. Keep it stable —
-        /// the PWA install is bound to the origin.
+        /// Listen port (default `[remote] port`, else 7420). Keep it stable: the PWA is bound to it.
         #[arg(long)]
         port: Option<u16>,
         /// Regenerate the persisted daemon token (revocation: every installed PWA/link dies).
@@ -396,6 +394,8 @@ pub(crate) enum Command {
         /// New sessions use the offline deterministic mock provider (testing).
         #[arg(long)]
         mock: bool,
+        #[command(subcommand)]
+        cmd: Option<mcp::serve::ServeCmd>,
     },
     /// Securely reach Forge through the optional managed Anywhere companion.
     Anywhere {

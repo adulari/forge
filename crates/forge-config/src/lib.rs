@@ -363,6 +363,16 @@ pub struct RemoteConfig {
     /// sessions read-only, as before.
     #[serde(default = "default_true")]
     pub interactive_local_sessions: bool,
+    /// Extra `Host` header values the daemon accepts on its token routes (exact names, or
+    /// `*.example.com`). IP literals, `localhost`, single-label names, `*.local`, `*.ts.net`, the
+    /// well-known tunnel domains and `tunnel_hostname` are always accepted; any other name is
+    /// refused so a DNS-rebinding page cannot reach the daemon through a hostname it controls.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Reverse-proxy addresses whose `X-Forwarded-For` the daemon believes when it records a
+    /// client address in the remote audit log. Loopback is always trusted (tunnel agents).
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 }
 
 // Hand-written, NOT derived. `Config` carries `#[serde(default)] pub remote: RemoteConfig`, so a
@@ -384,6 +394,8 @@ impl Default for RemoteConfig {
             publish_local_runs: default_true(),
             publish_local_sessions: default_true(),
             interactive_local_sessions: default_true(),
+            allowed_hosts: Vec::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }

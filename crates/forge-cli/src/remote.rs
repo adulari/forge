@@ -1591,7 +1591,7 @@ pub(crate) async fn pump_ws(
     input_tx: mpsc::Sender<RemoteInput>,
     since: u64,
 ) {
-    pump_ws_draining(socket, snapshot_rx, events, input_tx, since, None).await;
+    pump_ws_draining(socket, snapshot_rx, events, input_tx, since, None, None).await;
 }
 
 /// The close frame a daemon sends when it is about to restart: code 1001 ("going away") with a
@@ -1628,6 +1628,7 @@ pub(crate) async fn pump_ws_draining(
     input_tx: mpsc::Sender<RemoteInput>,
     since: u64,
     mut going_away: Option<watch::Receiver<bool>>,
+    gate: Option<crate::serve_access::InputGate>,
 ) {
     use futures::stream::StreamExt;
     use futures::SinkExt;
@@ -1767,6 +1768,10 @@ pub(crate) async fn pump_ws_draining(
             if text.len() > MAX_INPUT_BYTES {
                 continue;
             }
+            if let Some(reason) = gate.as_ref().and_then(|g| g.check(&text)) {
+                let _ = note_tx.send(reason);
+                continue;
+            }
             match forward_remote_input(&dedupe_events, &input_tx, &text).await {
                 Forwarded::Sent | Forwarded::Duplicate => {}
                 Forwarded::Closed => break, // render loop dropped the receiver (remote turned off)
@@ -1777,6 +1782,8 @@ pub(crate) async fn pump_ws_draining(
         }
     });
 
+    let _abort =
+        crate::serve_access::AbortOnDrop(vec![forward.abort_handle(), receive.abort_handle()]);
     // When either half ends, drop the other.
     tokio::select! {
         _ = &mut forward => { receive.abort(); }

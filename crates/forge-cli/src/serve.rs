@@ -616,6 +616,7 @@ pub(crate) async fn serve_cmd(
     // A second daemon on this config dir stops here, before it touches the token or the store.
     let _host_lock = crate::host_lock::acquire_for_config()?;
     let token = daemon_token(rotate_token)?;
+    crate::serve_access::init_from_config(&config);
     if rotate_token {
         println!("⚒ daemon token rotated — previously installed PWAs/links are now invalid");
     }
@@ -764,6 +765,13 @@ pub(crate) async fn serve_cmd(
     } else {
         "lan"
     };
+    crate::serve_access::access().set_exposure(crate::serve_access::Exposure {
+        mode: exposure.to_string(),
+        port: addr.port(),
+        lan_host: (exposure == "lan")
+            .then(|| remote::lan_display_host(config.remote.host.as_deref(), addr)),
+        public_url: anywhere.then(|| url.trim_end_matches(&format!("/{token}")).to_string()),
+    });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -808,7 +816,11 @@ pub(crate) async fn serve_cmd(
     let server = async {
         if local || anywhere {
             let tokio_listener = tokio::net::TcpListener::from_std(listener)?;
-            axum::serve(tokio_listener, app).await?;
+            axum::serve(
+                tokio_listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
         } else {
             let host = remote::lan_display_host(config.remote.host.as_deref(), addr);
             let tls = remote::generate_self_signed(vec![host, "localhost".to_string()])
@@ -817,7 +829,7 @@ pub(crate) async fn serve_cmd(
             let tls_config =
                 axum_server::tls_rustls::RustlsConfig::from_pem(tls.cert_pem, tls.key_pem).await?;
             axum_server::from_tcp_rustls(listener, tls_config)?
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         }
         Ok::<(), anyhow::Error>(())
@@ -889,6 +901,10 @@ async fn drain_sessions(registry: &SessionRegistry, timeout: std::time::Duration
 /// The daemon's full route table over `state.base` — extracted from [`serve_cmd`] so tests can
 /// drive the real router (tower `oneshot`) without binding a socket.
 pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
+    crate::serve_access::guard(state.clone(), daemon_routes(state))
+}
+
+fn daemon_routes(state: Arc<DaemonState>) -> Router {
     use tower_http::cors::CorsLayer;
     let base = state.base.clone();
     Router::new()
@@ -984,6 +1000,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
+        .merge(crate::serve_access::routes(&base))
         // Schedule registry (serve_schedules.rs) — the same rows + OS timers `forge schedule` owns.
         .route(
             &format!("{base}/api/schedules"),
@@ -1220,6 +1237,7 @@ mod serve_providers;
 mod serve_session_meta;
 mod serve_usage;
 mod serve_workflows;
+mod serve_ws;
 use serve_assets::*;
 use serve_changelog::*;
 use serve_config::*;
@@ -1229,6 +1247,7 @@ use serve_projects::*;
 use serve_providers::*;
 use serve_usage::*;
 use serve_workflows::*;
+use serve_ws::ws_handler;
 
 /// `GET /api/sessions` — the fleet list, newest first. Merges the daemon's own driven sessions
 /// with terminal-local sessions a plain `forge` chat process published presence for (read-only —
@@ -2731,63 +2750,6 @@ impl Drop for WsClientGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
-}
-
-async fn ws_handler(
-    State(state): State<Arc<DaemonState>>,
-    Query(params): Query<WsParams>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    match state.store.session_handoff_blocked(&params.session) {
-        Ok(true) => {
-            return err_response(
-                axum::http::StatusCode::CONFLICT,
-                "session is frozen by an Anywhere handoff",
-            )
-        }
-        Err(error) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("handoff state check failed: {error}"),
-            )
-        }
-        Ok(false) => {}
-    }
-    // A terminal-local session with a published control channel is proxied to it rather than
-    // looked up in the registry (it is not, and never will be, in there). This is what makes a
-    // terminal chat drivable from the apps instead of read-only.
-    if let Ok(Some(control_url)) = state.store.local_session_control_url(&params.session) {
-        let rev = params.rev;
-        return ws.on_upgrade(move |socket| {
-            serve_local_control::pump_proxy(
-                socket,
-                serve_local_control::upstream_ws_url(&control_url, rev),
-            )
-        });
-    }
-    if let Some(rejection) = reject_ws_if_local_read_only(&state.store, &params.session) {
-        return rejection;
-    }
-    let Some(handle) = state.registry.get(&params.session).await else {
-        return crate::serve_agents::child_or_404(&state, &params.session, params.rev, ws).await;
-    };
-    let snapshot_rx = handle.snapshot_rx.clone();
-    let events = handle.events.clone();
-    let input_tx = handle.input_tx.clone();
-    let clients = handle.ws_clients.clone();
-    let going_away = Some(state.registry.signals.going_away_rx());
-    ws.on_upgrade(move |socket| async move {
-        let _attached = WsClientGuard::attach(clients);
-        remote::pump_ws_draining(
-            socket,
-            snapshot_rx,
-            events,
-            input_tx,
-            params.rev,
-            going_away,
-        )
-        .await;
-    })
 }
 
 // ---------------------------------------------------------------------------

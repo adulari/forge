@@ -108,7 +108,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             port,
             rotate_token,
             mock,
+            cmd,
         } => {
+            if let Some(cmd) = cmd {
+                return crate::serve_clients_cli::run(cmd);
+            }
             if anywhere {
                 eprintln!(
                     "warning: `forge serve --anywhere` is deprecated; use `forge serve --tunnel`"

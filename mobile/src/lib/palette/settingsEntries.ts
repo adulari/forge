@@ -17,7 +17,8 @@ export type SettingsHref =
   | "/hooks"
   | "/session-tree"
   | "/workflows"
-  | "/prs";
+  | "/prs"
+  | "/remote-access";
 
 export interface SettingsEntry {
   href: SettingsHref;
@@ -43,5 +44,6 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
   { href: "/hooks", title: "Hooks", subtitle: "Pre and post tool hooks", keywords: "hooks shell pre post tool" },
   { href: "/session-tree", title: "Session tree", subtitle: "Parent and child sessions", keywords: "tree subagents children fork" },
   { href: "/prs", title: "Pull requests", subtitle: "Open PRs across projects", keywords: "pull requests prs github review merge checks" },
+  { href: "/remote-access", title: "Remote access", subtitle: "Pair devices and manage who can connect", keywords: "remote access pair qr devices clients revoke token viewer scopes lan tailscale tunnel" },
   { href: "/workflows", title: "Workflows", subtitle: "Workflow runs", keywords: "workflows runs graph" },
 ];

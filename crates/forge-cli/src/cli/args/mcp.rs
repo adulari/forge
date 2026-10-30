@@ -3,6 +3,10 @@
 use super::Scope;
 use clap::{Subcommand, ValueEnum};
 
+// Declared here, not in args.rs, to keep that file under its size ratchet.
+#[path = "serve.rs"]
+pub(crate) mod serve;
+
 #[derive(Subcommand)]
 pub(crate) enum McpCmd {
     /// Add an MCP server to the config. Takes `claude mcp add` syntax unchanged:
