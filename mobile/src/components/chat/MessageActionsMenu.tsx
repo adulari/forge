@@ -2,7 +2,7 @@
 // bottom sheet reads as bugged when it spans a 1440px window for a right-click menu.
 // Same actions as MessageActionsSheet; that sheet remains the touch/long-press surface.
 import * as Clipboard from "expo-clipboard";
-import { Copy, PencilLine, Quote } from "lucide-react-native";
+import { Copy, PencilLine, Quote, Undo2 } from "lucide-react-native";
 import React from "react";
 import { Modal, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 
@@ -20,18 +20,22 @@ export interface MessageActionsMenuProps {
   onClose: () => void;
   onQuote: (text: string) => void;
   onEdit?: (text: string) => void;
+  onRewind?: (message: HistoryRow) => void;
+  rewindDisabledReason?: string | null;
+  rewindWarning?: string | null;
 }
 
 const MENU_WIDTH = 220;
 const ROW_HEIGHT = 40;
 const MENU_MARGIN = 8;
+const CAPTION_HEIGHT = 52;
 
 function firstCodeBlock(text: string): string | null {
   const match = text.match(/```[^\n]*\n([\s\S]*?)```/);
   return match ? match[1].replace(/\n$/, "") : null;
 }
 
-export function MessageActionsMenu({ message, anchor, onClose, onQuote, onEdit }: MessageActionsMenuProps) {
+export function MessageActionsMenu({ message, anchor, onClose, onQuote, onEdit, onRewind, rewindDisabledReason, rewindWarning }: MessageActionsMenuProps) {
   const tokens = useTokens();
   const toast = useToast();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -42,7 +46,8 @@ export function MessageActionsMenu({ message, anchor, onClose, onQuote, onEdit }
   const code = firstCodeBlock(text);
   const editable = message.role === "user" && onEdit != null;
 
-  const rows: { label: string; icon: React.ReactNode; run: () => void }[] = [
+  const rewindable = message.role === "user" && onRewind != null;
+  const rows: { label: string; icon: React.ReactNode; run: () => void; disabledReason?: string | null; caption?: string | null }[] = [
     {
       label: "Copy text",
       icon: <Copy size={15} strokeWidth={1.75} color={tokens.ink2} />,
@@ -71,9 +76,21 @@ export function MessageActionsMenu({ message, anchor, onClose, onQuote, onEdit }
           },
         ]
       : []),
+    ...(rewindable
+      ? [
+          {
+            label: "Rewind to here",
+            icon: <Undo2 size={15} strokeWidth={1.75} color={tokens.ink2} />,
+            run: () => onRewind!(message),
+            disabledReason: rewindDisabledReason,
+            caption: rewindDisabledReason ?? rewindWarning,
+          },
+        ]
+      : []),
   ];
 
-  const menuHeight = rows.length * ROW_HEIGHT + 2 * MENU_MARGIN;
+  const captionRows = rows.filter((row) => row.caption).length;
+  const menuHeight = rows.length * ROW_HEIGHT + captionRows * CAPTION_HEIGHT + 2 * MENU_MARGIN;
   const left = Math.max(MENU_MARGIN, Math.min(anchor.x, windowWidth - MENU_WIDTH - MENU_MARGIN));
   const top = Math.max(MENU_MARGIN, Math.min(anchor.y, windowHeight - menuHeight - MENU_MARGIN));
 
@@ -89,15 +106,22 @@ export function MessageActionsMenu({ message, anchor, onClose, onQuote, onEdit }
           accessibilityRole="menu"
         >
           {rows.map((row) => (
-            <MenuRow
-              key={row.label}
-              label={row.label}
-              icon={row.icon}
-              onPress={() => {
-                row.run();
-                onClose();
-              }}
-            />
+            <React.Fragment key={row.label}>
+              <MenuRow
+                label={row.label}
+                icon={row.icon}
+                disabledReason={row.disabledReason}
+                onPress={() => {
+                  row.run();
+                  onClose();
+                }}
+              />
+              {row.caption ? (
+                <Text style={[typeScale.meta, styles.caption, { color: row.disabledReason ? tokens.ink3 : tokens.warn }]}>
+                  {row.caption}
+                </Text>
+              ) : null}
+            </React.Fragment>
           ))}
         </View>
       </Pressable>
@@ -105,17 +129,22 @@ export function MessageActionsMenu({ message, anchor, onClose, onQuote, onEdit }
   );
 }
 
-function MenuRow({ label, icon, onPress }: { label: string; icon: React.ReactNode; onPress: () => void }) {
+function MenuRow({ label, icon, onPress, disabledReason }: { label: string; icon: React.ReactNode; onPress: () => void; disabledReason?: string | null }) {
+  const disabled = disabledReason != null;
   const tokens = useTokens();
   const [hovered, setHovered] = React.useState(false);
   return (
     <Pressable
-      onPress={onPress}
+      onPress={disabled ? undefined : onPress}
+      disabled={disabled}
+      {...(disabled ? ({ title: disabledReason } as object) : null)}
+      accessibilityHint={disabledReason ?? undefined}
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
       accessibilityRole="menuitem"
       accessibilityLabel={label}
-      style={[styles.menuRow, { backgroundColor: hovered ? tokens.bg3 : "transparent" }]}
+      accessibilityState={{ disabled }}
+      style={[styles.menuRow, { backgroundColor: hovered && !disabled ? tokens.bg3 : "transparent", opacity: disabled ? 0.5 : 1 }]}
     >
       {icon}
       <Text style={[typeScale.sub, { color: tokens.ink }]}>{label}</Text>
@@ -132,6 +161,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.radius12,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  caption: { paddingHorizontal: space.space16, paddingBottom: space.space8, minHeight: CAPTION_HEIGHT - ROW_HEIGHT + 20 },
   menuRow: {
     height: ROW_HEIGHT,
     flexDirection: "row",

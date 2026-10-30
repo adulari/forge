@@ -1711,6 +1711,21 @@ fn redact_token(url: &str, token: &str) -> String {
 #[serde(deny_unknown_fields)]
 struct ForkSessionReq {
     at_seq: i64,
+    /// Pin the child to this model instead of inheriting the source's last one.
+    #[serde(default)]
+    model: Option<String>,
+    /// Pin the child's reasoning effort (`low` .. `max`).
+    #[serde(default)]
+    effort: Option<String>,
+    /// Start the child in this temper (same names as `CreateSessionReq::temper`).
+    #[serde(default)]
+    temper: Option<String>,
+    /// First prompt for the child; blank is treated as absent.
+    #[serde(default)]
+    prompt: Option<String>,
+    /// Display title; defaults to `Fork of <source id>`.
+    #[serde(default)]
+    title: Option<String>,
 }
 
 async fn fork_session(
@@ -1724,6 +1739,48 @@ async fn fork_session(
             "at_seq must be a non-negative message sequence number",
         );
     }
+    let temper = match req
+        .temper
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        Some(raw) => match parse_temper(raw) {
+            Ok(mode) => Some(mode),
+            Err(message) => return err_response(axum::http::StatusCode::BAD_REQUEST, &message),
+        },
+        None => None,
+    };
+    let effort = match req
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        Some(raw) => match forge_types::EffortLevel::parse(raw) {
+            Some(level) => Some(level),
+            None => {
+                return err_response(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    &format!("effort: unknown value {raw:?}"),
+                )
+            }
+        },
+        None => None,
+    };
+    let requested_model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    let first_prompt = req.prompt.clone().filter(|p| !p.trim().is_empty());
+    let child_title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string);
     let store = state.store.clone();
     let source = id.clone();
     let store_for_fork = store.clone();
@@ -1744,6 +1801,11 @@ async fn fork_session(
         let fork_id = store_for_fork
             .fork_session(&source, req.at_seq)
             .map_err(|error| error.to_string())?;
+        if let Some(level) = effort {
+            store_for_fork
+                .set_session_pinned_effort(&fork_id, Some(level.as_str()))
+                .map_err(|error| error.to_string())?;
+        }
         Ok::<_, String>((fork_id, cwd))
     })
     .await;
@@ -1763,11 +1825,18 @@ async fn fork_session(
     let spec = DriverSpec {
         cwd,
         worktree: None,
-        title: format!("Fork of {}", &id[..id.len().min(8)]),
+        title: child_title
+            .clone()
+            .unwrap_or_else(|| format!("Fork of {}", &id[..id.len().min(8)])),
         mock: state.mock,
-        model: store.session_last_model(&id).ok().flatten(),
+        model: requested_model.clone().or_else(|| {
+            // A `--mock` daemon's sessions record `mock::mock`, which is not a real provider id.
+            (!state.mock)
+                .then(|| store.session_last_model(&id).ok().flatten())
+                .flatten()
+        }),
         resume: Some(fork_id.clone()),
-        temper: None,
+        temper,
         push: state.push.clone(),
         apns: state.apns.clone(),
         registry: Some(state.registry.clone()),
@@ -1776,12 +1845,26 @@ async fn fork_session(
     };
     match spawn_session_driver(spec).await {
         Ok(handle) => {
+            if let Some(model) = requested_model.as_deref() {
+                let _ = state
+                    .store
+                    .set_session_pinned_model(&handle.session_id, Some(model));
+            }
             let handle = state.registry.insert(handle, &state.store).await;
             // Fleet membership has to outlive this process: without it a restart comes back with
             // an empty fleet and a mid-task session is invisible until someone resumes it by hand.
             let _ = state
                 .store
                 .set_session_daemon_live(&handle.session_id, true);
+            if let Some(text) = first_prompt {
+                let _ = handle
+                    .input_tx
+                    .send(remote::RemoteInput::Prompt {
+                        text,
+                        attachments: Vec::new(),
+                    })
+                    .await;
+            }
             json_response(&serde_json::json!({
                 "id": handle.session_id,
                 "title": handle.title(),
@@ -1789,10 +1872,16 @@ async fn fork_session(
                 "worktree": handle.worktree,
             }))
         }
-        Err(error) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("fork start failed: {error}"),
-        ),
+        Err(error) => {
+            let message = format!("fork start failed: {error}");
+            let _ = store.delete_session(&fork_id);
+            let status = if message.contains("unknown model") {
+                axum::http::StatusCode::BAD_REQUEST
+            } else {
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            };
+            err_response(status, &message)
+        }
     }
 }
 
@@ -4296,6 +4385,96 @@ pub(crate) mod tests {
         }
 
         handle.shutdown();
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fork_can_pin_a_different_model_effort_and_temper_without_touching_the_source() {
+        use tower::ServiceExt;
+
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-fork-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("fork-api.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+        let registry = Arc::new(SessionRegistry::new());
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            project_roots: vec![dir.clone()],
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+
+        let source = json_body(
+            router
+                .clone()
+                .oneshot(post_json_req(
+                    "/api/sessions",
+                    serde_json::json!({ "cwd": &dir, "title": "source" }),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let source_id = source["id"].as_str().unwrap().to_string();
+
+        let bad = router
+            .clone()
+            .oneshot(post_json_req(
+                &format!("/api/sessions/{source_id}/fork"),
+                serde_json::json!({ "at_seq": 0, "temper": "nonsense" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let forked = router
+            .clone()
+            .oneshot(post_json_req(
+                &format!("/api/sessions/{source_id}/fork"),
+                serde_json::json!({
+                    "at_seq": 0,
+                    "model": "anthropic::claude-sonnet-5-5",
+                    "effort": "high",
+                    "temper": "Auto-edit",
+                    "title": "try another model",
+                }),
+            ))
+            .await
+            .unwrap();
+        let forked_status = forked.status();
+        let forked = json_body(forked).await;
+        assert_eq!(forked_status, axum::http::StatusCode::OK, "{forked}");
+        let child_id = forked["id"].as_str().unwrap().to_string();
+        assert_ne!(child_id, source_id);
+        assert_eq!(forked["title"], "try another model");
+        assert_eq!(
+            store.session_pinned_model(&child_id).unwrap().as_deref(),
+            Some("anthropic::claude-sonnet-5-5")
+        );
+        assert_eq!(
+            store.session_pinned_effort(&child_id).unwrap().as_deref(),
+            Some("high")
+        );
+        assert_eq!(store.session_pinned_model(&source_id).unwrap(), None);
+        assert!(
+            registry.get(&source_id).await.is_some(),
+            "source keeps running"
+        );
+
+        for handle in registry.all().await {
+            handle.shutdown();
+        }
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
     }
