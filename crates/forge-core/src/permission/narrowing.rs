@@ -5,8 +5,10 @@
 //! * `**/.env.*` and the shell verbs that read `*.env.*` also covered `.env.example`, the
 //!   committed template every project keeps next to its real `.env`;
 //! * `rm -rf /*` is a literal for "wipe the root", but `*` is a wildcard here, so it refused
-//!   `rm -rf /tmp/scratch` and every other absolute-path delete (the structural check in
-//!   `catastrophic.rs` already covers the real root, home and system directories);
+//!   `rm -rf /app/__pycache__` and every other absolute-path delete (the structural check in
+//!   `catastrophic.rs` already covers the real root, home and system directories, so the glob
+//!   now fires only when that check does). The plain-text `rm -rf /` and `rm -rf ~` also fired on
+//!   `rm -rf /app/x && make`, because a multi-statement line is searched for them as text;
 //! * one denied path in a `read_file` batch refused the whole call, including the files that
 //!   were fine to read.
 //!
@@ -27,6 +29,19 @@ use super::{denying_rule, effective_commands, lexical_clean, path_match, shell_m
 const DOTENV_VARIANTS: &str = "**/.env.*";
 /// The built-in glob meant for `rm -rf /*`, which `*` widens to every absolute-path delete.
 const ROOT_WILDCARD_DELETE: &str = "rm -rf /*";
+/// The PowerShell spellings of the same literal, which `*` widens the same way.
+const ROOT_WILDCARD_DELETE_PS: [&str; 2] =
+    ["Remove-Item -Recurse -Force /*", "rm -Recurse -Force /*"];
+/// `dd of=/dev/*` is a disk write, except for the pseudo-devices that discard or print.
+const HARMLESS_DEVICES: [&str; 6] = [
+    "/dev/null",
+    "/dev/zero",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/tty",
+    "/dev/shm",
+];
+const DD_TO_DEVICE: &str = "dd of=/dev/*";
 
 /// A shell word that is a dotenv template, replaced so the `*.env.*` verbs do not see it.
 const TEMPLATE_WORD: &str = "<dotenv-template>";
@@ -37,8 +52,24 @@ pub(super) fn glob_hits(rule: &PermissionRule, pattern: &str, text: &str) -> boo
     if rule.source != RuleSource::Builtin {
         return shell_match(pattern, text);
     }
-    let text = mask_dotenv_templates(text);
-    shell_match(pattern, &text) && !(pattern == ROOT_WILDCARD_DELETE && only_scratch_deletes(&text))
+    let text = mask_public_keys(&mask_dotenv_templates(text)).into_owned();
+    if !shell_match(pattern, &text) {
+        return false;
+    }
+    if pattern == ROOT_WILDCARD_DELETE {
+        return super::catastrophic::catastrophic_shell(&text).is_some()
+            || risky_absolute_delete(&text);
+    }
+    if ROOT_WILDCARD_DELETE_PS.contains(&pattern) {
+        return text.split_whitespace().any(|w| w == "/*");
+    }
+    if pattern == DD_TO_DEVICE {
+        return !text
+            .split_whitespace()
+            .find_map(|w| w.strip_prefix("of="))
+            .is_some_and(|target| HARMLESS_DEVICES.contains(&target));
+    }
+    true
 }
 
 /// The built-in literal for "wipe the root". Multi-statement lines are also searched for it as
@@ -47,7 +78,42 @@ const ROOT_DELETE: &str = "rm -rf /";
 
 /// Whether the plain-text deny `pattern` occurs in the multi-statement line `cmd`.
 pub(super) fn literal_hits(pattern: &str, cmd: &str) -> bool {
-    cmd.contains(pattern) && !(pattern == ROOT_DELETE && only_scratch_deletes(cmd))
+    if pattern == ROOT_DELETE && only_scratch_deletes(cmd) {
+        return false;
+    }
+    if !pattern.ends_with(['/', '~']) {
+        return cmd.contains(pattern);
+    }
+    // A pattern that names a place ends there: `rm -rf /` is the root, `rm -rf /app` is not.
+    cmd.match_indices(pattern).any(|(at, _)| {
+        cmd[at + pattern.len()..].chars().next().is_none_or(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    ';' | '&' | '|' | ')' | '}' | '"' | '\'' | '`' | '*' | '#'
+                )
+        })
+    })
+}
+
+/// A word that names a public key (`id_rsa.pub`), replaced so the `*id_rsa*` verbs do not see it.
+fn mask_public_keys(text: &str) -> Cow<'_, str> {
+    if !text.contains(".pub") {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for piece in text.split_inclusive(char::is_whitespace) {
+        let word = piece.trim_end();
+        let bare =
+            word.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | ';' | '&' | '|'));
+        if bare.ends_with(".pub") && bare.len() > ".pub".len() {
+            out.push_str("<public-key>");
+            out.push_str(&piece[word.len()..]);
+        } else {
+            out.push_str(piece);
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Whether `pattern` matches the file path `candidate`. Anything but the built-in dotenv glob
@@ -142,6 +208,92 @@ fn only_scratch_deletes(line: &str) -> bool {
         saw_delete = true;
     }
     saw_delete
+}
+
+/// Directories nobody scripts a delete inside: system trees, other users' homes' parents, the
+/// shared temp roots themselves. Deleting a named project path under `/home`, `/opt`, `/srv` or
+/// `/var/lib` is ordinary work and is not on this list.
+const PROTECTED_ROOTS: [&str; 22] = [
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/proc",
+    "/root",
+    "/sbin",
+    "/sys",
+    "/usr",
+    "/System",
+    "/Library",
+    "/Applications",
+    "/Users",
+    "/home",
+    "/var",
+    "/opt",
+    "/srv",
+    "/mnt",
+    "/media",
+];
+
+/// `/`, `/tmp` and the system trees themselves or anything below the system trees.
+fn is_protected_path(clean: &str) -> bool {
+    if matches!(clean, "" | "/" | "/tmp" | "/var/tmp") {
+        return true;
+    }
+    PROTECTED_ROOTS.iter().any(|root| {
+        clean == *root
+            || (clean.starts_with(&format!("{root}/"))
+                && !matches!(
+                    *root,
+                    "/home" | "/Users" | "/var" | "/opt" | "/srv" | "/mnt" | "/media"
+                ))
+    })
+}
+
+/// Whether an `rm`/`rmdir` operand reaches somewhere an absolute-path delete must not: a `..`
+/// escape, a protected path, or a variable or wildcard that sits directly under one.
+fn is_risky_operand(operand: &str) -> bool {
+    if !operand.starts_with('/') {
+        return false;
+    }
+    if operand.split('/').any(|c| c == "..") {
+        return true;
+    }
+    let clean = lexical_clean(operand);
+    let fixed: Vec<&str> = clean
+        .split('/')
+        .take_while(|c| !c.contains(['$', '`', '*', '?', '[', '{']))
+        .collect();
+    let prefix = fixed.join("/");
+    let unresolved = fixed.len() < clean.split('/').count();
+    if unresolved {
+        return is_protected_path(&prefix);
+    }
+    if is_protected_path(&clean) {
+        return true;
+    }
+    std::fs::canonicalize(&clean).is_ok_and(|real| is_protected_path(&real.to_string_lossy()))
+}
+
+/// Whether the line has an `rm`/`rmdir` aimed at a risky absolute path, after the scratch
+/// exemption (`/tmp/build-*`) that [`only_scratch_deletes`] grants.
+fn risky_absolute_delete(line: &str) -> bool {
+    let (segments, _) = effective_commands(line);
+    segments.iter().any(|segment| {
+        let words = split_words(segment);
+        let Some((bin, rest)) = strip_wrappers(&words).and_then(|w| w.split_first()) else {
+            return false;
+        };
+        if !matches!(bin.rsplit('/').next().unwrap_or(bin), "rm" | "rmdir") {
+            return false;
+        }
+        rest.iter()
+            .filter(|w| !w.starts_with('-'))
+            .any(|o| is_risky_operand(o) && !is_scratch_operand(o))
+    })
 }
 
 /// A batched `read_file` with the entries a deny rule refuses taken out.
@@ -381,8 +533,10 @@ mod tests {
             "rm -rf /tmp/x; rm -rf /usr/local/y",
             "rm -rf /tmp/x\nrm -rf /etc/y",
             "rm -rf /tmp/$NAME",
-            "rm -rf /home/someone/project/build",
-            "rm -rf /opt/app/cache",
+            "rm -rf /usr/local/lib/x",
+            "rm -rf /etc/cron.d/y",
+            "rm -rf /var",
+            "rm -rf /home",
         ] {
             assert_eq!(shell(command), Deny, "{command}");
         }
@@ -454,6 +608,101 @@ mod tests {
         assert_eq!(split.args["paths"], json!(["ok.txt"]));
         assert!(
             with_withheld_note(String::new(), Some(&split), true).contains("configured deny rule")
+        );
+    }
+
+    #[test]
+    fn real_root_and_home_wipes_are_denied_in_every_spelling() {
+        for cmd in [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -fr /",
+            "rm -fr /*",
+            "rm -r -f /",
+            "rm -rf --no-preserve-root /",
+            "rm -rf --no-preserve-root /*",
+            "rm --recursive --force /",
+            "rm -rf -- /",
+            "/bin/rm -rf /",
+            "rm -rf / --no-preserve-root",
+            "rm -rf /usr",
+            "rm -rf /etc/",
+            "cd /app && rm -rf /",
+            "rm -rf /app/cache && rm -rf /",
+            "rm -rf /app/cache; rm -rf /*",
+            "ls | rm -rf /",
+            "rm -rf ~",
+            "rm -rf ~/",
+            "rm -rf ~/*",
+            "rm -fr ~",
+            "echo hi && rm -rf ~",
+            "bash -c 'rm -rf /'",
+            "echo 'x'\nrm -rf /",
+            "Remove-Item -Recurse -Force /*",
+            "sudo rm -rf /",
+        ] {
+            assert_eq!(
+                shell(cmd),
+                PermissionDecision::Deny,
+                "must stay denied: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_absolute_path_commands_are_allowed() {
+        for cmd in [
+            "rm -rf /app/__pycache__",
+            "rm -rf /app/__pycache__ && echo done",
+            "rm -rf /app/__pycache__ /app/.pytest_cache && python -m pytest",
+            "cd /app && rm -rf /app/build; make",
+            "rm -rf /app/a\nrm -rf /app/b",
+            "rm -rf /workspace/out | tee log",
+            "rm -rf /var/tmp/build-1 && mkdir /var/tmp/build-1",
+            "rm -rf /tmp/scratch && make",
+            "rm -rf /home/someone/project/build",
+            "rm -rf /opt/app/cache",
+            "rm -rf /var/lib/app/cache && mkdir /var/lib/app/cache",
+            "rm -rf /mnt/work/target",
+            "rm -rf ~/projects/old && mkdir ~/projects/old",
+            "rm -rf ~/.cache/pip && pip install x",
+            "rm -rf /home/user/proj/target && cargo build",
+            "grep 'rm -rf /' script.sh",
+            "dd if=/dev/zero of=/dev/null count=1",
+            "dd of=/dev/null if=/dev/urandom count=1",
+            "find / -xdev -name '*.py' -size +1M 2>/dev/null | head -20",
+            "find / -xdev -type f | head -50",
+            "find / -xdev -maxdepth 2 -name '*.conf' | sort | head -30",
+            "cat ~/.ssh/id_rsa.pub",
+            "grep -n Host /app/README.md",
+        ] {
+            assert_eq!(
+                shell(cmd),
+                PermissionDecision::Allow,
+                "must not be denied: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn dd_to_a_real_device_stays_denied() {
+        for cmd in ["dd of=/dev/sda if=disk.img", "dd of=/dev/nvme0n1 if=x"] {
+            assert_eq!(shell(cmd), PermissionDecision::Deny, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_exact_pattern_that_matched() {
+        let rules = rules();
+        let call = json!({ "command": "dd of=/dev/sda if=disk.img" });
+        let rule = denying_rule("shell", &call, &rules).expect("denied");
+        let text = crate::permission::rule_denial("shell", rule, &call);
+        assert!(text.contains("deny rule `dd of=/dev/*`"), "{text}");
+        assert!(!text.contains("mkfs"), "no unrelated patterns: {text}");
+        assert!(
+            text.len() < 700,
+            "short enough to survive truncation: {}",
+            text.len()
         );
     }
 

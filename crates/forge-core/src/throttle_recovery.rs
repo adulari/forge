@@ -64,6 +64,25 @@ pub(crate) async fn announce_backoff(
     }
 }
 
+/// "provider busy (503 gateway_overloaded), retrying in 5s" for a pinned turn waiting out an
+/// overloaded provider; the provider's whole answer goes to the log.
+pub(crate) fn announce_overload(
+    session: &mut Session,
+    active_model: &str,
+    err: &forge_provider::ProviderError,
+    delay: std::time::Duration,
+    attempt: u32,
+) {
+    let forge_provider::ProviderError::Overloaded { status, reason, .. } = err else {
+        return;
+    };
+    tracing::warn!(model = %active_model, attempt, error = %err, "pinned model provider busy");
+    session.presenter.emit(PresenterEvent::Warning(format!(
+        "{active_model}: provider busy ({status} {reason}), retrying in {}s (attempt {attempt})",
+        delay.as_secs().max(1)
+    )));
+}
+
 /// The provider's reason for a failure, short enough for a status line: `Bedrock: Too many tokens,
 /// please wait before trying again.` The full text goes to the log, never the chat.
 pub(crate) fn provider_reason(model: &str, err: &forge_provider::ProviderError) -> String {

@@ -281,16 +281,21 @@ pub fn denying_rule<'a>(
 }
 
 /// The model-facing refusal for a call a deny rule matched.
-pub fn rule_denial(tool_name: &str, rule: &PermissionRule) -> String {
+pub fn rule_denial(tool_name: &str, rule: &PermissionRule, args: &Value) -> String {
     let origin = match rule.source {
         RuleSource::Builtin => "Forge's built-in",
         RuleSource::Configured => "a configured",
         RuleSource::Turn => "the invoked skill's",
     };
+    // Name the pattern(s) this call hit, not the rule's whole list: the built-in shell rule has
+    // over a hundred, and a refusal that lists them all gets cut off before the culprit.
+    let hit = hit_patterns(rule, tool_name, args);
     let pattern = if rule.patterns.is_empty() {
         "(any arguments)".to_string()
-    } else {
+    } else if hit.is_empty() {
         rule.patterns.join("`, `")
+    } else {
+        hit.join("`, `")
     };
     let why = rule
         .reason
@@ -347,33 +352,34 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
     if rule.tool != "*" && rule.tool != tool_name {
         return false;
     }
-    if rule.patterns.is_empty() {
-        return true; // matches any args for this tool
-    }
+    rule.patterns.is_empty() || !hit_patterns(rule, tool_name, args).is_empty()
+}
+
+/// The patterns of `rule` that this call matches, in rule order. Empty when none does; a rule
+/// with no patterns matches everything and has none to name.
+fn hit_patterns<'a>(rule: &'a PermissionRule, tool_name: &str, args: &Value) -> Vec<&'a str> {
+    let all = |hits: &dyn Fn(&str) -> bool| -> Vec<&'a str> {
+        rule.patterns
+            .iter()
+            .map(String::as_str)
+            .filter(|p| hits(p))
+            .collect()
+    };
     // Shell tool: match against every effective command extracted from the command line.
     if is_shell_tool(tool_name) {
         let cmd_text = forge_types::shell_command_text(args);
         let cmd = cmd_text.as_deref().unwrap_or("");
         let (segments, parsed_ok) = effective_commands(cmd);
-        let any_glob = segments.iter().any(|seg| {
-            rule.patterns
+        let mut hit = all(&|p| {
+            segments
                 .iter()
-                .any(|p| narrowing::glob_hits(rule, p, seg))
+                .any(|seg| narrowing::glob_hits(rule, p, seg))
         });
-        if any_glob {
-            return true;
-        }
-        if rule.source == RuleSource::Builtin {
+        if hit.is_empty() && rule.source == RuleSource::Builtin {
             // Built-in denies also match against the *raw* command line. This catches
             // pipe-to-shell (`curl … | sh`) that segment-splitting would separate, and
             // other obfuscation the per-segment match misses.
-            if rule
-                .patterns
-                .iter()
-                .any(|p| narrowing::glob_hits(rule, p, cmd))
-            {
-                return true;
-            }
+            hit = all(&|p| narrowing::glob_hits(rule, p, cmd));
             // Conservative floor: if extraction was imperfect, still catch a literal deny
             // token hidden anywhere in the raw command (e.g. `bash -c 'rm -rf /'`).
             //
@@ -381,41 +387,31 @@ fn rule_matches(rule: &PermissionRule, tool_name: &str, args: &Value) -> bool {
             // single statement: newlines are where indirection hides (`X="rm -rf /"` on line 1,
             // `$X` on line 2) and a literal catastrophic token is never legitimate there. The
             // cost is a narrow false positive — a multi-line command that merely *contains* the
-            // text of a non-glob deny pattern (`rm -rf /`, `rm -rf ~`, the fork bomb, `rd /s /q /`,
-            // `rmdir /s /q /`) as data is denied. Single-line commands keep the old behaviour, so
-            // `grep "rm -rf /" script.sh` still works.
-            if !parsed_ok || segments.len() > 1 || cmd.contains(['\n', '\r']) {
-                return rule
-                    .patterns
-                    .iter()
-                    .any(|p| !p.contains('*') && narrowing::literal_hits(p, cmd));
+            // text of a non-glob deny pattern (the fork bomb, `rd /s /q /`, `rmdir /s /q /`) as
+            // data is denied. Single-line commands keep the old behaviour, so
+            // `grep "rm -rf /" script.sh` still works. The root and home deletes need the token
+            // to END there (`rm -rf /app/x && make` is not a root wipe).
+            if hit.is_empty() && (!parsed_ok || segments.len() > 1 || cmd.contains(['\n', '\r'])) {
+                hit = all(&|p| !p.contains('*') && narrowing::literal_hits(p, cmd));
             }
         }
-        return false;
+        return hit;
     }
     // Path tools: match against the path arg and its normalized variants. The target path is read
     // via the centralized `extract_path_arg` (not just the literal `"path"` key), so a write tool
     // that names its arg `file_path`/`target` is still subject to the secret denylist and path rules.
     for path in forge_types::all_path_args(args) {
         let candidates = path_candidates(&path);
-        if rule
-            .patterns
-            .iter()
-            .any(|p| candidates.iter().any(|c| narrowing::path_hits(rule, p, c)))
-        {
-            return true;
+        let hit = all(&|p| candidates.iter().any(|c| narrowing::path_hits(rule, p, c)));
+        if !hit.is_empty() {
+            return hit;
         }
-        // Fall through to the generic `"*"` check below rather than early-returning: a rule that
-        // means "match any call to this tool" (patterns = `["*"]`) must still apply to a path tool.
     }
     // Generic tools (MCP server tools, etc.): a bare "*" means "match any args". More specific
     // patterns are intentionally not supported for non-shell/non-path tools — the only meaningful
     // distinction users make is "deny any call to this tool" (deny = "*") vs "deny for specific
     // args" (which requires tool-specific pattern support we don't have yet).
-    if rule.patterns.iter().any(|p| p == "*") {
-        return true;
-    }
-    false
+    all(&|p| p == "*")
 }
 
 pub(crate) fn is_shell_tool(tool_name: &str) -> bool {
@@ -717,7 +713,7 @@ mod tests {
         }];
         let call = sh_call("hostname; grep -i host ~/.ssh/config");
         let rule = denying_rule("shell", &call, &rules).expect("the ~/.ssh read is denied");
-        let text = rule_denial("shell", rule);
+        let text = rule_denial("shell", rule, &call);
         assert!(text.contains("`grep */.ssh/*`"), "{text}");
         assert!(text.contains("`shell` itself still works"), "{text}");
         assert!(denying_rule("shell", &sh_call("hostname"), &rules).is_none());

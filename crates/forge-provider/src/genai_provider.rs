@@ -2610,8 +2610,12 @@ mod tests {
             ProviderError::Auth(_)
         ));
         assert!(matches!(
-            classify_status(503, "x".into(), "", None),
+            classify_status(502, "x".into(), "", None),
             ProviderError::Unavailable(_)
+        ));
+        assert!(matches!(
+            classify_status(503, "x".into(), "", None),
+            ProviderError::Overloaded { .. }
         ));
         // 400 misuse is non-retryable — must not fail over.
         let bad = classify_status(400, "x".into(), "", None);

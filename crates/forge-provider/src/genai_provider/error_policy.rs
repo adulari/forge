@@ -546,8 +546,80 @@ pub(super) fn classify_status(
             retry_after: retry_after.filter(|_| !exhausted),
         },
         401 | 403 => ProviderError::Auth(message),
-        500..=599 => ProviderError::Unavailable(message),
+        500..=599 => match overload_reason(code, body, &message, retry_after) {
+            Some(reason) => ProviderError::Overloaded {
+                status: code,
+                reason,
+                message: overload_message(provider_message.as_deref().unwrap_or(&message)),
+                retry_after,
+            },
+            None => ProviderError::Unavailable(message),
+        },
         _ => ProviderError::Request(message),
+    }
+}
+
+/// Why a 5xx is the provider shedding load rather than failing: 503/529, a `Retry-After`, a body
+/// that says `retryable: true`, or `overloaded`/`busy`/`capacity` in its type/code/category.
+/// Returns the short name to show (`gateway_overloaded`, `overloaded_error`, or `overloaded`).
+/// A plain `500 Internal server error` is none of these and stays [`ProviderError::Unavailable`],
+/// which keeps the identical-fast-error rejection heuristic for models a provider does not serve.
+fn overload_reason(
+    code: u16,
+    body: &str,
+    message: &str,
+    retry_after: Option<std::time::Duration>,
+) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error = value.as_ref().map(|v| v.get("error").unwrap_or(v));
+    let field = |obj: Option<&serde_json::Value>, key: &str| {
+        obj.and_then(|o| o.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let details = error.and_then(|e| e.get("details"));
+    let names: Vec<String> = [
+        field(details, "category"),
+        field(error, "code"),
+        field(error, "type"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let marked = |n: &str| {
+        let l = n.to_ascii_lowercase();
+        ["overload", "busy", "capacity"]
+            .iter()
+            .any(|k| l.contains(k))
+    };
+    let retryable = details
+        .and_then(|d| d.get("retryable"))
+        .or_else(|| error.and_then(|e| e.get("retryable")))
+        .and_then(|v| v.as_bool())
+        == Some(true);
+    let named = names.iter().find(|n| marked(n)).cloned();
+    let prose = marked(message) && message.to_ascii_lowercase().contains("overload");
+    if matches!(code, 503 | 529) || retry_after.is_some() || retryable || named.is_some() || prose {
+        return Some(
+            named
+                .or_else(|| names.first().cloned())
+                .unwrap_or_else(|| "overloaded".to_string()),
+        );
+    }
+    None
+}
+
+/// The provider's own sentence without the per-request `(request id: …)` tail, which differs on
+/// every attempt and has nothing to act on.
+fn overload_message(message: &str) -> String {
+    let first = message.lines().next().unwrap_or(message);
+    let cut = first.find("(request id").map_or(first, |i| &first[..i]);
+    let cut = cut.trim();
+    if cut.chars().count() > 300 {
+        let head: String = cut.chars().take(297).collect();
+        format!("{head}…")
+    } else {
+        cut.to_string()
     }
 }
 
