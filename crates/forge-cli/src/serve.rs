@@ -723,6 +723,7 @@ pub(crate) async fn serve_cmd(
     });
     crate::serve_update::start_auto(&state.registry);
     crate::serve_lifecycle::start(&state, config.sessions.clone());
+    crate::serve_pr_watch::start(&state);
 
     // Forge Anywhere gets a private loopback copy of the SAME router. The public LAN/local/tunnel
     // listener below is unchanged, while the connector never needs to upload the daemon token or

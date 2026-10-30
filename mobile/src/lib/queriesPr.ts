@@ -11,11 +11,14 @@ import {
   getPrDiff,
   getPrList,
   getPrStatus,
+  getPrWatch,
+  getPrWatches,
   getRunDetail,
   getWorkflowRuns,
   getWorkflows,
   mergePr,
   runAction,
+  setPrWatch,
   type PrState,
 } from "./apiPr";
 import { useAuth } from "./auth";
@@ -194,5 +197,39 @@ export function useAllPrs(sessionIds: readonly string[], state: PrState) {
       enabled: baseUrl != null,
       staleTime: 20_000,
     })),
+  });
+}
+
+const WATCH_POLL_MS = 10_000;
+
+export function usePrWatch(sessionId: string | null) {
+  const baseUrl = useDirectBase();
+  return useQuery({
+    queryKey: ["pr", "watch", baseUrl, sessionId],
+    queryFn: () => getPrWatch(baseUrl as string, sessionId as string),
+    enabled: baseUrl != null && sessionId != null,
+    refetchInterval: (query) => (query.state.data?.watch?.state === "watching" ? WATCH_POLL_MS : false),
+  });
+}
+
+export function usePrWatches() {
+  const baseUrl = useDirectBase();
+  return useQuery({
+    queryKey: ["pr", "watches", baseUrl],
+    queryFn: () => getPrWatches(baseUrl as string),
+    enabled: baseUrl != null,
+    refetchInterval: WATCH_POLL_MS,
+  });
+}
+
+export function useSetPrWatch() {
+  const baseUrl = useDirectBase();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof setPrWatch>[1]) => setPrWatch(baseUrl as string, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
+    },
   });
 }

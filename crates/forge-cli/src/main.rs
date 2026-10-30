@@ -116,6 +116,7 @@ mod serve_lifecycle;
 mod serve_media;
 mod serve_onboarding;
 mod serve_pr;
+mod serve_pr_watch;
 mod serve_recovery;
 mod serve_schedules;
 mod serve_spend;

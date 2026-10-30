@@ -223,3 +223,29 @@ export const runAction = (
   verb: "rerun" | "cancel" | "delete",
   body: { session: string; id: number; failed_only?: boolean },
 ) => post<{ ok: boolean }>(baseUrl, `/api/actions/${verb}`, body);
+
+export type PrWatchMode = "off" | "fix" | "merge";
+export type PrWatchMethod = MergeMethod | "auto";
+
+export interface PrWatch {
+  session_id: string;
+  mode: PrWatchMode;
+  method: PrWatchMethod;
+  state: "watching" | "merged" | "blocked";
+  blocked_reason: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  head_sha: string | null;
+  fix_turns: number;
+  last_checked: number | null;
+  last_action: string | null;
+  created_at: number;
+}
+
+export const getPrWatch = (baseUrl: string, session: string) =>
+  request<{ watch: PrWatch | null }>(baseUrl, `/api/pr/watch${query({ session })}`);
+
+export const getPrWatches = (baseUrl: string) => request<{ watches: PrWatch[] }>(baseUrl, "/api/pr/watches");
+
+export const setPrWatch = (baseUrl: string, body: { session: string; mode: PrWatchMode; method?: PrWatchMethod }) =>
+  post<{ watch: PrWatch | null }>(baseUrl, "/api/pr/watch", body);

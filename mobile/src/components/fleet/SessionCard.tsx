@@ -314,6 +314,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                       {title}
                     </Text>
                     {failed ? <Badge label="failed" tone="danger" /> : null}
+                    {row.pr_watch ? <Badge label={row.pr_watch === "merge" ? "watching - merge" : "watching"} tone="accent" /> : null}
                     {hasDraft ? (
                       <View accessibilityRole="image" accessibilityLabel="unsent draft" style={[styles.draftDot, { backgroundColor: tokens.accent }]} />
                     ) : null}

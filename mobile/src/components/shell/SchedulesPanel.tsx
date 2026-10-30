@@ -9,6 +9,7 @@ import { Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-na
 
 import type { ScheduleRow } from "../../lib/api";
 import { useScheduleRuns, useSchedules } from "../../lib/queries";
+import { usePrWatches } from "../../lib/queriesPr";
 import { activeWorkspaceProjects, useShellPrefs } from "../../lib/shellPrefs";
 import { projectName } from "../../lib/sidebarModel";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -18,6 +19,7 @@ import { EmptyState } from "../ds/EmptyState";
 import { SearchField } from "../ds/SearchField";
 import { Segmented } from "../ds/Segmented";
 import { Sheet } from "../ds/Sheet";
+import { PrWatchList } from "./schedules/PrWatchList";
 import { ScheduleForm } from "./schedules/ScheduleForm";
 import { ScheduleResults, unreadCount } from "./schedules/ScheduleResults";
 import { ScheduleRowView } from "./schedules/ScheduleRowView";
@@ -72,6 +74,7 @@ export function SchedulesPanel({ visible, onClose }: SchedulesPanelProps) {
   const all = (query.data ?? []).filter((row) => !workspaceProjects || workspaceProjects.has(projectName(row.cwd)));
   const rows = filterSchedules(all, filter, search);
   const unread = unreadCount(runsQuery.data);
+  const watches = (usePrWatches().data?.watches ?? []).filter((w) => w.mode !== "off");
 
   return (
     <Sheet visible={visible} onClose={onClose} accessibilityLabel="Schedules">
@@ -135,6 +138,8 @@ export function SchedulesPanel({ visible, onClose }: SchedulesPanelProps) {
                 />
               </View>
             ) : null}
+
+            <PrWatchList watches={watches} onNavigate={onClose} />
 
             {query.isLoading && all.length === 0 ? (
               <Text style={[typeScale.sub, styles.loading, { color: tokens.ink3 }]}>Loading schedules...</Text>
