@@ -148,6 +148,7 @@ pub(crate) fn mcp_add(req: AddRequest) -> Result<()> {
             oauth: None,
         });
     let server = forge_config::McpServerConfig {
+        disabled_tools: Vec::new(),
         name: req.name.clone(),
         transport: mcp_transport,
         auth,

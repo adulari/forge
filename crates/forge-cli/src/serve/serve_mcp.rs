@@ -26,7 +26,7 @@ pub(super) struct CreateMcpServerRequest {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum McpTransportRequest {
+pub(super) enum McpTransportRequest {
     Stdio,
     Http,
     Sse,
@@ -40,18 +40,38 @@ struct McpServerRow {
     auth_configured: bool,
     secret_env_count: usize,
     editable: bool,
+    scope: &'static str,
+    status: String,
+    last_error: Option<String>,
+    tool_count: Option<usize>,
+    disabled_tools: Vec<String>,
+    command: Option<String>,
+    args: Vec<String>,
+    url: Option<String>,
+    token_env: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct McpBuiltinRow {
+    id: &'static str,
+    label: &'static str,
+    detail: &'static str,
+    enabled: bool,
+    toggleable: bool,
+    tool_count: Option<usize>,
 }
 
 #[derive(serde::Serialize)]
 struct McpResponse {
     servers: Vec<McpServerRow>,
+    builtins: Vec<McpBuiltinRow>,
     allowed_servers: Vec<String>,
     allowed_tools: Vec<String>,
     call_timeout_secs: u64,
     connect_timeout_secs: u64,
 }
 
-fn valid_server_name(name: &str) -> bool {
+pub(super) fn valid_server_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
@@ -102,6 +122,7 @@ pub(super) async fn create_mcp_server(Json(request): Json<CreateMcpServerRequest
                 oauth: None,
             });
         config.servers.push(forge_config::McpServerConfig {
+            disabled_tools: Vec::new(),
             name: name.to_string(),
             transport,
             auth,
@@ -126,10 +147,11 @@ pub(super) async fn create_mcp_server(Json(request): Json<CreateMcpServerRequest
 #[serde(deny_unknown_fields)]
 pub(super) struct UpdateMcpServerRequest {
     name: String,
-    enabled: bool,
+    enabled: Option<bool>,
+    disabled_tools: Option<Vec<String>>,
 }
 
-fn mcp_toml_scopes() -> Vec<PathBuf> {
+pub(super) fn mcp_toml_scopes() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from(".forge/mcp.toml")];
     if let Some(dir) = forge_config::config_dir() {
         paths.push(dir.join("mcp.toml"));
@@ -148,10 +170,21 @@ pub(super) async fn update_mcp_server(Json(request): Json<UpdateMcpServerRequest
             else {
                 continue;
             };
-            if server.enabled == request.enabled {
+            if request.enabled.is_none() && request.disabled_tools.is_none() {
+                return Err("enabled or disabled_tools is required".to_string());
+            }
+            let before = (server.enabled, server.disabled_tools.clone());
+            if let Some(enabled) = request.enabled {
+                server.enabled = enabled;
+            }
+            if let Some(mut disabled) = request.disabled_tools.clone() {
+                disabled.sort();
+                disabled.dedup();
+                server.disabled_tools = disabled;
+            }
+            if before == (server.enabled, server.disabled_tools.clone()) {
                 return Ok(());
             }
-            server.enabled = request.enabled;
             return forge_config::write_mcp_toml(&path, &config).map_err(|error| error.to_string());
         }
         Err(format!(
@@ -170,7 +203,9 @@ pub(super) async fn update_mcp_server(Json(request): Json<UpdateMcpServerRequest
     }
 }
 
-fn load_mutable_mcp_toml(path: &std::path::Path) -> Result<forge_config::McpConfig, String> {
+pub(super) fn load_mutable_mcp_toml(
+    path: &std::path::Path,
+) -> Result<forge_config::McpConfig, String> {
     match std::fs::read_to_string(path) {
         Ok(body) => toml::from_str(&body)
             .map_err(|error| format!("refusing to overwrite invalid {}: {error}", path.display())),
@@ -179,7 +214,7 @@ fn load_mutable_mcp_toml(path: &std::path::Path) -> Result<forge_config::McpConf
     }
 }
 
-fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
+pub(super) fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
     let url = url.ok_or_else(|| "HTTP and SSE servers need an http(s) URL".to_string())?;
     let parsed = reqwest::Url::parse(&url)
         .map_err(|_| "HTTP and SSE servers need a valid http(s) URL".to_string())?;
@@ -193,6 +228,7 @@ fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
 pub(super) async fn mcp_page() -> Response {
     match tokio::task::spawn_blocking(|| {
         let config = forge_config::load().unwrap_or_default();
+        let project: HashSet<String> = project_server_names();
         let editable: HashSet<String> = mcp_toml_scopes()
             .iter()
             .flat_map(|path| forge_config::load_mcp_toml(path).servers)
@@ -203,15 +239,34 @@ pub(super) async fn mcp_page() -> Response {
                 .mcp
                 .servers
                 .iter()
-                .map(|server| McpServerRow {
-                    name: server.name.clone(),
-                    transport: server.transport_label().to_string(),
-                    enabled: server.enabled,
-                    auth_configured: server.auth.is_some(),
-                    secret_env_count: server.secret_env.len(),
-                    editable: editable.contains(&server.name),
-                })
+                .map(|server| server_row(server, &project, &editable))
                 .collect(),
+            builtins: vec![
+                McpBuiltinRow {
+                    id: "browser",
+                    label: "Browser",
+                    detail: "Headless browser tool",
+                    enabled: true,
+                    toggleable: false,
+                    tool_count: Some(1),
+                },
+                McpBuiltinRow {
+                    id: "web",
+                    label: "Web tools",
+                    detail: "web_search and web_fetch",
+                    enabled: true,
+                    toggleable: false,
+                    tool_count: Some(2),
+                },
+                McpBuiltinRow {
+                    id: "self",
+                    label: "Forge self-MCP",
+                    detail: "Lets the agent drive a sub-Forge session",
+                    enabled: config.self_mcp,
+                    toggleable: true,
+                    tool_count: None,
+                },
+            ],
             allowed_servers: config.mcp.allow.servers,
             allowed_tools: config.mcp.allow.tools,
             call_timeout_secs: config.mcp.call_timeout_secs,
@@ -228,9 +283,61 @@ pub(super) async fn mcp_page() -> Response {
     }
 }
 
+fn project_server_names() -> HashSet<String> {
+    forge_config::load_mcp_toml(std::path::Path::new(".forge/mcp.toml"))
+        .servers
+        .into_iter()
+        .map(|server| server.name)
+        .collect()
+}
+
+fn server_row(
+    server: &forge_config::McpServerConfig,
+    project: &HashSet<String>,
+    editable: &HashSet<String>,
+) -> McpServerRow {
+    let probe = super::serve_mcp_probe::cached(&server.name);
+    let status = if !server.enabled {
+        "disabled".to_string()
+    } else {
+        probe
+            .as_ref()
+            .map_or_else(|| "unknown".to_string(), |p| p.status.clone())
+    };
+    let (command, args, url) = match &server.transport {
+        forge_config::McpTransport::Stdio { command, args, .. } => {
+            (Some(command.clone()), args.clone(), None)
+        }
+        forge_config::McpTransport::Http { url, .. }
+        | forge_config::McpTransport::Sse { url, .. } => (None, Vec::new(), Some(url.clone())),
+    };
+    McpServerRow {
+        name: server.name.clone(),
+        transport: server.transport_label().to_string(),
+        enabled: server.enabled,
+        auth_configured: server.auth.is_some(),
+        secret_env_count: server.secret_env.len(),
+        editable: editable.contains(&server.name),
+        scope: if project.contains(&server.name) {
+            "project"
+        } else {
+            "global"
+        },
+        status,
+        last_error: probe.as_ref().and_then(|p| p.last_error.clone()),
+        tool_count: probe.as_ref().map(|p| p.tools.len()),
+        disabled_tools: server.disabled_tools.clone(),
+        command,
+        args,
+        url,
+        token_env: server.auth.as_ref().and_then(|a| a.token_env.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{load_mutable_mcp_toml, valid_mcp_url, valid_server_name};
+    use super::{load_mutable_mcp_toml, server_row, valid_mcp_url, valid_server_name};
+    use std::collections::HashSet;
 
     #[test]
     fn server_names_match_the_persisted_catalog_contract() {
@@ -269,5 +376,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let config = load_mutable_mcp_toml(&temp.path().join("missing.toml")).unwrap();
         assert!(config.servers.is_empty());
+    }
+
+    #[test]
+    fn row_reports_scope_status_and_edit_fields() {
+        let mut server: forge_config::McpServerConfig = toml::from_str(
+            "name = \"probe_row\"\n[transport]\ntype = \"stdio\"\ncommand = \"node\"\nargs = [\"a.js\"]\n",
+        )
+        .unwrap();
+        server.disabled_tools = vec!["danger".into()];
+        let project: HashSet<String> = ["probe_row".to_string()].into();
+        let row = server_row(&server, &project, &HashSet::new());
+        assert_eq!((row.scope, row.status.as_str()), ("project", "unknown"));
+        assert_eq!(row.command.as_deref(), Some("node"));
+        assert_eq!(row.disabled_tools, ["danger"]);
+        server.enabled = false;
+        assert_eq!(
+            server_row(&server, &HashSet::new(), &HashSet::new()).status,
+            "disabled"
+        );
     }
 }

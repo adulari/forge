@@ -6,7 +6,7 @@
 // `McpServerRow` carries no "which file defines this" field, so that case is undetectable until
 // the first PATCH comes back — the row is then latched read-only for the rest of the session with
 // the daemon's own explanation, instead of leaving a toggle that can only ever fail.
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
@@ -21,7 +21,14 @@ import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { ApiError } from "../lib/api";
 import { useMcp, useUpdateMcpServer } from "../lib/queries";
-import { Plug } from "lucide-react-native";
+import { useDeleteMcpServer, useReloadMcp, useUpdateMcpBuiltin } from "../lib/mcpManage";
+import type { McpServerRow } from "../lib/api";
+import { McpProbeSheet } from "../components/mcp/McpProbeSheet";
+import { McpServerItem } from "../components/mcp/McpServerItem";
+import { ConfirmDialog } from "../components/ds/ConfirmDialog";
+import { SectionHeader } from "../components/ds/SectionHeader";
+import { Plug, RefreshCw } from "lucide-react-native";
+import { IconButton } from "../components/ds/IconButton";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { monoFamily, type } from "../theme/typography";
@@ -61,8 +68,14 @@ function McpScreenBody() {
   const query = useMcp();
   const pull = usePullRefresh(query.refetch);
   const update = useUpdateMcpServer();
+  const reload = useReloadMcp();
+  const remove = useDeleteMcpServer();
+  const builtin = useUpdateMcpBuiltin();
   const data = query.data;
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<McpServerRow | null>(null);
+  const [probing, setProbing] = useState<McpServerRow | null>(null);
+  const [removing, setRemoving] = useState<McpServerRow | null>(null);
   // The relay refuses MCP writes by design: registering or enabling a server persists a command
   // the host later runs. Over Anywhere the screen reviews only, instead of offering an Add sheet
   // and toggles whose requests always come back "not allowlisted".
@@ -73,6 +86,14 @@ function McpScreenBody() {
   // failure rolls back to whatever the server still reports.
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const [external, setExternal] = useState<Record<string, string>>({});
+
+  const { mutate: runReload } = reload;
+  const autoChecked = useRef(false);
+  useEffect(() => {
+    if (!direct || autoChecked.current || !data) return;
+    autoChecked.current = true;
+    if (data.servers.some((server) => server.enabled && server.status === "unknown")) runReload();
+  }, [data, direct, runReload]);
 
   const toggle = useCallback(
     (name: string, enabled: boolean) => {
@@ -86,6 +107,9 @@ function McpScreenBody() {
               delete next[name];
               return next;
             }),
+          onSuccess: () => {
+            if (enabled) runReload();
+          },
           onError: (error) => {
             const reason = externalConfigReason(error);
             if (reason) {
@@ -101,11 +125,28 @@ function McpScreenBody() {
         },
       );
     },
-    [toast, update],
+    [toast, update, runReload],
   );
 
+  const confirmRemove = () => {
+    if (!removing) return;
+    const name = removing.name;
+    remove.mutate(name, {
+      onSuccess: () => setRemoving(null),
+      onError: (error) => {
+        setRemoving(null);
+        toast.show(error instanceof ApiError ? (error.body as { error?: string } | undefined)?.error ?? error.message : `could not remove ${name}`, { tone: "danger" });
+      },
+    });
+  };
+
   return <Screen scroll refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={styles.content}>
-    <View style={styles.headerRow}><BackLink /><View style={styles.flexFill} />{direct ? <Pressable onPress={() => setAdding(true)} accessibilityRole="button"><Text style={[styles.add, { color: tokens.accent }]}>+ Add</Text></Pressable> : null}</View>
+    <View style={styles.headerRow}>
+      <BackLink />
+      <View style={styles.flexFill} />
+      {direct ? <IconButton icon={<RefreshCw size={18} strokeWidth={1.75} color={tokens.ink2} />} onPress={() => runReload()} disabled={reload.isPending} accessibilityLabel={reload.isPending ? "Checking MCP servers" : "Reload MCP servers"} /> : null}
+      {direct ? <Pressable onPress={() => setAdding(true)} accessibilityRole="button" style={styles.addButton}><Text style={[styles.add, { color: tokens.accent }]}>+ Add</Text></Pressable> : null}
+    </View>
     <Text style={[type.title, { color: tokens.ink }]}>MCP servers</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>External tools available to Forge. Secrets remain on the host.</Text>
     {query.isLoading ? (
@@ -122,6 +163,30 @@ function McpScreenBody() {
         action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} accessibilityLabel="Retry loading MCP servers" />}
       />
     ) : null}
+    {data?.builtins && data.builtins.length > 0 ? (
+      <View>
+        <SectionHeader>Built-in</SectionHeader>
+        {data.builtins.map((item, index) => (
+          <View key={item.id} style={[styles.builtin, index < data.builtins!.length - 1 ? { borderBottomColor: tokens.hairline, borderBottomWidth: StyleSheet.hairlineWidth } : null]}>
+            <View style={styles.serverBody}>
+              <Text style={[styles.name, { color: tokens.ink }]} numberOfLines={1}>{item.label}</Text>
+              <Text style={[type.monoMeta, { color: tokens.ink4 }]} numberOfLines={2}>{[item.detail, item.tool_count != null ? `${item.tool_count} ${item.tool_count === 1 ? "tool" : "tools"}` : null].filter(Boolean).join(" · ")}</Text>
+            </View>
+            {item.toggleable && direct ? (
+              <Switch
+                value={item.enabled}
+                onValueChange={(value) => builtin.mutate({ id: item.id, enabled: value }, { onError: () => toast.show(`could not update ${item.label}`, { tone: "danger" }) })}
+                disabled={builtin.isPending}
+                accessibilityLabel={`${item.label} enabled`}
+              />
+            ) : (
+              <Badge label={item.enabled ? "always on" : "off"} tone={item.enabled ? "success" : "neutral"} />
+            )}
+          </View>
+        ))}
+      </View>
+    ) : null}
+    {data ? <SectionHeader>Servers</SectionHeader> : null}
     {!query.isLoading && data?.servers.length === 0 ? <EmptyState icon={Plug} message="No MCP servers configured." /> : null}
     {data?.servers.map((server, index) => {
       const enabled = pending[server.name] ?? server.enabled;
@@ -131,27 +196,33 @@ function McpScreenBody() {
         external[server.name] ??
         (server.editable === false ? "defined outside mcp.toml — edit it where it is defined" : null) ??
         (direct ? null : "change it on the host — Forge Anywhere does not carry MCP changes");
-      return <View key={server.name} style={[styles.server, index < data.servers.length - 1 ? { borderBottomColor: tokens.hairline, borderBottomWidth: StyleSheet.hairlineWidth } : null]}>
-        <View style={[styles.dot, { backgroundColor: enabled ? tokens.success : tokens.ink4 }]} />
-        <View style={styles.serverBody}>
-          <Text style={[styles.name, { color: enabled ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>{server.name}</Text>
-          <Text style={[type.monoMeta, { color: tokens.ink4 }]} numberOfLines={1}>{[server.transport, server.auth_configured ? "auth configured" : null, server.secret_env_count > 0 ? `${server.secret_env_count} secret ref${server.secret_env_count === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ")}</Text>
-          {readOnlyReason ? <Text style={[type.monoMeta, { color: tokens.warnBgInk }]}>{readOnlyReason}</Text> : null}
-        </View>
-        {readOnlyReason ? (
-          <Badge label={enabled ? "enabled" : "disabled"} tone={enabled ? "success" : "neutral"} />
-        ) : (
-          <Switch
-            value={enabled}
-            onValueChange={(value) => toggle(server.name, value)}
-            disabled={pending[server.name] !== undefined}
-            accessibilityLabel={`${server.name} enabled`}
-          />
-        )}
-      </View>;
+      return <McpServerItem
+        key={server.name}
+        server={server}
+        enabled={enabled}
+        checking={reload.isPending}
+        readOnlyReason={readOnlyReason}
+        toggling={pending[server.name] !== undefined}
+        last={index === data.servers.length - 1}
+        onToggle={(value) => toggle(server.name, value)}
+        onOpen={() => setProbing(server)}
+        onEdit={() => setEditing(server)}
+        onRemove={() => setRemoving(server)}
+      />;
     })}
     {data ? <Text style={[type.monoMeta, styles.footerMeta, { color: tokens.ink4 }]}>call timeout {data.call_timeout_secs}s · connect timeout {data.connect_timeout_secs}s · token values stay in your keyring — only the variable name is saved</Text> : null}
-    <AddMcpServerSheet visible={adding} onClose={() => setAdding(false)} />
+    <AddMcpServerSheet visible={adding || editing != null} editing={editing} onClose={() => { setAdding(false); setEditing(null); }} />
+    <McpProbeSheet server={probing} canEdit={direct && probing?.editable !== false} onClose={() => setProbing(null)} />
+    <ConfirmDialog
+      visible={removing != null}
+      title={`Remove ${removing?.name ?? "server"}?`}
+      message="Deletes its entry from mcp.toml. Stored tokens in your keyring are not touched."
+      confirmLabel="Remove"
+      destructive
+      loading={remove.isPending}
+      onConfirm={confirmRemove}
+      onCancel={() => setRemoving(null)}
+    />
   </Screen>;
 }
 
@@ -159,4 +230,4 @@ export default function McpScreen() {
   return <DesktopDrillDown><SettingsShell active="mcp"><McpScreenBody /></SettingsShell></DesktopDrillDown>;
 }
 
-const styles = StyleSheet.create({ content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 }, headerRow: { flexDirection: "row", alignItems: "center" }, flexFill: { flex: 1 }, add: { fontSize: 15, fontWeight: "600" }, server: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space12, minHeight: 56 }, dot: { width: 7, height: 7, borderRadius: 4 }, serverBody: { flex: 1, minWidth: 0, gap: 2 }, name: { fontSize: 14, fontFamily: monoFamily.bold }, footerMeta: { paddingTop: space.space4 } });
+const styles = StyleSheet.create({ content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 }, headerRow: { flexDirection: "row", alignItems: "center" }, flexFill: { flex: 1 }, add: { fontSize: 15, fontWeight: "600" }, addButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: space.space8 }, builtin: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space12, minHeight: 56 }, server: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space12, minHeight: 56 }, dot: { width: 7, height: 7, borderRadius: 4 }, serverBody: { flex: 1, minWidth: 0, gap: 2 }, name: { fontSize: 14, fontFamily: monoFamily.bold }, footerMeta: { paddingTop: space.space4 } });

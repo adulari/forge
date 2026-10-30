@@ -599,6 +599,8 @@ pub(crate) struct CreateSessionReq {
     /// dispatch scheduler sets it. See [`DriverSpec::dispatch_worker`].
     #[serde(skip)]
     pub(crate) dispatch_worker: bool,
+    #[serde(default)]
+    pub(crate) mcp_off: Vec<String>,
 }
 
 pub(crate) async fn serve_cmd(
@@ -1039,12 +1041,8 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/workflows"), get(workflows_page))
         .route(&format!("{base}/api/models"), models_route())
         .route(&format!("{base}/api/plans"), get(plans_page))
-        .route(
-            &format!("{base}/api/mcp"),
-            get(mcp_page)
-                .post(create_mcp_server)
-                .patch(update_mcp_server),
-        )
+        .route(&format!("{base}/api/mcp"), serve_mcp_probe::mcp_route())
+        .merge(serve_mcp_probe::mcp_subroutes(&base))
         .route(
             &format!("{base}/api/config"),
             get(config_page).put(update_config),
@@ -1235,6 +1233,7 @@ mod serve_changelog;
 mod serve_config;
 mod serve_local_control;
 mod serve_mcp;
+mod serve_mcp_probe;
 mod serve_models;
 mod serve_projects;
 mod serve_providers;
@@ -1245,7 +1244,6 @@ mod serve_ws;
 use serve_assets::*;
 use serve_changelog::*;
 use serve_config::*;
-use serve_mcp::*;
 use serve_models::*;
 use serve_projects::*;
 use serve_providers::*;
@@ -1678,7 +1676,10 @@ pub(crate) async fn start_session(
         dispatch_coordinator: req.dispatch_coordinator,
         dispatch_worker: req.dispatch_worker,
     };
-    let handle = spawn_session_driver(spec).await.map_err(|e| {
+    let spawned =
+        crate::cli::commands::run::session_mcp_off::scoped(req.mcp_off, spawn_session_driver(spec))
+            .await;
+    let handle = spawned.map_err(|e| {
         let message = format!("session create failed: {e}");
         let status = if message.contains("unknown model") {
             StatusCode::BAD_REQUEST

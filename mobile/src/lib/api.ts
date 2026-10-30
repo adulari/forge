@@ -217,14 +217,19 @@ export interface AzureProviderRequest {
 
 export interface CreateMcpServerRequest { name: string; transport: "stdio" | "http" | "sse"; command?: string; args?: string[]; url?: string; token_env?: string; }
 
-export interface McpResponse { servers: McpServerRow[]; allowed_servers: string[]; allowed_tools: string[]; call_timeout_secs: number; connect_timeout_secs: number; }
+export interface McpResponse { servers: McpServerRow[]; builtins?: McpBuiltinRow[]; allowed_servers: string[]; allowed_tools: string[]; call_timeout_secs: number; connect_timeout_secs: number; }
 // `editable` is false for a server the daemon resolves from somewhere other than the mcp.toml
 // files it writes (an imported `.mcp.json`) — PATCH would 404, so the row stays read-only.
 // Optional: a pre-v9 daemon omits it, and an absent flag must not disable a working toggle.
-export interface McpServerRow { name: string; transport: "stdio" | "http" | "sse"; enabled: boolean; auth_configured: boolean; secret_env_count: number; editable?: boolean; }
+export interface McpServerRow { name: string; transport: "stdio" | "http" | "sse"; enabled: boolean; auth_configured: boolean; secret_env_count: number; editable?: boolean;
+  // v-P23 fields; a daemon that predates them omits all of these.
+  scope?: "global" | "project"; status?: McpStatus; last_error?: string | null; tool_count?: number | null;
+  disabled_tools?: string[]; command?: string | null; args?: string[]; url?: string | null; token_env?: string | null; }
+export type McpStatus = "connected" | "failed" | "unauthorized" | "reconnecting" | "slow" | "disabled" | "blocked" | "unknown";
+export interface McpBuiltinRow { id: string; label: string; detail: string; enabled: boolean; toggleable: boolean; tool_count: number | null; }
 /** `PATCH /api/mcp` — 404 when the server is configured somewhere the CLI does not write
  * (an imported `.mcp.json`); the daemon refuses to fork the source of truth. */
-export interface UpdateMcpServerRequest { name: string; enabled: boolean; }
+export interface UpdateMcpServerRequest { name: string; enabled?: boolean; disabled_tools?: string[]; }
 
 // --- Git review dock (crates/forge-cli/src/serve_git.rs) ---
 
@@ -501,6 +506,8 @@ export interface CreateSessionRequest {
   mode?: PermissionMode;
   resume?: string;
   temper?: string;
+  /** MCP server names to leave out of this session only. */
+  mcp_off?: string[];
   /** Run the new session's first turn with this text immediately, server-side — added so the
    * task composer's very first prompt survives even when this device's WebSocket to the new
    * session never reaches `open` before the screen unmounts (see mobile/src/app/new-session.tsx).

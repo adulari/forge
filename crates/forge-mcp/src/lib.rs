@@ -1116,6 +1116,20 @@ impl McpManager {
             .unwrap_or_default()
     }
 
+    /// `(uri, name)` for every resource a connected server advertises.
+    pub fn resource_lines(&self, server: &str) -> Vec<(String, String)> {
+        let conns = self.conns.lock();
+        conns
+            .get(server)
+            .map(|c| {
+                c.resources
+                    .iter()
+                    .map(|r| (r.uri.clone(), r.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Close all connections (kill stdio children / close HTTP streams). Best-effort.
     pub async fn shutdown(&self) {
         let services: Vec<RunningService<RoleClient, ForgeClientHandler>> = {
@@ -1267,6 +1281,7 @@ mod tests {
     async fn reconnect_retries_a_configured_server_and_refuses_unknown_names() {
         let config = McpConfig {
             servers: vec![forge_config::McpServerConfig {
+                disabled_tools: Vec::new(),
                 name: "ghost".into(),
                 transport: forge_config::McpTransport::Stdio {
                     command: "/nonexistent/forge-mcp-ghost".into(),
@@ -1432,6 +1447,7 @@ mod tests {
         // list instantly; `connect_active` fills in the real status in the background.
         let config = McpConfig {
             servers: vec![forge_config::McpServerConfig {
+                disabled_tools: Vec::new(),
                 name: "blackhole".into(),
                 transport: forge_config::McpTransport::Http {
                     url: "http://10.255.255.1:8080/mcp".into(),
@@ -1462,6 +1478,7 @@ mod tests {
             connect_timeout_secs: 1,
             servers: vec![
                 forge_config::McpServerConfig {
+                    disabled_tools: Vec::new(),
                     name: "slow".into(),
                     transport: forge_config::McpTransport::Stdio {
                         command: "sh".into(),
@@ -1474,6 +1491,7 @@ mod tests {
                     shared: None,
                 },
                 forge_config::McpServerConfig {
+                    disabled_tools: Vec::new(),
                     name: "also-slow".into(),
                     transport: forge_config::McpTransport::Stdio {
                         command: "sh".into(),
@@ -1573,6 +1591,7 @@ mod tests {
         let config = McpConfig {
             connect_timeout_secs: 1,
             servers: vec![forge_config::McpServerConfig {
+                disabled_tools: Vec::new(),
                 name: "down".into(),
                 transport: forge_config::McpTransport::Stdio {
                     command: "sh".into(),

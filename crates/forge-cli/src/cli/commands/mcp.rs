@@ -44,6 +44,7 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
         }
         Some(McpCmd::Remove { name, scope }) => return mcp_remove(name, scope),
         Some(McpCmd::Get { name }) => return mcp_get(name),
+        Some(McpCmd::Sync { to, dry_run }) => return sync::mcp_sync(&to, dry_run),
         Some(McpCmd::Tools { server }) => Some(server),
         Some(McpCmd::List) | None => None,
     };
@@ -309,6 +310,7 @@ mod login;
 pub(crate) use login::mcp_login;
 
 mod add;
+mod sync;
 
 pub(crate) async fn read_callback_params(
     stream: &mut tokio::net::TcpStream,

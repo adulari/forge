@@ -1367,6 +1367,7 @@ mod tests {
         use std::collections::HashMap;
         forge_config::McpConfig {
             servers: vec![forge_config::McpServerConfig {
+                disabled_tools: Vec::new(),
                 name: "demo".to_string(),
                 transport: forge_config::McpTransport::Stdio {
                     command: "true".to_string(),

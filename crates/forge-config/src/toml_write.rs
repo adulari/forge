@@ -370,6 +370,7 @@ mod tests {
         .unwrap();
         let mut config = crate::mcp::load_mcp_toml(&path);
         config.servers.push(crate::mcp::McpServerConfig {
+            disabled_tools: Vec::new(),
             name: "git".into(),
             transport: crate::mcp::McpTransport::Stdio {
                 command: "git-mcp".into(),

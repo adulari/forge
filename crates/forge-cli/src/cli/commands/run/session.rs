@@ -257,6 +257,7 @@ pub(crate) async fn build_session_with_self_mcp(
         mcp_config.servers.insert(
             0,
             forge_config::McpServerConfig {
+                disabled_tools: Vec::new(),
                 name: "forge".to_string(),
                 transport: forge_config::McpTransport::Stdio {
                     command: exe.to_string_lossy().into_owned(),
@@ -270,6 +271,7 @@ pub(crate) async fn build_session_with_self_mcp(
             },
         );
     }
+    super::session_mcp_off::apply(&mut mcp_config);
     let config_has_mcp = mcp_config.active_servers().next().is_some();
     let lattice_enabled = config.lattice.enabled;
     let config_lattice_watch = config.lattice.watch;
@@ -781,6 +783,7 @@ mod tests {
 
     fn stdio_server(name: &str, command: &str, args: &[&str]) -> forge_config::McpServerConfig {
         forge_config::McpServerConfig {
+            disabled_tools: Vec::new(),
             name: name.to_string(),
             transport: forge_config::McpTransport::Stdio {
                 command: command.to_string(),

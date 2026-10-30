@@ -29,6 +29,7 @@ import { Segmented } from "../components/ds/Segmented";
 import { Sheet } from "../components/ds/Sheet";
 import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
+import { McpSessionChips } from "../components/mcp/McpSessionChips";
 import { ModelPicker } from "../components/session/ModelPicker";
 import { ProjectPicker } from "../components/session/ProjectPicker";
 import { ApiError, isUnsupportedPromptFieldError, type CreateSessionResponse } from "../lib/api";
@@ -201,6 +202,7 @@ export default function NewSessionScreen() {
   const [model, setModel] = useState("");
   const [worktreePref, setWorktreePref] = useState<WorktreePreference>(DEFAULT_WORKTREE_PREFERENCE);
   const [temper, setTemper] = useState<Temper>("Ask");
+  const [mcpOff, setMcpOff] = useState<string[]>([]);
   const create = useCreateSession();
   const toast = useToast();
 
@@ -310,6 +312,7 @@ export default function NewSessionScreen() {
       model: model.trim() || undefined,
       worktree,
       temper,
+      mcp_off: mcpOff.length > 0 ? mcpOff : undefined,
     };
 
     void (async () => {
@@ -349,7 +352,7 @@ export default function NewSessionScreen() {
       // A failed retry (the non-prompt path) leaves `create.error` set by mutateAsync — nothing
       // further to do here, the error text is already what `serverError` renders.
     });
-  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, activeServerId, baseUrl, consumeShare, incomingShareId]);
+  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, mcpOff, activeServerId, baseUrl, consumeShare, incomingShareId]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -408,6 +411,7 @@ export default function NewSessionScreen() {
         <Segmented options={TEMPER_OPTIONS} value={temper} onChange={setTemper} />
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{TEMPER_HINT[temper]}</Text>
       </View>
+      <McpSessionChips off={mcpOff} onChange={setMcpOff} />
       <View style={styles.worktreeRow}>
         <Switch
           value={worktree}
