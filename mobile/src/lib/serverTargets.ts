@@ -9,6 +9,8 @@ export interface StoredServer {
   transport?: "direct" | "anywhere";
   /** True only after the user explicitly chooses a display name. */
   customName?: boolean;
+  /** `sha256:<hex>` of the TLS leaf the pairing link pinned; absent for trusted-CA hosts. */
+  fingerprint?: string;
 }
 
 export interface ServerIdentity {

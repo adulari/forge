@@ -17,6 +17,7 @@
 import type { Message as TauriWsMessage } from "@tauri-apps/plugin-websocket";
 
 import { isTauri } from "../platform";
+import { rewritePinned, rewritePinnedReady } from "../pinnedLan";
 import { AnywhereTransport } from "./AnywhereTransport";
 import { DirectTransport } from "./DirectTransport";
 import { EncryptedAnywhereRelay } from "./EncryptedAnywhereRelay";
@@ -47,7 +48,15 @@ async function tauriAwareFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> {
-  if (isTauri && requestUrl(input).startsWith("http:")) {
+  const raw = requestUrl(input);
+  if (isTauri && raw.startsWith("https:")) {
+    const pinned = await rewritePinnedReady(raw);
+    if (pinned !== raw) {
+      const { fetch: tauriFetch } = await import("@tauri-apps/plugin-http");
+      return tauriFetch(pinned, init);
+    }
+  }
+  if (isTauri && raw.startsWith("http:")) {
     const { fetch: tauriFetch } = await import("@tauri-apps/plugin-http");
     return tauriFetch(input as string | URL | Request, init);
   }
@@ -94,7 +103,8 @@ class TauriAwareWebSocket {
   private fallbackStarted = false;
   private closeNotified = false;
 
-  constructor(url: string) {
+  constructor(requested: string) {
+    const url = rewritePinned(requested);
     if (url.startsWith("wss:")) {
       // Already a secure context — no mixed-content risk, native WebSocket is fine.
       this.attachNative(url, /* allowFallback */ false);

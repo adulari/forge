@@ -388,6 +388,10 @@ pub(crate) enum Command {
         /// Deprecated alias for `--tunnel`; managed Forge Anywhere uses `forge anywhere`.
         #[arg(long, hide = true, conflicts_with_all = ["local", "lan", "tunnel"])]
         anywhere: bool,
+        /// Also publish the daemon on your tailnet with `tailscale serve` and put the MagicDNS
+        /// HTTPS address (a trusted certificate) in the pairing QR.
+        #[arg(long, conflicts_with_all = ["local", "tunnel", "anywhere"])]
+        tailscale: bool,
         /// Listen port (default `[remote] port`, else 7420). Keep it stable: the PWA is bound to it.
         #[arg(long)]
         port: Option<u16>,

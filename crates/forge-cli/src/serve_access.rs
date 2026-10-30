@@ -42,6 +42,7 @@ pub(crate) struct Exposure {
     pub(crate) port: u16,
     pub(crate) lan_host: Option<String>,
     pub(crate) public_url: Option<String>,
+    pub(crate) tls_fingerprint: Option<String>,
 }
 
 pub(crate) struct Access {
@@ -563,25 +564,7 @@ struct AddressView {
     note: String,
 }
 
-fn tailscale_ip() -> Option<String> {
-    let out = std::process::Command::new("tailscale")
-        .args(["ip", "-4"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .map(str::to_string)
-        })
-        .flatten()
-        .filter(|ip| ip.parse::<IpAddr>().is_ok())
-}
-
-fn addresses(exposure: &Exposure, tailscale: Option<String>) -> Vec<AddressView> {
+fn addresses(exposure: &Exposure, tailscale: crate::serve_pairing::Tailscale) -> Vec<AddressView> {
     let port = exposure.port;
     let lan_reachable = exposure.mode == "lan";
     let local = AddressView {
@@ -606,23 +589,18 @@ fn addresses(exposure: &Exposure, tailscale: Option<String>) -> Vec<AddressView>
                 .into(),
         },
     };
-    let tailscale = match (tailscale, lan_reachable) {
-        (Some(ip), true) => AddressView {
-            kind: "tailscale",
-            base: Some(format!("https://{ip}:{port}")),
-            note: "Reachable from your tailnet. Self-signed certificate.".into(),
+    let tailscale = AddressView {
+        kind: "tailscale",
+        base: match &tailscale {
+            crate::serve_pairing::Tailscale::Ready { dns_name } if lan_reachable => {
+                Some(format!("https://{dns_name}"))
+            }
+            _ => None,
         },
-        (Some(_), false) => AddressView {
-            kind: "tailscale",
-            base: None,
-            note:
-                "Tailscale is up, but the daemon is on loopback. Start it with `forge serve --lan`."
-                    .into(),
-        },
-        (None, _) => AddressView {
-            kind: "tailscale",
-            base: None,
-            note: "Tailscale was not detected on this machine.".into(),
+        note: if lan_reachable {
+            tailscale.note()
+        } else {
+            "The daemon is on loopback. Start it with `forge serve --tailscale`.".into()
         },
     };
     let public = match &exposure.public_url {
@@ -651,10 +629,9 @@ struct RemoteAccessView {
 async fn remote_access() -> Json<RemoteAccessView> {
     let access = access();
     let exposure = access.exposure();
-    let tailscale = tokio::task::spawn_blocking(tailscale_ip)
+    let tailscale = tokio::task::spawn_blocking(crate::serve_pairing::tailscale_state)
         .await
-        .ok()
-        .flatten();
+        .unwrap_or(crate::serve_pairing::Tailscale::NotInstalled);
     Json(RemoteAccessView {
         online: true,
         mode: exposure.mode.clone(),
@@ -677,7 +654,24 @@ struct PairRequest {
 struct PairResponse {
     client: ClientView,
     token: String,
+    link: Option<String>,
     expires_in: u64,
+}
+
+fn exposure_origin(exposure: &Exposure) -> Option<String> {
+    if let Some(public) = &exposure.public_url {
+        return Some(public.trim_end_matches('/').to_string());
+    }
+    let host = exposure.lan_host.as_ref()?;
+    Some(format!("https://{host}:{}", exposure.port))
+}
+
+fn fp_for(exposure: &Exposure) -> Option<&str> {
+    if exposure.public_url.is_some() {
+        None
+    } else {
+        exposure.tls_fingerprint.as_deref()
+    }
 }
 
 async fn pair(Extension(auth): Extension<ClientAuth>, body: Option<Json<PairRequest>>) -> Response {
@@ -712,9 +706,13 @@ async fn pair(Extension(auth): Extension<ClientAuth>, body: Option<Json<PairRequ
                 status: Some(200),
                 ip: None,
             });
+            let link = exposure_origin(&access.exposure()).map(|origin| {
+                crate::serve_pairing::pairing_link(&origin, &token, fp_for(&access.exposure()))
+            });
             Json(PairResponse {
                 client: view(&record),
                 token,
+                link,
                 expires_in: ttl.clamp(30, crate::serve_clients::MAX_PAIR_TTL_SECS),
             })
             .into_response()

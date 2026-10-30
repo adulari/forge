@@ -105,6 +105,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             lan: _,
             tunnel,
             anywhere,
+            tailscale,
             port,
             rotate_token,
             mock,
@@ -118,7 +119,15 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                     "warning: `forge serve --anywhere` is deprecated; use `forge serve --tunnel`"
                 );
             }
-            crate::serve::serve_cmd(local, tunnel || anywhere, port, rotate_token, mock).await
+            crate::serve::serve_cmd(
+                local,
+                tunnel || anywhere,
+                port,
+                rotate_token,
+                mock,
+                tailscale,
+            )
+            .await
         }
         Command::Anywhere { cmd } => crate::anywhere::anywhere_cmd(cmd).await,
         Command::Attach {

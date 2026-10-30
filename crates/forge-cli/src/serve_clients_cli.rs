@@ -53,7 +53,13 @@ fn pair(
             (format!("http://127.0.0.1:{port}"), false)
         }
     };
-    let link = format!("{origin}/{token}");
+    let link = match crate::serve::read_state() {
+        Ok(Some(state)) if running => {
+            let fingerprint = cert_fingerprint_for(&state.exposure);
+            crate::serve_pairing::pairing_link(&origin, &token, fingerprint.as_deref())
+        }
+        _ => format!("{origin}/{token}"),
+    };
     println!("paired device {} ({})", record.id, record.label);
     println!("  access: {}", scope_summary(&record));
     println!(
@@ -71,6 +77,15 @@ fn pair(
         }
     }
     Ok(())
+}
+
+fn cert_fingerprint_for(exposure: &str) -> Option<String> {
+    if exposure != "lan" {
+        return None;
+    }
+    let dir = forge_config::config_dir()?;
+    let pem = std::fs::read(dir.join("serve-tls-cert.pem")).ok()?;
+    crate::serve_pairing::fingerprint_of_pem(&pem)
 }
 
 fn origin_of(base_url: &str, owner_token: &str) -> String {

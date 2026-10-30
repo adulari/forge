@@ -4,7 +4,7 @@
 // instant a QR code decodes — the parent (`connect.tsx`) owns testing the
 // scanned URL against the daemon and reports back via `paused` while it does.
 import { CameraView, useCameraPermissions, type BarcodeScanningResult } from "expo-camera";
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, {
   useAnimatedStyle,
@@ -37,7 +37,12 @@ export function QRScan({ onScanned, enabled = false, paused = false }: QRScanPro
   const reduced = useReducedMotion();
   const [permission, requestPermission] = useCameraPermissions();
   const lockRef = useRef(false);
+  const [mountError, setMountError] = useState(false);
   const flash = useSharedValue(0);
+
+  useEffect(() => {
+    if (!enabled) setMountError(false);
+  }, [enabled]);
 
   useEffect(() => {
     if (enabled && permission && !permission.granted && permission.canAskAgain) {
@@ -72,6 +77,22 @@ export function QRScan({ onScanned, enabled = false, paused = false }: QRScanPro
     return <View style={[styles.frame, styles.center, { borderColor: tokens.border, backgroundColor: tokens.bg3 }]} accessibilityRole="image" accessibilityLabel="QR scanner is off until you start scanning"><Text style={[typeScale.sub, styles.centerText, { color: tokens.ink2 }]}>Camera stays off until you choose to scan.</Text></View>;
   }
 
+  if (mountError) {
+    return (
+      <View
+        style={[styles.frame, styles.center, { borderColor: tokens.border, backgroundColor: tokens.bg3 }]}
+        accessibilityRole="text"
+      >
+        <Text style={[typeScale.sub, styles.centerText, { color: tokens.ink2 }]}>
+          the camera is busy or unavailable — close other apps using it, or use other ways to connect.
+        </Text>
+        <Pressable onPress={() => setMountError(false)} accessibilityRole="button" accessibilityLabel="Try camera again" style={styles.action}>
+          <Text style={[typeScale.sub, { color: tokens.accent }]}>try again</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   if (!permission || !permission.granted) {
     const canRetry = !permission || permission.canAskAgain;
     return (
@@ -82,7 +103,7 @@ export function QRScan({ onScanned, enabled = false, paused = false }: QRScanPro
         <Text style={[typeScale.sub, styles.centerText, { color: tokens.ink2 }]}>
           {permission == null
             ? "checking camera access…"
-            : "camera access is off — paste the connect url below instead."}
+            : "camera access is off — use other ways to connect instead."}
         </Text>
         {permission && !canRetry ? (
           <Pressable
@@ -109,6 +130,7 @@ export function QRScan({ onScanned, enabled = false, paused = false }: QRScanPro
         facing="back"
         barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
         onBarcodeScanned={paused ? undefined : onBarcode}
+        onMountError={() => setMountError(true)}
       />
       <View pointerEvents="none" style={styles.reticleWrap}>
         <View style={styles.reticle}>

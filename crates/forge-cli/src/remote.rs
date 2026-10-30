@@ -84,7 +84,7 @@ pub(crate) fn generate_self_signed(sans: Vec<String>) -> Result<SelfSignedCert, 
 /// Compute a SHA-256 digest over `bytes` and return it as uppercase colon-separated hex,
 /// e.g. `"AB:CD:EF:…"`. Pure-Rust, no external crypto dep — we just need a fingerprint for
 /// display, not a security-critical MAC, so a straightforward byte-by-byte implementation is fine.
-fn sha256_fingerprint(bytes: &[u8]) -> String {
+pub(crate) fn sha256_fingerprint(bytes: &[u8]) -> String {
     // SHA-256 is available via rustls/ring which are already in the dep tree, but rather than
     // adding another direct dep (ring or sha2) we implement the digest inline using the
     // `rustls` re-export of the ring digest via `rustls::crypto::ring`. However, the cleanest

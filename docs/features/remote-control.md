@@ -834,3 +834,25 @@ schema is newer than the installed binary against the real store (see `AGENTS.md
 
 The stdin-prompt fix (`ef8a365`, feed CLI-bridge prompts via stdin to avoid `ARG_MAX`) is
 included on this branch — it's the prior commit this feature builds on.
+
+## Pairing and LAN trust
+
+`forge serve --lan` serves HTTPS with a self-signed certificate that is now **saved** under the
+config dir (`serve-tls-cert.pem` / `serve-tls-key.pem`, key 0600) and reused while the advertised
+host is unchanged. Its SHA-256 leaf fingerprint travels in the pairing link:
+
+    https://192.168.1.20:7420/#token=<hex>&fp=sha256:<hex>
+
+The old `https://host:7420/<token>` form still parses (it carries no pin). The desktop app dials
+the daemon through a loopback proxy that accepts only that leaf (`mobile/src-tauri/src/pinned.rs`)
+and answers "certificate changed, re-pair" on a mismatch. iOS and Android need a native pinning
+module and are not covered yet.
+
+- **Discovery.** The daemon advertises `_forge._tcp` over mDNS with TXT `id` and `fp`; the token is
+  never advertised. The desktop Connect screen lists these as Nearby hosts.
+- **Tailscale.** `forge serve --tailscale` runs `tailscale serve --bg --https=443` against the
+  daemon and prints a QR for the MagicDNS address, whose certificate every device already trusts
+  (so the link carries no pin). Remote Access reports the state: not installed, logged out,
+  stopped, HTTPS certificates off, or ready.
+- **Reverse proxy.** `[remote] public_url = "https://forge.example.com"` makes links and QR codes
+  point at an origin you manage.

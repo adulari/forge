@@ -607,6 +607,7 @@ pub(crate) async fn serve_cmd(
     port: Option<u16>,
     rotate_token: bool,
     mock: bool,
+    tailscale: bool,
 ) -> Result<()> {
     // A present but malformed config must stop startup with its parse context. Falling back to
     // defaults here silently changes the daemon's port, project roots, and feature switches while
@@ -629,6 +630,7 @@ pub(crate) async fn serve_cmd(
 
     let cert_host = (!(local || anywhere))
         .then(|| remote::lan_display_host(config.remote.host.as_deref(), addr));
+    let lan_cert = crate::serve_pairing::lan_cert(cert_host.as_deref())?;
     let store = Arc::new(
         crate::serve_recovery::open_store_or_recover(&listener, &format!("/{token}"), cert_host)
             .await?,
@@ -734,6 +736,7 @@ pub(crate) async fn serve_cmd(
     // LAN = 0.0.0.0 + self-signed HTTPS; local/anywhere = loopback plain HTTP (a tunnel
     // terminates TLS at the provider). The socket was bound above.
     let mut tunnel_child = None;
+    let lan_fingerprint = lan_cert.as_ref().map(|c| c.fingerprint.clone());
     let url = if anywhere {
         let kind =
             remote::resolve_tunnel_kind(&config.remote).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -756,6 +759,19 @@ pub(crate) async fn serve_cmd(
         let host = remote::lan_display_host(config.remote.host.as_deref(), addr);
         format!("https://{host}:{}/{token}", addr.port())
     };
+    let lan_base = remote::lan_display_host(config.remote.host.as_deref(), addr);
+    let connect_link = crate::serve_pairing::connect_link(
+        tailscale && !(local || anywhere),
+        addr.port(),
+        config.remote.public_url.as_deref(),
+        &format!("https://{lan_base}:{}", addr.port()),
+        &token,
+        lan_fingerprint.as_deref(),
+        &url,
+    );
+    let _advertisement = lan_fingerprint.as_deref().and_then(|fp| {
+        crate::serve_pairing::advertise(addr.port(), &crate::serve_pairing::host_id(), fp)
+    });
 
     // Discovery state for clients that can't run a shell/fs plugin (the Tauri desktop app):
     // `url` above is already exactly `base_url` for every exposure mode (local/lan/anywhere all
@@ -772,7 +788,10 @@ pub(crate) async fn serve_cmd(
         port: addr.port(),
         lan_host: (exposure == "lan")
             .then(|| remote::lan_display_host(config.remote.host.as_deref(), addr)),
-        public_url: anywhere.then(|| url.trim_end_matches(&format!("/{token}")).to_string()),
+        public_url: anywhere
+            .then(|| url.trim_end_matches(&format!("/{token}")).to_string())
+            .or_else(|| config.remote.public_url.clone()),
+        tls_fingerprint: lan_fingerprint.clone(),
     });
     let started_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -796,14 +815,14 @@ pub(crate) async fn serve_cmd(
     // The token is the credential: only a terminal gets it. Under `forge service` stdout is the
     // systemd journal, which other users and log shippers can read.
     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        println!("  connect: {url}");
-        if let Some(qr) = remote::qr_lines(&url) {
+        println!("  connect: {connect_link}");
+        if let Some(qr) = remote::qr_lines(&connect_link) {
             for line in qr {
                 println!("{line}");
             }
         }
     } else {
-        println!("  connect: {}", redact_token(&url, &token));
+        println!("  connect: {}", redact_token(&connect_link, &token));
         println!("  (token not printed: stdout is not a terminal; it is stored in the config dir's serve-token file)");
     }
     if anywhere {
@@ -824,9 +843,7 @@ pub(crate) async fn serve_cmd(
             )
             .await?;
         } else {
-            let host = remote::lan_display_host(config.remote.host.as_deref(), addr);
-            let tls = remote::generate_self_signed(vec![host, "localhost".to_string()])
-                .map_err(|e| anyhow::anyhow!("self-signed cert generation failed: {e}"))?;
+            let tls = lan_cert.context("LAN TLS certificate missing")?;
             println!("  TLS fingerprint: {}", tls.fingerprint);
             let tls_config =
                 axum_server::tls_rustls::RustlsConfig::from_pem(tls.cert_pem, tls.key_pem).await?;

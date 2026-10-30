@@ -4,7 +4,7 @@
 // no native module, no bundle-size cost. When either isn't available (Firefox
 // and Safari still lack `BarcodeDetector`; camera can be denied, missing, or
 // blocked by an insecure context) this falls back to the same "scan on your
-// phone, or paste the connect url below" hint the static placeholder used —
+// phone, or use other ways to connect" hint the static placeholder used —
 // paste-the-url always works regardless of browser support.
 import { ScanLine } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -36,7 +36,7 @@ export interface QRScanProps {
 const FRAME = 240;
 const CORNER = 28;
 const CORNER_W = 3;
-const DETECT_INTERVAL_MS = 200;
+const DETECT_INTERVAL_MS = 100;
 
 // The Shape Detection API isn't in TS's `lib.dom` yet (2026) — declared locally
 // rather than as an ambient global so it can't collide if/when it lands there.
@@ -55,7 +55,7 @@ function getBarcodeDetectorCtor(): BarcodeDetectorCtor | null {
   return (window as unknown as { BarcodeDetector?: BarcodeDetectorCtor }).BarcodeDetector ?? null;
 }
 
-type UnavailableReason = "unsupported" | "insecure" | "no-camera" | "error";
+type UnavailableReason = "unsupported" | "insecure" | "no-camera" | "busy" | "error";
 
 type ScanState =
   | { kind: "requesting" }
@@ -65,17 +65,19 @@ type ScanState =
 
 const UNAVAILABLE_COPY: Record<UnavailableReason, string> = {
   unsupported:
-    "camera scanning isn't supported in this browser — open forge on your phone to scan, or paste the connect url below.",
+    "camera scanning isn't supported in this browser — open forge on your phone to scan, or use other ways to connect.",
   insecure:
-    "camera needs a secure (https) connection — open forge on your phone to scan, or paste the connect url below.",
-  "no-camera": "no camera found — open forge on your phone to scan, or paste the connect url below.",
-  error: "camera unavailable — open forge on your phone to scan, or paste the connect url below.",
+    "camera needs a secure (https) connection — open forge on your phone to scan, or use other ways to connect.",
+  "no-camera": "no camera found — open forge on your phone to scan, or use other ways to connect.",
+  busy: "the camera is in use by another app — close it and try again, or use other ways to connect.",
+  error: "camera unavailable — open forge on your phone to scan, or use other ways to connect.",
 };
 
 const CAN_RETRY: Record<UnavailableReason, boolean> = {
   unsupported: false,
   insecure: false,
   "no-camera": true,
+  busy: true,
   error: true,
 };
 
@@ -207,6 +209,8 @@ export function QRScan({ onScanned, enabled = false, paused = false }: QRScanPro
           setState({ kind: "denied" });
         } else if (name === "NotFoundError" || name === "OverconstrainedError") {
           setState({ kind: "unavailable", reason: "no-camera" });
+        } else if (name === "NotReadableError" || name === "AbortError") {
+          setState({ kind: "unavailable", reason: "busy" });
         } else {
           setState({ kind: "unavailable", reason: "error" });
         }
@@ -230,7 +234,7 @@ export function QRScan({ onScanned, enabled = false, paused = false }: QRScanPro
   }
 
   if (state.kind !== "scanning") {
-    const text = state.kind === "requesting" ? "requesting camera access…" : state.kind === "denied" ? "camera blocked — allow access in your browser, or paste the connect url below." : UNAVAILABLE_COPY[state.reason];
+    const text = state.kind === "requesting" ? "requesting camera access…" : state.kind === "denied" ? "camera blocked — allow access in your browser, or use other ways to connect." : UNAVAILABLE_COPY[state.reason];
     const canRetry = state.kind === "denied" || (state.kind === "unavailable" && CAN_RETRY[state.reason]);
     return (
       <View
