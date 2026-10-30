@@ -392,6 +392,8 @@ pub struct App {
     child_notice: Option<String>,
     /// The dynamic `/config` settings editor overlay (modal while `open`).
     pub config_editor: crate::config_editor::ConfigEditor,
+    /// The `/anywhere` menu (account, account sync, devices), while open.
+    pub anywhere_menu: crate::anywhere_menu::AnywhereMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.

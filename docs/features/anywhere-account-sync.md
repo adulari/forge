@@ -29,6 +29,34 @@ The same switches are in `/config` (Anywhere sync group), the onboarding Anywher
 `anywhere_sync` shows `sync ✓`, `sync 2↑` (changes waiting to upload) or `sync !` (a conflict or an
 error), and hides itself when account sync is off.
 
+## In the terminal: `/anywhere`
+
+`/anywhere` (also in the command palette) opens the Forge Anywhere menu instead of printing a line:
+
+- **Account and connection**: the account, connector state, this device, how many hosts are online,
+  and whether `anywhere.sync` is on. When you are not signed in the first row is "Sign in to Forge
+  Anywhere", which runs `forge anywhere setup` with the terminal handed over.
+- **Sync across machines**: the five categories with an on/off switch, item count, pending changes,
+  last sync, conflicts and skipped items with their reasons. Space or Enter toggles, `s` runs Sync now
+  (it asks the running `forge serve` for a cycle), and a "Sign in again" list shows the rotating logins
+  other devices use (`forge auth codex-oauth`, `forge mcp login <server>`); Enter runs the command.
+- **Devices**: every enrolled device with last seen and enrolled date, this one marked. It is
+  read-only: revoking needs the recovery phrase, so the menu shows `forge anywhere devices --revoke <id>`.
+- **Open Recovery Center and approvals** opens the web page; it is a labelled row, not the default.
+
+Keys: arrows or `j`/`k` move, Tab and Shift+Tab jump between sections, `r` refreshes, Esc closes.
+Status refreshes every 3 seconds while the menu is open (the same builder as `forge anywhere sync`)
+and the device list every 30 seconds.
+
+Safety is the same as everywhere else. Turning `keys` on shows a confirmation that explains the second
+vault key and that OAuth tokens never sync; it opens on Cancel, so Enter alone never turns it on, and
+the switch only exists in the local TUI (the bridge still refuses it). Turning a category off says that
+local data stays in place. No screen ever renders a secret value.
+
+The statusline `anywhere_sync` badge now appears on its own while any category is on. `/statusline
+toggle sync` hides it (`statusline.hide_sync_badge = true`) or brings it back; listing the widget
+yourself works as before.
+
 ## How it works
 
 - A reconcile pass runs in the 10-second sync loop after download and apply, only for categories

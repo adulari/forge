@@ -944,6 +944,7 @@ and keep going."
             };
             return Ok(DispatchOutcome::ToggleRemote { exposure });
         }
+        CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {
                 Ok(summary) => app.note(&summary),
@@ -1129,6 +1130,25 @@ and keep going."
                         }
                     };
                     let cfg = &mut app.statusline_config;
+                    if widget == forge_config::StatuslineWidget::AnywhereSync && !cfg.lists(&widget)
+                    {
+                        cfg.hide_sync_badge = !cfg.hide_sync_badge;
+                        let hidden = cfg.hide_sync_badge;
+                        app.note(&format!(
+                            "statusline: sync badge {}",
+                            if hidden {
+                                "hidden"
+                            } else {
+                                "shown while sync is on"
+                            }
+                        ));
+                        match forge_config::write_statusline_config(&app.statusline_config.clone())
+                        {
+                            Ok(path) => app.note(&format!("  saved → {}", path.display())),
+                            Err(e) => app.note(&format!("  ⚠ could not save config: {e}")),
+                        }
+                        return Ok(DispatchOutcome::Handled);
+                    }
                     let pos_right = cfg.right.iter().position(|w| w == &widget);
                     let pos_left = cfg.left.iter().position(|w| w == &widget);
                     if let Some(i) = pos_right {

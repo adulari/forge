@@ -21,6 +21,8 @@ mod status;
 mod vault;
 
 pub(crate) use reconcile::run_cycle;
+#[cfg(test)]
+pub(crate) use status::status_fixture;
 pub(crate) use status::{status_snapshot, AccountSyncStatus};
 
 pub(crate) const SCHEMA: &str = "forge-account-sync-v1";

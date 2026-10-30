@@ -394,6 +394,26 @@ fn the_anywhere_sync_widget_shows_health_and_hides_when_sync_is_off() {
 }
 
 #[test]
+fn the_sync_badge_appears_by_itself_while_sync_is_on_and_can_be_hidden() {
+    use forge_config::account_sync::SyncBadge;
+    let mut app = routed(located());
+    assert!(!app
+        .statusline_config
+        .lists(&forge_config::StatuslineWidget::AnywhereSync));
+    let last = |app: &App| screen_rows(app, 100, 24).pop().unwrap();
+    assert!(!last(&app).contains("sync"), "no badge, nothing to show");
+    app.anywhere_sync = Some(SyncBadge {
+        updated_at_ms: 0,
+        pending: 0,
+        conflicts: 0,
+        error: false,
+    });
+    assert!(last(&app).contains("sync ✓"), "{}", last(&app));
+    app.statusline_config.hide_sync_badge = true;
+    assert!(!last(&app).contains("sync"), "removed by the user");
+}
+
+#[test]
 fn every_status_widget_renders_in_the_status_line_or_in_status() {
     use forge_config::StatuslineWidget as W;
     let mut app = routed(located());
