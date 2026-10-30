@@ -32,7 +32,7 @@ function onKeyDown(event: KeyboardEvent): void {
 }
 
 function ensureListener(): void {
-  if (listening || typeof window === "undefined") return;
+  if (listening || typeof window === "undefined" || typeof window.addEventListener !== "function") return;
   window.addEventListener("keydown", onKeyDown, true);
   listening = true;
 }
