@@ -407,3 +407,158 @@ async fn revoking_a_device_reseals_keys_under_the_new_epoch_and_lists_labels_onl
     assert!(labels.iter().all(|l| !l.contains(SECRET)));
     assert_eq!(epoch_of(&a), Some(2));
 }
+
+fn machine_with_epochs(device: u8, epochs: &[(u32, u8)]) -> Machine {
+    let mut m = machine(device);
+    let current = epochs.iter().map(|(e, _)| *e).max().unwrap();
+    m.state.data_key_epochs = epochs
+        .iter()
+        .map(|(e, b)| (*e, URL_SAFE_NO_PAD.encode([*b; 32])))
+        .collect();
+    m.state.key_epoch = Some(current);
+    m.state.account_data_key =
+        Some(URL_SAFE_NO_PAD.encode([epochs.iter().find(|(e, _)| *e == current).unwrap().1; 32]));
+    m
+}
+
+fn live_ids_for(m: &Machine, item: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for kind in ["user_setting", "skill", "command", "agent"] {
+        for r in m.store.portable_sync_records(kind).unwrap() {
+            if r.deleted {
+                continue;
+            }
+            if let Ok(p) = serde_json::from_slice::<super::Payload>(&r.payload) {
+                if p.item == item {
+                    ids.push(r.stable_id.clone());
+                }
+            }
+        }
+    }
+    ids
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_enrolled_after_a_rotation_shares_record_ids_with_older_devices() {
+    let _lock = crate::serve::tests::FORGE_DB_LOCK.lock().await;
+    let env = Env::save();
+    let a = machine_with_epochs(0xA1, &[(1, 0x44), (2, 0x55)]);
+    let b = machine_with_epochs(0xB2, &[(2, 0x55)]);
+    let config = forge_config::AccountSyncConfig {
+        keys: true,
+        skills: true,
+        ..Default::default()
+    };
+    env.enter(&a);
+    write(a.config.join("forge/skills/foo/SKILL.md"), "one");
+    forge_config::store_secret("openai", SECRET).unwrap();
+    run_cycle(&a.store, &a.state, &config).await.unwrap();
+    let clocks = |m: &Machine| {
+        let mut v: Vec<(String, u64)> = Vec::new();
+        for kind in ["user_setting", "skill"] {
+            for r in m.store.portable_sync_records(kind).unwrap() {
+                v.push((r.stable_id, r.logical_clock));
+            }
+        }
+        v.sort();
+        v
+    };
+    let before = clocks(&a);
+
+    env.enter(&b);
+    forge_config::delete_secret("openai").unwrap();
+    transfer(&a, &b);
+    run_cycle(&b.store, &b.state, &config).await.unwrap();
+    run_cycle(&b.store, &b.state, &config).await.unwrap();
+    assert_eq!(forge_config::load_secret("openai").as_deref(), Some(SECRET));
+    assert_eq!(
+        clocks(&b),
+        before,
+        "B must adopt A's ids and write nothing back"
+    );
+
+    write(b.config.join("forge/skills/foo/SKILL.md"), "two");
+    run_cycle(&b.store, &b.state, &config).await.unwrap();
+    assert_eq!(
+        live_ids_for(&b, "skill/foo").len(),
+        1,
+        "one record per item"
+    );
+    transfer(&b, &a);
+    env.enter(&a);
+    run_cycle(&a.store, &a.state, &config).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(a.config.join("forge/skills/foo/SKILL.md")).unwrap(),
+        "two"
+    );
+    assert_eq!(live_ids_for(&a, "skill/foo"), live_ids_for(&b, "skill/foo"));
+    assert_eq!(live_ids_for(&a, "openai").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicate_pair_collapses_onto_one_record() {
+    let _lock = crate::serve::tests::FORGE_DB_LOCK.lock().await;
+    let env = Env::save();
+    let a = machine_with_epochs(0xA1, &[(1, 0x44), (2, 0x55)]);
+    let b = machine_with_epochs(0xB2, &[(2, 0x55)]);
+    let config = forge_config::AccountSyncConfig {
+        skills: true,
+        ..Default::default()
+    };
+    for m in [&a, &b] {
+        env.enter(m);
+        write(m.config.join("forge/skills/foo/SKILL.md"), "same");
+        run_cycle(&m.store, &m.state, &config).await.unwrap();
+    }
+    let id_a = live_ids_for(&a, "skill/foo");
+    let id_b = live_ids_for(&b, "skill/foo");
+    assert_ne!(id_a, id_b, "the setup must start with two ids");
+    let smallest = id_a.iter().chain(&id_b).min().unwrap().clone();
+    for _ in 0..3 {
+        transfer(&a, &b);
+        transfer(&b, &a);
+        for m in [&a, &b] {
+            env.enter(m);
+            run_cycle(&m.store, &m.state, &config).await.unwrap();
+        }
+    }
+    transfer(&a, &b);
+    transfer(&b, &a);
+    for m in [&a, &b] {
+        assert_eq!(live_ids_for(m, "skill/foo"), vec![smallest.clone()]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_rotation_does_not_reupload_unchanged_items() {
+    let _lock = crate::serve::tests::FORGE_DB_LOCK.lock().await;
+    let env = Env::save();
+    let mut a = machine_with_epochs(0xA1, &[(1, 0x44)]);
+    let config = forge_config::AccountSyncConfig {
+        skills: true,
+        instructions: true,
+        ..Default::default()
+    };
+    env.enter(&a);
+    write(a.config.join("forge/skills/foo/SKILL.md"), "x");
+    write(a.config.join("forge/AGENTS.md"), "y");
+    run_cycle(&a.store, &a.state, &config).await.unwrap();
+    let snapshot = |m: &Machine| {
+        let mut v: Vec<(String, u64)> = Vec::new();
+        for kind in ["user_setting", "skill"] {
+            for r in m.store.portable_sync_records(kind).unwrap() {
+                v.push((r.stable_id, r.logical_clock));
+            }
+        }
+        v.sort();
+        v
+    };
+    let before = snapshot(&a);
+    assert!(!before.is_empty());
+    a = Machine {
+        state: machine_with_epochs(0xA1, &[(1, 0x44), (2, 0x55)]).state,
+        ..a
+    };
+    run_cycle(&a.store, &a.state, &config).await.unwrap();
+    assert_eq!(snapshot(&a), before);
+}
