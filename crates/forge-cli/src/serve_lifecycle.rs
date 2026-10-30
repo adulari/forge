@@ -87,6 +87,69 @@ async fn done(
     )
 }
 
+/// `POST /api/sessions/{id}/archive` — stop the driver, snapshot a worktree's uncommitted
+/// edits onto its branch (never silently lose work), and hide the session from lists.
+pub(crate) async fn archive_session(
+    State(state): State<Arc<DaemonState>>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(refusal) = crate::serve::reject_if_open_in_terminal(&state, &id, "archived").await {
+        return refusal;
+    }
+    let handle = state.registry.remove(&id).await;
+    let worktree = if let Some(handle) = &handle {
+        handle.worktree.clone()
+    } else {
+        match state.store.session_worktree(&id) {
+            Ok(worktree) => worktree,
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("reading session failed: {error}"),
+                );
+            }
+        }
+    };
+    if handle.is_none() {
+        match state.store.session_exists(&id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+            }
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("reading session failed: {error}"),
+                );
+            }
+        }
+    }
+    state.terminals.close_session(&id).await;
+    // Archiving is an explicit "done with this" — drop it from the fleet a restart would restore.
+    let _ = state.store.set_session_daemon_live(&id, false);
+    if let Some(handle) = handle {
+        handle.shutdown();
+        handle.join(crate::serve::ARCHIVE_JOIN_TIMEOUT).await;
+    }
+    if let Some(wt) = worktree {
+        // Best-effort snapshot: uncommitted edits land on the session's branch so nothing is
+        // lost; the worktree + branch stay in place for a manual review/merge.
+        if let Err(error) = forge_core::worktree::commit_worktree(std::path::Path::new(&wt)) {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("snapshotting the session worktree failed: {error}"),
+            );
+        }
+    }
+    if let Err(error) = state.store.archive_session(&id) {
+        return err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("archiving session failed: {error}"),
+        );
+    }
+    json_response(&serde_json::json!({ "ok": true }))
+}
+
 /// Un-archive without resuming: the session returns to the lists and stays unloaded until opened.
 async fn restore(State(state): State<Arc<DaemonState>>, Path(id): Path<String>) -> Response {
     match state.store.session_exists(&id) {
