@@ -50,7 +50,7 @@ impl ProgressLedger {
         if scope == Scope::Waiting {
             return self.waiting_stop_due().then_some(Lane::Waiting);
         }
-        if self.cycle_hold >= CYCLE_STOP_AFTER {
+        if self.cycle_hold >= self.cycle_stop_after {
             Some(Lane::Cycle)
         } else if self
             .failure

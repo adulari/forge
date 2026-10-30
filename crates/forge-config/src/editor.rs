@@ -274,6 +274,10 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "anywhere.account_sync.instructions" => Some(("Anywhere sync", "Sync instructions")),
         "mesh.auto_orchestrate" => Some(("Behaviour", "Auto-orchestrate")),
         "mesh.harness_profile" => Some(("Behaviour", "Harness profile")),
+        "harness.completion_contract" => Some(("Behaviour", "Completion contract")),
+        "harness.stop_retries" => Some(("Behaviour", "Stop retries")),
+        "harness.thinking_loop_breaker" => Some(("Behaviour", "Thinking-loop breaker")),
+        "harness.repeat_interrupt" => Some(("Behaviour", "Repeat-call interrupt")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -522,6 +526,10 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "lsp.enabled" => "Feed language-server diagnostics back into the turn after edits.",
         "mesh.auto_orchestrate" => "Inject the orchestration framework every session: skills first, highest-level tool, subagents/MCP/web/Lattice — no need to /orchestrate manually.",
         "mesh.harness_profile" => "guarded keeps every advisory nudge; minimal drops them (progress asks, stall nudges, commit reminders, continue nudges) and keeps only the safety guards. Per-model globs go in [mesh.harness_profiles].",
+        "harness.completion_contract" => "Append a short completion contract to the end of the system prompt: do not yield while actionable work remains, smoke-run before yielding, no stubs. Default off.",
+        "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
+        "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
+        "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
         _ => return None,
     })
 }

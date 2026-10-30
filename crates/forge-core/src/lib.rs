@@ -117,6 +117,7 @@ mod hooks_subagent;
 mod hooks_turn;
 mod hooks_worktree;
 pub mod host_move;
+mod stop_guards;
 pub use hooks_cc::forge_tool_to_cc;
 pub mod bridge_progress;
 mod child_ask;
@@ -1781,6 +1782,8 @@ pub struct Session {
     harness_profile: forge_config::HarnessProfile,
     /// The empty-reply nudge is spent until the model makes tool progress again (empty_reply.rs).
     empty_reply_nudged: bool,
+    /// Empty-reply retries spent in the current streak (`[harness] stop_retries`).
+    empty_reply_retries: u8,
     /// USD spend guards for the active turn and the session (`spend_guard.rs`).
     spend: spend_guard::SpendState,
     /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
@@ -3079,6 +3082,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_forced_stop = None;
         self.bridge_stall = None;
         self.empty_reply_nudged = false;
+        self.empty_reply_retries = 0;
         self.trim_watch.begin_turn();
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();

@@ -16,6 +16,20 @@ impl Session {
     /// Spend the empty-reply nudge. Returns `false` when it is already spent and the model has
     /// made no tool progress since.
     pub(crate) fn nudge_empty_reply(&mut self) -> bool {
+        if self.config.harness.stop_retries {
+            if self.empty_reply_retries >= crate::stop_guards::STOP_RETRY_MAX as u8 {
+                return false;
+            }
+            self.empty_reply_retries += 1;
+            self.require_tool_call = !crate::nudge_policy::open_titles(&self.tasks).is_empty();
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "model returned an empty response — retrying ({}/{})",
+                self.empty_reply_retries,
+                crate::stop_guards::STOP_RETRY_MAX
+            )));
+            let _ = self.push_nudge(crate::stop_guards::EMPTY_STOP_NUDGE);
+            return true;
+        }
         if self.empty_reply_nudged {
             return false;
         }
@@ -33,5 +47,6 @@ impl Session {
 
     pub(crate) fn rearm_empty_reply_nudge(&mut self) {
         self.empty_reply_nudged = false;
+        self.empty_reply_retries = 0;
     }
 }
