@@ -301,7 +301,10 @@ export interface SessionDiffResponse { base: string; branch: string; worktree: s
 export type WorkspaceEntryKind = "directory" | "file" | "symlink";
 export interface WorkspaceEntry { name: string; path: string; kind: WorkspaceEntryKind; size: number; modified_ms: number | null; }
 export interface WorkspaceEntriesResponse { root: string; path: string; entries: WorkspaceEntry[]; truncated: number; }
-export interface WorkspaceFileResponse { root: string; path: string; name: string; content: string; size: number; modified_ms: number | null; hash: string; extension: string | null; }
+/** `path` is where the file really is, which can differ from the path asked for: a chat chip's
+ * `SOLVER.md` resolves to `notes/SOLVER.md`, or to an absolute path outside the workspace that the
+ * session's transcript names. Those outside files come back `read_only`. */
+export interface WorkspaceFileResponse { root: string; path: string; name: string; content: string; size: number; modified_ms: number | null; hash: string; extension: string | null; read_only?: boolean; }
 export type WorkspaceSearchMode = "files" | "content";
 export interface WorkspaceSearchResult { path: string; kind: "file" | "match"; line: number | null; column: number | null; preview: string | null; }
 export interface WorkspaceSearchResponse { query: string; mode: WorkspaceSearchMode; results: WorkspaceSearchResult[]; scanned_files: number; truncated: boolean; }

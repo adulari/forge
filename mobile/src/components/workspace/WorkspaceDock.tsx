@@ -447,6 +447,10 @@ function WorkspaceEditor({
   }, []);
 
   const loadedContent = file.data?.content ?? null;
+  // The daemon may resolve the asked-for path elsewhere (`SOLVER.md` → `notes/SOLVER.md`); saves
+  // go to where the file really is.
+  const actualPath = file.data?.path ?? path;
+  const readOnly = file.data?.read_only === true;
   useEffect(() => {
     if (line == null || loadedContent == null) return;
     const range = lineRange(loadedContent, line);
@@ -471,16 +475,16 @@ function WorkspaceEditor({
   };
 
   const save = async () => {
-    if (!loadedHash || !dirty) return;
+    if (!loadedHash || !dirty || readOnly) return;
     try {
       const saved = await write.mutateAsync({
         session: sessionId,
-        path,
+        path: actualPath,
         content: draft,
         expected_hash: loadedHash,
       });
       loadResponse(saved);
-      toast.show(`Saved ${workspaceBasename(path)}`, { tone: "success" });
+      toast.show(`Saved ${workspaceBasename(actualPath)}`, { tone: "success" });
     } catch {
       // The mutation's concrete daemon message renders below the toolbar.
     }
@@ -517,12 +521,12 @@ function WorkspaceEditor({
         ) : null}
         <View style={styles.editorMeta}>
           <Text style={[typeScale.monoMeta, { color: tokens.ink2 }]} numberOfLines={1}>
-            {path}
+            {actualPath}
           </Text>
           <Text style={[typeScale.meta, { color: tokens.ink4 }]}>
             {lineCount.toLocaleString()} lines · {draft.length.toLocaleString()} chars
             {line != null ? ` · line ${line}` : ""}
-            {dirty ? " · modified" : ""}
+            {readOnly ? " · read only, outside this workspace" : dirty ? " · modified" : ""}
           </Text>
         </View>
         <IconButton
@@ -532,13 +536,15 @@ function WorkspaceEditor({
           accessibilityLabel="Reload file from disk"
           style={styles.compactButton}
         />
-        <IconButton
-          icon={<Save size={17} color={dirty ? tokens.accent : tokens.ink4} />}
-          onPress={() => void save()}
-          disabled={!dirty || write.isPending}
-          accessibilityLabel="Save file"
-          style={styles.compactButton}
-        />
+        {readOnly ? null : (
+          <IconButton
+            icon={<Save size={17} color={dirty ? tokens.accent : tokens.ink4} />}
+            onPress={() => void save()}
+            disabled={!dirty || write.isPending}
+            accessibilityLabel="Save file"
+            style={styles.compactButton}
+          />
+        )}
       </View>
       {write.error ? (
         <View style={[styles.saveError, { backgroundColor: tokens.dangerBg }]}>
@@ -559,7 +565,7 @@ function WorkspaceEditor({
         autoCapitalize="none"
         autoCorrect={false}
         spellCheck={false}
-        editable={!write.isPending}
+        editable={!write.isPending && !readOnly}
         textAlignVertical="top"
         selectionColor={tokens.accent}
         accessibilityLabel={`Edit ${path}`}
