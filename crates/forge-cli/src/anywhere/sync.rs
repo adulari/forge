@@ -800,6 +800,67 @@ mod tests {
         );
     }
 
+    /// The wire path account sync depends on: a portable record journaled on one device is sealed
+    /// by the uploader and verified, opened and staged by the downloader on another.
+    #[test]
+    fn a_portable_record_survives_seal_upload_and_stage_between_two_stores() {
+        let a = Store::open_in_memory().expect("store a");
+        let b = Store::open_in_memory().expect("store b");
+        a.set_sync_journal_enabled(true).expect("journal on");
+        let device = [0x22; 16];
+        a.write_portable_sync_record(
+            device,
+            "user_setting",
+            &"ab".repeat(32),
+            Some(b"{\"schema\":\"x\"}"),
+        )
+        .expect("write portable");
+        let entry = a.pending_sync_journal(1).expect("pending").remove(0);
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state_store = StateStore {
+            path: temp.path().join("anywhere/state.json"),
+        };
+        state_store
+            .save(&LocalState {
+                version: super::super::STATE_VERSION,
+                account_id: Some(hex::encode([0x11; 16])),
+                device_id: Some(hex::encode(device)),
+                signing_private_key: Some(URL_SAFE_NO_PAD.encode([0x33; 32])),
+                account_data_key: Some(URL_SAFE_NO_PAD.encode([0x44; 32])),
+                key_epoch: Some(1),
+                ..LocalState::default()
+            })
+            .expect("save state");
+        let prepared = prepare_envelope(&a, &state_store, &entry).expect("seal");
+        let change = Change {
+            cursor: 1,
+            device_id: hex::encode(device),
+            signing_public_key: URL_SAFE_NO_PAD.encode(
+                SigningKey::from_bytes(&[0x33; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            ),
+            record_kind: entry.record_kind.clone(),
+            stable_id: entry.stable_id.clone(),
+            revision: entry.revision,
+            logical_clock: entry.logical_clock,
+            operation: entry.operation.clone(),
+            base_hash: None,
+            content_hash: URL_SAFE_NO_PAD.encode(entry.content_hash.clone()),
+            ciphertext_bytes: prepared.envelope.len() as u64,
+            ciphertext_sha256: URL_SAFE_NO_PAD.encode(prepared.ciphertext_sha256),
+            download_url: String::new(),
+        };
+        stage_change(&b, &state_store, change, &prepared.envelope).expect("stage");
+        b.apply_staged_portable_records([0x99; 16], 10)
+            .expect("apply");
+        let landed = b
+            .portable_sync_record("user_setting", &entry.stable_id)
+            .expect("read")
+            .expect("record landed");
+        assert_eq!(landed.payload, b"{\"schema\":\"x\"}");
+    }
+
     #[test]
     fn harness_kinds_are_not_uploadable_so_legacy_rows_are_skipped() {
         assert!(record_kind("harness_entry").is_err());
