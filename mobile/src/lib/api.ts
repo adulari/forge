@@ -521,7 +521,22 @@ export function isUnsupportedPromptFieldError(error: unknown): boolean {
   );
 }
 
-export interface ForkSessionRequest { at_seq: number; }
+export interface ForkSessionRequest {
+  at_seq: number;
+  /** Pin the child to this model instead of inheriting the source's. Additive: an older daemon rejects it. */
+  model?: string;
+  effort?: string;
+  temper?: string;
+  /** First prompt, sent in the child as soon as it starts. */
+  prompt?: string;
+  title?: string;
+}
+
+/** The 400 an older daemon returns for a fork body carrying fields it predates
+ * (`deny_unknown_fields`); the caller retries with the fork point alone. */
+export function isUnsupportedForkFieldError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 400 || error.status === 422) && error.message.includes("unknown field");
+}
 
 export interface CreateSessionResponse {
   id: string;

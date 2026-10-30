@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { Copy, PencilLine, Quote } from "lucide-react-native";
+import { Copy, PencilLine, Quote, Undo2 } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -19,6 +19,12 @@ export interface MessageActionsSheetProps {
   onQuote: (text: string) => void;
   /** Load this message's text into the composer for editing (user messages only). */
   onEdit?: (text: string) => void;
+  /** Rewind the session to before this message (user messages only). */
+  onRewind?: (message: HistoryRow) => void;
+  /** Set while a rewind cannot run (a turn is in flight): shown as the row's reason. */
+  rewindDisabledReason?: string | null;
+  /** Shown under the row when another live session shares this worktree. */
+  rewindWarning?: string | null;
 }
 
 function firstCodeBlock(text: string): string | null {
@@ -26,7 +32,7 @@ function firstCodeBlock(text: string): string | null {
   return match ? match[1].replace(/\n$/, "") : null;
 }
 
-export function MessageActionsSheet({ visible, message, onClose, onQuote, onEdit }: MessageActionsSheetProps) {
+export function MessageActionsSheet({ visible, message, onClose, onQuote, onEdit, onRewind, rewindDisabledReason, rewindWarning }: MessageActionsSheetProps) {
   const tokens = useTokens();
   const toast = useToast();
   const text = message ? displayMessageText(message) : "";
@@ -72,6 +78,19 @@ export function MessageActionsSheet({ visible, message, onClose, onQuote, onEdit
             leading={<PencilLine size={18} strokeWidth={1.75} color={tokens.ink2} />}
             onPress={() => {
               onEdit!(text);
+              onClose();
+            }}
+            showSeparator={false}
+          />
+        ) : null}
+        {message?.role === "user" && onRewind != null ? (
+          <ListRow
+            title="Rewind to here"
+            subtitle={rewindDisabledReason ?? rewindWarning ?? "Restore the chat and files to before this message"}
+            leading={<Undo2 size={18} strokeWidth={1.75} color={tokens.ink2} />}
+            disabled={rewindDisabledReason != null}
+            onPress={() => {
+              onRewind(message);
               onClose();
             }}
             showSeparator={false}

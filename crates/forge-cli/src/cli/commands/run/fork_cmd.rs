@@ -3,6 +3,31 @@
 
 use super::*;
 
+/// Split a leading `--model <id>` (or `--model=<id>`) off the `/fork` argument. The rest is the
+/// first message for the child.
+pub(crate) fn split_model_flag(arg: Option<String>) -> (Option<String>, Option<String>) {
+    let Some(arg) = arg else {
+        return (None, None);
+    };
+    let trimmed = arg.trim();
+    let rest = if let Some(rest) = trimmed.strip_prefix("--model=") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("--model") {
+        if !rest.starts_with(char::is_whitespace) {
+            return (None, Some(arg));
+        }
+        rest.trim_start()
+    } else {
+        return (None, Some(arg));
+    };
+    let (model, message) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let message = message.trim();
+    (
+        (!model.is_empty()).then(|| model.to_string()),
+        (!message.is_empty()).then(|| message.to_string()),
+    )
+}
+
 /// Branch this session at its latest message, continue in the child, and (with a message) send
 /// that message there as the first turn.
 pub(crate) async fn fork(
@@ -11,6 +36,7 @@ pub(crate) async fn fork(
     app: &mut forge_tui::App,
     message: Option<String>,
 ) -> Result<DispatchOutcome> {
+    let (model, message) = split_model_flag(message);
     let parent = session.lock().await.id().to_string();
     let store = open_store()?;
     let last = store
@@ -37,6 +63,9 @@ pub(crate) async fn fork(
         &parent[..parent.len().min(8)],
         &child[..child.len().min(8)]
     ));
+    if let Some(model) = model {
+        super::model_switch::pin_from_command(session, app, &model).await;
+    }
     Ok(match message.filter(|m| !m.trim().is_empty()) {
         Some(prompt) => DispatchOutcome::RunTurn {
             prompt,
@@ -69,4 +98,30 @@ pub(crate) fn skills(catalog: &forge_skills::Catalog, app: &mut forge_tui::App) 
         ));
     }
     app.note(&lines.join("\n"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_model_flag;
+
+    #[test]
+    fn model_flag_is_split_from_the_message() {
+        assert_eq!(split_model_flag(None), (None, None));
+        assert_eq!(
+            split_model_flag(Some("try again".into())),
+            (None, Some("try again".into()))
+        );
+        assert_eq!(
+            split_model_flag(Some("--model inferhub::x try again".into())),
+            (Some("inferhub::x".into()), Some("try again".into()))
+        );
+        assert_eq!(
+            split_model_flag(Some("--model=inferhub::x".into())),
+            (Some("inferhub::x".into()), None)
+        );
+        assert_eq!(
+            split_model_flag(Some("--modelx hi".into())),
+            (None, Some("--modelx hi".into()))
+        );
+    }
 }

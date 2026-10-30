@@ -74,6 +74,7 @@ import { type FollowUpMode } from "../../../lib/followUp";
 import { useFollowUpSetting } from "../../../lib/useFollowUpSetting";
 import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessionAgents, useSessions } from "../../../lib/queries";
+import { rewindDisabledReason, sessionsSharingWorktree, sharedWorktreeWarning } from "../../../lib/forkRequest";
 import { useConnectionAccess } from "../../../lib/queriesAccess";
 import { parseReasoning } from "../../../lib/reasoning";
 import { AgentIndexProvider } from "../../../lib/agentLinks";
@@ -481,6 +482,23 @@ export function SessionChat() {
   // rendering it the instant `historyRows` advances), so that half uses ordinary effects.
   // ---------------------------------------------------------------------
   const busy = snapshot?.busy ?? false;
+  const rewindBlocked = rewindDisabledReason(busy);
+  const rewindWarning = useMemo(
+    () => sharedWorktreeWarning(sessionsSharingWorktree(sessionsQuery.data, sessionId)),
+    [sessionsQuery.data, sessionId],
+  );
+  // `/rewind` opens the server's checkpoint picker; selecting the message's own row jumps to the
+  // restore-scope step, so the person only chooses chat / files / both. The prompt comes back
+  // into the composer the way the terminal puts it back in its input.
+  const onRewind = useCallback((message: HistoryRow) => {
+    if (!send({ kind: "prompt", text: "/rewind" })) {
+      toast.show("Not connected — could not start the rewind", { tone: "danger" });
+      return;
+    }
+    send({ kind: "overlay_select", id: String(message.seq) });
+    setDraftText(displayMessageText(message));
+    focusComposer();
+  }, [focusComposer, send, setDraftText, toast]);
 
   const [track, setTrack] = useState(() => ({
     sessionId,
@@ -1028,6 +1046,9 @@ export function SessionChat() {
           }}
           onQuote={onQuote}
           onEdit={onEditMessage}
+          onRewind={onRewind}
+          rewindDisabledReason={rewindBlocked}
+          rewindWarning={rewindWarning}
         />
       ) : (
         <MessageActionsSheet
@@ -1036,6 +1057,9 @@ export function SessionChat() {
           onClose={() => setSelectedMessage(null)}
           onQuote={onQuote}
           onEdit={onEditMessage}
+          onRewind={onRewind}
+          rewindDisabledReason={rewindBlocked}
+          rewindWarning={rewindWarning}
         />
       )}
     </Screen>

@@ -185,7 +185,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "fork",
         desc: "branch this session into a child at its latest message and continue there",
-        usage: "/fork [message]",
+        usage: "/fork [--model <id>] [message]",
     },
     Command {
         name: "timeline",
