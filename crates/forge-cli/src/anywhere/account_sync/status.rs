@@ -102,14 +102,13 @@ pub(crate) fn status_snapshot(store: &Store) -> Result<AccountSyncStatus> {
         let mut remote_only = None;
         if let Some(ctx) = &ctx {
             let (locals, _) = catalog::collect(category);
-            let by_id: BTreeMap<_, _> = rows.iter().map(|r| (r.item_id.as_str(), r)).collect();
+            let by_id: BTreeMap<_, _> = rows.iter().map(|r| (r.item.as_str(), r)).collect();
             if enabled {
                 pending = locals
                     .iter()
                     .filter(|l| {
-                        let id = ctx.vault.stable_id(category.id(), &l.item);
                         by_id
-                            .get(id.as_str())
+                            .get(l.item.as_str())
                             .is_none_or(|r| r.local_hash != ctx.vault.content_hash(&l.canonical()))
                     })
                     .count();

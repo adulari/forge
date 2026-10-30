@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use forge_store::Store;
 
-use super::reconcile::{build_payload, remotes, Ctx};
+use super::reconcile::{build_payload, recorded_id, remotes, Ctx};
 use super::vault::Vault;
 use super::{catalog, Body, Category};
 use crate::anywhere::{decode_hex_array, LocalState};
@@ -38,7 +38,7 @@ pub(crate) fn reseal_keys(store: &Store, state: &LocalState) -> Result<Vec<Strin
     for local in locals.iter().filter(|l| matches!(l.body, Body::Secret(_))) {
         labels.push(local.label.clone());
         if Category::Keys.enabled(&config.anywhere.account_sync) {
-            let id = vault.stable_id(Category::Keys.id(), &local.item);
+            let id = recorded_id(&ctx, Category::Keys, &local.item);
             let payload = serde_json::to_vec(&build_payload(&ctx, &id, local)?)?;
             store.write_portable_sync_record(device_id, local.kind, &id, Some(&payload))?;
         }

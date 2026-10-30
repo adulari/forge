@@ -20,6 +20,7 @@ pub(super) struct Ctx<'a> {
 
 pub(super) struct Remote {
     pub clock: u64,
+    pub sender: [u8; 16],
     pub mine: bool,
     pub payload: Option<Payload>,
 }
@@ -58,6 +59,7 @@ pub(super) fn remotes(ctx: &Ctx, category: Category) -> Result<BTreeMap<String, 
                 record.stable_id,
                 Remote {
                     clock: record.logical_clock,
+                    sender: record.sender_device_id,
                     mine,
                     payload,
                 },
@@ -153,22 +155,69 @@ pub(super) fn build_payload(ctx: &Ctx, id: &str, local: &LocalItem) -> Result<Pa
     })
 }
 
+/// Whether an incoming payload already says what this device holds, so nothing needs applying.
+fn same_content(ctx: &Ctx, id: &str, payload: &Payload, local: &LocalItem) -> bool {
+    match (&local.body, &payload.sealed, &payload.value) {
+        (Body::Secret(mine), Some(sealed), _) => ctx
+            .vault
+            .open(id, sealed)
+            .is_ok_and(|bytes| bytes == mine.as_bytes()),
+        (Body::Plain(_), None, Some(value)) => super::canonical_json(value) == local.canonical(),
+        _ => false,
+    }
+}
+
+/// The record id an item uses on the wire. Identity is the (category, item) inside the payload,
+/// never which key epochs a device holds, so the id is whatever the account already uses: the
+/// smallest live id any device published, else the one this device last recorded, else a fresh one.
+fn canonical_id(
+    ctx: &Ctx,
+    category: Category,
+    name: &str,
+    st: Option<&AccountSyncItem>,
+    live: &[(&String, &Remote)],
+) -> String {
+    let recorded_live = st.and_then(|s| live.iter().find(|(id, _)| **id == s.item_id));
+    live.iter()
+        .map(|(id, _)| (*id).clone())
+        .chain(recorded_live.map(|(id, _)| (*id).clone()))
+        .min()
+        .or_else(|| st.map(|s| s.item_id.clone()))
+        .unwrap_or_else(|| ctx.vault.stable_id(category.id(), name))
+}
+
+pub(super) fn recorded_id(ctx: &Ctx, category: Category, name: &str) -> String {
+    ctx.store
+        .account_sync_items(Some(category.id()))
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|r| r.item == name))
+        .map_or_else(|| ctx.vault.stable_id(category.id(), name), |r| r.item_id)
+}
+
+struct Refresh {
+    id: String,
+    old_id: Option<String>,
+    name: String,
+    label: String,
+    clock: u64,
+    status: &'static str,
+    detail: String,
+}
+
 async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
     let (locals, skips) = catalog::collect(category);
-    let local: BTreeMap<String, LocalItem> = locals
-        .into_iter()
-        .map(|i| (ctx.vault.stable_id(category.id(), &i.item), i))
-        .collect();
-    let states: BTreeMap<String, AccountSyncItem> = ctx
-        .store
-        .account_sync_items(Some(category.id()))?
-        .into_iter()
-        .map(|s| (s.item_id.clone(), s))
-        .collect();
-    for state in states.values().filter(|s| s.item.starts_with("skip/")) {
+    let local: BTreeMap<String, LocalItem> =
+        locals.into_iter().map(|i| (i.item.clone(), i)).collect();
+    let all_states = ctx.store.account_sync_items(Some(category.id()))?;
+    for state in all_states.iter().filter(|s| s.item.starts_with("skip/")) {
         ctx.store
             .delete_account_sync_item(category.id(), &state.item_id)?;
     }
+    let states: BTreeMap<String, AccountSyncItem> = all_states
+        .into_iter()
+        .filter(|s| !s.item.starts_with("skip/"))
+        .map(|s| (s.item.clone(), s))
+        .collect();
     for skip in &skips {
         let name = format!("skip/{}", skip.label);
         let id = ctx.vault.stable_id(category.id(), &name);
@@ -184,47 +233,46 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
         ))?;
     }
     let remote = remotes(ctx, category)?;
+    let mut live: BTreeMap<String, Vec<(&String, &Remote)>> = BTreeMap::new();
+    for (id, r) in &remote {
+        if let Some(p) = &r.payload {
+            live.entry(p.item.clone()).or_default().push((id, r));
+        }
+    }
 
-    let mut ids: Vec<&String> = local
+    let mut names: Vec<&String> = local
         .keys()
         .chain(states.keys())
-        .chain(remote.keys())
+        .chain(live.keys())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let name_of = |id: &String| -> String {
-        local
-            .get(id)
-            .map(|l| l.item.clone())
-            .or_else(|| {
-                remote
-                    .get(id)
-                    .and_then(|r| r.payload.as_ref())
-                    .map(|p| p.item.clone())
-            })
-            .or_else(|| states.get(id).map(|s| s.item.clone()))
-            .unwrap_or_default()
-    };
-    ids.sort_by_key(|id| (rank(&name_of(id)), name_of(id)));
+    names.sort_by_key(|n| (rank(n), (*n).clone()));
 
-    let mut refresh: Vec<(String, String, String, u64, &'static str, String)> = Vec::new();
-    for id in ids {
-        let st = states.get(id).filter(|s| !s.item.starts_with("skip/"));
-        let loc = local.get(id);
-        let rem = remote.get(id).filter(|r| !r.mine);
-        if loc.is_none() && st.is_none() && rem.is_some_and(|r| r.payload.is_none()) {
-            continue;
-        }
-        let name = name_of(id);
-        if name.is_empty() || name.starts_with("skip/") {
+    let mut refresh: Vec<Refresh> = Vec::new();
+    for name in names {
+        let st = states.get(name);
+        let loc = local.get(name);
+        let cands: &[(&String, &Remote)] = live.get(name).map_or(&[], Vec::as_slice);
+        let id = canonical_id(ctx, category, name, st, cands);
+        let moved = st.filter(|s| s.item_id != id).map(|s| s.item_id.clone());
+        // Newest record by another device: any live id for this item, or a tombstone at the id in use.
+        let tomb = remote.get(&id).filter(|r| r.payload.is_none() && !r.mine);
+        let newest = cands
+            .iter()
+            .map(|(rid, r)| (Some(*rid), *r))
+            .chain(tomb.map(|t| (None, t)))
+            .filter(|(_, r)| !r.mine)
+            .max_by_key(|(_, r)| (r.clock, r.sender));
+        let rem_payload = newest.and_then(|(_, r)| r.payload.as_ref());
+        let rem_id = newest.and_then(|(rid, _)| rid.cloned());
+        let remote_clock = newest.map_or(0, |(_, r)| r.clock);
+        if loc.is_none() && st.is_none() && rem_payload.is_none() {
             continue;
         }
         let label = loc
             .map(|l| l.label.clone())
-            .or_else(|| {
-                rem.and_then(|r| r.payload.as_ref())
-                    .map(|p| p.label.clone())
-            })
+            .or_else(|| rem_payload.map(|p| p.label.clone()))
             .or_else(|| st.map(|s| s.label.clone()))
             .unwrap_or_else(|| name.clone());
         let local_hash = loc.map(|l| ctx.vault.content_hash(&l.canonical()));
@@ -235,117 +283,175 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
             _ => false,
         };
         let local_removed = loc.is_none() && was_synced;
-        let remote_new = rem.is_some_and(|r| r.clock > st.map_or(0, |s| s.remote_clock));
-        let remote_payload = rem.and_then(|r| r.payload.as_ref());
-        let remote_clock = rem.map_or(0, |r| r.clock);
+        let remote_new = newest.is_some()
+            && (moved.is_some() || remote_clock > st.map_or(0, |s| s.remote_clock));
 
         let outcome = async {
+            if remote_new {
+                if let (Some(p), Some(l), Some(rid)) = (rem_payload, loc, rem_id.as_deref()) {
+                    if same_content(ctx, rid, p, l) {
+                        return Ok(Some(Step::Record(remote_clock, "synced", String::new())));
+                    }
+                }
+            }
             match (remote_new, local_changed || local_removed) {
                 (false, false) => Ok(None),
-                (false, true) => upload(ctx, category, id, &name, &label, loc).map(Some),
+                (false, true) => upload(ctx, &id, name, loc).map(Some),
                 (true, false) => take_remote(
                     ctx,
                     category,
-                    id,
-                    remote_payload,
+                    rem_id.as_deref(),
+                    rem_payload,
                     remote_clock,
-                    &name,
-                    &label,
+                    name,
                     false,
                 )
                 .await
                 .map(Some),
                 (true, true) => {
-                    if let (Some(p), Some(h)) = (remote_payload, &local_hash) {
-                        if p.hash == *h {
-                            return Ok(Some(Step::Record(remote_clock, "synced", String::new())));
-                        }
-                    }
-                    let remote_wins = match (remote_payload, loc) {
+                    let remote_wins = match (rem_payload, loc) {
                         (None, Some(_)) => false,
-                        (Some(_), None) => true,
-                        (None, None) => true,
+                        (Some(_), None) | (None, None) => true,
                         (Some(p), Some(l)) => p.updated_at > l.modified_ms.unwrap_or_else(now_ms),
                     };
-                    if remote_wins {
+                    let (step, kept) = if remote_wins {
                         let step = take_remote(
                             ctx,
                             category,
-                            id,
-                            remote_payload,
+                            rem_id.as_deref(),
+                            rem_payload,
                             remote_clock,
-                            &name,
-                            &label,
+                            name,
                             loc.is_some(),
                         )
                         .await?;
-                        Ok(Some(match step {
-                            Step::Record(c, _, _) if loc.is_some() => Step::Record(
-                                c,
-                                "conflict",
-                                "changed here and on another device; kept the other device's"
-                                    .into(),
-                            ),
-                            other => other,
-                        }))
+                        (step, "the other device's")
                     } else {
-                        let step = upload(ctx, category, id, &name, &label, loc)?;
-                        Ok(Some(match step {
-                            Step::Record(c, _, _) => Step::Record(
-                                c,
-                                "conflict",
-                                "changed here and on another device; kept this device's".into(),
-                            ),
-                            other => other,
-                        }))
-                    }
+                        (upload(ctx, &id, name, loc)?, "this device's")
+                    };
+                    Ok(Some(match step {
+                        Step::Record(c, _, _) if loc.is_some() => Step::Record(
+                            c,
+                            "conflict",
+                            format!("changed here and on another device; kept {kept}"),
+                        ),
+                        other => other,
+                    }))
                 }
             }
         }
         .await;
         match outcome {
-            Ok(None) => {}
-            Ok(Some(Step::Record(clock, status, detail))) => {
-                refresh.push((id.clone(), name, label, clock, status, detail))
+            Ok(None) => {
+                if moved.is_some() {
+                    refresh.push(Refresh {
+                        id: id.clone(),
+                        old_id: moved,
+                        name: name.clone(),
+                        label,
+                        clock: remote_clock,
+                        status: "synced",
+                        detail: String::new(),
+                    });
+                }
             }
-            Ok(Some(Step::Skipped(reason))) => ctx.store.upsert_account_sync_item(&row(
-                category, id, &name, &label, "", 0, "skipped", &reason,
-            ))?,
-            Err(error) => ctx.store.upsert_account_sync_item(&row(
-                category,
-                id,
-                &name,
-                &label,
-                st.map_or("", |s| s.local_hash.as_str()),
-                st.map_or(0, |s| s.remote_clock),
-                "error",
-                &format!("{error:#}"),
-            ))?,
+            Ok(Some(Step::Record(clock, status, detail))) => {
+                refresh.push(Refresh {
+                    id: id.clone(),
+                    old_id: moved,
+                    name: name.clone(),
+                    label,
+                    clock,
+                    status,
+                    detail,
+                });
+            }
+            Ok(Some(Step::Skipped(reason))) => {
+                if let Some(old) = &moved {
+                    ctx.store.delete_account_sync_item(category.id(), old)?;
+                }
+                ctx.store.upsert_account_sync_item(&row(
+                    category, &id, name, &label, "", 0, "skipped", &reason,
+                ))?;
+            }
+            Err(error) => {
+                ctx.store.upsert_account_sync_item(&row(
+                    category,
+                    st.map_or(id.as_str(), |s| s.item_id.as_str()),
+                    name,
+                    &label,
+                    st.map_or("", |s| s.local_hash.as_str()),
+                    st.map_or(0, |s| s.remote_clock),
+                    "error",
+                    &format!("{error:#}"),
+                ))?;
+            }
         }
+        collapse_duplicates(ctx, &id, name, loc, cands)?;
     }
 
     if !refresh.is_empty() {
         let (fresh, _) = catalog::collect(category);
         let fresh: BTreeMap<String, String> = fresh
             .into_iter()
-            .map(|i| {
-                (
-                    ctx.vault.stable_id(category.id(), &i.item),
-                    ctx.vault.content_hash(&i.canonical()),
-                )
-            })
+            .map(|i| (i.item.clone(), ctx.vault.content_hash(&i.canonical())))
             .collect();
-        for (id, name, label, clock, status, detail) in refresh {
-            let hash = fresh.get(&id).cloned().unwrap_or_default();
-            let status = if hash.is_empty() && status == "synced" {
+        for r in refresh {
+            let hash = fresh.get(&r.name).cloned().unwrap_or_default();
+            let status = if hash.is_empty() && r.status == "synced" {
                 "removed"
             } else {
-                status
+                r.status
             };
+            if let Some(old) = &r.old_id {
+                ctx.store.delete_account_sync_item(category.id(), old)?;
+            }
             ctx.store.upsert_account_sync_item(&row(
-                category, &id, &name, &label, &hash, clock, status, &detail,
+                category, &r.id, &r.name, &r.label, &hash, r.clock, status, &r.detail,
             ))?;
         }
+    }
+    Ok(())
+}
+
+/// Two ids for one item (old duplicates, or two devices that created it before meeting) collapse
+/// onto the smallest id. Only the device that wrote the newest of them acts, so two devices can
+/// never tombstone each other's copies.
+fn collapse_duplicates(
+    ctx: &Ctx,
+    canonical: &str,
+    name: &str,
+    loc: Option<&LocalItem>,
+    cands: &[(&String, &Remote)],
+) -> Result<()> {
+    let dupes: Vec<&(&String, &Remote)> = cands
+        .iter()
+        .filter(|(id, _)| id.as_str() != canonical)
+        .collect();
+    if dupes.is_empty() {
+        return Ok(());
+    }
+    let Some((_, newest)) = cands.iter().max_by_key(|(_, r)| (r.clock, r.sender)) else {
+        return Ok(());
+    };
+    if !newest.mine {
+        return Ok(());
+    }
+    let kind = kind_for(name);
+    let canonical_is_mine_newest = cands
+        .iter()
+        .find(|(id, _)| id.as_str() == canonical)
+        .is_some_and(|(_, r)| r.mine && r.clock >= newest.clock);
+    if !canonical_is_mine_newest {
+        if let Some(l) = loc {
+            upload(ctx, canonical, name, Some(l))?;
+        } else {
+            return Ok(());
+        }
+    }
+    for (id, _) in dupes {
+        ctx.store
+            .write_portable_sync_record(ctx.device_id, kind, id, None)?;
     }
     Ok(())
 }
@@ -355,14 +461,7 @@ pub(super) enum Step {
     Skipped(String),
 }
 
-fn upload(
-    ctx: &Ctx,
-    category: Category,
-    id: &str,
-    name: &str,
-    label: &str,
-    loc: Option<&LocalItem>,
-) -> Result<Step> {
+fn upload(ctx: &Ctx, id: &str, name: &str, loc: Option<&LocalItem>) -> Result<Step> {
     let kind = loc.map_or_else(|| kind_for(name), |l| l.kind);
     match loc {
         Some(local) => {
@@ -378,28 +477,22 @@ fn upload(
         .store
         .portable_sync_record(kind, id)?
         .map_or(0, |r| r.logical_clock);
-    let _ = (category, label);
     Ok(Step::Record(clock, "synced", String::new()))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn take_remote(
     ctx: &Ctx<'_>,
     category: Category,
-    id: &str,
+    id: Option<&str>,
     payload: Option<&Payload>,
     clock: u64,
     name: &str,
-    _label: &str,
     keep_conflict: bool,
 ) -> Result<Step> {
-    let Some(payload) = payload else {
+    let (Some(payload), Some(id)) = (payload, id) else {
         apply::remove_local(category, name)?;
         return Ok(Step::Record(clock, "synced", String::new()));
     };
-    if ctx.vault.stable_id(category.id(), &payload.item) != id {
-        anyhow::bail!("a synced item does not match its record id");
-    }
     let secret = match &payload.sealed {
         Some(sealed) => Some(
             String::from_utf8(ctx.vault.open(id, sealed)?).context("synced secret is not text")?,

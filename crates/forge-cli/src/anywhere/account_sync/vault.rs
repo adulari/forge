@@ -28,6 +28,7 @@ pub(crate) struct Sealed {
 pub(crate) struct Vault {
     epochs: BTreeMap<u32, [u8; 32]>,
     current: u32,
+    hash_key: [u8; 32],
 }
 
 fn derive(key: &[u8; 32], info: &[u8]) -> [u8; 32] {
@@ -45,6 +46,26 @@ fn hmac(key: &[u8; 32], message: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
+const HASH_KEY_SLOT: &str = "anywhere-sync-hash-key";
+
+/// The key behind local change detection. It is persisted once so a key rotation, or a device that
+/// only ever held later epochs, never makes unchanged items look modified. The first value is the
+/// historical id key, so devices that already tracked items keep matching their stored hashes.
+fn local_hash_key(epochs: &BTreeMap<u32, [u8; 32]>) -> [u8; 32] {
+    if let Some(key) = forge_config::load_secret(HASH_KEY_SLOT)
+        .and_then(|hex| hex::decode(hex).ok())
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+    {
+        return key;
+    }
+    let seed = epochs
+        .values()
+        .next()
+        .map_or([0; 32], |base| derive(base, ID_INFO));
+    let _ = forge_config::store_secret(HASH_KEY_SLOT, &hex::encode(seed));
+    seed
+}
+
 impl Vault {
     pub fn from_state(state: &LocalState) -> Result<Self> {
         let mut epochs = BTreeMap::new();
@@ -60,7 +81,12 @@ impl Vault {
         if !epochs.contains_key(&current) {
             bail!("the current Account Data Key epoch is unavailable");
         }
-        Ok(Self { epochs, current })
+        let hash_key = local_hash_key(&epochs);
+        Ok(Self {
+            epochs,
+            current,
+            hash_key,
+        })
     }
 
     /// Ids and hashes use the oldest epoch this device holds. Rotating the Account Data Key must
@@ -83,9 +109,10 @@ impl Vault {
 
     /// Keyed hash of an item's canonical content, safe to keep in the local database.
     pub fn content_hash(&self, canonical: &str) -> String {
+        let id_key = self.hash_key;
         let mut message = b"content:".to_vec();
         message.extend_from_slice(canonical.as_bytes());
-        hex::encode(hmac(&self.id_key(), &message))
+        hex::encode(hmac(&id_key, &message))
     }
 
     fn vault_key(&self, epoch: u32) -> Result<[u8; 32]> {
@@ -146,6 +173,7 @@ mod tests {
         Vault {
             epochs: epochs.iter().map(|(e, b)| (*e, [*b; 32])).collect(),
             current,
+            hash_key: [1; 32],
         }
     }
 
