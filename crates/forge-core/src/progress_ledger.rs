@@ -195,6 +195,8 @@ pub(crate) struct ProgressLedger {
     headless: bool,
     futile_nudge: u32,
     futile_stop: u32,
+    /// Cycle-hold steps before the cycle lane stops the turn.
+    cycle_stop_after: u32,
 }
 
 impl Default for ProgressLedger {
@@ -234,6 +236,7 @@ impl Default for ProgressLedger {
             headless: false,
             futile_nudge: FUTILE_NUDGE_AT,
             futile_stop: FUTILE_STOP_AT,
+            cycle_stop_after: CYCLE_STOP_AFTER,
         }
     }
 }
@@ -252,6 +255,28 @@ impl ProgressLedger {
             idle_stop: 0,
             ..Self::default()
         }
+    }
+
+    /// `[harness] repeat_interrupt` lets the model hear about a repeated call two steps before
+    /// the cycle lane stops the turn.
+    pub(crate) fn set_repeat_interrupt(&mut self, on: bool) {
+        self.cycle_stop_after = if on {
+            CYCLE_STOP_AFTER + 2
+        } else {
+            CYCLE_STOP_AFTER
+        };
+    }
+
+    /// The label of the call just repeated when it is the `at`-th identical call (same batch, same
+    /// result) in a row. Exactly `at`, so the interrupt is sent once per run.
+    pub(crate) fn repeat_label(&self, at: u32) -> Option<String> {
+        if self.cycle_run != at {
+            return None;
+        }
+        self.recent_calls
+            .back()
+            .map(|(label, _)| label.clone())
+            .filter(|l| !l.is_empty())
     }
 
     /// The idle thresholds (`0` disables) and whether no person is watching the turn. Cheap,

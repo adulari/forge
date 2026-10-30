@@ -1566,6 +1566,25 @@ pub struct HarnessConfig {
     /// Max characters per injected harness entry; longer entries are truncated.
     #[serde(default = "default_harness_max_entry_chars")]
     pub max_entry_chars: u32,
+    /// Loop/stop behaviours borrowed from oh-my-pi and Factory Droid, each default off so a
+    /// benchmark round can A/B them. A flag that is on wins over `[mesh] harness_profile =
+    /// "minimal"` (docs/features/harness-profile.md).
+    ///
+    /// A short completion contract at the end of the system prompt.
+    #[serde(default)]
+    pub completion_contract: bool,
+    /// Up to 3 corrective continuations after an announced-but-undone final reply, and up to 3
+    /// retries of an empty or text-only tool-call reply before benching; a pinned model is never
+    /// benched for a single empty reply.
+    #[serde(default)]
+    pub stop_retries: bool,
+    /// Inject "act, don't re-plan" when consecutive tool-free replies keep restating a plan.
+    #[serde(default)]
+    pub thinking_loop_breaker: bool,
+    /// Interrupt naming the tool and arguments after 5 identical calls with identical results,
+    /// and move the progress ledger's cycle stop two repeats later.
+    #[serde(default)]
+    pub repeat_interrupt: bool,
 }
 
 impl Default for HarnessConfig {
@@ -1576,6 +1595,10 @@ impl Default for HarnessConfig {
             auto_refine_turns: default_harness_auto_refine_turns(),
             max_context_entries: default_harness_max_context_entries(),
             max_entry_chars: default_harness_max_entry_chars(),
+            completion_contract: false,
+            stop_retries: false,
+            thinking_loop_breaker: false,
+            repeat_interrupt: false,
         }
     }
 }

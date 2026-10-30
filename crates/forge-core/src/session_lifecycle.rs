@@ -296,6 +296,7 @@ impl Session {
             turn_forced_stop: None,
             harness_profile: forge_config::HarnessProfile::default(),
             empty_reply_nudged: false,
+            empty_reply_retries: 0,
             trim_watch: Default::default(),
             gauge_model: None,
             spend: Default::default(),

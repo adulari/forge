@@ -108,7 +108,7 @@ impl NarrationTracker {
 /// The first sentence-ish of the reply as lowercase alphanumeric words. Only the opening is
 /// compared: a stuck model repeats its preamble verbatim, while a working model's reply changes
 /// from the first words.
-fn opening_words(text: &str) -> Vec<String> {
+pub(crate) fn opening_words(text: &str) -> Vec<String> {
     text.split_whitespace()
         .take(24)
         .map(|w| {
@@ -143,7 +143,7 @@ const MIN_WORDS: usize = 5;
 /// "fixing the broken revert", "pinning the 429 source") around a fixed opening, and its
 /// fifth word changed every time ("You're right — I looped. Answering / Recovering / I'll …"), so
 /// a five-word prefix let thirty near-identical apologies through.
-fn similar(a: &[String], b: &[String]) -> bool {
+pub(crate) fn similar(a: &[String], b: &[String]) -> bool {
     const PREFIX_WORDS: usize = 4;
     if a.len() < MIN_WORDS || b.len() < MIN_WORDS {
         return false;

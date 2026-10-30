@@ -87,3 +87,24 @@ This applies to every profile.
 Run `forge bench swe --attempts 3` twice per model, once with `harness_profile = "guarded"` and
 once with `"minimal"`, on Claude through Bedrock and on codex luna. Keep `minimal` for a model only
 where mean pass@1 holds and steps or cost go down.
+
+## `[harness]` stop-guard flags (A/B, default off)
+
+Four opt-in loop behaviours, each its own flag in `[harness]` (code: `crates/forge-core/src/stop_guards.rs`).
+A flag that is on wins over `harness_profile = "minimal"` (the built-in default for `inferhub::*` and
+`modelgateway::*`), which otherwise silences the mid-intent nudge and the stall nudges.
+
+| Flag | Behaviour |
+| --- | --- |
+| `completion_contract` | Appends a short `<critical>` block (do not yield while actionable work remains, smoke-run before yielding, reproduce-then-confirm bug fixes, no stubs, never mention budgets) to the end of the base system prompt. Static text, so the cached prefix stays stable. |
+| `stop_retries` | An announced-but-undone final reply is continued up to 3 times ("Call the next concrete tool now"); empty replies get 3 corrective retries before the bench/failover path; a tool call written as text gets 3 re-issue requests. A single empty reply never benches a model. |
+| `thinking_loop_breaker` | When consecutive tool-free replies restate an earlier one (stall_guard opening similarity), injects "Act, don't re-plan: make the next tool call." at most twice per stretch. |
+| `repeat_interrupt` | After 5 identical calls with identical results, names the call and says not to repeat it; the progress ledger's cycle stop moves from 5 to 7 repeats so the model gets two steps to react. Repeats with new results (polling) never count. |
+
+```toml
+[harness]
+completion_contract = true
+stop_retries = true
+thinking_loop_breaker = true
+repeat_interrupt = true
+```

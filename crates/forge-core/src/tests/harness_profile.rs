@@ -576,3 +576,159 @@ async fn an_empty_reply_right_after_the_nudge_goes_to_the_honest_failure_path() 
         "the second empty reply in a row stops the pinned-equivalent turn"
     );
 }
+
+fn harness_config(
+    profile: HarnessProfile,
+    edit: impl FnOnce(&mut forge_config::HarnessConfig),
+) -> Config {
+    let mut cfg = config(profile);
+    edit(&mut cfg.harness);
+    cfg
+}
+
+fn transcript_hits(run: &Run, needle: &str) -> usize {
+    run.session
+        .transcript
+        .iter()
+        .filter(|m| m.content.contains(needle))
+        .count()
+}
+
+async fn announced_run(cfg: Config) -> (usize, usize, Run) {
+    let provider = Arc::new(Script::new(vec![say(
+        "Now let me look at the workspace layout:",
+    )]));
+    let calls = Arc::clone(&provider.calls);
+    let mut run = Run::new(provider, cfg, test_workspace());
+    run.session.run_turn("look around").await.unwrap();
+    let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+    (run.warnings("announced another action"), n, run)
+}
+
+#[tokio::test]
+async fn stop_retries_continue_an_announced_reply_three_times_then_stop_even_under_minimal() {
+    let (nudges, calls, run) = announced_run(harness_config(HarnessProfile::Minimal, |h| {
+        h.stop_retries = true;
+    }))
+    .await;
+    assert_eq!(nudges, 3);
+    assert_eq!(calls, 4);
+    assert_eq!(
+        transcript_hits(&run, crate::stop_guards::UNEXPECTED_STOP_NUDGE),
+        3
+    );
+}
+
+#[tokio::test]
+async fn stop_retries_off_keeps_the_old_caps() {
+    let (nudges, calls, _) = announced_run(config(HarnessProfile::Guarded)).await;
+    assert_eq!((nudges, calls), (2, 3));
+    let (nudges, calls, _) = announced_run(config(HarnessProfile::Minimal)).await;
+    assert_eq!((nudges, calls), (0, 1));
+}
+
+async fn empty_calls(stop_retries: bool) -> usize {
+    let provider = Arc::new(Script::new(vec![say("")]));
+    let calls = Arc::clone(&provider.calls);
+    let mut run = Run::new(
+        provider,
+        harness_config(HarnessProfile::Guarded, |h| h.stop_retries = stop_retries),
+        test_workspace(),
+    );
+    let _ = run.session.run_turn("do the thing").await;
+    calls.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn stop_retries_retry_an_empty_reply_three_times_before_giving_up() {
+    assert_eq!(empty_calls(false).await, 2);
+    assert_eq!(empty_calls(true).await, 4);
+}
+
+#[tokio::test]
+async fn thinking_loop_breaker_interrupts_a_restated_plan_at_most_twice() {
+    let plan = "I will first inspect the parser module and then rewrite the tokenizer for you";
+    let (_, _, run) = {
+        let provider = Arc::new(Script::new(vec![say(plan)]));
+        let calls = Arc::clone(&provider.calls);
+        let mut run = Run::new(
+            provider,
+            harness_config(HarnessProfile::Minimal, |h| {
+                h.stop_retries = true;
+                h.thinking_loop_breaker = true;
+            }),
+            test_workspace(),
+        );
+        run.session.run_turn("go").await.unwrap();
+        (0, calls.load(std::sync::atomic::Ordering::SeqCst), run)
+    };
+    assert_eq!(
+        transcript_hits(&run, crate::stop_guards::THINKING_LOOP_NUDGE),
+        2
+    );
+
+    let mut off = Run::new(
+        Arc::new(Script::new(vec![say(plan)])),
+        harness_config(HarnessProfile::Minimal, |h| h.stop_retries = true),
+        test_workspace(),
+    );
+    off.session.run_turn("go").await.unwrap();
+    assert_eq!(
+        transcript_hits(&off, crate::stop_guards::THINKING_LOOP_NUDGE),
+        0
+    );
+}
+
+async fn repeated_shell(repeat_interrupt: bool) -> (usize, usize) {
+    let steps: Vec<_> = (0..20)
+        .map(|_| {
+            (
+                String::new(),
+                vec![call("shell", serde_json::json!({"command": "echo same"}))],
+            )
+        })
+        .collect();
+    let provider = Arc::new(Script::new(steps));
+    let calls = Arc::clone(&provider.calls);
+    let mut run = Run::new(
+        provider,
+        harness_config(HarnessProfile::Minimal, |h| {
+            h.repeat_interrupt = repeat_interrupt
+        }),
+        test_workspace(),
+    );
+    run.session.run_turn("check it").await.unwrap();
+    (
+        transcript_hits(&run, "Do not call it with these arguments again"),
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+    )
+}
+
+#[tokio::test]
+async fn repeat_interrupt_names_the_call_before_the_ledger_stops() {
+    let (off_notes, off_calls) = repeated_shell(false).await;
+    let (on_notes, on_calls) = repeated_shell(true).await;
+    assert_eq!(off_notes, 0);
+    assert_eq!(on_notes, 1);
+    assert!(on_calls > off_calls, "{on_calls} vs {off_calls}");
+}
+
+#[tokio::test]
+async fn completion_contract_is_the_tail_of_the_system_prompt_only_when_on() {
+    let on = Run::new(
+        Arc::new(Script::new(vec![say("ok")])),
+        harness_config(HarnessProfile::Minimal, |h| h.completion_contract = true),
+        test_workspace(),
+    );
+    let off = Run::new(
+        Arc::new(Script::new(vec![say("ok")])),
+        config(HarnessProfile::Minimal),
+        test_workspace(),
+    );
+    assert!(on.session.system_preamble()[0]
+        .content
+        .ends_with(crate::stop_guards::COMPLETION_CONTRACT));
+    assert!(!off.session.system_preamble()[0]
+        .content
+        .contains("<critical>"));
+}

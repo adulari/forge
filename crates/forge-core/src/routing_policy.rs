@@ -253,7 +253,11 @@ impl Session {
         let os = std::env::consts::OS;
         let env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n</env>");
         let base = crate::commit_policy::apply(FORGE_SYSTEM, self.commit_policy());
-        let mut msgs = vec![Message::system(base.as_ref()), Message::system(env)];
+        let mut base = base.into_owned();
+        if self.config.harness.completion_contract {
+            base.push_str(crate::stop_guards::COMPLETION_CONTRACT);
+        }
+        let mut msgs = vec![Message::system(base), Message::system(env)];
         // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
         // context, so it reaches direct AND bridge providers without touching the bridge preamble.
         if self.expect_code_change {
@@ -284,6 +288,11 @@ impl Session {
         // message). The live env block and any minimal-diff bias are kept.
         if let Some(override_prompt) = self.system_prompt_override(model) {
             preamble[0].content.clone_from(override_prompt);
+            if self.config.harness.completion_contract {
+                preamble[0]
+                    .content
+                    .push_str(crate::stop_guards::COMPLETION_CONTRACT);
+            }
         }
         // Codemode guidance rides with the tool itself: present exactly when `run_code` is
         // advertised, static text so the cached prefix stays stable. A bridge is handed the

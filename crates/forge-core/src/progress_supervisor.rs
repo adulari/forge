@@ -60,12 +60,15 @@ impl Session {
             mesh.progress_guard,
         );
         self.ledger.configure(idle_nudge, idle_stop, headless);
+        self.ledger
+            .set_repeat_interrupt(self.config.harness.repeat_interrupt);
         let root = self.workspace_root().to_path_buf();
         let verdict = self
             .ledger
             .observe_step(narration, observations, task_closed, &mut || {
                 crate::working_tree::progress_fingerprint(&root)
             });
+        self.repeat_interrupt();
         // Carried into the NEXT request's sampling (see `model_request`).
         self.repetition_pressure = self.ledger.pressure();
         match verdict {

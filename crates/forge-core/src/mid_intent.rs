@@ -432,8 +432,14 @@ impl crate::Session {
         bridge_tool_progress: bool,
         sent: &mut usize,
     ) -> bool {
-        if *sent >= MAX_FOLLOWUP_INTENT_NUDGES
-            || !self.advisory_nudges_on()
+        let retries = self.config.harness.stop_retries;
+        let max = if retries {
+            crate::stop_guards::STOP_RETRY_MAX
+        } else {
+            MAX_FOLLOWUP_INTENT_NUDGES
+        };
+        if *sent >= max
+            || !(retries || self.advisory_nudges_on())
             || !(ends_mid_intent(content) || (content.trim().is_empty() && bridge_tool_progress))
             || self.has_open_tasks()
         {
@@ -441,18 +447,18 @@ impl crate::Session {
         }
         *sent += 1;
         self.presenter.emit(crate::PresenterEvent::Warning(format!(
-            "model announced another action but stopped before doing it — continuing ({sent}/{MAX_FOLLOWUP_INTENT_NUDGES})"
+            "model announced another action but stopped before doing it — continuing ({sent}/{max})"
         )));
+        let nudge = if retries {
+            crate::stop_guards::UNEXPECTED_STOP_NUDGE
+        } else {
+            FOLLOWUP_INTENT_NUDGE
+        };
         let nseq = self.next_seq();
-        let _ = self.store.add_message(
-            &self.id,
-            nseq,
-            forge_types::Role::System,
-            FOLLOWUP_INTENT_NUDGE,
-            None,
-        );
-        self.transcript
-            .push(forge_types::Message::system(FOLLOWUP_INTENT_NUDGE));
+        let _ = self
+            .store
+            .add_message(&self.id, nseq, forge_types::Role::System, nudge, None);
+        self.transcript.push(forge_types::Message::system(nudge));
         true
     }
 }

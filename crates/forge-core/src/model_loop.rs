@@ -125,6 +125,7 @@ impl Session {
         }
         // Mid-intent nudges sent in the current stretch of idleness; see `followup_intent_nudge`.
         let mut followup_intent_nudges = 0usize;
+        let mut thinking_loop = crate::stop_guards::ThinkingLoop::default();
         let mut silence = crate::silence_guard::SilenceTracker::new(std::time::Instant::now());
         let mut codemode_steer = crate::codemode::Steer::default();
         // `toolcall_repair_nudges`: bounded retries when a direct model writes a tool call as TEXT
@@ -307,6 +308,7 @@ impl Session {
 
             if resp.wants_tools() || bridge_tool_progress {
                 followup_intent_nudges = 0;
+                thinking_loop.reset();
                 self.rearm_empty_reply_nudge();
             }
 
@@ -408,7 +410,9 @@ impl Session {
                         hit_step_cap = false;
                         break;
                     }
-                } else if self.inject_steers(&resp.content) {
+                } else if self.inject_steers(&resp.content)
+                    || self.thinking_loop_nudge(&resp.content, &mut thinking_loop)
+                {
                     // The user queued a prompt while this response was being produced. Rather than
                     // ending the turn and starting a new one, continue with it now — the model
                     // keeps its working context and the queued instruction lands as soon as it
@@ -618,12 +622,12 @@ impl Session {
                     // merged no PR and pushed no tag. Detect it and nudge the model to actually
                     // call the tool (bounded); never silently accept narrated tool calls.
                     if forge_provider::looks_like_unexecuted_tool_call(&resp.content) {
-                        const MAX_TOOLCALL_REPAIR_NUDGES: usize = 2;
-                        if toolcall_repair_nudges < MAX_TOOLCALL_REPAIR_NUDGES {
+                        let max_toolcall_repair_nudges = self.toolcall_repair_max();
+                        if toolcall_repair_nudges < max_toolcall_repair_nudges {
                             toolcall_repair_nudges += 1;
                             self.tools_advertised_once = true;
                             self.presenter.emit(PresenterEvent::Warning(format!(
-                                "model wrote a tool call as text instead of invoking it — nothing ran; asking it to retry ({toolcall_repair_nudges}/{MAX_TOOLCALL_REPAIR_NUDGES})"
+                                "model wrote a tool call as text instead of invoking it — nothing ran; asking it to retry ({toolcall_repair_nudges}/{max_toolcall_repair_nudges})"
                             )));
                             let nudge = "Your last message contained a tool call written as TEXT \
                                          (`<invoke …>`, a DeepSeek DSML block or `default_api:` \

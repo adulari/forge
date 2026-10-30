@@ -194,6 +194,7 @@ mod refine_tests {
             auto_refine_turns: 20,
             max_context_entries: cap,
             max_entry_chars: chars,
+            ..Default::default()
         }
     }
 
