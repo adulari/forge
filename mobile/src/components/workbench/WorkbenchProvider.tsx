@@ -269,7 +269,8 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     if (primaryId) recent.current = touchRecent(recent.current, primaryId);
   }, [primaryId]);
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    // React Native defines `window` without DOM events; only the web/desktop build has keyup.
+    if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
     const release = (event: KeyboardEvent) => {
       if (event.key === "Control" || event.key === "Meta") cycle.current = null;
     };

@@ -46,6 +46,14 @@ describe("overlayEscapeStack", () => {
     return dispose;
   };
 
+  it("registers without throwing where window has no DOM events (React Native)", () => {
+    vi.stubGlobal("window", {});
+    const dispose = registerOverlay(vi.fn());
+    expect(openOverlayCount()).toBe(1);
+    dispose();
+    expect(openOverlayCount()).toBe(0);
+  });
+
   it("closes only the topmost overlay and swallows the key", () => {
     const sheet = vi.fn();
     const palette = vi.fn();
