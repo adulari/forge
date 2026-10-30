@@ -8,6 +8,7 @@
 // until history has actual rows. The two sources remain mutually exclusive, so there is nothing
 // to de-duplicate by content. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
+import { DeadPinBanner } from "../../../components/session/DeadPinBanner";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router, useIsFocused, useNavigation } from "expo-router";
 import { ChevronDown, ChevronUp, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
@@ -991,6 +992,8 @@ export function SessionChat() {
           </Text>
         </View>
       ) : (
+        <>
+        <DeadPinBanner model={snapshot?.model} pinned={snapshot?.model_pinned} onReplace={(id) => handleSend(`/model ${id}`, [])} />
         <Composer
           sessionId={sessionId}
           busy={snapshot?.busy ?? false}
@@ -1004,6 +1007,7 @@ export function SessionChat() {
           recallPrompts={recallPrompts}
           onInterrupt={handleInterrupt}
         />
+        </>
       )}
       {actionsAnchor != null ? (
         <MessageActionsMenu

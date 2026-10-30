@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModelRow, ModelsResponse } from "./api";
-import { catalogHasModel, catalogModels, providerReadiness } from "./modelCatalog";
+import { catalogHasModel, catalogModels, deadPin, pickerSections, providerReadiness, pushRecent, runtimeLabel } from "./modelCatalog";
 
 const model = (id: string, health: ModelRow["health"] = null): ModelRow => ({
   id,
@@ -62,5 +62,52 @@ describe("catalogModels", () => {
     expect(catalogHasModel(data, "claude-cli::sonnet")).toBe(true);
     expect(catalogHasModel(data, "claude-cli::fable")).toBe(false);
     expect(catalogHasModel(undefined, "claude-cli::fable")).toBe(false);
+  });
+});
+
+describe("picker sections", () => {
+  const data = response([
+    { provider: "claude-cli", models: [model("claude-cli::fable"), model("claude-cli::sonnet")] },
+    { provider: "groq", models: [{ ...model("groq::m"), subscription: false }] },
+  ]);
+  const catalog = catalogModels(data);
+
+  it("pins favourites then recents above the vendor groups", () => {
+    const sections = pickerSections(catalog, ["groq::m"], ["claude-cli::sonnet", "groq::m"]);
+    expect(sections.map((s) => s.key)).toEqual(["favorites", "recent", "vendor:claude-cli", "vendor:groq"]);
+    expect(sections[1].rows.map((r) => r.model.id)).toEqual(["claude-cli::sonnet"]);
+  });
+
+  it("labels runtimes", () => {
+    expect(runtimeLabel(catalog[0])).toBe("Subscription bridge");
+    expect(runtimeLabel(catalog[2])).toBe("API");
+  });
+
+  it("keeps recents unique and capped", () => {
+    expect(pushRecent(["a", "b"], "b")).toEqual(["b", "a"]);
+    expect(pushRecent(["1", "2", "3", "4", "5"], "6")).toHaveLength(5);
+  });
+});
+
+describe("deadPin", () => {
+  const data = response([
+    { provider: "claude-cli", models: [model("claude-cli::fable", { until_epoch: 1, reason: "rate limited" }), { ...model("claude-cli::sonnet"), benchmark_intelligence: 50 }] },
+    { provider: "groq", models: [{ ...model("groq::m"), benchmark_intelligence: 90 }] },
+  ]);
+
+  it("is null for a healthy or empty pin", () => {
+    expect(deadPin(data, "claude-cli::sonnet")).toBeNull();
+    expect(deadPin(data, "")).toBeNull();
+  });
+
+  it("offers a same-provider replacement for a benched pin", () => {
+    const dead = deadPin(data, "claude-cli::fable");
+    expect(dead?.reason).toBe("rate limited");
+    expect(dead?.replacement?.model.id).toBe("claude-cli::sonnet");
+  });
+
+  it("falls back across providers for a fake model", () => {
+    const dead = deadPin(data, "nope::ghost");
+    expect(dead?.replacement?.model.id).toBe("groq::m");
   });
 });

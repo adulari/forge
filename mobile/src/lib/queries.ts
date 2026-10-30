@@ -34,6 +34,8 @@ import {
   type CustomProviderRequest,
   type AzureProviderRequest,
   getProviders,
+  updateModel,
+  type UpdateModelRequest,
   storeProviderKey,
   removeProviderKeys,
   setProviderEnabled,
@@ -520,6 +522,17 @@ export function useModels() {
     refetchOnMount: true,
     refetchOnReconnect: true,
     refetchOnWindowFocus: isFocused,
+  });
+}
+
+/** Persist a favourite/hide toggle to the host config, then refetch the catalog so every surface
+ * reading `/api/models` sees the same state. */
+export function useUpdateModel() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateModelRequest) => updateModel(baseUrl as string, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).models }),
   });
 }
 

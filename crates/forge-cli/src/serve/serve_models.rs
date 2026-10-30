@@ -42,6 +42,54 @@ struct ModelsResponse {
     refreshed_at: Option<i64>,
     /// A background rediscovery is running; polling again shortly will return a newer catalog.
     refreshing: bool,
+    /// `[mesh] disabled` entries. A disabled model never enters the catalog, so this is the only
+    /// place a surface can list what it hid in order to offer a restore.
+    disabled: Vec<String>,
+    /// `[mesh] favorites` model ids.
+    favorites: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UpdateModelRequest {
+    model: String,
+    favorite: Option<bool>,
+    hidden: Option<bool>,
+}
+
+pub(super) fn models_route() -> axum::routing::MethodRouter<Arc<DaemonState>> {
+    axum::routing::get(models_page).patch(update_model)
+}
+
+/// Persist a favourite or hide toggle for one model id (or bare provider for `hidden`).
+pub(super) async fn update_model(axum::Json(request): axum::Json<UpdateModelRequest>) -> Response {
+    let result = tokio::task::spawn_blocking(move || {
+        let _lock = super::serve_config::mutation_lock()
+            .lock()
+            .map_err(|_| "configuration mutation lock is poisoned".to_string())?;
+        if request.favorite.is_none() && request.hidden.is_none() {
+            return Err("favorite or hidden is required".to_string());
+        }
+        let scope = forge_config::ConfigScope::User;
+        if let Some(favorite) = request.favorite {
+            forge_config::set_model_favorite(scope, &request.model, favorite)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(hidden) = request.hidden {
+            forge_config::set_model_disabled(scope, &request.model, hidden)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => json_response(&serde_json::json!({ "ok": true })),
+        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not update model preferences",
+        ),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -117,6 +165,11 @@ async fn discover_now() -> Option<(forge_mesh::ModelCatalog, i64)> {
         .map(|(catalog, refreshed_at, _)| (catalog, refreshed_at))
 }
 
+fn config_lists() -> (Vec<String>, Vec<String>) {
+    let config = forge_config::load().unwrap_or_default();
+    (config.mesh.disabled, config.mesh.favorites)
+}
+
 /// Kick off a rediscovery behind the response, unless one is already running.
 fn spawn_refresh() -> bool {
     if REFRESHING
@@ -161,6 +214,8 @@ pub(super) async fn models_page(
             providers: Vec::new(),
             refreshed_at: None,
             refreshing,
+            disabled: config_lists().0,
+            favorites: config_lists().1,
         });
     };
 
@@ -203,6 +258,8 @@ pub(super) async fn models_page(
             catalog: "available",
             refreshed_at: Some(refreshed_at),
             refreshing,
+            disabled: config.mesh.disabled.clone(),
+            favorites: config.mesh.favorites.clone(),
             providers: catalog
                 .by_provider(&pricing)
                 .into_iter()
@@ -212,6 +269,9 @@ pub(super) async fn models_page(
                     models: provider
                         .models
                         .into_iter()
+                        .filter(|model| {
+                            !forge_config::is_model_disabled(&model.id, &config.mesh.disabled)
+                        })
                         .map(|model| ModelRow {
                             health: benches.get(&model.id).cloned(),
                             id: model.id.clone(),
@@ -239,6 +299,7 @@ pub(super) async fn models_page(
                         })
                         .collect(),
                 })
+                .filter(|provider| !provider.models.is_empty())
                 .collect(),
         }
     })

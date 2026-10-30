@@ -1016,7 +1016,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/hooks"), get(hooks_page))
         .route(&format!("{base}/api/skills"), get(skills_page))
         .route(&format!("{base}/api/workflows"), get(workflows_page))
-        .route(&format!("{base}/api/models"), get(models_page))
+        .route(&format!("{base}/api/models"), models_route())
         .route(&format!("{base}/api/plans"), get(plans_page))
         .route(
             &format!("{base}/api/mcp"),

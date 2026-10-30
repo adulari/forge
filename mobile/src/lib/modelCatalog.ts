@@ -37,3 +37,87 @@ export function providerReadiness(provider: ModelProvider): { total: number; rea
 export function catalogHasModel(data: ModelsResponse | undefined, id: string): boolean {
   return (data?.providers ?? []).some((provider) => provider.models.some((model) => model.id === id));
 }
+
+export type RuntimeLabel = "Subscription bridge" | "OAuth" | "API";
+
+/** How a model is reached: a CLI bridge rides a subscription login, other subscription providers
+ * use an OAuth sign-in, everything else is a keyed API. */
+export function runtimeLabel({ provider, model }: CatalogModel): RuntimeLabel {
+  if (!model.subscription) return "API";
+  return provider.endsWith("-cli") ? "Subscription bridge" : "OAuth";
+}
+
+export interface PickerSection {
+  key: string;
+  title: string;
+  rows: CatalogModel[];
+}
+
+/** Picker layout: favourites, then recents, then one group per vendor. A model appears once in
+ * the pinned sections and again under its vendor so the vendor list stays complete. */
+export function pickerSections(
+  catalog: CatalogModel[],
+  favorites: readonly string[],
+  recents: readonly string[],
+): PickerSection[] {
+  const byId = new Map(catalog.map((row) => [row.model.id, row]));
+  const pick = (ids: readonly string[]) => ids.flatMap((id) => byId.get(id) ?? []);
+  const favoriteRows = catalog.filter(({ model }) => favorites.includes(model.id));
+  const recentRows = pick(recents).filter(({ model }) => !favorites.includes(model.id));
+  const vendors = new Map<string, CatalogModel[]>();
+  for (const row of catalog) vendors.set(row.provider, [...(vendors.get(row.provider) ?? []), row]);
+  return [
+    { key: "favorites", title: "Favourites", rows: favoriteRows },
+    { key: "recent", title: "Recent", rows: recentRows },
+    ...[...vendors].map(([provider, rows]) => ({ key: `vendor:${provider}`, title: provider, rows })),
+  ].filter((section) => section.rows.length > 0);
+}
+
+export interface DeadPin {
+  reason: string;
+  replacement: CatalogModel | null;
+}
+
+const benchmark = ({ model }: CatalogModel) => model.benchmark_intelligence ?? -Infinity;
+
+/** A pin the catalog cannot serve right now (benched, provider excluded, or unknown) with the
+ * nearest healthy replacement: same provider first, then the same tier anywhere, best benchmark. */
+export function deadPin(data: ModelsResponse | undefined, pin: string | null | undefined): DeadPin | null {
+  if (!pin || !data || data.catalog !== "available") return null;
+  const catalog = catalogModels(data);
+  const current = catalog.find(({ model }) => model.id === pin);
+  if (current && !current.model.health) return null;
+  const healthy = catalog.filter(({ model }) => !model.health && model.id !== pin);
+  const provider = pin.includes("::") ? pin.split("::")[0] : current?.provider;
+  const sameProvider = healthy.filter((row) => row.provider === provider);
+  const sameTier = healthy.filter((row) => current != null && row.model.tier === current.model.tier);
+  const best = (rows: CatalogModel[]) => [...rows].sort((a, b) => benchmark(b) - benchmark(a))[0] ?? null;
+  return {
+    reason: current?.model.health?.reason ?? "this model is not in the host's catalog",
+    replacement: best(sameProvider) ?? best(sameTier) ?? best(healthy),
+  };
+}
+
+const RECENTS_KEY = "forge.recentModels";
+const RECENTS_MAX = 5;
+
+export function pushRecent(recents: readonly string[], id: string): string[] {
+  return [id, ...recents.filter((entry) => entry !== id)].slice(0, RECENTS_MAX);
+}
+
+export function loadRecents(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(globalThis.localStorage?.getItem(RECENTS_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveRecents(recents: readonly string[]): void {
+  try {
+    globalThis.localStorage?.setItem(RECENTS_KEY, JSON.stringify(recents));
+  } catch {
+    // storage blocked: recents are a convenience only
+  }
+}
