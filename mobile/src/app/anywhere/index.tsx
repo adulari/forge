@@ -28,7 +28,9 @@ import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere, type AnywherePendingApproval } from "../../lib/AnywhereProvider";
 import { formatBytes, formatStorageUsage } from "../../lib/anywhere/format";
 import { hostFleetSummary, hostStatusText } from "../../lib/anywhereHostPresence";
+import { syncHubMeta, syncNeedsAttention } from "../../lib/accountSync";
 import { useAuth } from "../../lib/auth";
+import { useAccountSync } from "../../lib/queries";
 import { goBackOr } from "../../lib/nav";
 import { isTauri } from "../../lib/platform";
 import { MAX_ACTIVE_HOSTS } from "../../lib/anywhere/types";
@@ -423,6 +425,9 @@ function ReadyCenter() {
 function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typeof useAnywhere>; trialBadge: string | null; login: string | undefined }) {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
+  const syncStatus = useAccountSync().data;
+  const syncMeta = syncHubMeta(syncStatus);
+  const syncAttention = syncNeedsAttention(syncStatus);
 
   if (!isExpanded) {
     return (
@@ -440,6 +445,7 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
           />
           <HubRow label="Devices" value={`${anywhere.devices.length} paired`} onPress={() => router.push("/anywhere/devices")} />
           <HubRow label="Remote jobs" value={`${anywhere.remoteJobs.length} queued`} onPress={() => router.push("/anywhere/jobs")} />
+          <HubRow label="Sync" value={syncMeta} valueColor={syncAttention ? tokens.warn : undefined} onPress={() => router.push("/anywhere/sync")} />
           <HubRow label="Offline history" value="Encrypted sync feed" onPress={() => router.push("/anywhere/history")} />
           <HubRow label="Notifications" value={pushStatusLabel(anywhere.pushStatus)} onPress={() => router.push("/anywhere/notifications")} />
           <HubRow
@@ -503,6 +509,12 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
 
         <View style={styles.desktopColumn}>
           <Text style={[typeScale.section, { color: tokens.ink3 }]}>STORAGE · BILLING · ACCOUNT</Text>
+          <Pressable onPress={() => router.push("/anywhere/sync")} accessibilityRole="button" accessibilityLabel="Sync across machines" style={[styles.desktopCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
+            <View style={styles.desktopCardRow}>
+              <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Sync across machines</Text>
+              <Text style={[typeScale.monoMeta, { color: syncAttention ? tokens.warn : tokens.ink }]}>{syncMeta}</Text>
+            </View>
+          </Pressable>
           <Pressable onPress={() => router.push("/anywhere/storage")} style={[styles.desktopCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
             <View style={styles.desktopCardRow}>
               <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Encrypted storage</Text>

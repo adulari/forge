@@ -95,6 +95,38 @@ describe("AnywhereTransport", () => {
     ).rejects.toThrow("not allowlisted");
   });
 
+  it("maps the account-sync routes and nothing else under /api/anywhere", async () => {
+    const captured: AnywhereBridgeRequest[] = [];
+    const relay: AnywhereRelay = {
+      request: async (request) => {
+        captured.push(request);
+        return { status: 200, body: new TextEncoder().encode("{}") };
+      },
+      openSessionSocket: socket,
+    };
+    const transport = new AnywhereTransport("host-1", relay);
+
+    await transport.fetch("fany://host-1/api/anywhere/sync");
+    await transport.fetch("fany://host-1/api/anywhere/sync", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category: "skills", enabled: true }),
+    });
+    await transport.fetch("fany://host-1/api/anywhere/sync/now", { method: "POST" });
+
+    expect(captured.map((request) => [request.route, request.method])).toEqual([
+      ["account_sync_status", "GET"],
+      ["account_sync_update", "PUT"],
+      ["account_sync_now", "POST"],
+    ]);
+    await expect(
+      transport.fetch("fany://host-1/api/anywhere/sync", { method: "DELETE" }),
+    ).rejects.toThrow("not allowlisted");
+    await expect(
+      transport.fetch("fany://host-1/api/anywhere/sync/now", { method: "GET" }),
+    ).rejects.toThrow("not allowlisted");
+  });
+
   it("maps the MCP catalog read but never MCP server registration", async () => {
     // Registering a stdio server persists a command the host executes, so it is a local-only
     // action: the host has no bridge route for it and the phone must not emit one.

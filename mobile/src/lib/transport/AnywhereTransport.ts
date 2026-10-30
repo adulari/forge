@@ -58,7 +58,10 @@ export type BridgeRoute =
   | "delete_schedule"
   | "changelog"
   | "list_notices"
-  | "identity";
+  | "identity"
+  | "account_sync_status"
+  | "account_sync_update"
+  | "account_sync_now";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -287,6 +290,8 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/changelog": { GET: "changelog" },
     "/api/notices": { GET: "list_notices" },
     "/api/identity": { GET: "identity" },
+    "/api/anywhere/sync": { GET: "account_sync_status", PUT: "account_sync_update" },
+    "/api/anywhere/sync/now": { POST: "account_sync_now" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };

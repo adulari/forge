@@ -826,5 +826,11 @@
     "platform": "web",
     "reason": "Decoding a QR from a photo uses the browser BarcodeDetector and a file picker.",
     "category": "capability"
+  },
+  {
+    "file": "mobile/src/lib/useSyncToggleContext.ts",
+    "platform": "desktop",
+    "reason": "The Keys & tokens sync category can only be switched on a computer connected directly; phones and Anywhere connections see it locked.",
+    "category": "capability"
   }
 ]

@@ -81,6 +81,23 @@ export async function decryptSyncChange(change: AnywhereSyncChange, credentials:
   return { cursor: change.cursor, record, createdAt: change.created_at * 1000, conflict: false };
 }
 
+export const ACCOUNT_SYNC_SCHEMA = "forge-account-sync-v1";
+
+/** Account-sync records (keys, settings, skills for other machines) are never shown in history. */
+export function isAccountSyncRecord(record: Pick<DecryptedSyncRecord, "operation" | "payload">): boolean {
+  if (record.operation === "tombstone" || record.payload.length === 0) return false;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(new Uint8Array(record.payload))) as unknown;
+    return typeof parsed === "object" && parsed !== null && (parsed as { schema?: unknown }).schema === ACCOUNT_SYNC_SCHEMA;
+  } catch {
+    return false;
+  }
+}
+
+export function withoutAccountSyncRecords(entries: OfflineHistoryEntry[]): OfflineHistoryEntry[] {
+  return entries.filter((entry) => !isAccountSyncRecord(entry.record));
+}
+
 export function markSyncConflicts(entries: OfflineHistoryEntry[]): OfflineHistoryEntry[] {
   const fileBases = new Map<string, Set<string>>();
   for (const entry of entries) {
@@ -104,7 +121,7 @@ export function syncPayloadText(entry: OfflineHistoryEntry): string {
 export async function writeOfflineHistory(credentials: StoredAnywhereCredentials, entries: OfflineHistoryEntry[], storage: CacheStorage = AsyncStorage): Promise<void> {
   const key = cacheKey(credentials);
   const nonce = secureRandomBytes(24);
-  const plaintext = new TextEncoder().encode(JSON.stringify(entries.slice(-500)));
+  const plaintext = new TextEncoder().encode(JSON.stringify(withoutAccountSyncRecords(entries).slice(-500)));
   const ciphertext = xchacha20poly1305(key, nonce).encrypt(plaintext);
   await storage.setItem(cacheName(credentials), JSON.stringify({ version: 1, nonce: base64Url(nonce), ciphertext: base64Url(ciphertext) }));
 }
@@ -117,7 +134,7 @@ export async function readOfflineHistory(credentials: StoredAnywhereCredentials,
     if (value.version !== 1) throw new Error("version");
     const plaintext = xchacha20poly1305(cacheKey(credentials), fromBase64Url(value.nonce)).decrypt(fromBase64Url(value.ciphertext));
     const entries = JSON.parse(new TextDecoder().decode(plaintext)) as OfflineHistoryEntry[];
-    return Array.isArray(entries) ? entries : [];
+    return Array.isArray(entries) ? withoutAccountSyncRecords(entries) : [];
   } catch { await storage.removeItem(cacheName(credentials)); return []; }
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { markSyncConflicts, readOfflineHistory, writeOfflineHistory, type CacheStorage, type OfflineHistoryEntry } from "./anywhereSyncBrowser";
+import { isAccountSyncRecord, markSyncConflicts, withoutAccountSyncRecords, readOfflineHistory, writeOfflineHistory, type CacheStorage, type OfflineHistoryEntry } from "./anywhereSyncBrowser";
 import type { StoredAnywhereCredentials } from "./transport/anywhereCredentialTypes";
 
 const credentials: StoredAnywhereCredentials = { version: 1, accountIdHex: "11".repeat(16), deviceIdHex: "22".repeat(16), signingPrivateKeyHex: "33".repeat(32), exchangePrivateKeyHex: "44".repeat(32), accountDataKeyHex: "55".repeat(32), keyEpoch: 1, accessToken: "secret-access", refreshToken: "secret-refresh", accessExpiresAtMs: 1, nextSequence: "1", acceptedSequences: {}, signingPublicKeys: {} };
@@ -31,4 +31,28 @@ it("marks only divergent copies at the same file revision as conflicts", () => {
   const divergent = { ...file, cursor: 2, record: { ...file.record, base_hash: [3], content_hash: [4] } };
   const later = { ...file, cursor: 3, record: { ...file.record, revision: 2, base_hash: [2], content_hash: [5] } };
   expect(markSyncConflicts([file, divergent, later]).map((value) => value.conflict)).toEqual([true, true, false]);
+});
+
+describe("account-sync records", () => {
+  const syncEntry = (payload: unknown, extra: Partial<OfflineHistoryEntry["record"]> = {}): OfflineHistoryEntry => ({
+    ...entry,
+    record: { ...entry.record, payload: [...new TextEncoder().encode(JSON.stringify(payload))], ...extra },
+  });
+
+  it("detects the account-sync schema marker and nothing else", () => {
+    expect(isAccountSyncRecord(syncEntry({ schema: "forge-account-sync-v1", category: "keys" }).record)).toBe(true);
+    expect(isAccountSyncRecord(syncEntry({ schema: "other" }).record)).toBe(false);
+    expect(isAccountSyncRecord(syncEntry([1, 2]).record)).toBe(false);
+    expect(isAccountSyncRecord(entry.record)).toBe(false);
+    expect(isAccountSyncRecord({ operation: "tombstone", payload: [] })).toBe(false);
+  });
+
+  it("never writes or reads them from the offline cache", async () => {
+    const hidden = syncEntry({ schema: "forge-account-sync-v1", value: "sk-secret-value" });
+    const map = new Map<string, string>();
+    const storage: CacheStorage = { getItem: async (key) => map.get(key) ?? null, setItem: async (key, value) => { map.set(key, value); }, removeItem: async (key) => { map.delete(key); } };
+    await writeOfflineHistory(credentials, [entry, hidden], storage);
+    expect(await readOfflineHistory(credentials, storage)).toEqual([entry]);
+    expect(withoutAccountSyncRecords([entry, hidden])).toEqual([entry]);
+  });
 });

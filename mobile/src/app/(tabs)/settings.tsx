@@ -48,6 +48,7 @@ import { leaveSettings } from "../../lib/nav";
 import { Sheet } from "../../components/ds/Sheet";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
+import { syncHubMeta } from "../../lib/accountSync";
 import { entitlementBadge } from "../../lib/anywhere/format";
 import { useVersionMeta } from "../../lib/appVersion";
 import { useAnywhere } from "../../lib/anywhere/store";
@@ -74,7 +75,7 @@ import {
 import { REPORTING_MODES, setReportingMode, useReporting, type ReportingMode } from "../../lib/reporting";
 import { ReportProblemSheet, WhatGetsSentSheet } from "../../components/ReportingUi";
 import { ActivityCard } from "../../components/usage/ActivityCard";
-import { useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, useSkills, useUsage } from "../../lib/queries";
+import { useAccountSync, useHooks, useMcp, useModels, usePlans, useProviders, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { catalogModels } from "../../lib/modelCatalog";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { persistTabBadge, publishTabBadge, useTabBadgePreference } from "../../lib/tabBadge";
@@ -131,7 +132,7 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows" | "/prs" | "/remote-access";
+type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows" | "/prs" | "/remote-access";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
@@ -141,6 +142,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "diagnostics", label: "Diagnostics & updates", href: "/diagnostics" },
   { key: "legal", label: "Legal & support", href: "/legal" },
   { key: "anywhere", label: "Forge Anywhere", href: "/anywhere" },
+  { key: "anywhere-sync", label: "Sync across machines", href: "/anywhere/sync" },
   { key: "usage", label: "Usage", href: "/usage" },
   { key: "providers", label: "Providers & accounts", href: "/providers" },
   { key: "models", label: "Models & mesh", href: "/models" },
@@ -416,6 +418,7 @@ export function SettingsScreen() {
   // "off · sign in" when signed out; otherwise the same lowercase entitlement label the
   // rail badge and /anywhere hub use (e.g. "trial · 9d") — entitlementBadge() is the single
   // source of truth for that text, this just re-cases it for a row meta instead of a pill.
+  const syncMetaLabel = syncHubMeta(useAccountSync().data).toLowerCase();
   const anywhereMetaLabel = anywhereSignedIn && anywhereAccount ? entitlementBadge(anywhereAccount).label.toLowerCase() : "off · sign in";
 
   useEffect(() => {
@@ -656,6 +659,7 @@ export function SettingsScreen() {
           <SectionHeader>Forge</SectionHeader>
           <ActivityCard />
           <NavListRow label="Forge Anywhere" meta={anywhereMetaLabel} onPress={() => router.push("/anywhere")} />
+          <NavListRow label="Sync across machines" meta={syncMetaLabel} onPress={() => router.push("/anywhere/sync")} />
           <NavListRow label="Usage" meta={usageWeekLabel} onPress={() => router.push("/usage")} />
           <NavListRow label="Providers & accounts" meta={providersConfiguredLabel} onPress={() => router.push("/providers")} />
           <NavListRow label="Models & mesh health" meta={modelsReadyLabel} onPress={() => router.push("/models")} />
