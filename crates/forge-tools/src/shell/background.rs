@@ -168,6 +168,24 @@ pub async fn start(
     workspace: Option<&Path>,
     policy: &SandboxPolicy,
 ) -> Result<Job, String> {
+    start_with(command, cwd, workspace, policy, false).await
+}
+
+/// Pids whose exit the starting call is still waiting on itself, so no wake notice is queued for
+/// them (see `autobackground`).
+static INLINE: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+pub(super) fn release_inline(pid: u32) {
+    INLINE.lock().unwrap().retain(|p| *p != pid);
+}
+
+pub(super) async fn start_with(
+    command: &str,
+    cwd: &str,
+    workspace: Option<&Path>,
+    policy: &SandboxPolicy,
+    inline: bool,
+) -> Result<Job, String> {
     if policy.enabled && !crate::sandbox::is_supported() {
         return Err(
             "refusing to start a background job unconfined: `shell.sandbox = true` is set but \
@@ -236,6 +254,9 @@ pub async fn start(
         tunnel: None,
     };
     write_record(&dir, &job)?;
+    if inline {
+        INLINE.lock().unwrap().push(pid);
+    }
 
     // Watch for the exit so `status` can report a real code rather than only "gone". This task
     // also reaps the child, which is what keeps a finished job from lingering as a zombie and
@@ -254,7 +275,7 @@ pub async fn start(
         let _ =
             tokio::task::spawn_blocking(move || super::preview::stop_job_tunnel(&tunnel_dir, pid))
                 .await;
-        let stopped = take_stopping(pid);
+        let stopped = take_stopping(pid) || INLINE.lock().unwrap().contains(&pid);
         if let (Some(sink), true, false) = (sink, first, stopped) {
             let tail = tail(&log_for_task, 8).unwrap_or_default();
             sink(JobExit {

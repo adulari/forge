@@ -587,3 +587,99 @@ fn a_bridge_request_carries_no_run_code_guidance() {
 
 #[path = "codemode_deferred.rs"]
 mod deferred;
+
+/// A read-only tool that sleeps and records how many copies ran at the same moment.
+struct SlowProbe {
+    live: Arc<AtomicU64>,
+    peak: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl forge_tools::Tool for SlowProbe {
+    fn name(&self) -> &str {
+        "slow_probe"
+    }
+    fn description(&self) -> &str {
+        "sleeps, then reports"
+    }
+    fn side_effect(&self) -> SideEffect {
+        SideEffect::ReadOnly
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"n": {"type": "integer"}}})
+    }
+    async fn run(&self, args: &serde_json::Value) -> Result<String, forge_tools::ToolError> {
+        let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        self.live.fetch_sub(1, Ordering::SeqCst);
+        Ok(format!(
+            "probe {}",
+            args.get("n").and_then(|n| n.as_u64()).unwrap_or(0)
+        ))
+    }
+}
+
+const PROMISE_ALL: &str =
+    "const r = await Promise.all([1, 2, 3].map((n) => tools.slow_probe({n})));\n\
+                           return r.join(',');";
+
+async fn probe_run(parallel: bool) -> (String, u64, std::time::Duration) {
+    let dir = workspace("overlap");
+    let mut config = Config::default();
+    config.harness.script_parallel = parallel;
+    let mut session =
+        session_with_config(&dir, PermissionMode::Bypass, Approver::default(), config);
+    let (live, peak) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    session.tools.register(Box::new(SlowProbe {
+        live: live.clone(),
+        peak: peak.clone(),
+    }));
+    let ledgers = Ledgers::new();
+    let started = std::time::Instant::now();
+    let (_, result) = step(&mut session, &ledgers, run_code_call(PROMISE_ALL, None)).await;
+    let took = started.elapsed();
+    let _ = std::fs::remove_dir_all(&dir);
+    (result, peak.load(Ordering::SeqCst), took)
+}
+
+#[tokio::test]
+async fn script_parallel_makes_promise_all_inner_calls_overlap() {
+    let (result, peak, took) = probe_run(true).await;
+    assert!(result.starts_with("probe 1,probe 2,probe 3"), "{result}");
+    assert!(result.contains("[run_code: 3 tool calls, 3 ok"), "{result}");
+    assert!(peak >= 2, "calls must overlap, peak {peak}");
+    assert!(
+        took < std::time::Duration::from_millis(650),
+        "took {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn without_the_flag_promise_all_inner_calls_stay_serial() {
+    let (result, peak, took) = probe_run(false).await;
+    assert!(result.starts_with("probe 1,probe 2,probe 3"), "{result}");
+    assert_eq!(peak, 1, "serial without the flag");
+    assert!(
+        took >= std::time::Duration::from_millis(700),
+        "took {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_flagged_script_can_start_a_background_job_and_the_footer_names_saved_output() {
+    let dir = workspace("bg");
+    let mut config = Config::default();
+    config.harness.script_parallel = true;
+    let mut session =
+        session_with_config(&dir, PermissionMode::Bypass, Approver::default(), config);
+    let ledgers = Ledgers::new();
+    let code = "const job = await tools.$background('sleep 30');\n\
+                const big = await tools.shell({command: 'seq 1 20000'});\n\
+                const status = await tools.shell_job({action: 'status', id: job.id});\n\
+                await tools.shell_job({action: 'stop', id: job.id});\n\
+                return `${job.id > 0} ${big.length > 10000} ${status.includes('running')}`;";
+    let (_, result) = step(&mut session, &ledgers, run_code_call(code, None)).await;
+    assert!(result.starts_with("true true true"), "{result}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -79,8 +79,14 @@ pub(crate) fn tool_detail(result: &str) -> Option<String> {
 /// `result` cut to [`MODEL_RESULT_MAX_CHARS`], start and end kept, with a note in the middle saying
 /// how much is missing and where the complete output is (`kept`, when it could be written).
 pub(crate) fn fit_for_model(result: String, kept: Option<&str>) -> String {
+    fit_for_model_capped(result, kept, MODEL_RESULT_MAX_CHARS)
+}
+
+/// [`fit_for_model`] with an explicit ceiling: the larger one a `run_code` script's inner calls
+/// get under `[harness] script_parallel`, where the script (not the model) trims the output.
+pub(crate) fn fit_for_model_capped(result: String, kept: Option<&str>, cap: usize) -> String {
     let total = result.chars().count();
-    if total <= MODEL_RESULT_MAX_CHARS {
+    if total <= cap {
         return result;
     }
     let lines: Vec<&str> = result.lines().collect();
@@ -104,9 +110,9 @@ pub(crate) fn fit_for_model(result: String, kept: Option<&str>) -> String {
         }
         out
     };
-    let head = within(&mut lines.iter().copied(), MODEL_RESULT_MAX_CHARS * 2 / 3);
+    let head = within(&mut lines.iter().copied(), cap * 2 / 3);
     let rest = &lines[head.len()..];
-    let mut tail = within(&mut rest.iter().rev().copied(), MODEL_RESULT_MAX_CHARS / 3);
+    let mut tail = within(&mut rest.iter().rev().copied(), cap / 3);
     tail.reverse();
     let shown: usize = head.iter().chain(&tail).map(|l| l.chars().count()).sum();
     let hidden_lines = lines.len().saturating_sub(head.len() + tail.len());

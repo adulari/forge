@@ -138,7 +138,7 @@ impl Tool for SearchTool {
         SideEffect::ReadOnly
     }
     fn schema(&self) -> Value {
-        json!({
+        let mut schema = json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string" },
@@ -175,7 +175,16 @@ impl Tool for SearchTool {
                 }
             },
             "required": ["query"]
-        })
+        });
+        if crate::harness::read_shaping() {
+            schema["properties"]["page"] = json!({
+                "type": "integer",
+                "minimum": 1,
+                "description": "Page of results, 20 files per page (1-based). The result footer \
+                                says when a next page exists."
+            });
+        }
+        schema
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         // Claude Code's names (`pattern`, `glob`, `-i`, `-C`) are accepted as aliases: models
@@ -216,6 +225,18 @@ impl Tool for SearchTool {
             Some("files_with_matches") => SearchMode::Files,
             Some("count") => SearchMode::Count,
             _ => SearchMode::Content,
+        };
+        let paged = crate::harness::read_shaping() && mode == SearchMode::Content;
+        let page = args
+            .get("page")
+            .and_then(Value::as_u64)
+            .filter(|p| *p >= 1)
+            .map(|p| p as usize)
+            .unwrap_or(1);
+        let context = if paged && context == 0 {
+            (1, 3)
+        } else {
+            (context, context)
         };
         let head_limit = args
             .get("head_limit")
@@ -264,7 +285,7 @@ impl Tool for SearchTool {
                 Some(re) => content.lines().filter(|line| re.is_match(line)).count(),
                 None => content.lines().filter(|line| line.contains(&query)).count(),
             };
-            let report =
+            let report_inner =
                 |label: &str, content: &str, per_file_cap: usize, out: &mut Vec<String>| match mode
                 {
                     SearchMode::Content => append_search_matches(
@@ -287,6 +308,21 @@ impl Tool for SearchTool {
                         }
                         out.len() < SEARCH_FILE_LIST_CAP
                     }
+                };
+            let mut groups: Vec<String> = Vec::new();
+            let page_end = page * crate::search_paging::FILES_PER_PAGE;
+            let mut report =
+                |label: &str, content: &str, per_file_cap: usize, out: &mut Vec<String>| -> bool {
+                    if !paged {
+                        return report_inner(label, content, per_file_cap, out);
+                    }
+                    let mut one = Vec::new();
+                    report_inner(label, content, per_file_cap, &mut one);
+                    if !one.is_empty() {
+                        groups.push(one.join("\n"));
+                    }
+                    // One file past the page proves there is a next page, then the walk can stop.
+                    groups.len() <= page_end
                 };
             if root_is_file {
                 // A file path searches that single file with the same matching semantics and
@@ -348,6 +384,9 @@ impl Tool for SearchTool {
                     stack.extend(subdirs.into_iter().rev());
                 }
             }
+            if paged {
+                return Ok(crate::search_paging::render_page(&query, &groups, page));
+            }
             if matches.is_empty() {
                 return Ok(format!("no matches for '{query}'"));
             }
@@ -371,7 +410,7 @@ fn append_search_matches(
     content: &str,
     re: Option<&regex::Regex>,
     query: &str,
-    context: usize,
+    context: (usize, usize),
     per_file_cap: usize,
     matches: &mut Vec<String>,
 ) -> bool {
@@ -391,7 +430,7 @@ fn append_search_matches(
     if hits.is_empty() {
         return true;
     }
-    if context == 0 {
+    if context == (0, 0) {
         // One file full of hits (a log, a lockfile, generated code) used to fill the whole budget
         // and hide every other file. Show a sample per file and say how many more it has.
         let shown = hits.len().min(per_file_cap);
@@ -483,12 +522,17 @@ fn cap_line(line: &str) -> std::borrow::Cow<'_, str> {
 /// adjacent/overlapping windows so a cluster of nearby hits prints as ONE block, then render with
 /// ripgrep's convention — match lines as `path:lineno:`, context lines as `path:lineno-`, `--`
 /// between non-contiguous hunks. `hits` must be sorted ascending (it is, by construction).
-fn context_hunks(rel: &str, lines: &[&str], hits: &[usize], ctx: usize) -> Vec<String> {
+fn context_hunks(
+    rel: &str,
+    lines: &[&str],
+    hits: &[usize],
+    (before, after): (usize, usize),
+) -> Vec<String> {
     let hit_set: std::collections::HashSet<usize> = hits.iter().copied().collect();
     let mut windows: Vec<(usize, usize)> = Vec::new();
     for &i in hits {
-        let lo = i.saturating_sub(ctx);
-        let hi = (i + ctx).min(lines.len().saturating_sub(1));
+        let lo = i.saturating_sub(before);
+        let hi = (i + after).min(lines.len().saturating_sub(1));
         match windows.last_mut() {
             // Merge when this window touches or overlaps the previous one.
             Some((_, prev_hi)) if lo <= *prev_hi + 1 => *prev_hi = (*prev_hi).max(hi),

@@ -1585,6 +1585,27 @@ pub struct HarnessConfig {
     /// and move the progress ledger's cycle stop two repeats later.
     #[serde(default)]
     pub repeat_interrupt: bool,
+    /// Closest-match / occurrence-list text when `edit_file`/`multi_edit` cannot place `old`.
+    /// Text-only improvement, on by default.
+    #[serde(default = "default_true")]
+    pub edit_errors: bool,
+    /// Schema-directed coercion of tool arguments (string to array/bool/number, lone value to
+    /// array), and the tool's compact schema in a bad-arguments error. On by default.
+    #[serde(default = "default_true")]
+    pub arg_coercion: bool,
+    /// `read_file`/`search` shaping: `path:50-100` ranges, declarations-only outline for bare
+    /// reads of code files of 100+ lines, 300-line default page, 768-byte line cap, `search`
+    /// paged at 20 files with context. Off by default.
+    #[serde(default)]
+    pub read_shaping: bool,
+    /// `run_code`: concurrent inner calls under `Promise.all`, `background: true` shell jobs, the
+    /// saved-output path in the footer, a higher inner-result cap. Off by default.
+    #[serde(default)]
+    pub script_parallel: bool,
+    /// A foreground shell command still running after 60 s moves to the background and the tool
+    /// returns the job id and output so far; `job_wake` delivers completion. Off by default.
+    #[serde(default)]
+    pub shell_autobackground: bool,
 }
 
 impl Default for HarnessConfig {
@@ -1599,6 +1620,11 @@ impl Default for HarnessConfig {
             stop_retries: false,
             thinking_loop_breaker: false,
             repeat_interrupt: false,
+            edit_errors: true,
+            arg_coercion: true,
+            read_shaping: false,
+            script_parallel: false,
+            shell_autobackground: false,
         }
     }
 }
@@ -4431,6 +4457,9 @@ compact_model = "auto"
         assert_eq!(parsed.privacy, shipped.privacy);
         assert_eq!(parsed.preview, shipped.preview);
         assert_eq!(parsed.codemode, shipped.codemode);
+        assert!(parsed.harness.edit_errors && parsed.harness.arg_coercion);
+        assert!(!parsed.harness.read_shaping);
+        assert!(!parsed.harness.script_parallel && !parsed.harness.shell_autobackground);
         assert_eq!(parsed.pr, shipped.pr);
     }
 

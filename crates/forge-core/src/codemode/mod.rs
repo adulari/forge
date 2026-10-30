@@ -18,6 +18,24 @@ use forge_provider::ToolSpec;
 
 pub(crate) use guidance::{advertised as guidance_advertised, Steer, GUIDANCE};
 
+/// Characters an inner call's result may keep while a script runs under `[harness]
+/// script_parallel`; the script trims it, so the model-wide 32K ceiling is too tight there.
+pub(crate) const PARALLEL_INNER_CAP_CHARS: usize = 128_000;
+
+tokio::task_local! {
+    static INNER_CAP: usize;
+}
+
+/// Run `fut` with the raised inner-result ceiling in effect.
+pub(crate) async fn with_parallel_inner_cap<F: std::future::Future>(fut: F) -> F::Output {
+    INNER_CAP.scope(PARALLEL_INNER_CAP_CHARS, fut).await
+}
+
+/// The raised inner-result ceiling, set only around a flagged script's run.
+pub(crate) fn inner_result_cap() -> Option<usize> {
+    INNER_CAP.try_with(|cap| *cap).ok()
+}
+
 /// The virtual tool name the model calls.
 pub const RUN_CODE_TOOL: &str = "run_code";
 
@@ -114,16 +132,27 @@ fn strip_fence(raw: &str) -> String {
 /// line 2. The prelude defines `tools`, `console` and `log`, and the epilogue reports the value,
 /// the error (with the model's own line, read from the stack) and the captured logs as one
 /// object, so logs survive a thrown error.
+#[cfg(test)]
 pub(crate) fn wrap(code: &str) -> String {
+    wrap_with(code, false)
+}
+
+/// [`wrap`], with the `tools.$background` helper when `extras` is set (`[harness] script_parallel`).
+pub(crate) fn wrap_with(code: &str, extras: bool) -> String {
     let last = code.lines().count().max(1) + 1;
     format!(
         "{}\n{code}\n{}",
-        prelude(),
+        prelude(extras),
         EPILOGUE.replace("__LAST__", &last.to_string())
     )
 }
 
-fn prelude() -> String {
+/// `tools.$background(command, opts)`: start a long shell command as a background job and get
+/// `{id, text}` back at once. The job's exit is delivered to the session on its own, and
+/// `tools.shell_job({action: 'log', id})` reads its output whenever the script wants it.
+const BACKGROUND_HELPER: &str = " if (name === '$background') return async (command, opts) => { const out = await __tool('shell', Object.assign({}, opts || {}, { command: String(command), background: true })); const m = /background job (\\d+)/.exec(out); if (!m) throw new Error('tools.$background failed: ' + out); return { id: Number(m[1]), text: out }; };";
+
+fn prelude(extras: bool) -> String {
     [
         "(async () => {",
         "const __logs = []; let __dropped = 0;",
@@ -138,6 +167,7 @@ fn prelude() -> String {
         // a tool named "then"; Symbol keys (`String(symbol)` throws) and `toJSON` likewise.
         "const tools = new Proxy({}, { get(_t, name) { if (typeof name !== 'string' || name === 'then' || name === 'toJSON') return undefined;",
         &format!(" if (name === '{SEARCH_CALL}') return (query) => __tool('{SEARCH_CALL}', {{ query: __fmt(query === undefined ? '' : query) }});"),
+        if extras { BACKGROUND_HELPER } else { "" },
         // A rejected call names the call that failed, so the model can fix that one line.
         " return (args) => { const a = args === undefined ? {} : args; return __tool(name, a).catch((e) => { let m = e && e.message !== undefined ? String(e.message) : __fmt(e); if (m.startsWith('error: ')) m = m.slice(7); let shown = __fmt(a); if (shown.length > 120) shown = shown.slice(0, 120) + '…'; throw new Error('tools.' + name + '(' + shown + ') failed: ' + m); }); }; } });",
         "try { const __value = await (async () => {",
@@ -214,6 +244,8 @@ pub(crate) struct ScriptReport {
     pub(crate) deadline_hit: bool,
     pub(crate) timeout_secs: u64,
     pub(crate) elapsed: std::time::Duration,
+    /// Where complete inner outputs were saved (`script_parallel` only): `(call number, path)`.
+    pub(crate) saved: Vec<(usize, String)>,
 }
 
 impl ScriptReport {
@@ -286,7 +318,19 @@ pub(crate) fn render(report: &ScriptReport, max_chars: usize) -> String {
     if !report.succeeded() {
         body.push_str(&failure_hint(report));
     }
-    let footer = footer(report);
+    let mut footer = footer(report);
+    if !report.saved.is_empty() {
+        let list: Vec<String> = report
+            .saved
+            .iter()
+            .map(|(n, path)| format!("call {n} -> {path}"))
+            .collect();
+        // Above the run_code line: `without_footer` strips only the last line.
+        footer = format!(
+            "[full inner outputs saved (read with shell sed/grep): {}]\n{footer}",
+            list.join("; ")
+        );
+    }
     let room = max_chars
         .saturating_sub(footer.chars().count() + 2)
         .max(200);

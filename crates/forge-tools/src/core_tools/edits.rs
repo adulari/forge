@@ -440,9 +440,25 @@ fn not_found_message(content: &str, old: &str, new: &str) -> String {
              write_file if you are creating a brand-new file",
         );
     }
-    if let Some(candidate) = closest_candidate(content, old) {
-        msg.push_str("; ");
-        msg.push_str(&candidate);
+    let closest = crate::harness::edit_errors()
+        .then(|| super::edit_diagnostics::closest_match(content, old))
+        .flatten();
+    // A strong match gets the similarity and the differing line; a weak one is better served by
+    // the first-line anchor (a line the model copied exactly) when there is one.
+    match (closest, closest_candidate(content, old)) {
+        (Some(m), _) if m.similarity >= 60 => {
+            msg.push_str("; ");
+            msg.push_str(&super::edit_diagnostics::closest_match_message(&m));
+        }
+        (_, Some(candidate)) => {
+            msg.push_str("; ");
+            msg.push_str(&candidate);
+        }
+        (Some(m), None) => {
+            msg.push_str("; ");
+            msg.push_str(&super::edit_diagnostics::closest_match_message(&m));
+        }
+        (None, None) => {}
     }
     msg
 }
@@ -517,6 +533,9 @@ fn apply_edit_inner(
                 }
                 not_found_message(content, old, new)
             }),
+        n if crate::harness::edit_errors() => {
+            Err(super::edit_diagnostics::ambiguous_message(content, old, n))
+        }
         n => Err(format!(
             "`old` is ambiguous: {n} occurrences — add surrounding context, or pass \
              `replace_all: true` if every occurrence should change"
@@ -977,7 +996,8 @@ mod tests {
     fn apply_edit_ambiguous_advises_adding_context() {
         let err = apply_edit("let x = 1;\nlet x = 1;\n", "let x = 1;", "let x = 2;").unwrap_err();
         assert!(err.contains("ambiguous"), "{err}");
-        assert!(err.contains("context"), "{err}");
+        assert!(err.contains("surrounding lines"), "{err}");
+        assert!(err.contains("line 2: let x = 1;"), "{err}");
     }
 
     #[test]

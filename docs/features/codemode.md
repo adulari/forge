@@ -199,3 +199,18 @@ the turn's mutations.
 | `forge-store/src/codemode_store.rs` | `codemode_stats`, `tool_call_rows` |
 | `forge-cli/src/cli/commands/stats_codemode.rs` | `forge stats codemode` |
 | `forge-config/src/codemode.rs` | `[codemode]` |
+
+## Parallel inner calls (`[harness] script_parallel`)
+
+Off by default. With `script_parallel = true`, inner calls a script awaits together
+(`Promise.all`, `allSettled`) run concurrently when every one of them is read-only, needs no
+permission prompt and no tool hook is configured; any other mix runs one at a time in arrival
+order, so prompts, `/undo` snapshots and writes to the same path stay serialized. Every inner call
+still goes through the same permission, audit and bookkeeping path. The flag also raises the
+inner-result ceiling from 32K to 128K characters (the script trims it), names the file holding each
+complete inner output in the result footer, and adds `await tools.$background(command, opts)`, which
+starts a shell command as a background job and resolves to `{id, text}` at once; the job's exit is
+delivered to the session without polling, and `tools.shell_job({action: "log", id})` reads it.
+
+Other `[harness]` tool flags: `read_shaping`, `shell_autobackground` (off) and `edit_errors`,
+`arg_coercion` (on).
