@@ -28,6 +28,7 @@ pub mod app;
 mod app_btw;
 mod app_remote;
 pub use app_btw::BtwOverlay;
+pub mod anywhere_menu;
 mod arg_parse;
 pub mod board;
 mod commands;

@@ -354,6 +354,13 @@ fn collect_items(app: &App, w: u16) -> Vec<Item> {
     for widget in &app.statusline_config.left {
         items.extend(widget_items(widget, app, w));
     }
+    if app.statusline_config.auto_sync_badge() {
+        items.extend(widget_items(
+            &forge_config::StatuslineWidget::AnywhereSync,
+            app,
+            w,
+        ));
+    }
     // The turn readout is built in, not a widget: tokens, then how fast. The tokens are a live
     // counter; once the turn ends its footer in the transcript carries the same numbers.
     if app.busy && app.turn_ran && (app.turn_in > 0 || app.turn_out > 0) {

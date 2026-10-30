@@ -84,6 +84,7 @@ mod pickers;
 pub(crate) use pickers::*;
 mod rewind_menu;
 pub(crate) use rewind_menu::*;
+mod anywhere_menu;
 mod dispatch;
 mod fork_cmd;
 mod heartbeat_cmd;
@@ -766,6 +767,7 @@ pub(crate) async fn run_chat_tui(
     let mut mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>> =
         None;
     let mut usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>> = None;
+    let mut anywhere_driver = anywhere_menu::AnywhereMenuDriver::new(mock);
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
     // rendering-facing `VoiceOverlay`. See `apply_voice_start`/`start_voice_transcribe`.
@@ -1537,6 +1539,13 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            // The `/anywhere` menu owns every key while open; side effects go through its driver.
+            if app.anywhere_menu.open {
+                anywhere_driver.key(&mut app, &mut tui, key)?;
+                dirty = true;
+                continue;
+            }
+
             // The `/config` editor is modal while open: it owns every key (filter / navigate / edit
             // / Tab scope / Esc). The editor returns an action; the shell performs the validated
             // write and refreshes the rows.
@@ -1692,6 +1701,7 @@ pub(crate) async fn run_chat_tui(
                 || app.palette.open
                 || app.btw_open()
                 || app.usage_overlay.open
+                || app.anywhere_menu.open
                 || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -4925,6 +4935,9 @@ pub(crate) async fn run_chat_tui(
             // Same settle-then-stop reveal as the mesh inspector; while the run is busy the
             // normal spinner tick keeps the row spinners animating past this point.
             app.workflow.anim_tick += 1;
+            dirty = true;
+        }
+        if anywhere_driver.tick(&mut app) {
             dirty = true;
         }
         if app.usage_overlay.open {

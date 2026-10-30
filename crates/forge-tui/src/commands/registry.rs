@@ -329,7 +329,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "anywhere",
-        desc: "set up and manage Forge Anywhere hosts, recovery, and device approvals",
+        desc: "Forge Anywhere menu: account, sync across machines, devices, recovery",
         usage: "/anywhere",
     },
     Command {

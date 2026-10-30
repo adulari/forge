@@ -2908,6 +2908,28 @@ pub struct StatuslineConfig {
     /// unchanged. `forge import claude` fills this from CC's `statusLine.command`.
     #[serde(default)]
     pub command: Option<String>,
+    /// Hide the account-sync badge that otherwise appears on its own while any account-sync
+    /// category is on and no `anywhere_sync` widget is configured. `/statusline toggle sync`
+    /// flips it.
+    #[serde(default)]
+    pub hide_sync_badge: bool,
+}
+
+impl StatuslineConfig {
+    /// True when `widget` sits in any configured segment.
+    pub fn lists(&self, widget: &StatuslineWidget) -> bool {
+        self.left
+            .iter()
+            .chain(&self.center)
+            .chain(&self.right)
+            .chain(self.extra_rows.iter().flatten())
+            .any(|w| w == widget)
+    }
+
+    /// The sync badge shows by itself: not listed anywhere, and not switched off.
+    pub fn auto_sync_badge(&self) -> bool {
+        !self.hide_sync_badge && !self.lists(&StatuslineWidget::AnywhereSync)
+    }
 }
 
 fn default_sl_left() -> Vec<StatuslineWidget> {
@@ -2932,6 +2954,7 @@ impl Default for StatuslineConfig {
             separator: default_sl_separator(),
             extra_rows: Vec::new(),
             command: None,
+            hide_sync_badge: false,
         }
     }
 }
@@ -5767,6 +5790,7 @@ reason = "no privilege escalation"
             separator: " | ".to_string(),
             extra_rows: vec![vec![StatuslineWidget::RepoName]],
             command: Some("~/.claude/statusline.sh".to_string()),
+            hide_sync_badge: false,
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let parsed: StatuslineConfig = toml::from_str(&serialized).unwrap();
@@ -5790,10 +5814,24 @@ reason = "no privilege escalation"
             separator: default_sl_separator(),
             extra_rows: vec![],
             command: None,
+            hide_sync_badge: false,
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let parsed: StatuslineConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.left, cfg.left);
+    }
+
+    #[test]
+    fn the_sync_badge_is_automatic_until_listed_or_hidden() {
+        let mut cfg = StatuslineConfig::default();
+        assert!(cfg.auto_sync_badge());
+        cfg.hide_sync_badge = true;
+        assert!(!cfg.auto_sync_badge());
+        cfg.hide_sync_badge = false;
+        cfg.extra_rows = vec![vec![StatuslineWidget::AnywhereSync]];
+        assert!(!cfg.auto_sync_badge(), "a listed widget renders itself");
+        let parsed: StatuslineConfig = toml::from_str("left = []").unwrap();
+        assert!(!parsed.hide_sync_badge, "old configs keep the badge");
     }
 
     #[test]

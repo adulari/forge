@@ -221,3 +221,42 @@ fn collect_hints(
         }
     }
 }
+
+/// A signed-in status with one of everything, for tests of the layers that present it.
+#[cfg(test)]
+pub(crate) fn status_fixture() -> AccountSyncStatus {
+    let category = |id: &'static str, label: &'static str, enabled: bool| CategoryStatus {
+        id,
+        label,
+        enabled,
+        items: 2,
+        pending: 0,
+        last_sync_at: None,
+        remote_only: None,
+        conflicts: Vec::new(),
+        skipped: Vec::new(),
+        toggle_requires_direct: id == "keys",
+    };
+    let mut categories = vec![
+        category("keys", "Keys & tokens", false),
+        category("mcp", "MCP servers", true),
+    ];
+    categories[0].remote_only = Some(3);
+    categories[1].skipped.push(Skipped {
+        item: "mcp: github".into(),
+        reason: "needs `npx`, not installed here".into(),
+    });
+    AccountSyncStatus {
+        signed_in: true,
+        anywhere_enabled: true,
+        last_sync_at: None,
+        last_error: None,
+        categories,
+        sign_ins: vec![SignIn {
+            provider: "codex".into(),
+            label: "Codex (ChatGPT)".into(),
+            command: "forge auth codex-oauth".into(),
+        }],
+        missing_tools: Vec::new(),
+    }
+}
