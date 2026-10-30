@@ -154,6 +154,9 @@ async fn upload_batch() -> Result<()> {
         return Ok(());
     }
     let state_store = StateStore::platform()?;
+    if let Err(error) = state_store.migrate_keys_to_secret_store() {
+        tracing::warn!("could not move Anywhere keys into the secret store: {error:#}");
+    }
     let mut state = state_store.load()?;
     let access_token = ensure_access_token(&state_store, &mut state).await?;
     let service_url = config.anywhere.service_url().to_owned();
