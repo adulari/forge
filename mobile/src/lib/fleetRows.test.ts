@@ -50,4 +50,20 @@ describe("fleet deck", () => {
     expect(deck).toHaveLength(1_001);
     expect(deck.at(-1)).toMatchObject({ type: "session", sourceIndex: 999 });
   });
+
+  it("floats starred rows under their own label and sinks done rows into a collapsed section", () => {
+    const starred = { ...row(1, "idle"), starred: true };
+    const done = { ...row(3, "busy"), done_at: 99 };
+    const all = [row(0, "idle"), starred, row(2, "busy"), done];
+    expect(buildFleetDeck(all, all).map((item) => (item.type === "label" ? item.label : item.row.id))).toEqual([
+      "STARRED",
+      "s1",
+      "FORGING",
+      "s2",
+      "COOL",
+      "s0",
+      "DONE · 1",
+    ]);
+    expect(buildFleetDeck(all, all, true).at(-1)).toMatchObject({ type: "session", sourceIndex: 3 });
+  });
 });

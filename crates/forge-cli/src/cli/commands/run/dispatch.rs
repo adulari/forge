@@ -1243,7 +1243,10 @@ script with `return <final result>` so the run yields a relayable answer.\n\nGoa
         | CommandAction::AddDir(_)
         | CommandAction::Doctor
         | CommandAction::Bug(_)
-        | CommandAction::Rename(_) => super::slash_commands::dispatch(action, session, app).await,
+        | CommandAction::Rename(_)
+        | CommandAction::Star
+        | CommandAction::Done
+        | CommandAction::Archived(_) => super::slash_commands::dispatch(action, session, app).await,
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {
             return dispatch_catalog(line, catalog, session, app, armed, trust_project, busy).await

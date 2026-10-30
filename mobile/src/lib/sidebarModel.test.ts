@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SessionRow } from "./api";
-import { buildProjectGroups, diffLabel, failedTurn, filterByWorkspace, projectAccent, projectName, sortSessions, walkNodes, type ScopedSession } from "./sidebarModel";
+import { buildProjectGroups, diffLabel, failedTurn, filterByWorkspace, projectAccent, projectName, sortSessions, splitDone, walkNodes, type ScopedSession } from "./sidebarModel";
 
 function entry(id: string, over: Partial<SessionRow> = {}, serverId = "s1"): ScopedSession {
   return {
@@ -138,5 +138,18 @@ describe("projectAccent", () => {
     expect(projectAccent("forge", "dark")).not.toBe(projectAccent("site", "dark"));
     expect(projectAccent("forge", "dark")).toContain("62%");
     expect(projectAccent("forge", "light")).toContain("42%");
+  });
+});
+
+describe("starred and done", () => {
+  it("floats starred sessions under the ones that need a decision", () => {
+    const rows = [entry("recent", { last_activity: 900 }), entry("starred", { starred: true, last_activity: 1 }), entry("wait", { waiting: true })];
+    expect(sortSessions(rows, "updated").map((e) => e.row.id)).toEqual(["wait", "starred", "recent"]);
+  });
+
+  it("splits done sessions out of the active list", () => {
+    const { active, done } = splitDone([entry("a"), entry("b", { done_at: 5 })]);
+    expect(active.map((e) => e.row.id)).toEqual(["a"]);
+    expect(done.map((e) => e.row.id)).toEqual(["b"]);
   });
 });

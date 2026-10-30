@@ -114,6 +114,9 @@ import {
   forkSession,
   answer as apiAnswer,
   archiveSession,
+  markSessionDone,
+  restoreSession,
+  starSession,
   deleteSession,
   type CreateSessionRequest,
   createSession,
@@ -1073,6 +1076,30 @@ export function useArchiveSession() {
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
     },
   });
+}
+
+function useSessionListMutation<V>(fn: (baseUrl: string, vars: V) => Promise<unknown>) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: V) => fn(baseUrl as string, vars),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).pastSessions });
+    },
+  });
+}
+
+export function useStarSession() {
+  return useSessionListMutation((baseUrl, { id, starred }: { id: string; starred: boolean }) => starSession(baseUrl, id, starred));
+}
+
+export function useMarkSessionDone() {
+  return useSessionListMutation((baseUrl, { id, done }: { id: string; done: boolean }) => markSessionDone(baseUrl, id, done));
+}
+
+export function useRestoreSession() {
+  return useSessionListMutation((baseUrl, id: string) => restoreSession(baseUrl, id));
 }
 
 export function useRenameSession() {

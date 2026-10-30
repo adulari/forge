@@ -63,8 +63,23 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "export",
-        desc: "export this session's transcript as one self-contained HTML file",
-        usage: "/export [path]",
+        desc: "export this session's transcript as one self-contained HTML file (--json for JSON)",
+        usage: "/export [--json] [path]",
+    },
+    Command {
+        name: "star",
+        desc: "star or unstar this session; starred sessions float and skip auto-archive",
+        usage: "/star",
+    },
+    Command {
+        name: "done",
+        desc: "mark this session done, or reopen it",
+        usage: "/done",
+    },
+    Command {
+        name: "archived",
+        desc: "list archived sessions, or restore one without resuming it",
+        usage: "/archived [restore <id>]",
     },
     Command {
         name: "resume",

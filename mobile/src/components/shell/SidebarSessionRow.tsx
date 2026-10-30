@@ -11,7 +11,7 @@ import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { providerFamily, providerFamilyLabel, providerIdOf } from "../../lib/providerFamily";
 import { getResolvedShortcut, shortcutBindingFromEvent, shortcutBindingsEqual } from "../../lib/shortcuts/bindings";
-import { useArchiveSession, useCreateSession, useDeleteSession, usePrefetchSessionHistory, useRenameSession } from "../../lib/queries";
+import { useArchiveSession, useCreateSession, useDeleteSession, useMarkSessionDone, usePrefetchSessionHistory, useRenameSession, useStarSession } from "../../lib/queries";
 import { diffLabel, failedTurn, projectRoot, sessionStateWord } from "../../lib/sidebarModel";
 import { requestSessionPrewarm } from "../../lib/sessionPrewarm";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -58,6 +58,8 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
   const rename = useRenameSession();
   const archive = useArchiveSession();
   const remove = useDeleteSession();
+  const star = useStarSession();
+  const markDone = useMarkSessionDone();
   const createSession = useCreateSession();
   const warmSession = useCallback(
     (id: string) => void prefetchHistory(id).then(() => requestSessionPrewarm(id)),
@@ -166,6 +168,26 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
       hint: row.worktree ? "already in one" : undefined,
       onPress: openInWorktree,
     },
+    {
+      kind: "item",
+      id: "star",
+      label: row.starred ? "Unstar" : "Star",
+      onPress: () =>
+        star.mutate(
+          { id: row.id, starred: !row.starred },
+          { onError: (error) => toast.show(errorText(error, "could not update the session"), { tone: "danger" }) },
+        ),
+    },
+    {
+      kind: "item",
+      id: "done",
+      label: row.done_at != null ? "Reopen" : "Mark done",
+      onPress: () =>
+        markDone.mutate(
+          { id: row.id, done: row.done_at == null },
+          { onError: (error) => toast.show(errorText(error, "could not update the session"), { tone: "danger" }) },
+        ),
+    },
     { kind: "separator", id: "sep-end" },
     { kind: "item", id: "archive", label: "Archive", disabled: terminal, hint: lifecycleReason, onPress: () => setConfirm("archive") },
     { kind: "item", id: "delete", label: "Delete…", disabled: terminal, hint: lifecycleReason, onPress: () => setConfirm("delete") },
@@ -230,7 +252,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
         onHoverIn={() => warmSession(row.id)}
         onPressIn={() => void prefetchHistory(row.id)}
         accessibilityRole="button"
-        accessibilityLabel={`${title}, ${sessionStateWord(row)}, ${family}${diff ? `, ${diff} lines` : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}${depth > 0 ? ", fork" : ""}`}
+        accessibilityLabel={`${title}, ${sessionStateWord(row)}, ${family}${diff ? `, ${diff} lines` : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}${depth > 0 ? ", fork" : ""}${row.starred ? ", starred" : ""}${row.done_at != null ? ", done" : ""}`}
         accessibilityHint="Opens in the focused pane. Right-click or double-click for more, or drag onto a pane."
         style={[
           styles.row,
@@ -265,6 +287,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
         {failed ? (
           <View accessibilityRole="image" accessibilityLabel="last turn failed" style={[styles.failedDot, { backgroundColor: tokens.danger }]} />
         ) : null}
+        {row.starred ? <Text accessibilityElementsHidden style={[typeScale.monoMeta, { color: tokens.accent }]}>★</Text> : null}
         {row.worktree ? <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>⑂</Text> : null}
         {diff ? (
           <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]} numberOfLines={1}>

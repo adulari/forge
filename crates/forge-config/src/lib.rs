@@ -54,6 +54,7 @@ pub mod quota_status;
 pub mod reporting;
 pub mod secret_health;
 pub mod secret_store;
+pub mod sessions;
 pub mod terminal;
 mod vision_fallback;
 mod workspace_state;
@@ -225,6 +226,9 @@ pub struct Config {
     /// How `open_pr` publishes pull requests (`[pr] publish_evidence_images`).
     #[serde(default)]
     pub pr: pr::PrConfig,
+    /// Idle unload and auto-archive of sessions (`[sessions]`).
+    #[serde(default)]
+    pub sessions: sessions::SessionsConfig,
     /// User-configurable keybind map (action → key combo). Defaults to the built-in map.
     #[serde(default)]
     pub keybinds: KeybindsConfig,
@@ -2992,6 +2996,7 @@ impl Default for Config {
             terminal: terminal::TerminalConfig::default(),
             codemode: codemode::CodemodeConfig::default(),
             pr: pr::PrConfig::default(),
+            sessions: sessions::SessionsConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             system_prompt_overrides: HashMap::new(),

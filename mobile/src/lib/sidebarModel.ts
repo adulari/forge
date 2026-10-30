@@ -50,6 +50,7 @@ function sortKey(row: SessionRow, sort: SidebarSort): number {
 export function sortSessions(entries: readonly ScopedSession[], sort: SidebarSort): ScopedSession[] {
   return [...entries].sort((a, b) => {
     if (a.row.waiting !== b.row.waiting) return a.row.waiting ? -1 : 1;
+    if (!!a.row.starred !== !!b.row.starred) return a.row.starred ? -1 : 1;
     return sortKey(b.row, sort) - sortKey(a.row, sort) || a.row.id.localeCompare(b.row.id);
   });
 }
@@ -126,6 +127,18 @@ export function buildProjectGroups(entries: readonly ScopedSession[], sort: Side
     }
   }
   return [...groups.values()];
+}
+
+export function isDone(row: Pick<SessionRow, "done_at">): boolean {
+  return row.done_at != null;
+}
+
+/** Done sessions leave the project groups for their own collapsed section. */
+export function splitDone(entries: readonly ScopedSession[]): { active: ScopedSession[]; done: ScopedSession[] } {
+  const active: ScopedSession[] = [];
+  const done: ScopedSession[] = [];
+  for (const entry of entries) (isDone(entry.row) ? done : active).push(entry);
+  return { active, done };
 }
 
 export function filterByWorkspace(entries: readonly ScopedSession[], projects: ReadonlySet<string> | null): ScopedSession[] {

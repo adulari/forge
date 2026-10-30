@@ -137,7 +137,7 @@ pub enum CommandAction {
     /// distinct side-note card, not a turn (`/btw <question>`, alias `/side`). Each call is
     /// independent (docs/features/side-questions.md).
     Btw(String),
-    /// Export this session's transcript as one self-contained HTML file (`/export [path]`).
+    /// Export this session's transcript as HTML, or JSON with `--json` (`/export [--json] [path]`).
     /// `None` uses the default `forge-session-<id8>.html` in the current directory.
     Export(Option<String>),
     /// Open the usage overlay showing API spend + token breakdown (`/usage`).
@@ -222,6 +222,12 @@ pub enum CommandAction {
     Doctor,
     /// Name this session (`/rename <title>`); empty shows the current name.
     Rename(String),
+    /// Star or unstar this session (`/star`).
+    Star,
+    /// Mark this session done, or reopen it (`/done`).
+    Done,
+    /// List archived sessions, or `restore <id>` one (`/archived [restore <id>]`).
+    Archived(String),
     /// Branch this session at its latest message into a child and continue there (`/fork [message]`).
     Fork(Option<String>),
     /// Park or restore a draft (`/stash [push|pop|list|clear]`).
@@ -407,6 +413,9 @@ pub fn parse_command(line: &str) -> CommandAction {
         "add-dir" => CommandAction::AddDir(arg),
         "doctor" => CommandAction::Doctor,
         "rename" => CommandAction::Rename(arg),
+        "star" => CommandAction::Star,
+        "done" => CommandAction::Done,
+        "archived" => CommandAction::Archived(arg),
         "bug" | "report" => CommandAction::Bug(arg),
         "rewind" | "undo" | "u" | "timeline" => CommandAction::Undo,
         "fork" | "branch" => CommandAction::Fork((!arg.is_empty()).then_some(arg)),
@@ -1148,6 +1157,12 @@ mod tests {
         assert_eq!(
             parse_command("/rename auth refactor"),
             CommandAction::Rename("auth refactor".into())
+        );
+        assert_eq!(parse_command("/star"), CommandAction::Star);
+        assert_eq!(parse_command("/done"), CommandAction::Done);
+        assert_eq!(
+            parse_command("/archived restore ab12"),
+            CommandAction::Archived("restore ab12".into())
         );
         for name in [
             "context",

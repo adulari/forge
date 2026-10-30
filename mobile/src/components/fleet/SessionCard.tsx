@@ -418,6 +418,8 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
           cwd: row.cwd,
           archived: false,
           running: true,
+          starred: row.starred ?? false,
+          done: row.done_at != null,
         }}
         visible={lifecycleVisible}
         onClose={() => setLifecycleVisible(false)}

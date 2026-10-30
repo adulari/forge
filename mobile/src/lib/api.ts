@@ -393,6 +393,10 @@ export interface SessionRow {
   diff_removed?: number | null;
   /** The checked-out branch of the session's working directory. */
   branch?: string | null;
+  /** Starred sessions float to the top of every list. Additive. */
+  starred?: boolean;
+  /** Unix seconds the session was marked done; absent or null while it is not. Additive. */
+  done_at?: number | null;
 }
 
 export interface PastSessionRow {
@@ -406,6 +410,8 @@ export interface PastSessionRow {
   last_activity: number;
   created_at: number;
   preview: string | null;
+  starred?: boolean;
+  done_at?: number | null;
 }
 
 export interface SessionSearchResult {
@@ -849,6 +855,26 @@ export function deleteSession(baseUrl: string, id: string): Promise<OkResponse> 
 
 export function archiveSession(baseUrl: string, id: string): Promise<OkResponse> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/archive`, {
+    method: "POST",
+  });
+}
+
+export function starSession(baseUrl: string, id: string, starred: boolean): Promise<OkResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/star`, {
+    method: "POST",
+    body: JSON.stringify({ starred }),
+  });
+}
+
+export function markSessionDone(baseUrl: string, id: string, done: boolean): Promise<OkResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/done`, {
+    method: "POST",
+    body: JSON.stringify({ done }),
+  });
+}
+
+export function restoreSession(baseUrl: string, id: string): Promise<OkResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/restore`, {
     method: "POST",
   });
 }

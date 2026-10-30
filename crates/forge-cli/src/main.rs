@@ -112,6 +112,7 @@ mod serve_git;
 mod serve_going_away;
 mod serve_history;
 mod serve_keybindings;
+mod serve_lifecycle;
 mod serve_media;
 mod serve_onboarding;
 mod serve_pr;

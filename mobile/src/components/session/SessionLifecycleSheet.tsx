@@ -1,8 +1,11 @@
 import {
   Archive,
+  ArchiveRestore,
+  CircleCheck,
   ExternalLink,
   Pencil,
   Play,
+  Star,
   Trash2,
 } from "lucide-react-native";
 import { router, usePathname } from "expo-router";
@@ -14,7 +17,10 @@ import {
   useArchiveSession,
   useCreateSession,
   useDeleteSession,
+  useMarkSessionDone,
   useRenameSession,
+  useRestoreSession,
+  useStarSession,
 } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -32,6 +38,8 @@ export interface SessionLifecycleTarget {
   cwd: string;
   archived: boolean;
   running: boolean;
+  starred?: boolean;
+  done?: boolean;
 }
 
 export interface SessionLifecycleSheetProps {
@@ -56,6 +64,9 @@ export function SessionLifecycleSheet({
   const archiveSession = useArchiveSession();
   const renameSession = useRenameSession();
   const deleteSession = useDeleteSession();
+  const starSession = useStarSession();
+  const markDone = useMarkSessionDone();
+  const restoreSession = useRestoreSession();
   const [current, setCurrent] = useState<SessionLifecycleTarget | null>(target);
   const [mode, setMode] = useState<"actions" | "rename">("actions");
   const [title, setTitle] = useState(target?.title ?? "");
@@ -65,6 +76,8 @@ export function SessionLifecycleSheet({
   const targetCwd = target?.cwd ?? "";
   const targetArchived = target?.archived ?? false;
   const targetRunning = target?.running ?? false;
+  const targetStarred = target?.starred ?? false;
+  const targetDone = target?.done ?? false;
 
   useEffect(() => {
     if (!targetId) return;
@@ -74,10 +87,12 @@ export function SessionLifecycleSheet({
       cwd: targetCwd,
       archived: targetArchived,
       running: targetRunning,
+      starred: targetStarred,
+      done: targetDone,
     });
     setTitle(targetTitle);
     setMode("actions");
-  }, [targetArchived, targetCwd, targetId, targetRunning, targetTitle]);
+  }, [targetArchived, targetCwd, targetId, targetRunning, targetTitle, targetStarred, targetDone]);
 
   const close = () => {
     setMode("actions");
@@ -114,6 +129,47 @@ export function SessionLifecycleSheet({
       },
       onError: (error) =>
         toast.show(errorMessage(error, "could not archive session."), { tone: "danger" }),
+    });
+  };
+
+  const toggleStar = () => {
+    if (!current) return;
+    const starred = !current.starred;
+    starSession.mutate(
+      { id: current.id, starred },
+      {
+        onSuccess: () => {
+          toast.show(starred ? "session starred" : "session unstarred");
+          close();
+        },
+        onError: (error) => toast.show(errorMessage(error, "could not update session."), { tone: "danger" }),
+      },
+    );
+  };
+
+  const toggleDone = () => {
+    if (!current) return;
+    const done = !current.done;
+    markDone.mutate(
+      { id: current.id, done },
+      {
+        onSuccess: () => {
+          toast.show(done ? "marked done" : "reopened");
+          close();
+        },
+        onError: (error) => toast.show(errorMessage(error, "could not update session."), { tone: "danger" }),
+      },
+    );
+  };
+
+  const restore = () => {
+    if (!current) return;
+    restoreSession.mutate(current.id, {
+      onSuccess: () => {
+        toast.show("session restored");
+        close();
+      },
+      onError: (error) => toast.show(errorMessage(error, "could not restore session."), { tone: "danger" }),
     });
   };
 
@@ -205,10 +261,33 @@ export function SessionLifecycleSheet({
                   onPress={open}
                 />
                 <ListRow
+                  title={current.starred ? "Unstar session" : "Star session"}
+                  subtitle={current.starred ? undefined : "Keeps it at the top and out of auto-archive"}
+                  leading={<Star size={19} color={tokens.ink2} />}
+                  onPress={toggleStar}
+                  disabled={starSession.isPending}
+                />
+                <ListRow
+                  title={current.done ? "Reopen session" : "Mark done"}
+                  subtitle={current.done ? undefined : "Moves it to the collapsed Done section"}
+                  leading={<CircleCheck size={19} color={tokens.ink2} />}
+                  onPress={toggleDone}
+                  disabled={markDone.isPending}
+                />
+                <ListRow
                   title="Rename session"
                   leading={<Pencil size={19} color={tokens.ink2} />}
                   onPress={() => setMode("rename")}
                 />
+                {current.archived && !current.running ? (
+                  <ListRow
+                    title="Restore from archive"
+                    subtitle="Back in your lists, not resumed"
+                    leading={<ArchiveRestore size={19} color={tokens.ink2} />}
+                    onPress={restore}
+                    disabled={restoreSession.isPending}
+                  />
+                ) : null}
                 {!current.archived ? (
                   <ListRow
                     title="Archive session"
@@ -220,7 +299,7 @@ export function SessionLifecycleSheet({
                 ) : null}
                 {!current.running ? (
                   <ListRow
-                    title="Delete permanently…"
+                    title={current.archived ? "Delete forever…" : "Delete permanently…"}
                     subtitle="Removes the session and transcript; managed worktrees must be resolved first"
                     leading={<Trash2 size={19} color={tokens.danger} />}
                     onPress={() => {

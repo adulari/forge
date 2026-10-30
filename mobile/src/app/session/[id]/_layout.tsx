@@ -572,6 +572,8 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             cwd: snapshot?.cwd ?? "",
             archived: false,
             running: !(closed || sessionEnded),
+            starred: fleetRows?.find((r) => r.id === sessionId)?.starred ?? false,
+            done: fleetRows?.find((r) => r.id === sessionId)?.done_at != null,
           }}
           visible={lifecycleVisible}
           onClose={() => setLifecycleVisible(false)}

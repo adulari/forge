@@ -29,7 +29,7 @@ import { filterByProject, projectChips } from "../../lib/fleetProjects";
 import { useScopedFleet } from "../../lib/useScopedFleet";
 import { useUsage } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
-import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
+import { buildFleetDeck, DONE_LABEL_PREFIX, type FleetDeckItem } from "../../lib/fleetRows";
 import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
 import { space } from "../../theme/tokens";
 import { useShortcutLabel } from "../../lib/shortcuts";
@@ -182,7 +182,8 @@ export function FleetScreen() {
     () => filterByProject(filterSessions(data, "", needsYouOnly), activeProject),
     [data, needsYouOnly, activeProject],
   );
-  const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
+  const [showDone, setShowDone] = useState(false);
+  const deckRows = useMemo(() => buildFleetDeck(filteredData, data, showDone), [filteredData, data, showDone]);
   const hasData = data.length > 0;
   const isFirstLoad = fleet.isLoading && !hasData;
   const showingLastKnown = fleet.showingLastKnown;
@@ -190,6 +191,22 @@ export function FleetScreen() {
 
   const renderItem = useCallback(
     ({ item }: { item: FleetDeckItem }) => {
+      if (item.type === "label" && item.label.startsWith(DONE_LABEL_PREFIX)) {
+        return (
+          <Pressable
+            onPress={() => setShowDone((value) => !value)}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: showDone }}
+            accessibilityLabel={`${item.label.replace(" · ", ", ")} sessions, ${showDone ? "collapse" : "expand"}`}
+            hitSlop={8}
+          >
+            <Text style={[typeScale.section, styles.groupLabel, { color: tokens.ink4 }]}>
+              {showDone ? "▾ " : "▸ "}
+              {item.label}
+            </Text>
+          </Pressable>
+        );
+      }
       if (item.type === "label") {
         return <Text style={[typeScale.section, styles.groupLabel, { color: tokens.ink4 }]}>{item.label}</Text>;
       }
@@ -201,7 +218,7 @@ export function FleetScreen() {
       const serverId = serverByRowId.get(item.row.id);
       return serverId ? <ServerScope serverId={serverId}>{card}</ServerScope> : card;
     },
-    [tokens.ink4, onPeek, serverByRowId],
+    [tokens.ink4, onPeek, serverByRowId, showDone],
   );
   const keyExtractor = useCallback((item: (typeof deckRows)[number]) => item.type === "label" ? `label:${item.label}` : item.row.id, []);
 

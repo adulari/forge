@@ -138,6 +138,8 @@ function HistoryRowBase({ row, index, onPress, onActions }: HistoryRowProps) {
                     "running" on an idle session read as busy. */}
                 {row.running ? <Badge label="live" tone="success" /> : null}
                 {row.archived ? <Badge label="archived" tone="neutral" /> : null}
+                {row.done_at != null ? <Badge label="done" tone="neutral" /> : null}
+                {row.starred ? <Badge label="starred" tone="neutral" /> : null}
               </View>
               <Text
                 style={[type.sub, styles.cwd, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
@@ -187,6 +189,8 @@ const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
     a.title === b.title &&
     a.cwd === b.cwd &&
     a.archived === b.archived &&
+    a.starred === b.starred &&
+    a.done_at === b.done_at &&
     a.message_count === b.message_count &&
     a.cost_usd === b.cost_usd &&
     a.preview === b.preview &&
@@ -402,6 +406,8 @@ export function HistoryScreen() {
                 cwd: actionsRow.cwd,
                 archived: actionsRow.archived,
                 running: actionsRow.running,
+                starred: actionsRow.starred ?? false,
+                done: actionsRow.done_at != null,
               }
             : null
         }

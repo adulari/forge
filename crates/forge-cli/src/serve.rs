@@ -722,6 +722,7 @@ pub(crate) async fn serve_cmd(
         crate::serve_dispatch::run_supervisor(supervised).await;
     });
     crate::serve_update::start_auto(&state.registry);
+    crate::serve_lifecycle::start(&state, config.sessions.clone());
 
     // Forge Anywhere gets a private loopback copy of the SAME router. The public LAN/local/tunnel
     // listener below is unchanged, while the connector never needs to upload the daemon token or
@@ -1001,6 +1002,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
         .merge(crate::serve_access::routes(&base))
+        .merge(crate::serve_lifecycle::routes(&base))
         // Schedule registry (serve_schedules.rs) — the same rows + OS timers `forge schedule` owns.
         .route(
             &format!("{base}/api/schedules"),
@@ -2089,6 +2091,8 @@ struct PastSessionRow {
     created_at: i64,
     /// First user message — a one-line hint of what the session was about.
     preview: Option<String>,
+    starred: bool,
+    done_at: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2209,14 +2213,20 @@ async fn past_sessions(
         if let Ok(local) = store.local_live_sessions() {
             running.extend(local.into_iter().map(|row| row.id));
         }
-        store
+        let page: Vec<_> = store
             .list_sessions_for_resume()
             .unwrap_or_default()
             .into_iter()
             .filter(|s| !running.contains(&s.id))
             .filter(|s| before.is_none_or(|b| s.last_activity < b))
             .take(limit)
+            .collect();
+        let ids: Vec<String> = page.iter().map(|s| s.id.clone()).collect();
+        let lifecycle = store.session_lifecycle(&ids).unwrap_or_default();
+        page.into_iter()
             .map(|s| PastSessionRow {
+                starred: lifecycle.get(&s.id).is_some_and(|l| l.0),
+                done_at: lifecycle.get(&s.id).and_then(|l| l.1),
                 // A saved title wins; an untitled session (most of them — only the daemon
                 // driver, the rename route, and subagents ever write `session.title`) falls
                 // back to its opening prompt instead of showing nothing, the same fallback the

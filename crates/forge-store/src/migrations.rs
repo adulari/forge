@@ -15,6 +15,7 @@ mod m0043_bench_solve;
 mod m0044_session_host_state;
 mod m0045_queued_prompts;
 mod m0046_usage_api_calls;
+mod m0047_session_lifecycle;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
@@ -30,6 +31,7 @@ use m0043_bench_solve::migration_0043;
 use m0044_session_host_state::migration_0044;
 use m0045_queued_prompts::migration_0045;
 use m0046_usage_api_calls::migration_0046;
+use m0047_session_lifecycle::migration_0047;
 mod usage;
 use usage::migration_0030;
 
@@ -724,6 +726,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0044,
     migration_0045,
     migration_0046,
+    migration_0047,
 ];
 
 /// Migration #33: whether a session has released its subagents from the active model pin.
