@@ -202,3 +202,88 @@ export function nextCronRun(expression: string, now: number = Date.now()): numbe
   }
   return null;
 }
+
+const WEEKDAY_LONG = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** `3:00 AM`, `12:30 PM` - the 12-hour clock a person says out loud. */
+export function formatClock(hour: number, minute: number): string {
+  const suffix = hour < 12 ? "AM" : "PM";
+  const h12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h12}:${String(minute).padStart(2, "0")} ${suffix}`;
+}
+
+function isRun(values: number[], from: number, to: number): boolean {
+  return values.length === to - from + 1 && values.every((value, index) => value === from + index);
+}
+
+function ordinal(day: number): string {
+  const rest = day % 100;
+  if (rest >= 11 && rest <= 13) return `${day}th`;
+  return `${day}${["th", "st", "nd", "rd"][day % 10 > 3 ? 0 : day % 10]}`;
+}
+
+/**
+ * A cron expression in words, or null when it has no short honest rendering ("Weekdays at 3:00 AM",
+ * "Every 15 minutes", "Mondays and Fridays at 9:00 AM"). Null means "show the raw expression" -
+ * a vague paraphrase of a spec we do not fully understand would be worse than the spec itself.
+ */
+export function describeCron(expression: string): string | null {
+  const fields = parseCron(expression);
+  if (!fields) return null;
+  const { minutes, hours, daysOfMonth, months, daysOfWeek } = fields;
+  const everyDay = isRun(daysOfMonth, 1, 31);
+  const everyMonth = isRun(months, 1, 12);
+  const allWeek = isRun(daysOfWeek, 0, 6);
+  const singleTime = minutes.length === 1 && hours.length === 1;
+  const clock = singleTime ? formatClock(hours[0], minutes[0]) : null;
+
+  if (everyDay && everyMonth && allWeek) {
+    if (hours.length === 24 && minutes.length === 1) {
+      return minutes[0] === 0 ? "Every hour" : `Every hour at :${String(minutes[0]).padStart(2, "0")}`;
+    }
+    if (hours.length === 24 && minutes.length > 1) {
+      const step = minutes[1] - minutes[0];
+      const regular = minutes.every((value, index) => value === minutes[0] + index * step);
+      if (minutes[0] === 0 && regular && 60 % step === 0 && minutes.length === 60 / step) {
+        return step === 1 ? "Every minute" : `Every ${step} minutes`;
+      }
+      return null;
+    }
+    return clock ? `Daily at ${clock}` : null;
+  }
+  if (!clock) return null;
+  if (everyDay && everyMonth && !allWeek) {
+    if (isRun(daysOfWeek, 1, 5)) return `Weekdays at ${clock}`;
+    if (daysOfWeek.length === 2 && daysOfWeek[0] === 0 && daysOfWeek[1] === 6) return `Weekends at ${clock}`;
+    if (daysOfWeek.length === 1) return `${WEEKDAY_LONG[daysOfWeek[0]]}s at ${clock}`;
+    return `${daysOfWeek.map((day) => WEEKDAY_SHORT[day]).join(", ")} at ${clock}`;
+  }
+  if (allWeek && everyMonth && daysOfMonth.length === 1) {
+    return `Monthly on the ${ordinal(daysOfMonth[0])} at ${clock}`;
+  }
+  if (allWeek && months.length === 1 && daysOfMonth.length === 1) {
+    return `${MONTH_SHORT[months[0] - 1]} ${daysOfMonth[0]} at ${clock}`;
+  }
+  return null;
+}
+
+/** The label for a stored spec (`every:1800` / `daily:09:00` / `cron:<expr>`): words when we have
+ * them, the daemon's own `spec_label` when we do not. */
+export function describeStoredSpec(stored: string, fallback: string): string {
+  if (stored.startsWith("every:")) {
+    const seconds = parseInt(stored.slice("every:".length), 10);
+    if (!Number.isFinite(seconds) || seconds <= 0) return fallback;
+    if (seconds % 86_400 === 0) return seconds === 86_400 ? "Every day" : `Every ${seconds / 86_400} days`;
+    if (seconds % 3_600 === 0) return seconds === 3_600 ? "Every hour" : `Every ${seconds / 3_600} hours`;
+    if (seconds % 60 === 0) return seconds === 60 ? "Every minute" : `Every ${seconds / 60} minutes`;
+    return `Every ${seconds} seconds`;
+  }
+  if (stored.startsWith("daily:")) {
+    const [hours, minutes] = stored.slice("daily:".length).split(":").map((part) => parseInt(part, 10));
+    return Number.isFinite(hours) && Number.isFinite(minutes) ? `Daily at ${formatClock(hours, minutes)}` : fallback;
+  }
+  if (stored.startsWith("cron:")) return describeCron(stored.slice("cron:".length)) ?? fallback;
+  return fallback;
+}

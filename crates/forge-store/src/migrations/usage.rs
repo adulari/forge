@@ -1,5 +1,47 @@
 use super::*;
 
+/// Migrate `subscription_usage` from its old single-column PK to the composite
+/// `(provider, window_kind)` PK. Safe to call on any DB version: a no-op when the table
+/// doesn't exist yet (schema will create it correctly) or already has the composite key.
+pub(crate) fn migrate_subscription_usage(conn: &Connection) -> rusqlite::Result<()> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='subscription_usage'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if exists == 0 {
+        return Ok(()); // table not yet created; schema will handle it
+    }
+    let pk_cols: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('subscription_usage') WHERE pk > 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if pk_cols >= 2 {
+        return Ok(()); // already on composite PK
+    }
+    // Old single-column PK — recreate with composite key.
+    // subscription_usage is a transient cache; data loss on migration is acceptable.
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS subscription_usage_new;
+         CREATE TABLE subscription_usage_new (
+             provider    TEXT NOT NULL,
+             window_kind TEXT NOT NULL,
+             status      TEXT NOT NULL,
+             resets_at   INTEGER,
+             fraction    REAL,
+             updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+             PRIMARY KEY (provider, window_kind)
+         );
+         DROP TABLE subscription_usage;
+         ALTER TABLE subscription_usage_new RENAME TO subscription_usage;",
+    )
+}
+
 /// Make `usage.cached_input_tokens` nullable so "the provider does not report prompt-cache hits"
 /// stops being recorded as the factual claim "nothing was cached".
 ///

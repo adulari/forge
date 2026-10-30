@@ -38,6 +38,7 @@ mod model_health_store;
 mod notification_store;
 mod provider_items_store;
 mod queued_prompt_store;
+mod schedule_run_store;
 use migrations::{
     add_column_if_missing, migrate_subscription_usage, run_migrations, seed_singleton_rows,
 };
@@ -93,7 +94,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 47;
+const SCHEMA_VERSION: i64 = 48;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -2014,6 +2015,54 @@ pub struct Schedule {
     pub enabled: bool,
     pub created_at: i64,
     pub last_run: Option<i64>,
+    pub policy: SchedulePolicy,
+}
+
+/// How a schedule's ticks behave: the zone its calendar is read in and the limits one tick runs
+/// under. `misfire` is `"run"` (fire a tick missed while the machine was off, once) or `"skip"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulePolicy {
+    pub tz: Option<String>,
+    pub max_runtime_secs: Option<i64>,
+    pub max_iterations: Option<i64>,
+    pub retries: i64,
+    pub backoff_secs: i64,
+    pub misfire: String,
+    pub stop_on_error: bool,
+    pub stop_when: Option<String>,
+}
+
+impl Default for SchedulePolicy {
+    fn default() -> Self {
+        Self {
+            tz: None,
+            max_runtime_secs: None,
+            max_iterations: None,
+            retries: 0,
+            backoff_secs: 60,
+            misfire: "run".to_string(),
+            stop_on_error: false,
+            stop_when: None,
+        }
+    }
+}
+
+/// One tick of a schedule. `status`: `running` -> `ok` / `failed` / `interrupted` (the process
+/// died mid-run) / `skipped` (the previous tick was still running).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleRun {
+    pub id: String,
+    pub schedule_id: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub status: String,
+    pub trigger: String,
+    pub attempt: i64,
+    pub session_id: Option<String>,
+    pub pid: Option<i64>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub read: bool,
 }
 
 /// One `forge queue` row: a queued headless task plus, once drained, its recorded outcome.

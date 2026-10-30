@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 
+use forge_store::SchedulePolicy;
+
 use super::{
     cron::{cron_to_launchd_intervals, cron_to_on_calendar, cron_to_schtasks_trigger},
     parse_posix_cron, ScheduleSpec,
@@ -25,18 +27,16 @@ fn launchd_agents_dir() -> Result<std::path::PathBuf> {
 pub(crate) fn install_timer(
     id: &str,
     spec: &ScheduleSpec,
-    task: &str,
     cwd: &str,
-    mode: Option<&str>,
-    model: Option<&str>,
     forge_exe: &str,
+    policy: &SchedulePolicy,
 ) -> Result<()> {
     if cfg!(target_os = "linux") {
-        install_systemd(id, spec, task, cwd, mode, model, forge_exe)
+        install_systemd(id, spec, cwd, forge_exe, policy)
     } else if cfg!(target_os = "macos") {
-        install_launchd(id, spec, task, cwd, mode, model, forge_exe)
+        install_launchd(id, spec, cwd, forge_exe, policy)
     } else if cfg!(target_os = "windows") {
-        install_schtasks(id, spec, task, cwd, mode, model, forge_exe)
+        install_schtasks(id, spec, cwd, forge_exe, policy)
     } else {
         anyhow::bail!("forge schedule has no OS-timer backend for this platform")
     }
@@ -73,21 +73,14 @@ fn run_checked(cmd: &str, args: &[&str]) -> Result<()> {
 
 // --- systemd (Linux) ---
 
-pub(super) fn render_systemd_service(
-    id: &str,
-    task: &str,
-    cwd: &str,
-    mode: Option<&str>,
-    model: Option<&str>,
-    forge_exe: &str,
-) -> String {
-    let mut exec = format!("{} run {}", quote_unit_arg(forge_exe), quote_unit_arg(task));
-    if let Some(m) = mode {
-        exec.push_str(&format!(" --mode {}", quote_unit_arg(m)));
-    }
-    if let Some(m) = model {
-        exec.push_str(&format!(" --model {}", quote_unit_arg(m)));
-    }
+/// The timer launches `forge schedule tick <id>`, which reads the task, mode and model from the
+/// store at fire time - so an edit never needs the unit rewritten, and the tick can record history.
+pub(super) fn render_systemd_service(id: &str, cwd: &str, forge_exe: &str) -> String {
+    let exec = format!(
+        "{} schedule tick {}",
+        quote_unit_arg(forge_exe),
+        quote_unit_arg(id)
+    );
     format!(
         "[Unit]\nDescription=Forge scheduled task {id}\n\n\
          [Service]\nType=oneshot\nWorkingDirectory={}\nExecStart={exec}\n",
@@ -97,14 +90,29 @@ pub(super) fn render_systemd_service(
     )
 }
 
-pub(super) fn render_systemd_timer(id: &str, spec: &ScheduleSpec) -> Result<String> {
+pub(super) fn render_systemd_timer(
+    id: &str,
+    spec: &ScheduleSpec,
+    policy: &SchedulePolicy,
+) -> Result<String> {
+    // systemd reads a trailing zone name on a calendar expression, which is what lets "3:00 in
+    // Tokyo" fire at the right instant whatever the machine's own zone is.
+    let zone = match policy
+        .tz
+        .as_deref()
+        .map(str::trim)
+        .filter(|tz| !tz.is_empty())
+    {
+        Some(tz) => format!(" {tz}"),
+        None => String::new(),
+    };
     let body = match spec {
         ScheduleSpec::Every(d) => {
             let secs = d.as_secs();
             format!("OnActiveSec={secs}s\nOnUnitActiveSec={secs}s")
         }
         ScheduleSpec::Daily { hour, minute } => {
-            format!("OnCalendar=*-*-* {hour:02}:{minute:02}:00")
+            format!("OnCalendar=*-*-* {hour:02}:{minute:02}:00{zone}")
         }
         // A POSIX expression becomes one OnCalendar= line per systemd expression it needs (two for
         // the DOM/DOW OR case, which systemd unions); anything else is the historical verbatim
@@ -112,15 +120,18 @@ pub(super) fn render_systemd_timer(id: &str, spec: &ScheduleSpec) -> Result<Stri
         ScheduleSpec::Cron(expr) => match parse_posix_cron(expr) {
             Some(fields) => cron_to_on_calendar(&fields)
                 .into_iter()
-                .map(|line| format!("OnCalendar={line}"))
+                .map(|line| format!("OnCalendar={line}{zone}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            None => format!("OnCalendar={expr}"),
+            None => format!("OnCalendar={expr}{zone}"),
         },
     };
+    // `Persistent=` is the misfire policy: true runs one tick that was missed while the machine
+    // was off, false drops it.
+    let persistent = policy.misfire != "skip";
     Ok(format!(
         "[Unit]\nDescription=Forge schedule timer {id}\n\n\
-         [Timer]\n{body}\nPersistent=true\n\n\
+         [Timer]\n{body}\nPersistent={persistent}\n\n\
          [Install]\nWantedBy=timers.target\n"
     ))
 }
@@ -141,16 +152,14 @@ fn quote_unit_arg(s: &str) -> String {
 fn install_systemd(
     id: &str,
     spec: &ScheduleSpec,
-    task: &str,
     cwd: &str,
-    mode: Option<&str>,
-    model: Option<&str>,
     forge_exe: &str,
+    policy: &SchedulePolicy,
 ) -> Result<()> {
     let dir = systemd_user_dir()?;
     std::fs::create_dir_all(&dir).context("creating ~/.config/systemd/user")?;
-    let service = render_systemd_service(id, task, cwd, mode, model, forge_exe);
-    let timer = render_systemd_timer(id, spec)?;
+    let service = render_systemd_service(id, cwd, forge_exe);
+    let timer = render_systemd_timer(id, spec, policy)?;
     let service_path = dir.join(format!("forge-{id}.service"));
     let timer_path = dir.join(format!("forge-{id}.timer"));
     std::fs::write(&service_path, service).context("writing systemd service unit")?;
@@ -197,6 +206,23 @@ fn uninstall_systemd(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// launchd and Task Scheduler only know the machine's own zone, so a schedule pinned to another
+/// one cannot be expressed there. Saying so beats firing at the wrong hour.
+fn reject_foreign_zone(os: &str, policy: &SchedulePolicy) -> Result<()> {
+    match policy
+        .tz
+        .as_deref()
+        .map(str::trim)
+        .filter(|tz| !tz.is_empty())
+    {
+        Some(tz) => anyhow::bail!(
+            "{os} timers always use this machine's time zone, so a schedule in {tz} can't be \
+             installed here - clear the time zone, or run the schedule on a Linux daemon"
+        ),
+        None => Ok(()),
+    }
+}
+
 // --- launchd (macOS) ---
 
 fn xml_escape(s: &str) -> String {
@@ -208,22 +234,13 @@ fn xml_escape(s: &str) -> String {
 
 pub(super) fn render_launchd_plist(
     id: &str,
-    task: &str,
     cwd: &str,
-    mode: Option<&str>,
-    model: Option<&str>,
     forge_exe: &str,
     spec: &ScheduleSpec,
+    policy: &SchedulePolicy,
 ) -> Result<String> {
-    let mut args = vec![forge_exe.to_string(), "run".to_string(), task.to_string()];
-    if let Some(m) = mode {
-        args.push("--mode".to_string());
-        args.push(m.to_string());
-    }
-    if let Some(m) = model {
-        args.push("--model".to_string());
-        args.push(m.to_string());
-    }
+    reject_foreign_zone("macOS", policy)?;
+    let args = [forge_exe, "schedule", "tick", id].map(str::to_string);
     let mut args_xml = String::new();
     for a in &args {
         args_xml.push_str(&format!("        <string>{}</string>\n", xml_escape(a)));
@@ -287,19 +304,16 @@ pub(super) fn render_launchd_plist(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn install_launchd(
     id: &str,
     spec: &ScheduleSpec,
-    task: &str,
     cwd: &str,
-    mode: Option<&str>,
-    model: Option<&str>,
     forge_exe: &str,
+    policy: &SchedulePolicy,
 ) -> Result<()> {
     let dir = launchd_agents_dir()?;
     std::fs::create_dir_all(&dir).context("creating ~/Library/LaunchAgents")?;
-    let plist = render_launchd_plist(id, task, cwd, mode, model, forge_exe, spec)?;
+    let plist = render_launchd_plist(id, cwd, forge_exe, spec, policy)?;
     let path = dir.join(format!("dev.forge.schedule.{id}.plist"));
     std::fs::write(&path, plist).context("writing launchd plist")?;
     if let Err(error) = run_checked("launchctl", &["load", &path.to_string_lossy()]) {
@@ -324,23 +338,15 @@ fn uninstall_launchd(id: &str) -> Result<()> {
 /// not something `schtasks` can exec directly).
 pub(super) fn render_schtasks_create_args(
     id: &str,
-    task: &str,
     cwd: &str,
-    mode: Option<&str>,
-    model: Option<&str>,
     forge_exe: &str,
     spec: &ScheduleSpec,
+    policy: &SchedulePolicy,
 ) -> Result<Vec<String>> {
+    reject_foreign_zone("Windows", policy)?;
     let quoted_cwd = cwd.replace('"', "\"\"");
     let quoted_exe = forge_exe.replace('"', "\"\"");
-    let quoted_task = task.replace('"', "\"\"");
-    let mut inner = format!(r#"cd /d ""{quoted_cwd}"" && ""{quoted_exe}"" run ""{quoted_task}"""#);
-    if let Some(m) = mode {
-        inner.push_str(&format!(r#" --mode ""{}"""#, m.replace('"', "\"\"")));
-    }
-    if let Some(m) = model {
-        inner.push_str(&format!(r#" --model ""{}"""#, m.replace('"', "\"\"")));
-    }
+    let inner = format!(r#"cd /d ""{quoted_cwd}"" && ""{quoted_exe}"" schedule tick {id}"#);
 
     let mut args = vec![
         "/Create".to_string(),
@@ -386,17 +392,14 @@ pub(super) fn render_schtasks_create_args(
     Ok(args)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn install_schtasks(
     id: &str,
     spec: &ScheduleSpec,
-    task: &str,
     cwd: &str,
-    mode: Option<&str>,
-    model: Option<&str>,
     forge_exe: &str,
+    policy: &SchedulePolicy,
 ) -> Result<()> {
-    let args = render_schtasks_create_args(id, task, cwd, mode, model, forge_exe, spec)?;
+    let args = render_schtasks_create_args(id, cwd, forge_exe, spec, policy)?;
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_checked("schtasks", &arg_refs)
 }

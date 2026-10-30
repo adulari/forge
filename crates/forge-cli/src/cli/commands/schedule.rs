@@ -17,8 +17,30 @@ pub(crate) fn schedule_cmd(cmd: Option<ScheduleCmd>) -> Result<()> {
             cron,
             mode,
             model,
-        }) => add_schedule_cmd(task.join(" "), every, at, cron, mode, model),
+            tz,
+            max_runtime,
+            max_runs,
+            retries,
+            stop_on_error,
+            stop_when,
+            skip_missed,
+        }) => {
+            let policy = forge_store::SchedulePolicy {
+                tz: tz.filter(|tz| !tz.trim().is_empty()),
+                max_runtime_secs: max_runtime.map(|minutes| minutes.saturating_mul(60)),
+                max_iterations: max_runs,
+                retries: retries.clamp(0, 5),
+                stop_on_error,
+                stop_when: stop_when.filter(|text| !text.trim().is_empty()),
+                misfire: if skip_missed { "skip" } else { "run" }.to_string(),
+                ..Default::default()
+            };
+            add_schedule_cmd(task.join(" "), every, at, cron, mode, model, policy)
+        }
+        Some(ScheduleCmd::Run { id }) => tick::tick_cmd(&id, true),
+        Some(ScheduleCmd::History { id, limit }) => history_cmd(id.as_deref(), limit),
         Some(ScheduleCmd::Remove { id }) => remove_schedule_cmd(&id),
+        Some(ScheduleCmd::Tick { id, manual }) => tick::tick_cmd(&id, manual),
     }
 }
 
@@ -150,6 +172,7 @@ fn add_schedule_cmd(
     cron: Option<String>,
     mode: Option<String>,
     model: Option<String>,
+    policy: forge_store::SchedulePolicy,
 ) -> Result<()> {
     if task.trim().is_empty() {
         anyhow::bail!("empty task — usage: forge schedule add \"<task>\" --every 30m");
@@ -193,18 +216,13 @@ fn add_schedule_cmd(
             &spec.to_stored(),
         )
         .context("persisting schedule")?;
+    store
+        .set_schedule_policy(&id, &policy)
+        .context("persisting schedule policy")?;
 
     // Install the OS timer only after the row lands — on failure, roll the row back so a failed
     // `add` never leaves an orphaned schedule with no matching timer.
-    if let Err(e) = install_timer(
-        &id,
-        &spec,
-        &task,
-        &cwd,
-        mode.as_deref(),
-        model.as_deref(),
-        &forge_exe,
-    ) {
+    if let Err(e) = install_timer(&id, &spec, &cwd, &forge_exe, &policy) {
         let _ = store.remove_schedule(&id);
         return Err(e).context("installing the OS timer");
     }
@@ -250,6 +268,44 @@ fn list_schedules_cmd() -> Result<()> {
     Ok(())
 }
 
+fn history_cmd(id_prefix: Option<&str>, limit: i64) -> Result<()> {
+    let store = open_store()?;
+    tick::sweep_dead_runs(&store)?;
+    let schedule_id = id_prefix
+        .map(|prefix| resolve_schedule_id(&store, prefix))
+        .transpose()?;
+    let runs = store.list_schedule_runs(schedule_id.as_deref(), limit.clamp(1, 500))?;
+    if runs.is_empty() {
+        println!("no runs recorded yet");
+        return Ok(());
+    }
+    println!(
+        "{:<10} {:<11} {:<8} {:<9} {:<10} DETAIL",
+        "SCHEDULE", "STATUS", "TRIGGER", "WHEN", "SESSION"
+    );
+    for run in &runs {
+        let short = |id: &str| id.chars().take(8).collect::<String>();
+        let detail = run
+            .error
+            .as_deref()
+            .or(run.summary.as_deref())
+            .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("");
+        println!(
+            "{:<10} {:<11} {:<8} {:<9} {:<10} {}",
+            short(&run.schedule_id),
+            run.status,
+            run.trigger,
+            fmt_age(run.started_at),
+            run.session_id.as_deref().map(short).unwrap_or_default(),
+            detail
+        );
+    }
+    Ok(())
+}
+
 fn remove_schedule_cmd(id_prefix: &str) -> Result<()> {
     let store = open_store()?;
     let id = resolve_schedule_id(&store, id_prefix)?;
@@ -282,6 +338,7 @@ pub(crate) use cron::parse_posix_cron;
 // ---------------------------------------------------------------------------
 mod native;
 pub(crate) use native::{install_timer, uninstall_timer};
+pub(crate) mod tick;
 #[cfg(test)]
 use native::{
     render_launchd_plist, render_schtasks_create_args, render_systemd_service, render_systemd_timer,
@@ -290,6 +347,7 @@ use native::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forge_store::SchedulePolicy;
 
     #[test]
     fn parse_every_handles_units_and_rejects_garbage() {
@@ -346,38 +404,25 @@ mod tests {
 
     #[test]
     fn systemd_service_unit_contains_task_cwd_and_exec() {
-        let unit = render_systemd_service(
-            "abc123",
-            "check the deploy",
-            "/home/user/proj",
-            Some("bypass"),
-            Some("openai::gpt-4o"),
-            "/usr/local/bin/forge",
-        );
+        let unit = render_systemd_service("abc123", "/home/user/proj", "/usr/local/bin/forge");
         assert!(unit.contains("WorkingDirectory=/home/user/proj"));
-        assert!(unit.contains("\"check the deploy\""));
-        assert!(unit.contains("\"/usr/local/bin/forge\" run"));
-        assert!(unit.contains("--mode \"bypass\""));
-        assert!(unit.contains("--model \"openai::gpt-4o\""));
+        assert!(unit.contains("ExecStart=\"/usr/local/bin/forge\" schedule tick \"abc123\""));
 
-        let spaced = render_systemd_service(
-            "abc123",
-            "check deploy",
-            "/tmp/project",
-            None,
-            None,
-            "/home/me/Forge Bin/forge",
-        );
-        assert!(spaced.contains("ExecStart=\"/home/me/Forge Bin/forge\" run \"check deploy\""));
+        let spaced = render_systemd_service("abc123", "/tmp/project", "/home/me/Forge Bin/forge");
+        assert!(spaced.contains("ExecStart=\"/home/me/Forge Bin/forge\" schedule tick \"abc123\""));
     }
 
     /// The `OnCalendar=` values a spec renders to, one per line.
     fn on_calendar_of(expr: &str) -> Vec<String> {
-        render_systemd_timer("abc123", &ScheduleSpec::Cron(expr.into()))
-            .unwrap()
-            .lines()
-            .filter_map(|line| line.strip_prefix("OnCalendar=").map(str::to_string))
-            .collect()
+        render_systemd_timer(
+            "abc123",
+            &ScheduleSpec::Cron(expr.into()),
+            &SchedulePolicy::default(),
+        )
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("OnCalendar=").map(str::to_string))
+        .collect()
     }
 
     #[test]
@@ -509,6 +554,7 @@ mod tests {
         let every = render_systemd_timer(
             "abc123",
             &ScheduleSpec::Every(std::time::Duration::from_secs(1800)),
+            &SchedulePolicy::default(),
         )
         .unwrap();
         assert!(every.contains("OnUnitActiveSec=1800s"));
@@ -519,28 +565,78 @@ mod tests {
                 hour: 9,
                 minute: 30,
             },
+            &SchedulePolicy::default(),
         )
         .unwrap();
         assert!(daily.contains("OnCalendar=*-*-* 09:30:00"));
 
-        let cron =
-            render_systemd_timer("abc123", &ScheduleSpec::Cron("*-*-* 06:00:00".into())).unwrap();
+        let cron = render_systemd_timer(
+            "abc123",
+            &ScheduleSpec::Cron("*-*-* 06:00:00".into()),
+            &SchedulePolicy::default(),
+        )
+        .unwrap();
         assert!(cron.contains("OnCalendar=*-*-* 06:00:00"));
+    }
+
+    #[test]
+    fn systemd_timer_appends_the_zone_and_maps_misfire_to_persistent() {
+        let policy = SchedulePolicy {
+            tz: Some("Asia/Tokyo".into()),
+            misfire: "skip".into(),
+            ..Default::default()
+        };
+        let weekdays =
+            render_systemd_timer("abc123", &ScheduleSpec::Cron("0 3 * * 1-5".into()), &policy)
+                .unwrap();
+        assert!(weekdays.contains("OnCalendar=Mon,Tue,Wed,Thu,Fri *-*-* 03:00:00 Asia/Tokyo"));
+        assert!(weekdays.contains("Persistent=false"));
+        let daily = render_systemd_timer(
+            "abc123",
+            &ScheduleSpec::Daily { hour: 9, minute: 5 },
+            &policy,
+        )
+        .unwrap();
+        assert!(daily.contains("OnCalendar=*-*-* 09:05:00 Asia/Tokyo"));
+        let local = render_systemd_timer(
+            "abc123",
+            &ScheduleSpec::Daily { hour: 9, minute: 5 },
+            &SchedulePolicy::default(),
+        )
+        .unwrap();
+        assert!(local.contains("OnCalendar=*-*-* 09:05:00\n"));
+        assert!(local.contains("Persistent=true"));
+    }
+
+    #[test]
+    fn launchd_and_schtasks_refuse_a_foreign_zone() {
+        let policy = SchedulePolicy {
+            tz: Some("Asia/Tokyo".into()),
+            ..Default::default()
+        };
+        let spec = ScheduleSpec::Daily { hour: 3, minute: 0 };
+        let mac = render_launchd_plist("abc123", "/Users/me", "/bin/forge", &spec, &policy)
+            .unwrap_err()
+            .to_string();
+        assert!(mac.contains("Asia/Tokyo") && mac.contains("macOS"), "{mac}");
+        let win = render_schtasks_create_args("abc123", "C:\\x", "forge.exe", &spec, &policy)
+            .unwrap_err()
+            .to_string();
+        assert!(win.contains("Windows"), "{win}");
     }
 
     #[test]
     fn launchd_plist_contains_task_cwd_and_interval() {
         let plist = render_launchd_plist(
             "abc123",
-            "check the deploy",
             "/Users/me/proj",
-            None,
-            None,
             "/usr/local/bin/forge",
             &ScheduleSpec::Every(std::time::Duration::from_secs(3600)),
+            &SchedulePolicy::default(),
         )
         .unwrap();
-        assert!(plist.contains("<string>check the deploy</string>"));
+        assert!(plist.contains("<string>tick</string>"));
+        assert!(plist.contains("<string>abc123</string>"));
         assert!(plist.contains("<string>/Users/me/proj</string>"));
         assert!(plist.contains("<key>StartInterval</key>\n    <integer>3600</integer>"));
         assert!(plist.contains("dev.forge.schedule.abc123"));
@@ -549,12 +645,10 @@ mod tests {
     fn launchd_plist_of(expr: &str) -> Result<String> {
         render_launchd_plist(
             "abc123",
-            "task",
             "/Users/me",
-            None,
-            None,
             "/usr/local/bin/forge",
             &ScheduleSpec::Cron(expr.into()),
+            &SchedulePolicy::default(),
         )
     }
 
@@ -606,16 +700,14 @@ mod tests {
     fn schtasks_args_contain_task_cwd_and_interval() {
         let args = render_schtasks_create_args(
             "abc123",
-            "check the deploy",
             "C:\\Users\\me\\proj",
-            Some("bypass"),
-            None,
             "C:\\forge\\forge.exe",
             &ScheduleSpec::Every(std::time::Duration::from_secs(1800)),
+            &SchedulePolicy::default(),
         )
         .unwrap();
         let joined = args.join(" ");
-        assert!(joined.contains("check the deploy"));
+        assert!(joined.contains("schedule tick abc123"));
         assert!(joined.contains("C:\\Users\\me\\proj"));
         assert!(joined.contains("/SC MINUTE"));
         assert!(joined.contains("/MO 30"));
@@ -623,12 +715,10 @@ mod tests {
 
         let spaced = render_schtasks_create_args(
             "abc123",
-            "task",
             "C:\\Users\\Jane Doe\\proj",
-            None,
-            None,
             "C:\\Forge Bin\\forge.exe",
             &ScheduleSpec::Every(std::time::Duration::from_secs(1800)),
+            &SchedulePolicy::default(),
         )
         .unwrap()
         .join(" ");
@@ -636,24 +726,20 @@ mod tests {
 
         let error = render_schtasks_create_args(
             "abc123",
-            "task",
             "C:\\x",
-            None,
-            None,
             "forge.exe",
             &ScheduleSpec::Every(std::time::Duration::from_secs(45)),
+            &SchedulePolicy::default(),
         )
         .expect_err("Windows cannot represent sub-minute schedules");
         assert!(error.to_string().contains("whole minutes"));
 
         let daily_error = render_schtasks_create_args(
             "abc123",
-            "task",
             "C:\\x",
-            None,
-            None,
             "forge.exe",
             &ScheduleSpec::Every(std::time::Duration::from_secs(86_400)),
+            &SchedulePolicy::default(),
         )
         .expect_err("Windows cannot represent daily minute intervals");
         assert!(daily_error.to_string().contains("1439"));
@@ -662,12 +748,10 @@ mod tests {
     fn schtasks_trigger_of(expr: &str) -> Result<String> {
         let args = render_schtasks_create_args(
             "abc123",
-            "task",
             "C:\\x",
-            None,
-            None,
             "forge.exe",
             &ScheduleSpec::Cron(expr.into()),
+            &SchedulePolicy::default(),
         )?;
         // Everything from `/SC` on is the trigger; the prefix is the task name and command line.
         let start = args.iter().position(|a| a == "/SC").expect("a /SC trigger");

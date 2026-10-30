@@ -8,7 +8,7 @@
 ```bash
 forge schedule add "check the deploy, alert me in the summary" --every 30m
 forge schedule add "morning standup summary" --at 09:00
-forge schedule add "weekly deps audit" --cron "Mon 08:00"   # Linux only
+forge schedule add "weekly deps audit" --cron "0 8 * * 1" --tz Europe/Amsterdam
 forge schedule                       # list (id, spec, task, last run)
 forge schedule remove <id-prefix>    # uninstall the timer + delete (git-style prefix ok)
 ```
@@ -19,10 +19,38 @@ Exactly one of `--every` / `--at` / `--cron` selects the schedule:
 |------|--------|---------|
 | `--every` | `<N><unit>`, unit `s`/`m`/`h`/`d` (`30m`, `1h`, `1d`) | fixed interval |
 | `--at` | `HH:MM` | once a day at that local time |
-| `--cron` | raw systemd `OnCalendar=` expression | calendar schedule — **Linux only**, rejected cleanly on macOS/Windows |
+| `--cron` | 5-field cron (`0 3 * * 1-5`), translated to systemd / launchd / Task Scheduler; a raw `OnCalendar=` string still works on Linux | calendar schedule |
 
 `--mode` (e.g. `bypass`, `accept-edits`) and `--model` pin the permission mode and model each tick
 runs with. The tick runs `forge run "<task>"` in the directory where the schedule was added.
+
+Policy flags on `add` (all optional, also editable in the app):
+
+| Flag | Meaning |
+|------|---------|
+| `--tz Europe/Amsterdam` | read `--at` / `--cron` on that zone's clock (systemd `OnCalendar=... <zone>`; Linux only) |
+| `--max-runtime <min>` | kill a tick that runs longer |
+| `--max-runs <n>` | pause the schedule after n ticks (a one-time schedule is a dated cron with `--max-runs 1`) |
+| `--retries <0-5>` | re-run a failed tick with doubling backoff (60s base) |
+| `--stop-on-error` | pause the schedule when a tick fails |
+| `--stop-when "<condition>"` | the run is told to end with `[[schedule:done]]` once the condition holds; the tick then pauses the schedule |
+| `--skip-missed` | drop a tick missed while the machine was off (`Persistent=false`) instead of running it once on wake |
+
+`forge schedule run <id>` fires one tick now, even when paused. `forge schedule history [id]` lists
+recent runs.
+
+## Run history
+
+Every OS timer launches the hidden `forge schedule tick <id>`, which reads the task, mode, model and
+policy from the store at fire time and writes one `schedule_run` row per attempt:
+`running` -> `ok` / `failed` / `interrupted` / `skipped`. `interrupted` means the tick process died
+before it finished (the next tick, `forge schedule history`, or a daemon read notices the dead pid);
+`skipped` means the previous tick was still running. The row carries the id of the session the tick
+created, so the app links a result straight to it, plus a short summary or the error.
+
+The daemon exposes this at `GET /api/schedule-runs`, `POST /api/schedules/{id}/run` (Run now),
+`POST /api/schedules/{id}/update`, and `POST /api/schedule-runs/{id}/read` / `read-all` for the
+results inbox.
 
 ## How it works
 
@@ -50,7 +78,9 @@ runs with. The tick runs `forge run "<task>"` in the directory where the schedul
 
 ## Limitations
 
-- `--cron` is systemd `OnCalendar` syntax and Linux-only; use `--every`/`--at` elsewhere.
+- A raw `OnCalendar=` expression and `--tz` are Linux-only; 5-field cron works everywhere Task Scheduler and launchd can express it.
+- Timers installed before the run history existed call `forge run` directly and record nothing until they are paused and resumed once.
+- `Run now` uses the daemon's own environment, so it needs the same store the timers use.
 - Ticks are headless `forge run` turns — output lands in the session store (see `forge sessions` /
   `forge replay`), not a terminal.
 - Timers fire under your user session (systemd `--user` / launchd agent): on Linux, enable
