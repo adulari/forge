@@ -28,7 +28,9 @@ import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere, type AnywherePendingApproval } from "../../lib/AnywhereProvider";
 import { formatBytes, formatStorageUsage } from "../../lib/anywhere/format";
 import { hostFleetSummary, hostStatusText } from "../../lib/anywhereHostPresence";
+import { syncHubMeta, syncNeedsAttention, syncPillModel } from "../../lib/accountSync";
 import { useAuth } from "../../lib/auth";
+import { useAccountSync } from "../../lib/queries";
 import { goBackOr } from "../../lib/nav";
 import { isTauri } from "../../lib/platform";
 import { MAX_ACTIVE_HOSTS } from "../../lib/anywhere/types";
@@ -423,6 +425,11 @@ function ReadyCenter() {
 function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typeof useAnywhere>; trialBadge: string | null; login: string | undefined }) {
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
+  const syncStatus = useAccountSync().data;
+  const syncMeta = syncHubMeta(syncStatus);
+  const syncAttention = syncNeedsAttention(syncStatus);
+  const syncTone = syncPillModel(syncStatus)?.tone;
+  const syncDot = syncTone === "success" ? tokens.success : syncTone === "warn" ? tokens.warn : syncTone === "danger" ? tokens.danger : undefined;
 
   if (!isExpanded) {
     return (
@@ -440,6 +447,7 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
           />
           <HubRow label="Devices" value={`${anywhere.devices.length} paired`} onPress={() => router.push("/anywhere/devices")} />
           <HubRow label="Remote jobs" value={`${anywhere.remoteJobs.length} queued`} onPress={() => router.push("/anywhere/jobs")} />
+          <HubRow label="Sync" value={syncMeta} valueColor={syncAttention ? tokens.warn : undefined} dotColor={syncDot} onPress={() => router.push("/anywhere/sync")} />
           <HubRow label="Offline history" value="Encrypted sync feed" onPress={() => router.push("/anywhere/history")} />
           <HubRow label="Notifications" value={pushStatusLabel(anywhere.pushStatus)} onPress={() => router.push("/anywhere/notifications")} />
           <HubRow
@@ -503,6 +511,12 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
 
         <View style={styles.desktopColumn}>
           <Text style={[typeScale.section, { color: tokens.ink3 }]}>STORAGE · BILLING · ACCOUNT</Text>
+          <Pressable onPress={() => router.push("/anywhere/sync")} accessibilityRole="button" accessibilityLabel="Sync across machines" style={[styles.desktopCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
+            <View style={styles.desktopCardRow}>
+              <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Sync across machines</Text>
+              <Text style={[typeScale.monoMeta, { color: syncAttention ? tokens.warn : tokens.ink }]}>{syncMeta}</Text>
+            </View>
+          </Pressable>
           <Pressable onPress={() => router.push("/anywhere/storage")} style={[styles.desktopCard, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
             <View style={styles.desktopCardRow}>
               <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Encrypted storage</Text>
@@ -533,7 +547,7 @@ function HubOverview({ anywhere, trialBadge, login }: { anywhere: ReturnType<typ
   );
 }
 
-function HubRow({ label, value, valueColor, onPress, last }: { label: string; value: string; valueColor?: string; onPress: () => void; last?: boolean }) {
+function HubRow({ label, value, valueColor, dotColor, onPress, last }: { label: string; value: string; valueColor?: string; dotColor?: string; onPress: () => void; last?: boolean }) {
   const tokens = useTokens();
   return (
     <Pressable
@@ -547,6 +561,7 @@ function HubRow({ label, value, valueColor, onPress, last }: { label: string; va
       ]}
     >
       <Text style={[typeScale.body, styles.hubRowLabel, { color: tokens.ink }]}>{label}</Text>
+      {dotColor ? <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: dotColor }} /> : null}
       <Text style={[typeScale.monoMeta, { color: valueColor ?? tokens.ink3 }]} numberOfLines={1}>{value}</Text>
       <ChevronRight size={14} strokeWidth={1.75} color={tokens.ink4} />
     </Pressable>

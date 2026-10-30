@@ -112,6 +112,10 @@ import {
   type DiagnosticsResponse,
   getDiagnostics,
   getIdentity,
+  type AccountSyncStatus,
+  getAccountSync,
+  updateAccountSync,
+  runAccountSyncNow,
   getDaemonUpdate,
   applyDaemonUpdate,
 
@@ -201,6 +205,7 @@ function keys(baseUrl: string | null) {
     plans: ["plans", baseUrl] as const,
 
     mcp: ["mcp", baseUrl] as const,
+    accountSync: ["account-sync", baseUrl] as const,
     gitStatus: (sessionId: string) => ["git", "status", baseUrl, sessionId] as const,
     gitBranches: (sessionId: string) => ["git", "branches", baseUrl, sessionId] as const,
     gitDiff: (sessionId: string, path: string, staged: boolean, context = 0, ignoreWhitespace = false) =>
@@ -284,6 +289,42 @@ export function useApplyDaemonUpdate() {
   return useMutation({
     mutationFn: () => applyDaemonUpdate(baseUrl as string),
     onSettled: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).daemonUpdate }),
+  });
+}
+
+/** Account-sync status. An older daemon answers 404 and a signed-out one still answers 200, so
+ * neither retries; while any category is on, status is re-read every 30s (the title-bar pill shares this query; background tabs pause). */
+export function useAccountSync(enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery<AccountSyncStatus>({
+    queryKey: keys(baseUrl).accountSync,
+    queryFn: () => getAccountSync(baseUrl as string),
+    enabled: enabled && baseUrl != null,
+    staleTime: 10_000,
+    refetchInterval: (query) =>
+      query.state.data?.categories.some((category) => category.enabled) ? 30_000 : 60_000,
+    retry: false,
+  });
+}
+
+export function useUpdateAccountSync() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { category: string; enabled: boolean }) => updateAccountSync(baseUrl as string, body),
+    onSuccess: (status) => queryClient.setQueryData(keys(baseUrl).accountSync, status),
+  });
+}
+
+export function useRunAccountSyncNow() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => runAccountSyncNow(baseUrl as string),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: keys(baseUrl).accountSync });
+      setTimeout(() => void queryClient.invalidateQueries({ queryKey: keys(baseUrl).accountSync }), 3_000);
+    },
   });
 }
 

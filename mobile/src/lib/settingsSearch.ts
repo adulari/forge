@@ -49,6 +49,11 @@ const FIELD_KEYWORDS: Record<string, string> = {
   "tui.theme": "colour color appearance dark light",
   "tui.reduce_motion": "animation accessibility",
   permission_mode: "approve safety sandbox bypass",
+  "anywhere.account_sync.keys": "sync account machines api keys tokens vault encrypted",
+  "anywhere.account_sync.skills": "sync account machines skills agents commands",
+  "anywhere.account_sync.settings": "sync account machines preferences keybindings",
+  "anywhere.account_sync.mcp": "sync account machines mcp servers",
+  "anywhere.account_sync.instructions": "sync account machines agents.md instructions",
 };
 
 export interface SettingsHit {

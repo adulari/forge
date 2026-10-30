@@ -9,6 +9,7 @@ import type { Action } from "../../lib/onboarding/types";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
+import { AccountSyncToggles } from "../anywhere/AccountSyncToggles";
 import { Button } from "../ds/Button";
 import { Checkbox } from "../ds/Checkbox";
 import { Segmented } from "../ds/Segmented";
@@ -179,7 +180,10 @@ export function AnywhereStep({ c, snapshot, step, position }: StepProps) {
   return (
     <StepFrame step={step} snapshot={snapshot} position={position} onBack={c.back} onSkip={() => void c.skip("anywhere").then(c.next)} skipLabel="Not now">
       {signedIn ? (
-        <Button label="Continue" onPress={() => void c.markDone("anywhere").then(c.next)} />
+        <>
+          <AccountSyncToggles />
+          <Button label="Continue" onPress={() => void c.markDone("anywhere").then(c.next)} />
+        </>
       ) : (
         <>
           <Button label="Set up Forge Anywhere" onPress={() => router.push("/anywhere")} />

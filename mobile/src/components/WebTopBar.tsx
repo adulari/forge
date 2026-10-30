@@ -8,6 +8,7 @@ import { Flame, Search } from "lucide-react-native";
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { SyncStatusPill } from "./anywhere/SyncStatusPill";
 import { useAuth } from "../lib/auth";
 import { useShortcutLabel } from "../lib/shortcuts";
 import { useSessions } from "../lib/queries";
@@ -79,6 +80,7 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
         })}
       </View>
       <View style={styles.spacer} />
+      <SyncStatusPill />
       <View style={styles.server}>
         <View style={[styles.serverDot, { backgroundColor: tokens.success }]} />
         <Text style={[styles.serverLabel, { color: tokens.ink4 }]}>

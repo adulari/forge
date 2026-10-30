@@ -1025,6 +1025,74 @@ export function updateMcpServer(baseUrl: string, body: UpdateMcpServerRequest): 
 }
 
 // ---------------------------------------------------------------------------
+// Account sync (Forge Anywhere): per-machine setup carried across machines
+// ---------------------------------------------------------------------------
+
+export type AccountSyncCategoryId = "keys" | "skills" | "settings" | "mcp" | "instructions";
+
+export interface AccountSyncConflict {
+  item: string;
+  detail: string;
+}
+
+export interface AccountSyncSkipped {
+  item: string;
+  reason: string;
+}
+
+export interface AccountSyncCategory {
+  id: AccountSyncCategoryId | (string & {});
+  label: string;
+  enabled: boolean;
+  items: number;
+  pending: number;
+  last_sync_at: number | null;
+  /** Items other devices synced that this machine has not applied; null when unknown (disabled). */
+  remote_only: number | null;
+  conflicts: AccountSyncConflict[];
+  skipped: AccountSyncSkipped[];
+  /** True only for keys: cannot be switched over Anywhere. */
+  toggle_requires_direct: boolean;
+}
+
+export interface AccountSyncSignIn {
+  provider: string;
+  label: string;
+  command: string;
+}
+
+export interface AccountSyncMissingTool {
+  tool: string;
+  label: string;
+  hint: string;
+}
+
+export interface AccountSyncStatus {
+  signed_in: boolean;
+  anywhere_enabled: boolean;
+  last_sync_at: number | null;
+  last_error: string | null;
+  categories: AccountSyncCategory[];
+  sign_ins: AccountSyncSignIn[];
+  missing_tools: AccountSyncMissingTool[];
+}
+
+export function getAccountSync(baseUrl: string): Promise<AccountSyncStatus> {
+  return expectObject(request(baseUrl, "/api/anywhere/sync"), "account sync");
+}
+
+export function updateAccountSync(
+  baseUrl: string,
+  body: { category: string; enabled: boolean },
+): Promise<AccountSyncStatus> {
+  return request(baseUrl, "/api/anywhere/sync", { method: "PUT", body: JSON.stringify(body) });
+}
+
+export function runAccountSyncNow(baseUrl: string): Promise<{ ok: boolean }> {
+  return request(baseUrl, "/api/anywhere/sync/now", { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
 // Git review dock
 // ---------------------------------------------------------------------------
 

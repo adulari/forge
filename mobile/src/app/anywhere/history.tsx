@@ -9,7 +9,7 @@ import { Button } from "../../components/ds/Button";
 import { Card } from "../../components/ds/Card";
 import { Screen } from "../../components/ds/Screen";
 import { useAnywhere } from "../../lib/AnywhereProvider";
-import { clearOfflineHistory, decryptSyncChange, fetchSyncFeed, markSyncConflicts, readOfflineHistory, syncPayloadText, writeOfflineHistory, type OfflineHistoryEntry } from "../../lib/anywhereSyncBrowser";
+import { clearOfflineHistory, decryptSyncChange, fetchSyncFeed, markSyncConflicts, readOfflineHistory, syncPayloadText, withoutAccountSyncRecords, writeOfflineHistory, type OfflineHistoryEntry } from "../../lib/anywhereSyncBrowser";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -28,7 +28,7 @@ export default function AnywhereHistoryScreen() {
       const token = await anywhere.accessToken();
       const feed = await fetchSyncFeed(credentials.serviceUrl ?? "https://app.forge.adulari.dev", token, 0);
       const decrypted = await Promise.all(feed.changes.map((change) => decryptSyncChange(change, credentials)));
-      const next = markSyncConflicts(decrypted).sort((a, b) => b.cursor - a.cursor);
+      const next = markSyncConflicts(withoutAccountSyncRecords(decrypted)).sort((a, b) => b.cursor - a.cursor);
       await writeOfflineHistory(credentials, next); setEntries(next);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "History could not be refreshed"); }
     finally { setBusy(false); }
