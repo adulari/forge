@@ -15,6 +15,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **Resuming a session no longer opens the setup screen.** `forge chat --resume <id>` and the session picker skip the once-per-release setup run, which sat in front of the session being resumed after every update; a fresh `forge` or `forge setup` still opens it, and the Claude reconnect card still appears when needed.
 - **The iOS and Android app start again.** A keyboard listener added with the new session shortcuts called `window.addEventListener` on React Native, where `window` exists without DOM events, so every launch failed with "undefined is not a function" (auto-report #1763). The listener, and the overlay Escape stack's, now run only where DOM events exist.
 - **A retried prompt can no longer be queued twice.** The mobile app now stamps each prompt with a `client_msg_id` when you compose it and re-sends that same id on every retry and offline-queue flush; the daemon remembers the last 256 ids per session and drops a repeat instead of enqueueing it again, so a lost acknowledgement cannot duplicate a prompt. The field is optional: older apps send none and older daemons ignore it.
 

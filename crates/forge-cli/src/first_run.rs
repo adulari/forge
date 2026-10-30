@@ -36,7 +36,7 @@ pub(crate) fn bare_command() -> Option<Command> {
         if let Ok(config) = forge_config::load() {
             forge_tui::theme::init(&config.tui);
         }
-        match crate::onboarding::maybe_open(false) {
+        match crate::onboarding::maybe_open(false, false) {
             // Onboarding just ran and said where things stand; the static panel would repeat it.
             Ok(true) if !provider_configured() => return None,
             Ok(_) => {}
