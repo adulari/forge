@@ -57,6 +57,10 @@ pub(super) struct UpdateModelRequest {
     hidden: Option<bool>,
 }
 
+pub(super) fn models_route() -> axum::routing::MethodRouter<Arc<DaemonState>> {
+    axum::routing::get(models_page).patch(update_model)
+}
+
 /// Persist a favourite or hide toggle for one model id (or bare provider for `hidden`).
 pub(super) async fn update_model(axum::Json(request): axum::Json<UpdateModelRequest>) -> Response {
     let result = tokio::task::spawn_blocking(move || {
