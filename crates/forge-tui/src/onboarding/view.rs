@@ -54,7 +54,11 @@ pub fn render(f: &mut Frame, s: &Screen) {
         height: inner.height - top,
     };
 
-    let job = job_lines(s);
+    let job = if s.sign_in.as_ref().is_some_and(|x| x.qr) {
+        Vec::new()
+    } else {
+        job_lines(s)
+    };
     let notice = notice_line(s, body.width as usize);
     let wide = inner.width >= RAIL_MIN_WIDTH && !s.reconnect_card;
     let dots_h = u16::from(!wide && !s.reconnect_card);

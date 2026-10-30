@@ -109,10 +109,18 @@ pub(crate) fn strip_ansi(text: &str) -> String {
         }
         match chars.next() {
             Some('[') => {
+                let mut params = String::new();
                 for n in chars.by_ref() {
                     if ('\u{40}'..='\u{7e}').contains(&n) {
+                        // Full-screen CLIs (Claude Code's Ink UI) move the cursor right instead
+                        // of printing spaces; keep the gap or words run together.
+                        if n == 'C' {
+                            let gap = params.parse::<usize>().unwrap_or(1).clamp(1, 512);
+                            out.push_str(&" ".repeat(gap));
+                        }
                         break;
                     }
+                    params.push(n);
                 }
             }
             Some(']') => {
@@ -294,6 +302,14 @@ mod tests {
              Paste code here if prompted > \u{1b}[?25h"
             .as_bytes()
             .to_vec()
+    }
+
+    #[test]
+    fn cursor_forward_moves_become_spaces() {
+        assert_eq!(
+            strip_ansi("Paste\u{1b}[1Ccode\u{1b}[Chere\u{1b}[3Cif"),
+            "Paste code here   if"
+        );
     }
 
     #[test]

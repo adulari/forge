@@ -22,57 +22,112 @@ fn hard_wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 pub(super) fn sign_in(s: &Screen, width: usize, height: usize) -> Vec<Line<'static>> {
+    use super::qr::{fitted, Qr};
     let Some(state) = &s.sign_in else {
         return Vec::new();
     };
-    let mut out = vec![heading("Sign in")];
-    match &state.url {
-        Some(url) => {
-            out.extend(paragraph(
-                "Open this page and sign in. Forge carries on by itself when you are done.",
-                width,
-                0,
-                styles::muted(),
-            ));
-            out.push(blank());
-            for row in hard_wrap(url, width) {
-                out.push(Line::from(Span::styled(row, styles::brand())));
-            }
-            out.push(blank());
-            let qr = super::qr::lines(url);
-            let room = height.saturating_sub(out.len() + 3);
-            match qr {
-                Some(rows) if state.qr || rows.len() + 2 <= room => {
-                    for row in rows {
-                        out.push(Line::from(Span::styled(row, styles::fg())));
-                    }
-                }
-                Some(_) => out.push(Line::from(Span::styled(
-                    "On another device? Press v for a QR code to scan.",
-                    styles::faint(),
-                ))),
-                None => {}
-            }
-        }
-        None => out.extend(paragraph(
+    let Some(url) = &state.url else {
+        let mut out = vec![heading("Sign in")];
+        out.extend(paragraph(
             "Finish the sign-in in your browser.",
             width,
             0,
             styles::muted(),
-        )),
-    }
-    if let Some(entry) = &s.entry {
+        ));
+        push_entry(s, width, &mut out);
+        return out;
+    };
+    let code = state.code.is_some();
+    if state.qr {
+        // The QR view gives the code the whole page: no link, no log.
+        let mut out = vec![heading("Scan to sign in")];
+        let how = if code {
+            "Scan with your phone's camera, sign in there, then paste the code it shows."
+        } else {
+            "Scan with your phone's camera and sign in there. Press v for the link."
+        };
+        out.push(Line::from(Span::styled(
+            truncate(how, width),
+            styles::muted(),
+        )));
+        push_entry(s, width, &mut out);
         out.push(blank());
-        out.push(heading(&entry.label));
-        if let Some(hint) = &entry.hint {
-            out.push(Line::from(Span::styled(
-                truncate(hint, width),
-                styles::muted(),
-            )));
+        let room = height.saturating_sub(out.len());
+        match fitted(url, room, width, s.rich_glyphs) {
+            Some(Qr::Fits(rows)) => out.extend(
+                rows.into_iter()
+                    .map(|row| Line::from(Span::styled(row, styles::fg()))),
+            ),
+            Some(Qr::TooBig { rows, cols }) => {
+                let taller = rows.saturating_sub(room);
+                let wider = cols.saturating_sub(width);
+                let grow = match (taller, wider) {
+                    (0, w) => format!("{w} columns wider"),
+                    (t, 0) => format!("{t} rows taller"),
+                    (t, w) => format!("{t} rows taller and {w} columns wider"),
+                };
+                out.extend(paragraph(
+                    &format!("The QR code needs a bigger window: make it {grow}, or press v and use the link."),
+                    width,
+                    0,
+                    styles::faint(),
+                ));
+            }
+            None => out.push(Line::from(Span::styled(
+                "This link is too long for a QR code. Press v and use the link.",
+                styles::faint(),
+            ))),
         }
-        out.push(entry_field(s, width));
+        return out;
+    }
+    let mut out = vec![heading("Sign in")];
+    let how = match (s.can_open_browser, code) {
+        (true, true) => "Open this page and sign in, then paste the code it shows.",
+        (true, false) => "Open this page and sign in. Forge carries on by itself when you are done.",
+        (false, true) => "Click the link or press c to copy it, sign in on any device, then paste the code it shows.",
+        (false, false) => "Click the link or press c to copy it, then sign in on any device.",
+    };
+    out.extend(paragraph(how, width, 0, styles::muted()));
+    out.push(blank());
+    for row in hard_wrap(url, width) {
+        out.push(Line::from(Span::styled(row, styles::brand())));
+    }
+    push_entry(s, width, &mut out);
+    out.push(blank());
+    // Shown inline only when it fits with a row to spare; otherwise v opens the QR view.
+    match fitted(
+        url,
+        height.saturating_sub(out.len() + 2),
+        width,
+        s.rich_glyphs,
+    ) {
+        Some(Qr::Fits(rows)) => out.extend(
+            rows.into_iter()
+                .map(|row| Line::from(Span::styled(row, styles::fg()))),
+        ),
+        Some(Qr::TooBig { .. }) => out.push(Line::from(Span::styled(
+            "On another device? Press v for a QR code to scan.",
+            styles::faint(),
+        ))),
+        None => {}
     }
     out
+}
+
+/// The code field sits right under the link, so the QR code can never push it off the screen.
+fn push_entry(s: &Screen, width: usize, out: &mut Vec<Line<'static>>) {
+    let Some(entry) = &s.entry else {
+        return;
+    };
+    out.push(blank());
+    out.push(heading(&entry.label));
+    if let Some(hint) = &entry.hint {
+        out.push(Line::from(Span::styled(
+            truncate(hint, width),
+            styles::muted(),
+        )));
+    }
+    out.push(entry_field(s, width));
 }
 
 pub(super) fn reconnect_card(s: &Screen, width: usize) -> Vec<Line<'static>> {

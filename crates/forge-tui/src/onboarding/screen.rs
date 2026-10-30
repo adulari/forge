@@ -44,6 +44,8 @@ pub enum Effect {
     Redetect,
     /// Open a page in the browser.
     OpenUrl(String),
+    /// Put text on the clipboard (OSC 52, so it works over SSH).
+    Copy(String),
     /// Type text into a running job that asked for it (a code from the browser).
     Input { job: JobId, text: String },
     /// Stop a running job.
@@ -129,6 +131,8 @@ pub struct SignIn {
     pub job: JobId,
     pub url: Option<String>,
     pub qr: bool,
+    /// The job is waiting for a code from the browser; the label of the field that collects it.
+    pub code: Option<String>,
 }
 
 pub struct Screen {
@@ -146,6 +150,10 @@ pub struct Screen {
     /// The host starts a session when the run ends, so the last page says so.
     pub launches_session: bool,
     pub sign_in: Option<SignIn>,
+    /// A browser can open on this machine. False over SSH, where `o` would open one on the server.
+    pub can_open_browser: bool,
+    /// The terminal draws Unicode block sextants itself, so a QR code can pack six modules a cell.
+    pub rich_glyphs: bool,
     /// The small "Connect Claude Code" card shown at session start instead of the full flow.
     pub reconnect_card: bool,
     /// The person asked not to be asked about the card again.
@@ -174,6 +182,8 @@ impl Screen {
             ui: Ui::default(),
             launches_session: false,
             sign_in: None,
+            can_open_browser: true,
+            rich_glyphs: false,
             reconnect_card: false,
             card_dismissed: false,
             batch: None,
@@ -314,34 +324,72 @@ impl Screen {
         use forge_onboarding::PromptKind;
         match prompt {
             PromptKind::OpenUrl { url } | PromptKind::DeviceCode { url, .. } => {
-                let qr = self.sign_in.as_ref().is_some_and(|s| s.qr);
+                let (qr, code) = self
+                    .sign_in
+                    .as_ref()
+                    .map(|s| (s.qr, s.code.clone()))
+                    .unwrap_or_default();
                 self.sign_in = Some(SignIn {
                     job,
                     url: Some(url.clone()),
                     qr,
+                    code,
                 });
             }
             PromptKind::Code { label } => {
-                if self.sign_in.is_none() {
-                    self.sign_in = Some(SignIn {
-                        job,
-                        url: None,
-                        qr: false,
-                    });
+                match self.sign_in.as_mut() {
+                    Some(s) => s.code = Some(label.clone()),
+                    None => {
+                        self.sign_in = Some(SignIn {
+                            job,
+                            url: None,
+                            qr: false,
+                            code: Some(label.clone()),
+                        })
+                    }
                 }
-                self.entry = Some(Entry {
-                    target: SecretTarget::JobCode(job),
-                    label: label.clone(),
-                    hint: Some("Paste it here and press Enter. It is not saved or shown.".into()),
-                    url: None,
-                    buf: String::new(),
-                });
+                // The field opens on Enter, p or a paste, not here: the CLI asks for the code at
+                // the same moment it prints the link, and the page's keys must still work then.
             }
             PromptKind::Terminal => {}
         }
     }
 
+    /// Pasted text (bracketed paste): into the open field, or into the code field a sign-in is
+    /// waiting on, opening it.
+    pub fn paste(&mut self, text: &str) -> Vec<Effect> {
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        if self.entry.is_none() {
+            if let Some(SignIn {
+                job,
+                code: Some(label),
+                ..
+            }) = self.sign_in.clone()
+            {
+                self.open_code_entry(job, label);
+            }
+        }
+        if let Some(entry) = self.entry.as_mut() {
+            entry.buf.push_str(text.trim());
+        }
+        Vec::new()
+    }
+
+    fn open_code_entry(&mut self, job: JobId, label: String) {
+        self.entry = Some(Entry {
+            target: SecretTarget::JobCode(job),
+            label,
+            hint: Some("Paste it here and press Enter. It is not saved or shown.".into()),
+            url: None,
+            buf: String::new(),
+        });
+    }
+
     fn push_log(&mut self, line: String) {
+        // Full-screen CLIs redraw the same line; show it once.
+        if self.log.back() == Some(&line) {
+            return;
+        }
         if self.log.len() >= LOG_CAP {
             self.log.pop_front();
         }
@@ -397,9 +445,25 @@ impl Screen {
         self.notice = None;
         if let Some(sign_in) = self.sign_in.clone() {
             match key.code {
-                KeyCode::Char('o') => {
+                KeyCode::Char('o') if self.can_open_browser => {
                     if let Some(url) = sign_in.url {
                         return vec![Effect::OpenUrl(url)];
+                    }
+                    return Vec::new();
+                }
+                KeyCode::Char('c') => {
+                    if let Some(url) = sign_in.url {
+                        self.notify(
+                            NoticeKind::Ok,
+                            "Link copied. If nothing landed on your clipboard, click the link instead.",
+                        );
+                        return vec![Effect::Copy(url)];
+                    }
+                    return Vec::new();
+                }
+                KeyCode::Char('p') | KeyCode::Enter => {
+                    if let Some(label) = sign_in.code {
+                        self.open_code_entry(sign_in.job, label);
                     }
                     return Vec::new();
                 }
@@ -409,7 +473,7 @@ impl Screen {
                     }
                     return Vec::new();
                 }
-                KeyCode::Esc | KeyCode::Char('c') => return vec![Effect::Cancel(sign_in.job)],
+                KeyCode::Esc => return vec![Effect::Cancel(sign_in.job)],
                 KeyCode::Char('q') => return self.leave(),
                 _ => return Vec::new(),
             }

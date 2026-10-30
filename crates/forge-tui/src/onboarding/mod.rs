@@ -5,6 +5,7 @@
 //! host carries out. The host also owns the terminal; [`terminal`] has the pieces it needs.
 
 mod batch;
+mod links;
 mod models;
 mod pages;
 mod plumbing;
@@ -20,6 +21,7 @@ mod view_pages;
 mod tests;
 
 pub use batch::{Batch, BatchItem, BatchStatus};
+pub use links::{link_rows, osc8, LinkRow};
 pub use models::CardStatus;
 pub use screen::{
     Effect, Entry, Exit, Notice, NoticeKind, Purpose, Screen, SecretTarget, SignIn, Tracked,
@@ -39,15 +41,23 @@ pub mod terminal {
         crate::driver::install_panic_restore();
     }
 
-    /// Raw mode plus the alternate screen.
+    /// Raw mode, the alternate screen, and bracketed paste (a pasted code arrives whole).
     pub fn enter() -> io::Result<()> {
         enable_raw_mode()?;
-        crossterm::execute!(io::stdout(), EnterAlternateScreen)
+        crossterm::execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            crossterm::event::EnableBracketedPaste
+        )
     }
 
     /// Back to the normal screen, for the end of the run or to hand the terminal to a child.
     pub fn leave() {
-        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::event::DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }

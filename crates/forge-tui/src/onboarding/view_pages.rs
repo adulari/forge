@@ -616,11 +616,19 @@ fn done(s: &Screen, width: usize) -> Vec<Line<'static>> {
 pub(crate) fn chips_for(s: &Screen) -> ((String, String), Vec<(String, String)>) {
     let enter = ("Enter".to_string(), s.enter_label());
     let c = |k: &str, l: &str| (k.to_string(), l.to_string());
-    if s.sign_in.is_some() && s.entry.is_none() {
-        return (
-            c("o", "Open the page"),
-            vec![c("v", "QR code"), c("Esc", "Cancel")],
-        );
+    if let (Some(sign_in), None) = (&s.sign_in, &s.entry) {
+        let mut keys = vec![c("c", "Copy link")];
+        if s.can_open_browser {
+            keys.insert(0, c("o", "Open the page"));
+        }
+        let qr = if sign_in.qr { "Show link" } else { "QR code" };
+        keys.extend([c("v", qr), c("Esc", "Cancel")]);
+        let primary = if sign_in.code.is_some() {
+            c("Enter", "Paste code")
+        } else {
+            keys.remove(0)
+        };
+        return (primary, keys);
     }
     if s.reconnect_card && s.entry.is_none() {
         return (
@@ -629,7 +637,14 @@ pub(crate) fn chips_for(s: &Screen) -> ((String, String), Vec<(String, String)>)
         );
     }
     if s.entry.is_some() {
-        let mut keys = vec![c("Esc", "Cancel"), c("Ctrl+U", "Clear")];
+        let back = matches!(
+            s.entry.as_ref().map(|e| &e.target),
+            Some(super::screen::SecretTarget::JobCode(_))
+        );
+        let mut keys = vec![
+            c("Esc", if back { "Back" } else { "Cancel" }),
+            c("Ctrl+U", "Clear"),
+        ];
         if s.entry.as_ref().is_some_and(|e| e.url.is_some()) {
             keys.push(c("Ctrl+O", "Open the page"));
         }

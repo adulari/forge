@@ -44,6 +44,8 @@ fn event_loop(session: Session, launches_session: bool, card: bool) -> Result<Ou
     let mut screen = Screen::new(session);
     screen.launches_session = launches_session;
     screen.reconnect_card = card;
+    screen.can_open_browser = browser_opens_here();
+    screen.rich_glyphs = draws_sextants();
     let mut detecting: Option<Receiver<Machine>> = None;
     let mut effects = screen.opening_effects();
 
@@ -76,13 +78,18 @@ fn event_loop(session: Session, launches_session: bool, card: bool) -> Result<Ou
                 effects.extend(screen.machine_updated(machine));
             }
         }
-        terminal.draw(|f| onboarding::render(f, &screen))?;
+        let frame = terminal.draw(|f| onboarding::render(f, &screen))?;
+        if let Some(url) = screen.sign_in.as_ref().and_then(|s| s.url.as_deref()) {
+            let rows = onboarding::link_rows(frame.buffer, url);
+            write_links(&rows, url)?;
+        }
 
         if event::poll(Duration::from_millis(60))? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     effects.extend(screen.key(key));
                 }
+                Event::Paste(text) => effects.extend(screen.paste(&text)),
                 Event::Resize(..) => terminal.clear()?,
                 _ => {}
             }
@@ -162,6 +169,10 @@ fn carry_out(
             let _ = crate::cli::commands::mcp::open_browser(&url);
             Vec::new()
         }
+        Effect::Copy(text) => {
+            crate::cli::commands::run::copy::osc52_copy(&text);
+            Vec::new()
+        }
         Effect::Persist => {
             screen.session.save();
             Vec::new()
@@ -204,4 +215,52 @@ fn hand_over_terminal(action: &Action, host: &dyn Host) -> Result<bool> {
     let _ = io::stdin().read_line(&mut line);
     onboarding::terminal::enter().context("reopening the setup screen")?;
     Ok(ok)
+}
+
+/// Rewrite the sign-in link's rows with an OSC 8 hyperlink so a click opens it, wrapped or not.
+/// The text and colours are the ones just drawn, so nothing visibly changes.
+fn write_links(rows: &[onboarding::LinkRow], url: &str) -> io::Result<()> {
+    use crossterm::cursor::MoveTo;
+    use crossterm::style::{Print, ResetColor, SetAttribute, SetStyle};
+    use ratatui::prelude::IntoCrossterm;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut out = io::stdout();
+    for row in rows {
+        crossterm::queue!(
+            out,
+            MoveTo(row.x, row.y),
+            SetStyle(row.style.into_crossterm()),
+            Print(onboarding::osc8(url, &row.text)),
+            SetAttribute(crossterm::style::Attribute::Reset),
+            ResetColor,
+        )?;
+    }
+    out.flush()
+}
+
+/// `o` would open a browser on the remote machine over SSH, and there is none without a display.
+fn browser_opens_here() -> bool {
+    if ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some())
+    {
+        return false;
+    }
+    cfg!(any(target_os = "macos", windows))
+        || ["DISPLAY", "WAYLAND_DISPLAY"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()))
+}
+
+/// Terminals known to draw Unicode block sextants themselves (gapless, no font needed). SSH
+/// carries `TERM` across, so this also holds on a remote host.
+fn draws_sextants() -> bool {
+    let term = std::env::var("TERM").unwrap_or_default();
+    let program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    ["kitty", "ghostty", "foot", "wezterm"]
+        .iter()
+        .any(|t| term.contains(t))
+        || matches!(program.as_str(), "WezTerm" | "ghostty")
 }

@@ -78,7 +78,7 @@ use local_presence::LocalPresenceGuard;
 
 mod atfiles;
 pub(crate) use atfiles::*;
-mod copy;
+pub(crate) mod copy;
 pub(crate) use copy::*;
 mod pickers;
 pub(crate) use pickers::*;
