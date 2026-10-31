@@ -52,21 +52,38 @@ describe("pairing link with a pinned certificate", () => {
 
   it("describes the target from the parsed host", () => {
     const plain = parseConnectUrl(`http://192.168.1.5:7420/${token}`)!;
-    expect(describeConnectTarget(plain)).toMatchObject({ cleartext: true, private: true, lookalike: false, pinned: false });
+    expect(describeConnectTarget(plain, true)).toMatchObject({ cleartext: true, private: true, lookalike: false, pinned: false });
     const lookalike = parseConnectUrl(`https://xn--forge-9ua.example/${token}`)!;
-    expect(describeConnectTarget(lookalike).lookalike).toBe(true);
+    expect(describeConnectTarget(lookalike, true).lookalike).toBe(true);
     const pinned = parseConnectUrl(`https://10.0.0.2:7420/#token=${token}&fp=sha256:${hex}`)!;
-    expect(describeConnectTarget(pinned).pinned).toBe(true);
+    expect(describeConnectTarget(pinned, true)).toMatchObject({ pinned: true, pinIgnored: false });
+  });
+
+  it("claims a pin only where it is enforced: https on a platform that checks it", () => {
+    const withPin = (scheme: string) => parseConnectUrl(`${scheme}://10.0.0.2:7420/#token=${token}&fp=sha256:${hex}`)!;
+    expect(describeConnectTarget(withPin("https"), false)).toMatchObject({ pinned: false, pinIgnored: true });
+    expect(describeConnectTarget(withPin("http"), true)).toMatchObject({ pinned: false, pinIgnored: true, cleartext: true });
+    expect(describeConnectTarget(parseConnectUrl(`https://10.0.0.2:7420/${token}`)!, true)).toMatchObject({
+      pinned: false,
+      pinIgnored: false,
+    });
   });
 });
 
 describe("manual pairing link", () => {
   const token = "c".repeat(32);
 
-  it("builds a link the parser accepts, with the nearby pin", () => {
+  it("builds a link the parser accepts, with a fingerprint the user typed", () => {
     const fp = `sha256:${"ef".repeat(32)}`;
     const link = composeManualLink(" https://192.168.1.20/ ", "7420", token, fp);
     expect(parseConnectUrl(link ?? "")).toMatchObject({ host: "192.168.1.20:7420", token, fingerprint: fp });
+  });
+
+  it("normalises a typed fingerprint and refuses a malformed one", () => {
+    const colon = "AB".repeat(32).match(/../g)!.join(":");
+    expect(parseConnectUrl(composeManualLink("h", "7420", token, colon) ?? "")?.fingerprint).toBe(`sha256:${"ab".repeat(32)}`);
+    expect(composeManualLink("h", "7420", token, "sha256:nope")).toBeNull();
+    expect(parseConnectUrl(composeManualLink("h", "7420", token, "  ") ?? "")?.fingerprint).toBeUndefined();
   });
 
   it("needs a host and a token", () => {

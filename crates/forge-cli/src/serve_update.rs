@@ -79,7 +79,7 @@ pub(crate) fn status_from(
 
 /// Whether a request reached the daemon directly from this machine: a loopback `Host`, and none of
 /// the headers a tunnel or reverse proxy adds when it forwards someone else's request.
-pub(crate) fn is_local_request(headers: &HeaderMap) -> bool {
+fn is_local_request(headers: &HeaderMap) -> bool {
     const FORWARDED: [&str; 6] = [
         "x-forwarded-for",
         "x-forwarded-host",
@@ -99,6 +99,27 @@ pub(crate) fn is_local_request(headers: &HeaderMap) -> bool {
         None => host.rsplit_once(':').map_or(host, |(name, _)| name),
     };
     matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+/// Whether a request truly came from this machine. The `Host` header alone is not enough: the
+/// desktop app's pinned loopback proxy forwards a remote daemon's traffic with `Host: 127.0.0.1`,
+/// and any paired client can type that header. The TCP peer cannot be forged, so it must be
+/// loopback too. A request served without connection info is refused.
+pub(crate) struct Direct(pub bool);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Direct {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let peer_is_loopback = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .is_some_and(|c| c.0.ip().is_loopback());
+        Ok(Direct(peer_is_loopback && is_local_request(&parts.headers)))
+    }
 }
 
 async fn busy_sessions(registry: &SessionRegistry) -> usize {
@@ -211,8 +232,8 @@ pub(crate) fn run_update(
     }
 }
 
-async fn post_update(State(state): State<Arc<DaemonState>>, headers: HeaderMap) -> Response {
-    if !is_local_request(&headers) {
+async fn post_update(State(state): State<Arc<DaemonState>>, Direct(local): Direct) -> Response {
+    if !local {
         return err_response(
             StatusCode::FORBIDDEN,
             "updating the daemon is only allowed from the machine it runs on",
@@ -560,14 +581,20 @@ mod tests {
         // The status lookup must not reach the network from a test.
         std::env::set_var("FORGE_NO_UPDATE_CHECK", "1");
         let router = router();
+        let call_from =
+            |peer: [u8; 4], method: &'static str, uri: &'static str, host: Option<&'static str>| {
+                let mut req = axum::http::Request::builder().method(method).uri(uri);
+                if let Some(host) = host {
+                    req = req.header("host", host);
+                }
+                let mut req = req.body(axum::body::Body::empty()).unwrap();
+                req.extensions_mut().insert(axum::extract::ConnectInfo(
+                    std::net::SocketAddr::from((peer, 50000)),
+                ));
+                router.clone().oneshot(req)
+            };
         let call = |method: &'static str, uri: &'static str, host: Option<&'static str>| {
-            let mut req = axum::http::Request::builder().method(method).uri(uri);
-            if let Some(host) = host {
-                req = req.header("host", host);
-            }
-            router
-                .clone()
-                .oneshot(req.body(axum::body::Body::empty()).unwrap())
+            call_from([127, 0, 0, 1], method, uri, host)
         };
 
         let wrong_token = call("GET", "/api/update", None).await.unwrap();
@@ -596,6 +623,17 @@ mod tests {
             let refused = call("POST", "/tok/api/update", host).await.unwrap();
             assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{host:?}");
         }
+
+        // The desktop's pinned loopback proxy relays a remote client with `Host: 127.0.0.1`.
+        let proxied = call_from(
+            [192, 168, 1, 9],
+            "POST",
+            "/tok/api/update",
+            Some("127.0.0.1:7420"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(proxied.status(), StatusCode::FORBIDDEN);
     }
 
     fn daemon_facts() -> DaemonFacts {

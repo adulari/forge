@@ -3,7 +3,7 @@ import { ClipboardPaste, ImageUp } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { composeManualLink } from "../../lib/connectUrl";
+import { composeManualLink, normalizeFingerprint } from "../../lib/connectUrl";
 import { decodeQrFromFile, qrImageSupported } from "../../lib/qrImage";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
@@ -12,10 +12,10 @@ import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
 import { Sheet } from "../ds/Sheet";
 
+/** Address only. A discovery record is unauthenticated, so it never supplies a certificate pin. */
 export interface ManualPrefill {
   host: string;
   port: string;
-  fingerprint?: string;
 }
 
 export interface OtherWaysSheetProps {
@@ -31,12 +31,14 @@ export function OtherWaysSheet({ visible, onClose, onSubmit, prefill }: OtherWay
   const [host, setHost] = useState("");
   const [port, setPort] = useState("7420");
   const [token, setToken] = useState("");
+  const [fingerprint, setFingerprint] = useState("");
   const [photoNote, setPhotoNote] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible || !prefill) return;
     setHost(prefill.host);
     setPort(prefill.port);
+    setFingerprint("");
   }, [visible, prefill]);
 
   const pasteFromClipboard = async () => {
@@ -59,7 +61,8 @@ export function OtherWaysSheet({ visible, onClose, onSubmit, prefill }: OtherWay
     }
   };
 
-  const manualLink = composeManualLink(host, port, token, prefill?.fingerprint);
+  const fingerprintBad = fingerprint.trim() !== "" && normalizeFingerprint(fingerprint) === null;
+  const manualLink = composeManualLink(host, port, token, fingerprint);
 
   return (
     <Sheet visible={visible} onClose={onClose} accessibilityLabel="Other ways to connect" maxHeightRatio={0.92}>
@@ -108,11 +111,21 @@ export function OtherWaysSheet({ visible, onClose, onSubmit, prefill }: OtherWay
           <Input label="Host" mono value={host} onChangeText={setHost} placeholder="192.168.1.20" autoCapitalize="none" autoCorrect={false} />
           <Input label="Port" mono value={port} onChangeText={setPort} placeholder="7420" keyboardType="number-pad" />
           <Input label="Token" mono value={token} onChangeText={setToken} placeholder="from `forge serve pair`" autoCapitalize="none" autoCorrect={false} />
-          {prefill?.fingerprint ? (
-            <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]} numberOfLines={1}>
-              pinned to the certificate this host advertised
-            </Text>
-          ) : null}
+          <Input
+            label="Certificate fingerprint (optional)"
+            mono
+            value={fingerprint}
+            onChangeText={setFingerprint}
+            placeholder="sha256:… as printed by `forge serve pair`"
+            autoCapitalize="none"
+            autoCorrect={false}
+            error={fingerprintBad ? "not a sha-256 fingerprint" : undefined}
+          />
+          <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>
+            {prefill
+              ? "nearby only found this address, and anyone on the network can claim a name. the certificate is not verified: type the fingerprint your computer prints, or paste the full link instead."
+              : "without a fingerprint the certificate is not pinned. paste the link or scan the code to pin it."}
+          </Text>
           <Button label="Continue" onPress={() => manualLink && onSubmit(manualLink)} disabled={!manualLink} fullWidth />
         </View>
       </View>
