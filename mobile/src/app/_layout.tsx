@@ -249,6 +249,7 @@ function RootNavigator() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="configuration" />
         <Stack.Screen name="skills" />
+        <Stack.Screen name="import" />
         <Stack.Screen name="hooks" />
         <Stack.Screen name="providers" />
         <Stack.Screen name="appearance" />

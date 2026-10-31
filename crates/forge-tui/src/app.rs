@@ -394,6 +394,8 @@ pub struct App {
     pub config_editor: crate::config_editor::ConfigEditor,
     /// The `/anywhere` menu (account, account sync, devices), while open.
     pub anywhere_menu: crate::anywhere_menu::AnywhereMenu,
+    /// The `/import` picker for Claude Code and Codex conversations, while open.
+    pub import_menu: crate::import_menu::ImportMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.

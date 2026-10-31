@@ -15,6 +15,7 @@ export type SettingsHref =
   | "/mcp"
   | "/configuration"
   | "/skills"
+  | "/import"
   | "/hooks"
   | "/session-tree"
   | "/workflows"
@@ -43,6 +44,7 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
   { href: "/mcp", title: "MCP servers", subtitle: "Tool servers", keywords: "mcp servers tools external" },
   { href: "/configuration", title: "Configuration", subtitle: "Daemon configuration", keywords: "config toml configuration permissions" },
   { href: "/skills", title: "Skills", subtitle: "Installed skills and commands", keywords: "skills commands slash catalog" },
+  { href: "/import", title: "Import conversations", subtitle: "Bring Claude Code and Codex sessions into Forge", keywords: "import conversations sessions history claude code codex transcripts migrate resume" },
   { href: "/hooks", title: "Hooks", subtitle: "Pre and post tool hooks", keywords: "hooks shell pre post tool" },
   { href: "/session-tree", title: "Session tree", subtitle: "Parent and child sessions", keywords: "tree subagents children fork" },
   { href: "/prs", title: "Pull requests", subtitle: "Open PRs across projects", keywords: "pull requests prs github review merge checks" },

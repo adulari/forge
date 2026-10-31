@@ -954,6 +954,8 @@ and keep going."
             return Ok(DispatchOutcome::ToggleRemote { exposure });
         }
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
+        CommandAction::Import if tui.is_some() => app.import_menu.open(super::import_menu::fallback_dir()),
+        CommandAction::Import => app.note("/import opens in a terminal chat; run `forge import scan` and `forge import sessions` instead"),
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {
                 Ok(summary) => app.note(&summary),

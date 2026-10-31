@@ -132,7 +132,7 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows" | "/prs" | "/remote-access";
+type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/import" | "/hooks" | "/session-tree" | "/workflows" | "/prs" | "/remote-access";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
@@ -150,6 +150,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "mcp", label: "MCP servers", href: "/mcp" },
   { key: "configuration", label: "Configuration", href: "/configuration" },
   { key: "skills", label: "Skills", href: "/skills" },
+  { key: "import", label: "Import conversations", href: "/import" },
   { key: "hooks", label: "Hooks", href: "/hooks" },
   { key: "session-tree", label: "Session tree", href: "/session-tree" },
   { key: "workflows", label: "Workflows", href: "/workflows" },
@@ -680,6 +681,7 @@ export function SettingsScreen() {
           <NavListRow label="MCP servers" meta={mcpEnabledLabel} onPress={() => router.push("/mcp")} />
           <NavListRow label="Configuration" onPress={() => router.push("/configuration")} />
           <NavListRow label="Skills" meta={skillsCountLabel} onPress={() => router.push("/skills")} />
+          <NavListRow label="Import conversations" onPress={() => router.push("/import")} />
           <NavListRow label="Hooks" meta={hooksCountLabel} onPress={() => router.push("/hooks")} />
           <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} />
           <NavListRow label="Workflows" onPress={() => router.push("/workflows")} />

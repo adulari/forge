@@ -155,6 +155,8 @@ pub enum CommandAction {
     },
     /// Show local Anywhere health and open the trusted controller surface for setup/approvals.
     Anywhere,
+    /// Pick Claude Code and Codex conversations from this computer and import them (`/import`).
+    Import,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -502,6 +504,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             CommandAction::Remote { mode }
         }
         "anywhere" | "aw" => CommandAction::Anywhere,
+        "import" => CommandAction::Import,
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),

@@ -1021,6 +1021,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         )
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
+        .merge(crate::serve_import::routes(&base))
         .merge(crate::serve_skills::routes(&base))
         .merge(crate::serve_account_sync::routes(&base))
         .merge(crate::serve_access::routes(&base))
