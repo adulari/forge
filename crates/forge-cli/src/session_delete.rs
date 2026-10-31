@@ -15,6 +15,7 @@ pub(crate) enum Refusal {
         host: String,
     },
     Running,
+    RunningSubagents,
     OwnsWorktree(String),
     Frozen,
     Failed(String),
@@ -30,6 +31,7 @@ impl Refusal {
                 format!("this session is open in a forge chat terminal on {host}")
             }
             Self::Running => "this session is running in the Forge daemon".into(),
+            Self::RunningSubagents => "this session has detached subagents still running".into(),
             Self::OwnsWorktree(path) => format!("this session still owns the worktree {path}"),
             Self::Frozen => "this session is frozen by an Anywhere handoff".into(),
             Self::Failed(why) => format!("deleting failed: {why}"),
@@ -44,6 +46,9 @@ impl Refusal {
                 "run /delete in that terminal, or close the chat and delete it here"
             }
             Self::Running => "stop or archive the running session first, then delete it",
+            Self::RunningSubagents => {
+                "cancel them first (ask the session to cancel_subagent, or wait), then delete it"
+            }
             Self::OwnsWorktree(_) => {
                 "resume the session and merge or discard its worktree first, then delete it"
             }
@@ -104,6 +109,9 @@ pub(crate) async fn check_with(
     if running_in_daemon {
         return Err(Refusal::Running);
     }
+    if preview.running_subagents > 0 {
+        return Err(Refusal::RunningSubagents);
+    }
     if !own_terminal && crate::terminal_owner::terminal_owns_session(store, id).await {
         return Err(Refusal::OpenInTerminal { host: host_name() });
     }
@@ -151,14 +159,32 @@ pub(crate) async fn delete_local(
 /// Delete through the running daemon when there is one, so its registry-aware checks apply;
 /// otherwise in this process with the same checks.
 pub(crate) async fn delete_anywhere(store: &Arc<Store>, id: &str) -> Result<Deleted, Refusal> {
-    let daemon = crate::serve::read_state()
-        .ok()
-        .flatten()
-        .filter(|state| state.process_is_alive());
-    match daemon {
+    match daemon_for_this_store() {
         Some(state) => delete_via_daemon(&state, id).await,
         None => delete_local(store, id, false).await,
     }
+}
+
+/// The live daemon, but only when it owns the store this process opened: a daemon on another
+/// store would answer 404 for a session it never had, or worse delete a same-id session in its own.
+pub(crate) fn daemon_for_this_store() -> Option<crate::serve::ServeState> {
+    let state = crate::serve::read_state()
+        .ok()
+        .flatten()
+        .filter(|state| state.process_is_alive())?;
+    daemon_owns_store(&state, &crate::cli::commands::replay::resolved_store_path()).then_some(state)
+}
+
+fn daemon_owns_store(state: &crate::serve::ServeState, ours: &Path) -> bool {
+    let theirs = match state.store_path.as_deref() {
+        Some(path) => std::path::PathBuf::from(path),
+        // Daemons older than the `store_path` field always opened the release store.
+        None => match forge_config::data_dir() {
+            Some(dir) => dir.join("forge.db"),
+            None => return false,
+        },
+    };
+    std::fs::canonicalize(&theirs).unwrap_or(theirs) == ours
 }
 
 async fn delete_via_daemon(state: &crate::serve::ServeState, id: &str) -> Result<Deleted, Refusal> {
@@ -363,6 +389,47 @@ mod tests {
         assert!(store.session_exists(&id).unwrap());
     }
 
+    #[tokio::test]
+    async fn refuses_while_a_detached_subagent_is_running_and_allows_it_once_cancelled() {
+        let (store, id) = store_with_session();
+        let child = store.create_child_session("/proj", "Smith", &id).unwrap();
+        store
+            .create_detached_child(&child, &id, "worker", "m")
+            .unwrap();
+        let refusal = delete_local(&store, &id, false).await.unwrap_err();
+        assert_eq!(refusal, Refusal::RunningSubagents);
+        assert!(store.session_exists(&id).unwrap());
+        assert!(store.cancel_detached_child(&child).unwrap());
+        delete_local(&store, &id, false).await.unwrap();
+        assert!(!store.session_exists(&child).unwrap());
+    }
+
+    fn daemon_state(store_path: Option<&str>) -> crate::serve::ServeState {
+        crate::serve::ServeState {
+            pid: std::process::id(),
+            port: 1,
+            exposure: "local".into(),
+            base_url: "http://127.0.0.1:1/t".into(),
+            token: "t".into(),
+            started_at: 0,
+            store_path: store_path.map(String::from),
+        }
+    }
+
+    #[test]
+    fn a_daemon_on_another_store_is_not_where_a_delete_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.db");
+        let copy = dir.path().join("copy.db");
+        std::fs::write(&real, b"").unwrap();
+        std::fs::write(&copy, b"").unwrap();
+        let real = std::fs::canonicalize(real).unwrap();
+        let copy = std::fs::canonicalize(copy).unwrap();
+        let daemon = daemon_state(Some(real.to_str().unwrap()));
+        assert!(daemon_owns_store(&daemon, &real));
+        assert!(!daemon_owns_store(&daemon, &copy));
+    }
+
     #[test]
     fn path_components_are_validated() {
         assert!(!safe_component("../etc"));
@@ -382,6 +449,7 @@ mod tests {
             worktree: None,
             synced: true,
             frozen: false,
+            running_subagents: 0,
             memories_kept: 3,
             targets: Vec::new(),
         };

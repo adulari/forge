@@ -23,6 +23,22 @@ All notable changes to Forge are documented here. The format follows
 ### Security
 
 - **The threat model no longer claims phones and controllers never receive secrets.** They hold the Account Data Key the vault key derives from and download the key records; the app discards them unseen. The second seal is documented as a guardrail against rendering, not a boundary against an enrolled device.
+### Changed
+
+- **`forge sessions --delete` refuses a name shared by several sessions instead of deleting the newest.** An id or id prefix works as before; a title that matches more than one top-level session now stops with an "ambiguous" error that asks for the id.
+
+### Fixed
+
+- **Deleting a session now removes its tool calls, routing decisions and usage records from the sync journal.** Those records carry a message id rather than a session id, so the purge never matched them and their arguments, results and queued uploads stayed behind and still synced after the delete. They are now purged with the rest of the session's journalled content.
+- **Session delete goes to the daemon that owns the store you opened, not to whichever daemon is running.** `serve-state.json` now records the daemon's store; with `FORGE_DB` pointing elsewhere, `forge sessions --delete`, `/delete` and `--compact-db` act on your own store instead of deleting a same-id session in the daemon's or failing with "no such session".
+- **A session with detached subagents still running can no longer be deleted out from under them.** The delete is refused with a next step, and `/delete` on the current chat cancels its own detached subagents first, so no task keeps writing to rows that are gone.
+- **Opening a file the chat names stops scanning the whole transcript on every miss.** A path or suffix inside the workspace is answered first; only an outside-workspace path reads, and then just the newest 400 user messages and tool calls.
+- **The repeat interrupt no longer fires again on the waiting or gated steps that follow it.** `repeat_interrupt` is sent only from the step that counted the repeat, so a model that already switched approach is not told to change approach a second time.
+- **`thinking_loop_breaker` no longer pre-empts the text-tool-call repair note or the CLI-bridge cost and anti-spiral checks.** A reply that writes a tool call as text keeps its explanatory repair, and a bridge re-run is judged by the bridge checks instead of getting extra re-drives.
+
+### Security
+
+- **A view-only device can no longer read host files outside the workspace through the chat's file route.** Reading outside the workspace now needs the workspace-write scope, never view alone; only paths the user typed or a tool call's own arguments named count (tool output and fetched pages do not); and credentials, SSH and cloud keys, `.env` files, Forge's own config and database, keyrings and anything under a `.git` directory are refused whoever asks.
 
 ## [2.26.0] - 2026-10-30
 

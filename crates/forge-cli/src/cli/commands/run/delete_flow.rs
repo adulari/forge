@@ -89,6 +89,7 @@ pub(super) async fn delete_current(
     let store = {
         let mut s = session.lock().await;
         let cwd = s.workspace_scope();
+        s.cancel_all_detached();
         if let Err(error) = s.reset_fresh_hooked(&cwd).await {
             app.note(&format!(
                 "⚠ nothing deleted, could not start a fresh session: {error}"

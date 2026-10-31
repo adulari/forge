@@ -679,6 +679,26 @@ async fn thinking_loop_breaker_interrupts_a_restated_plan_at_most_twice() {
     );
 }
 
+#[tokio::test]
+async fn thinking_loop_breaker_leaves_a_text_tool_call_to_the_repair_note() {
+    let markup =
+        r#"<invoke name="shell"><parameter name="command">cargo test</parameter></invoke>"#;
+    let mut run = Run::new(
+        Arc::new(Script::new(vec![say(markup)])),
+        harness_config(HarnessProfile::Minimal, |h| {
+            h.stop_retries = true;
+            h.thinking_loop_breaker = true;
+        }),
+        test_workspace(),
+    );
+    run.session.run_turn("go").await.unwrap();
+    assert_eq!(
+        transcript_hits(&run, crate::stop_guards::THINKING_LOOP_NUDGE),
+        0
+    );
+    assert!(transcript_hits(&run, "text is not a tool call") >= 1);
+}
+
 async fn repeated_shell(repeat_interrupt: bool) -> (usize, usize) {
     let steps: Vec<_> = (0..20)
         .map(|_| {

@@ -173,6 +173,10 @@ pub(crate) struct ServeState {
     pub(crate) base_url: String,
     pub(crate) token: String,
     pub(crate) started_at: u64,
+    /// The session store this daemon owns. Absent in files written by older daemons, which always
+    /// used the default store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) store_path: Option<String>,
 }
 
 impl ServeState {
@@ -806,6 +810,11 @@ pub(crate) async fn serve_cmd(
         base_url: url.clone(),
         token: token.clone(),
         started_at,
+        store_path: Some(
+            crate::cli::commands::replay::resolved_store_path()
+                .to_string_lossy()
+                .into_owned(),
+        ),
     }) {
         eprintln!(
             "⚠ could not write serve-state.json — desktop auto-detect won't find this daemon: {e}"
@@ -4029,6 +4038,7 @@ pub(crate) mod tests {
             base_url: "http://127.0.0.1:7420/abc123".to_string(),
             token: "abc123".to_string(),
             started_at: 1_700_000_000,
+            store_path: None,
         };
         let parsed: serde_json::Value = serde_json::from_str(&state.to_json()).unwrap();
         assert_eq!(parsed["pid"], 12345);
@@ -4123,6 +4133,7 @@ pub(crate) mod tests {
             base_url: "https://example.trycloudflare.com/deadbeef".to_string(),
             token: "deadbeef".to_string(),
             started_at: 1_700_000_001,
+            store_path: Some("/data/forge.db".to_string()),
         };
         write_state_at(&path, &state).unwrap();
         let read_back: ServeState =
