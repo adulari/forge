@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Nearby hosts on the desktop Connect screen no longer hand out a certificate pin, and the pin text no longer overpromises.** Anyone on the network can publish a `_forge._tcp` record, so the `fp` it carried was attacker-controlled and the pairing token went to whichever machine answered under the victim's name. Nearby now suggests an address only: the pin must come from the pairing link or QR, or from a fingerprint you type from `forge serve pair` into the new optional field (a malformed one is refused), and the list is labelled unverified and flags hosts sharing a name. The confirm card now claims a pinned certificate only on https links on the desktop app, where the pin is checked; elsewhere (web, iOS, Android, plain http) it warns that the pin is not checked. The daemon's "only from this machine" gate for setup and binary updates also requires a loopback TCP peer, not just a loopback `Host`, so a remote desktop client relayed through the pinned loopback proxy (or any paired client typing `Host: 127.0.0.1`) can no longer run onboarding or replace the daemon binary. The saved LAN TLS key is created with mode 0600 instead of being chmod'ed after a world-readable moment.
+
 ### Fixed
 
 - **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.

@@ -1,7 +1,9 @@
 // Nearby hosts: browse `_forge._tcp` (advertised by `forge serve --lan`) so the pairing screen can
 // list daemons on the local network without a URL being typed. The TXT record carries only a
-// host id and the certificate fingerprint; the pairing token is never advertised, so choosing a
-// host still needs a link, a scan, or a one-time code from the machine itself.
+// host id and the certificate fingerprint, but anyone on the network can publish that record, so
+// discovery suggests an address only: the fingerprint is deliberately not read, and a pin must
+// come from the pairing link or from a fingerprint the user compares by eye. The pairing token is
+// never advertised, so choosing a host still needs a link, a scan, or a one-time code.
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -14,7 +16,6 @@ pub struct NearbyHost {
     pub name: String,
     pub host: String,
     pub port: u16,
-    pub fingerprint: Option<String>,
 }
 
 /// Home and office LANs are 192.168/16 or 10/8; 172.16/12 is mostly container bridges.
@@ -60,7 +61,6 @@ pub fn browse(window: Duration) -> Result<Vec<NearbyHost>, String> {
                         name,
                         host: address.to_string(),
                         port: info.get_port(),
-                        fingerprint: info.get_property_val_str("fp").map(str::to_string),
                     },
                 );
             }

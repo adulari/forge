@@ -67,13 +67,27 @@ pub(crate) fn load_or_create_cert(dir: &Path, sans: Vec<String>) -> Result<SelfS
     Ok(fresh)
 }
 
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    use std::io::Write as _;
+    let mut file = create_private(path).with_context(|| format!("writing {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
@@ -269,6 +283,29 @@ mod tests {
         assert_eq!(
             pairing_link("https://box.ts.net", "abcd", None),
             "https://box.ts.net/abcd"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_key_file_is_private_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.pem");
+        let file = create_private(&path).unwrap();
+        let mode = file.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "group/other bits set at creation: {mode:o}"
+        );
+
+        let fresh = tempfile::tempdir().unwrap();
+        load_or_create_cert(fresh.path(), vec!["localhost".to_string()]).unwrap();
+        let key = fresh.path().join(KEY_FILE);
+        assert_eq!(
+            std::fs::metadata(key).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 

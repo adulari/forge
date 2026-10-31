@@ -849,7 +849,12 @@ and answers "certificate changed, re-pair" on a mismatch. iOS and Android need a
 module and are not covered yet.
 
 - **Discovery.** The daemon advertises `_forge._tcp` over mDNS with TXT `id` and `fp`; the token is
-  never advertised. The desktop Connect screen lists these as Nearby hosts.
+  never advertised. The desktop Connect screen lists these as unverified Nearby hosts. mDNS is
+  unauthenticated, so Nearby suggests an address only and never a pin: take the pin from the
+  pairing link or QR, or type the fingerprint `forge serve pair` prints into the sheet's
+  fingerprint field.
+- **Local-only endpoints.** Onboarding and daemon updates require a loopback TCP peer as well as a
+  loopback `Host`, so traffic relayed by the desktop's pinned proxy from a remote machine is refused.
 - **Tailscale.** `forge serve --tailscale` runs `tailscale serve --bg --https=443` against the
   daemon and prints a QR for the MagicDNS address, whose certificate every device already trusts
   (so the link carries no pin). Remote Access reports the state: not installed, logged out,

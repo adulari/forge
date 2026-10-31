@@ -91,7 +91,6 @@ export interface NearbyHost {
   name: string;
   host: string;
   port: number;
-  fingerprint: string | null;
 }
 
 /** `_forge._tcp` daemons on the local network. Desktop only; elsewhere the list is empty. */

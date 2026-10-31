@@ -53,7 +53,10 @@ export interface ConnectTarget {
   /** Host as it will be dialled, lowercased, never the token. */
   host: string;
   cleartext: boolean;
+  /** The link carries a pin and this device will check it against the server's certificate. */
   pinned: boolean;
+  /** The link carries a pin that is not checked here: plain http, or a platform without pinning. */
+  pinIgnored: boolean;
   /** Set when the host mixes scripts or uses punycode, which is how lookalike hosts hide. */
   lookalike: boolean;
   private: boolean;
@@ -69,23 +72,29 @@ function isPrivateHost(hostname: string): boolean {
 }
 
 /** What the confirm card shows. Built from the parsed URL, never from the raw input. */
-export function describeConnectTarget(parsed: ParsedConnectUrl): ConnectTarget {
+export function describeConnectTarget(parsed: ParsedConnectUrl, pinEnforced: boolean): ConnectTarget {
   const url = new URL(parsed.baseUrl);
   const hostname = url.hostname.toLowerCase();
+  const hasPin = parsed.fingerprint !== undefined;
+  const enforced = hasPin && pinEnforced && url.protocol === "https:";
   return {
     host: url.host.toLowerCase(),
     cleartext: url.protocol === "http:",
-    pinned: parsed.fingerprint !== undefined,
+    pinned: enforced,
+    pinIgnored: hasPin && !enforced,
     lookalike: hostname.split(".").some((label) => label.startsWith("xn--")) || /[^\x00-\x7f]/.test(hostname),
     private: isPrivateHost(hostname.replace(/^\[|\]$/g, "")),
   };
 }
 
+/** `fingerprint` must be one the user typed or scanned, never one a discovery record supplied. */
 export function composeManualLink(host: string, port: string, token: string, fingerprint?: string): string | null {
   const cleanHost = host.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
   const cleanToken = token.trim();
   if (!cleanHost || !cleanToken) return null;
   const portPart = port.trim() ? `:${port.trim()}` : "";
-  const pin = fingerprint ? `&fp=${fingerprint}` : "";
+  const normalized = fingerprint?.trim() ? normalizeFingerprint(fingerprint) : null;
+  if (fingerprint?.trim() && !normalized) return null;
+  const pin = normalized ? `&fp=${normalized}` : "";
   return `https://${cleanHost}${portPart}/#token=${cleanToken}${pin}`;
 }

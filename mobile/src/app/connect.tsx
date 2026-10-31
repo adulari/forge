@@ -138,7 +138,7 @@ export default function ConnectScreen() {
       return;
     }
     setFormatError(null);
-    setConfirm({ candidate, target: describeConnectTarget(parsed) });
+    setConfirm({ candidate, target: describeConnectTarget(parsed, isTauri) });
   }, []);
 
   useEffect(() => {
@@ -403,7 +403,7 @@ export default function ConnectScreen() {
 
       <NearbyHosts
         onPick={(host) => {
-          setPrefill({ host: host.host, port: String(host.port), fingerprint: host.fingerprint ?? undefined });
+          setPrefill({ host: host.host, port: String(host.port) });
           setOtherOpen(true);
         }}
       />
