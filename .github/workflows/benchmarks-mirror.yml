@@ -64,7 +64,7 @@ jobs:
 
       - name: Cache the build
         if: steps.gate.outputs.run == 'true'
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
         with:
           key: benchmarks-mirror-${{ steps.toolchain.outputs.channel }}
           add-job-id-key: false
