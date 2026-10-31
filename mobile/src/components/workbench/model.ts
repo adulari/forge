@@ -11,7 +11,8 @@ export type WorkbenchSurfaceKind =
   | "agents"
   | "plan"
   | "gallery"
-  | "actions";
+  | "actions"
+  | "notes";
 
 export interface WorkbenchSurfaceDefinition {
   kind: WorkbenchSurfaceKind;
@@ -94,6 +95,13 @@ export const WORKBENCH_SURFACE_DEFINITIONS: Record<
     placement: "right",
     defaultSize: 400,
     sessionScoped: true,
+  },
+  notes: {
+    kind: "notes",
+    title: "Notes",
+    placement: "right",
+    defaultSize: 360,
+    sessionScoped: false,
   },
 };
 

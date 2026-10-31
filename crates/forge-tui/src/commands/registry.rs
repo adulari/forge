@@ -338,6 +338,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/anywhere",
     },
     Command {
+        name: "notes",
+        desc: "this project's to-dos and scratchpad; any to-do can start a thread",
+        usage: "/notes",
+    },
+    Command {
         name: "self-mcp",
         desc: "toggle self-MCP mode: a sub-Forge MCP agent this session can call as tools",
         usage: "/self-mcp [enable|disable]",

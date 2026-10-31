@@ -84,6 +84,9 @@ export function FleetWatcher() {
           if (frame.kind === "fleet_changed" && typeof frame.revision === "number") {
             void queryClient.invalidateQueries({ queryKey: ["sessions", baseUrl] });
           }
+          if (frame.kind === "notes_changed") {
+            void queryClient.invalidateQueries({ queryKey: ["notes", baseUrl] });
+          }
         } catch {
           // Ignore malformed invalidations; the recovery poll remains authoritative.
         }

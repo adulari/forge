@@ -19,6 +19,8 @@ pub(crate) struct HostSignals {
     /// Fleet sockets open right now; with the per-session counts this says whether any app is
     /// connected, which `[power] keep_awake = "while_remote"` keys on.
     fleet_clients: Arc<AtomicUsize>,
+    /// Bumped on every project-notes write (`serve_notes`), so a second device refetches them.
+    notes_changed: tokio::sync::watch::Sender<u64>,
 }
 
 impl HostSignals {
@@ -26,7 +28,17 @@ impl HostSignals {
         Self {
             going_away: tokio::sync::watch::channel(false).0,
             fleet_clients: Arc::new(AtomicUsize::new(0)),
+            notes_changed: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    pub(crate) fn notify_notes(&self) {
+        self.notes_changed
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
+    pub(crate) fn notes_rx(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.notes_changed.subscribe()
     }
 
     pub(crate) fn announce_going_away(&self) {
@@ -64,16 +76,18 @@ pub(crate) async fn fleet_ws_handler(
 ) -> Response {
     let fleet_rx = state.registry.subscribe_fleet();
     let going_away = state.registry.signals.going_away_rx();
+    let notes_rx = state.registry.signals.notes_rx();
     let attached = FleetClient::attach(&state.registry.signals.fleet_clients);
     ws.on_upgrade(move |socket| async move {
         let _attached = attached;
-        pump_fleet_ws(socket, fleet_rx, going_away).await;
+        pump_fleet_ws(socket, fleet_rx, notes_rx, going_away).await;
     })
 }
 
 async fn pump_fleet_ws(
     mut socket: WebSocket,
     mut fleet_rx: tokio::sync::watch::Receiver<u64>,
+    mut notes_rx: tokio::sync::watch::Receiver<u64>,
     mut going_away: tokio::sync::watch::Receiver<bool>,
 ) {
     let initial = *fleet_rx.borrow();
@@ -96,6 +110,12 @@ async fn pump_fleet_ws(
                 if changed.is_err() { break; }
                 let revision = *fleet_rx.borrow_and_update();
                 let frame = serde_json::json!({ "kind": "fleet_changed", "revision": revision }).to_string();
+                if socket.send(WsMessage::Text(frame.into())).await.is_err() { break; }
+            }
+            changed = notes_rx.changed() => {
+                if changed.is_err() { break; }
+                let revision = *notes_rx.borrow_and_update();
+                let frame = serde_json::json!({ "kind": "notes_changed", "revision": revision }).to_string();
                 if socket.send(WsMessage::Text(frame.into())).await.is_err() { break; }
             }
             _ = keepalive.tick() => {

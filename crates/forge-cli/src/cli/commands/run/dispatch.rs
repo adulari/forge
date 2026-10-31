@@ -953,6 +953,19 @@ and keep going."
             };
             return Ok(DispatchOutcome::ToggleRemote { exposure });
         }
+        CommandAction::Notes if tui.is_some() => {
+            let project = session
+                .lock()
+                .await
+                .workspace_root()
+                .to_string_lossy()
+                .into_owned();
+            app.notes_overlay.open();
+            app.notes_overlay.data.project = forge_store::project_key(&project);
+        }
+        CommandAction::Notes => {
+            app.note("/notes opens in the interactive TUI. From a shell, use: forge notes")
+        }
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {

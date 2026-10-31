@@ -248,6 +248,9 @@ pub(crate) use session_flags::SessionFlags;
 #[path = "args/schedule.rs"]
 pub(crate) mod schedule;
 pub(crate) use schedule::ScheduleCmd;
+#[path = "args/notes.rs"]
+pub(crate) mod notes;
+pub(crate) use notes::NotesCmd;
 #[path = "args/stats.rs"]
 pub(crate) mod stats;
 pub(crate) use stats::StatsCmd;
@@ -853,6 +856,12 @@ pub(crate) enum Command {
     SelfMcp {
         #[command(subcommand)]
         action: SelfMcpAction,
+    },
+    /// The project's scratchpad and to-do list: `forge notes`, `add`, `done`, `rm`, `pad`. The
+    /// same notes the desktop, web and mobile Notes surface and the TUI `/notes` overlay edit.
+    Notes {
+        #[command(subcommand)]
+        cmd: Option<NotesCmd>,
     },
     /// Register/list/remove recurring tasks that fire `forge run` on a native OS timer (systemd
     /// on Linux, launchd on macOS, Task Scheduler on Windows) — the headless analog to
