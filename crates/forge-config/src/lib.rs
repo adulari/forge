@@ -67,6 +67,7 @@ pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name,
 pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
 pub use edit_mode::EditMode;
+pub use edit_mode::EditMode;
 pub use hard_stop::HardStop;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
@@ -1587,9 +1588,6 @@ pub struct HarnessConfig {
     /// and move the progress ledger's cycle stop two repeats later.
     #[serde(default)]
     pub repeat_interrupt: bool,
-    /// How the model edits existing files. `replace` (default) is exact-text `edit_file`/
-    /// `multi_edit`; `hashline` tags `read_file` lines and edits by line anchor. A plain value so a
-    /// per-model family profile can set it.
     #[serde(default)]
     pub edit_mode: EditMode,
 }
