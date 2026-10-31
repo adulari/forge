@@ -45,6 +45,27 @@ pub(crate) fn lifecycle_event(ev: subagent::Lifecycle) -> PresenterEvent {
 }
 
 impl Session {
+    /// Stop every detached child `parent_session` (this session, or the one just replaced by a
+    /// fresh one) still has running: abort the task held in this
+    /// process and settle its row. Used before the session is deleted, so no task keeps writing
+    /// to rows that are about to vanish. Returns how many were cancelled.
+    pub fn cancel_all_detached(&self, parent_session: &str) -> usize {
+        let Ok(children) = self.store.list_detached_children(parent_session) else {
+            return 0;
+        };
+        let mut cancelled = 0;
+        for child in children
+            .iter()
+            .filter(|c| c.status == forge_store::DetachedChildStatus::Running)
+        {
+            self.detached_registry.abort(&child.child_id);
+            if matches!(self.store.cancel_detached_child(&child.child_id), Ok(true)) {
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
     /// Where detached children report their lifecycle after the admitting turn has ended: the
     /// presenter's background sink. `None` on a surface without one (plain headless output),
     /// where the labeled result message at the next turn boundary is the only report.

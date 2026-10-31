@@ -411,7 +411,7 @@ impl Session {
                         break;
                     }
                 } else if self.inject_steers(&resp.content)
-                    || self.thinking_loop_nudge(&resp.content, &mut thinking_loop)
+                    || self.thinking_loop_nudge(&resp.content, &mut thinking_loop, &active_model)
                 {
                     // The user queued a prompt while this response was being produced. Rather than
                     // ending the turn and starting a new one, continue with it now — the model

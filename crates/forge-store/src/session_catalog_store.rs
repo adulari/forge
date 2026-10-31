@@ -499,6 +499,15 @@ impl Store {
             .optional()?)
     }
 
+    /// How many top-level sessions are named exactly `title`.
+    pub fn count_sessions_titled(&self, title: &str) -> Result<i64> {
+        Ok(self.lock()?.query_row(
+            "SELECT COUNT(*) FROM session WHERE title = ?1 AND parent_session_id IS NULL",
+            [title],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Whether a session with this id exists.
     pub fn session_exists(&self, session_id: &str) -> Result<bool> {
         let n: i64 = self.lock()?.query_row(

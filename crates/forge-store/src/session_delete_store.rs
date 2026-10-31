@@ -29,6 +29,8 @@ pub struct SessionDeletePreview {
     pub synced: bool,
     /// An Anywhere handoff froze this tree.
     pub frozen: bool,
+    /// Detached subagents of the tree whose task is still running somewhere.
+    pub running_subagents: i64,
     /// Saved memories distilled from the tree; they are the person's own notes and are kept.
     pub memories_kept: i64,
     /// Root first, then descendants.
@@ -50,9 +52,11 @@ const TREE_CTE: &str = "WITH RECURSIVE session_tree(id) AS (
         JOIN session_tree parent ON child.parent_session_id = parent.id
     )";
 
-/// Journal kinds whose payload is the session's content, with `session_id` in the JSON.
-const CONTENT_KINDS: &str =
-    "('message','tool_call','routing_decision','usage','compaction','checkpoint')";
+/// Journal kinds whose payload names its session directly (`session_id` in the JSON).
+const SESSION_KEYED_KINDS: &str = "('message','compaction','checkpoint')";
+
+/// Journal kinds keyed to a message instead (`message_id` in the JSON, no `session_id`).
+const MESSAGE_KEYED_KINDS: &str = "('tool_call','routing_decision','usage')";
 
 impl Store {
     /// The tree rooted at `session_id` and what deleting it takes with it, or `None` if absent.
@@ -93,6 +97,11 @@ impl Store {
             "SELECT COUNT(*) FROM anywhere_handoff_session_state
              WHERE session_id IN (SELECT id FROM session_tree)",
         )? > 0;
+        let running_subagents = count(
+            "SELECT COUNT(*) FROM detached_child WHERE status = 'running'
+               AND (parent_session IN (SELECT id FROM session_tree)
+                    OR child_id IN (SELECT id FROM session_tree))",
+        )?;
         let synced = count(
             "SELECT (SELECT COUNT(*) FROM sync_journal WHERE record_kind='session'
                        AND stable_id IN (SELECT id FROM session_tree))
@@ -119,6 +128,7 @@ impl Store {
             worktree,
             synced,
             frozen,
+            running_subagents,
             memories_kept,
             targets,
         }))
@@ -219,9 +229,18 @@ fn delete_tree(conn: &rusqlite::Connection, targets: &[DeleteTarget]) -> Result<
         }
         // The journal keeps every revision of a synced record. Purge the content copies (and any
         // queued upload envelopes, which cascade); the tombstone is what other devices need.
+        // Must run before the session row goes: it resolves message ids through `message`.
         tx.execute(
             &format!(
-                "DELETE FROM sync_journal WHERE record_kind IN {CONTENT_KINDS}
+                "DELETE FROM sync_journal WHERE record_kind IN {MESSAGE_KEYED_KINDS}
+                   AND json_extract(CAST(payload AS TEXT), '$.message_id') IN
+                       (SELECT id FROM message WHERE session_id = ?1)"
+            ),
+            [id],
+        )?;
+        tx.execute(
+            &format!(
+                "DELETE FROM sync_journal WHERE record_kind IN {SESSION_KEYED_KINDS}
                    AND json_extract(CAST(payload AS TEXT), '$.session_id') = ?1"
             ),
             [id],
@@ -337,10 +356,34 @@ mod tests {
                 )
                 .unwrap()
         };
-        assert!(journalled("message") > 0);
+        let mid = store
+            .add_message(&sid, 1, Role::Assistant, "ran a tool", None)
+            .unwrap();
+        store
+            .record_tool_call(&mid, "shell", "{}", "TOOL-SECRET", "auto", "ok")
+            .unwrap();
+        store
+            .record_routing(&mid, forge_types::TaskTier::Standard, "m", "why")
+            .unwrap();
+        store
+            .record_usage(&sid, &mid, &forge_types::Usage::default(), Some("m"))
+            .unwrap();
+        let other = store.create_session("/other", "Smith").unwrap();
+        let other_msg = store
+            .add_message(&other, 0, Role::Assistant, "keep", None)
+            .unwrap();
+        store
+            .record_tool_call(&other_msg, "shell", "{}", "KEEP", "auto", "ok")
+            .unwrap();
+        for kind in ["message", "tool_call", "routing_decision", "usage"] {
+            assert!(journalled(kind) > 0, "{kind} was never journalled");
+        }
         assert!(store.session_delete_preview(&sid).unwrap().unwrap().synced);
         store.delete_session(&sid).unwrap();
-        assert_eq!(journalled("message"), 0);
+        assert_eq!(journalled("message"), 1, "only the other session's remains");
+        assert_eq!(journalled("tool_call"), 1);
+        assert_eq!(journalled("routing_decision"), 0);
+        assert_eq!(journalled("usage"), 0);
         let ops: Vec<String> = {
             let conn = store.lock().unwrap();
             let mut stmt = conn

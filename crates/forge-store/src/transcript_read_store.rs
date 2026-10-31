@@ -6,7 +6,7 @@ use super::*;
 /// damaged. The surrounding message stays readable either way — losing one row's call list must
 /// not make a whole transcript unloadable — but corruption is reported instead of silently
 /// presenting the turn as call-free.
-fn parse_tool_calls_with_diagnostic(
+pub(crate) fn parse_tool_calls_with_diagnostic(
     session_id: &str,
     seq: Option<i64>,
     raw: Option<&str>,
@@ -44,7 +44,7 @@ fn parse_provider_items(
     }
 }
 
-fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> Role {
+pub(crate) fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> Role {
     match Role::parse(raw) {
         Some(role) => role,
         None => {

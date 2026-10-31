@@ -170,6 +170,9 @@ pub(crate) struct ProgressLedger {
     failure: Option<FailureRun>,
     recent_batches: VecDeque<(u64, u64)>,
     cycle_run: u32,
+    /// Whether the step being observed reached the repeat count at all. Waiting and gated steps
+    /// return before it, and must not make an earlier step's `cycle_run` look current.
+    cycle_counted: bool,
     cycle_hold: u32,
     idle_steps: u32,
     wait_steps: u32,
@@ -213,6 +216,7 @@ impl Default for ProgressLedger {
             failure: None,
             recent_batches: VecDeque::new(),
             cycle_run: 0,
+            cycle_counted: false,
             cycle_hold: 0,
             idle_steps: 0,
             wait_steps: 0,
@@ -268,9 +272,10 @@ impl ProgressLedger {
     }
 
     /// The label of the call just repeated when it is the `at`-th identical call (same batch, same
-    /// result) in a row. Exactly `at`, so the interrupt is sent once per run.
+    /// result) in a row. Exactly `at` and only from the step that counted it, so the interrupt is sent
+    /// once per run, not again by the waiting or gated steps that follow.
     pub(crate) fn repeat_label(&self, at: u32) -> Option<String> {
-        if self.cycle_run != at {
+        if !self.cycle_counted || self.cycle_run != at {
             return None;
         }
         self.recent_calls
@@ -440,6 +445,7 @@ impl ProgressLedger {
         tree: &mut dyn FnMut() -> Option<u64>,
     ) -> Verdict {
         self.step_no += 1;
+        self.cycle_counted = false;
         let (new_write, informative, fresh_read) = self.assess(calls);
         let steered = std::mem::take(&mut self.steer_pending);
         let gated = std::mem::take(&mut self.gate_pending);
@@ -620,6 +626,7 @@ impl ProgressLedger {
         } else {
             1
         };
+        self.cycle_counted = true;
         self.recent_batches.push_back(key);
         if self.recent_batches.len() > CYCLE_WINDOW {
             self.recent_batches.pop_front();
