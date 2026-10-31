@@ -19,7 +19,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Instant;
 
-use forge_tui::{handle_key, App, ChannelPresenter, ConfirmOutcome, InputOutcome, KeyKind, UiMsg};
+use forge_tui::{handle_key, App, ChannelPresenter, InputOutcome, KeyKind, UiMsg};
 
 mod daemon_dispatch;
 pub(crate) mod daemon_fleet;

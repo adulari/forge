@@ -438,6 +438,7 @@ fn parse_one(q: &serde_json::Value, index: usize) -> Result<forge_types::Questio
         multi: flag("multi_select", false) || flag("multi", false),
         allow_other: flag("allow_other", true) || options.is_empty(),
         allow_note: flag("allow_note", true),
+        secret: false,
         options,
     })
 }

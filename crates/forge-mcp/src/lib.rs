@@ -38,6 +38,7 @@ use serde_json::Value;
 
 mod connect_log;
 mod content;
+pub mod elicit;
 mod handler;
 pub mod oauth;
 mod pool;
@@ -315,6 +316,8 @@ pub struct McpManager {
     /// are connected once for every manager, instead of once per manager. `None` keeps every
     /// connection private (the CLI's single session, tests).
     pool: Option<Arc<McpPool>>,
+    /// Identity of this manager's connections for elicitation routing (see [`elicit`]).
+    id: u64,
 }
 
 impl McpManager {
@@ -330,6 +333,7 @@ impl McpManager {
             connect_done,
             reconnect_locks: Mutex::new(HashMap::new()),
             pool: None,
+            id: elicit::new_owner_id(),
         }
     }
 
@@ -365,6 +369,7 @@ impl McpManager {
             roots: self.roots.clone(),
             sampling: self.sampling.clone(),
             conns: pool::CatalogLink::Manager(Arc::downgrade(&self.conns)),
+            owner: Some(self.id),
         }
     }
 
@@ -913,13 +918,26 @@ impl McpManager {
         let arguments = args.as_object().cloned();
         let mut params = CallToolRequestParams::new(raw_name);
         params.arguments = arguments;
-        match tokio::time::timeout(self.call_timeout, peer.call_tool(params)).await {
-            Ok(Ok(result)) => {
+        let call = peer.call_tool(params);
+        tokio::pin!(call);
+        // The timeout restarts while the server is waiting on a person (elicitation).
+        let finished = loop {
+            tokio::select! {
+                result = &mut call => break Some(result),
+                () = tokio::time::sleep(self.call_timeout) => {
+                    if !elicit::user_is_answering(self.id, &server) {
+                        break None;
+                    }
+                }
+            }
+        };
+        match finished {
+            Some(Ok(result)) => {
                 self.mark(&server, ServerStatus::Connected);
                 tool_result_to_outcome(result)
             }
-            Ok(Err(e)) => self.classify_call_error(&server, e),
-            Err(_) => self.timed_out(&server),
+            Some(Err(e)) => self.classify_call_error(&server, e),
+            None => self.timed_out(&server),
         }
     }
 

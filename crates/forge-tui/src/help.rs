@@ -65,7 +65,9 @@ fn command_group(name: &str) -> &'static str {
         | "btw" | "rename" | "star" | "done" | "delete" | "archived" | "import" | "cls" => {
             "History"
         }
-        "model" | "models" | "usage" | "mesh" | "duel" | "subagents" => "Models & routing",
+        "model" | "models" | "usage" | "mesh" | "duel" | "subagents" | "delegation" | "crew" => {
+            "Models & routing"
+        }
         "plan" | "execute" | "goal" | "pr" | "loop" | "workflow" | "assay" | "lattice"
         | "commit" | "dispatch" | "diff" => "Work",
         _ => "Project & tools",

@@ -82,6 +82,7 @@ use execution::{execute_tool, tool_result_failed};
 
 mod progress;
 mod requests;
+mod resume_repair;
 pub(crate) mod structured;
 #[cfg(test)]
 mod structured_tests;
@@ -268,6 +269,7 @@ pub async fn resume_subagent(
     budget: BudgetState,
     on_delta: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Result<SubagentOutcome, CoreError> {
+    resume_repair::close_dangling_tool_calls(&ctx.store, child_id)?;
     let stored = ctx.store.load_messages(child_id)?;
     let mut transcript = Vec::with_capacity(stored.len() + 2);
     transcript.push(Message::system(child_system_prompt(ctx, agent)));

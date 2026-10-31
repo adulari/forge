@@ -27,6 +27,8 @@ pub(crate) struct HandlerDeps {
     pub roots: Vec<Root>,
     pub sampling: Option<Arc<dyn SamplingHandler>>,
     pub conns: CatalogLink,
+    /// The manager this connection belongs to; `None` for a pooled connection shared by several.
+    pub owner: Option<u64>,
 }
 
 /// Connect to a server (spawn the stdio child / open the HTTP stream) and run `initialize`,
@@ -108,8 +110,13 @@ pub(crate) async fn serve(
     // filesystem server given a relative path would look in $HOME. The first advertised root is the
     // project the session is actually working in, so use it.
     let workspace_cwd = deps.roots.first().and_then(|r| root_dir(&r.uri));
-    let handler =
-        ForgeClientHandler::new(server.name.clone(), deps.roots, deps.sampling, deps.conns);
+    let handler = ForgeClientHandler::new(
+        server.name.clone(),
+        deps.roots,
+        deps.sampling,
+        deps.conns,
+        deps.owner,
+    );
     match &server.transport {
         McpTransport::Stdio { command, args, env } => {
             let mut cmd = stdio_command(command, args);

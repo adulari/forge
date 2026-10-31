@@ -184,6 +184,11 @@ pub enum CommandAction {
     /// model pin — `/subagents free` / `/subagents pinned`. `None` = bare `/subagents`, which
     /// toggles and reports the resulting state.
     Subagents(Option<bool>),
+    /// Allow (`Some(true)`) or withhold (`Some(false)`) delegation for this thread: `/delegation
+    /// on|off`. `None` = bare `/delegation`, which toggles and reports the resulting state.
+    Delegation(Option<bool>),
+    /// `/crew [name|off]`: list the saved crews, select one for this session, or clear the choice.
+    Crew(Option<String>),
     /// `/theme [name]`: list the accent palettes, or switch to one and save it.
     Theme(Option<String>),
     /// List the subagent types `spawn_agents` can use (`/agents`): built-ins plus agent files.
@@ -465,6 +470,10 @@ pub fn parse_command(line: &str) -> CommandAction {
         "subagents" | "subagent" => {
             CommandAction::Subagents(subagent_args::parse_subagents_arg(&arg))
         }
+        "crew" | "crews" => {
+            CommandAction::Crew((!arg.is_empty()).then(|| arg.trim().to_lowercase()))
+        }
+        "delegation" => CommandAction::Delegation(subagent_args::parse_delegation_arg(&arg)),
         "theme" | "palette" => {
             CommandAction::Theme((!arg.is_empty()).then(|| arg.trim().to_lowercase()))
         }

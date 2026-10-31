@@ -288,6 +288,16 @@ pub const COMMANDS: &[Command] = &[
         usage: "/subagents [free|pinned]",
     },
     Command {
+        name: "crew",
+        desc: "list saved crews, or pick the one this session delegates to (or @crew:name in a prompt)",
+        usage: "/crew [name|off]",
+    },
+    Command {
+        name: "delegation",
+        desc: "allow or withhold subagent delegation for this thread",
+        usage: "/delegation [on|off]",
+    },
+    Command {
         name: "agents",
         desc: "list the subagent types spawn_agents can use (built-in plus your agent files)",
         usage: "/agents",

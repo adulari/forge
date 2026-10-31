@@ -115,6 +115,7 @@ mod serve_agents;
 mod serve_clients;
 mod serve_clients_cli;
 mod serve_control;
+mod serve_crews;
 mod serve_diagnostics;
 mod serve_dispatch;
 mod serve_fleet_ws;

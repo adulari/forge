@@ -120,6 +120,7 @@ impl SharedServer {
             roots: self.roots.clone(),
             sampling: None,
             conns: CatalogLink::Shared(Arc::downgrade(self)),
+            owner: None,
         }
     }
 

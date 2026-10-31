@@ -37,6 +37,7 @@ rmcp = { workspace = true, features = [
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
     "reqwest",
+    "elicitation",
 ] }
 
 [dev-dependencies]

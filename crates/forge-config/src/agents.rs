@@ -26,6 +26,8 @@
 //! The front matter goes through the lenient reader `forge_skills::frontmatter` (YAML lists, folded
 //! scalars), so a malformed file degrades to being skipped rather than failing the whole load.
 
+pub mod crews;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -81,7 +83,12 @@ pub fn load_agents_layered(project_root: &Path, agents_dir: &str) -> HashMap<Str
         &crate::project_resource_dirs(project_root),
         agents_dir,
     );
-    merge_layers(dirs)
+    let mut agents = merge_layers(dirs);
+    // Saved crews contribute one `<crew>-<role>` type per member; an agent file of the same name wins.
+    for (name, def) in crews::crew_agents(&crews::load_crews(project_root)) {
+        agents.entry(name).or_insert(def);
+    }
+    agents
 }
 
 /// The built-in agents overlaid by each directory in order, later ones winning by name.
@@ -344,7 +351,7 @@ pub fn parse_model(value: &str) -> (Option<TaskTier>, Option<String>) {
     }
 }
 
-fn parse_tier(value: &str) -> Option<TaskTier> {
+pub(crate) fn parse_tier(value: &str) -> Option<TaskTier> {
     match unquote(value).to_lowercase().as_str() {
         "trivial" => Some(TaskTier::Trivial),
         "standard" => Some(TaskTier::Standard),

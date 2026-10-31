@@ -253,6 +253,7 @@ function RootNavigator() {
         <Stack.Screen name="import" />
         <Stack.Screen name="hooks" />
         <Stack.Screen name="control" />
+        <Stack.Screen name="crews" />
         <Stack.Screen name="providers" />
         <Stack.Screen name="appearance" />
         <Stack.Screen name="desktop" />

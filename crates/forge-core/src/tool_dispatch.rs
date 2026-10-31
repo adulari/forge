@@ -7,6 +7,7 @@ use super::*;
 mod deferred;
 mod denial;
 mod mcp;
+mod mcp_elicit;
 mod permission_hooks;
 mod runtime_allow;
 mod tool_hooks;
@@ -216,6 +217,9 @@ impl Session {
         }
         // The subagent virtual tool is owned by core (it needs provider/router/store), not the
         // registry — intercept before the registry lookup (RFC subagent-orchestration).
+        if let Some(refusal) = self.delegation_refusal(&call.name) {
+            return Ok(refusal);
+        }
         if call.name == subagent::SPAWN_AGENTS_TOOL {
             return self.spawn_agents(msg_id, call).await;
         }
@@ -230,6 +234,12 @@ impl Session {
         }
         if call.name == subagent::CANCEL_SUBAGENT_TOOL {
             return self.cancel_subagent(msg_id, call);
+        }
+        if call.name == crate::subagent_wait::WAIT_FOR_SUBAGENTS_TOOL {
+            return self.wait_for_subagents(msg_id, call).await;
+        }
+        if call.name == crate::subagent_wait::STEER_SUBAGENT_TOOL {
+            return self.steer_subagent(msg_id, call).await;
         }
         // Workflow scripts are core-owned for the same reason (docs/rfcs/forge-workflow.md).
         if call.name == workflow::RUN_WORKFLOW_TOOL {

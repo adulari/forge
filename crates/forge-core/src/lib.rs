@@ -127,6 +127,8 @@ pub use hooks_cc::forge_tool_to_cc;
 pub mod bridge_progress;
 mod child_ask;
 pub mod context_report;
+mod crew_guidance;
+pub mod delegation_flag;
 mod file_restore;
 mod instructions;
 pub mod job_wake;
@@ -168,6 +170,7 @@ mod routing_policy;
 pub mod run_budget;
 mod run_overrides;
 mod shell_diagnosis;
+pub mod subagent_wait;
 pub use run_budget::RunBudget;
 pub use session_restore::RestoredTurnState;
 mod pin_availability;
@@ -1106,6 +1109,7 @@ impl TaskScope {
                 | forge_tools::PYTHON_TOOL
                 | "spawn_agents"
                 | "send_to_agent"
+                | "steer_subagent"
                 | "run_workflow"
                 | "update_tasks"
                 | "remember"
@@ -1647,6 +1651,12 @@ pub struct Session {
     /// releases this session's children from the active model pin so they route the mesh on their
     /// own; `Some(false)` forces inheritance. `None` = follow `mesh.subagents.inherit_pin`.
     subagent_pin_free: Option<bool>,
+    /// Per-thread switch that withholds delegation (`/delegation off`): `spawn_agents` and its
+    /// companions are neither advertised nor run. Session-scoped, like `exact_effort`: a column
+    /// for it would mean a schema migration.
+    delegation_off: bool,
+    /// The saved crew every turn delegates to (`/crew <name>`); `None` = only `@crew:` mentions.
+    active_crew: Option<String>,
     /// Per-turn shrinking cap on the usable context window (tokens), armed only after a provider
     /// context-overflow error and reset at the start of each turn. Each overflow retry lowers it so
     /// the SENT transcript view trims harder — a non-destructive self-heal (the stored transcript is
@@ -2384,6 +2394,7 @@ impl Session {
         // subagent-orchestration). Children may receive it separately only when the explicitly
         // configured recursion depth allows another generation.
         if self.config.mesh.subagents.enabled
+            && !self.delegation_off
             && self
                 .task_scope
                 .as_ref()
@@ -2407,6 +2418,8 @@ impl Session {
             // gate, same "empty until first use" story as send_to_agent above.
             specs.push(subagent::list_subagents_spec());
             specs.push(subagent::cancel_subagent_spec());
+            specs.push(subagent_wait::wait_for_subagents_spec());
+            specs.push(subagent_wait::steer_subagent_spec());
         }
         if self
             .task_scope
@@ -5048,6 +5061,8 @@ mod tests {
 
     #[path = "detached_agents.rs"]
     mod detached_agents_tests;
+    #[path = "mcp_elicitation.rs"]
+    mod mcp_elicitation_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
     #[path = "subagent_schema.rs"]

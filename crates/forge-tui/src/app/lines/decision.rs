@@ -40,7 +40,13 @@ pub(crate) fn decision_rows(q: &Question, answer: Option<&Answer>) -> Vec<Line<'
     match answer {
         Some(a) if !a.is_empty() => {
             spans.push(Span::styled(format!("{} ", g().ok), styles::ok()));
-            spans.push(Span::styled(a.summary(), styles::ok().bold()));
+            // A secret never lands in scrollback, not even as a record of what was typed.
+            let shown = if q.secret {
+                "hidden".to_string()
+            } else {
+                a.summary()
+            };
+            spans.push(Span::styled(shown, styles::ok().bold()));
             if let Some(d) = chosen_description(q, a) {
                 spans.push(Span::styled(format!("  {d}"), styles::faint()));
             }

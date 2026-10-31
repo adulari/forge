@@ -734,7 +734,7 @@ impl ForgeMcp {
             .collect();
         // Advertise the subagent virtual tools only when enabled here — spawn_agents for fresh
         // fan-out, send_to_agent for follow-ups to persisted children (persistent subagents).
-        if let Some(s) = &self.subagents {
+        if let Some(s) = self.visible_subagents() {
             let spec = subagent::spawn_agents_spec_with(s.max_agents, &s.agents);
             let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
