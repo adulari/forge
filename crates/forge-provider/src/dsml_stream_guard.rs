@@ -24,6 +24,10 @@ enum Opener {
 
 /// Classify text that starts with `<`.
 fn classify(s: &str) -> Opener {
+    match chat_template_opener(s) {
+        Opener::NotDsml => {}
+        decided => return decided,
+    }
     let body = s[1..].strip_prefix('/').unwrap_or(&s[1..]);
     let bars = body.trim_start_matches(is_dsml_bar);
     let had_bar = bars.len() < body.len();
@@ -42,6 +46,27 @@ fn classify(s: &str) -> Opener {
         },
         None if MARKER.starts_with(bars) => Opener::Partial,
         None => Opener::NotDsml,
+    }
+}
+
+/// `<|tool_call…` / `<｜tool▁call…`: the Kimi and DeepSeek V3 chat-template tool-call tokens
+/// (`chat_template_calls`), spelled with ASCII or fullwidth bars and `_` or `▁`.
+fn chat_template_opener(s: &str) -> Opener {
+    const WANT: &str = "tool_call";
+    let Some(rest) = s[1..].strip_prefix(['|', '｜']) else {
+        return Opener::NotDsml;
+    };
+    let seen: String = rest
+        .chars()
+        .take(WANT.len())
+        .map(|c| if c == '▁' { '_' } else { c })
+        .collect();
+    if seen == WANT {
+        Opener::Confirmed
+    } else if seen.len() < WANT.len() && WANT.starts_with(&seen) {
+        Opener::Partial
+    } else {
+        Opener::NotDsml
     }
 }
 
@@ -104,6 +129,22 @@ mod tests {
     }
 
     const BLOCK: &str = "<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"read_file\"><｜｜DSML｜｜parameter name=\"path\" string=\"true\">a.rs</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>";
+
+    #[test]
+    fn kimi_and_deepseek_v3_tokens_never_reach_the_live_view_at_any_split() {
+        let kimi = "Ok.<|tool_calls_section_begin|><|tool_call_begin|>functions.shell:0<|tool_call_argument_begin|>{}<|tool_call_end|><|tool_calls_section_end|>";
+        let v3 = "Ok.<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>shell\n```json\n{}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
+        for text in [kimi, v3] {
+            for chunks in every_split(text) {
+                let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+                assert_eq!(stream(&refs), "Ok.", "{chunks:?}");
+            }
+        }
+        assert_eq!(
+            stream(&["a <| b and <|tool|> ok"]),
+            "a <| b and <|tool|> ok"
+        );
+    }
 
     #[test]
     fn dsml_block_never_reaches_the_live_view_at_any_split() {

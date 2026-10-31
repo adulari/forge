@@ -11,6 +11,8 @@
 impl crate::Session {
     pub(crate) fn note_harness_model(&mut self, model: &str) {
         self.harness_profile = self.config.mesh.harness_profile_for(model);
+        self.harness_flags = self.config.harness.flags_for(model);
+        self.harness_model = model.to_string();
     }
 
     pub(crate) fn advisory_nudges_on(&self) -> bool {

@@ -16,7 +16,7 @@ impl Session {
     /// Spend the empty-reply nudge. Returns `false` when it is already spent and the model has
     /// made no tool progress since.
     pub(crate) fn nudge_empty_reply(&mut self) -> bool {
-        if self.config.harness.stop_retries {
+        if self.harness_flags.stop_retries {
             if self.empty_reply_retries >= crate::stop_guards::STOP_RETRY_MAX as u8 {
                 return false;
             }

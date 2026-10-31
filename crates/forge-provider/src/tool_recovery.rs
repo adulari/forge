@@ -21,6 +21,9 @@
 //!     every dialect (V3.2 `function_calls`, V4 `tool_calls`, V4.1 `calls` with a space) and
 //!     refuses partial or malformed blocks.
 //!
+//!   - Kimi / DeepSeek V3 chat-template tokens (`<|tool_call_begin|>…`, `<｜tool▁calls▁begin｜>…`),
+//!     parsed by the `chat_template_calls` module.
+//!
 //! Wrapper namespaces some SDKs prepend (`default_api:`, `default_api.`, `functions.`,
 //! `mcp__forge__`) are normalized back to the bare Forge tool name so the recovered call dispatches.
 
@@ -35,13 +38,18 @@ pub fn recover_text_tool_calls(content: &str) -> (Vec<ToolCall>, String) {
     if let Some(found) = crate::dsml::recover(content) {
         return found;
     }
+    if let Some(found) = crate::chat_template_calls::recover(content) {
+        return found;
+    }
     recover_plain(content)
 }
 
 /// `content` with tool-call markup that never ran removed, for an answer shown to the user after
 /// the model kept writing calls as text. Only DeepSeek DSML is cut; other formats are left alone.
 pub fn strip_tool_call_markup(content: &str) -> String {
-    crate::dsml::recover(content).map_or_else(|| content.to_string(), |(_, shown)| shown)
+    crate::dsml::recover(content)
+        .or_else(|| crate::chat_template_calls::recover(content))
+        .map_or_else(|| content.to_string(), |(_, shown)| shown)
 }
 
 fn recover_plain(content: &str) -> (Vec<ToolCall>, String) {
@@ -436,6 +444,7 @@ pub fn looks_like_unexecuted_tool_call(content: &str) -> bool {
         || content.contains("<tool_call")
         || content.contains("<function=")
         || crate::dsml::has_markup(content)
+        || crate::chat_template_calls::has_markup(content)
         || content.contains("default_api:")
         || content.contains("default_api.")
     {

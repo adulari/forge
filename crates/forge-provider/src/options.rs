@@ -95,4 +95,8 @@ pub struct CompletionOptions {
     /// request after the model narrated its next step and stopped with tasks still open. Honoured
     /// only where the provider is known to accept it; elsewhere it is a no-op.
     pub require_tool_call: bool,
+    /// Echo `reasoning_content` on every assistant message, as a thinking-only API demands, for a
+    /// model the provider's own id rules do not already cover (DeepSeek or Kimi behind a custom
+    /// OpenAI-compatible gateway). Set by `[harness] family_profiles`; `false` changes nothing.
+    pub echo_reasoning: bool,
 }
