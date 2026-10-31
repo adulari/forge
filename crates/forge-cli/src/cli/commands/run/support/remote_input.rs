@@ -28,6 +28,30 @@ pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
         || app.session_delete.is_some()
 }
 
+/// Why a command typed over a remote or fleet channel is refused, if it is. These open surfaces
+/// that change what leaves this machine, destroy data, or block the host terminal on its own
+/// stdin, so they only run from the keyboard here.
+pub(crate) fn remote_command_refusal(text: &str) -> Option<&'static str> {
+    match forge_tui::parse_command(text) {
+        forge_tui::CommandAction::Keys => {
+            Some("⌨ /keys is host-only (a fullscreen keybind configurator on the host terminal)")
+        }
+        forge_tui::CommandAction::Anywhere => Some(
+            "⌨ /anywhere is host-only (it switches key sync and signs in on the host terminal)",
+        ),
+        forge_tui::CommandAction::Delete => {
+            Some("⌨ /delete is host-only (a permanent delete is confirmed at the host terminal)")
+        }
+        _ => None,
+    }
+}
+
+/// Surfaces that only the host keyboard may drive. Remote keys and overlay verbs are dropped
+/// while one is open, so a menu opened at the host cannot be steered from a phone either.
+pub(crate) fn host_only_modal_open(app: &forge_tui::App) -> bool {
+    app.anywhere_menu.open || app.session_delete.is_some()
+}
+
 /// A remote overlay verb, decoded from [`remote::RemoteInput`] by the drain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteOverlayOp {
@@ -51,6 +75,9 @@ pub(crate) fn apply_overlay_input(
     op: RemoteOverlayOp,
 ) -> Vec<forge_tui::KeyKind> {
     use forge_tui::KeyKind as K;
+    if host_only_modal_open(app) {
+        return Vec::new();
+    }
     match op {
         RemoteOverlayOp::Cancel => {
             if any_remote_modal_open(app) {
@@ -404,4 +431,32 @@ pub(crate) async fn toggle_remote(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod host_only_tests {
+    use super::*;
+
+    #[test]
+    fn remote_channels_cannot_open_host_only_surfaces() {
+        for text in ["/anywhere", "/keys", "/delete"] {
+            assert!(remote_command_refusal(text).is_some(), "{text}");
+        }
+        assert!(remote_command_refusal("/status").is_none());
+        assert!(remote_command_refusal("fix the bug").is_none());
+    }
+
+    #[test]
+    fn remote_overlay_verbs_do_nothing_inside_a_host_only_menu() {
+        let mut app = forge_tui::App::default();
+        app.anywhere_menu.open = true;
+        for op in [
+            RemoteOverlayOp::Select("keys".into()),
+            RemoteOverlayOp::Nav(1),
+            RemoteOverlayOp::Cancel,
+        ] {
+            assert!(apply_overlay_input(&mut app, op).is_empty());
+        }
+        assert!(host_only_modal_open(&app));
+    }
 }

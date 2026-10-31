@@ -1158,22 +1158,18 @@ and keep going."
                         }
                         return Ok(DispatchOutcome::Handled);
                     }
-                    let pos_right = cfg.right.iter().position(|w| w == &widget);
-                    let pos_left = cfg.left.iter().position(|w| w == &widget);
-                    if let Some(i) = pos_right {
-                        cfg.right.remove(i);
-                        app.note(&format!(
-                            "statusline: removed '{widget_name_str}' from right"
-                        ));
-                    } else if let Some(i) = pos_left {
-                        cfg.left.remove(i);
-                        app.note(&format!(
-                            "statusline: removed '{widget_name_str}' from left"
-                        ));
-                    } else {
-                        cfg.right.push(widget);
-                        app.note(&format!("statusline: added '{widget_name_str}' to right"));
-                    }
+                    let note = match cfg.toggle_widget(widget) {
+                        forge_config::WidgetToggle::RemovedRight => {
+                            format!("statusline: removed '{widget_name_str}' from right")
+                        }
+                        forge_config::WidgetToggle::RemovedLeft => {
+                            format!("statusline: removed '{widget_name_str}' from left")
+                        }
+                        forge_config::WidgetToggle::AddedRight => {
+                            format!("statusline: added '{widget_name_str}' to right")
+                        }
+                    };
+                    app.note(&note);
                     match forge_config::write_statusline_config(&app.statusline_config.clone()) {
                         Ok(path) => app.note(&format!("  saved → {}", path.display())),
                         Err(e) => app.note(&format!("  ⚠ could not save config: {e}")),
