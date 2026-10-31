@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
 pub mod advisor;
+mod statusline_toggle;
+pub use statusline_toggle::WidgetToggle;
 mod agent_builtins;
 pub mod agents;
 pub mod browser;

@@ -50,7 +50,7 @@ and the device list every 30 seconds.
 
 Safety is the same as everywhere else. Turning `keys` on shows a confirmation that explains the second
 vault key and that OAuth tokens never sync; it opens on Cancel, so Enter alone never turns it on, and
-the switch only exists in the local TUI (the bridge still refuses it). Turning a category off says that
+the desktop app shows the same confirmation. The switch can only be flipped at the machine itself: the bridge refuses it, and a remote or fleet channel cannot open `/anywhere` in the host terminal or type into it. Turning a category off says that
 local data stays in place. No screen ever renders a secret value.
 
 The statusline `anywhere_sync` badge now appears on its own while any category is on. `/statusline

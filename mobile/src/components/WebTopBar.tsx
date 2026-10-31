@@ -18,6 +18,7 @@ import { useProviderPace, UsageRing } from "./shell/UsageRing";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space } from "../theme/tokens";
 import { monoFamily } from "../theme/typography";
+import { isTopBarTabActive } from "../lib/topBarActive";
 
 const NAV_LINKS = [
   { label: "Fleet", href: "/" },
@@ -28,10 +29,6 @@ const NAV_LINKS = [
 ] as const;
 
 export const WEB_TOP_BAR_HEIGHT = 40;
-
-// Every route reached from the Settings rail belongs to the Settings tab; without this the
-// top bar showed no active tab on any sub-page.
-const SETTINGS_FAMILY = /^\/(settings|appearance|desktop|keybindings|diagnostics|legal|anywhere|usage|providers|models|plans|mcp|configuration|skills|hooks|session-tree|workflows|prs|remote-access)(\/|$)/;
 
 export interface WebTopBarProps {
   /** Doubles the combined usage ring as the ⌘U dock toggle affordance — see
@@ -53,12 +50,7 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
   const activeServer = servers.find((server) => server.id === activeServerId);
   const { combinedPct } = useProviderPace();
 
-  const isActive = (href: string) =>
-    href === "/"
-      ? pathname === "/" || pathname.startsWith("/session")
-      : href === "/settings"
-        ? SETTINGS_FAMILY.test(pathname)
-        : pathname.startsWith(href);
+  const isActive = (href: string) => isTopBarTabActive(href, pathname);
 
   return (
     <View style={[styles.bar, { backgroundColor: tokens.bg1, borderBottomColor: tokens.border }]}>

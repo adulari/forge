@@ -25,6 +25,13 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
+- **Closing `/anywhere` while it was still loading no longer leaves it stuck on "Loading" the next time you open it.** A status or device fetch that finished while the menu was closed was thrown away without clearing its in-flight flag, so reopening never started a new one.
+- **`/statusline toggle sync` hides the sync badge even when `anywhere_sync` is listed in a segment.** Removing the listed widget used to hand the badge straight back to the automatic one, so it took a second toggle.
+- **The desktop app asks before turning key sync on.** The Sync page and the onboarding step now show the same warning as the terminal menu (second vault key, OAuth sign-ins never sync, revoked devices keep what they downloaded), opening on Cancel.
+- **The web top bar underlines one tab on the Session tree page, not two.** Fleet matched `/session-tree` as a prefix; it now matches only `/session` and its sub-routes.
+
+
 - **The Skills panel's Reinstall now works, flat `*.md` packages install, and Remove keeps skills the pack never owned.** Reinstall treats the pack's recorded skills as replaceable and says "kept your existing skill(s)" instead of "no skills found" when everything was skipped. A marketplace entry that is a single `name.md` file is staged and installed. Removing a pack deletes only the skills recorded for it, so a hand-written skill that shares the pack's name survives. Copying a `/skill` line no longer counts as a use; it is counted once, when the skill runs.
 - **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
 
@@ -67,6 +74,8 @@ All notable changes to Forge are documented here. The format follows
 - **A view-only device can no longer read host files outside the workspace through the chat's file route.** Reading outside the workspace now needs the workspace-write scope, never view alone; only paths the user typed or a tool call's own arguments named count (tool output and fetched pages do not); and credentials, SSH and cloud keys, `.env` files, Forge's own config and database, keyrings and anything under a `.git` directory are refused whoever asks.
 
 - **The threat model no longer claims phones and controllers never receive secrets.** They hold the Account Data Key the vault key derives from and download the key records; the app discards them unseen. The second seal is documented as a guardrail against rendering, not a boundary against an enrolled device.
+
+- **Remote and fleet channels can no longer open `/anywhere` or `/delete` in the host terminal, or type into those menus.** A paired phone could send `/anywhere`, Enter and `y` to switch key sync on without anyone at the machine (the daemon refuses the same toggle over the bridge), or leave the host stuck on a sign-in prompt waiting for stdin. Both commands now join `/keys` as host-only, and remote keys and overlay verbs are dropped while either menu is open.
 
 ## [2.26.0] - 2026-10-30
 

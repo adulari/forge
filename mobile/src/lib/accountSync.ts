@@ -42,6 +42,19 @@ export function toggleLockReason(category: AccountSyncCategory, context: KeysTog
   return null;
 }
 
+/** Turning a direct-only category (key sync) on asks first, like the CLI and the terminal menu. */
+export function needsKeysConfirmation(category: AccountSyncCategory, enabled: boolean): boolean {
+  return enabled && category.toggle_requires_direct;
+}
+
+export const KEYS_CONFIRM_TITLE = "Turn on key sync?";
+export const KEYS_CONFIRM_MESSAGE =
+  "Your provider and search API keys and static MCP secrets will be uploaded and delivered to every device on this account that also turns key sync on.\n\n" +
+  "- Sealed with a second vault key, on top of end-to-end encryption.\n" +
+  "- OAuth sign-ins (Codex, xAI, MCP) never sync; other devices get a sign-in prompt instead.\n" +
+  "- A revoked device keeps what it already downloaded, so rotate keys at the provider after revoking one.\n" +
+  "- Secret values are never shown on screen.";
+
 export interface CategoryStatusLine {
   text: string;
   tone: "neutral" | "warn" | "success";

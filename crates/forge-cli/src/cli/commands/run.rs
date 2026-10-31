@@ -1132,7 +1132,13 @@ pub(crate) async fn run_chat_tui(
         // next iteration) come FIRST so an overlay commit (cursor move + synthesized Enter)
         // can't be interleaved by local typing — then the terminal's own events.
         let mut input_handled = false;
-        while let Some(ev) = next_input_event(&mut remote_keys, &mut tui)? {
+        while let Some((ev, ev_remote)) = next_input_event(&mut remote_keys, &mut tui)? {
+            set_remote_origin(ev_remote);
+            // Checked here, when the key is consumed, because the menu may have been opened at
+            // the keyboard after the key was queued: a remote key never drives a host-only menu.
+            if ev_remote && host_only_modal_open(&app) {
+                continue;
+            }
             dirty = true;
             input_handled = true;
             if iter_started.is_some() {
@@ -3352,8 +3358,12 @@ pub(crate) async fn run_chat_tui(
                         let autonomous = loop_state.is_some() || goal_state.is_some();
                         match route_busy_line(trimmed, &catalog, autonomous) {
                             BusyRoute::RunNow => {
-                                prompt_history.record(&line);
-                                local_lines.push((line.clone(), false));
+                                if let Some(refusal) = origin_refusal(trimmed) {
+                                    app.note(refusal);
+                                } else {
+                                    prompt_history.record(&line);
+                                    local_lines.push((line.clone(), false));
+                                }
                             }
                             BusyRoute::Queue => {
                                 prompt_history.record(&line);
@@ -3930,6 +3940,7 @@ pub(crate) async fn run_chat_tui(
                 }
             }
         }
+        set_remote_origin(false);
         if quit {
             break;
         }
@@ -3987,6 +3998,7 @@ pub(crate) async fn run_chat_tui(
                 (input, Some(from_queue))
             }));
             for (input, local) in remote_inputs {
+                set_remote_origin(local.is_none());
                 dirty = true;
                 pump_queue |= local == Some(true);
                 // Fleet-messaging "steer" delivery — outrank the queued backlog for the target's
@@ -4085,20 +4097,14 @@ pub(crate) async fn run_chat_tui(
                             attachments,
                         )
                         .await;
-                        // `/keys` is host-only BY DESIGN: it runs a blocking fullscreen
-                        // configurator loop on the host terminal — dispatching it from here
-                        // would freeze the host TUI on a screen the remote can't see or drive.
-                        if local.is_none()
-                            && matches!(
-                                forge_tui::parse_command(&text),
-                                forge_tui::CommandAction::Keys
-                            )
-                        {
-                            push_remote_note(
-                                &mut remote_notes,
-                                "⌨ /keys is host-only (a fullscreen keybind configurator on the host terminal)",
-                            );
-                            continue;
+                        // Host-only commands (`/keys`, `/anywhere`, `/delete`) never run from a
+                        // remote or fleet channel: they block the host terminal on its own stdin
+                        // or change what leaves the machine, so the keyboard here is the gate.
+                        if local.is_none() {
+                            if let Some(refusal) = remote_command_refusal(&text) {
+                                push_remote_note(&mut remote_notes, refusal);
+                                continue;
+                            }
                         }
                         // Mid-turn: queue plain prompts to run after this turn, exactly like local
                         // typing. A `/command` follows `busy_policy`: it runs beside the turn
@@ -4597,7 +4603,12 @@ pub(crate) async fn run_chat_tui(
                         //    the seq-checked Allow/Answer inputs only.
                         // 2. Esc with nothing modal open and no turn running QUITS the host
                         //    TUI locally; remotely that's an accidental one-tap host kill.
-                        if pending.is_some() || app.awaiting_question() {
+                        if host_only_modal_open(&app) {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⌨ that menu is host-only — use the keyboard on this machine",
+                            );
+                        } else if pending.is_some() || app.awaiting_question() {
                             push_remote_note(
                                 &mut remote_notes,
                                 "⚠ a prompt is pending — answer it with its buttons",
