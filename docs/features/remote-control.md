@@ -709,6 +709,13 @@ code 0) or reattach with `restart=true` (the Restart button after any other code
 carries a per-terminal output counter, `sequence`, that moves on every output chunk or clear; the
 apps compare it with the value they last saw to mark a background tab as having new output.
 
+A project action (`[[actions]]` in `.forge/config.toml`) runs as a terminal keyed `act-<id>`, and
+its list entry carries an `action` field. Stop (`POST /api/terminals/actions/stop`) signals the
+whole process group and works even after the session was idle-unloaded; the idle sweep also keeps
+a session loaded while one of its actions runs. An `act-` terminal is never created as an
+interactive shell: `restart=true` on one re-runs the action from the project's config, and
+attaching to one that is gone returns 404. See `docs/features/project-actions.md`.
+
 `POST /api/sessions` starts the session's first terminal (`term-1`) right away so the dock opens
 onto a running shell. `[terminal] prewarm = false` turns that off, and a host with
 `[host] max_terminals` set never starts one early. `[terminal] shell` and `shell_args` choose what a
