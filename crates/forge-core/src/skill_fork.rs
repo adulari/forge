@@ -69,6 +69,7 @@ impl Session {
         let request = subagent::AgentRequest {
             agent: fork.agent.clone(),
             task,
+            ..Default::default()
         };
         let budget = self.budget_snapshot();
         let parent_id = self.id.clone();

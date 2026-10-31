@@ -103,6 +103,8 @@ pub async fn spawn_detached(
     let mut handles = Vec::with_capacity(requests.len());
     for req in requests {
         let mut resolved = resolve(&req, &ctx.agents);
+        // Detached children return prose; a schema is not enforced for them.
+        resolved.output_schema = None;
         let name = resolved.name.clone();
         let shown_task = resolved.task.clone();
         let child_cwd = ctx.repo_root.to_string_lossy();

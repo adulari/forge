@@ -26,6 +26,7 @@ const VERBS: Record<string, string> = {
   web_fetch: "Fetch",
   web_search: "Web",
   spawn_agents: "Agents",
+  submit_result: "Result",
   dispatch_sessions: "Agents",
   update_tasks: "Tasks",
   run_code: "Script",

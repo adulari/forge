@@ -288,6 +288,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.family_profiles" => Some(("Behaviour", "Model-family profiles")),
         "harness.eval_kernel" => Some(("Behaviour", "Persistent Python kernel")),
         "harness.lsp_nav" => Some(("Behaviour", "LSP navigation tool")),
+        "harness.subagent_output_schema" => Some(("Behaviour", "Subagent output schemas")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -549,6 +550,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.compaction_summary_cap" => "Cap a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k. Default off.",
         "harness.eval_kernel" => "Advertise a `python` tool: a persistent per-session Python kernel. Runs code with shell-level permissions. Applies to new sessions. Default off.",
         "harness.lsp_nav" => "Add a deferred read-only lsp tool (definition, hover, references; Python via ty/pyright). Library definitions come back with source inline. Default off.",
+        "harness.subagent_output_schema" => "Let the parent request a JSON-schema result from spawn_agents children; validated with up to 2 retries.",
         _ => return None,
     })
 }

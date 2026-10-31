@@ -165,3 +165,6 @@ column is informational until the edit A/B.
   distills or strict hosts such as groq or nvidia (`CompletionOptions::echo_reasoning`).
   ModelGateway does not reject its absence (measured 2026-10-31), but only engages thinking on the
   next turn when it is present.
+`subagent_output_schema` is a fifth flag in the same table but a different kind: it changes `spawn_agents`,
+not the main loop. See "Structured results" in `docs/features/subagent-orchestration.md`. Default off; with it
+off the spawn spec, the child prompt and the combined output are byte-identical.

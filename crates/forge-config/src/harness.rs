@@ -103,6 +103,10 @@ pub struct HarnessConfig {
     /// Register the deferred, read-only `lsp` navigation tool (definition, hover, references).
     #[serde(default)]
     pub lsp_nav: bool,
+    /// Let the parent attach a JSON-schema `output_schema` to `spawn_agents` children; the child
+    /// returns validated data through a `submit_result` tool instead of prose.
+    #[serde(default)]
+    pub subagent_output_schema: bool,
 }
 
 impl Default for HarnessConfig {
@@ -132,6 +136,7 @@ impl Default for HarnessConfig {
             explicit_flags: Vec::new(),
             eval_kernel: false,
             lsp_nav: false,
+            subagent_output_schema: false,
         }
     }
 }

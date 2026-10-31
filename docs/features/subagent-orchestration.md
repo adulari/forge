@@ -461,3 +461,25 @@ worktree`) a write-capable child gets its own worktree whose changes are merged 
 finishes, and conflicts are reported in its result. A child in `plan` temper is never given a worktree.
 `context: fork` in a skill (see `command-skill-system.md`) runs the skill as one child of the type its
 `agent:` names.
+
+## Structured results
+
+`[harness] subagent_output_schema = true` lets the parent ask for data instead of prose (code:
+`crates/forge-core/src/subagent/structured.rs`, validator `crates/forge-tools/src/schema_check.rs`). Default off.
+
+- The parent gives `output_schema` on an agent, or at the top level for every agent without its own. The root
+  must be `{"type":"object"}`; supported keywords are `type` (a string or an array such as
+  `["string","null"]`), `properties`, `required`, `additionalProperties` (bool), `items` and `enum`, plus
+  `description`/`title`. Anything else is refused by name, before any child session exists. Limits: 4 KB, depth 8.
+- The child gets a `submit_result` tool whose parameters are the schema. Lossless shape slips are fixed first
+  (`"12"` to 12, `"true"` to true, JSON in a string, a lone scalar for an array). An invalid submission is
+  returned with `$.path: message` lines; there are at most 2 corrective attempts. A reply with no tool call is
+  accepted when it holds a matching JSON object, and is otherwise nudged once per retry.
+- A child that hits its step limit or the progress guard without a result gets one more call whose only tool is
+  `submit_result`; an accepted answer is `partial`.
+- A batch that requested a schema returns JSON, one row per line:
+  `{"agents":[{"index":1,"agent":"explore","status":"valid","attempts":1,"data":{...}}],"notes":[]}`.
+  `status` is `valid`, `partial`, `invalid` (with `errors` and a 1 KB `raw`), `text` (a child that ran without a
+  schema: bridged models, or a failover to one) or `error`. Over 64 KB the largest `data` is cut to 1 KB.
+  A blocking `subagent_stop` hook adds its reason to `notes`, so the result stays valid JSON.
+- The Bridge parent (`forge mcp-serve`) does not advertise `output_schema` yet, and detached children ignore it.

@@ -209,6 +209,7 @@ pub(crate) fn verb(name: &str) -> String {
         "web_fetch" => "Fetch",
         "web_search" => "Web",
         "spawn_agents" => "Agents",
+        "submit_result" => "Result",
         "run_code" => "Script",
         "python" => "Python",
         other => return other.to_string(),
@@ -1066,6 +1067,7 @@ mod tests {
             ("web_fetch", "Fetch"),
             ("web_search", "Web"),
             ("spawn_agents", "Agents"),
+            ("submit_result", "Result"),
             ("mcp__srv__lookup", "lookup"),
             ("custom_tool", "custom_tool"),
         ] {

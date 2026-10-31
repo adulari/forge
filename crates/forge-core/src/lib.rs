@@ -2382,11 +2382,15 @@ impl Session {
                 .as_ref()
                 .is_none_or(|scope| scope.permits_tool(subagent::SPAWN_AGENTS_TOOL))
         {
-            specs.push(subagent::spawn_agents_spec_for(
+            let mut spawn_spec = subagent::spawn_agents_spec_for(
                 self.config.mesh.subagents.max_agents,
                 self.workspace.root(),
                 &self.config.mesh.subagents.agents_dir,
-            ));
+            );
+            if self.config.harness.subagent_output_schema {
+                subagent::structured::advertise_output_schema(&mut spawn_spec);
+            }
+            specs.push(spawn_spec);
             // Follow-ups to already-spawned children (persistent subagents). Advertised beside
             // spawn_agents — a fresh session simply has no children yet and the tool says so.
             specs.push(subagent::send_to_agent_spec());
@@ -5034,6 +5038,8 @@ mod tests {
     mod detached_agents_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
+    #[path = "subagent_schema.rs"]
+    mod subagent_schema_tests;
 
     #[path = "completeness_gate.rs"]
     mod completeness_gate_tests;
