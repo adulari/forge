@@ -94,6 +94,7 @@ mod mesh_overlay;
 mod model_switch;
 mod notes_menu;
 mod refine_cmd;
+mod run_menu;
 mod slash_commands;
 pub(crate) use dispatch::*;
 pub(crate) mod driver;
@@ -778,6 +779,7 @@ pub(crate) async fn run_chat_tui(
     let mut usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>> = None;
     let mut anywhere_driver = anywhere_menu::AnywhereMenuDriver::new(mock);
     let mut notes_driver = notes_menu::NotesMenuDriver::new();
+    let mut run_menu_driver = run_menu::RunMenuDriver::new();
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
     // rendering-facing `VoiceOverlay`. See `apply_voice_start`/`start_voice_transcribe`.
@@ -1651,6 +1653,13 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            // The `/run` overlay owns every key while open; it owns the action processes too.
+            if app.run_menu.open {
+                run_menu_driver.key(&mut app, &mut clipboard, key);
+                dirty = true;
+                continue;
+            }
+
             // The `/config` editor is modal while open: it owns every key (filter / navigate / edit
             // / Tab scope / Esc). The editor returns an action; the shell performs the validated
             // write and refreshes the rows.
@@ -1809,6 +1818,7 @@ pub(crate) async fn run_chat_tui(
                 || app.anywhere_menu.open
                 || app.notes_overlay.open
                 || app.polish.qr.is_some()
+                || app.run_menu.open
                 || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -5073,6 +5083,9 @@ pub(crate) async fn run_chat_tui(
             app.workflow.anim_tick += 1;
             dirty = true;
         }
+        if run_menu_driver.tick(&mut app) {
+            dirty = true;
+        }
         if anywhere_driver.tick(&mut app) {
             dirty = true;
         }
@@ -5414,6 +5427,7 @@ pub(crate) async fn run_chat_tui(
         }
     }
     forge_tui::perf::flush();
+    run_menu_driver.shutdown();
     let (resume_hint, final_session_id) = {
         let (hooks, sid, workspace, hint) = {
             let s = session.lock().await;

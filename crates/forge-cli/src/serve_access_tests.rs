@@ -99,6 +99,15 @@ fn classification_maps_routes_to_scopes() {
     assert_eq!(scope(Method::POST, "/api/dispatches/x/approve"), "approve");
     assert_eq!(scope(Method::GET, "/ws/terminal"), "terminal");
     assert_eq!(scope(Method::GET, "/api/terminals"), "terminal");
+    assert_eq!(
+        scope(Method::POST, "/api/terminals/actions/run"),
+        "terminal"
+    );
+    assert_eq!(
+        scope(Method::GET, "/api/terminals/actions/running"),
+        "terminal"
+    );
+    assert_eq!(scope(Method::GET, "/api/ports"), "terminal");
     assert_eq!(scope(Method::PUT, "/api/workspace/file"), "workspace-write");
     assert_eq!(scope(Method::POST, "/api/git/push"), "workspace-write");
     assert_eq!(scope(Method::POST, "/api/pr/merge"), "workspace-write");

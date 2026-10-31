@@ -398,6 +398,8 @@ pub struct App {
     pub notes_overlay: crate::notes_overlay::NotesOverlay,
     /// Wheel speed, cursor shape, verbosity and the QR overlay (`app/polish.rs`).
     pub polish: polish::PolishState,
+    /// The `/run` overlay (project actions and listening ports); also feeds the status badge.
+    pub run_menu: crate::run_menu::RunMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.

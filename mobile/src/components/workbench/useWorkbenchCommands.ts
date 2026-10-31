@@ -12,6 +12,7 @@ import { publishFocusTag } from "../../lib/shortcuts/focusContext";
 import { useDesktopMenuAction, type DesktopMenuId } from "../../lib/desktopMenu";
 import type { PresetName } from "./layoutModel";
 import type { WorkbenchSurfaceKind } from "./model";
+import { useOpenActionOutput } from "../ports/useOpenActionOutput";
 import { useWorkbench } from "./WorkbenchProvider";
 
 export interface WorkbenchCommandOptions {
@@ -73,6 +74,8 @@ export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: Workbench
   useDesktopMenuAction("view:gallery", toggle("gallery"));
   useDesktopMenuAction("view:actions", toggle("actions"));
   useDesktopMenuAction("view:notes", toggle("notes"));
+  useDesktopMenuAction("view:ports", toggle("ports"));
+  useOpenActionOutput(workbench, enabled);
 
   useDesktopMenuAction("view:layout-focus", preset("focus", true));
   useDesktopMenuAction("view:layout-side-by-side", preset("side-by-side", false));

@@ -972,6 +972,10 @@ and keep going."
         CommandAction::Notes => {
             app.note("/notes opens in the interactive TUI. From a shell, use: forge notes")
         }
+        CommandAction::Run if tui.is_some() => app.run_menu.open(),
+        CommandAction::Run => {
+            app.note("/run needs the interactive TUI; define actions under [[actions]] in .forge/config.toml");
+        }
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {

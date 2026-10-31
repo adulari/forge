@@ -247,6 +247,18 @@ pub fn install_panic_restore() {
     });
 }
 
+static TERMINATE_HOOKS: std::sync::Mutex<Vec<fn()>> = std::sync::Mutex::new(Vec::new());
+
+/// Run `hook` when SIGTERM / SIGHUP ends the process, before it exits. That exit skips every
+/// destructor, so anything that must not outlive the TUI (child process groups) registers here.
+pub fn on_terminate(hook: fn()) {
+    if let Ok(mut hooks) = TERMINATE_HOOKS.lock() {
+        if !hooks.contains(&hook) {
+            hooks.push(hook);
+        }
+    }
+}
+
 /// SIGTERM / SIGHUP (a `kill`, a closing terminal window, a supervisor stop) would otherwise end
 /// the process with the terminal still in raw/mouse mode. Restore it, then exit with the
 /// conventional 128+signal status. Needs a tokio runtime; without one it is a no-op.
@@ -271,6 +283,13 @@ fn install_terminate_restore() {
                     _ = term.recv() => 143,
                     _ = hup.recv() => 129,
                 };
+                let hooks = TERMINATE_HOOKS
+                    .lock()
+                    .map(|h| h.clone())
+                    .unwrap_or_default();
+                for hook in hooks {
+                    hook();
+                }
                 let _ = disable_raw_mode();
                 let _ = crossterm::execute!(
                     io::stdout(),

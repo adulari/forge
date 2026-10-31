@@ -9,6 +9,7 @@ import {
   Files,
   GitFork,
   GitPullRequest,
+  Plug,
   History,
   GitCompareArrows,
   Map,
@@ -66,6 +67,7 @@ export interface SessionHeaderProps {
   onSelfMcp: () => void;
   onCheckpoint: () => void;
   onPullRequest: () => void;
+  onPorts: () => void;
   /** The branch's pull request chip; renders nothing when there is none. */
   prChip?: React.ReactNode;
   onMemory: () => void;
@@ -242,6 +244,7 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
             />
           ) : null}
           <ListRow title="Create pull request" leading={<GitPullRequest size={20} color={tokens.ink2} />} onPress={() => run(props.onPullRequest)} />
+          <ListRow title="Ports and project actions" leading={<Plug size={20} color={tokens.ink2} />} onPress={() => run(props.onPorts)} />
           <ListRow title="Manage project memory" leading={<Brain size={20} color={tokens.ink2} />} onPress={() => run(props.onMemory)} />
           <ListRow title="Inspect code symbol" leading={<Network size={20} color={tokens.ink2} />} onPress={() => run(props.onLattice)} showSeparator={false} />
         </ScrollView>

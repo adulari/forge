@@ -42,6 +42,7 @@ import { Badge } from "../ds/Badge";
 import { IconButton } from "../ds/IconButton";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
+import { useActionPaletteItems } from "../ports/useActionPaletteItems";
 import { KeyHint } from "./PaletteRows";
 import type { PaletteItem } from "./paletteTypes";
 
@@ -76,6 +77,7 @@ const WORKBENCH_PALETTE_ENTRIES: readonly WorkbenchPaletteEntry[] = [
   { menu: "view:browser-preview", title: "Toggle Browser preview", keywords: "browser preview web dock panel right" },
   { menu: "view:actions", title: "Toggle GitHub Actions", keywords: "github actions workflows runs ci dispatch dock panel right" },
   { menu: "view:notes", title: "Toggle Notes", keywords: "notes todo to-do scratchpad checklist project dock panel right" },
+  { menu: "view:ports", title: "Toggle Ports", keywords: "ports listening dev server localhost actions run dock panel right" },
   { menu: "view:gallery", title: "Toggle Gallery", keywords: "gallery images screenshots pictures evidence dock panel right" },
   { menu: "view:usage", title: "Toggle usage panel", keywords: "usage dock panel limits quota subscription spend right sidebar", shortcut: "shell.usage" },
 ];
@@ -89,6 +91,8 @@ export interface PaletteSourceOptions {
   openSchedules: () => void;
   peekDecision: (sessionId: string) => void;
   runSlashCommand: (command: string) => void;
+  /** The palette is mounted for the whole app; queries that only matter while it is open wait for this. */
+  visible?: boolean;
 }
 
 export function liveSessionState(row: { waiting: boolean; busy: boolean }): StatusDotState {
@@ -96,7 +100,7 @@ export function liveSessionState(row: { waiting: boolean; busy: boolean }): Stat
 }
 
 export function usePaletteSources(options: PaletteSourceOptions) {
-  const { close, isCompact, activeSessionId, recents, openWhatsNew, openSchedules, peekDecision, runSlashCommand } = options;
+  const { close, isCompact, activeSessionId, recents, openWhatsNew, openSchedules, peekDecision, runSlashCommand, visible = false } = options;
   const tokens = useTokens();
   const { scheme, setScheme } = useTheme();
   const toast = useToast();
@@ -382,7 +386,9 @@ export function usePaletteSources(options: PaletteSourceOptions) {
 
   const allSettingsItems = useMemo(() => [...settingsItems, ...settingFieldItems], [settingsItems, settingFieldItems]);
 
-  return { sessions, sessionItems, commandItems, settingsItems: allSettingsItems };
+  const actionItems = useActionPaletteItems(activeSessionId, visible, close);
+  const commandsWithActions = useMemo(() => [...commandItems, ...actionItems], [commandItems, actionItems]);
+  return { sessions, sessionItems, commandItems: commandsWithActions, settingsItems: allSettingsItems };
 }
 
 const styles = StyleSheet.create({

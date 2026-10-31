@@ -343,6 +343,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/notes",
     },
     Command {
+        name: "run",
+        desc: "run project actions and see listening ports (aliases: /actions, /ports)",
+        usage: "/run",
+    },
+    Command {
         name: "self-mcp",
         desc: "toggle self-MCP mode: a sub-Forge MCP agent this session can call as tools",
         usage: "/self-mcp [enable|disable]",

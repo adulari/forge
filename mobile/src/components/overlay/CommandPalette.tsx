@@ -290,6 +290,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
     openSchedules,
     peekDecision: setPeekSessionId,
     runSlashCommand,
+    visible,
   });
 
   const q = query.trim();

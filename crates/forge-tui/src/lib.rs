@@ -53,6 +53,7 @@ pub mod perf;
 mod picker;
 mod print_presenter;
 mod prompt_history;
+pub mod run_menu;
 mod stash_args;
 pub mod theme;
 pub use prompt_history::PromptHistory;
@@ -98,7 +99,7 @@ pub use commands::{
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{
     edit_in_external_editor, external_editor_command, frame_wait, install_panic_restore,
-    ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg,
+    on_terminate, ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg,
 };
 pub use headless::HeadlessPresenter;
 pub use help::{run_help, HelpTab};
