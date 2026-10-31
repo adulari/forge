@@ -27,7 +27,8 @@ const KILL_GRACE: Duration = Duration::from_millis(1500);
 /// Process groups that may still hold a live action, by leader pid. A group leaves this set the
 /// moment it is seen empty, and is never signalled again: after that the pid can belong to an
 /// unrelated process.
-static LIVE_GROUPS: Mutex<HashSet<u32>> = Mutex::new(HashSet::new());
+static LIVE_GROUPS: std::sync::LazyLock<Mutex<HashSet<u32>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn live_groups() -> std::sync::MutexGuard<'static, HashSet<u32>> {
     LIVE_GROUPS
