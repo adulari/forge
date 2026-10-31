@@ -31,30 +31,32 @@
 //! profile reads the same keyring + file as the release binary. [`backend`] tells which store a
 //! process is reading so the commands can say so.
 
+#![cfg_attr(feature = "test-secrets", allow(dead_code))]
+
 #[cfg(any(not(feature = "test-secrets"), test))]
 use std::path::PathBuf;
 use std::path::{Component, Path};
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 use std::collections::BTreeMap;
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 use std::io::Write as _;
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 use base64::Engine as _;
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 use chacha20poly1305::aead::{Aead, KeyInit};
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
 use crate::ConfigError;
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 const KEYRING_SERVICE: &str = "forge";
 
 /// Escape hatch for the runtime tripwire: set to `1` only when a test deliberately needs the
 /// real keyring/file store (almost never).
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 const ALLOW_REAL_SECRETS_ENV: &str = "FORGE_ALLOW_REAL_SECRETS";
 
 // =============================================================================================
@@ -143,6 +145,24 @@ pub fn delete(key: &str) -> Result<bool, ConfigError> {
     memory::delete(key)
 }
 
+/// Read `key` straight from the backends, skipping (and then refreshing) the read memo.
+#[cfg(feature = "test-secrets")]
+pub fn get_fresh(key: &str) -> Option<String> {
+    memory::get_fresh(key)
+}
+
+/// Every copy of `key` held by a store this process can reach, keyring first.
+#[cfg(feature = "test-secrets")]
+pub fn get_each(key: &str) -> Vec<String> {
+    memory::get_each(key)
+}
+
+/// Store `value` under `key` in every store this process can reach.
+#[cfg(feature = "test-secrets")]
+pub fn set_all(key: &str, value: &str) -> Result<(), ConfigError> {
+    memory::set_all(key, value)
+}
+
 /// Store `value` under `key`: OS keyring first, encrypted file on keyring failure/unavailability.
 #[cfg(not(feature = "test-secrets"))]
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
@@ -155,7 +175,7 @@ pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
     result
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn set_inner(key: &str, value: &str) -> Result<(), ConfigError> {
     if keyring_available() {
         let key = key.to_string();
@@ -181,6 +201,11 @@ fn set_inner(key: &str, value: &str) -> Result<(), ConfigError> {
 #[cfg(not(feature = "test-secrets"))]
 pub fn get(key: &str) -> Option<String> {
     refuse_if_test_binary();
+    cached_get(key)
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn cached_get(key: &str) -> Option<String> {
     let now = std::time::Instant::now();
     if let Some(hit) = read_cache().lookup(key, now) {
         return hit;
@@ -190,7 +215,94 @@ pub fn get(key: &str) -> Option<String> {
     value
 }
 
+/// Read `key` from the backends, bypassing the process-local memo, and refresh the memo with the
+/// answer. Needed wherever the value must agree with something another process may have just
+/// rewritten (the memo only learns of this process's own writes).
 #[cfg(not(feature = "test-secrets"))]
+pub fn get_fresh(key: &str) -> Option<String> {
+    refuse_if_test_binary();
+    fresh_get(key)
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn fresh_get(key: &str) -> Option<String> {
+    let value = get_uncached(key);
+    read_cache().store(key, value.clone(), std::time::Instant::now());
+    value
+}
+
+/// Every copy of `key` held by a store this process can reach, keyring first, then the encrypted
+/// file, uncached. [`get`] returns only the first non-empty one, so two processes that reach
+/// different stores can each see a different value (or none); a caller that can tell a stale copy
+/// from the right one needs all of them.
+#[cfg(not(feature = "test-secrets"))]
+pub fn get_each(key: &str) -> Vec<String> {
+    refuse_if_test_binary();
+    each_get(key)
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn each_get(key: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    if keyring_available() {
+        let name = key.to_string();
+        if let Some(Ok(v)) = keyring_call("read", move || {
+            keyring::Entry::new(KEYRING_SERVICE, &name).and_then(|entry| entry.get_password())
+        }) {
+            if !v.is_empty() {
+                found.push(v);
+            }
+        }
+    }
+    if let Some(v) = file_get(key) {
+        if !found.contains(&v) {
+            found.push(v);
+        }
+    }
+    found
+}
+
+/// Store `value` under `key` in the keyring AND the encrypted file. [`set`] writes to only one,
+/// so a process that cannot reach the keyring never sees what a process that can wrote there.
+/// `Ok` when at least one store took the write; a copy left stale in the other store is the
+/// reader's to recognise via [`get_each`].
+#[cfg(not(feature = "test-secrets"))]
+pub fn set_all(key: &str, value: &str) -> Result<(), ConfigError> {
+    refuse_if_test_binary();
+    all_set(key, value)
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn all_set(key: &str, value: &str) -> Result<(), ConfigError> {
+    read_cache().invalidate(key);
+    let mut stored = false;
+    if keyring_available() {
+        let name = key.to_string();
+        let secret = value.to_string();
+        stored |= matches!(
+            keyring_call("write", move || {
+                keyring::Entry::new(KEYRING_SERVICE, &name)
+                    .and_then(|entry| entry.set_password(&secret))
+            }),
+            Some(Ok(()))
+        );
+    }
+    let file = file_set(key, value);
+    let result = match (stored, file) {
+        (_, Ok(())) => Ok(()),
+        (true, Err(error)) => {
+            tracing::warn!("secret `{key}` reached the keyring only: {error}");
+            Ok(())
+        }
+        (false, Err(error)) => Err(error),
+    };
+    if result.is_ok() {
+        touch_change_stamp();
+    }
+    result
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn get_uncached(key: &str) -> Option<String> {
     if keyring_available() {
         let key = key.to_string();
@@ -205,7 +317,7 @@ fn get_uncached(key: &str) -> Option<String> {
     file_get(key)
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn read_cache() -> std::sync::MutexGuard<'static, ReadCache> {
     static CACHE: std::sync::Mutex<ReadCache> = std::sync::Mutex::new(ReadCache::new());
     CACHE.lock().unwrap_or_else(|e| e.into_inner())
@@ -215,10 +327,14 @@ fn read_cache() -> std::sync::MutexGuard<'static, ReadCache> {
 /// change notification, and re-reading ~150 entries to notice a new key would be a D-Bus storm, so
 /// writers leave this one-stat signal for long-running sessions to poll.
 fn change_stamp_path() -> Option<std::path::PathBuf> {
-    crate::config_dir().map(|d| d.join("secrets.stamp"))
+    #[cfg(any(not(feature = "test-secrets"), test))]
+    let dir = store_dir();
+    #[cfg(all(feature = "test-secrets", not(test)))]
+    let dir = crate::config_dir();
+    dir.map(|d| d.join("secrets.stamp"))
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn touch_change_stamp() {
     if let Some(path) = change_stamp_path() {
         if let Some(parent) = path.parent() {
@@ -295,7 +411,7 @@ pub fn delete(key: &str) -> Result<bool, ConfigError> {
     result
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn delete_inner(key: &str) -> Result<bool, ConfigError> {
     let mut removed = false;
     if keyring_available() {
@@ -317,41 +433,12 @@ fn delete_inner(key: &str) -> Result<bool, ConfigError> {
 // =============================================================================================
 
 #[cfg(feature = "test-secrets")]
-mod memory {
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
+mod memory;
 
-    use crate::ConfigError;
-
-    fn map() -> &'static Mutex<BTreeMap<String, String>> {
-        static MAP: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
-        &MAP
-    }
-
-    pub(super) fn set(key: &str, value: &str) -> Result<(), ConfigError> {
-        map()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.to_string(), value.to_string());
-        Ok(())
-    }
-
-    pub(super) fn get(key: &str) -> Option<String> {
-        map()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .cloned()
-    }
-
-    pub(super) fn delete(key: &str) -> Result<bool, ConfigError> {
-        Ok(map()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(key)
-            .is_some())
-    }
-}
+/// Staging helpers re-exported for tests in other crates.
+#[cfg(feature = "test-secrets")]
+#[doc(hidden)]
+pub use memory::staging;
 
 // =============================================================================================
 // Runtime tripwire (real path only) — panic if a cargo test binary reaches here
@@ -398,7 +485,7 @@ fn refuse_if_test_binary() {
 /// Max time to wait for the OS keyring backend to answer a probe before declaring it unusable for
 /// the session. Generous enough for a slow-but-live Secret Service, short enough that a *dead* one
 /// (the WSL/headless case) doesn't stall startup.
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 const KEYRING_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
 
 #[cfg(any(not(feature = "test-secrets"), test))]
@@ -413,14 +500,14 @@ fn call_with_timeout<T: Send + 'static>(
     rx.recv_timeout(timeout).ok()
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 static KEYRING_TIMED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Run every real keyring operation under the same bound as the availability probe. A Secret
 /// Service can answer the initial probe and still wedge a later credential lookup; after the first
 /// such timeout, disable it for this process so bulk provider-key injection leaks at most one
 /// blocked worker and immediately falls back to the encrypted file store.
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn keyring_call<T: Send + 'static>(
     operation: &str,
     call: impl FnOnce() -> Result<T, keyring::Error> + Send + 'static,
@@ -442,8 +529,12 @@ fn keyring_call<T: Send + 'static>(
 /// thread and wait at most [`KEYRING_PROBE_TIMEOUT`]; if it doesn't answer we treat the keyring as
 /// unavailable for the whole session and use the encrypted file store exclusively. A box with a
 /// live keyring answers in milliseconds, so this is invisible there.
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn keyring_available() -> bool {
+    // Unit tests drive the real file path; they must never probe or write the user's keyring.
+    if cfg!(test) {
+        return false;
+    }
     if KEYRING_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
@@ -473,18 +564,47 @@ fn keyring_available() -> bool {
 
 // --- encrypted file fallback ------------------------------------------------------------------
 
-#[cfg(not(feature = "test-secrets"))]
-fn secrets_path() -> Option<PathBuf> {
-    crate::config_dir().map(|d| d.join("secrets.enc"))
+/// Where the file store, its key and the change stamp live. Unit tests redirect it per thread so
+/// the real path runs against a temp dir and never the user's config.
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn store_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = test_dir::get() {
+        return Some(dir);
+    }
+    crate::config_dir()
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(test)]
+mod test_dir {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn get() -> Option<PathBuf> {
+        DIR.with(|d| d.borrow().clone())
+    }
+
+    pub(super) fn set(dir: PathBuf) {
+        DIR.with(|d| *d.borrow_mut() = Some(dir));
+    }
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn secrets_path() -> Option<PathBuf> {
+    store_dir().map(|d| d.join("secrets.enc"))
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn keyfile_path() -> Option<PathBuf> {
-    crate::config_dir().map(|d| d.join("secret.key"))
+    store_dir().map(|d| d.join("secret.key"))
 }
 
 /// Load (or create) the 32-byte file-store key. Stored `0600` next to the encrypted blob.
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn load_or_create_key() -> Result<Key, ConfigError> {
     let path = keyfile_path().ok_or_else(|| ConfigError::Keyring("no config dir".into()))?;
     if let Ok(bytes) = std::fs::read(&path) {
@@ -512,7 +632,7 @@ fn load_or_create_key() -> Result<Key, ConfigError> {
 }
 
 /// Write a file readable/writable only by the owner (`0600` on Unix).
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn write_private(path: &PathBuf, bytes: &[u8]) -> Result<(), ConfigError> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -536,13 +656,13 @@ fn write_private(path: &PathBuf, bytes: &[u8]) -> Result<(), ConfigError> {
     Ok(())
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn cipher() -> Result<ChaCha20Poly1305, ConfigError> {
     Ok(ChaCha20Poly1305::new(&load_or_create_key()?))
 }
 
 /// The on-disk map is `name -> base64(nonce ‖ ciphertext)`.
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn read_map() -> BTreeMap<String, String> {
     secrets_path()
         .and_then(|p| std::fs::read(p).ok())
@@ -552,7 +672,7 @@ fn read_map() -> BTreeMap<String, String> {
 
 /// Like [`read_map`] but an unreadable or corrupt store is an error, never "empty": the write
 /// paths rebuild the file from this map, so treating garbage as empty destroyed every other key.
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn read_map_strict() -> Result<BTreeMap<String, String>, ConfigError> {
     let Some(path) = secrets_path() else {
         return Ok(BTreeMap::new());
@@ -572,7 +692,7 @@ fn read_map_strict() -> Result<BTreeMap<String, String>, ConfigError> {
     }
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn write_map(map: &BTreeMap<String, String>) -> Result<(), ConfigError> {
     let path = secrets_path().ok_or_else(|| ConfigError::Keyring("no config dir".into()))?;
     if let Some(parent) = path.parent() {
@@ -585,7 +705,7 @@ fn write_map(map: &BTreeMap<String, String>) -> Result<(), ConfigError> {
 /// Serialize read-modify-write of `secrets.enc` across processes (two `forge auth` runs, the
 /// daemon): an exclusive `flock` on a sibling lock file, polled for up to 10s. Best effort — if the
 /// lock cannot be taken the write proceeds unlocked, as before.
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn with_store_lock<T>(f: impl FnOnce() -> Result<T, ConfigError>) -> Result<T, ConfigError> {
     #[cfg(unix)]
     let _guard = secrets_path().and_then(|p| {
@@ -609,7 +729,7 @@ fn with_store_lock<T>(f: impl FnOnce() -> Result<T, ConfigError>) -> Result<T, C
     f()
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn file_set(key: &str, value: &str) -> Result<(), ConfigError> {
     let cipher = cipher()?;
     let nonce_bytes: [u8; 12] = rand::random();
@@ -628,7 +748,7 @@ fn file_set(key: &str, value: &str) -> Result<(), ConfigError> {
     })
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn file_get(key: &str) -> Option<String> {
     let encoded = read_map().get(key)?.clone();
     let blob = base64::engine::general_purpose::STANDARD
@@ -643,7 +763,7 @@ fn file_get(key: &str) -> Option<String> {
     String::from_utf8(pt).ok()
 }
 
-#[cfg(not(feature = "test-secrets"))]
+#[cfg(any(not(feature = "test-secrets"), test))]
 fn file_delete(key: &str) -> Result<bool, ConfigError> {
     with_store_lock(|| {
         let mut map = read_map_strict()?;
@@ -717,6 +837,43 @@ mod tests {
             1,
             "re-store replaces, never duplicates"
         );
+    }
+
+    fn isolated_file_store() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        test_dir::set(dir.path().to_path_buf());
+        dir
+    }
+
+    #[test]
+    fn real_cached_read_misses_another_process_write_until_read_fresh() {
+        let _dir = isolated_file_store();
+        file_set("slot-cached-read", "v1").unwrap();
+        assert_eq!(cached_get("slot-cached-read").as_deref(), Some("v1"));
+        // A second process rewrites the secret; this process's memo cannot know.
+        file_set("slot-cached-read", "v2").unwrap();
+        assert_eq!(
+            cached_get("slot-cached-read").as_deref(),
+            Some("v1"),
+            "the memo serves the old value for the TTL, which is the hazard"
+        );
+        assert_eq!(fresh_get("slot-cached-read").as_deref(), Some("v2"));
+        assert_eq!(
+            cached_get("slot-cached-read").as_deref(),
+            Some("v2"),
+            "a fresh read also refreshes the memo"
+        );
+    }
+
+    #[test]
+    fn real_set_all_invalidates_the_memo_and_every_reader_sees_the_copy() {
+        let _dir = isolated_file_store();
+        file_set("slot-set-all", "old").unwrap();
+        assert_eq!(cached_get("slot-set-all").as_deref(), Some("old"));
+        all_set("slot-set-all", "new").unwrap();
+        assert_eq!(cached_get("slot-set-all").as_deref(), Some("new"));
+        assert_eq!(each_get("slot-set-all"), vec!["new".to_string()]);
+        assert!(change_stamp().is_some());
     }
 
     #[test]

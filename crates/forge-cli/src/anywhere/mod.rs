@@ -74,6 +74,7 @@ pub(crate) async fn notify_attention_required() {
     .await;
 }
 
+mod key_blob;
 mod state;
 pub(crate) use state::*;
 
@@ -420,7 +421,7 @@ async fn setup(name: Option<String>, recovery: bool) -> Result<()> {
 
 async fn login(recovery: bool) -> Result<()> {
     let store = StateStore::platform()?;
-    let mut state = store.load()?;
+    let mut state = store.load_lenient()?;
     if state.is_logged_in() {
         println!(
             "Already logged in{}.",
@@ -1881,7 +1882,7 @@ async fn disable() -> Result<()> {
 
 async fn logout() -> Result<()> {
     let store = StateStore::platform()?;
-    let state = store.load()?;
+    let state = store.load_lenient()?;
     let refresh_token = state.refresh_token.clone();
     let service_url = forge_config::load()
         .ok()
@@ -1905,7 +1906,7 @@ async fn logout() -> Result<()> {
         };
     // Local revocation is the security boundary. It is one owner-only atomic state replacement
     // and must not depend on service reachability; encrypted history and device keys stay intact.
-    let _ = store.update(|latest| {
+    let _ = store.update_lenient(|latest| {
         latest.clear_tokens();
         Ok(())
     })?;

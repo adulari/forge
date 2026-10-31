@@ -21,13 +21,26 @@ service sees neither a slot name nor whether a record is a key or a theme.
 - Rotating OAuth logins (Codex, xAI, MCP OAuth) never sync: refresh tokens are single use, so a copy
   would sign both machines out. Only a presence marker travels and the receiving device is prompted
   to sign in.
-- Environment-variable keys are never uploaded, and phones and controllers never receive secrets.
+- Environment-variable keys are never uploaded. Phones and controllers are never asked to use or
+  install a secret, but they are not cryptographically kept from one: every enrolled device holds the
+  Account Data Key, they download the whole sync feed, and the vault key is derived from that same
+  key, so a phone could open a synced key record. The second seal is a guardrail against rendering,
+  not a boundary against an enrolled device. The mobile app filters account-sync records out before
+  anything is shown or cached and contains no vault-unseal code, and a compromised enrolled phone is
+  a stated non-goal below. Keeping secrets from phones would need a vault key that only full hosts
+  hold; that is a protocol change and is not done in v1.
 - Revocation rotates the Account Data Key but cannot recall ciphertext a revoked device already
   downloaded. Keys synced before the revocation must be rotated at their providers; `forge anywhere
   devices --revoke` re-seals this device's keys under the new epoch and lists their labels.
-- The Account Data Key epochs and device private keys now live in the secret store (OS keyring, then
-  the encrypted fallback file) rather than the plaintext `state.json`, so synced secrets are not
-  protected more weakly than local ones.
+- The Account Data Key epochs and device private keys now live in the secret store rather than the
+  plaintext `state.json`, so synced secrets are not protected more weakly than local ones. They are
+  written to the OS keyring and to the encrypted fallback file, so a process that cannot reach the
+  keyring (an SSH shell) still reads them. The copy records the device and key epoch it was saved
+  for; a copy that does not match `state.json` is refused, never combined with it, so a stale copy
+  cannot put an old key under a newer epoch number.
+- An MCP definition that carries a credential inline (a secret-looking argument or flag, a token in
+  the URL path or query, a connection string or token in an env value) stays on the device that
+  holds it and is reported as skipped. The check is a heuristic that errs towards holding back.
 
 The service is trusted for availability, entitlement decisions, routing, quota accounting, expiry,
 and metadata integrity. It is not trusted with plaintext. GitHub and Paddle establish identity and
