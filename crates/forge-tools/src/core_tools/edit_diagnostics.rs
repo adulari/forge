@@ -3,14 +3,28 @@
 //! `old` matched. Pure functions over the file text; the model gets enough to fix the call
 //! without another read.
 
+use std::collections::HashMap;
+
 const MIN_SIMILARITY: u32 = 50;
 const MAX_SCAN_WINDOWS: usize = 40_000;
 const MAX_OCCURRENCES_SHOWN: usize = 5;
 const PREVIEW_CHARS: usize = 100;
 
-fn bigrams(s: &str) -> Vec<(char, char)> {
-    let chars: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
-    chars.windows(2).map(|w| (w[0], w[1])).collect()
+/// Only the head of a line is compared: the score is a hint for the model, and an unbounded line
+/// (minified bundle, data file) must not turn one failed edit into seconds of CPU.
+const MAX_COMPARED_CHARS: usize = 400;
+
+fn bigrams(s: &str) -> HashMap<(char, char), u32> {
+    let chars: Vec<char> = s
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .take(MAX_COMPARED_CHARS)
+        .collect();
+    let mut counts = HashMap::new();
+    for w in chars.windows(2) {
+        *counts.entry((w[0], w[1])).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// Dice coefficient over character bigrams, ignoring whitespace, 0..=100.
@@ -19,19 +33,16 @@ fn line_similarity(a: &str, b: &str) -> u32 {
     if a == b {
         return 100;
     }
-    let (ga, mut gb) = (bigrams(a), bigrams(b));
-    if ga.is_empty() || gb.is_empty() {
+    let (ga, gb) = (bigrams(a), bigrams(b));
+    let total: u32 = ga.values().sum::<u32>() + gb.values().sum::<u32>();
+    if total == 0 || ga.is_empty() || gb.is_empty() {
         return 0;
     }
-    let total = ga.len() + gb.len();
-    let mut shared = 0;
-    for g in &ga {
-        if let Some(i) = gb.iter().position(|x| x == g) {
-            gb.swap_remove(i);
-            shared += 1;
-        }
-    }
-    (200 * shared / total) as u32
+    let shared: u32 = ga
+        .iter()
+        .map(|(g, n)| (*n).min(gb.get(g).copied().unwrap_or(0)))
+        .sum();
+    200 * shared / total
 }
 
 pub(super) struct ClosestMatch {
@@ -138,6 +149,24 @@ mod tests {
         let msg = closest_match_message(&m);
         assert!(msg.contains("first difference at line 2"), "{msg}");
         assert!(msg.contains("- ") && msg.contains("+ "), "{msg}");
+    }
+
+    #[test]
+    fn long_lines_are_bounded() {
+        let line = "ab,cd;".repeat(2_000);
+        let content = std::iter::repeat_n(line.as_str(), 100)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let old = std::iter::repeat_n(format!("{line}x"), 5)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let started = std::time::Instant::now();
+        let _ = closest_match(&content, &old);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

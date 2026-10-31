@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod harness_notice;
 mod job_notice;
 mod message_kind;
+mod repair_flag;
 pub use message_kind::MessageKind;
 mod provider_items;
 pub use provider_items::ProviderItems;
@@ -936,6 +937,7 @@ pub const PATH_ARG_KEYS: &[&str] = &[
 
 mod path_args;
 pub use path_args::{all_path_args, is_dotenv_template, strip_line_range};
+pub use repair_flag::{json_repair, set_json_repair};
 
 /// The command text of a `shell` call: `command`, or a `commands` batch joined with newlines.
 /// Permission rules, auto-mode risk and the other shell-aware checks read this, so every entry of

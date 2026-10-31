@@ -179,6 +179,39 @@ pub(super) fn release_inline(pid: u32) {
     INLINE.lock().unwrap().retain(|p| *p != pid);
 }
 
+pub(super) fn mark_stopping(pid: u32) {
+    if let Ok(mut stopping) = STOPPING.lock() {
+        stopping.push(pid);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn inline_pids() -> Vec<u32> {
+    INLINE.lock().unwrap().clone()
+}
+
+#[cfg(test)]
+pub(super) fn mark_inline_for_test(pid: u32) {
+    INLINE.lock().unwrap().push(pid);
+}
+
+/// Whether a job started now would report its exit to this session.
+pub(super) fn has_job_exit_sink() -> bool {
+    JOB_EXIT_SINK.try_with(|_| ()).is_ok()
+}
+
+/// Release `pid` from [`INLINE`] unless the job has already exited. An exited job stays marked
+/// until its watcher has looked, so the watcher cannot queue a notice for a result the caller is
+/// returning itself. Returns whether the pid was released.
+pub(super) fn release_inline_unless(pid: u32, exited: impl FnOnce() -> bool) -> bool {
+    let mut inline = INLINE.lock().unwrap();
+    if exited() {
+        return false;
+    }
+    inline.retain(|p| *p != pid);
+    true
+}
+
 pub(super) async fn start_with(
     command: &str,
     cwd: &str,
@@ -268,14 +301,25 @@ pub(super) async fn start_with(
     tokio::spawn(async move {
         let code = match child.wait().await {
             Ok(status) => status.code().map(i64::from).unwrap_or(-1),
-            Err(_) => return,
+            Err(_) => {
+                release_inline(pid);
+                return;
+            }
         };
         let first = record_exit(&dir_for_task, pid, code);
         let tunnel_dir = dir_for_task.clone();
         let _ =
             tokio::task::spawn_blocking(move || super::preview::stop_job_tunnel(&tunnel_dir, pid))
                 .await;
-        let stopped = take_stopping(pid) || INLINE.lock().unwrap().contains(&pid);
+        // One lock for the check and the release: the caller that is waiting on this job relies
+        // on the watcher to drop the mark once it has seen the exit.
+        let was_inline = {
+            let mut inline = INLINE.lock().unwrap();
+            let before = inline.len();
+            inline.retain(|p| *p != pid);
+            inline.len() != before
+        };
+        let stopped = take_stopping(pid) || was_inline;
         if let (Some(sink), true, false) = (sink, first, stopped) {
             let tail = tail(&log_for_task, 8).unwrap_or_default();
             sink(JobExit {

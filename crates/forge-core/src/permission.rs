@@ -975,6 +975,37 @@ mod tests {
     }
 
     #[test]
+    fn secret_denylist_sees_through_read_selectors() {
+        let rules = forge_config::builtin_deny_rules();
+        for spec in [
+            ".env:raw",
+            ".env:-5",
+            ".env:1-2,3-4",
+            ".env:40-",
+            "key.pem:1-5,6-9",
+            "id_rsa:-60",
+            "config/.env.production:raw",
+        ] {
+            for args in [
+                json!({ "path": spec }),
+                json!({ "paths": ["ok.txt", spec] }),
+            ] {
+                assert_eq!(
+                    decide(
+                        PermissionMode::Bypass,
+                        SideEffect::ReadOnly,
+                        "read_file",
+                        &args,
+                        &rules
+                    ),
+                    Deny,
+                    "selector must not hide a secret: {args}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn secret_denylist_sees_batched_paths_patches_and_symlinks() {
         let rules = forge_config::builtin_deny_rules();
         let deny_call = |tool: &str, side, args: Value| {

@@ -15,6 +15,7 @@ static SHELL_AUTOBACKGROUND: AtomicBool = AtomicBool::new(false);
 pub fn set_harness(config: &HarnessConfig) {
     EDIT_ERRORS.store(config.edit_errors, Ordering::Relaxed);
     ARG_COERCION.store(config.arg_coercion, Ordering::Relaxed);
+    forge_types::set_json_repair(config.arg_coercion);
     READ_SHAPING.store(config.read_shaping, Ordering::Relaxed);
     SCRIPT_PARALLEL.store(config.script_parallel, Ordering::Relaxed);
     SHELL_AUTOBACKGROUND.store(config.shell_autobackground, Ordering::Relaxed);

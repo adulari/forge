@@ -6,6 +6,8 @@ pub fn all_path_args(args: &serde_json::Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Some(p) = crate::extract_path_arg(args) {
         out.push(p.to_string());
+        // `read_file` takes `path: "key.pem:raw"` too; the rules must judge the file.
+        out.extend(strip_line_range(p).map(String::from));
     }
     if let Some(list) = args.get("paths").and_then(|v| v.as_array()) {
         for entry in list.iter().filter_map(|v| v.as_str()) {
@@ -37,12 +39,27 @@ pub fn all_path_args(args: &serde_json::Value) -> Vec<String> {
     out
 }
 
-/// The path of a `path:START` / `path:START-END` entry, or `None` when it carries no line range.
+/// The path of a `path:SPEC` entry, or `None` when it carries no selector. Every form
+/// `read_file` accepts counts: `:12`, `:5-16`, `:5-16,960-973`, `:40-`, `:-60` and `:raw`.
 pub fn strip_line_range(entry: &str) -> Option<&str> {
     let (path, spec) = entry.rsplit_once(':')?;
-    let (start, end) = spec.split_once('-').unwrap_or((spec, spec));
-    let (start, end) = (start.parse::<usize>().ok()?, end.parse::<usize>().ok()?);
-    (start >= 1 && end >= start && !path.is_empty()).then_some(path)
+    (!path.is_empty() && is_selector(spec)).then_some(path)
+}
+
+fn is_selector(spec: &str) -> bool {
+    if spec == "raw" {
+        return true;
+    }
+    if let Some(n) = spec.strip_prefix('-') {
+        return n.parse::<usize>().is_ok_and(|n| n >= 1);
+    }
+    spec.split(',').all(|part| {
+        let (a, b) = part.split_once('-').unwrap_or((part, part));
+        let Some(start) = a.parse::<usize>().ok().filter(|s| *s >= 1) else {
+            return false;
+        };
+        b.is_empty() || b.parse::<usize>().is_ok_and(|end| end >= start)
+    })
 }
 
 /// Whether `path` names a dotenv *template* (`.env.example`, `.env.local.sample`, ...): a file
@@ -128,6 +145,28 @@ mod tests {
         assert_eq!(strip_line_range("a/b.rs:20-10"), None);
         assert_eq!(strip_line_range("a/b.rs"), None);
         assert_eq!(strip_line_range(":3"), None);
+    }
+
+    #[test]
+    fn every_read_selector_form_names_its_file_in_path_and_paths() {
+        for spec in ["raw", "-5", "1-2,3-4", "40-", "12", "5-16"] {
+            let entry = format!(".env:{spec}");
+            assert_eq!(strip_line_range(&entry), Some(".env"), "{entry}");
+            assert!(all_path_args(&serde_json::json!({ "path": entry })).contains(&".env".into()));
+            assert!(
+                all_path_args(&serde_json::json!({ "paths": [entry] })).contains(&".env".into())
+            );
+        }
+        for not in [
+            ".env:rawx",
+            ".env:-0",
+            ".env:3-1",
+            ".env:1,",
+            ".env:",
+            "C:\\x",
+        ] {
+            assert_eq!(strip_line_range(not), None, "{not}");
+        }
     }
 
     #[test]
