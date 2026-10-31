@@ -8,6 +8,8 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **Move now carries the whole thread, hands its worktree to the fork, and the rewind warning sees forks.** Move used to fork before the latest prompt, so the child silently lost the last exchange before the source was archived. From a worktree session it also left the child running in a worktree it did not own while the archived source kept the record, so neither could Merge or Discard and a resumed source could remove the directory under the child. The daemon now forks the full thread, gives the child the worktree record and archives the source without snapshotting or removing it. The "live in this directory" rewind warning compares the effective directory (`worktree` or `cwd`), so a fork running in the same worktree is no longer invisible.
+- **The Activity tab, the Settings activity card and `forge stats poster` bucket days correctly.** A window that crossed a daylight-saving change put turns between midnight and 1am on the wrong local day, because every row used today's UTC offset; days are now bucketed with the offset in force at each instant, in the app and in the CLI. Both app views also computed "today" once at mount, so a window left open past midnight dropped the new day's usage; it now rolls over at local midnight and when fresh rows arrive. The poster totals cover exactly the labelled window, the header shows the clamped day count, and `--days 0` no longer blanks the heatmap.
 - **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
 
 ### Added

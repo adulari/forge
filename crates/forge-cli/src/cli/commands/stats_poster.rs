@@ -5,6 +5,7 @@ use chrono::{Datelike, Duration, NaiveDate};
 use forge_store::{streaks, DayUsage};
 use std::collections::BTreeMap;
 
+const MAX_WINDOW_DAYS: u32 = 400;
 const SHADES: [char; 5] = ['·', '░', '▒', '▓', '█'];
 
 fn human(n: u64) -> String {
@@ -31,9 +32,12 @@ pub(crate) fn render(
     window_days: u32,
     provider: Option<&str>,
 ) -> String {
+    let window_days = window_days.clamp(1, MAX_WINDOW_DAYS);
+    let window_start = today - Duration::days(i64::from(window_days) - 1);
+    let window_start_key = window_start.format("%Y-%m-%d").to_string();
     let rows: Vec<&DayUsage> = rows
         .iter()
-        .filter(|r| provider.is_none_or(|p| r.provider == p))
+        .filter(|r| r.day >= window_start_key && provider.is_none_or(|p| r.provider == p))
         .collect();
     let mut per_day: BTreeMap<&str, u64> = BTreeMap::new();
     let mut per_provider: BTreeMap<&str, u64> = BTreeMap::new();
@@ -56,7 +60,6 @@ pub(crate) fn render(
     let monday_this_week =
         today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
     let start = monday_this_week - Duration::weeks(weeks - 1);
-    let window_start = today - Duration::days(i64::from(window_days) - 1);
     let max = per_day.values().copied().max().unwrap_or(0);
     for (row, label) in ["Mon", "   ", "Wed", "   ", "Fri", "   ", "Sun"]
         .iter()
@@ -106,11 +109,27 @@ pub(crate) fn run(
     days: u32,
     provider: Option<&str>,
 ) -> anyhow::Result<String> {
+    use chrono::{Offset, TimeZone};
+    let days = days.clamp(1, MAX_WINDOW_DAYS);
     let now = chrono::Local::now();
-    let offset = i64::from(chrono::Offset::fix(now.offset()).local_minus_utc());
-    let since = now.timestamp() - i64::from(days.clamp(1, 400)) * 86_400;
-    let rows = store.usage_by_day(since, offset)?;
-    Ok(render(&rows, now.date_naive(), days, provider))
+    let today = now.date_naive();
+    let first_day = today - Duration::days(i64::from(days) - 1);
+    // Start at local midnight of the first day the window shows, so the totals cover exactly the
+    // days the label and the heatmap do.
+    let since = chrono::Local
+        .from_local_datetime(&first_day.and_hms_opt(0, 0, 0).unwrap_or_default())
+        .earliest()
+        .map_or(now.timestamp() - i64::from(days) * 86_400, |t| {
+            t.timestamp()
+        });
+    let offset_at = |ts: i64| {
+        chrono::Local
+            .timestamp_opt(ts, 0)
+            .single()
+            .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()))
+    };
+    let rows = store.usage_by_day_with(since, offset_at)?;
+    Ok(render(&rows, today, days, provider))
 }
 
 #[cfg(test)]
@@ -163,5 +182,29 @@ mod tests {
             only.contains("1 active days") && !only.contains("claude-cli"),
             "{only}"
         );
+    }
+
+    #[test]
+    fn the_totals_cover_exactly_the_labelled_window() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 18).unwrap();
+        let rows = vec![
+            row("2026-02-16", "gemini", 9000),
+            row("2026-02-17", "gemini", 100),
+            row("2026-03-18", "gemini", 200),
+        ];
+        let text = render(&rows, today, 30, None);
+        assert!(text.contains("2 active days"), "{text}");
+        assert!(text.contains("300 tokens"), "{text}");
+        assert!(!text.contains("9.0K"), "{text}");
+    }
+
+    #[test]
+    fn out_of_range_windows_are_clamped_for_the_label_and_the_grid() {
+        let today = NaiveDate::from_ymd_opt(2026, 3, 18).unwrap();
+        let rows = vec![row("2026-03-18", "gemini", 50)];
+        assert!(render(&rows, today, 1000, None).contains("last 400 days"));
+        let zero = render(&rows, today, 0, None);
+        assert!(zero.contains("last 1 days"), "{zero}");
+        assert!(zero.contains('█'), "today must still be drawn: {zero}");
     }
 }

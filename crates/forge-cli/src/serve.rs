@@ -1731,7 +1731,7 @@ fn redact_token(url: &str, token: &str) -> String {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ForkSessionReq {
+pub(crate) struct ForkSessionReq {
     at_seq: i64,
     /// Pin the child to this model instead of inheriting the source's last one.
     #[serde(default)]
@@ -1748,9 +1748,17 @@ struct ForkSessionReq {
     /// Display title; defaults to `Fork of <source id>`.
     #[serde(default)]
     title: Option<String>,
+    /// Fork the whole thread (`at_seq` is ignored): the child carries every message, the latest
+    /// turn included, instead of stopping before a prompt that a first prompt would re-ask.
+    #[serde(default)]
+    whole_thread: bool,
+    /// Move the thread: the child takes over the source's worktree and the source is archived
+    /// without snapshotting or removing that worktree. See `serve_fork_move`.
+    #[serde(default)]
+    move_source: bool,
 }
 
-async fn fork_session(
+pub(crate) async fn fork_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
     axum::Json(req): axum::Json<ForkSessionReq>,
@@ -1803,6 +1811,11 @@ async fn fork_session(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
+    if req.move_source {
+        if let Some(refusal) = reject_if_open_in_terminal(&state, &id, "moved").await {
+            return refusal;
+        }
+    }
     let store = state.store.clone();
     let source = id.clone();
     let store_for_fork = store.clone();
@@ -1814,24 +1827,36 @@ async fn fork_session(
         let max_seq = store_for_fork
             .session_max_seq(&source)
             .map_err(|error| error.to_string())?;
-        if req.at_seq < 0 || req.at_seq > max_seq {
+        if !req.whole_thread && (req.at_seq < 0 || req.at_seq > max_seq) {
             return Err(format!(
                 "at_seq {} is outside this session's history (0..={max_seq})",
                 req.at_seq
             ));
         }
+        let at_seq = if req.whole_thread {
+            max_seq + 1
+        } else {
+            req.at_seq
+        };
+        let adopted_worktree = if req.move_source {
+            store_for_fork
+                .session_worktree(&source)
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
         let fork_id = store_for_fork
-            .fork_session(&source, req.at_seq)
+            .fork_session(&source, at_seq)
             .map_err(|error| error.to_string())?;
         if let Some(level) = effort {
             store_for_fork
                 .set_session_pinned_effort(&fork_id, Some(level.as_str()))
                 .map_err(|error| error.to_string())?;
         }
-        Ok::<_, String>((fork_id, cwd))
+        Ok::<_, String>((fork_id, cwd, adopted_worktree))
     })
     .await;
-    let (fork_id, cwd) = match result {
+    let (fork_id, cwd, adopted_worktree) = match result {
         Ok(Ok(value)) => value,
         Ok(Err(message)) if message == "no such session" => {
             return err_response(axum::http::StatusCode::NOT_FOUND, &message)
@@ -1846,7 +1871,7 @@ async fn fork_session(
     };
     let spec = DriverSpec {
         cwd,
-        worktree: None,
+        worktree: adopted_worktree,
         title: child_title
             .clone()
             .unwrap_or_else(|| format!("Fork of {}", &id[..id.len().min(8)])),
@@ -1878,6 +1903,12 @@ async fn fork_session(
             let _ = state
                 .store
                 .set_session_daemon_live(&handle.session_id, true);
+            if req.move_source {
+                if let Err(message) = crate::serve_fork_move::retire_moved_source(&state, &id).await
+                {
+                    return err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &message);
+                }
+            }
             if let Some(text) = first_prompt {
                 let _ = handle
                     .input_tx

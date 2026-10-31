@@ -74,7 +74,7 @@ import { type FollowUpMode } from "../../../lib/followUp";
 import { useFollowUpSetting } from "../../../lib/useFollowUpSetting";
 import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessionAgents, useSessions } from "../../../lib/queries";
-import { rewindDisabledReason, sessionsSharingWorktree, sharedWorktreeWarning } from "../../../lib/forkRequest";
+import { rewindDisabledReason, sessionsSharingDirectory, sharedWorktreeWarning } from "../../../lib/forkRequest";
 import { useConnectionAccess } from "../../../lib/queriesAccess";
 import { parseReasoning } from "../../../lib/reasoning";
 import { AgentIndexProvider } from "../../../lib/agentLinks";
@@ -484,7 +484,7 @@ export function SessionChat() {
   const busy = snapshot?.busy ?? false;
   const rewindBlocked = rewindDisabledReason(busy);
   const rewindWarning = useMemo(
-    () => sharedWorktreeWarning(sessionsSharingWorktree(sessionsQuery.data, sessionId)),
+    () => sharedWorktreeWarning(sessionsSharingDirectory(sessionsQuery.data, sessionId)),
     [sessionsQuery.data, sessionId],
   );
   // `/rewind` opens the server's checkpoint picker; selecting the message's own row jumps to the
