@@ -261,6 +261,16 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
             VerificationObservation::Mutation
         };
     }
+    if name == forge_tools::PYTHON_TOOL {
+        return serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .as_ref()
+            .and_then(crate::eval_kernel::cell_code)
+            .map_or(
+                VerificationObservation::Generic,
+                crate::eval_kernel::classify,
+            );
+    }
     if !name.ends_with("shell") && !name.ends_with("exec_command") {
         return VerificationObservation::Generic;
     }

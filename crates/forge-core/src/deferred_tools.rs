@@ -39,8 +39,12 @@ pub const CORE_TOOLS: &[&str] = &[
 /// its measured lean surface keeps `spawn_agents` deferred; FORGE_SYSTEM tells a direct model to
 /// ask before pushing, and spawn_agents is the most-used platform tool (23 of 407 sessions).
 /// `run_code` is direct-only too, and hiding it behind `tool_search` would defeat its purpose.
-pub const DIRECT_CORE_EXTRA: &[&str] =
-    &["ask_user", "spawn_agents", crate::codemode::RUN_CODE_TOOL];
+pub const DIRECT_CORE_EXTRA: &[&str] = &[
+    "ask_user",
+    "spawn_agents",
+    crate::codemode::RUN_CODE_TOOL,
+    forge_tools::PYTHON_TOOL,
+];
 
 /// External-MCP meta-tools that `tool_search`/`tool_call` replace on the direct path. They are
 /// dropped from the catalog but stay callable by name (old transcripts, the orchestrate skill).

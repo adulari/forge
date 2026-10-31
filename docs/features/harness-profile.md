@@ -100,6 +100,7 @@ A flag that is on wins over `harness_profile = "minimal"` (the built-in default 
 | `stop_retries` | An announced-but-undone final reply is continued up to 3 times ("Call the next concrete tool now"); empty replies get 3 corrective retries before the bench/failover path; a tool call written as text gets 3 re-issue requests. A single empty reply never benches a model. |
 | `thinking_loop_breaker` | When consecutive tool-free replies restate an earlier one (stall_guard opening similarity), injects "Act, don't re-plan: make the next tool call." at most twice per stretch. |
 | `repeat_interrupt` | After 5 identical calls with identical results, names the call and says not to repeat it; the progress ledger's cycle stop moves from 5 to 7 repeats so the model gets two steps to react. Repeats with new results (polling) never count. |
+| `eval_kernel` | Advertises a `python` tool: a persistent per-session Python kernel (variables, imports and loaded data survive between calls). Not a loop-stop behaviour, so `harness_profile = "minimal"` does not affect it. See [eval-kernel.md](eval-kernel.md). |
 
 ```toml
 [harness]
@@ -107,4 +108,5 @@ completion_contract = true
 stop_retries = true
 thinking_loop_breaker = true
 repeat_interrupt = true
+eval_kernel = true
 ```

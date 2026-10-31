@@ -278,6 +278,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.stop_retries" => Some(("Behaviour", "Stop retries")),
         "harness.thinking_loop_breaker" => Some(("Behaviour", "Thinking-loop breaker")),
         "harness.repeat_interrupt" => Some(("Behaviour", "Repeat-call interrupt")),
+        "harness.eval_kernel" => Some(("Behaviour", "Persistent Python kernel")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -530,6 +531,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
         "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
         "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
+        "harness.eval_kernel" => "Advertise a `python` tool: a persistent per-session Python kernel. Runs code with shell-level permissions. Applies to new sessions. Default off.",
         _ => return None,
     })
 }
@@ -844,6 +846,23 @@ mod tests {
         let text = brief(&error);
         assert!(!text.contains("TOML source string"), "{text}");
         assert!(!text.contains("for key"), "{text}");
+    }
+
+    #[test]
+    fn eval_kernel_is_off_by_default_and_has_a_curated_row() {
+        let empty: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[harness]\n"))
+            .extract()
+            .unwrap();
+        assert!(!empty.harness.eval_kernel);
+        assert_eq!(
+            setting_group_and_label("harness.eval_kernel"),
+            (
+                "Behaviour".to_string(),
+                "Persistent Python kernel".to_string()
+            )
+        );
+        assert!(setting_help("harness.eval_kernel").is_some_and(|h| h.contains("`python` tool")));
     }
 
     #[test]

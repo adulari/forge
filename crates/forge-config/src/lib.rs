@@ -1585,6 +1585,10 @@ pub struct HarnessConfig {
     /// and move the progress ledger's cycle stop two repeats later.
     #[serde(default)]
     pub repeat_interrupt: bool,
+    /// Advertise a persistent per-session `python` kernel; it runs code with shell-level
+    /// permissions. Default off (docs/features/eval-kernel.md).
+    #[serde(default)]
+    pub eval_kernel: bool,
 }
 
 impl Default for HarnessConfig {
@@ -1599,6 +1603,7 @@ impl Default for HarnessConfig {
             stop_retries: false,
             thinking_loop_breaker: false,
             repeat_interrupt: false,
+            eval_kernel: false,
         }
     }
 }

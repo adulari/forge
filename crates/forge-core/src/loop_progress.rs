@@ -269,7 +269,14 @@ pub(crate) fn call_signature(call: &forge_types::ToolCall) -> u64 {
 /// `read_file src/lib.rs`, `shell cargo test`: the tool and the one argument that says what it
 /// was aimed at, short enough for a one-line report.
 pub(crate) fn call_label(call: &forge_types::ToolCall) -> String {
-    let target = if call.name == "shell" {
+    let target = if call.name == forge_tools::PYTHON_TOOL {
+        crate::eval_kernel::cell_code(&call.args).and_then(|code| {
+            code.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_string)
+        })
+    } else if call.name == "shell" {
         forge_types::shell_command_text(&call.args).and_then(|text| {
             text.lines()
                 .find(|l| !l.trim().is_empty())

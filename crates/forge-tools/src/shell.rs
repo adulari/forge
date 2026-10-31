@@ -57,7 +57,7 @@ pub use background::{ShellJobTool, JOB_HINT};
 pub use rtk::RtkRewriter;
 mod batch;
 mod capture;
-mod output;
+pub(crate) mod output;
 use capture::read_capped;
 use output::{render_streams, stream_text, truncate_for_model};
 
@@ -758,7 +758,7 @@ fn shell_invocation() -> (&'static str, &'static [&'static str]) {
 }
 
 /// Put the child in its own process group so a timeout kill takes down the whole tree.
-fn put_in_own_process_group(cmd: &mut Command) {
+pub(crate) fn put_in_own_process_group(cmd: &mut Command) {
     #[cfg(unix)]
     {
         cmd.process_group(0);
@@ -784,7 +784,7 @@ impl Drop for GroupKillOnDrop {
     }
 }
 
-fn kill_process_group(pgid: Option<i32>) {
+pub(crate) fn kill_process_group(pgid: Option<i32>) {
     #[cfg(unix)]
     if let Some(pg) = pgid {
         unsafe { libc::kill(-pg, libc::SIGKILL) };
