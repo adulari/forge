@@ -224,7 +224,9 @@ export interface McpResponse { servers: McpServerRow[]; builtins?: McpBuiltinRow
 export interface McpServerRow { name: string; transport: "stdio" | "http" | "sse"; enabled: boolean; auth_configured: boolean; secret_env_count: number; editable?: boolean;
   // v-P23 fields; a daemon that predates them omits all of these.
   scope?: "global" | "project"; status?: McpStatus; last_error?: string | null; tool_count?: number | null;
-  disabled_tools?: string[]; command?: string | null; args?: string[]; url?: string | null; token_env?: string | null; }
+  disabled_tools?: string[]; command?: string | null; args?: string[]; url?: string | null; token_env?: string | null;
+  /** True when the host masked secrets in `args`/`url` for this caller; never send them back as an edit. */
+  redacted?: boolean; }
 export type McpStatus = "connected" | "failed" | "unauthorized" | "reconnecting" | "slow" | "disabled" | "blocked" | "unknown";
 export interface McpBuiltinRow { id: string; label: string; detail: string; enabled: boolean; toggleable: boolean; tool_count: number | null; }
 /** `PATCH /api/mcp` — 404 when the server is configured somewhere the CLI does not write

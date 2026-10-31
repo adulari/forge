@@ -1238,6 +1238,7 @@ mod serve_config;
 mod serve_local_control;
 mod serve_mcp;
 mod serve_mcp_probe;
+mod serve_mcp_redact;
 mod serve_models;
 mod serve_projects;
 mod serve_providers;
