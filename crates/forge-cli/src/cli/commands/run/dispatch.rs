@@ -997,19 +997,14 @@ and keep going."
         CommandAction::Project => app.note("/project opens an overlay in the chat TUI"),
         CommandAction::Clone(url) => super::workspace_menu::clone_command(&url, app, tui.is_some()),
         CommandAction::Home => super::workspace_menu::home_command(session, app).await,
-        CommandAction::Anywhere => {
-            match crate::anywhere::tui_status_summary() {
-                Ok(summary) => app.note(&summary),
-                Err(error) => app.note(&format!("⚠ Forge Anywhere status unavailable: {error}")),
-            }
-            let url = "https://app.forge.adulari.dev/anywhere";
-            match crate::cli::commands::mcp::open_browser(url) {
-                Ok(()) => {
-                    app.note("Opening Forge Anywhere setup, Recovery Center, and Approval inbox…")
-                }
-                Err(error) => app.note(&format!("⚠ could not open the system browser: {error}")),
-            }
+        CommandAction::Strip(arg) => super::panes::toggle(app, "strip", &arg),
+        CommandAction::Sidebar(arg) => super::panes::toggle(app, "sidebar", &arg),
+        CommandAction::Jobs if tui.is_some() => app.jobs_overlay.open(),
+        CommandAction::Jobs => app.note("/jobs needs the interactive chat"),
+        CommandAction::Diff(path) if tui.is_some() && app.fullscreen && path.trim().is_empty() => {
+            app.open_diff_overlay()
         }
+        CommandAction::Anywhere => super::anywhere_menu::status_and_open_page(app),
         // `/remember <text>` — save a durable memory for this project.
         CommandAction::Remember(text) => {
             let text = text.trim().to_string();

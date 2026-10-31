@@ -42,6 +42,14 @@ pub struct TuiConfig {
     /// Enter opens it). Default: true. False shows every call as its own card, as before.
     #[serde(default = "default_true")]
     pub fold_tool_groups: bool,
+    /// One-row strip of the daemon's other sessions above the chat (Alt+1-9 switches). Default:
+    /// false. `/strip` flips it live and saves it here.
+    #[serde(default)]
+    pub session_strip: bool,
+    /// Right sidebar (context, spend, MCP health, tasks, branch) on terminals 120+ columns wide.
+    /// Default: false. Ctrl+B and `/sidebar` flip it live and saves it here.
+    #[serde(default)]
+    pub sidebar: bool,
     /// After a `!command` typed in the composer runs, have the model respond to its output (Claude
     /// Code's `respondToBashCommands`). Default: true. False only adds the run to the context.
     #[serde(default = "default_true")]
@@ -77,6 +85,8 @@ impl Default for TuiConfig {
             glyphs: default_tui_auto(),
             reduce_motion: false,
             fold_tool_groups: true,
+            session_strip: false,
+            sidebar: false,
             respond_to_bash: true,
             palette: default_tui_palette(),
             colors: std::collections::BTreeMap::new(),

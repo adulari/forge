@@ -44,6 +44,9 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Host(_)
         | CommandAction::Control
         | CommandAction::AgentClis
+        | CommandAction::Strip(_)
+        | CommandAction::Sidebar(_)
+        | CommandAction::Jobs
         | CommandAction::GoalControl(
             GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
         )

@@ -99,6 +99,7 @@ mod import_menu;
 mod mesh_overlay;
 mod model_switch;
 mod notes_menu;
+mod panes;
 mod refine_cmd;
 mod run_menu;
 mod slash_commands;
@@ -452,6 +453,8 @@ pub(crate) async fn run_chat_tui(
     let mut app = App::default();
     app.fullscreen = fullscreen;
     app.queue_visible = true;
+    app.session_strip.enabled = tui_config.tui.session_strip;
+    app.sidebar.enabled = tui_config.tui.sidebar;
     app.fold_tool_groups = tui_config.tui.fold_tool_groups;
     app.apply_tui_prefs(&tui_config.tui);
     for (action, text) in tui_config.keybinds.invalid_sequences() {
@@ -794,6 +797,7 @@ pub(crate) async fn run_chat_tui(
     let mut usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>> = None;
     let mut anywhere_driver = anywhere_menu::AnywhereMenuDriver::new(mock);
     let mut notes_driver = notes_menu::NotesMenuDriver::new();
+    let mut pane_host = panes::PaneHost::new();
     let mut run_menu_driver = run_menu::RunMenuDriver::new();
     let mut import_driver = import_menu::ImportMenuDriver::new();
     let mut agents_driver = agents_menu::AgentsMenuDriver::new(mock);
@@ -1693,6 +1697,16 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            // The diff and background-shell overlays own every key while open; Ctrl+B and Alt+1-9
+            // are the sidebar and session-strip chords.
+            let attach_blocked = busy || pending.is_some() || app.awaiting_question();
+            if pane_host.key(&mut app, &mut tui, key, attach_blocked, &mut || {
+                local_presence.touch(false)
+            })? {
+                dirty = true;
+                continue;
+            }
+
             // The `/config` editor is modal while open: it owns every key (filter / navigate / edit
             // / Tab scope / Esc). The editor returns an action; the shell performs the validated
             // write and refreshes the rows.
@@ -1723,6 +1737,7 @@ pub(crate) async fn run_chat_tui(
                                 if path == "tui.fold_tool_groups" {
                                     app.fold_tool_groups = value.trim() != "false";
                                 }
+                                panes::apply_config(&mut app, &path, &value);
                                 app.config_editor.rows = config_editor_rows();
                                 app.config_editor.status = Some(format!("✓ saved {path}"));
                             }
@@ -1740,6 +1755,7 @@ pub(crate) async fn run_chat_tui(
                                 if path == "tui.fold_tool_groups" {
                                     app.fold_tool_groups = true;
                                 }
+                                panes::apply_config(&mut app, &path, "false");
                                 app.config_editor.rows = config_editor_rows();
                                 app.config_editor.status =
                                     Some(format!("✓ reset {path} to default"));
@@ -1850,6 +1866,8 @@ pub(crate) async fn run_chat_tui(
                 || app.usage_overlay.open
                 || app.anywhere_menu.open
                 || app.notes_overlay.open
+                || app.diff_overlay.open
+                || app.jobs_overlay.open
                 || app.polish.qr.is_some()
                 || app.run_menu.open
                 || app.import_menu.open
@@ -5122,6 +5140,9 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if agents_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if pane_host.tick(&mut app, &session) {
             dirty = true;
         }
         if app.usage_overlay.open {

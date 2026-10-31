@@ -167,6 +167,12 @@ pub enum CommandAction {
     Control,
     /// Open the agent CLI install/update menu (`/clis`).
     AgentClis,
+    /// Show or hide the session strip (`/strip [on|off]`).
+    Strip(String),
+    /// Show or hide the right sidebar (`/sidebar [on|off]`, Ctrl+B).
+    Sidebar(String),
+    /// List this workspace's background shells (`/jobs`).
+    Jobs,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -541,6 +547,9 @@ pub fn parse_command(line: &str) -> CommandAction {
         "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
         "control" => CommandAction::Control,
         "clis" | "agent-clis" => CommandAction::AgentClis,
+        "strip" => CommandAction::Strip(arg),
+        "sidebar" => CommandAction::Sidebar(arg),
+        "jobs" | "shells" => CommandAction::Jobs,
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),

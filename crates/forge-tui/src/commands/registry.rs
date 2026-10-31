@@ -36,6 +36,21 @@ pub const COMMANDS: &[Command] = &[
         usage: "/diff [path]",
     },
     Command {
+        name: "strip",
+        desc: "show or hide the one-line strip of your other sessions (Alt+1-9 switches)",
+        usage: "/strip [on|off]",
+    },
+    Command {
+        name: "sidebar",
+        desc: "show or hide the right sidebar: context, spend, MCP health, tasks (Ctrl+B)",
+        usage: "/sidebar [on|off]",
+    },
+    Command {
+        name: "jobs",
+        desc: "background shells of this workspace: view their logs, stop them",
+        usage: "/jobs",
+    },
+    Command {
         name: "sessions",
         desc: "browse & resume past sessions",
         usage: "/sessions",

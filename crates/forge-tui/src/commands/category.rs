@@ -5,14 +5,16 @@ pub fn command_category(name: &str) -> &'static str {
         "sessions" | "resume" | "replay" | "rewind" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" | "status" | "reground" | "refine" | "clear" | "btw"
         | "export" | "star" | "done" | "delete" | "archived" | "context" | "rename" | "cls"
-        | "fork" | "stash" | "timeline" | "notes" => "Session",
+        | "fork" | "stash" | "timeline" | "notes" | "jobs" => "Session",
         "model" | "models" | "mode" | "effort" | "subagents" | "delegation" | "crew" | "agents"
         | "thinking" | "mesh" | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" | "commit" | "diff" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "import" | "clis" | "host" | "self-mcp" | "voice"
         | "image" | "claude" => "Integrations",
         "config" | "theme" | "statusline" | "keys" | "help" | "init" | "remember" | "memories"
-        | "permissions" | "add-dir" | "doctor" | "skills" => "Settings & help",
+        | "permissions" | "add-dir" | "doctor" | "skills" | "strip" | "sidebar" => {
+            "Settings & help"
+        }
         "copy" | "quit" => "Utilities",
         _ => "More",
     }

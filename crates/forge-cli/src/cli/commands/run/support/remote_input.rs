@@ -52,6 +52,8 @@ pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
         || app.import_menu.open
         || app.workspace_menu.open
         || app.agents_menu.open
+        || app.diff_overlay.open
+        || app.jobs_overlay.open
         || app.command_center.open
         || app.palette.open
         || app.usage_overlay.open

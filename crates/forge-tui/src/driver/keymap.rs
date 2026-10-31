@@ -66,17 +66,19 @@ pub(super) fn static_key(k: &KeyEvent, ctrl_r_reasoning: bool) -> Option<KeyKind
             'a' => KeyKind::Home,
             'e' => KeyKind::End,
             'f' => KeyKind::FindTranscript,
+            'b' => KeyKind::ToggleSidebar,
             'd' => KeyKind::ExitOrDelete,
             'g' => KeyKind::ExternalEditor,
             'p' => KeyKind::Up,
             'n' => KeyKind::Down,
             'r' if ctrl_r_reasoning => KeyKind::ToggleReasoning,
-            // An unbound Ctrl chord (Ctrl+B, Ctrl+X, Ctrl+Q…) must not type its letter.
+            // An unbound Ctrl chord (Ctrl+X, Ctrl+Q…) must not type its letter.
             _ => return None,
         },
         KeyCode::Char('b') if alt_only(k) => KeyKind::WordLeft,
         KeyCode::Char('f') if alt_only(k) => KeyKind::WordRight,
         KeyCode::Char('y') if alt_only(k) => KeyKind::YankPop,
+        KeyCode::Char(c @ '1'..='9') if alt_only(k) => KeyKind::SessionSlot(c as u8 - b'0'),
         // An unbound Alt chord must not type its letter into the draft.
         KeyCode::Char(_) if alt_only(k) => return None,
         KeyCode::Char(c) => KeyKind::Char(c),
@@ -130,9 +132,23 @@ mod tests {
             let alt = press(KeyCode::Char(c), KeyModifiers::ALT);
             assert_ne!(alt, Some(KeyKind::Char(c)), "Alt+{c}");
         }
-        for c in ['b', 'q', 'v', 's', 'z', 'l'] {
+        for c in ['q', 'v', 's', 'z', 'l'] {
             assert_eq!(ctrl_char(c), None, "Ctrl+{c} is unbound by default");
         }
+    }
+
+    #[test]
+    fn sidebar_and_session_slot_chords() {
+        assert_eq!(ctrl_char('b'), Some(KeyKind::ToggleSidebar));
+        assert_eq!(
+            press(KeyCode::Char('3'), KeyModifiers::ALT),
+            Some(KeyKind::SessionSlot(3))
+        );
+        assert_eq!(press(KeyCode::Char('0'), KeyModifiers::ALT), None);
+        assert_eq!(
+            press(KeyCode::Char('3'), KeyModifiers::NONE),
+            Some(KeyKind::Char('3'))
+        );
     }
 
     #[test]
