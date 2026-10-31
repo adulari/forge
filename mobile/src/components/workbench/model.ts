@@ -11,7 +11,8 @@ export type WorkbenchSurfaceKind =
   | "agents"
   | "plan"
   | "gallery"
-  | "actions";
+  | "actions"
+  | "ports";
 
 export interface WorkbenchSurfaceDefinition {
   kind: WorkbenchSurfaceKind;
@@ -93,6 +94,13 @@ export const WORKBENCH_SURFACE_DEFINITIONS: Record<
     title: "Actions",
     placement: "right",
     defaultSize: 400,
+    sessionScoped: true,
+  },
+  ports: {
+    kind: "ports",
+    title: "Ports",
+    placement: "right",
+    defaultSize: 360,
     sessionScoped: true,
   },
 };

@@ -52,6 +52,7 @@ pub mod perf;
 mod picker;
 mod print_presenter;
 mod prompt_history;
+pub mod run_menu;
 mod stash_args;
 pub mod theme;
 pub use prompt_history::PromptHistory;

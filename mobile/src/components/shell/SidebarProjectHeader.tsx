@@ -12,6 +12,7 @@ import { toggleProjectInWorkspace, type Workspace } from "../../lib/shellPrefs";
 import { useTheme } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
+import { useActionMenuEntries } from "../ports/useActionMenuEntries";
 import { PopoverMenu, type MenuAnchor, type MenuEntry } from "./PopoverMenu";
 
 const MENU_WIDTH = 232;
@@ -26,7 +27,7 @@ export interface SidebarProjectHeaderProps {
 
 export function SidebarProjectHeader({ group, collapsed, serverName, workspaces, onToggle }: SidebarProjectHeaderProps) {
   const { scheme, tokens } = useTheme();
-  const { setActive } = useAuth();
+  const { setActive, activeServerId } = useAuth();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [menu, setMenu] = useState<MenuAnchor | null>(null);
@@ -40,6 +41,9 @@ export function SidebarProjectHeader({ group, collapsed, serverName, workspaces,
     router.push({ pathname: "/new-session", params: { cwd: group.root } });
   };
 
+  // Actions are the project's, so any of its sessions answers; the most recent one is first.
+  const actionSession = group.serverId === activeServerId ? (group.nodes[0]?.entry.row.id ?? null) : null;
+  const actionEntries = useActionMenuEntries(actionSession, menu != null);
   const entries: MenuEntry[] = [
     { kind: "item", id: "new", label: "New thread here", onPress: newThread },
     { kind: "item", id: "fold", label: collapsed ? "Expand" : "Collapse", onPress: onToggle },
@@ -56,6 +60,7 @@ export function SidebarProjectHeader({ group, collapsed, serverName, workspaces,
             onPress: () => toggleProjectInWorkspace(workspace.id, group.name),
           }),
         )),
+    ...actionEntries,
   ];
 
   return (

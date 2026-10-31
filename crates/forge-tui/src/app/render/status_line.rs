@@ -361,6 +361,20 @@ fn collect_items(app: &App, w: u16) -> Vec<Item> {
             w,
         ));
     }
+    let running = app.run_menu.running_count();
+    if running > 0 {
+        let label = match app.run_menu.sole_running_name() {
+            Some(name) => name.to_string(),
+            None => format!("{running} running"),
+        };
+        items.push(Item::left(
+            Class::Extras,
+            vec![
+                Span::styled(g().live_dot, styles::ok()),
+                Span::styled(format!(" {label}"), styles::muted()),
+            ],
+        ));
+    }
     // The turn readout is built in, not a widget: tokens, then how fast. The tokens are a live
     // counter; once the turn ends its footer in the transcript carries the same numbers.
     if app.busy && app.turn_ran && (app.turn_in > 0 || app.turn_out > 0) {

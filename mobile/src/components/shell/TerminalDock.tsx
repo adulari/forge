@@ -55,8 +55,8 @@ import {
   resizeDelay,
   terminalGrid,
   terminalInputDelta,
-  terminalTitle,
 } from "./terminalModel";
+import { terminalLabel } from "../ports/actionTerminalNames";
 import { terminalsToAdopt } from "./terminalTabs";
 import { useTerminalActivity } from "./useTerminalActivity";
 import { useTerminalFind } from "./useTerminalFind";
@@ -425,7 +425,7 @@ export function TerminalDock({
     const missing = terminalsToAdopt(workbench.state.bottom.tabs, sessionId, terminals);
     if (missing.length === 0) return;
     for (const id of missing) {
-      workbench.openSurface({ kind: "terminal", sessionId, resourceId: id, title: terminalTitle(id) });
+      workbench.openSurface({ kind: "terminal", sessionId, resourceId: id, title: terminalLabel(id) });
     }
     if (surfaceId) workbench.activateSurface("bottom", surfaceId);
   }, [compact, sessionId, surfaceId, terminals, workbench]);
@@ -670,7 +670,7 @@ export function TerminalDock({
                   ]}
                 >
                   <Text style={[typeScale.monoMeta, { color: active ? tokens.ink : tokens.ink3 }]}>
-                    {terminalTitle(id)}
+                    {terminalLabel(id)}
                     {summary?.status === "exited" ? ` · ${exitLabel(summary.exit_code)}` : ""}
                   </Text>
                   {streaming ? (

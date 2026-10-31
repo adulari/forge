@@ -394,6 +394,8 @@ pub struct App {
     pub config_editor: crate::config_editor::ConfigEditor,
     /// The `/anywhere` menu (account, account sync, devices), while open.
     pub anywhere_menu: crate::anywhere_menu::AnywhereMenu,
+    /// The `/run` overlay (project actions and listening ports); also feeds the status badge.
+    pub run_menu: crate::run_menu::RunMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.

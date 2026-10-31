@@ -29,7 +29,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::serve::{err_response, json_response, DaemonState};
 use crate::serve_terminal_util::{
-    clamp_size, now_ms, terminal_id_order, terminal_shell, valid_terminal_id,
+    action_of_terminal, clamp_size, now_ms, terminal_id_order, terminal_shell, valid_terminal_id,
 };
 #[cfg(test)]
 use crate::serve_terminal_util::{MAX_COLS, MAX_ROWS, MAX_TERMINAL_ID_BYTES};
@@ -45,6 +45,8 @@ const EXIT_DRAIN_MS: u64 = 250;
 /// How long a socket stays open after its shell exited, so the client can discard the terminal.
 const EXIT_LINGER: std::time::Duration = std::time::Duration::from_secs(30);
 const NO_EXIT_CODE: i64 = -1;
+
+mod actions;
 
 fn default_terminal_id() -> String {
     "term-1".to_string()
@@ -125,6 +127,8 @@ pub(crate) struct TerminalSummary {
     /// The shell's own exit code. Absent while it runs and when it was killed rather than exiting.
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
 }
 
 #[derive(Clone, Eq)]
@@ -202,6 +206,7 @@ struct TerminalHandle {
     updated_at_ms: AtomicU64,
     sequence: AtomicU64,
     exit_code: AtomicI64,
+    pid: Option<u32>,
 }
 
 impl TerminalHandle {
@@ -244,6 +249,7 @@ impl TerminalHandle {
             updated_at_ms: self.updated_at_ms.load(Ordering::Acquire),
             sequence: self.sequence.load(Ordering::Acquire),
             exit_code: self.exit_code(),
+            action: action_of_terminal(&self.key.terminal_id).map(str::to_string),
         }
     }
 }
@@ -303,7 +309,7 @@ impl TerminalRegistry {
                 "a session may have at most {MAX_TERMINALS_PER_SESSION} terminals"
             )));
         }
-        let handle = spawn_terminal(key.clone(), cwd, cols, rows).map_err(Refusal::Other)?;
+        let handle = spawn_terminal(key.clone(), cwd, cols, rows, None).map_err(Refusal::Other)?;
         terminals.insert(key, handle.clone());
         Ok(handle)
     }
@@ -384,6 +390,7 @@ fn spawn_terminal(
     cwd: String,
     cols: u16,
     rows: u16,
+    run: Option<&str>,
 ) -> Result<Arc<TerminalHandle>, String> {
     let size = PtySize {
         rows,
@@ -396,8 +403,9 @@ fn spawn_terminal(
         .map_err(|error| format!("failed to open a pty: {error}"))?;
 
     let (shell, shell_args) = terminal_shell();
+    let run_args = run.map(|line| actions::run_args(&shell, line));
     let mut command = CommandBuilder::new(shell);
-    command.args(shell_args);
+    command.args(run_args.unwrap_or(shell_args));
     command.cwd(&cwd);
     command.env("TERM", "xterm-256color");
     let mut child = pair
@@ -405,6 +413,7 @@ fn spawn_terminal(
         .spawn_command(command)
         .map_err(|error| format!("failed to start a shell in {cwd}: {error}"))?;
     drop(pair.slave);
+    let pid = child.process_id();
 
     let mut reader = match pair.master.try_clone_reader() {
         Ok(reader) => reader,
@@ -473,8 +482,10 @@ fn spawn_terminal(
         updated_at_ms: AtomicU64::new(now_ms()),
         sequence: AtomicU64::new(0),
         exit_code: AtomicI64::new(NO_EXIT_CODE),
+        pid,
     });
     let runtime_handle = handle.clone();
+    let is_action = run.is_some();
 
     tokio::spawn(async move {
         loop {
@@ -512,6 +523,9 @@ fn spawn_terminal(
                             });
                         }
                         Some(TerminalCommand::Kill) | None => {
+                            if is_action {
+                                actions::terminate_group(pid);
+                            }
                             let _ = killer.kill();
                             break;
                         }
@@ -538,6 +552,9 @@ fn spawn_terminal(
         runtime_handle.touch();
         let _ = events.send(TerminalEvent::Status(TerminalStatus::Exited));
         drop(input_tx);
+        if is_action {
+            actions::terminate_group(pid);
+        }
         drop(master);
         reader_task.abort();
         writer_task.abort();

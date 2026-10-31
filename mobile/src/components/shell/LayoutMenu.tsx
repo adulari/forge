@@ -76,6 +76,7 @@ export function useLayoutMenuEntries(): MenuEntry[] {
       dock("preview", "view:browser-preview", "Browser preview"),
       dock("gallery", "view:gallery", "Gallery"),
       dock("actions", "view:actions", "GitHub Actions"),
+      dock("ports", "view:ports", "Ports"),
       dock("usage", "view:usage", "Usage", hints.usage),
       { kind: "separator", id: "s-reset" },
       item("view:layout-reset", "Reset layout"),

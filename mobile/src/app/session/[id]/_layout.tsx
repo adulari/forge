@@ -55,6 +55,7 @@ import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
 
 
 import { PrChip } from "../../../components/pr/PrChip";
+import { PortsSheet } from "../../../components/ports/PortsSheet";
 import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
 
 
@@ -166,6 +167,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
 
   const [pullRequestVisible, setPullRequestVisible] = useState(false);
+  const [portsVisible, setPortsVisible] = useState(false);
 
 
   const [memoryVisible, setMemoryVisible] = useState(false);
@@ -384,6 +386,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const onSelfMcp = useCallback(() => setSelfMcpVisible(true), []);
   const onCheckpoint = useCallback(() => setCheckpointVisible(true), []);
   const onPullRequest = useCallback(() => setPullRequestVisible(true), []);
+  const onPorts = useCallback(() => setPortsVisible(true), []);
   const onMemory = useCallback(() => setMemoryVisible(true), []);
   const onLattice = useCallback(() => setLatticeVisible(true), []);
   const onManageLifecycle = useCallback(() => setLifecycleVisible(true), []);
@@ -482,6 +485,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             onSelfMcp={onSelfMcp}
             onCheckpoint={onCheckpoint}
             onPullRequest={onPullRequest}
+            onPorts={onPorts}
             prChip={<PrChip sessionId={sessionId} onPress={onPullRequest} />}
             onMemory={onMemory}
             onLattice={onLattice}
@@ -565,6 +569,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
 
         <OnFirstOpen visible={latticeVisible}><LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
+        <OnFirstOpen visible={portsVisible}><PortsSheet visible={portsVisible} onClose={() => setPortsVisible(false)} sessionId={sessionId} /></OnFirstOpen>
         <OnFirstOpen visible={lifecycleVisible}><SessionLifecycleSheet
           target={{
             id: sessionId,

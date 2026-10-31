@@ -1026,6 +1026,8 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_access::routes(&base))
         .merge(crate::serve_lifecycle::routes(&base))
         .merge(crate::serve_schedules::routes(&base))
+        .merge(crate::serve_project_actions::routes(&base))
+        .merge(crate::serve_ports::routes(&base))
         // Terminal dock (serve_terminal.rs): a real PTY in the session's directory, gated by the
         // same daemon token as every other route and granted no additional privilege.
         .route(

@@ -17,11 +17,14 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space } from "../../theme/tokens";
 import { formatCwd, type as typeScale } from "../../theme/typography";
 import { ActionsDock } from "../actions/ActionsDock";
+import { PortsDock } from "../ports/PortsDock";
+import { hasActionTerminal, useActionTabInfo } from "../ports/useActionTabInfo";
 import { GalleryDock } from "../gallery/GalleryDock";
 import { GitReviewDock } from "../git/GitReviewDock";
 import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { EmptyState } from "../ds/EmptyState";
+import { StatusDot } from "../ds/StatusDot";
 import { WorkspaceDock } from "../workspace/WorkspaceDock";
 import {
   clampBottomHeight,
@@ -38,7 +41,7 @@ import { ResizeHandle } from "./ResizeHandle";
 import { useDragSource, useDropTarget, type DragPayload } from "./sessionDrag";
 import { SessionDock } from "./SessionDocks";
 import { TerminalDock } from "./TerminalDock";
-import { terminalTitle } from "./terminalModel";
+import { terminalLabel } from "../ports/actionTerminalNames";
 import { markTerminalClosed, tabsForSession, tabTerminalId } from "./terminalTabs";
 import { useTerminalActivity } from "./useTerminalActivity";
 import { UsageDock } from "./UsageDock";
@@ -47,7 +50,7 @@ export type DockKind = WorkbenchSurfaceKind;
 
 /** What a terminal tab says about its shell when the person is not looking at it. */
 export interface TabSignal {
-  kind: "unseen" | "streaming" | "exited";
+  kind: "unseen" | "streaming" | "exited" | "running";
   label: string;
 }
 
@@ -96,7 +99,11 @@ function DockTab({
         <Text style={[typeScale.bodyBold, { color: active ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>
           {tab.title}
         </Text>
-        {signal?.kind === "streaming" ? (
+        {signal?.kind === "running" ? (
+          <View style={styles.runningDot}>
+            <StatusDot state="busy" accessibilityLabel={`${tab.title} running`} />
+          </View>
+        ) : signal?.kind === "streaming" ? (
           <Text
             accessibilityLabel="Printing output"
             style={[typeScale.monoMeta, styles.liveBadge, { color: tokens.accent, backgroundColor: hexToRgba(tokens.accent, 0.12) }]}
@@ -176,6 +183,7 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
     render: ({ sessionId }) => (sessionId ? <GalleryDock sessionId={sessionId} /> : <NeedsSession what="its images" />),
   },
   actions: { render: ({ sessionId }) => <ActionsDock sessionId={sessionId} /> },
+  ports: { render: ({ sessionId }) => <PortsDock sessionId={sessionId} /> },
 };
 
 export interface DockHostProps {
@@ -222,7 +230,7 @@ export function DockHost({
         kind: "terminal",
         sessionId: effectiveSessionId,
         resourceId: terminalId,
-        title: terminalTitle(terminalId),
+        title: terminalLabel(terminalId),
       });
     },
     [effectiveSessionId, workbench],
@@ -232,7 +240,18 @@ export function DockHost({
   // Terminal tabs belong to the session they were opened for: the focused session shows its own
   // plus the default one, and the daemon's list brings back any it still has running.
   const isTerminal = kind === "terminal";
-  const shownTabs = useMemo(() => (isTerminal ? tabsForSession(tabs, sessionId) : tabs), [isTerminal, sessionId, tabs]);
+  const sessionTabs = useMemo(() => (isTerminal ? tabsForSession(tabs, sessionId) : tabs), [isTerminal, sessionId, tabs]);
+  const actionTabs = useActionTabInfo(effectiveSessionId, isTerminal && open && hasActionTerminal(sessionTabs));
+  const shownTabs = useMemo(
+    () =>
+      actionTabs.size === 0
+        ? sessionTabs
+        : sessionTabs.map((tab) => {
+            const info = tab.kind === "terminal" ? actionTabs.get(tabTerminalId(tab.resourceId)) : undefined;
+            return info ? { ...tab, title: info.name } : tab;
+          }),
+    [actionTabs, sessionTabs],
+  );
   const activeTerminalId = isTerminal ? tabTerminalId(surface?.resourceId ?? null) : null;
   const terminalActivity = useTerminalActivity(
     isTerminal ? effectiveSessionId : null,
@@ -282,8 +301,10 @@ export function DockHost({
     onCloseSurface?.(surface.id);
   }, [onCloseSurface, sessionId, surface]);
   const signalFor = (tab: WorkbenchSurface): TabSignal | null => {
-    if (tab.kind !== "terminal" || tab.id === surface?.id) return null;
+    if (tab.kind !== "terminal") return null;
     const id = tabTerminalId(tab.resourceId);
+    if (actionTabs.get(id)?.running) return { kind: "running", label: "running" };
+    if (tab.id === surface?.id) return null;
     const code = terminalActivity.exitCodeOf(id);
     if (code !== undefined) return { kind: "exited", label: code == null ? "ended" : `exit ${code}` };
     if (terminalActivity.isStreaming(id)) return { kind: "streaming", label: "live" };
@@ -444,6 +465,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 2,
   },
   tabLabel: { flexShrink: 1, flexDirection: "row", alignItems: "center", alignSelf: "stretch" },
+  runningDot: { marginLeft: space.space8, alignSelf: "center" },
   unseenDot: { width: 6, height: 6, borderRadius: 3, marginLeft: space.space8, alignSelf: "center" },
   liveBadge: { marginLeft: space.space8, paddingHorizontal: 4, borderRadius: 2, overflow: "hidden", alignSelf: "center" },
   exitLabel: { marginLeft: space.space8, flexShrink: 0 },

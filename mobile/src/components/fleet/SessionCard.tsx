@@ -38,6 +38,8 @@ import { ListRow } from "../ds/ListRow";
 import { ProviderGlyph } from "../ds/ProviderGlyph";
 import { RelativeTime } from "../ds/RelativeTime";
 import { Sheet } from "../ds/Sheet";
+import { ActionRunningIndicator } from "../ports/ActionRunningIndicator";
+import { SessionActionRows } from "../ports/SessionActionRows";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
 import { SessionLifecycleSheet } from "../session/SessionLifecycleSheet";
@@ -315,6 +317,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                     </Text>
                     {failed ? <Badge label="failed" tone="danger" /> : null}
                     {row.pr_watch ? <Badge label={row.pr_watch === "merge" ? "watching - merge" : "watching"} tone="accent" /> : null}
+                    <ActionRunningIndicator sessionId={row.id} variant="chip" />
                     {hasDraft ? (
                       <View accessibilityRole="image" accessibilityLabel="unsent draft" style={[styles.draftDot, { backgroundColor: tokens.accent }]} />
                     ) : null}
@@ -410,6 +413,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
               showSeparator={false}
             />
           ) : null}
+          {actionsVisible ? <SessionActionRows sessionId={row.id} onDone={() => setActionsVisible(false)} /> : null}
         </View>
       </Sheet>
       <SessionLifecycleSheet

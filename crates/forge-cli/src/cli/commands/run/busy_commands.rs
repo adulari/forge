@@ -38,6 +38,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Btw(_)
         | CommandAction::Remote { .. }
         | CommandAction::Anywhere
+        | CommandAction::Run
         | CommandAction::GoalControl(
             GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
         )

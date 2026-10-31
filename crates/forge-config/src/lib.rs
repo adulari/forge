@@ -51,6 +51,7 @@ pub mod power;
 pub mod pr;
 pub mod preview;
 pub mod privacy;
+pub mod project_actions;
 mod project_dirs;
 pub mod project_trust;
 pub mod provider_oauth;
@@ -225,6 +226,9 @@ pub struct Config {
     /// Which shell terminal tabs and the agent's shell tool use (`[terminal]`).
     #[serde(default)]
     pub terminal: terminal::TerminalConfig,
+    /// One-click dev scripts (`[[actions]]`), from the project's `.forge/config.toml`.
+    #[serde(default)]
+    pub actions: Vec<project_actions::ProjectActionConfig>,
     /// The `run_code` tool on the direct path (`[codemode]`).
     #[serde(default)]
     pub codemode: codemode::CodemodeConfig,
@@ -3107,6 +3111,7 @@ impl Default for Config {
             power: power::PowerConfig::default(),
             host: host::HostConfig::default(),
             terminal: terminal::TerminalConfig::default(),
+            actions: Vec::new(),
             codemode: codemode::CodemodeConfig::default(),
             pr: pr::PrConfig::default(),
             sessions: sessions::SessionsConfig::default(),
