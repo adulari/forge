@@ -1,10 +1,14 @@
 //! Process-group handling for foreground shell commands: own group on spawn, group kill on drop,
 //! and SIGTERM-then-SIGKILL on timeout.
 
+#[cfg(not(unix))]
+use std::process::Stdio;
+#[cfg(unix)]
 use std::time::Duration;
 
 use tokio::process::{Child, Command};
 
+#[cfg(unix)]
 use super::KILL_GRACE;
 
 /// Put the child in its own process group so a timeout kill takes down the whole tree.
