@@ -208,6 +208,16 @@ pub struct AgentRequest {
     pub output_schema: Option<Value>,
 }
 
+/// A model-sent `output_schema`, kept as data. A schema sent as a JSON string is decoded; anything
+/// else that is present is kept so the preflight can refuse it instead of it vanishing.
+fn schema_value(v: &Value) -> Option<Value> {
+    match v {
+        Value::Null => None,
+        Value::String(s) => Some(serde_json::from_str(s).unwrap_or_else(|_| v.clone())),
+        other => Some(other.clone()),
+    }
+}
+
 /// Parse `spawn_agents` arguments into child requests, capped at `max_agents`. Returns an
 /// `Err(message)` describing the problem in model-readable form if the shape is wrong.
 pub fn parse_requests(
@@ -227,7 +237,7 @@ pub fn parse_requests(
             arr.len()
         ));
     }
-    let default_schema = args.get("output_schema").filter(|v| v.is_object());
+    let default_schema = args.get("output_schema").and_then(schema_value);
     let mut out = Vec::new();
     for entry in arr.iter() {
         let task = entry
@@ -244,9 +254,8 @@ pub fn parse_requests(
             .to_string();
         let output_schema = entry
             .get("output_schema")
-            .filter(|v| v.is_object())
-            .or(default_schema)
-            .cloned();
+            .and_then(schema_value)
+            .or_else(|| default_schema.clone());
         out.push(AgentRequest {
             agent,
             task: task.to_string(),

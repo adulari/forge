@@ -384,7 +384,7 @@ async fn run_agent_loop(
             .unwrap_or_else(|| ctx.repo_root.clone()),
     );
     let mut stalled: Option<String> = None;
-    for step in 0usize.. {
+    'steps: for step in 0usize.. {
         if contract
             .as_ref()
             .is_some_and(structured::Contract::wrap_spent)
@@ -416,7 +416,10 @@ async fn run_agent_loop(
             {
                 schema_note = Some(note);
             }
-            let wrapping = wrapping && contract.is_some();
+            if wrapping && contract.is_none() {
+                // The wrap-up was the child's last call; a bridged model would get the full toolset.
+                break 'steps;
+            }
             let step_specs: &[ToolSpec] = if wrapping { &wrap_specs } else { &specs };
             on_delta(StreamEvent::Reasoning(format!(
                 "model step {}: waiting for `{active_model}`",
@@ -482,11 +485,8 @@ async fn run_agent_loop(
         // `cost_for_usage`, not the bare rate: it bills a subscription (codex) call at $0 and
         // prices cache hits at their discounted rate, exactly like the parent turn.
         resp.usage.cost_usd = ctx.pricing.cost_for_usage(&active_model, &resp.usage);
-        let wrapping = wrapping && contract.is_some();
-        if wrapping {
-            if let Some(c) = contract.as_mut() {
-                c.spend_wrap_up();
-            }
+        if let Some(c) = contract.as_mut().filter(|_| wrapping) {
+            c.spend_wrap_up();
         }
 
         transcript.push(Message::assistant_tool_calls(
@@ -618,13 +618,13 @@ async fn run_agent_loop(
             &mut *on_delta,
         ) {
             final_text = resp.content.clone();
+            stalled = Some(headline);
             if contract
                 .as_mut()
                 .is_some_and(|c| c.arm_wrap_up(structured::WrapReason::Stalled))
             {
                 continue;
             }
-            stalled = Some(headline);
             break;
         }
     }
@@ -636,6 +636,7 @@ async fn run_agent_loop(
         return Ok(structured::with_note(
             progress::stalled_outcome(final_text, &headline),
             schema_note,
+            true,
         ));
     }
 
@@ -655,6 +656,7 @@ async fn run_agent_loop(
             structured: None,
         },
         schema_note,
+        false,
     ))
 }
 

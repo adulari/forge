@@ -551,10 +551,25 @@ pub(super) fn outcome_from(contract: Contract, note: Option<String>) -> Subagent
     }
 }
 
-pub(super) fn with_note(mut outcome: SubagentOutcome, note: Option<String>) -> SubagentOutcome {
-    if let Some(note) = note {
-        outcome.structured = Some(StructuredResult::text(&outcome.final_text, note));
-    }
+pub(super) fn with_note(
+    mut outcome: SubagentOutcome,
+    note: Option<String>,
+    stalled: bool,
+) -> SubagentOutcome {
+    let Some(note) = note else {
+        return outcome;
+    };
+    let failed = !outcome.ok && (stalled || outcome.final_text.starts_with("error: "));
+    outcome.structured = Some(if failed {
+        let text = outcome.final_text.as_str();
+        let message = text.strip_prefix("error: ").unwrap_or(text);
+        StructuredResult {
+            notes: vec![note],
+            ..StructuredResult::error(&truncate_bytes(message, RAW_ECHO_BYTES))
+        }
+    } else {
+        StructuredResult::text(&outcome.final_text, note)
+    });
     outcome
 }
 
@@ -884,6 +899,21 @@ mod tests {
         let r = c.into_result(None);
         assert_eq!((r.status, r.attempts), (ResultStatus::Invalid, 3));
         assert!(r.raw.is_some() && !r.errors.is_empty());
+    }
+
+    #[test]
+    fn non_object_schemas_are_refused_not_dropped() {
+        let on = HarnessConfig {
+            subagent_output_schema: true,
+            ..HarnessConfig::default()
+        };
+        for bad in [json!("not json"), json!([1]), json!(true)] {
+            let req = AgentRequest {
+                output_schema: Some(bad),
+                ..AgentRequest::default()
+            };
+            assert!(preflight(&on, &[req]).is_err());
+        }
     }
 
     #[test]

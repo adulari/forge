@@ -51,6 +51,7 @@ struct Scripted {
     replies: Mutex<std::collections::VecDeque<Reply>>,
     wrap_reply: Mutex<Option<Reply>>,
     bad_models: Vec<&'static str>,
+    bad_from: usize,
     seen: Mutex<Vec<Seen>>,
 }
 
@@ -60,6 +61,7 @@ impl Scripted {
             replies: Mutex::new(replies.into()),
             wrap_reply: Mutex::new(None),
             bad_models: Vec::new(),
+            bad_from: 0,
             seen: Mutex::new(Vec::new()),
         })
     }
@@ -84,7 +86,8 @@ impl Scripted {
             last_content: last.content.clone(),
             model: model.to_string(),
         });
-        if self.bad_models.contains(&model) {
+        let calls_so_far = self.seen.lock().unwrap().len();
+        if self.bad_models.contains(&model) && calls_so_far > self.bad_from {
             return Err(ProviderError::RateLimited {
                 message: "429".into(),
                 retry_after: Some(std::time::Duration::from_secs(30)),
@@ -449,6 +452,7 @@ async fn failover_to_a_bridged_model_drops_the_contract() {
         replies: Mutex::new(vec![prose("prose from the bridge")].into()),
         wrap_reply: Mutex::new(None),
         bad_models: vec!["good::model"],
+        bad_from: 0,
         seen: Mutex::new(Vec::new()),
     });
     let mut setup = Setup::new(provider);
@@ -632,4 +636,72 @@ fn advertised_spec_differs_only_by_the_output_schema_delta() {
         .remove("output_schema");
     assert_eq!(stripped.schema, plain.schema);
     assert!(flagged.description.starts_with(&plain.description));
+}
+
+#[tokio::test]
+async fn a_wrap_up_that_fails_over_to_a_bridge_never_reaches_it() {
+    let provider = Arc::new(Scripted {
+        replies: Mutex::new(vec![read_manifest()].into()),
+        wrap_reply: Mutex::new(None),
+        bad_models: vec!["good::model"],
+        bad_from: 1,
+        seen: Mutex::new(Vec::new()),
+    });
+    let mut setup = Setup::new(provider);
+    setup.max_turns = Some(1);
+    setup.fallbacks = vec!["claude-cli::sonnet".into()];
+    let ran = setup.run().await;
+    assert!(
+        ran.seen.iter().all(|s| s.model != "claude-cli::sonnet"),
+        "{:?}",
+        ran.seen
+    );
+    assert_eq!(status(&ran), ResultStatus::Error);
+    assert!(!ran.out.ok);
+}
+
+#[tokio::test]
+async fn a_failed_bridged_child_is_an_error_row_not_text() {
+    let mut setup = Setup::new(Scripted::new(vec![prose("")]));
+    setup.model = "claude-cli::sonnet";
+    let ran = setup.run().await;
+    assert_eq!(status(&ran), ResultStatus::Error);
+    assert!(!ran.out.ok);
+    assert!(ran.out.structured.unwrap().notes[0].contains("bridged"));
+}
+
+#[tokio::test]
+async fn a_string_schema_is_decoded_and_a_non_object_one_is_refused() {
+    let ctx = orchestrate_ctx(Scripted::new(vec![submit(json!({"line": 7}))]), true);
+    let mut sink = |_: Lifecycle| {};
+    let args = json!({"agents": [{"task": "t", "output_schema": line_schema().to_string()}]});
+    let requests = parse_requests(&args, 4).unwrap();
+    let (text, _) = orchestrate(
+        &ctx,
+        "parent",
+        requests,
+        BudgetState::default(),
+        1,
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert!(text.contains("\"status\":\"valid\""), "{text}");
+
+    let args = json!({"agents": [{"task": "t", "output_schema": [1, 2]}]});
+    let requests = parse_requests(&args, 4).unwrap();
+    let (text, ok) = orchestrate(
+        &ctx,
+        "parent",
+        requests,
+        BudgetState::default(),
+        1,
+        &mut sink,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !ok && text.starts_with("error: output_schema for agent 1"),
+        "{text}"
+    );
 }
