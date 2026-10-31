@@ -207,6 +207,12 @@ pub(crate) async fn dispatch_command(
     assay_scope: &mut forge_types::AssayScope,
 ) -> Result<DispatchOutcome> {
     use forge_tui::CommandAction;
+    // The last line of defence: whichever path a host-only command took here (typed as remote
+    // keys, a palette pick), a remote origin never opens its menu or confirms its action.
+    if let Some(refusal) = super::support::origin_refusal(line) {
+        app.note(refusal);
+        return Ok(DispatchOutcome::Handled);
+    }
     app.note_command_used(line);
     let action = forge_tui::parse_command(line);
     // Commands that need the session lock (held by the running turn) are queued by the input
@@ -966,6 +972,10 @@ and keep going."
         CommandAction::Notes => {
             app.note("/notes opens in the interactive TUI. From a shell, use: forge notes")
         }
+        CommandAction::Run if tui.is_some() => app.run_menu.open(),
+        CommandAction::Run => {
+            app.note("/run needs the interactive TUI; define actions under [[actions]] in .forge/config.toml");
+        }
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {
@@ -1171,22 +1181,18 @@ and keep going."
                         }
                         return Ok(DispatchOutcome::Handled);
                     }
-                    let pos_right = cfg.right.iter().position(|w| w == &widget);
-                    let pos_left = cfg.left.iter().position(|w| w == &widget);
-                    if let Some(i) = pos_right {
-                        cfg.right.remove(i);
-                        app.note(&format!(
-                            "statusline: removed '{widget_name_str}' from right"
-                        ));
-                    } else if let Some(i) = pos_left {
-                        cfg.left.remove(i);
-                        app.note(&format!(
-                            "statusline: removed '{widget_name_str}' from left"
-                        ));
-                    } else {
-                        cfg.right.push(widget);
-                        app.note(&format!("statusline: added '{widget_name_str}' to right"));
-                    }
+                    let note = match cfg.toggle_widget(widget) {
+                        forge_config::WidgetToggle::RemovedRight => {
+                            format!("statusline: removed '{widget_name_str}' from right")
+                        }
+                        forge_config::WidgetToggle::RemovedLeft => {
+                            format!("statusline: removed '{widget_name_str}' from left")
+                        }
+                        forge_config::WidgetToggle::AddedRight => {
+                            format!("statusline: added '{widget_name_str}' to right")
+                        }
+                    };
+                    app.note(&note);
                     match forge_config::write_statusline_config(&app.statusline_config.clone()) {
                         Ok(path) => app.note(&format!("  saved → {}", path.display())),
                         Err(e) => app.note(&format!("  ⚠ could not save config: {e}")),

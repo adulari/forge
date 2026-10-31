@@ -48,6 +48,7 @@ pub(super) fn stalled_outcome(last_words: String, headline: &str) -> SubagentOut
     SubagentOutcome {
         final_text,
         ok: false,
+        structured: None,
     }
 }
 

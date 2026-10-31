@@ -168,6 +168,27 @@ pub async fn start(
     workspace: Option<&Path>,
     policy: &SandboxPolicy,
 ) -> Result<Job, String> {
+    start_with(command, cwd, workspace, policy, false).await
+}
+
+pub(super) fn mark_stopping(pid: u32) {
+    if let Ok(mut stopping) = STOPPING.lock() {
+        stopping.push(pid);
+    }
+}
+
+/// Whether a job started now would report its exit to this session.
+pub(super) fn has_job_exit_sink() -> bool {
+    JOB_EXIT_SINK.try_with(|_| ()).is_ok()
+}
+
+pub(super) async fn start_with(
+    command: &str,
+    cwd: &str,
+    workspace: Option<&Path>,
+    policy: &SandboxPolicy,
+    inline: bool,
+) -> Result<Job, String> {
     if policy.enabled && !crate::sandbox::is_supported() {
         return Err(
             "refusing to start a background job unconfined: `shell.sandbox = true` is set but \
@@ -236,6 +257,9 @@ pub async fn start(
         tunnel: None,
     };
     write_record(&dir, &job)?;
+    if inline {
+        super::inline::mark(pid);
+    }
 
     // Watch for the exit so `status` can report a real code rather than only "gone". This task
     // also reaps the child, which is what keeps a finished job from lingering as a zombie and
@@ -247,14 +271,20 @@ pub async fn start(
     tokio::spawn(async move {
         let code = match child.wait().await {
             Ok(status) => status.code().map(i64::from).unwrap_or(-1),
-            Err(_) => return,
+            Err(_) => {
+                super::inline::release(pid);
+                return;
+            }
         };
         let first = record_exit(&dir_for_task, pid, code);
         let tunnel_dir = dir_for_task.clone();
         let _ =
             tokio::task::spawn_blocking(move || super::preview::stop_job_tunnel(&tunnel_dir, pid))
                 .await;
-        let stopped = take_stopping(pid);
+        // One lock for the check and the release: the caller that is waiting on this job relies
+        // on the watcher to drop the mark once it has seen the exit.
+        let was_inline = super::inline::take(pid);
+        let stopped = take_stopping(pid) || was_inline;
         if let (Some(sink), true, false) = (sink, first, stopped) {
             let tail = tail(&log_for_task, 8).unwrap_or_default();
             sink(JobExit {
@@ -493,7 +523,19 @@ fn record_exit(dir: &Path, pid: u32, code: i64) -> bool {
     true
 }
 
-fn take_stopping(pid: u32) -> bool {
+/// Mark `pid` as one whose exit the caller reports itself, so the exit sink stays quiet.
+pub(super) fn note_waiting(pid: u32) {
+    if let Ok(mut stopping) = STOPPING.lock() {
+        stopping.push(pid);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn take_stopping_for_test(pid: u32) -> bool {
+    take_stopping(pid)
+}
+
+pub(super) fn take_stopping(pid: u32) -> bool {
     STOPPING.lock().is_ok_and(|mut stopping| {
         let before = stopping.len();
         stopping.retain(|p| *p != pid);
@@ -518,64 +560,7 @@ fn first_line(command: &str) -> String {
     }
 }
 
-/// Put the child in a new session, which is what actually survives a process-group kill.
-#[cfg(unix)]
-pub(super) fn detach_into_new_session(cmd: &mut Command) {
-    // SAFETY: setsid is async-signal-safe and touches only the calling (freshly forked) process.
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(unix))]
-pub(super) fn detach_into_new_session(_cmd: &mut Command) {}
-
-#[cfg(unix)]
-pub(super) fn pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-pub(super) fn pid_alive(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(unix)]
-pub(super) fn signal_group(pid: u32, signal: i32) {
-    unsafe { libc::kill(-(pid as i32), signal) };
-}
-
-#[cfg(not(unix))]
-pub(super) fn signal_group(_pid: u32, _signal: i32) {}
-
-#[cfg(unix)]
-pub(super) const SIGTERM: i32 = libc::SIGTERM;
-#[cfg(not(unix))]
-pub(super) const SIGTERM: i32 = 0;
-#[cfg(unix)]
-pub(super) const SIGKILL: i32 = libc::SIGKILL;
-#[cfg(not(unix))]
-pub(super) const SIGKILL: i32 = 0;
-
-/// Process start time in clock ticks since boot (`/proc/<pid>/stat` field 22). Two processes with
-/// the same pid but different start times are different processes.
-#[cfg(target_os = "linux")]
-pub(super) fn proc_start_ticks(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, rest) = stat.rsplit_once(')')?;
-    // Field 22 overall; after `comm` the first entry is field 3, so index 19.
-    rest.split_whitespace().nth(19)?.parse().ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(super) fn proc_start_ticks(_pid: u32) -> Option<u64> {
-    None
-}
+pub(super) use super::proc_util::*;
 
 // ---------------------------------------------------------------------------
 // The tool surface: `shell{background:true}` starts a job, `shell_job` manages it.
@@ -716,6 +701,16 @@ impl Tool for ShellJobTool {
                     job.status(),
                     job.log.display()
                 ))
+            }
+            "wait" => {
+                let id = id()?;
+                let secs = args
+                    .get("timeout_secs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(super::job_wait::DEFAULT_WAIT_SECS);
+                super::job_wait::wait_for_job(workspace, &cwd, id, secs)
+                    .await
+                    .map_err(ToolError::Failed)
             }
             "stop" => {
                 let id = id()?;

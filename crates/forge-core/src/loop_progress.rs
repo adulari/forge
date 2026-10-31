@@ -21,7 +21,7 @@ pub(crate) use text::hash_str;
 
 /// Tools that cannot change the working tree: a step made only of these is never a reason to
 /// look at it. Everything else (a shell command, a script, an external server's tool) might.
-const TREE_SAFE_TOOLS: [&str; 14] = [
+const TREE_SAFE_TOOLS: [&str; 15] = [
     "read_file",
     "list_dir",
     "glob",
@@ -29,6 +29,7 @@ const TREE_SAFE_TOOLS: [&str; 14] = [
     "web_fetch",
     "web_search",
     "lattice",
+    "lsp",
     "shell_job",
     "update_tasks",
     "ask_user",
@@ -269,7 +270,14 @@ pub(crate) fn call_signature(call: &forge_types::ToolCall) -> u64 {
 /// `read_file src/lib.rs`, `shell cargo test`: the tool and the one argument that says what it
 /// was aimed at, short enough for a one-line report.
 pub(crate) fn call_label(call: &forge_types::ToolCall) -> String {
-    let target = if call.name == "shell" {
+    let target = if call.name == forge_tools::PYTHON_TOOL {
+        crate::eval_kernel::cell_code(&call.args).and_then(|code| {
+            code.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_string)
+        })
+    } else if call.name == "shell" {
         forge_types::shell_command_text(&call.args).and_then(|text| {
             text.lines()
                 .find(|l| !l.trim().is_empty())
@@ -298,6 +306,15 @@ mod tests {
             name: "shell".into(),
             args: serde_json::json!({ "command": command }),
         }
+    }
+
+    #[test]
+    fn python_cell_counter_and_timing_do_not_hide_a_repeat() {
+        let a = CallObservation::new(1, true, false, "python: ok (cell 4, 0.3s)\nOut: 3");
+        let b = CallObservation::new(1, true, false, "python: ok (cell 5, 0.1s)\nOut: 3");
+        assert_eq!(a.result_fp(), b.result_fp());
+        let c = CallObservation::new(1, true, false, "python: ok (cell 6, 0.1s)\nOut: 4");
+        assert_ne!(a.result_fp(), c.result_fp());
     }
 
     #[test]

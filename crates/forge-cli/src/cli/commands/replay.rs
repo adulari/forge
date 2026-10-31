@@ -52,6 +52,18 @@ fn default_store_file_name() -> &'static str {
     }
 }
 
+/// The file [`open_store`] opens, canonicalized when it exists. The daemon records it in
+/// `serve-state.json` so a client only hands work to a daemon that owns the same store.
+pub(crate) fn resolved_store_path() -> std::path::PathBuf {
+    let path = match std::env::var("FORGE_DB") {
+        Ok(custom) => std::path::PathBuf::from(custom),
+        Err(_) => forge_config::data_dir()
+            .map(|dir| dir.join(default_store_file_name()))
+            .unwrap_or_else(|| std::path::PathBuf::from(".forge/forge.db")),
+    };
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
 /// The data dir holds the session store and kept tool output: owner-only (0700), like the config
 /// dir that holds the secrets.
 #[cfg(not(test))]
@@ -245,10 +257,26 @@ fn current_workspace() -> Result<String> {
 /// Resolve a (possibly abbreviated) session id to a single full id, git-style. A value that
 /// matches no id is tried as a session name (`forge run --name`); the newest such session wins.
 pub(crate) fn resolve_session(store: &Store, prefix: &str) -> Result<String> {
+    resolve_session_with(store, prefix, false)
+}
+
+/// [`resolve_session`] for irreversible actions: a name shared by several sessions is ambiguous
+/// instead of silently picking the newest.
+pub(crate) fn resolve_session_exact(store: &Store, prefix: &str) -> Result<String> {
+    resolve_session_with(store, prefix, true)
+}
+
+fn resolve_session_with(store: &Store, prefix: &str, unique_title: bool) -> Result<String> {
     let mut matches = store
         .matching_session_ids(prefix)
         .context("looking up session")?;
     if matches.is_empty() {
+        let titled = store.count_sessions_titled(prefix.trim())?;
+        if unique_title && titled > 1 {
+            anyhow::bail!(
+                "'{prefix}' is ambiguous ({titled} sessions have that name) — use the session id"
+            );
+        }
         if let Some(id) = store.newest_session_titled(prefix.trim())? {
             return Ok(id);
         }
@@ -775,6 +803,19 @@ mod fork_tree_tests {
 mod daemon_guard_tests {
     use super::*;
 
+    #[test]
+    fn delete_resolution_refuses_a_name_shared_by_several_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.create_session("/p", "Smith").unwrap();
+        store.set_session_title(&first, "fix tests").unwrap();
+        assert_eq!(resolve_session_exact(&store, "fix tests").unwrap(), first);
+        let second = store.create_session("/p", "Smith").unwrap();
+        store.set_session_title(&second, "fix tests").unwrap();
+        let err = resolve_session_exact(&store, "fix tests").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+        assert_eq!(resolve_session(&store, "fix tests").unwrap(), second);
+    }
+
     fn state(pid: u32) -> crate::serve::ServeState {
         crate::serve::ServeState {
             pid,
@@ -783,6 +824,7 @@ mod daemon_guard_tests {
             base_url: "http://127.0.0.1:1/t".into(),
             token: "t".into(),
             started_at: 0,
+            store_path: None,
         }
     }
 

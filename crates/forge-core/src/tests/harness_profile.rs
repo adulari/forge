@@ -7,13 +7,13 @@ use super::*;
 use forge_config::HarnessProfile;
 
 /// Replays `(content, tool_calls)`, repeating the last entry once the script runs out.
-struct Script {
-    steps: Vec<(String, Vec<forge_types::ToolCall>)>,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
+pub(super) struct Script {
+    pub(super) steps: Vec<(String, Vec<forge_types::ToolCall>)>,
+    pub(super) calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Script {
-    fn new(steps: Vec<(String, Vec<forge_types::ToolCall>)>) -> Self {
+    pub(super) fn new(steps: Vec<(String, Vec<forge_types::ToolCall>)>) -> Self {
         Self {
             steps,
             calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -48,7 +48,7 @@ impl Provider for Script {
     }
 }
 
-fn call(name: &str, args: serde_json::Value) -> forge_types::ToolCall {
+pub(super) fn call(name: &str, args: serde_json::Value) -> forge_types::ToolCall {
     forge_types::ToolCall {
         id: forge_types::new_id(),
         name: name.into(),
@@ -56,11 +56,11 @@ fn call(name: &str, args: serde_json::Value) -> forge_types::ToolCall {
     }
 }
 
-fn say(text: &str) -> (String, Vec<forge_types::ToolCall>) {
+pub(super) fn say(text: &str) -> (String, Vec<forge_types::ToolCall>) {
     (text.to_string(), Vec::new())
 }
 
-fn config(profile: HarnessProfile) -> Config {
+pub(super) fn config(profile: HarnessProfile) -> Config {
     let mut config = Config {
         permission_mode: PermissionMode::Bypass,
         ..Config::default()
@@ -75,13 +75,13 @@ fn config(profile: HarnessProfile) -> Config {
     config
 }
 
-struct Run {
-    session: Session,
-    events: Arc<Mutex<Vec<PresenterEvent>>>,
+pub(super) struct Run {
+    pub(super) session: Session,
+    pub(super) events: Arc<Mutex<Vec<PresenterEvent>>>,
 }
 
 impl Run {
-    fn new(provider: Arc<dyn Provider>, config: Config, root: &std::path::Path) -> Self {
+    pub(super) fn new(provider: Arc<dyn Provider>, config: Config, root: &std::path::Path) -> Self {
         Self::routed(provider, config, root, "direct::scripted", vec![])
     }
 
@@ -113,7 +113,7 @@ impl Run {
         Self { session, events }
     }
 
-    fn warnings(&self, needle: &str) -> usize {
+    pub(super) fn warnings(&self, needle: &str) -> usize {
         self.events
             .lock()
             .unwrap()
@@ -577,7 +577,7 @@ async fn an_empty_reply_right_after_the_nudge_goes_to_the_honest_failure_path() 
     );
 }
 
-fn harness_config(
+pub(super) fn harness_config(
     profile: HarnessProfile,
     edit: impl FnOnce(&mut forge_config::HarnessConfig),
 ) -> Config {
@@ -586,7 +586,7 @@ fn harness_config(
     cfg
 }
 
-fn transcript_hits(run: &Run, needle: &str) -> usize {
+pub(super) fn transcript_hits(run: &Run, needle: &str) -> usize {
     run.session
         .transcript
         .iter()
@@ -679,6 +679,26 @@ async fn thinking_loop_breaker_interrupts_a_restated_plan_at_most_twice() {
     );
 }
 
+#[tokio::test]
+async fn thinking_loop_breaker_leaves_a_text_tool_call_to_the_repair_note() {
+    let markup =
+        r#"<invoke name="shell"><parameter name="command">cargo test</parameter></invoke>"#;
+    let mut run = Run::new(
+        Arc::new(Script::new(vec![say(markup)])),
+        harness_config(HarnessProfile::Minimal, |h| {
+            h.stop_retries = true;
+            h.thinking_loop_breaker = true;
+        }),
+        test_workspace(),
+    );
+    run.session.run_turn("go").await.unwrap();
+    assert_eq!(
+        transcript_hits(&run, crate::stop_guards::THINKING_LOOP_NUDGE),
+        0
+    );
+    assert!(transcript_hits(&run, "text is not a tool call") >= 1);
+}
+
 async fn repeated_shell(repeat_interrupt: bool) -> (usize, usize) {
     let steps: Vec<_> = (0..20)
         .map(|_| {
@@ -731,4 +751,70 @@ async fn completion_contract_is_the_tail_of_the_system_prompt_only_when_on() {
     assert!(!off.session.system_preamble()[0]
         .content
         .contains("<critical>"));
+}
+
+fn family_run(edit: impl FnOnce(&mut forge_config::HarnessConfig)) -> Run {
+    Run::new(
+        Arc::new(Script::new(vec![say("ok")])),
+        harness_config(HarnessProfile::Guarded, edit),
+        test_workspace(),
+    )
+}
+
+#[test]
+fn family_profile_follows_the_model_and_tunes_flags_and_prompt() {
+    let mut run = family_run(|h| h.family_profiles = true);
+    run.session
+        .note_harness_model("bedrock::global.moonshotai.kimi-k3");
+    assert!(run.session.harness_flags.stop_retries);
+    assert!(run.session.system_preamble()[0]
+        .content
+        .ends_with(forge_config::model_family::KIMI_PROMPT_DELTA));
+    assert_eq!(
+        run.session.toolcall_repair_max(),
+        crate::stop_guards::STOP_RETRY_MAX
+    );
+
+    run.session.note_harness_model("codex-oauth::gpt-5.6-luna");
+    assert!(!run.session.harness_flags.stop_retries);
+    assert!(!run.session.system_preamble()[0]
+        .content
+        .contains("<critical>"));
+}
+
+#[test]
+fn family_profiles_are_off_by_default() {
+    let mut run = family_run(|_| {});
+    run.session
+        .note_harness_model("bedrock::global.moonshotai.kimi-k3");
+    assert!(!run.session.harness_flags.stop_retries);
+    assert!(!run.session.system_preamble()[0]
+        .content
+        .contains("<critical>"));
+}
+
+#[test]
+fn an_explicit_flag_beats_the_family_default_in_both_directions() {
+    let mut run = family_run(|h| {
+        h.family_profiles = true;
+        h.stop_retries = false;
+        h.explicit_flags = vec!["stop_retries".into()];
+    });
+    run.session
+        .note_harness_model("bedrock::global.moonshotai.kimi-k3");
+    assert!(
+        !run.session.harness_flags.stop_retries,
+        "explicit false wins"
+    );
+
+    let mut run = family_run(|h| {
+        h.family_profiles = true;
+        h.thinking_loop_breaker = true;
+        h.explicit_flags = vec!["thinking_loop_breaker".into()];
+    });
+    run.session.note_harness_model("ollama::llama3");
+    assert!(
+        run.session.harness_flags.thinking_loop_breaker,
+        "explicit true stays"
+    );
 }

@@ -80,12 +80,24 @@ impl AnywhereMenuDriver {
         });
     }
 
+    /// Results that land while the menu is closed are discarded, but the fetches they answer are
+    /// over: clear their inflight flags so the next open can start new ones.
+    fn drop_stale_messages(&mut self) {
+        while let Ok(msg) = self.rx.try_recv() {
+            match msg {
+                Msg::Snapshot(_) => self.status_inflight = false,
+                Msg::Devices(_) => self.devices_inflight = false,
+                _ => {}
+            }
+        }
+    }
+
     /// Drive refreshes and apply results. True when the screen needs a redraw.
     pub(crate) fn tick(&mut self, app: &mut App) -> bool {
         if !app.anywhere_menu.open {
             self.status_at = None;
             self.devices_at = None;
-            while self.rx.try_recv().is_ok() {}
+            self.drop_stale_messages();
             return false;
         }
         let mut dirty = false;
@@ -234,5 +246,30 @@ impl AnywhereMenuDriver {
         }
         self.status_at = None;
         self.devices_at = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fetch_that_finishes_while_closed_does_not_wedge_the_next_open() {
+        let mut driver = AnywhereMenuDriver::new(true);
+        driver.status_inflight = true;
+        driver.devices_inflight = true;
+        driver
+            .tx
+            .send(Msg::Snapshot(Err("gone".to_string())))
+            .unwrap();
+        driver
+            .tx
+            .send(Msg::Devices(Devices::Unavailable("gone".to_string())))
+            .unwrap();
+        let mut app = App::default();
+        assert!(!app.anywhere_menu.open);
+        driver.tick(&mut app);
+        assert!(!driver.status_inflight);
+        assert!(!driver.devices_inflight);
     }
 }

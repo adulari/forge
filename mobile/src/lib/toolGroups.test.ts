@@ -5,6 +5,7 @@ import {
   collapsedCalls,
   foldToolGroups,
   GroupMemo,
+  headline,
   summarize,
   summaryText,
   type CallDiff,
@@ -72,6 +73,13 @@ describe("summary text (ported from tool_groups_tests.rs)", () => {
       "Created notes.md (+2)",
     );
     expect(text([done("run_code", '{"code":"1"}')])).toBe("Ran 1 script");
+  });
+
+  it("groups python kernel cells with shell commands and names the first code line", () => {
+    const cell = JSON.stringify({ code: "# load\nimport pandas as pd\ndf = pd.read_csv('x.csv')" });
+    expect(text([done("python", cell)])).toBe("Ran import pandas as pd");
+    expect(text([done("python", cell), done("shell", '{"command":"ls"}')])).toBe("Ran 2 shell commands");
+    expect(headline("python", cell)).toBe("import pandas as pd");
   });
 
   it("gives agents, MCP, tasks and unknown tools their own words", () => {

@@ -174,6 +174,10 @@ pub(crate) struct ServeState {
     pub(crate) base_url: String,
     pub(crate) token: String,
     pub(crate) started_at: u64,
+    /// The session store this daemon owns. Absent in files written by older daemons, which always
+    /// used the default store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) store_path: Option<String>,
 }
 
 impl ServeState {
@@ -807,6 +811,11 @@ pub(crate) async fn serve_cmd(
         base_url: url.clone(),
         token: token.clone(),
         started_at,
+        store_path: Some(
+            crate::cli::commands::replay::resolved_store_path()
+                .to_string_lossy()
+                .into_owned(),
+        ),
     }) {
         eprintln!(
             "⚠ could not write serve-state.json — desktop auto-detect won't find this daemon: {e}"
@@ -1003,6 +1012,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/changelog"), get(changelog_page))
         .merge(crate::serve_git::routes(&base))
         .merge(crate::serve_media::routes(&base))
+        .merge(crate::serve_workspace_pdf::routes(&base))
         .merge(crate::serve_agents::routes(&base))
         .merge(crate::serve_spend::routes(&base))
         // Workspace inspector/editor (serve_workspace.rs). Roots come only from the live session;
@@ -1028,6 +1038,8 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_lifecycle::routes(&base))
         .merge(crate::serve_schedules::routes(&base))
         .merge(crate::serve_notes::routes(&base))
+        .merge(crate::serve_project_actions::routes(&base))
+        .merge(crate::serve_ports::routes(&base))
         // Terminal dock (serve_terminal.rs): a real PTY in the session's directory, gated by the
         // same daemon token as every other route and granted no additional privilege.
         .route(
@@ -1239,6 +1251,7 @@ mod serve_config;
 mod serve_local_control;
 mod serve_mcp;
 mod serve_mcp_probe;
+mod serve_mcp_redact;
 mod serve_models;
 mod serve_projects;
 mod serve_providers;
@@ -1733,7 +1746,7 @@ fn redact_token(url: &str, token: &str) -> String {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ForkSessionReq {
+pub(crate) struct ForkSessionReq {
     at_seq: i64,
     /// Pin the child to this model instead of inheriting the source's last one.
     #[serde(default)]
@@ -1750,9 +1763,17 @@ struct ForkSessionReq {
     /// Display title; defaults to `Fork of <source id>`.
     #[serde(default)]
     title: Option<String>,
+    /// Fork the whole thread (`at_seq` is ignored): the child carries every message, the latest
+    /// turn included, instead of stopping before a prompt that a first prompt would re-ask.
+    #[serde(default)]
+    whole_thread: bool,
+    /// Move the thread: the child takes over the source's worktree and the source is archived
+    /// without snapshotting or removing that worktree. See `serve_fork_move`.
+    #[serde(default)]
+    move_source: bool,
 }
 
-async fn fork_session(
+pub(crate) async fn fork_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
     axum::Json(req): axum::Json<ForkSessionReq>,
@@ -1805,6 +1826,11 @@ async fn fork_session(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string);
+    if req.move_source {
+        if let Some(refusal) = reject_if_open_in_terminal(&state, &id, "moved").await {
+            return refusal;
+        }
+    }
     let store = state.store.clone();
     let source = id.clone();
     let store_for_fork = store.clone();
@@ -1816,24 +1842,36 @@ async fn fork_session(
         let max_seq = store_for_fork
             .session_max_seq(&source)
             .map_err(|error| error.to_string())?;
-        if req.at_seq < 0 || req.at_seq > max_seq {
+        if !req.whole_thread && (req.at_seq < 0 || req.at_seq > max_seq) {
             return Err(format!(
                 "at_seq {} is outside this session's history (0..={max_seq})",
                 req.at_seq
             ));
         }
+        let at_seq = if req.whole_thread {
+            max_seq + 1
+        } else {
+            req.at_seq
+        };
+        let adopted_worktree = if req.move_source {
+            store_for_fork
+                .session_worktree(&source)
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
         let fork_id = store_for_fork
-            .fork_session(&source, req.at_seq)
+            .fork_session(&source, at_seq)
             .map_err(|error| error.to_string())?;
         if let Some(level) = effort {
             store_for_fork
                 .set_session_pinned_effort(&fork_id, Some(level.as_str()))
                 .map_err(|error| error.to_string())?;
         }
-        Ok::<_, String>((fork_id, cwd))
+        Ok::<_, String>((fork_id, cwd, adopted_worktree))
     })
     .await;
-    let (fork_id, cwd) = match result {
+    let (fork_id, cwd, adopted_worktree) = match result {
         Ok(Ok(value)) => value,
         Ok(Err(message)) if message == "no such session" => {
             return err_response(axum::http::StatusCode::NOT_FOUND, &message)
@@ -1848,7 +1886,7 @@ async fn fork_session(
     };
     let spec = DriverSpec {
         cwd,
-        worktree: None,
+        worktree: adopted_worktree,
         title: child_title
             .clone()
             .unwrap_or_else(|| format!("Fork of {}", &id[..id.len().min(8)])),
@@ -1880,6 +1918,12 @@ async fn fork_session(
             let _ = state
                 .store
                 .set_session_daemon_live(&handle.session_id, true);
+            if req.move_source {
+                if let Err(message) = crate::serve_fork_move::retire_moved_source(&state, &id).await
+                {
+                    return err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &message);
+                }
+            }
             if let Some(text) = first_prompt {
                 let _ = handle
                     .input_tx
@@ -4031,6 +4075,7 @@ pub(crate) mod tests {
             base_url: "http://127.0.0.1:7420/abc123".to_string(),
             token: "abc123".to_string(),
             started_at: 1_700_000_000,
+            store_path: None,
         };
         let parsed: serde_json::Value = serde_json::from_str(&state.to_json()).unwrap();
         assert_eq!(parsed["pid"], 12345);
@@ -4125,6 +4170,7 @@ pub(crate) mod tests {
             base_url: "https://example.trycloudflare.com/deadbeef".to_string(),
             token: "deadbeef".to_string(),
             started_at: 1_700_000_001,
+            store_path: Some("/data/forge.db".to_string()),
         };
         write_state_at(&path, &state).unwrap();
         let read_back: ServeState =

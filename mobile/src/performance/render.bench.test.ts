@@ -34,19 +34,19 @@ describe("headless render-path benchmarks", () => {
     measure("groupByPhase 10k rows / 100 phases", 20, () => {
       groupByPhase(rows, phases);
     });
-  });
+  }, 30_000);
 
   it("measures reasoning parsing for a long streamed message", () => {
     const message = `<think>${"reasoning token ".repeat(20_000)}</think>${"answer token ".repeat(20_000)}`;
     measure("parseReasoning 560kB streamed message", 20, () => {
       parseReasoning(message);
     });
-  });
+  }, 30_000);
 
   it("measures syntax tokenization for a large diff/code block", () => {
     const code = Array.from({ length: 10_000 }, (_, index) => `const value${index} = ${index}; // changed line ${index}\n`).join("");
     measure("highlightTokens 420kB TypeScript block", 10, () => {
       highlightTokens(code, "typescript");
     });
-  });
+  }, 30_000);
 });

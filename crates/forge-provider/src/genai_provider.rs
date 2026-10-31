@@ -1082,7 +1082,10 @@ impl GenAiProvider {
     ) -> Result<ModelResponse, ProviderError> {
         let model_name = to_genai_model(model);
 
-        let mut genai_messages = to_genai_messages(messages, requires_reasoning_echo(&model_name));
+        let mut genai_messages = to_genai_messages(
+            messages,
+            requires_reasoning_echo(&model_name) || opts.echo_reasoning,
+        );
         // Opt-in per provider (`[reasoning_prefill]`); absent for every provider by default.
         // Keyed on Forge's namespace, which is what `[reasoning_prefill]` names: genai's differs for
         // some providers (`bedrock` is `bedrock_api` by now), and the entry silently never applied.
@@ -1713,6 +1716,32 @@ mod tests {
 
         // Providers that never ask for it must not gain empty fields.
         assert!(reasoning_parts(&to_genai_messages(&messages, false)).is_empty());
+    }
+
+    // Captured shape: a DeepSeek reply behind a custom gateway that streamed `reasoning_content`
+    // and a tool call. The reasoning rides back verbatim on the tool-call message, and a family
+    // profile (`echo_reasoning`) adds the empty field on a reply that streamed none.
+    #[test]
+    fn gateway_deepseek_reasoning_round_trips_on_the_tool_call_turn() {
+        let call = forge_types::ToolCall {
+            id: "call_0".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": "/etc/hostname"}),
+        };
+        let mut thought = Message::assistant_tool_calls("", vec![call.clone()]);
+        thought.reasoning = Some("Need the hostname; read the file.".to_string());
+        let out = to_genai_messages(&[thought], false);
+        assert_eq!(
+            reasoning_parts(&out),
+            vec!["Need the hostname; read the file."]
+        );
+
+        let silent = Message::assistant_tool_calls("", vec![call]);
+        assert!(
+            reasoning_parts(&to_genai_messages(std::slice::from_ref(&silent), false)).is_empty()
+        );
+        let echoed = to_genai_messages(&[silent], true);
+        assert_eq!(reasoning_parts(&echoed), vec![String::new()]);
     }
 
     #[test]
@@ -2610,8 +2639,12 @@ mod tests {
             ProviderError::Auth(_)
         ));
         assert!(matches!(
-            classify_status(503, "x".into(), "", None),
+            classify_status(502, "x".into(), "", None),
             ProviderError::Unavailable(_)
+        ));
+        assert!(matches!(
+            classify_status(503, "x".into(), "", None),
+            ProviderError::Overloaded { .. }
         ));
         // 400 misuse is non-retryable — must not fail over.
         let bad = classify_status(400, "x".into(), "", None);

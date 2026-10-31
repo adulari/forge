@@ -90,6 +90,7 @@ mod mcp_agent;
 mod mcp_serve;
 mod onboarding;
 mod open_pr_hooks;
+mod ports;
 mod power;
 mod preview;
 mod push;
@@ -109,6 +110,7 @@ mod serve_clients_cli;
 mod serve_diagnostics;
 mod serve_dispatch;
 mod serve_fleet_ws;
+mod serve_fork_move;
 mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
@@ -119,8 +121,10 @@ mod serve_media;
 mod serve_notes;
 mod serve_onboarding;
 mod serve_pairing;
+mod serve_ports;
 mod serve_pr;
 mod serve_pr_watch;
+mod serve_project_actions;
 mod serve_recovery;
 mod serve_schedules;
 mod serve_skills;
@@ -129,6 +133,7 @@ mod serve_terminal;
 mod serve_terminal_util;
 mod serve_update;
 mod serve_workspace;
+mod serve_workspace_pdf;
 mod session_delete;
 mod startup_trace;
 mod telemetry;
@@ -301,6 +306,7 @@ async fn run_cli(login_path_added: Vec<String>) {
                 config.browser.allow_eval,
                 config.browser.allow_cookie_access,
             );
+            forge_tools::set_harness(&config.harness);
             preview::install(config);
         }
         open_pr_hooks::install(config.as_ref());

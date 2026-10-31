@@ -18,11 +18,14 @@ import { hexToRgba, space } from "../../theme/tokens";
 import { formatCwd, type as typeScale } from "../../theme/typography";
 import { ActionsDock } from "../actions/ActionsDock";
 import { NotesDock } from "../notes/NotesDock";
+import { PortsDock } from "../ports/PortsDock";
+import { hasActionTerminal, useActionTabInfo } from "../ports/useActionTabInfo";
 import { GalleryDock } from "../gallery/GalleryDock";
 import { GitReviewDock } from "../git/GitReviewDock";
 import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { EmptyState } from "../ds/EmptyState";
+import { StatusDot } from "../ds/StatusDot";
 import { WorkspaceDock } from "../workspace/WorkspaceDock";
 import {
   clampBottomHeight,
@@ -39,16 +42,17 @@ import { ResizeHandle } from "./ResizeHandle";
 import { useDragSource, useDropTarget, type DragPayload } from "./sessionDrag";
 import { SessionDock } from "./SessionDocks";
 import { TerminalDock } from "./TerminalDock";
-import { terminalTitle } from "./terminalModel";
+import { terminalLabel } from "../ports/actionTerminalNames";
 import { markTerminalClosed, tabsForSession, tabTerminalId } from "./terminalTabs";
 import { useTerminalActivity } from "./useTerminalActivity";
 import { UsageDock } from "./UsageDock";
+import { useWorkspaceDirty } from "../workspace/workspaceDirty";
 
 export type DockKind = WorkbenchSurfaceKind;
 
 /** What a terminal tab says about its shell when the person is not looking at it. */
 export interface TabSignal {
-  kind: "unseen" | "streaming" | "exited";
+  kind: "unseen" | "streaming" | "exited" | "running";
   label: string;
 }
 
@@ -70,9 +74,15 @@ function DockTab({
   onReorder?: (from: number, to: number) => void;
 }) {
   const tokens = useTokens();
+  const workbench = useWorkbench();
+  const unsaved = useWorkspaceDirty(tab.sessionId, tab.kind === "files" ? tab.resourceId : null);
   const ref = useRef<View>(null);
   const [over, setOver] = useState(false);
   useDragSource(ref, { kind: "tab", index });
+  // react-native-web forwards onDoubleClick to the DOM node; native ignores the prop.
+  const pinOnDoubleClick = {
+    onDoubleClick: () => tab.preview && workbench.pinSurface(tab.placement, tab.id),
+  } as object;
   const accepts = useCallback((payload: DragPayload) => payload.kind === "tab" && payload.index !== index, [index]);
   const drop = useCallback(
     (payload: DragPayload) => {
@@ -88,16 +98,27 @@ function DockTab({
     >
       <Pressable
         onPress={() => onActivate?.(tab.id)}
+        {...pinOnDoubleClick}
         accessibilityRole="tab"
         accessibilityState={{ selected: active }}
         accessibilityLabel={`Open ${tab.title} surface`}
         accessibilityHint="Drag to reorder"
         style={styles.tabLabel}
       >
-        <Text style={[typeScale.bodyBold, { color: active ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>
+        <Text
+          style={[typeScale.bodyBold, { color: active ? tokens.ink : tokens.ink3 }, tab.preview && styles.previewTitle]}
+          numberOfLines={1}
+        >
           {tab.title}
         </Text>
-        {signal?.kind === "streaming" ? (
+        {unsaved ? (
+          <View accessibilityLabel="Unsaved changes" style={[styles.unseenDot, { backgroundColor: tokens.warn }]} />
+        ) : null}
+        {signal?.kind === "running" ? (
+          <View style={styles.runningDot}>
+            <StatusDot state="busy" accessibilityLabel={`${tab.title} running`} />
+          </View>
+        ) : signal?.kind === "streaming" ? (
           <Text
             accessibilityLabel="Printing output"
             style={[typeScale.monoMeta, styles.liveBadge, { color: tokens.accent, backgroundColor: hexToRgba(tokens.accent, 0.12) }]}
@@ -157,7 +178,7 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   },
   preview: {
     render: ({ sessionId, surface }) =>
-      sessionId && surface ? <BrowserPreviewDock sessionId={sessionId} surface={surface} /> : <NeedsSession what="its preview" />,
+      sessionId && surface ? <BrowserPreviewDock key={surface.id} sessionId={sessionId} surface={surface} /> : <NeedsSession what="its preview" />,
   },
   terminal: {
     render: ({ sessionId, surface, openTerminal, closeFinishedTerminal }) => (
@@ -178,6 +199,7 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   },
   actions: { render: ({ sessionId }) => <ActionsDock sessionId={sessionId} /> },
   notes: { render: ({ sessionId }) => <NotesDock sessionId={sessionId} /> },
+  ports: { render: ({ sessionId }) => <PortsDock sessionId={sessionId} /> },
 };
 
 export interface DockHostProps {
@@ -224,7 +246,7 @@ export function DockHost({
         kind: "terminal",
         sessionId: effectiveSessionId,
         resourceId: terminalId,
-        title: terminalTitle(terminalId),
+        title: terminalLabel(terminalId),
       });
     },
     [effectiveSessionId, workbench],
@@ -234,7 +256,18 @@ export function DockHost({
   // Terminal tabs belong to the session they were opened for: the focused session shows its own
   // plus the default one, and the daemon's list brings back any it still has running.
   const isTerminal = kind === "terminal";
-  const shownTabs = useMemo(() => (isTerminal ? tabsForSession(tabs, sessionId) : tabs), [isTerminal, sessionId, tabs]);
+  const sessionTabs = useMemo(() => (isTerminal ? tabsForSession(tabs, sessionId) : tabs), [isTerminal, sessionId, tabs]);
+  const actionTabs = useActionTabInfo(effectiveSessionId, isTerminal && open && hasActionTerminal(sessionTabs));
+  const shownTabs = useMemo(
+    () =>
+      actionTabs.size === 0
+        ? sessionTabs
+        : sessionTabs.map((tab) => {
+            const info = tab.kind === "terminal" ? actionTabs.get(tabTerminalId(tab.resourceId)) : undefined;
+            return info ? { ...tab, title: info.name } : tab;
+          }),
+    [actionTabs, sessionTabs],
+  );
   const activeTerminalId = isTerminal ? tabTerminalId(surface?.resourceId ?? null) : null;
   const terminalActivity = useTerminalActivity(
     isTerminal ? effectiveSessionId : null,
@@ -284,8 +317,10 @@ export function DockHost({
     onCloseSurface?.(surface.id);
   }, [onCloseSurface, sessionId, surface]);
   const signalFor = (tab: WorkbenchSurface): TabSignal | null => {
-    if (tab.kind !== "terminal" || tab.id === surface?.id) return null;
+    if (tab.kind !== "terminal") return null;
     const id = tabTerminalId(tab.resourceId);
+    if (actionTabs.get(id)?.running) return { kind: "running", label: "running" };
+    if (tab.id === surface?.id) return null;
     const code = terminalActivity.exitCodeOf(id);
     if (code !== undefined) return { kind: "exited", label: code == null ? "ended" : `exit ${code}` };
     if (terminalActivity.isStreaming(id)) return { kind: "streaming", label: "live" };
@@ -446,8 +481,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 2,
   },
   tabLabel: { flexShrink: 1, flexDirection: "row", alignItems: "center", alignSelf: "stretch" },
+  runningDot: { marginLeft: space.space8, alignSelf: "center" },
   unseenDot: { width: 6, height: 6, borderRadius: 3, marginLeft: space.space8, alignSelf: "center" },
   liveBadge: { marginLeft: space.space8, paddingHorizontal: 4, borderRadius: 2, overflow: "hidden", alignSelf: "center" },
+  previewTitle: { fontStyle: "italic" },
   exitLabel: { marginLeft: space.space8, flexShrink: 0 },
   tabClose: { width: 20, height: 20, marginLeft: 2, alignItems: "center", justifyContent: "center" },
   headerSpacer: { flex: 1 },

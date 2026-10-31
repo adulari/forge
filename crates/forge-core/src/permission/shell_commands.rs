@@ -506,12 +506,32 @@ fn strip_wrappers(tokens: &[String]) -> Vec<String> {
     let mut i = 0;
     while i < tokens.len() {
         match tokens[i].as_str() {
-            "nohup" | "nice" | "time" | "command" | "builtin" | "exec" => i += 1,
+            "nohup" | "time" | "command" | "builtin" | "exec" => i += 1,
+            // Control words and grouping that only introduce the next command:
+            // `if x; then rm -rf y; fi`, `for d in a; do rm y; done`, `{ rm y; }`, `! rm y`.
+            "then" | "do" | "else" | "elif" | "if" | "while" | "until" | "!" | "{" | "(" => i += 1,
+            // Wrappers with options, some taking a value: `nice -n 5 rm`, `ionice -c 3 rm`.
+            "nice" | "ionice" | "setsid" | "stdbuf" => {
+                i += 1;
+                while i < tokens.len() && tokens[i].starts_with('-') {
+                    i += if matches!(tokens[i].as_str(), "-n" | "-c" | "-p" | "-i" | "-o" | "-e") {
+                        2
+                    } else {
+                        1
+                    };
+                }
+            }
             // `env` followed by VAR=VAL assignments
             "env" => {
                 i += 1;
-                while i < tokens.len() && tokens[i].contains('=') && !tokens[i].starts_with('-') {
-                    i += 1;
+                while i < tokens.len()
+                    && (tokens[i].starts_with('-') || is_env_assignment(&tokens[i]))
+                {
+                    i += if matches!(tokens[i].as_str(), "-u" | "-C" | "-S") {
+                        2
+                    } else {
+                        1
+                    };
                 }
             }
             // A BARE `VAR=value` prefix is as valid as `env VAR=value`, and skipping it here is

@@ -135,3 +135,70 @@ fn other_failures_pass_through_unchanged() {
     let e = explain_unrecognized_model("nonexistent-model-xyz", limited);
     assert!(matches!(e, ProviderError::RateLimited { .. }), "{e:?}");
 }
+
+const GATEWAY_503: &str = r#"{"error":{"message":"Gateway is temporarily busy. The gateway cannot accept this request at the moment because its capacity is limited. Wait briefly and retry. Follow the Retry-After header when one is provided. (request id: 20260930abc)","type":"new_api_error","code":"system_cpu_overloaded","details":{"source":"gateway","category":"gateway_overloaded","retryable":true}}}"#;
+
+#[test]
+fn a_gateway_overload_is_busy_not_unavailable_and_keeps_its_text() {
+    let err = classify_status(503, "HTTP 503".into(), GATEWAY_503, None);
+    let ProviderError::Overloaded {
+        status,
+        reason,
+        message,
+        ..
+    } = &err
+    else {
+        panic!("expected Overloaded, got {err:?}");
+    };
+    assert_eq!(*status, 503);
+    assert_eq!(reason, "gateway_overloaded");
+    assert!(message.contains("Wait briefly and retry"), "{message}");
+    assert!(!message.contains("request id"), "{message}");
+}
+
+#[test]
+fn overload_signals_are_recognised_on_any_5xx() {
+    let cases: &[(u16, &str, Option<u64>)] = &[
+        (
+            529,
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            None,
+        ),
+        (503, "upstream connect error", None),
+        (
+            502,
+            r#"{"error":{"message":"try later","retryable":true}}"#,
+            None,
+        ),
+        (
+            500,
+            r#"{"error":{"message":"x","code":"server_busy"}}"#,
+            None,
+        ),
+        (500, "Internal server error", Some(3)),
+    ];
+    for (code, body, retry_after) in cases {
+        let err = classify_status(
+            *code,
+            "HTTP".into(),
+            body,
+            retry_after.map(std::time::Duration::from_secs),
+        );
+        assert!(err.is_overloaded(), "{code} {body}: {err:?}");
+        assert_eq!(
+            err.retry_after(),
+            retry_after.map(std::time::Duration::from_secs)
+        );
+    }
+}
+
+#[test]
+fn a_plain_500_stays_a_candidate_for_the_rejection_heuristic() {
+    for code in [500, 502, 504] {
+        let err = classify_status(code, "HTTP".into(), "Internal server error", None);
+        assert!(
+            matches!(err, ProviderError::Unavailable(_)),
+            "{code}: {err:?}"
+        );
+    }
+}

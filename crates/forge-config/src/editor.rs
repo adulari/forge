@@ -113,6 +113,9 @@ const PRIORITY_PREFIXES: &[&str] = &[
     "tui.glyphs",
     "tui.reduce_motion",
     "tui.fold_tool_groups",
+    "tui.scroll_speed",
+    "tui.cursor",
+    "tui.show_tps",
     "project.auto_initialize",
     "recap.enabled",
     "mesh",
@@ -199,6 +202,7 @@ pub fn setting_options(path: &str) -> Option<Vec<&'static str>> {
         "tui.palette" => vec!["forge", "ocean", "grove", "rose"],
         "tui.color" => vec!["auto", "truecolor", "256", "16", "none"],
         "tui.glyphs" => vec!["auto", "unicode", "ascii"],
+        "tui.cursor" => vec!["auto", "block", "bar", "underline"],
         "reporting.mode" => vec!["auto", "ask", "off"],
         _ => return None,
     })
@@ -251,6 +255,9 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "tui.respond_to_bash" => Some(("Interface", "Respond to ! commands")),
         "tui.reduce_motion" => Some(("Interface", "Reduce motion")),
         "tui.fold_tool_groups" => Some(("Interface", "Fold tool calls")),
+        "tui.scroll_speed" => Some(("Interface", "Wheel scroll speed")),
+        "tui.cursor" => Some(("Interface", "Cursor shape")),
+        "tui.show_tps" => Some(("Interface", "Show tokens per second")),
         "project.auto_initialize" => Some(("Project", "Auto-initialize projects")),
         "recap.enabled" => Some(("Interface", "Per-turn recap")),
         "update.check" => Some(("Interface", "Check for updates")),
@@ -275,12 +282,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "anywhere.account_sync.instructions" => Some(("Anywhere sync", "Sync instructions")),
         "mesh.auto_orchestrate" => Some(("Behaviour", "Auto-orchestrate")),
         "mesh.harness_profile" => Some(("Behaviour", "Harness profile")),
-        "harness.completion_contract" => Some(("Behaviour", "Completion contract")),
-        "harness.stop_retries" => Some(("Behaviour", "Stop retries")),
-        "harness.thinking_loop_breaker" => Some(("Behaviour", "Thinking-loop breaker")),
-        "harness.repeat_interrupt" => Some(("Behaviour", "Repeat-call interrupt")),
-        "harness.edit_mode" => Some(("Behaviour", "File edit mode")),
-        _ => None,
+        _ => crate::editor_harness::group_and_label(path),
     };
     if let Some((g, l)) = curated {
         return (g.to_string(), l.to_string());
@@ -510,6 +512,9 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "tui.respond_to_bash" => "After a !command typed in the prompt runs, have the model respond to its output. Off only adds the run to the context.",
         "tui.reduce_motion" => "Turn off spinner colour cycling, rail cooling and flashes. FORGE_REDUCE_MOTION or NO_COLOR also turn it off.",
         "tui.fold_tool_groups" => "Fold each run of tool calls into one summary row in the full-screen transcript (Read 3 files, ran 2 shell commands). Click it, or Alt+↑/↓ then Enter, to open it; Alt+O opens every group. Off shows every call as its own card.",
+        "tui.scroll_speed" => "Transcript lines one mouse-wheel notch scrolls, 1 to 20. Default 3. Takes effect the next time `forge chat` starts.",
+        "tui.cursor" => "Terminal cursor shape: auto leaves your terminal's own, or block, bar, underline. Takes effect the next time `forge chat` starts.",
+        "tui.show_tps" => "Show the live tokens-per-second rate in the status line while a reply streams.",
         "project.auto_initialize" => "Run a model-backed, tailored Forge setup once when opening an uninitialized project.",
         "recap.enabled" => "Show a one-line AI recap after each completed turn.",
         "reporting.mode" => "Report Forge's own crashes and internal errors to the maintainers: auto sends a scrubbed, content-free report in the background, ask shows exactly what would be sent first, off sends nothing. FORGE_NO_REPORTS=1 forces off. Run `forge report --show-last` to see the last report.",
@@ -528,12 +533,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "lsp.enabled" => "Feed language-server diagnostics back into the turn after edits.",
         "mesh.auto_orchestrate" => "Inject the orchestration framework every session: skills first, highest-level tool, subagents/MCP/web/Lattice — no need to /orchestrate manually.",
         "mesh.harness_profile" => "guarded keeps every advisory nudge; minimal drops them (progress asks, stall nudges, commit reminders, continue nudges) and keeps only the safety guards. Per-model globs go in [mesh.harness_profiles].",
-        "harness.completion_contract" => "Append a short completion contract to the end of the system prompt: do not yield while actionable work remains, smoke-run before yielding, no stubs. Default off.",
-        "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
-        "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
-        "harness.edit_mode" => "How the model edits existing files. replace: edit_file and multi_edit with exact old/new text. hashline: read_file tags each line with its number under a per-file tag and edit_file takes line anchors plus that tag, which fails with the current lines if the file changed. Suits models that often miss exact matches. Default replace.",
-        "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
-        _ => return None,
+        _ => return crate::editor_harness::help(path),
     })
 }
 
@@ -847,6 +847,23 @@ mod tests {
         let text = brief(&error);
         assert!(!text.contains("TOML source string"), "{text}");
         assert!(!text.contains("for key"), "{text}");
+    }
+
+    #[test]
+    fn eval_kernel_is_off_by_default_and_has_a_curated_row() {
+        let empty: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[harness]\n"))
+            .extract()
+            .unwrap();
+        assert!(!empty.harness.eval_kernel);
+        assert_eq!(
+            setting_group_and_label("harness.eval_kernel"),
+            (
+                "Behaviour".to_string(),
+                "Persistent Python kernel".to_string()
+            )
+        );
+        assert!(setting_help("harness.eval_kernel").is_some_and(|h| h.contains("`python` tool")));
     }
 
     #[test]

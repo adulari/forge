@@ -6,19 +6,16 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use forge_store::SessionDeletePreview;
 
-use super::replay::{open_store, resolve_session};
+use super::replay::{open_store, resolve_session_exact};
 use crate::session_delete::{self, Refusal};
 
 pub(crate) async fn sessions_delete_cmd(prefix: &str, yes: bool, compact_db: bool) -> Result<()> {
     let store = Arc::new(open_store()?);
-    let id = resolve_session(&store, prefix)?;
+    let id = resolve_session_exact(&store, prefix)?;
     let preview = store
         .session_delete_preview(&id)?
         .context("session vanished while resolving it")?;
-    let daemon = crate::serve::read_state()
-        .ok()
-        .flatten()
-        .filter(|state| state.process_is_alive());
+    let daemon = session_delete::daemon_for_this_store();
     print!("{}", summary(&preview));
 
     if compact_db {
@@ -155,6 +152,7 @@ mod tests {
             worktree: Some("/tmp/wt".into()),
             synced: true,
             frozen: false,
+            running_subagents: 0,
             memories_kept: 1,
             targets: Vec::new(),
         };

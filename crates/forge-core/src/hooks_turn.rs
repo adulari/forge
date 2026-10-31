@@ -154,6 +154,7 @@ pub(crate) fn stop_failure_kind(error: &CoreError) -> Option<&'static str> {
             "unavailable" => overloaded_or_server(last_error),
             "auth failed" => "authentication_failed",
             "request error" => "invalid_request",
+            "provider busy" => "overloaded",
             "not available on this account" => "model_not_found",
             r if r.starts_with("unsupported") => billing_or_invalid(last_error),
             _ => "unknown",
@@ -166,6 +167,7 @@ fn provider_failure_kind(e: &ProviderError) -> &'static str {
     match e {
         ProviderError::RateLimited { .. } => "rate_limit",
         ProviderError::Unavailable(message) => overloaded_or_server(message),
+        ProviderError::Overloaded { .. } => "overloaded",
         ProviderError::Auth(_) => "authentication_failed",
         ProviderError::Capability(message) => billing_or_invalid(message),
         ProviderError::NoModelAccess(_) => "model_not_found",

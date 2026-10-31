@@ -22,10 +22,181 @@ use serde_json::{Map, Value};
 /// properties. Nested objects, and the objects inside arrays, are normalised against their own
 /// `properties`/`items` schema. Anything that is not an object comes back unchanged.
 pub fn normalize_args(schema: &Value, args: &Value) -> Value {
-    match args {
+    let normalized = match args {
         Value::Object(map) => Value::Object(normalize_object(schema, map)),
         other => other.clone(),
+    };
+    if crate::harness::arg_coercion() {
+        coerce_args(schema, &normalized)
+    } else {
+        normalized
     }
+}
+
+/// `args` with each property coerced to the type its schema declares, for the mistakes models make
+/// most: a JSON array or object sent as a string, a lone value where an array is wanted, `"true"`
+/// or `"12"` for a boolean or number, a number where a string is wanted. A value that cannot be
+/// coerced is left as sent, so validation reports it.
+pub fn coerce_args(schema: &Value, args: &Value) -> Value {
+    coerce_value(schema, args)
+}
+
+fn coerce_value(schema: &Value, value: &Value) -> Value {
+    if declares(schema, "array") {
+        let items = schema.get("items").cloned().unwrap_or(Value::Null);
+        return match value {
+            Value::Array(list) => {
+                Value::Array(list.iter().map(|v| coerce_value(&items, v)).collect())
+            }
+            Value::String(text) => match serde_json::from_str::<Value>(text.trim()) {
+                Ok(Value::Array(list)) => {
+                    Value::Array(list.iter().map(|v| coerce_value(&items, v)).collect())
+                }
+                _ if !text.trim().is_empty() => Value::Array(vec![coerce_value(&items, value)]),
+                _ => value.clone(),
+            },
+            Value::Object(_) | Value::Number(_) | Value::Bool(_) => {
+                Value::Array(vec![coerce_value(&items, value)])
+            }
+            Value::Null => value.clone(),
+        };
+    }
+    if declares(schema, "object") || schema.get("properties").is_some() {
+        let parsed;
+        let value = match value {
+            Value::String(text) => match serde_json::from_str::<Value>(text.trim()) {
+                Ok(v @ Value::Object(_)) => {
+                    parsed = v;
+                    &parsed
+                }
+                _ => value,
+            },
+            _ => value,
+        };
+        let (Value::Object(map), Some(props)) =
+            (value, schema.get("properties").and_then(Value::as_object))
+        else {
+            return value.clone();
+        };
+        return Value::Object(
+            map.iter()
+                .map(|(k, v)| match props.get(k) {
+                    Some(prop) => (k.clone(), coerce_value(prop, v)),
+                    None => (k.clone(), v.clone()),
+                })
+                .collect(),
+        );
+    }
+    if declares(schema, "boolean") {
+        if let Value::String(text) = value {
+            match text.trim().to_ascii_lowercase().as_str() {
+                "true" => return Value::Bool(true),
+                "false" => return Value::Bool(false),
+                _ => {}
+            }
+        }
+    } else if declares(schema, "integer") {
+        if let Value::String(text) = value {
+            if let Ok(n) = text.trim().parse::<i64>() {
+                return Value::from(n);
+            }
+        }
+        if let Some(f) = value.as_f64().filter(|_| value.is_f64()) {
+            if f.fract() == 0.0 && f.abs() < 9e15 {
+                return Value::from(f as i64);
+            }
+        }
+    } else if declares(schema, "number") {
+        if let Value::String(text) = value {
+            if let Ok(n) = text.trim().parse::<f64>() {
+                if let Some(n) = serde_json::Number::from_f64(n) {
+                    return Value::Number(n);
+                }
+            }
+        }
+    } else if declares(schema, "string") && !declares(schema, "number") {
+        match value {
+            Value::Number(n) => return Value::String(n.to_string()),
+            Value::Bool(b) => return Value::String(b.to_string()),
+            _ => {}
+        }
+    }
+    value.clone()
+}
+
+/// Type problems that coercion could not fix, one line each (`start_line: expected integer, got
+/// string`). Only top-level properties; empty when the arguments fit the schema.
+pub fn type_mismatches(schema: &Value, args: &Value) -> Vec<String> {
+    let (Some(map), Some(props)) = (
+        args.as_object(),
+        schema.get("properties").and_then(Value::as_object),
+    ) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (key, value) in map {
+        let Some(prop) = props.get(key) else { continue };
+        let Some(Value::String(kind)) = prop.get("type") else {
+            continue;
+        };
+        let actual = match value {
+            Value::Null => continue,
+            Value::Bool(_) => "boolean",
+            Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        };
+        let fits = actual == kind || (kind == "number" && actual == "integer");
+        if !fits {
+            out.push(format!("{key}: expected {kind}, got {actual}"));
+        }
+    }
+    out
+}
+
+/// The tool's parameters on one short line each (`path: string (required) - description`), for
+/// putting in an error so the model can repair the call without another schema lookup.
+pub fn compact_schema(schema: &Value) -> String {
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return String::new();
+    };
+    let required: HashSet<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut lines = Vec::new();
+    for (key, prop) in props {
+        let kind = match prop.get("type") {
+            Some(Value::String(t)) if t == "array" => {
+                let item = prop
+                    .get("items")
+                    .and_then(|i| i.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("any");
+                format!("array of {item}")
+            }
+            Some(Value::String(t)) => t.clone(),
+            _ => "any".to_string(),
+        };
+        let mark = if required.contains(key.as_str()) {
+            " (required)"
+        } else {
+            ""
+        };
+        let desc: String = prop
+            .get("description")
+            .and_then(Value::as_str)
+            .map(|d| d.chars().take(90).collect())
+            .unwrap_or_default();
+        let sep = if desc.is_empty() { "" } else { " - " };
+        lines.push(format!("  {key}: {kind}{mark}{sep}{desc}"));
+    }
+    lines.join("\n")
 }
 
 fn normalize_object(schema: &Value, map: &Map<String, Value>) -> Map<String, Value> {
@@ -301,5 +472,78 @@ mod tests {
             );
         }
         assert!(checked > 50, "the sweep saw {checked} optional properties");
+    }
+}
+
+#[cfg(test)]
+mod coercion_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "paths": { "type": "array", "items": { "type": "string" } },
+                "edits": { "type": "array", "items": { "type": "object", "properties": {
+                    "old": { "type": "string" }, "line": { "type": "integer" } } } },
+                "background": { "type": "boolean" },
+                "timeout_secs": { "type": "integer" },
+                "ratio": { "type": "number" },
+                "name": { "type": "string" },
+                "opts": { "type": "object", "properties": { "n": { "type": "integer" } } }
+            },
+            "required": ["paths"]
+        })
+    }
+
+    #[test]
+    fn strings_become_arrays_booleans_and_numbers() {
+        let args = json!({
+            "paths": "[\"a.rs\", \"b.rs\"]", "background": "true",
+            "timeout_secs": "30", "ratio": "0.5", "name": 7
+        });
+        assert_eq!(
+            coerce_args(&schema(), &args),
+            json!({ "paths": ["a.rs", "b.rs"], "background": true,
+                    "timeout_secs": 30, "ratio": 0.5, "name": "7" })
+        );
+    }
+
+    #[test]
+    fn a_lone_value_becomes_a_one_element_array() {
+        let args = json!({ "paths": "a.rs", "edits": { "old": "x", "line": "3" } });
+        assert_eq!(
+            coerce_args(&schema(), &args),
+            json!({ "paths": ["a.rs"], "edits": [{ "old": "x", "line": 3 }] })
+        );
+    }
+
+    #[test]
+    fn json_in_a_string_becomes_an_object_and_whole_floats_become_integers() {
+        let args = json!({ "paths": [], "opts": "{\"n\": \"4\"}", "timeout_secs": 5.0 });
+        assert_eq!(
+            coerce_args(&schema(), &args),
+            json!({ "paths": [], "opts": { "n": 4 }, "timeout_secs": 5 })
+        );
+    }
+
+    #[test]
+    fn unfixable_values_are_left_for_validation_to_report() {
+        let args = json!({ "paths": ["a"], "timeout_secs": "soon", "background": "maybe" });
+        let out = coerce_args(&schema(), &args);
+        assert_eq!(out, args);
+        let problems = type_mismatches(&schema(), &out);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems
+            .iter()
+            .any(|p| p.contains("timeout_secs: expected integer, got string")));
+    }
+
+    #[test]
+    fn compact_schema_lists_required_and_types() {
+        let text = compact_schema(&schema());
+        assert!(text.contains("paths: array of string (required)"), "{text}");
+        assert!(text.contains("background: boolean"), "{text}");
     }
 }

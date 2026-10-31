@@ -28,9 +28,11 @@ export function NearbyHosts({ onPick }: { onPick: (host: NearbyHost) => void }) 
   }, []);
 
   if (hosts.length === 0) return null;
+  const nameCounts = new Map<string, number>();
+  for (const host of hosts) nameCounts.set(host.name, (nameCounts.get(host.name) ?? 0) + 1);
   return (
     <View style={styles.wrap}>
-      <Text style={[typeScale.section, { color: tokens.ink4 }]}>nearby</Text>
+      <Text style={[typeScale.section, { color: tokens.ink4 }]}>nearby (unverified)</Text>
       {hosts.map((host) => (
         <Pressable
           key={`${host.host}:${host.port}`}
@@ -41,7 +43,7 @@ export function NearbyHosts({ onPick }: { onPick: (host: NearbyHost) => void }) 
         >
           <Wifi size={16} strokeWidth={1.75} color={tokens.accent} />
           <Text style={[typeScale.sub, styles.name, { color: tokens.ink }]} numberOfLines={1}>
-            {host.name}
+            {(nameCounts.get(host.name) ?? 0) > 1 ? `${host.name} (same name as another host)` : host.name}
           </Text>
           <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{`${host.host}:${host.port}`}</Text>
         </Pressable>

@@ -165,6 +165,7 @@ impl Session {
         seq: i64,
     ) -> Self {
         let mode = config.permission_mode;
+        let harness_flags = config.harness.flags_for("");
         let provider = crate::zero_retention::guard(provider, &config);
         // Opt-in allowlist (`tools.extra_roots`) of extra roots the structured file tools may
         // read and write, in addition to the workspace. Relative entries are ignored. Empty by
@@ -296,12 +297,15 @@ impl Session {
             fallback_models: Vec::new(),
             turn_forced_stop: None,
             harness_profile: forge_config::HarnessProfile::default(),
+            harness_flags,
+            harness_model: String::new(),
             empty_reply_nudged: false,
             empty_reply_retries: 0,
             trim_watch: Default::default(),
             gauge_model: None,
             spend: Default::default(),
             turn_unfinished_tasks: Vec::new(),
+            advisor_reviewed: false,
             turn_budget_refused: false,
             expect_code_change: false,
             cli_bridge_notice_shown: false,

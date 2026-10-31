@@ -145,7 +145,7 @@ pub(crate) fn remove_installed_at(path: &Path, name: &str) -> Result<bool> {
 }
 
 /// A name that is exactly one ordinary path component: never absolute, never `..`, no separators.
-fn is_plain_name(name: &str) -> bool {
+pub(crate) fn is_plain_name(name: &str) -> bool {
     let mut parts = Path::new(name).components();
     matches!(
         (parts.next(), parts.next()),
@@ -184,12 +184,14 @@ pub(crate) fn remove_plugin_at(skills_dir: &Path, lock_path: &Path, name: &str) 
     );
     let lock = load_installed_at(lock_path)?;
     let mut removed = false;
-    if let Some(entry) = lock.skills.get(name) {
-        for file in &entry.files {
-            removed |= remove_skill_entry(skills_dir, file)?;
+    match lock.skills.get(name) {
+        Some(entry) if !entry.files.is_empty() => {
+            for file in &entry.files {
+                removed |= remove_skill_entry(skills_dir, file)?;
+            }
         }
+        _ => removed |= remove_skill_entry(skills_dir, name)?,
     }
-    removed |= remove_skill_entry(skills_dir, name)?;
     let dropped = remove_installed_at(lock_path, name)?;
     Ok(removed || dropped)
 }

@@ -17,6 +17,7 @@ forge-device.workspace = true
 forge-proxy.workspace = true
 forge-types.workspace = true
 forge-index.workspace = true
+forge-lsp.workspace = true
 async-trait.workspace = true
 htmd.workspace = true
 serde_json.workspace = true

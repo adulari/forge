@@ -34,12 +34,17 @@ use async_trait::async_trait;
 use forge_types::SideEffect;
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 
 use crate::sandbox::{self, SandboxPolicy};
 use crate::{Tool, ToolError};
+mod autobackground;
 mod background;
+mod group;
+mod inline;
+mod job_wait;
 mod poll;
+mod proc_util;
 mod wait;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
 use poll::{run_poll, watched_jobs, PollJobs};
@@ -57,8 +62,10 @@ pub use background::{ShellJobTool, JOB_HINT};
 pub use rtk::RtkRewriter;
 mod batch;
 mod capture;
-mod output;
+pub(crate) mod output;
 use capture::read_capped;
+pub(crate) use group::{kill_process_group, put_in_own_process_group};
+use group::{terminate, GroupKillOnDrop};
 use output::{render_streams, stream_text, truncate_for_model};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -325,6 +332,12 @@ impl Tool for ShellTool {
         if use_pty {
             let (model, full) = pty::run_command_pty(command, &cwd, timeout_secs).await;
             return Ok(crate::ToolRun { model, full });
+        }
+        if let Some(out) = self
+            .autobackground(command, &cwd, workspace.as_deref(), timeout_secs)
+            .await
+        {
+            return Ok(out);
         }
         // RTK only on the plain path: a PTY run wants the real program's terminal behaviour, and
         // background/poll runs report through their own channels.
@@ -755,116 +768,6 @@ fn shell_invocation() -> (&'static str, &'static [&'static str]) {
     {
         ("sh", &["-c"])
     }
-}
-
-/// Put the child in its own process group so a timeout kill takes down the whole tree.
-fn put_in_own_process_group(cmd: &mut Command) {
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = cmd;
-    }
-}
-
-/// Best-effort SIGKILL of the child's process group, used on the *normal-exit* cleanup path to
-/// reap any backgrounded grandchild that outlived the shell and is still holding the output pipes
-/// open. Unlike [`terminate`] there is no SIGTERM/grace step (the main child has already exited and
-/// been reaped) and no `child.wait()` — this just nukes leaked descendants. A no-such-group error
-/// (the common case: nothing leaked) is harmless and swallowed. No-op on non-Unix.
-/// Aborting a turn drops the run future; `kill_on_drop` then kills only the direct `sh`, orphaning
-/// its children. This kills the whole group on that path; cleared once the wait completes.
-struct GroupKillOnDrop(Option<i32>);
-
-impl Drop for GroupKillOnDrop {
-    fn drop(&mut self) {
-        kill_process_group(self.0);
-    }
-}
-
-fn kill_process_group(pgid: Option<i32>) {
-    #[cfg(unix)]
-    if let Some(pg) = pgid {
-        unsafe { libc::kill(-pg, libc::SIGKILL) };
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pgid;
-    }
-}
-
-/// Kill the child's whole process tree on timeout: SIGTERM→grace→SIGKILL on the process group
-/// (Unix); `taskkill /F /T` on Windows. The tree matters because `cmd /C`/`sh -c` spawn the real
-/// command as a child — killing only the shell would leave it running and hold the output pipes
-/// open, hanging the read until it exits on its own.
-async fn terminate(child: &mut Child, pgid: Option<i32>) -> Vec<String> {
-    let mut errors = Vec::new();
-    #[cfg(unix)]
-    {
-        if let Some(pg) = pgid {
-            if let Err(error) = signal_process_group(pg, libc::SIGTERM) {
-                errors.push(format!("SIGTERM: {error}"));
-            }
-            // Wait out the grace only while something in the group is still alive: a command
-            // that dies on SIGTERM must not cost the full grace period.
-            let deadline = tokio::time::Instant::now() + KILL_GRACE;
-            loop {
-                let _ = child.try_wait(); // reap, so a zombie leader doesn't count as alive
-                let gone = unsafe { libc::kill(-pg, 0) } == -1
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-                if gone || tokio::time::Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            if let Err(error) = signal_process_group(pg, libc::SIGKILL) {
-                errors.push(format!("SIGKILL: {error}"));
-            }
-        }
-        if let Err(error) = child.wait().await {
-            errors.push(format!("wait: {error}"));
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pgid;
-        if let Some(pid) = child.id() {
-            // `/T` kills the tree (the command `cmd /C` spawned), `/F` forces it.
-            match Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await
-            {
-                Ok(status) if status.success() => {}
-                Ok(status) => errors.push(format!("taskkill exited with {status}")),
-                Err(error) => errors.push(format!("taskkill: {error}")),
-            }
-        }
-        if let Err(error) = child.start_kill() {
-            errors.push(format!("terminate: {error}"));
-        }
-        if let Err(error) = child.wait().await {
-            errors.push(format!("wait: {error}"));
-        }
-    }
-    errors
-}
-
-#[cfg(unix)]
-fn signal_process_group(pgid: i32, signal: libc::c_int) -> Result<(), std::io::Error> {
-    // ESRCH means the group already exited, which is a successful cleanup outcome.
-    if unsafe { libc::kill(-pgid, signal) } == -1 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1520,5 +1423,112 @@ mod tests {
             !after.contains("running"),
             "stop must be visible in status: {after}"
         );
+    }
+
+    async fn start_job(dir: &std::path::Path, command: &str) -> u32 {
+        let shell = ShellTool::with_policy_in_workspace(SandboxPolicy::default(), dir);
+        let started = shell
+            .run(&json!({ "command": command, "background": true }))
+            .await
+            .unwrap();
+        started
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no job id in: {started}"))
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn wait_returns_the_exit_code_and_log_tail_when_the_job_ends_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = start_job(dir.path(), "echo building; sleep 1; echo built; exit 3").await;
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        let started = std::time::Instant::now();
+        let out = jobs
+            .run(&json!({ "action": "wait", "id": pid, "timeout_secs": 20 }))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "{out}"
+        );
+        assert!(out.contains("exited 3"), "{out}");
+        assert!(out.contains("built"), "{out}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn wait_gives_up_at_the_timeout_and_leaves_the_job_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = start_job(dir.path(), "echo up; sleep 30").await;
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        let out = jobs
+            .run(&json!({ "action": "wait", "id": pid, "timeout_secs": 1 }))
+            .await
+            .unwrap();
+        assert!(
+            out.lines()
+                .next()
+                .is_some_and(|l| l.starts_with("job ") && l.contains(" is running")),
+            "the progress ledger reads this head as waiting: {out}"
+        );
+        assert!(out.contains("up"), "{out}");
+        let status = jobs
+            .run(&json!({ "action": "status", "id": pid }))
+            .await
+            .unwrap();
+        assert!(status.contains("running"), "{status}");
+        jobs.run(&json!({ "action": "stop", "id": pid }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_on_an_unknown_job_is_an_error_and_an_already_ended_job_answers_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        assert!(jobs
+            .run(&json!({ "action": "wait", "id": 4_000_000 }))
+            .await
+            .is_err());
+        #[cfg(unix)]
+        {
+            let pid = start_job(dir.path(), "echo quick").await;
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            let started = std::time::Instant::now();
+            let out = jobs
+                .run(&json!({ "action": "wait", "id": pid }))
+                .await
+                .unwrap();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "{out}"
+            );
+            assert!(out.contains("exited 0") && out.contains("quick"), "{out}");
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn an_interrupted_wait_still_announces_the_jobs_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = start_job(dir.path(), "sleep 30").await;
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        let args = json!({ "action": "wait", "id": pid, "timeout_secs": 30 });
+        let waiting = jobs.run(&args);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(400), waiting)
+                .await
+                .is_err()
+        );
+        assert!(
+            !background::take_stopping_for_test(pid),
+            "the dropped wait left the pid marked as stopping"
+        );
+        jobs.run(&json!({ "action": "stop", "id": pid }))
+            .await
+            .unwrap();
     }
 }

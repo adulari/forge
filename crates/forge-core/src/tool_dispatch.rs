@@ -50,6 +50,17 @@ impl Session {
         msg_id: &str,
         calls: &[forge_types::ToolCall],
     ) -> Result<Vec<(String, Option<ErrorCategory>, String)>, CoreError> {
+        self.run_readonly_calls(msg_id, calls, true).await
+    }
+
+    /// [`Self::run_readonly_batch`], optionally without appending the results to the transcript:
+    /// the inner calls of a `run_code` script report to the script, not to the model.
+    pub(crate) async fn run_readonly_calls(
+        &mut self,
+        msg_id: &str,
+        calls: &[forge_types::ToolCall],
+        to_transcript: bool,
+    ) -> Result<Vec<(String, Option<ErrorCategory>, String)>, CoreError> {
         struct Pending {
             id: String,
             name: String,
@@ -112,7 +123,13 @@ impl Session {
                 self.note_read_files(&p.name, &p.args);
             }
             let kept = self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
-            let result = crate::tool_output::fit_for_model(result, kept.as_deref());
+            let result = crate::tool_output::fit_for_model_capped(
+                result,
+                kept.as_deref(),
+                full.is_none(),
+                crate::codemode::inner_result_cap()
+                    .unwrap_or(crate::tool_output::MODEL_RESULT_MAX_CHARS),
+            );
             let result = if ok {
                 let touched = crate::instructions::touched_paths(&p.name, &p.args, None);
                 self.with_scoped_instructions(&touched, result)
@@ -132,17 +149,19 @@ impl Session {
                 classify_tool_failure(&result),
                 result.clone(),
             ));
-            let seq = self.next_seq();
-            self.store.add_message_full(
-                &self.id,
-                seq,
-                Role::Tool,
-                &result,
-                None,
-                &[],
-                Some(&p.id),
-            )?;
-            self.transcript.push(Message::tool_result(&p.id, result));
+            if to_transcript {
+                let seq = self.next_seq();
+                self.store.add_message_full(
+                    &self.id,
+                    seq,
+                    Role::Tool,
+                    &result,
+                    None,
+                    &[],
+                    Some(&p.id),
+                )?;
+                self.transcript.push(Message::tool_result(&p.id, result));
+            }
         }
         Ok(classified)
     }
@@ -432,15 +451,28 @@ impl Session {
         // call (missing a required field, or args that aren't an object) otherwise fails deep inside
         // the tool with an opaque message; instead return an actionable error naming what's missing
         // plus the required fields, so the model self-corrects on the next step instead of thrashing.
-        let validation = validate_tool_args(&tool.schema(), &effective_args).and_then(|()| {
-            // `command` and `commands` are alternatives, which `required` cannot express without
-            // a schema combinator some providers reject; hold the line here instead.
-            if call.name == "shell" && forge_types::shell_command_text(&effective_args).is_none() {
-                Err("missing required field: command (or commands)".to_string())
-            } else {
+        let tool_schema = tool.schema();
+        let validation = validate_tool_args(&tool_schema, &effective_args)
+            .and_then(|()| {
+                if forge_tools::harness::arg_coercion() {
+                    let problems = forge_tools::type_mismatches(&tool_schema, &effective_args);
+                    if !problems.is_empty() {
+                        return Err(problems.join("; "));
+                    }
+                }
                 Ok(())
-            }
-        });
+            })
+            .and_then(|()| {
+                // `command` and `commands` are alternatives, which `required` cannot express without
+                // a schema combinator some providers reject; hold the line here instead.
+                if call.name == "shell"
+                    && forge_types::shell_command_text(&effective_args).is_none()
+                {
+                    Err("missing required field: command (or commands)".to_string())
+                } else {
+                    Ok(())
+                }
+            });
         if let Err(reason) = validation {
             // Observed 2026-09-08: a session routed through a Headroom proxy (`[mesh] headroom`)
             // degraded into `{}` tool calls turn after turn — the proxy rewrites prior turns and
@@ -455,7 +487,13 @@ impl Session {
                         .to_string(),
                 ));
             }
-            let result = format!("error: invalid arguments for `{}` — {reason}", call.name);
+            let mut result = format!("error: invalid arguments for `{}` — {reason}", call.name);
+            if forge_tools::harness::arg_coercion() && !reason.contains("output limit") {
+                let schema = forge_tools::compact_schema(&tool_schema);
+                if !schema.is_empty() {
+                    result.push_str(&format!("\nParameters of `{}`:\n{schema}", call.name));
+                }
+            }
             self.presenter.emit(PresenterEvent::ToolResult {
                 name: call.name.clone(),
                 ok: false,
@@ -561,10 +599,11 @@ impl Session {
             };
             let run = self.evidence_scope(tool.run_full(&effective_args));
             let outcome = if call.name == "shell"
-                && effective_args
+                && (effective_args
                     .get("background")
                     .and_then(serde_json::Value::as_bool)
                     == Some(true)
+                    || forge_tools::harness::shell_autobackground())
             {
                 // Only a job THIS call starts reports its exit to this session (see job_wake.rs).
                 let wake = self.job_wake.clone();
@@ -638,7 +677,9 @@ impl Session {
 
         // The call ran, so `ok` stays true for the failure tracker and the commit bookkeeping, but
         // a shell command that exited non-zero must not be drawn with a success mark.
-        let shown_ok = ok && !(call.name == "shell" && shell_command_did_fail(&result));
+        let shown_ok = ok
+            && !(call.name == "shell" && shell_command_did_fail(&result))
+            && !(call.name == forge_tools::PYTHON_TOOL && crate::eval_kernel::cell_failed(&result));
         self.presenter.emit(PresenterEvent::ToolResult {
             name: call.name.clone(),
             ok: shown_ok,
@@ -646,7 +687,13 @@ impl Session {
             detail: crate::tool_detail(&result),
         });
         let kept = self.surface_full_output(&call.name, &call.id, full.as_deref(), &result);
-        let mut result = crate::tool_output::fit_for_model(result, kept.as_deref());
+        let mut result = crate::tool_output::fit_for_model_capped(
+            result,
+            kept.as_deref(),
+            full.is_none(),
+            crate::codemode::inner_result_cap()
+                .unwrap_or(crate::tool_output::MODEL_RESULT_MAX_CHARS),
+        );
         if let (true, Some(note)) = (allowed, &answer.note) {
             result = format!("{result}\n\n{}", runtime_allow::note_for_model(true, note));
         }

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 mod registry;
+pub(crate) use registry::is_plain_name;
 pub(crate) use registry::{
     add_marketplace_at, installed_path, load_installed_at, load_marketplaces_at, marketplaces_path,
     record_installed_at, remove_marketplace_at, remove_plugin, remove_plugin_at, skills_dir,
@@ -221,24 +222,64 @@ fn pick_root(clone: &Path, subdir: Option<&str>) -> Result<PathBuf> {
         }
         let direct = clone.join(sub_path);
         let nested = clone.join("skills").join(sub_path);
-        return Ok(if !direct.exists() && nested.exists() {
+        let chosen = if !direct.exists() && nested.exists() {
             nested
         } else {
             direct
-        });
+        };
+        return confined(clone, chosen);
     }
     let skills = clone.join("skills");
-    Ok(if skills.is_dir() {
-        skills
-    } else {
-        clone.to_path_buf()
-    })
+    confined(
+        clone,
+        if skills.is_dir() {
+            skills
+        } else {
+            clone.to_path_buf()
+        },
+    )
+}
+
+/// A path that exists must resolve (through any symlinked component) to somewhere inside `clone`,
+/// so a cloned repo cannot point the install at local directories with a symlink.
+fn confined(clone: &Path, path: PathBuf) -> Result<PathBuf> {
+    if let (Ok(real), Ok(base)) = (path.canonicalize(), clone.canonicalize()) {
+        anyhow::ensure!(
+            real.starts_with(&base),
+            "package path '{}' resolves outside the cloned repository",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn is_real_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// [`pick_root`], but a marketplace entry that is itself one skill (a directory holding `SKILL.md`)
 /// is staged as the only child of a scratch directory so `install_from` installs just that skill.
 fn stage_root(clone: &Path, subdir: Option<&str>) -> Result<(PathBuf, Option<TempDir>)> {
     let root = pick_root(clone, subdir)?;
+    if let Some(sub) = subdir {
+        if !root.exists() {
+            let flat = [
+                clone.join(format!("{sub}.md")),
+                clone.join("skills").join(format!("{sub}.md")),
+            ]
+            .into_iter()
+            .find(|f| is_real_file(f));
+            if let Some(flat) = flat {
+                confined(clone, flat.clone())?;
+                let stage = TempDir(
+                    std::env::temp_dir().join(format!("forge-stage-{}", forge_types::new_id())),
+                );
+                std::fs::create_dir_all(&stage.0)?;
+                std::fs::copy(&flat, stage.0.join(format!("{sub}.md")))?;
+                return Ok((stage.0.clone(), Some(stage)));
+            }
+        }
+    }
     if subdir.is_some() && root.join("SKILL.md").is_file() {
         let name = root
             .file_name()
@@ -272,7 +313,13 @@ fn install_from(
     for entry in entries.flatten() {
         let from = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if from.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             // A skill bundle: a directory with a SKILL.md.
             if !from.join("SKILL.md").is_file() {
                 continue;
@@ -345,6 +392,7 @@ fn normalize_in_place(dir: &Path) {
 // Public install / update entry points
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 pub(crate) struct InstallReport {
     pub(crate) name: String,
     pub(crate) installed: Vec<String>,
@@ -377,8 +425,18 @@ pub(crate) async fn install_pack_to(
         );
     }
     let mut skipped = Vec::new();
-    let installed = install_from(&root, skills_dir, None, &mut skipped)?;
+    let owned = load_installed_at(lock_path)
+        .ok()
+        .and_then(|l| l.skills.get(&resolved.name).map(|e| e.files.clone()));
+    let installed = install_from(&root, skills_dir, owned.as_deref(), &mut skipped)?;
     if installed.is_empty() {
+        if !skipped.is_empty() {
+            anyhow::bail!(
+                "nothing installed from {}: kept your existing skill(s) {}",
+                resolved.name,
+                skipped.join(", ")
+            );
+        }
         anyhow::bail!(
             "no skills found in {} (looked for *.md files and SKILL.md directories)",
             resolved.name
@@ -422,7 +480,13 @@ pub(crate) async fn list_available(
     for entry in std::fs::read_dir(&root)?.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        let skill_file = if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let skill_file = if file_type.is_dir() {
             path.join("SKILL.md")
         } else if name.ends_with(".md") && name != "README.md" && name != "SKILL.md" {
             path.clone()

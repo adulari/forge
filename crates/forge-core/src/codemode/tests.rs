@@ -149,6 +149,7 @@ fn report(end: ScriptEnd, calls: Vec<(&str, bool)>) -> ScriptReport {
         deadline_hit: false,
         timeout_secs: 300,
         elapsed: std::time::Duration::from_millis(2400),
+        saved: Vec::new(),
     }
 }
 
@@ -234,4 +235,30 @@ async fn join_on_a_tool_result_string_returns_it_unchanged() {
         panic!("expected a return, got {end:?}")
     };
     assert_eq!(v, serde_json::json!(["glob:{\"pattern\":\"*\"}", "a+b"]));
+}
+
+#[test]
+fn saved_inner_outputs_are_named_above_the_run_code_footer() {
+    let mut r = report(
+        ScriptEnd::Returned(serde_json::Value::String("answer".into())),
+        vec![("shell", true)],
+    );
+    r.saved = vec![(1, "/data/tool-output/s/rc1.1.txt".into())];
+    let out = render(&r, 16_000);
+    assert!(
+        out.contains("call 1 -> /data/tool-output/s/rc1.1.txt"),
+        "{out}"
+    );
+    assert!(out.trim_end().ends_with("2.4s]"), "{out}");
+    assert!(without_footer(&out)
+        .lines()
+        .last()
+        .unwrap()
+        .starts_with("[full inner"));
+}
+
+#[test]
+fn the_background_helper_exists_only_with_the_extras() {
+    assert!(!wrap_with("return 1;", false).contains("$background"));
+    assert!(wrap_with("return 1;", true).contains("$background"));
 }

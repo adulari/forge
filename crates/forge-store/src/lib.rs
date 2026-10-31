@@ -37,6 +37,7 @@ mod memory;
 mod migrations;
 mod model_health_store;
 mod notification_store;
+mod path_evidence_store;
 mod project_notes_store;
 mod provider_items_store;
 mod queued_prompt_store;

@@ -65,7 +65,7 @@ impl Session {
             // shell command in the session.
             let patterns = always_allow_patterns(&call.name, &call.args);
             let persist = outcome == forge_types::ConfirmOutcome::AlwaysAllow;
-            if persist {
+            if persist && call.name != forge_tools::PYTHON_TOOL {
                 if let Err(e) =
                     forge_config::append_allow_rule_in(self.rules_root(), &call.name, &patterns)
                 {
@@ -75,7 +75,11 @@ impl Session {
                 }
             }
             // An unscopable shell call is allowed once, whichever standing answer was picked.
-            if call.name != "shell" || !patterns.is_empty() {
+            // Arbitrary code: one click must not approve every later cell, so `python` stays allow-once
+            // and users who want a standing grant write a config rule.
+            let unscopable = call.name == forge_tools::PYTHON_TOOL
+                || (call.name == "shell" && patterns.is_empty());
+            if !unscopable {
                 let reason = if persist {
                     "user answered 'always' at runtime prompt"
                 } else {

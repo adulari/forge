@@ -25,6 +25,8 @@ import { useToast } from "../ds/ToastHost";
 import { ForkSheet } from "../session/ForkSheet";
 import { MAX_PANES } from "../workbench/layoutModel";
 import type { OpenMode } from "../workbench/WorkbenchProvider";
+import { ActionRunningIndicator } from "../ports/ActionRunningIndicator";
+import { useActionMenuEntries } from "../ports/useActionMenuEntries";
 import { PopoverMenu, type MenuAnchor, type MenuEntry } from "./PopoverMenu";
 import { useDragSource } from "./sessionDrag";
 
@@ -144,6 +146,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
     }
   };
 
+  const actionEntries = useActionMenuEntries(row.id, menu != null);
   const lifecycleReason = terminal ? "open in a terminal: run /delete there, or close the chat first" : undefined;
   const menuEntries: MenuEntry[] = [
     { kind: "item", id: "open", label: "Open", onPress: () => open("focused") },
@@ -188,6 +191,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
           { onError: (error) => toast.show(errorText(error, "could not update the session"), { tone: "danger" }) },
         ),
     },
+    ...actionEntries,
     { kind: "separator", id: "sep-end" },
     { kind: "item", id: "archive", label: "Archive", disabled: terminal, hint: lifecycleReason, onPress: () => setConfirm("archive") },
     { kind: "item", id: "delete", label: "Delete…", disabled: terminal, hint: lifecycleReason, onPress: () => setConfirm("delete") },
@@ -284,6 +288,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
             {title}
           </Text>
         )}
+        <ActionRunningIndicator sessionId={row.id} variant="dot" />
         {failed ? (
           <View accessibilityRole="image" accessibilityLabel="last turn failed" style={[styles.failedDot, { backgroundColor: tokens.danger }]} />
         ) : null}

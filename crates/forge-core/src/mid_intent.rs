@@ -432,7 +432,7 @@ impl crate::Session {
         bridge_tool_progress: bool,
         sent: &mut usize,
     ) -> bool {
-        let retries = self.config.harness.stop_retries;
+        let retries = self.harness_flags.stop_retries;
         let max = if retries {
             crate::stop_guards::STOP_RETRY_MAX
         } else {

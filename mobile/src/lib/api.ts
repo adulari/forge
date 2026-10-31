@@ -12,6 +12,7 @@ import { parseNoticesResponse, type NoticesResponse } from "./notices/core";
 import { noteHostResponse } from "./hostStatus";
 import { tFetch, TWebSocket } from "./transport";
 import type { DaemonUpdateInfo } from "./updateBanner";
+import { offsetChanges } from "./usageActivity";
 
 export class ApiError extends Error {
   status: number;
@@ -224,7 +225,9 @@ export interface McpResponse { servers: McpServerRow[]; builtins?: McpBuiltinRow
 export interface McpServerRow { name: string; transport: "stdio" | "http" | "sse"; enabled: boolean; auth_configured: boolean; secret_env_count: number; editable?: boolean;
   // v-P23 fields; a daemon that predates them omits all of these.
   scope?: "global" | "project"; status?: McpStatus; last_error?: string | null; tool_count?: number | null;
-  disabled_tools?: string[]; command?: string | null; args?: string[]; url?: string | null; token_env?: string | null; }
+  disabled_tools?: string[]; command?: string | null; args?: string[]; url?: string | null; token_env?: string | null;
+  /** True when the host masked secrets in `args`/`url` for this caller; never send them back as an edit. */
+  redacted?: boolean; }
 export type McpStatus = "connected" | "failed" | "unauthorized" | "reconnecting" | "slow" | "disabled" | "blocked" | "unknown";
 export interface McpBuiltinRow { id: string; label: string; detail: string; enabled: boolean; toggleable: boolean; tool_count: number | null; }
 /** `PATCH /api/mcp` — 404 when the server is configured somewhere the CLI does not write
@@ -542,6 +545,11 @@ export interface ForkSessionRequest {
   /** First prompt, sent in the child as soon as it starts. */
   prompt?: string;
   title?: string;
+  /** Fork every message, the latest turn included, instead of stopping before `at_seq`. Additive. */
+  whole_thread?: boolean;
+  /** Move the thread: the daemon hands the source's worktree to the child and archives the source
+   * without snapshotting it. Additive: an older daemon rejects it. */
+  move_source?: boolean;
 }
 
 /** The 400 an older daemon returns for a fork body carrying fields it predates
@@ -1335,7 +1343,7 @@ export function getChangelog(baseUrl: string, limit?: number): Promise<Changelog
 }
 
 export function getUsageActivity(baseUrl: string, days = 365, tzOffsetSecs = -new Date().getTimezoneOffset() * 60): Promise<UsageActivityResponse> {
-  return request(baseUrl, `/api/usage/activity${qs({ days, tzOffset: tzOffsetSecs })}`);
+  return request(baseUrl, `/api/usage/activity${qs({ days, tzOffset: tzOffsetSecs, tzChanges: offsetChanges(Date.now(), days) })}`);
 }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {

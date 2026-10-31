@@ -1173,3 +1173,26 @@ mod properties {
         }
     }
 }
+
+#[test]
+fn the_repeat_interrupt_is_not_offered_again_by_the_waiting_step_after_it() {
+    let mut ledger = ProgressLedger::default();
+    ledger.set_repeat_interrupt(true);
+    let text: String = (0..20).map(|i| format!("same line {i}\n")).collect();
+    let mut at = None;
+    for i in 0..12 {
+        feed(&mut ledger, &distinct(i), vec![obs(7, true, false, &text)]);
+        if ledger.cycle_run >= 3 && at.is_none() {
+            at = Some(ledger.cycle_run);
+            assert!(ledger.repeat_label(ledger.cycle_run).is_some());
+            break;
+        }
+    }
+    let at = at.expect("identical calls build a cycle run");
+    feed(&mut ledger, &distinct(99), vec![wait(0)]);
+    assert_eq!(
+        ledger.cycle_run, at,
+        "the waiting step leaves the count alone"
+    );
+    assert_eq!(ledger.repeat_label(at), None);
+}

@@ -20,6 +20,13 @@ const MAX_COMPACT_ROWS: usize = 12;
 /// Rows the welcome may use on a tall terminal.
 const TALL_ROWS: usize = 18;
 
+/// Width from which the wordmark is drawn with every cell doubled (the wide variant).
+const WORDMARK_WIDE_MIN_WIDTH: u16 = 72;
+
+/// Narrower than this, even the half-block wordmark would crowd the tagline, so it is the
+/// one-row `forge`.
+const WORDMARK_MIN_WIDTH: u16 = 28;
+
 /// The half-block `FORGE`, two rows, one entry per letter.
 const WORDMARK: [[&str; 5]; 2] = [
     ["█▀▀", "█▀█", "█▀█", "█▀▀", "█▀▀"],
@@ -46,7 +53,7 @@ pub(crate) fn transcript_is_empty(app: &App, width: u16) -> bool {
 
 /// The wordmark rows, each letter a step along the ember heat ramp. ASCII terminals get plain
 /// `FORGE` text.
-fn wordmark_rows() -> Vec<TextLine<'static>> {
+fn wordmark_rows(wide: bool) -> Vec<TextLine<'static>> {
     if !g().unicode {
         return vec![TextLine::from(Span::styled(
             "   FORGE",
@@ -58,8 +65,14 @@ fn wordmark_rows() -> Vec<TextLine<'static>> {
         .map(|row| {
             let mut spans = vec![Span::raw("   ")];
             for (i, letter) in row.iter().enumerate() {
+                let letter = if wide {
+                    letter.chars().flat_map(|c| [c, c]).collect::<String>()
+                } else {
+                    (*letter).to_string()
+                };
+                let gap = if wide { "  " } else { " " };
                 spans.push(Span::styled(
-                    format!("{letter} "),
+                    format!("{letter}{gap}"),
                     styles::heat(i).add_modifier(Modifier::BOLD),
                 ));
             }
@@ -306,8 +319,8 @@ fn recent_row(app: &App, width: usize) -> Option<TextLine<'static>> {
 pub(crate) fn welcome_lines(app: &App, width: u16, height: u16) -> Vec<TextLine<'static>> {
     let width = width as usize;
     let mut lines = vec![TextLine::default()];
-    if height >= WORDMARK_MIN_HEIGHT {
-        lines.extend(wordmark_rows());
+    if height >= WORDMARK_MIN_HEIGHT && width as u16 >= WORDMARK_MIN_WIDTH {
+        lines.extend(wordmark_rows(width as u16 >= WORDMARK_WIDE_MIN_WIDTH));
         lines.push(TextLine::default());
     } else {
         lines.push(TextLine::from(vec![

@@ -82,6 +82,9 @@ use execution::{execute_tool, tool_result_failed};
 
 mod progress;
 mod requests;
+pub(crate) mod structured;
+#[cfg(test)]
+mod structured_tests;
 #[cfg(test)]
 mod write_tests;
 pub use requests::{
@@ -131,6 +134,8 @@ pub struct AgentCtx {
 pub struct SubagentOutcome {
     pub final_text: String,
     pub ok: bool,
+    /// Set when the parent asked for a schema-validated result.
+    pub(crate) structured: Option<structured::StructuredResult>,
 }
 
 /// Run one child agent to completion against `child_id` (a persisted child session): route the
@@ -339,8 +344,19 @@ async fn run_agent_loop(
         })
         .collect();
     if can_recurse {
-        specs.push(spawn_agents_spec(ctx.config.mesh.subagents.max_agents));
+        let mut spec = spawn_agents_spec(ctx.config.mesh.subagents.max_agents);
+        if ctx.config.harness.subagent_output_schema {
+            structured::advertise_output_schema(&mut spec);
+        }
+        specs.push(spec);
     }
+    let (mut contract, mut schema_note) = structured::attach(
+        agent.output_schema.as_ref(),
+        ctx.config.harness.subagent_output_schema,
+        &decision.model,
+        &mut specs,
+        &mut transcript[0],
+    );
 
     let mut seq: i64 = seq_start;
     let mut next_seq = || {
@@ -368,13 +384,43 @@ async fn run_agent_loop(
             .unwrap_or_else(|| ctx.repo_root.clone()),
     );
     let mut stalled: Option<String> = None;
-    for step in 0usize.. {
-        if step_limit.is_some_and(|limit| step >= limit) {
+    'steps: for step in 0usize.. {
+        if contract
+            .as_ref()
+            .is_some_and(structured::Contract::wrap_spent)
+        {
             break;
         }
+        if step_limit.is_some_and(|limit| step >= limit) {
+            let armed = contract.as_mut().is_some_and(|c| {
+                c.wrap_armed() || c.arm_wrap_up(structured::WrapReason::StepLimit)
+            });
+            if !armed {
+                break;
+            }
+        }
+        let wrap_specs = structured::wrap_up_specs(
+            contract.as_ref(),
+            &mut transcript,
+            &ctx.store,
+            child_id,
+            &mut next_seq,
+        )?;
+        let wrapping = !wrap_specs.is_empty();
         // Forward the child's streamed deltas so the orchestrator can show live per-child
         // activity (RFC subagent-orchestration Phase 3b), with transparent failover.
         let mut resp = loop {
+            // A model that failed over to a bridge cannot be handed `submit_result`.
+            if let Some(note) =
+                structured::drop_for_bridge(&mut contract, &mut specs, &active_model)
+            {
+                schema_note = Some(note);
+            }
+            if wrapping && contract.is_none() {
+                // The wrap-up was the child's last call; a bridged model would get the full toolset.
+                break 'steps;
+            }
+            let step_specs: &[ToolSpec] = if wrapping { &wrap_specs } else { &specs };
             on_delta(StreamEvent::Reasoning(format!(
                 "model step {}: waiting for `{active_model}`",
                 progress::step_label(step, step_limit)
@@ -387,17 +433,17 @@ async fn run_agent_loop(
             };
             // The agent type's `effort`, resolved against the routed model's own ladder.
             let opts = forge_provider::CompletionOptions {
-                effort: agent.effort.and_then(|level| {
+                effort: agent.effort.filter(|_| !wrapping).and_then(|level| {
                     forge_types::effort::resolve_id(&active_model, Some(level)).sent
                 }),
                 ..Default::default()
             };
             let completion = if opts.effort.is_some() {
                 ctx.provider
-                    .complete_with(&active_model, &transcript, &specs, &opts, &mut sink)
+                    .complete_with(&active_model, &transcript, step_specs, &opts, &mut sink)
             } else {
                 ctx.provider
-                    .complete(&active_model, &transcript, &specs, &mut sink)
+                    .complete(&active_model, &transcript, step_specs, &mut sink)
             };
             let idle = crate::effective_stream_idle(&*ctx.provider, &active_model, stream_idle);
             let first_event = if idle > stream_idle {
@@ -439,6 +485,9 @@ async fn run_agent_loop(
         // `cost_for_usage`, not the bare rate: it bills a subscription (codex) call at $0 and
         // prices cache hits at their discounted rate, exactly like the parent turn.
         resp.usage.cost_usd = ctx.pricing.cost_for_usage(&active_model, &resp.usage);
+        if let Some(c) = contract.as_mut().filter(|_| wrapping) {
+            c.spend_wrap_up();
+        }
 
         transcript.push(Message::assistant_tool_calls(
             &resp.content,
@@ -461,12 +510,54 @@ async fn run_agent_loop(
             .record_usage(child_id, &msg_id, &resp.usage, Some(&active_model))?;
 
         if !resp.wants_tools() {
-            final_text = resp.content;
-            break;
+            let Some(c) = contract.as_mut() else {
+                final_text = resp.content;
+                break;
+            };
+            match c.on_text(&resp.content) {
+                structured::Submit::Rejected(nudge) => {
+                    structured::push_nudge(
+                        &mut transcript,
+                        &ctx.store,
+                        child_id,
+                        next_seq(),
+                        &nudge,
+                    )?;
+                    continue;
+                }
+                structured::Submit::Accepted | structured::Submit::Exhausted(_) => {
+                    final_text = resp.content;
+                    break;
+                }
+            }
         }
 
         let mut observations = Vec::new();
+        let mut submit_seen = false;
+        let mut finished = false;
         for call in &resp.tool_calls {
+            if let Some(c) = contract.as_mut() {
+                let taken = structured::Turn {
+                    msg_id: &msg_id,
+                    wrapping,
+                    finished,
+                    submit_seen: &mut submit_seen,
+                };
+                if let Some((text, done)) = structured::intercept(c, &ctx.store, call, taken)? {
+                    finished |= done;
+                    ctx.store.add_message_full(
+                        child_id,
+                        next_seq(),
+                        Role::Tool,
+                        &text,
+                        None,
+                        &[],
+                        Some(&call.id),
+                    )?;
+                    transcript.push(Message::tool_result(&call.id, text));
+                    continue;
+                }
+            }
             on_delta(StreamEvent::Reasoning(format!(
                 "model step {}: running tool `{}`",
                 progress::step_label(step, step_limit),
@@ -513,20 +604,40 @@ async fn run_agent_loop(
             )?;
             transcript.push(Message::tool_result(&call.id, result));
         }
+        if finished || wrapping {
+            final_text = resp.content.clone();
+            break;
+        }
+        if submit_seen && observations.is_empty() {
+            continue;
+        }
         if let Some(headline) = supervisor.observe(
             &resp.content,
             &observations,
             &mut transcript,
             &mut *on_delta,
         ) {
-            stalled = Some(headline);
             final_text = resp.content.clone();
+            stalled = Some(headline);
+            if contract
+                .as_mut()
+                .is_some_and(|c| c.arm_wrap_up(structured::WrapReason::Stalled))
+            {
+                continue;
+            }
             break;
         }
     }
 
+    if let Some(contract) = contract {
+        return Ok(structured::outcome_from(contract, schema_note));
+    }
     if let Some(headline) = stalled {
-        return Ok(progress::stalled_outcome(final_text, &headline));
+        return Ok(structured::with_note(
+            progress::stalled_outcome(final_text, &headline),
+            schema_note,
+            true,
+        ));
     }
 
     // The model produced no usable final answer — either it kept calling tools until the step
@@ -538,7 +649,15 @@ async fn run_agent_loop(
         final_text = progress::no_answer_error(step_limit);
     }
 
-    Ok(SubagentOutcome { final_text, ok })
+    Ok(structured::with_note(
+        SubagentOutcome {
+            final_text,
+            ok,
+            structured: None,
+        },
+        schema_note,
+        false,
+    ))
 }
 
 /// A child agent delegating further: recurse one level deeper. Grandchildren are not surfaced
@@ -599,6 +718,7 @@ struct ChildDone {
     text: String,
     ok: bool,
     cost: f64,
+    structured: Option<structured::StructuredResult>,
 }
 
 /// A subagent lifecycle event, surfaced to whatever is driving the orchestration (the TUI
@@ -637,6 +757,10 @@ pub async fn orchestrate(
 ) -> Result<(String, bool), CoreError> {
     use tokio::sync::{mpsc, Mutex, Semaphore};
 
+    let wants = match structured::preflight(&ctx.config.harness, &requests) {
+        Ok(wants) => wants,
+        Err(message) => return Ok((message, false)),
+    };
     let mode_label = format!("{:?}", ctx.mode);
     let n = requests.len();
     let sem = Arc::new(Semaphore::new(max_concurrency.max(1)));
@@ -821,9 +945,9 @@ pub async fn orchestrate(
                 &mut on_delta,
             )
             .await;
-            let (mut text, mut ok) = match outcome {
-                Ok(out) => (out.final_text, out.ok),
-                Err(e) => (format!("error: subagent failed: {e}"), false),
+            let (mut text, mut ok, mut structured) = match outcome {
+                Ok(out) => (out.final_text, out.ok, out.structured),
+                Err(e) => (format!("error: subagent failed: {e}"), false, None),
             };
 
             // Merge the child's worktree changes back into the main tree (serialized).
@@ -840,12 +964,20 @@ pub async fn orchestrate(
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
                         tracing::warn!("worktree snapshot failed for {child_id}: {e}");
-                        text.push_str(&format!("\n[worktree snapshot failed: {e}]"));
+                        structured::note_or_text(
+                            &mut text,
+                            &mut structured,
+                            format!("\n[worktree snapshot failed: {e}]"),
+                        );
                         ok = false;
                     }
                     Err(e) => {
                         tracing::warn!("worktree snapshot task failed for {child_id}: {e}");
-                        text.push_str(&format!("\n[worktree snapshot task failed: {e}]"));
+                        structured::note_or_text(
+                            &mut text,
+                            &mut structured,
+                            format!("\n[worktree snapshot task failed: {e}]"),
+                        );
                         ok = false;
                     }
                 }
@@ -866,17 +998,29 @@ pub async fn orchestrate(
                     }
                     Ok(Ok(report)) => {
                         let conflicts = report.conflicted_files.join(", ");
-                        text.push_str(&format!("\n[worktree merge conflicts in: {conflicts}]"));
+                        structured::note_or_text(
+                            &mut text,
+                            &mut structured,
+                            format!("\n[worktree merge conflicts in: {conflicts}]"),
+                        );
                         ok = false;
                     }
                     Ok(Err(e)) => {
                         tracing::warn!("merge_worktree_back failed for {child_id}: {e}");
-                        text.push_str(&format!("\n[worktree merge failed: {e}]"));
+                        structured::note_or_text(
+                            &mut text,
+                            &mut structured,
+                            format!("\n[worktree merge failed: {e}]"),
+                        );
                         ok = false;
                     }
                     Err(e) => {
                         tracing::warn!("merge_worktree_back task failed for {child_id}: {e}");
-                        text.push_str(&format!("\n[worktree merge task failed: {e}]"));
+                        structured::note_or_text(
+                            &mut text,
+                            &mut structured,
+                            format!("\n[worktree merge task failed: {e}]"),
+                        );
                         ok = false;
                     }
                 }
@@ -892,12 +1036,14 @@ pub async fn orchestrate(
                 text,
                 ok,
                 cost,
+                structured,
             }));
         }));
     }
     drop(tx); // close the channel once every task holds its own clone
 
-    let mut slots: Vec<Option<(String, String)>> = vec![None; n];
+    let mut slots: Vec<Option<(String, String, Option<structured::StructuredResult>)>> =
+        vec![None; n];
     while let Some(msg) = rx.recv().await {
         match msg {
             ChildMsg::Progress { index, snippet } => {
@@ -908,22 +1054,27 @@ pub async fn orchestrate(
             }
             ChildMsg::Done(done) => {
                 all_ok &= done.ok;
+                let one_line = match &done.structured {
+                    Some(result) => structured::preview(result),
+                    None => summary(&done.text),
+                };
                 on_event(Lifecycle::Done {
                     id: &done.id,
                     agent: &done.agent,
                     ok: done.ok,
-                    summary: &summary(&done.text),
+                    summary: &one_line,
                     cost_usd: done.cost,
                 });
-                slots[done.index] = Some((done.agent, done.text));
+                slots[done.index] = Some((done.agent, done.text, done.structured));
             }
         }
     }
 
     let mut combined = String::new();
+    let mut rows = Vec::with_capacity(n);
     for (i, slot) in slots.into_iter().enumerate() {
-        let (agent, text) = match slot {
-            Some(pair) => pair,
+        let (agent, text, result) = match slot {
+            Some(triple) => triple,
             // The child's task ended without ever sending Done — it panicked (or was aborted).
             // That MUST count as a failure: `all_ok` feeds the parent's tool-call status, and a
             // batch with a crashed child is not "ok" just because its siblings succeeded.
@@ -932,10 +1083,15 @@ pub async fn orchestrate(
                 (
                     "?".into(),
                     "error: no result (the agent crashed before reporting)".into(),
+                    None,
                 )
             }
         };
         combined.push_str(&format!("[agent {}: {}]\n{}\n\n", i + 1, agent, text));
+        rows.push(structured::row_for(i + 1, agent, &text, result));
+    }
+    if wants.iter().any(|w| *w) {
+        return Ok((structured::envelope(&rows), all_ok));
     }
     Ok((combined.trim_end().to_string(), all_ok))
 }
@@ -1002,6 +1158,7 @@ mod tests {
             &AgentRequest {
                 agent: "reviewer".into(),
                 task: "look at the diff".into(),
+                ..Default::default()
             },
             &agents,
         );
@@ -1014,6 +1171,7 @@ mod tests {
             &AgentRequest {
                 agent: "general".into(),
                 task: "t".into(),
+                ..Default::default()
             },
             &agents,
         );
@@ -2044,6 +2202,7 @@ mod tests {
             .map(|i| AgentRequest {
                 agent: "general".into(),
                 task: format!("t{i}"),
+                ..Default::default()
             })
             .collect();
         let mut sink = |_: Lifecycle| {};
@@ -2104,6 +2263,7 @@ mod tests {
             &AgentRequest {
                 agent: "general".into(),
                 task: "t".into(),
+                ..Default::default()
             },
             &ctx.agents,
         );
@@ -2154,6 +2314,7 @@ mod tests {
         let requests = vec![AgentRequest {
             agent: "general".into(),
             task: "t".into(),
+            ..Default::default()
         }];
         let mut sink = |_: Lifecycle| {};
         let (out, ok) = orchestrate(
@@ -2219,6 +2380,7 @@ mod tests {
             .map(|i| AgentRequest {
                 agent: "general".into(),
                 task: format!("t{i}"),
+                ..Default::default()
             })
             .collect();
 
@@ -2268,6 +2430,7 @@ mod tests {
             .map(|i| AgentRequest {
                 agent: "general".into(),
                 task: format!("t{i}"),
+                ..Default::default()
             })
             .collect();
         let mut sink = |_: Lifecycle| {};
@@ -2311,6 +2474,7 @@ mod tests {
         let requests = vec![AgentRequest {
             agent: "general".into(),
             task: "investigate something".into(),
+            ..Default::default()
         }];
 
         let handles = spawn_detached(
@@ -2389,6 +2553,7 @@ mod tests {
         let requests = vec![AgentRequest {
             agent: "general".into(),
             task: "investigate something".into(),
+            ..Default::default()
         }];
 
         let handles = spawn_detached(
@@ -2443,6 +2608,7 @@ mod tests {
         let requests = vec![AgentRequest {
             agent: "general".into(),
             task: "t".into(),
+            ..Default::default()
         }];
 
         let err = spawn_detached(

@@ -9,6 +9,7 @@ use crate::app::KeyKind;
 pub fn is_valid_key_name(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
     k.chars().count() == 1
+        || k == forge_config::UNBOUND_KEY
         || matches!(
             k.as_str(),
             "up" | "down"
@@ -123,6 +124,8 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
         "voice" => Some(KeyKind::ToggleVoice),
         "kill_line_forward" => Some(KeyKind::KillLineForward),
         "stash" => Some(KeyKind::StashPrompt),
+        "suspend" => Some(KeyKind::Suspend),
+        "verbosity_cycle" => Some(KeyKind::VerbosityCycle),
         _ => None,
     }
 }
@@ -154,6 +157,9 @@ pub fn resolve_action(keybinds: &KeybindsConfig, ev: &KeyEvent) -> Option<KeyKin
 /// `Ctrl+K`, `Ctrl+Shift+K`, `Alt+M`, `Shift+Tab`, `Ctrl+↑`, `PgUp`, `F1`. Modifiers come in
 /// the order Ctrl, Alt, Shift; single letters are upper-case.
 pub fn combo_display(combo: &KeyCombo) -> String {
+    if combo.is_unbound() {
+        return "unbound".to_string();
+    }
     let mut parts: Vec<String> = Vec::new();
     if combo.ctrl {
         parts.push("Ctrl".into());
@@ -178,6 +184,7 @@ pub fn combo_display(combo: &KeyCombo) -> String {
         "tab" => "Tab".to_string(),
         "home" => "Home".to_string(),
         "end" => "End".to_string(),
+        " " => "Space".to_string(),
         s if s.len() > 1 && s.starts_with('f') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
             s.to_uppercase()
         }
@@ -301,6 +308,41 @@ mod tests {
         assert!(combo.ctrl && !combo.alt && !combo.shift);
         assert!(matches(&combo, &e));
         assert_eq!(combo_display(&combo), "Ctrl+K");
+    }
+}
+
+#[cfg(test)]
+mod p37_tests {
+    use super::*;
+
+    fn ev(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn ctrl_z_suspends_and_alt_z_undoes() {
+        let kb = KeybindsConfig::default();
+        let ctrl_z = ev(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(resolve_action(&kb, &ctrl_z), Some(KeyKind::Suspend));
+        let alt_z = ev(KeyCode::Char('z'), KeyModifiers::ALT);
+        assert_eq!(resolve_action(&kb, &alt_z), Some(KeyKind::UndoWrite));
+        let alt_v = ev(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(resolve_action(&kb, &alt_v), Some(KeyKind::VerbosityCycle));
+    }
+
+    #[test]
+    fn an_unbound_action_matches_nothing_and_reads_unbound() {
+        let mut kb = KeybindsConfig::default();
+        kb.binds.insert("suspend".into(), KeyCombo::unbound());
+        let ctrl_z = ev(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(resolve_action(&kb, &ctrl_z), None);
+        assert_eq!(action_label(&kb, "suspend"), "unbound");
+        assert!(invalid_binds(&kb).is_empty());
+    }
+
+    #[test]
+    fn space_is_spelled_out() {
+        assert_eq!(combo_display(&KeyCombo::parse("alt+space")), "Alt+Space");
     }
 }
 

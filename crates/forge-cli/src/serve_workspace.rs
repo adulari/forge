@@ -23,11 +23,14 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
 const MAX_SEARCH_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEARCH_FILES: usize = 20_000;
+/// How many of the newest user messages and tool calls can vouch for a path outside the workspace.
+const PATH_EVIDENCE_MESSAGES: usize = 400;
 const DEFAULT_SEARCH_RESULTS: usize = 50;
 const MAX_SEARCH_RESULTS: usize = 100;
 
 mod edit;
 mod locate;
+mod sensitive;
 pub(crate) use edit::routes as edit_routes;
 
 #[derive(Debug)]
@@ -316,7 +319,7 @@ fn read_file(root: &Path, raw_path: &str) -> Result<WorkspaceFileResponse, Works
     })
 }
 
-/// A file outside the workspace that the session's transcript names, under the same size and
+/// A file outside the workspace that the session's own requests name, under the same size and
 /// text limits as a workspace file.
 fn read_outside(path: &Path) -> Result<WorkspaceFileResponse, WorkspaceFailure> {
     let parent = path
@@ -341,6 +344,7 @@ fn read_file_or_locate(
     session: &str,
     root: &Path,
     raw_path: &str,
+    allow_outside: bool,
 ) -> Result<WorkspaceFileResponse, WorkspaceFailure> {
     let error = match read_file(root, raw_path) {
         Ok(response) => return Ok(response),
@@ -354,10 +358,14 @@ fn read_file_or_locate(
         }
         Err(error) => return Err(error),
     };
-    let messages = store.load_messages_uncompacted(session).unwrap_or_default();
-    let texts = locate::transcript_texts(&messages);
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    match locate::locate(root, raw_path, texts.into_iter(), home.as_deref()) {
+    let evidence = || {
+        let messages = store
+            .load_path_evidence_tail(session, PATH_EVIDENCE_MESSAGES)
+            .unwrap_or_default();
+        locate::evidence_texts(&messages)
+    };
+    match locate::locate(root, raw_path, allow_outside, evidence, home.as_deref()) {
         Some(locate::Located::Inside(relative)) => read_file(root, &relative),
         Some(locate::Located::Outside(path)) => read_outside(&path),
         None if error.status == StatusCode::NOT_FOUND
@@ -653,15 +661,20 @@ pub(crate) async fn workspace_entries(
 
 pub(crate) async fn workspace_file(
     State(state): State<Arc<DaemonState>>,
+    auth: Option<axum::Extension<crate::serve_clients::ClientAuth>>,
     Query(params): Query<WorkspacePathQuery>,
 ) -> Response {
+    // Reading beyond the workspace needs the same trust as changing it; a view-only device sees
+    // the workspace and the transcript, nothing else on the host.
+    let allow_outside =
+        auth.is_some_and(|auth| auth.0.allows(crate::serve_clients::Scope::WorkspaceWrite));
     let root = match session_root(&state, &params.session).await {
         Ok(root) => root,
         Err(error) => return failure_response(error),
     };
     let store = state.store.clone();
     match tokio::task::spawn_blocking(move || {
-        read_file_or_locate(&store, &params.session, &root, &params.path)
+        read_file_or_locate(&store, &params.session, &root, &params.path, allow_outside)
     })
     .await
     {

@@ -17,6 +17,19 @@ pub(crate) fn terminal_id_order(left: &str, right: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Terminal ids that belong to a project action (`[[actions]]`) rather than a plain shell.
+pub(crate) const ACTION_TERMINAL_PREFIX: &str = "act-";
+
+pub(crate) fn action_terminal_id(action: &str) -> String {
+    format!("{ACTION_TERMINAL_PREFIX}{action}")
+}
+
+pub(crate) fn action_of_terminal(terminal_id: &str) -> Option<&str> {
+    terminal_id
+        .strip_prefix(ACTION_TERMINAL_PREFIX)
+        .filter(|action| !action.is_empty())
+}
+
 pub(crate) fn valid_terminal_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_TERMINAL_ID_BYTES

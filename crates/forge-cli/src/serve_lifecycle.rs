@@ -200,6 +200,7 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, config: &SessionsConfig, now
             .last_activity
             .load(std::sync::atomic::Ordering::Relaxed);
         if crate::serve_pr_watch::is_watching(&handle.session_id)
+            || state.terminals.has_running_action(&handle.session_id).await
             || !idle_unload_due(last, handle.created_at, now, config.idle_unload_minutes)
         {
             continue;

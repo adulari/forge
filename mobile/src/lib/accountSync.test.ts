@@ -7,6 +7,7 @@ import {
   syncHubMeta,
   syncNeedsAttention,
   syncPillModel,
+  needsKeysConfirmation,
   toggleLockReason,
   withCategoryEnabled,
 } from "./accountSync";
@@ -96,5 +97,14 @@ describe("syncPillModel", () => {
     expect(syncPillModel(status([on()], { sign_ins: [{ provider: "codex", label: "Codex", command: "x" }] }))).toMatchObject({ label: "Sign in needed", tone: "warn" });
     expect(syncPillModel(status([on({ conflicts: [{ item: "a", detail: "b" }] })], { last_error: "offline" }))).toMatchObject({ label: "Sync error", tone: "danger" });
     expect(syncPillModel(status([category({ pending: 4 })]))?.label).toBe("Sync off");
+  });
+});
+
+describe("needsKeysConfirmation", () => {
+  it("asks only when key sync is being turned on", () => {
+    const keys = category({ id: "keys", toggle_requires_direct: true });
+    expect(needsKeysConfirmation(keys, true)).toBe(true);
+    expect(needsKeysConfirmation(keys, false)).toBe(false);
+    expect(needsKeysConfirmation(category(), true)).toBe(false);
   });
 });

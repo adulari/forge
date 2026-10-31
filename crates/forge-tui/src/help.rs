@@ -284,6 +284,31 @@ impl HelpState {
             items.push(Item::Header("Shortcuts you can change".to_string()));
             items.extend(actions.into_iter().map(Item::Row));
         }
+        let sequences: Vec<Row> = self
+            .keybinds
+            .effective_sequences()
+            .into_iter()
+            .map(|seq| {
+                let label = seq
+                    .steps
+                    .iter()
+                    .map(combo_display)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (label, seq.action.replace('_', " "))
+            })
+            .filter(|(label, desc)| matches_query(&self.query, &[label, desc]))
+            .map(|(label, desc)| Row {
+                label,
+                label_style: Some(styles::key_chip()),
+                desc,
+                ..Row::default()
+            })
+            .collect();
+        if !sequences.is_empty() {
+            items.push(Item::Header("Key sequences".to_string()));
+            items.extend(sequences.into_iter().map(Item::Row));
+        }
         if !fixed.is_empty() {
             items.push(Item::Header("Fixed keys".to_string()));
             items.extend(fixed.into_iter().map(Item::Row));

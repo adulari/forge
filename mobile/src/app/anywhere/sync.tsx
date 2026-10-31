@@ -25,6 +25,7 @@ import {
 } from "../../lib/accountSync";
 import type { AccountSyncCategory } from "../../lib/api";
 import { useAccountSync, useRunAccountSyncNow, useUpdateAccountSync } from "../../lib/queries";
+import { useConfirmedSyncToggle } from "../../components/anywhere/useConfirmedSyncToggle";
 import { useSyncToggleContext } from "../../lib/useSyncToggleContext";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -46,7 +47,7 @@ export default function AnywhereSyncScreen() {
 
   const context = useSyncToggleContext();
 
-  const toggle = (category: AccountSyncCategory, enabled: boolean) => {
+  const applyToggle = (category: AccountSyncCategory, enabled: boolean) => {
     setPendingId(category.id);
     update.mutate(
       { category: category.id, enabled },
@@ -57,11 +58,14 @@ export default function AnywhereSyncScreen() {
     );
   };
 
+  const { request: toggle, dialog: keysDialog } = useConfirmedSyncToggle(applyToggle);
+
   const pill = syncPillModel(status);
   const problem = query.isError ? classifyAccountSyncError(query.error) : null;
 
   return (
     <>
+      {keysDialog}
       <Screen scroll contentContainerStyle={styles.content}>
         <View style={styles.column}>
           <PageHeader title="Sync across machines" subtitle={EXPLAINER} backLabel="Anywhere" onBack={() => router.replace("/anywhere")}>

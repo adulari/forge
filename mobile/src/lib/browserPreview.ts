@@ -2,6 +2,19 @@ import { isTauri } from "./platform";
 
 export const PREVIEW_STATE_EVENT = "forge://preview-state";
 export const PREVIEW_ANNOTATION_EVENT = "forge://preview-annotation";
+export const PREVIEW_CONSOLE_EVENT = "forge://preview-console";
+
+export type PreviewConsoleLevel = "log" | "info" | "warn" | "error" | "debug";
+
+export interface PreviewConsoleLine {
+  level: PreviewConsoleLevel;
+  text: string;
+}
+
+export interface PreviewConsoleEvent {
+  label: string;
+  entries: PreviewConsoleLine[];
+}
 
 export type PreviewViewport = "fill" | "mobile" | "tablet";
 
@@ -170,18 +183,21 @@ export function hideBrowserPreview(label: string): Promise<void> {
 export async function listenBrowserPreview(
   onState: (event: PreviewStateEvent) => void,
   onAnnotation: (event: PreviewAnnotationEvent) => void,
+  onConsole?: (event: PreviewConsoleEvent) => void,
 ): Promise<() => void> {
   if (!isTauri) return () => undefined;
   const { listen } = await import("@tauri-apps/api/event");
-  const [unlistenState, unlistenAnnotation] = await Promise.all([
+  const [unlistenState, unlistenAnnotation, unlistenConsole] = await Promise.all([
     listen<PreviewStateEvent>(PREVIEW_STATE_EVENT, (event) => onState(event.payload)),
     listen<PreviewAnnotationEvent>(PREVIEW_ANNOTATION_EVENT, (event) =>
       onAnnotation(event.payload),
     ),
+    listen<PreviewConsoleEvent>(PREVIEW_CONSOLE_EVENT, (event) => onConsole?.(event.payload)),
   ]);
   return () => {
     unlistenState();
     unlistenAnnotation();
+    unlistenConsole();
   };
 }
 

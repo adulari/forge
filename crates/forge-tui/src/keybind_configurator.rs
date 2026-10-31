@@ -49,6 +49,8 @@ pub(crate) fn action_desc(action: &str) -> &'static str {
         "reload" => "Hot-reload config",
         "voice" => "Open /voice recording overlay",
         "kill_line_forward" => "Delete from cursor to end of line",
+        "suspend" => "Suspend Forge to the shell (fg returns)",
+        "verbosity_cycle" => "Cycle transcript detail: quiet, default, everything",
         _ => "",
     }
 }
@@ -87,6 +89,8 @@ pub(crate) fn all_actions() -> Vec<&'static str> {
         "reload",
         "voice",
         "kill_line_forward",
+        "suspend",
+        "verbosity_cycle",
     ]
 }
 
@@ -161,6 +165,7 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                 OverlayMode::Browse => vec![
                     hint("↑↓", "move"),
                     hint("Enter", "rebind"),
+                    hint("u", "unbind"),
                     hint("r", "reset"),
                     hint("R", "reset all"),
                     hint("s", "save"),
@@ -279,6 +284,14 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                             working = defaults.clone();
                             changes += 1;
                             status = Some(("✓ all keybinds reset to defaults".to_string(), true));
+                        }
+                        KeyCode::Char('u') | KeyCode::Delete => {
+                            let action = actions[selected];
+                            working
+                                .binds
+                                .insert(action.to_string(), forge_config::KeyCombo::unbound());
+                            changes += 1;
+                            status = Some((format!("✓ {action} unbound"), true));
                         }
                         KeyCode::Char('r') => {
                             let action = actions[selected];

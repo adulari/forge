@@ -163,7 +163,12 @@ impl Session {
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "subagent_stop hook requested continuation: {reason}"
                 )));
-                format!("{combined}\n\n[subagent_stop hook] {reason}")
+                let note = format!("[subagent_stop hook] {reason}");
+                if crate::subagent::structured::is_envelope(&combined) {
+                    crate::subagent::structured::add_note(&combined, &note)
+                } else {
+                    format!("{combined}\n\n{note}")
+                }
             }
             None => combined,
         };
@@ -270,6 +275,7 @@ impl Session {
         let request = subagent::AgentRequest {
             agent: agent_name.to_string(),
             task: message.to_string(),
+            ..Default::default()
         };
         let resolved = subagent::resolve(&request, &agents);
         let budget = BudgetState {

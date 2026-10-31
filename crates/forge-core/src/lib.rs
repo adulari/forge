@@ -55,6 +55,7 @@ use build_command::is_env_setup_command;
 mod catalog_feed;
 mod local_evidence;
 pub use local_evidence::apply_local_evidence;
+mod advisor;
 pub mod assay;
 pub mod auto_classifier;
 mod auxiliary_candidates;
@@ -91,9 +92,11 @@ pub(crate) mod context_pipeline;
 pub mod deferred_tools;
 mod detached_subagents;
 pub mod dispatch;
+mod droid_loop;
 pub mod duel;
 mod empty_reply;
 mod error_report;
+mod eval_kernel;
 pub mod evidence_capture;
 mod exact_effort;
 mod failure_verdict;
@@ -539,6 +542,16 @@ const PINNED_RL_DELAY_CAP_SECS: u64 = 60;
 /// or `Retry-After` that would exceed the remaining budget fails the turn with the real error
 /// instead of blocking indefinitely.
 const PINNED_RL_TOTAL_WAIT_SECS: u64 = 180;
+
+/// Cheap jitter in [0,1) without a rand dependency: sub-second wall-clock nanos.
+fn wall_clock_jitter() -> f64 {
+    f64::from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0),
+    ) / 1e9
+}
 
 /// One pinned-backoff delay. `attempt` is 1-based. A server `Retry-After` (when the provider
 /// error carried one) is respected verbatim — the server knows its own reset better than our
@@ -1089,6 +1102,7 @@ impl TaskScope {
                 | "notebook_edit"
                 | "apply_patch"
                 | "shell"
+                | forge_tools::PYTHON_TOOL
                 | "spawn_agents"
                 | "send_to_agent"
                 | "run_workflow"
@@ -1353,7 +1367,8 @@ fn classify_tool_failure(result: &str) -> Option<ErrorCategory> {
     let lower = result.to_ascii_lowercase();
     let is_failure = lower.starts_with("error:")
         || lower.starts_with("permission denied")
-        || shell_command_did_fail(result);
+        || shell_command_did_fail(result)
+        || eval_kernel::cell_failed(result);
     if !is_failure {
         return None;
     }
@@ -1411,6 +1426,8 @@ fn context_fill_tokens(model: &str, transcript_est: u64, reported_input: u64) ->
 /// transient backoff before benching the model.
 fn should_retry_same_model_transient(model: &str, error: &forge_provider::ProviderError) -> bool {
     match error {
+        // A busy gateway wants a pause, not three half-second hammer retries.
+        forge_provider::ProviderError::Overloaded { .. } => false,
         forge_provider::ProviderError::Unavailable(message) => {
             model.starts_with("codex-oauth::")
                 && message
@@ -1470,6 +1487,7 @@ pub struct RoutingInspector {
     effort: Option<EffortLevel>,
     project: ProjectContext,
     routing_context: RoutingContext,
+    family_profiles: bool,
 }
 
 impl RoutingInspector {
@@ -1511,6 +1529,11 @@ impl RoutingInspector {
         } else {
             "llm".to_string()
         };
+        explanation.rationale = routing_policy::with_family_note(
+            std::mem::take(&mut explanation.rationale),
+            &explanation.pick,
+            self.family_profiles,
+        );
         explanation
     }
 }
@@ -1781,6 +1804,10 @@ pub struct Session {
     turn_forced_stop: Option<StopReason>,
     /// The harness profile of the model currently driving the turn (harness_profile.rs).
     harness_profile: forge_config::HarnessProfile,
+    /// The `[harness]` loop flags for that model, after family defaults (model_family.rs).
+    harness_flags: forge_config::model_family::HarnessFlags,
+    /// The routed model driving the turn; picks the family prompt delta.
+    harness_model: String,
     /// The empty-reply nudge is spent until the model makes tool progress again (empty_reply.rs).
     empty_reply_nudged: bool,
     /// Empty-reply retries spent in the current streak (`[harness] stop_retries`).
@@ -1790,6 +1817,8 @@ pub struct Session {
     /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
     /// turn is recorded as `TasksUnfinished` instead of a clean final answer.
     turn_unfinished_tasks: Vec<String>,
+    /// The advisor has reviewed this turn (one shot, spent even by an error; advisor.rs).
+    advisor_reviewed: bool,
     /// The latest turn was refused by a spend cap before any model call; a `/goal` driver reads
     /// it to stop instead of re-driving refused turns.
     turn_budget_refused: bool,
@@ -2344,6 +2373,9 @@ impl Session {
                 schema: t.schema(),
             })
             .collect();
+        if self.config.harness.wait_job {
+            specs.iter_mut().for_each(droid_loop::advertise_job_wait);
+        }
         // Advertise the subagent virtual tool to the top-level model (RFC
         // subagent-orchestration). Children may receive it separately only when the explicitly
         // configured recursion depth allows another generation.
@@ -2353,11 +2385,15 @@ impl Session {
                 .as_ref()
                 .is_none_or(|scope| scope.permits_tool(subagent::SPAWN_AGENTS_TOOL))
         {
-            specs.push(subagent::spawn_agents_spec_for(
+            let mut spawn_spec = subagent::spawn_agents_spec_for(
                 self.config.mesh.subagents.max_agents,
                 self.workspace.root(),
                 &self.config.mesh.subagents.agents_dir,
-            ));
+            );
+            if self.config.harness.subagent_output_schema {
+                subagent::structured::advertise_output_schema(&mut spawn_spec);
+            }
+            specs.push(spawn_spec);
             // Follow-ups to already-spawned children (persistent subagents). Advertised beside
             // spawn_agents — a fresh session simply has no children yet and the tool says so.
             specs.push(subagent::send_to_agent_spec());
@@ -2429,7 +2465,12 @@ impl Session {
         // the approve→Auto-edit→build flow non-recursive (the build turn can't re-propose a plan).
         if self.mode == PermissionMode::Plan {
             specs.push(present_plan_spec());
-            specs.retain(|s| !matches!(s.name.as_str(), "append_file" | "multi_edit"));
+            specs.retain(|s| {
+                !matches!(
+                    s.name.as_str(),
+                    "append_file" | "multi_edit" | forge_tools::PYTHON_TOOL
+                )
+            });
             for spec in specs.iter_mut().filter(|s| s.name == "shell") {
                 spec.description.push_str(permission::PLAN_SHELL_NOTE);
             }
@@ -3087,6 +3128,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.trim_watch.begin_turn();
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
+        self.advisor_reviewed = false;
         self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
@@ -4778,10 +4820,7 @@ where
                     } else {
                         "stream stalled"
                     };
-                    return Err(forge_provider::ProviderError::Unavailable(format!(
-                        "{what} — no data for {}s",
-                        effective_idle.as_secs()
-                    )));
+                    return Err(crate::droid_loop::stall_error(what, effective_idle.as_secs()));
                 }
             }
         }
@@ -5003,6 +5042,8 @@ mod tests {
     mod detached_agents_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
+    #[path = "subagent_schema.rs"]
+    mod subagent_schema_tests;
 
     #[path = "completeness_gate.rs"]
     mod completeness_gate_tests;
@@ -5097,6 +5138,9 @@ mod tests {
     #[path = "security_floor.rs"]
     mod security_floor_tests;
 
+    #[path = "eval_kernel.rs"]
+    mod eval_kernel_tests;
+
     #[path = "user_shell.rs"]
     mod user_shell_tests;
 
@@ -5133,11 +5177,16 @@ mod tests {
     #[path = "harness_profile.rs"]
     mod harness_profile_tests;
 
+    #[path = "droid_loop.rs"]
+    mod droid_loop_tests;
     #[path = "hashline_edit.rs"]
     mod hashline_edit_tests;
 
     #[path = "goal_evaluator.rs"]
     mod goal_evaluator_tests;
+
+    #[path = "advisor.rs"]
+    mod advisor_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
@@ -10243,6 +10292,13 @@ mod tests {
         assert!(fitted.starts_with("line 0 "));
         assert!(fitted.ends_with(&"z".repeat(40)) && fitted.contains("line 4999 "));
         assert!(fitted.contains("/tmp/out.log") && fitted.contains("sed -n '"));
+        // A file holding a different (uncut) text than this copy gets no line range.
+        let other = tool_output::fit_for_model_of(body, Some("/tmp/out.log"), false);
+        assert!(other.contains("/tmp/out.log") && other.contains("grep it"));
+        assert!(
+            !other.contains("lines 1") && !other.contains("sed -n '1"),
+            "{other}"
+        );
         // Small results pass through untouched.
         assert_eq!(tool_output::fit_for_model("ok".into(), None), "ok");
     }
@@ -13257,6 +13313,146 @@ mod tests {
                 "502 bad gateway (request {n})"
             )))
         }
+    }
+
+    /// Answers `Overloaded` with the SAME text every time, instantly, `fail_first` times, then
+    /// succeeds: the shape of a gateway shedding load (`503 gateway_overloaded`).
+    struct OverloadedThenOkProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        fail_first: usize,
+        retry_after: Option<std::time::Duration>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for OverloadedThenOkProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_first {
+                return Err(forge_provider::ProviderError::Overloaded {
+                    status: 503,
+                    reason: "gateway_overloaded".into(),
+                    message: "Gateway is temporarily busy.".into(),
+                    retry_after: self.retry_after,
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                reasoning_items: Vec::new(),
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    async fn overload_run(
+        fail_first: usize,
+        retry_after_ms: u64,
+        budget_secs: u64,
+        attended: bool,
+    ) -> (
+        Result<String, CoreError>,
+        Vec<PresenterEvent>,
+        std::time::Duration,
+    ) {
+        let provider = Arc::new(OverloadedThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first,
+            retry_after: Some(std::time::Duration::from_millis(retry_after_ms)),
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = budget_secs;
+        let capture = CapturePresenter {
+            attended,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let started = std::time::Instant::now();
+        let result = session.run_turn("fix the bug").await.map(|o| o.text);
+        let elapsed = started.elapsed();
+        let events = events.lock().unwrap().clone();
+        (result, events, elapsed)
+    }
+
+    #[tokio::test]
+    async fn repeated_instant_overload_is_retried_not_rejected() {
+        // Terminal-Bench: a gateway answered an identical, instant 503 overload and the turn died
+        // as "its provider rejected it twice". Busy is not refused: retry until it clears.
+        for attended in [true, false] {
+            let (result, events, _) = overload_run(3, 1000, 600, attended).await;
+            assert_eq!(result.unwrap(), "pin::model", "attended={attended}");
+            assert!(
+                events.iter().any(|e| matches!(e, PresenterEvent::Warning(w)
+                    if w.contains("provider busy (503 gateway_overloaded), retrying in"))),
+                "the warning names the real provider reason: {events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rejected"))),
+                "never described as a rejection"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn overload_retry_after_sets_the_wait() {
+        let (result, _, elapsed) = overload_run(2, 1500, 600, true).await;
+        assert!(result.is_ok());
+        assert!(
+            elapsed >= std::time::Duration::from_millis(3000),
+            "two Retry-After waits of 1.5s must both be honoured, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "Retry-After replaces the 5s blind schedule, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_zero_cannot_spin_and_the_warning_is_rate_limited() {
+        let (result, events, elapsed) = overload_run(1000, 0, 4, true).await;
+        let text = result.unwrap_err().to_string();
+        assert!(
+            text.contains("provider busy (503 gateway_overloaded)"),
+            "{text}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_secs(3),
+            "a Retry-After of 0 is floored at 1s, took {elapsed:?}"
+        );
+        let busy_warnings = events
+            .iter()
+            .filter(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("provider busy")))
+            .count();
+        assert!(
+            busy_warnings <= 1,
+            "one warning for the first four retries: {busy_warnings}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_overload_budget_fails_with_the_real_provider_text() {
+        let (result, _, _) = overload_run(100, 600, 1, true).await;
+        let text = result.unwrap_err().to_string();
+        assert!(
+            text.contains("provider busy (503 gateway_overloaded)")
+                && text.contains("Gateway is temporarily busy"),
+            "{text}"
+        );
+        assert!(!text.contains("isn't available"), "{text}");
     }
 
     #[tokio::test]

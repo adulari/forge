@@ -17,6 +17,7 @@ use crate::theme::styles;
 
 /// Rows of the shell command band at most; longer commands end in an ellipsis.
 const SHELL_ROWS: usize = 5;
+const PYTHON_ROWS: usize = 14;
 
 /// A drawn decision block: the rows above its bottom border, and the hints inside that border.
 pub(super) struct Decision {
@@ -217,6 +218,11 @@ pub(crate) fn pending_args(app: &App, tool: &str) -> String {
         .unwrap_or_default()
 }
 
+fn python_cell(args: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(args).ok()?;
+    value.get("code")?.as_str().map(str::to_string)
+}
+
 fn shell_command(args: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(args).ok()?;
     if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
@@ -249,6 +255,7 @@ fn title(app: &App, p: &PendingPermission, args: &str) -> String {
         },
         "edit_file" | "apply_patch" => format!("Allow {} of {target}?", verb(&p.tool)),
         "shell" => "Allow Shell to run this command?".to_string(),
+        "python" => "Allow Python to run this cell?".to_string(),
         _ if target.is_empty() => format!("Allow {}?", verb(&p.tool)),
         _ => format!("Allow {} {target}?", verb(&p.tool)),
     }
@@ -257,12 +264,23 @@ fn title(app: &App, p: &PendingPermission, args: &str) -> String {
 /// Subject rows: what changes.
 fn subject(app: &App, p: &PendingPermission, args: &str, width: usize) -> Vec<TextLine<'static>> {
     let sep = format!(" {} ", g().sep);
-    if p.tool == "shell" {
-        if let Some(cmd) = shell_command(args) {
+    let command = match p.tool.as_str() {
+        "shell" => shell_command(args).map(|c| (c, SHELL_ROWS)),
+        "python" => python_cell(args).map(|c| (c, PYTHON_ROWS)),
+        _ => None,
+    };
+    {
+        if let Some((cmd, cap)) = command {
             let painted = crate::theme::t().paints_backgrounds();
-            let mut rows = wrap(&plain(&cmd), width.saturating_sub(4));
-            if rows.len() > SHELL_ROWS {
-                rows.truncate(SHELL_ROWS);
+            let mut rows = if p.tool == "python" {
+                cmd.lines()
+                    .map(|l| fit(&l.replace('\t', "    "), width.saturating_sub(4)))
+                    .collect()
+            } else {
+                wrap(&plain(&cmd), width.saturating_sub(4))
+            };
+            if rows.len() > cap {
+                rows.truncate(cap);
                 if let Some(last) = rows.last_mut() {
                     *last = fit(&format!("{last} {}", g().ellipsis), width.saturating_sub(4));
                 }
@@ -274,7 +292,7 @@ fn subject(app: &App, p: &PendingPermission, args: &str, width: usize) -> Vec<Te
                     let prefix = if painted {
                         " ".to_string()
                     } else if i == 0 {
-                        "$ ".to_string()
+                        if p.tool == "python" { ">>> " } else { "$ " }.to_string()
                     } else {
                         "  ".to_string()
                     };
@@ -450,6 +468,12 @@ pub(super) fn permission_block(app: &App, width: u16) -> Decision {
         session_long
     } else {
         "Allow for this session".to_string()
+    };
+    let (always, session) = if p.tool == "python" {
+        let once = "Allow once (python cells always ask)".to_string();
+        (once.clone(), once)
+    } else {
+        (always, session)
     };
     let labels = [
         ("Allow once".to_string(), "y  Enter"),

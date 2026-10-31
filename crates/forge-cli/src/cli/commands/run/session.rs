@@ -466,6 +466,9 @@ pub(crate) async fn build_session_with_self_mcp(
     if let Some(shell_tool) = sandboxed_shell_tool_in(&config, &workspace_root) {
         tools.register(Box::new(shell_tool));
     }
+    if config.harness.eval_kernel {
+        register_eval_kernel(&mut tools, &config, &workspace_root);
+    }
     let mut lattice_update_rx = None;
     if let Some(lat) = &lattice {
         tools.register(Box::new(forge_tools::LatticeTool::new(Arc::clone(lat))));
@@ -518,6 +521,7 @@ pub(crate) async fn build_session_with_self_mcp(
     }
 
     let lsp_config = config.lsp.clone();
+    let lsp_pool = super::lsp_nav::build(&config, &mut tools);
     let mut session = match resume {
         Some(ref prefix) => {
             let full = resolve_session(&store, prefix)?;
@@ -664,9 +668,7 @@ pub(crate) async fn build_session_with_self_mcp(
         }
     }
     if lsp_config.enabled {
-        session.set_lsp(Some(std::sync::Arc::new(
-            forge_lsp::LspRegistry::from_config(&lsp_config),
-        )));
+        session.set_lsp(lsp_pool);
     }
     clock.mark("skills + mcp + lsp");
     super::skill_invoke::apply_one_shot_grant(&mut session);

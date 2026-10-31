@@ -87,3 +87,34 @@ pub(crate) fn resolve_extra_tool_roots(config: &forge_config::Config) -> Vec<std
         .map(|path| path.canonicalize().unwrap_or(path))
         .collect()
 }
+
+/// Register the persistent `python` kernel tool when `[harness] eval_kernel` is on and the
+/// platform, sandbox and interpreter situation allow it (docs/features/eval-kernel.md).
+pub(crate) fn register_eval_kernel(
+    tools: &mut forge_tools::ToolRegistry,
+    config: &forge_config::Config,
+    workspace: &std::path::Path,
+) {
+    #[cfg(not(unix))]
+    {
+        let _ = (tools, workspace);
+        if config.harness.eval_kernel {
+            tracing::warn!("harness.eval_kernel is not supported on this platform");
+        }
+    }
+    #[cfg(unix)]
+    {
+        if !config.harness.eval_kernel {
+            return;
+        }
+        if config.shell.sandbox {
+            tracing::warn!(
+                "harness.eval_kernel is off under [shell] sandbox = true (Landlock for the kernel is not implemented)"
+            );
+        } else if forge_tools::discover_python(workspace).is_empty() {
+            tracing::warn!("no python interpreter found; `python` not advertised");
+        } else {
+            tools.register(Box::new(forge_tools::PythonTool::new()));
+        }
+    }
+}

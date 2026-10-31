@@ -21,6 +21,7 @@ pub struct WireFingerprint {
     messages: Vec<MessageDigest>,
     kinds: Vec<&'static str>,
     tools: MessageDigest,
+    tool_names: Vec<String>,
 }
 
 /// How a request relates to the one sent before it.
@@ -54,6 +55,21 @@ impl WireFingerprint {
     /// The kind of wire message at `index` (`system`, `user`, `reminder`, `assistant`, `tool`).
     pub fn kind_at(&self, index: usize) -> &'static str {
         self.kinds.get(index).copied().unwrap_or("none")
+    }
+
+    /// Names of tools present here and absent from `previous`, then the reverse. A tool whose
+    /// schema or description changed in place is in neither list.
+    pub fn tool_name_diff(&self, previous: &WireFingerprint) -> (Vec<String>, Vec<String>) {
+        let missing_from = |a: &[String], b: &[String]| {
+            a.iter()
+                .filter(|n| !b.contains(n))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        (
+            missing_from(&self.tool_names, &previous.tool_names),
+            missing_from(&previous.tool_names, &self.tool_names),
+        )
     }
 
     pub fn reuse_against(&self, previous: &WireFingerprint) -> PrefixReuse {
@@ -92,6 +108,7 @@ pub fn fingerprint(messages: &[Message], tools: &[ToolSpec]) -> WireFingerprint 
         messages: digests,
         kinds,
         tools: truncate(tools_hash),
+        tool_names: tools.iter().map(|t| t.name.clone()).collect(),
     }
 }
 

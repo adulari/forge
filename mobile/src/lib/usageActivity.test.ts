@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { UsageActivityDay } from "./api";
-import { activityProviders, buildHeatmap, computeStreaks, filterProvider, summarize } from "./usageActivity";
+import { activityProviders, buildHeatmap, computeStreaks, filterProvider, offsetChanges, summarize } from "./usageActivity";
 
 const row = (day: string, provider: string, tokens: number): UsageActivityDay => ({ day, provider, inputTokens: tokens, outputTokens: 0, costUsd: 0.5, calls: 2 });
 const today = new Date(2026, 2, 18, 9);
@@ -42,5 +42,21 @@ describe("usageActivity", () => {
     expect(activityProviders(rows)).toEqual(["b", "a"]);
     expect(filterProvider(rows, "a")).toHaveLength(1);
     expect(summarize(filterProvider(rows, "b"), today, "30").providers).toEqual([{ provider: "b", tokens: 5 }]);
+  });
+});
+
+describe("offsetChanges", () => {
+  it("reports one entry for a zone without DST", () => {
+    expect(offsetChanges(Date.UTC(2026, 9, 31), 365, () => 3600)).toBe("0:3600");
+  });
+  it("pins the instant the offset changed", () => {
+    const change = Date.UTC(2026, 9, 25, 1, 0, 0);
+    const offsetAt = (ms: number) => (ms < change ? 7200 : 3600);
+    const out = offsetChanges(Date.UTC(2026, 9, 31), 365, offsetAt).split(",");
+    expect(out[0]).toBe("0:7200");
+    expect(out).toHaveLength(2);
+    const [epoch, offset] = out[1].split(":").map(Number);
+    expect(offset).toBe(3600);
+    expect(Math.abs(epoch * 1000 - change)).toBeLessThanOrEqual(1000);
   });
 });

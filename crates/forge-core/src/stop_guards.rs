@@ -73,17 +73,73 @@ impl ThinkingLoop {
 impl crate::Session {
     /// Re-issue requests for a tool call written as text.
     pub(crate) fn toolcall_repair_max(&self) -> usize {
-        if self.config.harness.stop_retries {
+        if self.harness_flags.stop_retries {
             STOP_RETRY_MAX
         } else {
             2
         }
     }
 
+    /// A direct model wrote a tool call as TEXT and nothing ran: ask it to make the call, bounded.
+    /// `true` means the turn should continue; at the bound the markup is stripped and the reply
+    /// finishes the turn with a loud warning.
+    pub(crate) fn repair_text_tool_call(
+        &mut self,
+        resp: &mut forge_provider::ModelResponse,
+        nudges: &mut usize,
+    ) -> bool {
+        // Honest-failure guard: a direct model wrote a tool call as TEXT (e.g.
+        // `<invoke>`/`default_api:` markup) instead of invoking it, and neither the
+        // provider nor the text-recovery pass turned it into a real call — so NOTHING
+        // ran. Accepting this as the final answer is how a turn "succeeds" while having
+        // merged no PR and pushed no tag. Detect it and nudge the model to actually
+        // call the tool (bounded); never silently accept narrated tool calls.
+        if forge_provider::looks_like_unexecuted_tool_call(&resp.content) {
+            let max_nudges = self.toolcall_repair_max();
+            if *nudges < max_nudges {
+                *nudges += 1;
+                self.tools_advertised_once = true;
+                self.presenter.emit(crate::PresenterEvent::Warning(format!(
+                    "model wrote a tool call as text instead of invoking it — nothing ran; asking it to retry ({}/{max_nudges})",
+                    *nudges
+                )));
+                let nudge = "Your last message contained a tool call written as TEXT \
+                             (`<invoke …>`, a DeepSeek DSML block or `default_api:` \
+                             syntax), or a block that was cut off or malformed. That \
+                             tool DID NOT run — text is not a tool call. Make the call \
+                             through the function-calling interface instead. Do not paste \
+                             tool-call markup into your message.";
+                let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
+                return true;
+            }
+            // Retries exhausted: do NOT pretend it worked. Surface it loudly so the user
+            // knows the turn's actions never executed, then end (can't loop forever).
+            self.presenter.emit(crate::PresenterEvent::Warning(
+                "model kept emitting tool calls as text that never executed — the turn did NOT complete its actions"
+                    .to_string(),
+            ));
+            resp.content = forge_provider::strip_tool_call_markup(&resp.content);
+        }
+        false
+    }
+
     /// `[harness] thinking_loop_breaker`: push the interrupt when `text` restates an earlier
     /// tool-free reply of this stretch. Returns `true` when the turn should continue.
-    pub(crate) fn thinking_loop_nudge(&mut self, text: &str, tracker: &mut ThinkingLoop) -> bool {
-        if !self.config.harness.thinking_loop_breaker || !tracker.repeats(text) {
+    ///
+    /// Left alone for a tool call written as text (it has its own repair note) and for CLI-bridge
+    /// turns (their cost ceiling and anti-spiral checks decide whether to re-drive): a generic
+    /// "act now" nudge would pre-empt both and add re-drives they never count.
+    pub(crate) fn thinking_loop_nudge(
+        &mut self,
+        text: &str,
+        tracker: &mut ThinkingLoop,
+        model: &str,
+    ) -> bool {
+        if !self.harness_flags.thinking_loop_breaker
+            || forge_provider::is_cli_bridge(model)
+            || forge_provider::looks_like_unexecuted_tool_call(text)
+            || !tracker.repeats(text)
+        {
             return false;
         }
         self.presenter.emit(crate::PresenterEvent::Warning(
@@ -97,7 +153,7 @@ impl crate::Session {
     /// calls with identical results, name the call to the model. Repeats that return new results
     /// never reach the count, so polling is unaffected.
     pub(crate) fn repeat_interrupt(&mut self) {
-        if !self.config.harness.repeat_interrupt {
+        if !self.harness_flags.repeat_interrupt {
             return;
         }
         if let Some(label) = self.ledger.repeat_label(REPEAT_INTERRUPT_AT) {

@@ -2,6 +2,7 @@ import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { Switch } from "../ds/Switch";
+import { useConfirmedSyncToggle } from "./useConfirmedSyncToggle";
 import { toggleLockReason } from "../../lib/accountSync";
 import { useAccountSync, useUpdateAccountSync } from "../../lib/queries";
 import { useSyncToggleContext } from "../../lib/useSyncToggleContext";
@@ -17,6 +18,9 @@ export function AccountSyncToggles() {
   const update = useUpdateAccountSync();
   const context = useSyncToggleContext();
   const status = query.data;
+  const { request, dialog } = useConfirmedSyncToggle((category, enabled) =>
+    update.mutate({ category: category.id, enabled }),
+  );
   if (!status || !status.signed_in) return null;
   return (
     <View style={styles.wrap}>
@@ -31,7 +35,7 @@ export function AccountSyncToggles() {
             <Switch
               value={category.enabled}
               disabled={locked != null || update.isPending}
-              onValueChange={(enabled) => update.mutate({ category: category.id, enabled })}
+              onValueChange={(enabled) => request(category, enabled)}
               accessibilityLabel={`Sync ${category.label}`}
             />
             <Text style={[type.body, styles.label, { color: locked ? tokens.ink3 : tokens.ink }]}>
@@ -41,6 +45,7 @@ export function AccountSyncToggles() {
           </View>
         );
       })}
+      {dialog}
     </View>
   );
 }

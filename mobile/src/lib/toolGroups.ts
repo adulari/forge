@@ -92,6 +92,7 @@ function categoryOf(call: GroupCall): Category {
       return { kind: "search" };
     case "shell":
     case "shell_job":
+    case "python":
       return { kind: "shell" };
     case "run_code":
       return { kind: "script" };
@@ -174,6 +175,11 @@ export function displayPath(path: string, cwd: string | null): string {
 
 /** What a call is about, for a group of one: the command run, the file read. "" when nothing is
  * worth naming (the raw argument blob is never shown). */
+/** The cell a `python` call runs, decoded from its JSON arguments. */
+export function pythonCode(args: string): string {
+  return field(args, ["code"]) ?? "";
+}
+
 export function headline(name: string, args: string): string {
   const tool = bareToolName(name);
   const cwd = field(args, ["cwd"]);
@@ -216,6 +222,12 @@ export function headline(name: string, args: string): string {
       break;
     case "run_code":
       return scriptHeadline(args, null);
+    case "python":
+      first = pythonCode(args)
+        .split("\n")
+        .map((line) => line.trim())
+        .find((line) => line && !line.startsWith("#") && !line.startsWith("```")) ?? null;
+      return first ? oneline(first) : "";
   }
   if (first === null) {
     const parsed = parseArgs(args);

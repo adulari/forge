@@ -52,6 +52,8 @@ export interface WorkbenchController {
   toggleSurface: (input: WorkbenchSurfaceInput) => void;
   activateSurface: (placement: WorkbenchPlacement, id: string) => void;
   closeSurface: (placement: WorkbenchPlacement, id: string) => void;
+  /** Keep a preview tab open: the next preview-open no longer replaces it. */
+  pinSurface: (placement: WorkbenchPlacement, id: string) => void;
   hidePlacement: (placement: WorkbenchPlacement) => void;
   reorderSurface: (placement: WorkbenchPlacement, from: number, to: number) => void;
 
@@ -199,6 +201,9 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const closeSurface = useCallback((placement: WorkbenchPlacement, id: string) => {
     dispatch({ type: "close", placement, id });
+  }, []);
+  const pinSurface = useCallback((placement: WorkbenchPlacement, id: string) => {
+    dispatch({ type: "pin", placement, id });
   }, []);
   const hidePlacement = useCallback((placement: WorkbenchPlacement) => {
     dispatch({ type: "hide", placement });
@@ -365,6 +370,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       toggleSurface,
       activateSurface,
       closeSurface,
+      pinSurface,
       hidePlacement,
       reorderSurface,
       layout,
@@ -388,7 +394,7 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       resetLayout,
     }),
     [
-      state, openSurface, toggleSurface, activateSurface, closeSurface, hidePlacement, reorderSurface,
+      state, openSurface, toggleSurface, activateSurface, closeSurface, pinSurface, hidePlacement, reorderSurface,
       layout, primaryId, paneIds, focusedSessionId, addPaneAction, closePane, focusPaneAction,
       cycleFocusAction, toggleMaximizeAction, swapWithPrimaryAction, swapPanes, openSession, stepSession, cycleRecent,
       setPaneWeights, setRightWidth, setBottomHeight, applyPreset, resetLayout,

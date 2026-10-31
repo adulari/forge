@@ -61,7 +61,7 @@ impl Session {
         );
         self.ledger.configure(idle_nudge, idle_stop, headless);
         self.ledger
-            .set_repeat_interrupt(self.config.harness.repeat_interrupt);
+            .set_repeat_interrupt(self.harness_flags.repeat_interrupt);
         let root = self.workspace_root().to_path_buf();
         let verdict = self
             .ledger

@@ -16,6 +16,17 @@ pub enum ProviderError {
     /// The provider is down / the stream dropped (5xx, connection/timeout). Retryable.
     #[error("provider unavailable: {0}")]
     Unavailable(String),
+    /// The provider (or its gateway) is up but shedding load: HTTP 429/503/529, a `Retry-After`
+    /// header, a body marked `retryable`, or an `overloaded`/`busy`/`capacity` code. Unlike
+    /// [`Unavailable`](Self::Unavailable) this is never evidence the model is refused, however
+    /// fast and however often it repeats; callers wait (honouring `retry_after`) and retry.
+    #[error("provider busy ({status} {reason}): {message}")]
+    Overloaded {
+        status: u16,
+        reason: String,
+        message: String,
+        retry_after: Option<Duration>,
+    },
     /// Authentication failed (HTTP 401/403) — the key is bad, missing, or lacks access. Failing
     /// over to *another* provider is correct, but the bad credential won't fix itself mid-session,
     /// so retrying THIS model auth-fails identically every turn (the per-turn failover churn). Like
@@ -50,6 +61,7 @@ impl ProviderError {
         matches!(
             self,
             Self::RateLimited { .. }
+                | Self::Overloaded { .. }
                 | Self::Unavailable(_)
                 | Self::Auth(_)
                 | Self::Capability(_)
@@ -85,6 +97,10 @@ impl ProviderError {
             Self::RateLimited {
                 retry_after: Some(d),
                 ..
+            }
+            | Self::Overloaded {
+                retry_after: Some(d),
+                ..
             } => *d,
             _ => default,
         }
@@ -95,6 +111,20 @@ impl ProviderError {
     /// often as a 4xx/5xx the generic classifier files under [`Unavailable`](Self::Unavailable) or
     /// [`Request`](Self::Request) — so we sniff the message. The correct response is to SHRINK the
     /// input (compact/trim) and retry the SAME model, not to bench a healthy model and fail over.
+    pub fn is_overloaded(&self) -> bool {
+        matches!(self, Self::Overloaded { .. })
+    }
+
+    /// The server's own `Retry-After` for a rate limit or an overload, when it sent one.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } | Self::Overloaded { retry_after, .. } => {
+                *retry_after
+            }
+            _ => None,
+        }
+    }
+
     pub fn is_context_overflow(&self) -> bool {
         let msg = match self {
             Self::Unavailable(m) | Self::Request(m) => m,
@@ -158,6 +188,7 @@ impl ProviderError {
         match self {
             Self::RateLimited { .. } => "rate-limited",
             Self::Unavailable(_) => "unavailable",
+            Self::Overloaded { .. } => "provider busy",
             Self::Auth(_) => "auth failed",
             Self::Request(_) => "request error",
             Self::Capability(_) => "unsupported (no tool calling / unaffordable)",

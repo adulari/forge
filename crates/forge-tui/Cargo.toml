@@ -32,6 +32,10 @@ similar.workspace = true
 # used by forge-core's shell-command permission parsing).
 shell-words.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Ctrl+Z hands the terminal back and stops the process with SIGTSTP.
+libc.workspace = true
+
 [dev-dependencies]
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).
 forge-config = { workspace = true, features = ["test-secrets"] }

@@ -125,3 +125,30 @@ export function summarize(rows: UsageActivityDay[], today: Date, window: Activit
 }
 
 export const compactTokens = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value).toLowerCase();
+
+const browserOffsetSecs = (ms: number) => -new Date(ms).getTimezoneOffset() * 60;
+
+/** The viewer's UTC offset from each change onwards across the last `days` days, as the daemon's
+ * `tzChanges` query value (`epoch:offset,...`). One current offset would put every day on the
+ * other side of a DST change an hour off, so a turn at 00:30 local lands on the wrong day. */
+export function offsetChanges(nowMs: number, days: number, offsetAt: (ms: number) => number = browserOffsetSecs): string {
+  const start = nowMs - (days + 1) * DAY_MS;
+  const changes: [number, number][] = [[0, offsetAt(start)]];
+  let previous = changes[0][1];
+  const step = DAY_MS / 2;
+  for (let at = start + step; at <= nowMs + step; at += step) {
+    const sample = Math.min(at, nowMs);
+    const offset = offsetAt(sample);
+    if (offset === previous) continue;
+    let low = sample - step;
+    let high = sample;
+    while (high - low > 1000) {
+      const mid = Math.floor((low + high) / 2);
+      if (offsetAt(mid) === previous) low = mid;
+      else high = mid;
+    }
+    changes.push([Math.ceil(high / 1000), offset]);
+    previous = offset;
+  }
+  return changes.map(([epoch, offset]) => `${epoch}:${offset}`).join(",");
+}

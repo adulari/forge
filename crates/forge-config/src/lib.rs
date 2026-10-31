@@ -13,6 +13,9 @@ use forge_types::{
 use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
+pub mod advisor;
+mod statusline_toggle;
+pub use statusline_toggle::WidgetToggle;
 mod agent_builtins;
 pub mod agents;
 pub mod browser;
@@ -22,6 +25,7 @@ pub mod codemode;
 mod commit_policy;
 mod compact_model;
 mod config_diagnostics;
+mod harness;
 pub mod setting_sources;
 pub mod skill_usage;
 mod system_prompt_overrides;
@@ -36,6 +40,9 @@ mod key_adoption;
 mod keybind_migration;
 mod keybindings_file;
 mod keybinds;
+pub mod model_family;
+mod tui_config;
+pub use tui_config::TuiConfig;
 mod progress_guard;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
 pub mod account_sync;
@@ -51,6 +58,7 @@ pub mod power;
 pub mod pr;
 pub mod preview;
 pub mod privacy;
+pub mod project_actions;
 mod project_dirs;
 pub mod project_trust;
 pub mod provider_oauth;
@@ -68,6 +76,7 @@ pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
 pub use edit_mode::EditMode;
 pub use hard_stop::HardStop;
+pub use harness::{AutoRefineMode, HarnessConfig};
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
 pub use install_notices::{install_notice_seen, mark_install_notice_seen, CLI_BRIDGE_TERMS};
@@ -75,7 +84,10 @@ pub use keybindings_file::{
     keybindings_path, overlay_tui, read_keybindings_file, write_app_overrides,
     write_keybindings_file, KeybindingsFile,
 };
-pub use keybinds::{write_keybind, write_keybind_preset, KeyCombo, KeybindPreset, KeybindsConfig};
+pub use keybinds::{
+    default_leader, remove_keybind, write_keybind, write_keybind_preset, KeyCombo, KeySequence,
+    KeybindPreset, KeybindsConfig, UNBOUND_KEY,
+};
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{
     discover_import_sources, embeds_credentials, import_mcp_json, load_mcp_toml,
@@ -225,6 +237,9 @@ pub struct Config {
     /// Which shell terminal tabs and the agent's shell tool use (`[terminal]`).
     #[serde(default)]
     pub terminal: terminal::TerminalConfig,
+    /// One-click dev scripts (`[[actions]]`), from the project's `.forge/config.toml`.
+    #[serde(default)]
+    pub actions: Vec<project_actions::ProjectActionConfig>,
     /// The `run_code` tool on the direct path (`[codemode]`).
     #[serde(default)]
     pub codemode: codemode::CodemodeConfig,
@@ -1165,90 +1180,6 @@ pub struct ProjectConfig {
     pub auto_initialize: bool,
 }
 
-/// Interactive chat TUI rendering mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TuiConfig {
-    /// Render the chat on the alternate screen (full-screen), with a scrollable transcript and
-    /// the panels pinned at the bottom. Default: true. When false, the chat runs inline in the
-    /// terminal's native scrollback (a small pinned live region). The `--inline` / `--fullscreen`
-    /// flags on `forge chat` override this per-invocation.
-    #[serde(default = "default_tui_fullscreen")]
-    pub fullscreen: bool,
-    /// In full-screen mode, enable minimal mouse reporting (button + wheel, no motion tracking) so
-    /// the wheel scrolls the transcript. Default: true. Because motion tracking stays off, the
-    /// terminal's native click-drag text selection keeps working. Set false to disable mouse
-    /// reporting entirely (e.g. a terminal where any reporting blocks selection). No effect inline.
-    #[serde(default = "default_tui_mouse_capture")]
-    pub mouse_capture: bool,
-    /// Colour mode: `"auto"` (default; detects from `COLORFGBG`), `"dark"` or `"light"`. The
-    /// `FORGE_THEME` environment variable overrides it.
-    #[serde(default = "default_tui_auto")]
-    pub theme: String,
-    /// Colour depth: `"auto"` (default; detects from `NO_COLOR`, `COLORTERM` and `TERM`),
-    /// `"truecolor"`, `"256"`, `"16"` or `"none"`. The `FORGE_COLOR` environment variable
-    /// overrides it.
-    #[serde(default = "default_tui_auto")]
-    pub color: String,
-    /// Glyph set: `"auto"` (default; ASCII on the Linux console, `TERM=dumb` and non-UTF-8 or CJK
-    /// locales), `"unicode"` or `"ascii"`. The `FORGE_GLYPHS` environment variable overrides it.
-    #[serde(default = "default_tui_auto")]
-    pub glyphs: String,
-    /// Turn off animation (spinner colour cycling, rail cooling, flashes). Default: false. The
-    /// `FORGE_REDUCE_MOTION` environment variable and monochrome terminals also turn it off.
-    #[serde(default)]
-    pub reduce_motion: bool,
-    /// Fold each run of tool calls into one summary row in the full-screen transcript (click or
-    /// Enter opens it). Default: true. False shows every call as its own card, as before.
-    #[serde(default = "default_true")]
-    pub fold_tool_groups: bool,
-    /// After a `!command` typed in the composer runs, have the model respond to its output (Claude
-    /// Code's `respondToBashCommands`). Default: true. False only adds the run to the context.
-    #[serde(default = "default_true")]
-    pub respond_to_bash: bool,
-    /// Named accent palette for truecolor terminals: `"forge"` (default), `"ocean"`, `"grove"` or
-    /// `"rose"`. `/theme <name>` switches it live and saves it here.
-    #[serde(default = "default_tui_palette")]
-    pub palette: String,
-    /// Per-role colour overrides on top of the palette, as `role = "#RRGGBB"`, e.g.
-    /// `brand = "#FF8A30"`. Roles: fg, fg_muted, fg_faint, line, brand, brand_hot, user, ok, warn,
-    /// err, surface, surface_raised. Truecolor terminals only.
-    #[serde(default)]
-    pub colors: std::collections::BTreeMap<String, String>,
-}
-
-impl Default for TuiConfig {
-    fn default() -> Self {
-        Self {
-            fullscreen: default_tui_fullscreen(),
-            mouse_capture: default_tui_mouse_capture(),
-            theme: default_tui_auto(),
-            color: default_tui_auto(),
-            glyphs: default_tui_auto(),
-            reduce_motion: false,
-            fold_tool_groups: true,
-            respond_to_bash: true,
-            palette: default_tui_palette(),
-            colors: std::collections::BTreeMap::new(),
-        }
-    }
-}
-
-fn default_tui_palette() -> String {
-    "forge".to_string()
-}
-
-fn default_tui_auto() -> String {
-    "auto".to_string()
-}
-
-fn default_tui_fullscreen() -> bool {
-    true
-}
-
-fn default_tui_mouse_capture() -> bool {
-    true
-}
-
 /// Local-LLM runtime settings. Forge runs local models through Ollama (exposed in the mesh as
 /// `ollama::<tag>`). Off by default — nothing starts unless the user opts in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1496,7 +1427,7 @@ fn default_autofix_iterations() -> u32 {
     3
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -1547,90 +1478,6 @@ fn default_assay_min_diff_bytes() -> usize {
 
 fn default_assay_max_cost_usd() -> f64 {
     0.50
-}
-
-/// Continual Harness (`/refine`, port of prime-agent's `/refine`): the agent proposes durable
-/// edits to its own prompts/skills/subagents, persisted via forge-store's `harness_entry` /
-/// `harness_refinement` tables. `enabled` gates both context injection and the ability to apply
-/// edits; `auto_refine` separately gates whether a refinement pass ever runs unprompted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HarnessConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub auto_refine: AutoRefineMode,
-    /// Turn interval for `auto_refine = "turns"`.
-    #[serde(default = "default_harness_auto_refine_turns")]
-    pub auto_refine_turns: u32,
-    /// Max harness entries injected into a turn's context.
-    #[serde(default = "default_harness_max_context_entries")]
-    pub max_context_entries: u32,
-    /// Max characters per injected harness entry; longer entries are truncated.
-    #[serde(default = "default_harness_max_entry_chars")]
-    pub max_entry_chars: u32,
-    /// Loop/stop behaviours borrowed from oh-my-pi and Factory Droid, each default off so a
-    /// benchmark round can A/B them. A flag that is on wins over `[mesh] harness_profile =
-    /// "minimal"` (docs/features/harness-profile.md).
-    ///
-    /// A short completion contract at the end of the system prompt.
-    #[serde(default)]
-    pub completion_contract: bool,
-    /// Up to 3 corrective continuations after an announced-but-undone final reply, and up to 3
-    /// retries of an empty or text-only tool-call reply before benching; a pinned model is never
-    /// benched for a single empty reply.
-    #[serde(default)]
-    pub stop_retries: bool,
-    /// Inject "act, don't re-plan" when consecutive tool-free replies keep restating a plan.
-    #[serde(default)]
-    pub thinking_loop_breaker: bool,
-    /// Interrupt naming the tool and arguments after 5 identical calls with identical results,
-    /// and move the progress ledger's cycle stop two repeats later.
-    #[serde(default)]
-    pub repeat_interrupt: bool,
-    #[serde(default)]
-    pub edit_mode: EditMode,
-}
-
-impl Default for HarnessConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            auto_refine: AutoRefineMode::default(),
-            auto_refine_turns: default_harness_auto_refine_turns(),
-            max_context_entries: default_harness_max_context_entries(),
-            max_entry_chars: default_harness_max_entry_chars(),
-            completion_contract: false,
-            stop_retries: false,
-            thinking_loop_breaker: false,
-            repeat_interrupt: false,
-            edit_mode: EditMode::default(),
-        }
-    }
-}
-
-/// When a refinement pass auto-triggers, if ever (ADR: Continual Harness).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AutoRefineMode {
-    /// Refinement only runs when explicitly requested (`/refine`).
-    #[default]
-    Off,
-    /// Auto-trigger a refinement pass after every `/compact`.
-    Compact,
-    /// Auto-trigger a refinement pass every `auto_refine_turns` turns.
-    Turns,
-}
-
-fn default_harness_auto_refine_turns() -> u32 {
-    20
-}
-
-fn default_harness_max_context_entries() -> u32 {
-    12
-}
-
-fn default_harness_max_entry_chars() -> u32 {
-    2000
 }
 
 /// Settings for the slash-command + skill system.
@@ -1910,6 +1757,7 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
         // so they need the same secrets-glob floor.
         deny("search", &secrets),
         deny("glob", &secrets),
+        deny("lsp", &secrets),
         // Secrets must also be blocked for write/edit/delete — overwriting a .env or deleting an
         // SSH key is as dangerous as reading it. Also block /etc writes (system config tampering).
         deny("write_file", &{
@@ -3107,6 +2955,7 @@ impl Default for Config {
             power: power::PowerConfig::default(),
             host: host::HostConfig::default(),
             terminal: terminal::TerminalConfig::default(),
+            actions: Vec::new(),
             codemode: codemode::CodemodeConfig::default(),
             pr: pr::PrConfig::default(),
             sessions: sessions::SessionsConfig::default(),
@@ -3500,6 +3349,10 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
         }
     })?;
     accumulate_permission_rules(&mut config, user_config.as_deref(), project_has_rules);
+    config.harness.explicit_flags = model_family::explicit_harness_flags(
+        user_config.as_deref(),
+        (layers.project && trusted).then_some(project_config),
+    );
     if !trusted {
         config
             .permissions
@@ -3811,6 +3664,7 @@ pub fn append_allow_rule_in(
 
 // ----------------------------------------------------------------------------------------------
 mod editor;
+mod editor_harness;
 mod endpoint_check;
 mod provider_registry;
 mod provider_reload;
@@ -4436,6 +4290,9 @@ compact_model = "auto"
         assert_eq!(parsed.privacy, shipped.privacy);
         assert_eq!(parsed.preview, shipped.preview);
         assert_eq!(parsed.codemode, shipped.codemode);
+        assert!(parsed.harness.edit_errors && parsed.harness.arg_coercion);
+        assert!(!parsed.harness.read_shaping);
+        assert!(!parsed.harness.script_parallel && !parsed.harness.shell_autobackground);
         assert_eq!(parsed.pr, shipped.pr);
     }
 

@@ -1,6 +1,7 @@
 // Hearth Fork sheet — a parallel line from any point; the original keeps running. The child can
-// pin its own model, effort and access and start with a first prompt; "Move" forks and then
-// archives the source, so a thread moves to another model instead of branching.
+// pin its own model, effort and access and start with a first prompt; "Move" forks the whole
+// thread, hands the worktree to the child and archives the source, so a thread moves to another
+// model instead of branching.
 import { router } from "expo-router";
 import { ChevronDown, GitBranch } from "lucide-react-native";
 import React, { useMemo, useState } from "react";
@@ -79,12 +80,24 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
   const startFork = (mode: "fork" | "move") => {
     if (!base) return;
     setPending(mode);
-    const draft = { atSeq: base.seq, model: model || null, effort, temper, prompt, title: name };
-    const finish = (session: { id: string }, renameTo: string) => {
+    // Move continues the thread, so by default it carries the latest turn too; an earlier prompt
+    // picked on purpose still cuts the thread there.
+    const wholeThread = mode === "move" && base.seq === prompts[prompts.length - 1]?.seq;
+    const draft = {
+      atSeq: base.seq,
+      model: model || null,
+      effort,
+      temper,
+      prompt,
+      title: name,
+      wholeThread,
+      moveSource: mode === "move",
+    };
+    const finish = (session: { id: string }, renameTo: string, archiveSource: boolean) => {
       // A daemon from before the extended fork body only took `at_seq`: the name is then applied
       // with the session menu's rename call, and the extra fields are dropped.
       if (renameTo) rename.mutate({ id: session.id, title: renameTo });
-      if (mode === "move") archive.mutate(sessionId);
+      if (archiveSource) archive.mutate(sessionId);
       reset();
       close();
       router.push(`/session/${session.id}`);
@@ -92,7 +105,7 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
     fork.mutate(
       { id: sessionId, body: buildForkRequest(draft) },
       {
-        onSuccess: (session) => finish(session, ""),
+        onSuccess: (session) => finish(session, "", false),
         onError: (error) => {
           if (!isUnsupportedForkFieldError(error)) {
             setPending(null);
@@ -100,7 +113,7 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
           }
           fork.mutate(
             { id: sessionId, body: { at_seq: base.seq } },
-            { onSuccess: (session) => finish(session, name.trim()), onError: () => setPending(null) },
+            { onSuccess: (session) => finish(session, name.trim(), mode === "move"), onError: () => setPending(null) },
           );
         },
       },
@@ -239,7 +252,7 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
             icon={<GitBranch size={16} strokeWidth={2} color={tokens.bg2} />}
           />
         </View>
-        <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Move forks, then archives this session.</Text>
+        <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Move carries the whole thread to the fork, then archives this session.</Text>
       </View>
     </Sheet>
   );

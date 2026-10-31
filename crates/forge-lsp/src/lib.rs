@@ -13,10 +13,13 @@
 //! unsupported language yields no diagnostics rather than an error, so live diagnostics never block
 //! a turn.
 
+pub mod nav;
+pub mod position;
 pub mod registry;
 pub mod rpc;
 pub mod server;
 pub mod types;
 
 pub use registry::LspRegistry;
+pub use server::NavError;
 pub use types::{Diagnostic, DiagnosticSeverity};

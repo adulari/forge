@@ -321,6 +321,7 @@ impl ForgeMcp {
         let request = subagent::AgentRequest {
             agent: agent_name.clone(),
             task: message.clone(),
+            ..Default::default()
         };
         let resolved = subagent::resolve(&request, &s.ctx.agents);
         let budget = match load_budget(&s.ctx.store, &self.config) {

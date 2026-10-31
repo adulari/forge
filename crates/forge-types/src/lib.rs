@@ -934,7 +934,7 @@ pub const PATH_ARG_KEYS: &[&str] = &[
     "destination",
 ];
 
-mod path_args;
+pub mod path_args;
 pub use path_args::{all_path_args, is_dotenv_template, strip_line_range};
 
 /// The command text of a `shell` call: `command`, or a `commands` batch joined with newlines.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { evidenceImageUrl, screenshotPathOf, workspaceImageUrl } from "./mediaApi";
+import { evidenceImageUrl, screenshotPathOf, workspaceImageUrl, workspacePdfUrl } from "./mediaApi";
 
 describe("media urls", () => {
   it("encodes the session, path and thumbnail width", () => {
@@ -24,5 +24,13 @@ describe("screenshotPathOf", () => {
     expect(screenshotPathOf("screenshot written to /a b/c.png (12 bytes)")).toBe("/a b/c.png");
     expect(screenshotPathOf("exit 0")).toBeNull();
     expect(screenshotPathOf(null)).toBeNull();
+  });
+});
+
+describe("workspacePdfUrl", () => {
+  it("names the session and path", () => {
+    expect(workspacePdfUrl("http://h/tok", "s1", "docs/a b.pdf")).toBe(
+      "http://h/tok/api/workspace/pdf?session=s1&path=docs%2Fa+b.pdf",
+    );
   });
 });

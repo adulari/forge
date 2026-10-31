@@ -316,6 +316,11 @@ fn announce_recovering(listener: &std::net::TcpListener, base: &str, lan_host: O
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        store_path: Some(
+            crate::cli::commands::replay::resolved_store_path()
+                .to_string_lossy()
+                .into_owned(),
+        ),
     };
     if let Err(error) = crate::serve::write_state(&state) {
         eprintln!("  could not write serve-state.json: {error}");

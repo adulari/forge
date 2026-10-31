@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Json, Path, Query};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
@@ -36,7 +36,7 @@ use forge_onboarding::{
 use serde::{Deserialize, Serialize};
 
 use crate::serve::{err_response, json_response, DaemonState};
-use crate::serve_update::is_local_request;
+use crate::serve_update::Direct;
 
 const MAX_WAIT_MS: u64 = 25_000;
 const POLL_EVERY: Duration = Duration::from_millis(100);
@@ -101,8 +101,8 @@ fn host() -> Arc<dyn Host> {
     Arc::new(TestHost)
 }
 
-fn local_only(headers: &HeaderMap) -> Option<Response> {
-    (!is_local_request(headers)).then(|| {
+fn local_only(local: bool) -> Option<Response> {
+    (!local).then(|| {
         err_response(
             StatusCode::FORBIDDEN,
             "setup is only available from the machine the daemon runs on",
@@ -228,8 +228,8 @@ fn flag(value: &Option<String>) -> bool {
         .is_some_and(|v| !matches!(v, "" | "0" | "false"))
 }
 
-async fn get_onboarding(headers: HeaderMap, Query(query): Query<SnapshotQuery>) -> Response {
-    if let Some(refused) = local_only(&headers) {
+async fn get_onboarding(Direct(local): Direct, Query(query): Query<SnapshotQuery>) -> Response {
+    if let Some(refused) = local_only(local) {
         return refused;
     }
     if flag(&query.brief) {
@@ -307,11 +307,11 @@ fn apply_step_op(op: StepOp) -> Snapshot {
 }
 
 async fn post_step(
-    headers: HeaderMap,
+    Direct(local): Direct,
     Path(id): Path<String>,
     Json(body): Json<StepBody>,
 ) -> Response {
-    if let Some(refused) = local_only(&headers) {
+    if let Some(refused) = local_only(local) {
         return refused;
     }
     let op = match parse_step_op(&id, &body.op) {
@@ -388,8 +388,8 @@ fn watch(id: u64, step: Option<StepId>) {
     });
 }
 
-async fn post_action(headers: HeaderMap, Json(body): Json<ActionBody>) -> Response {
-    if let Some(refused) = local_only(&headers) {
+async fn post_action(Direct(local): Direct, Json(body): Json<ActionBody>) -> Response {
+    if let Some(refused) = local_only(local) {
         return refused;
     }
     if body.recommended {
@@ -427,11 +427,11 @@ struct JobQuery {
 }
 
 async fn get_job(
-    headers: HeaderMap,
+    Direct(local): Direct,
     Path(id): Path<u64>,
     Query(query): Query<JobQuery>,
 ) -> Response {
-    if let Some(refused) = local_only(&headers) {
+    if let Some(refused) = local_only(local) {
         return refused;
     }
     let deadline = Instant::now() + Duration::from_millis(query.wait.min(MAX_WAIT_MS));
@@ -453,11 +453,11 @@ struct InputBody {
 }
 
 async fn post_input(
-    headers: HeaderMap,
+    Direct(local): Direct,
     Path(id): Path<u64>,
     Json(body): Json<InputBody>,
 ) -> Response {
-    if let Some(refused) = local_only(&headers) {
+    if let Some(refused) = local_only(local) {
         return refused;
     }
     if body.text.is_empty() || body.text.len() > MAX_INPUT_CHARS {
@@ -470,8 +470,8 @@ async fn post_input(
     }
 }
 
-async fn cancel_job(headers: HeaderMap, Path(id): Path<u64>) -> Response {
-    if let Some(refused) = local_only(&headers) {
+async fn cancel_job(Direct(local): Direct, Path(id): Path<u64>) -> Response {
+    if let Some(refused) = local_only(local) {
         return refused;
     }
     if jobs().state(id).is_none() {
@@ -574,7 +574,13 @@ mod tests {
             }
             None => Body::empty(),
         };
-        let response = router().oneshot(req.body(body).unwrap()).await.unwrap();
+        let mut req = req.body(body).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                50000,
+            ))));
+        let response = router().oneshot(req).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -634,6 +640,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_remote_peer_is_refused_even_with_a_loopback_host() {
+        let _e = env().await;
+        for uri in ["/tok/api/onboarding", "/tok/api/onboarding/jobs/1"] {
+            let mut request = Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("host", "127.0.0.1:7420")
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(axum::extract::ConnectInfo(
+                std::net::SocketAddr::from(([192, 168, 1, 9], 50000)),
+            ));
+            let response = router().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_forwarded_request_is_refused_even_with_a_loopback_host() {
         let _e = env().await;
         let request = Request::builder()
@@ -643,6 +667,13 @@ mod tests {
             .header("x-forwarded-for", "203.0.113.9")
             .body(Body::empty())
             .unwrap();
+        let mut request = request;
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                50000,
+            ))));
         let response = router().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }

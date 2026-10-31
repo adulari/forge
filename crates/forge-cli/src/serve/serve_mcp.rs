@@ -49,6 +49,7 @@ struct McpServerRow {
     args: Vec<String>,
     url: Option<String>,
     token_env: Option<String>,
+    redacted: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -134,7 +135,7 @@ pub(super) async fn create_mcp_server(Json(request): Json<CreateMcpServerRequest
     })
     .await;
     match result {
-        Ok(Ok(())) => mcp_page().await,
+        Ok(Ok(())) => mcp_listing(true).await,
         Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
         Err(_) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -194,7 +195,7 @@ pub(super) async fn update_mcp_server(Json(request): Json<UpdateMcpServerRequest
     })
     .await;
     match result {
-        Ok(Ok(())) => mcp_page().await,
+        Ok(Ok(())) => mcp_listing(true).await,
         Ok(Err(message)) => err_response(axum::http::StatusCode::NOT_FOUND, &message),
         Err(_) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -225,8 +226,17 @@ pub(super) fn valid_mcp_url(url: Option<String>) -> Result<String, String> {
     }
 }
 
-pub(super) async fn mcp_page() -> Response {
-    match tokio::task::spawn_blocking(|| {
+pub(super) async fn mcp_page(
+    axum::Extension(auth): axum::Extension<crate::serve_clients::ClientAuth>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let full = auth.allows(crate::serve_clients::Scope::ManageProviders)
+        && !headers.contains_key(crate::anywhere::RELAY_REQUEST_HEADER);
+    mcp_listing(full).await
+}
+
+pub(super) async fn mcp_listing(full: bool) -> Response {
+    match tokio::task::spawn_blocking(move || {
         let config = forge_config::load().unwrap_or_default();
         let project: HashSet<String> = project_server_names();
         let editable: HashSet<String> = mcp_toml_scopes()
@@ -239,7 +249,7 @@ pub(super) async fn mcp_page() -> Response {
                 .mcp
                 .servers
                 .iter()
-                .map(|server| server_row(server, &project, &editable))
+                .map(|server| server_row(server, &project, &editable, full))
                 .collect(),
             builtins: vec![
                 McpBuiltinRow {
@@ -295,6 +305,7 @@ fn server_row(
     server: &forge_config::McpServerConfig,
     project: &HashSet<String>,
     editable: &HashSet<String>,
+    full: bool,
 ) -> McpServerRow {
     let probe = super::serve_mcp_probe::cached(&server.name);
     let status = if !server.enabled {
@@ -310,6 +321,15 @@ fn server_row(
         }
         forge_config::McpTransport::Http { url, .. }
         | forge_config::McpTransport::Sse { url, .. } => (None, Vec::new(), Some(url.clone())),
+    };
+    let (command, args, url) = if full {
+        (command, args, url)
+    } else {
+        (
+            command.map(|c| super::serve_mcp_redact::redact_command(&c)),
+            super::serve_mcp_redact::redact_args(&args),
+            url.map(|u| super::serve_mcp_redact::redact_url(&u)),
+        )
     };
     McpServerRow {
         name: server.name.clone(),
@@ -331,6 +351,7 @@ fn server_row(
         args,
         url,
         token_env: server.auth.as_ref().and_then(|a| a.token_env.clone()),
+        redacted: !full,
     }
 }
 
@@ -386,13 +407,21 @@ mod tests {
         .unwrap();
         server.disabled_tools = vec!["danger".into()];
         let project: HashSet<String> = ["probe_row".to_string()].into();
-        let row = server_row(&server, &project, &HashSet::new());
+        let row = server_row(&server, &project, &HashSet::new(), true);
         assert_eq!((row.scope, row.status.as_str()), ("project", "unknown"));
         assert_eq!(row.command.as_deref(), Some("node"));
         assert_eq!(row.disabled_tools, ["danger"]);
+        let secret = "[transport]\ntype = \"stdio\"\ncommand = \"npx\"\nargs = [\"--access-token\", \"sbp_0123456789abcdef\"]\n";
+        let leaky: forge_config::McpServerConfig =
+            toml::from_str(&format!("name = \"leaky\"\n{secret}")).unwrap();
+        let hidden = server_row(&leaky, &HashSet::new(), &HashSet::new(), false);
+        assert!(hidden.redacted);
+        assert_eq!(hidden.args, ["--access-token", "***"]);
+        let shown = server_row(&leaky, &HashSet::new(), &HashSet::new(), true);
+        assert_eq!(shown.args, ["--access-token", "sbp_0123456789abcdef"]);
         server.enabled = false;
         assert_eq!(
-            server_row(&server, &HashSet::new(), &HashSet::new()).status,
+            server_row(&server, &HashSet::new(), &HashSet::new(), true).status,
             "disabled"
         );
     }

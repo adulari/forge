@@ -17,7 +17,7 @@ export interface ConfirmTargetCardProps {
 
 export function ConfirmTargetCard({ target, busy = false, onConnect, onCancel }: ConfirmTargetCardProps) {
   const tokens = useTokens();
-  const risky = target.cleartext || target.lookalike;
+  const risky = target.cleartext || target.lookalike || target.pinIgnored;
   const Icon = risky ? ShieldAlert : ShieldCheck;
   return (
     <View
@@ -34,6 +34,12 @@ export function ConfirmTargetCard({ target, busy = false, onConnect, onCancel }:
       {target.pinned ? (
         <Text style={[typeScale.sub, { color: tokens.ink2 }]}>
           this code pins the server&apos;s certificate, so a different machine on this network can&apos;t take its place.
+        </Text>
+      ) : null}
+      {target.pinIgnored ? (
+        <Text style={[typeScale.sub, { color: tokens.warn }]}>
+          this link carries a certificate pin, but this device does not check it, so it does not protect the
+          connection. only continue if you trust the network and the address.
         </Text>
       ) : null}
       {target.cleartext ? (

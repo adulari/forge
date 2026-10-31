@@ -12,7 +12,8 @@ export type WorkbenchSurfaceKind =
   | "plan"
   | "gallery"
   | "actions"
-  | "notes";
+  | "notes"
+  | "ports";
 
 export interface WorkbenchSurfaceDefinition {
   kind: WorkbenchSurfaceKind;
@@ -103,6 +104,13 @@ export const WORKBENCH_SURFACE_DEFINITIONS: Record<
     defaultSize: 360,
     sessionScoped: false,
   },
+  ports: {
+    kind: "ports",
+    title: "Ports",
+    placement: "right",
+    defaultSize: 360,
+    sessionScoped: true,
+  },
 };
 
 /**
@@ -120,6 +128,8 @@ export interface WorkbenchSurface {
   /** Where to land inside the resource (a file's line). Not part of the tab's identity, so opening
    * the same file at another line moves the open tab instead of adding one. */
   line: number | null;
+  /** A preview tab: the next preview-open replaces it in place until the person pins it. */
+  preview?: boolean;
 }
 
 export interface WorkbenchSurfaceInput {
@@ -128,6 +138,7 @@ export interface WorkbenchSurfaceInput {
   resourceId?: string | null;
   title?: string;
   line?: number | null;
+  preview?: boolean;
 }
 
 export interface WorkbenchLaneState {
@@ -152,6 +163,7 @@ export type WorkbenchAction =
   | { type: "activate"; placement: WorkbenchPlacement; id: string }
   | { type: "close"; placement: WorkbenchPlacement; id: string }
   | { type: "hide"; placement: WorkbenchPlacement }
+  | { type: "pin"; placement: WorkbenchPlacement; id: string }
   | { type: "reorder"; placement: WorkbenchPlacement; from: number; to: number }
   | { type: "replace"; state: WorkbenchState };
 
@@ -171,6 +183,7 @@ export function createWorkbenchSurface(input: WorkbenchSurfaceInput): WorkbenchS
     resourceId,
     title: input.title?.trim() || definition.title,
     line: input.line ?? null,
+    ...(input.preview ? { preview: true } : {}),
   };
 }
 
@@ -185,6 +198,25 @@ export function activeWorkbenchSurface(
 
 function upsertLane(lane: WorkbenchLaneState, surface: WorkbenchSurface): WorkbenchLaneState {
   const index = lane.tabs.findIndex((candidate) => candidate.id === surface.id);
+  if (index !== -1 && !lane.tabs[index]?.preview && surface.preview) {
+    // Re-opening a pinned tab as a preview must not demote it.
+    const { preview: _preview, ...pinned } = surface;
+    return {
+      tabs: lane.tabs.map((candidate, candidateIndex) => (candidateIndex === index ? pinned : candidate)),
+      activeId: surface.id,
+      visible: true,
+    };
+  }
+  if (index === -1 && surface.preview) {
+    const slot = lane.tabs.findIndex((candidate) => candidate.preview && candidate.kind === surface.kind && candidate.sessionId === surface.sessionId);
+    if (slot !== -1) {
+      return {
+        tabs: lane.tabs.map((candidate, candidateIndex) => (candidateIndex === slot ? surface : candidate)),
+        activeId: surface.id,
+        visible: true,
+      };
+    }
+  }
   const tabs =
     index === -1
       ? [...lane.tabs, surface]
@@ -244,6 +276,16 @@ export function workbenchReducer(
         ...state,
         [action.placement]: { ...state[action.placement], visible: false },
       };
+    case "pin": {
+      const lane = state[action.placement];
+      if (!lane.tabs.some((surface) => surface.id === action.id && surface.preview)) return state;
+      const tabs = lane.tabs.map((surface) => {
+        if (surface.id !== action.id) return surface;
+        const { preview: _preview, ...pinned } = surface;
+        return pinned;
+      });
+      return { ...state, [action.placement]: { ...lane, tabs } };
+    }
     case "reorder": {
       const lane = state[action.placement];
       const { from, to } = action;

@@ -179,18 +179,25 @@ impl Drop for SessionDriverHandle {
 /// the driver keeps running until [`SessionDriverHandle::shutdown`].
 pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriverHandle> {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiMsg>();
-    let session = build_session_with_self_mcp(
-        Box::new(ChannelPresenter::new(ui_tx)),
-        spec.mock,
-        None,
-        spec.resume.clone(),
-        spec.model.clone(),
-        true,
-        true,
-        Some(&spec.cwd),
+    let mcp_off = super::session_mcp_off::inherited(spec.resume.as_deref());
+    let session = super::session_mcp_off::scoped(
+        mcp_off.clone(),
+        build_session_with_self_mcp(
+            Box::new(ChannelPresenter::new(ui_tx)),
+            spec.mock,
+            None,
+            spec.resume.clone(),
+            spec.model.clone(),
+            true,
+            true,
+            Some(&spec.cwd),
+        ),
     )
     .await?;
     let session_id = session.session_id().to_string();
+    if !mcp_off.is_empty() {
+        super::session_mcp_off::save(session.store.db_path(), &session_id, &mcp_off);
+    }
     let (created_at, last_active_at) = session
         .store
         .session_times(&session_id)

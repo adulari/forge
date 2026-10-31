@@ -79,8 +79,26 @@ pub(crate) fn tool_detail(result: &str) -> Option<String> {
 /// `result` cut to [`MODEL_RESULT_MAX_CHARS`], start and end kept, with a note in the middle saying
 /// how much is missing and where the complete output is (`kept`, when it could be written).
 pub(crate) fn fit_for_model(result: String, kept: Option<&str>) -> String {
+    fit_for_model_of(result, kept, true)
+}
+
+/// [`fit_for_model`] where `kept_is_result` says whether the saved file holds the same text as
+/// `result`. When a tool kept its own uncut output instead (the shell), this copy's line numbers
+/// mean nothing in that file, so the note points at the file without a line range.
+pub(crate) fn fit_for_model_of(result: String, kept: Option<&str>, kept_is_result: bool) -> String {
+    fit_for_model_capped(result, kept, kept_is_result, MODEL_RESULT_MAX_CHARS)
+}
+
+/// [`fit_for_model_of`] with an explicit ceiling: the larger one a `run_code` script's inner calls
+/// get under `[harness] script_parallel`, where the script (not the model) trims the output.
+pub(crate) fn fit_for_model_capped(
+    result: String,
+    kept: Option<&str>,
+    kept_is_result: bool,
+    cap: usize,
+) -> String {
     let total = result.chars().count();
-    if total <= MODEL_RESULT_MAX_CHARS {
+    if total <= cap {
         return result;
     }
     let lines: Vec<&str> = result.lines().collect();
@@ -104,14 +122,19 @@ pub(crate) fn fit_for_model(result: String, kept: Option<&str>) -> String {
         }
         out
     };
-    let head = within(&mut lines.iter().copied(), MODEL_RESULT_MAX_CHARS * 2 / 3);
+    let head = within(&mut lines.iter().copied(), cap * 2 / 3);
     let rest = &lines[head.len()..];
-    let mut tail = within(&mut rest.iter().rev().copied(), MODEL_RESULT_MAX_CHARS / 3);
+    let mut tail = within(&mut rest.iter().rev().copied(), cap / 3);
     tail.reverse();
     let shown: usize = head.iter().chain(&tail).map(|l| l.chars().count()).sum();
     let hidden_lines = lines.len().saturating_sub(head.len() + tail.len());
     let first_hidden = head.len() + 1;
     let where_ = match kept {
+        Some(path) if !kept_is_result => format!(
+            " The complete output is saved at {path}; its line numbers differ from this copy, so \
+             grep it for what you need or read a slice with `sed -n 'START,ENDp' {path}`, or \
+             narrow the call."
+        ),
         Some(path) => format!(
             " The complete output is saved at {path} — read the part you need with \
              `sed -n '{first_hidden},{}p' {path}` (or grep it), or narrow the call.",
@@ -119,11 +142,14 @@ pub(crate) fn fit_for_model(result: String, kept: Option<&str>) -> String {
         ),
         None => " Narrow the call (a path, pattern, or line range) to see it.".to_string(),
     };
+    let span = if kept_is_result {
+        format!(" (lines {first_hidden}–{})", head.len() + hidden_lines)
+    } else {
+        String::new()
+    };
     let marker = format!(
-        "[… {} of {total} chars omitted here (lines {first_hidden}–{}) to keep the context \
-         small.{where_}]",
+        "[… {} of {total} chars omitted here{span} to keep the context small.{where_}]",
         total.saturating_sub(shown),
-        head.len() + hidden_lines
     );
     let mut parts = head;
     parts.push(marker);

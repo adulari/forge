@@ -78,6 +78,11 @@ impl Session {
                 format!("llm ({m}) — actual tier may differ from this heuristic preview")
             }
         };
+        exp.rationale = with_family_note(
+            std::mem::take(&mut exp.rationale),
+            &exp.pick,
+            self.config.harness.family_profiles,
+        );
         Some(exp)
     }
 
@@ -98,6 +103,7 @@ impl Session {
             tier_override: self.pinned_tier,
             effort: self.pinned_effort(),
             project: self.project.clone(),
+            family_profiles: self.config.harness.family_profiles,
             routing_context: RoutingContext::from_messages(&self.transcript)
                 .with_session_affinity(
                     self.route_affinity.clone(),
@@ -254,8 +260,11 @@ impl Session {
         let env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n</env>");
         let base = crate::commit_policy::apply(FORGE_SYSTEM, self.commit_policy());
         let mut base = base.into_owned();
-        if self.config.harness.completion_contract {
+        if self.harness_flags.completion_contract {
             base.push_str(crate::stop_guards::COMPLETION_CONTRACT);
+        }
+        if let Some(delta) = self.config.harness.family_prompt_delta(&self.harness_model) {
+            base.push_str(delta);
         }
         let mut msgs = vec![Message::system(base), Message::system(env)];
         // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
@@ -288,10 +297,13 @@ impl Session {
         // message). The live env block and any minimal-diff bias are kept.
         if let Some(override_prompt) = self.system_prompt_override(model) {
             preamble[0].content.clone_from(override_prompt);
-            if self.config.harness.completion_contract {
+            if self.harness_flags.completion_contract {
                 preamble[0]
                     .content
                     .push_str(crate::stop_guards::COMPLETION_CONTRACT);
+            }
+            if let Some(delta) = self.config.harness.family_prompt_delta(&self.harness_model) {
+                preamble[0].content.push_str(delta);
             }
         }
         // A bridged model's tools come from `forge mcp-serve`, which stays in replace mode, so it
@@ -306,6 +318,11 @@ impl Session {
         // call a tool neither can see.
         if crate::codemode::guidance_advertised(specs) && !forge_provider::is_cli_bridge(model) {
             preamble.insert(1, Message::system(crate::codemode::GUIDANCE));
+        }
+        if specs.iter().any(|s| s.name == forge_tools::PYTHON_TOOL)
+            && !forge_provider::is_cli_bridge(model)
+        {
+            preamble.insert(1, Message::system(crate::eval_kernel::GUIDANCE));
         }
         // The pinned session context follows the stable prefix, so the provider can cache that
         // prefix on its own and only the block behind it moves when its content does.
@@ -552,6 +569,7 @@ Rules:\n\
             response_chain_prefix_tokens: 0,
             response_format: None,
             require_tool_call: false,
+            echo_reasoning: false,
             deny_data_collection: false,
         };
 
@@ -640,4 +658,13 @@ Rules:\n\
 
         Ok(Some(resp.content))
     }
+}
+
+/// `rationale` with the harness family profile of the picked model appended, so `/mesh` and
+/// `forge mesh` show which tuning is active.
+pub(crate) fn with_family_note(rationale: String, pick: &str, family_profiles: bool) -> String {
+    format!(
+        "{rationale} — harness: {}",
+        forge_config::model_family::describe(pick, family_profiles)
+    )
 }

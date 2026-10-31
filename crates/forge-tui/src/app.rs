@@ -396,6 +396,10 @@ pub struct App {
     pub anywhere_menu: crate::anywhere_menu::AnywhereMenu,
     /// The `/notes` overlay (project to-dos and scratchpad), while open.
     pub notes_overlay: crate::notes_overlay::NotesOverlay,
+    /// Wheel speed, cursor shape, verbosity and the QR overlay (`app/polish.rs`).
+    pub polish: polish::PolishState,
+    /// The `/run` overlay (project actions and listening ports); also feeds the status badge.
+    pub run_menu: crate::run_menu::RunMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.
@@ -944,6 +948,12 @@ pub enum KeyKind {
     OpenCommandCenter,
     /// Open the keybind configurator overlay.
     OpenKeybindConfig,
+    /// Suspend Forge to the shell (SIGTSTP); `fg` brings it back with the screen restored.
+    Suspend,
+    /// Step the transcript verbosity Quiet / Default / Everything.
+    VerbosityCycle,
+    /// A leader or sequence key was consumed (or timed out): nothing to do but repaint.
+    Pending,
     /// Open the model picker overlay.
     ModelPicker,
     /// Cycle effort level (low→medium→high→max).
@@ -1202,6 +1212,9 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::ToggleReasoning
         | KeyKind::OpenCommandCenter
         | KeyKind::OpenKeybindConfig
+        | KeyKind::Suspend
+        | KeyKind::VerbosityCycle
+        | KeyKind::Pending
         | KeyKind::ModelPicker
         | KeyKind::EffortCycle
         | KeyKind::TemperCycle
@@ -3561,6 +3574,8 @@ mod group_body;
 mod group_flow;
 mod group_rows;
 mod lines;
+mod polish;
+pub use polish::{CursorShape, Verbosity};
 mod state;
 mod transcript_find;
 mod transcript_flow;

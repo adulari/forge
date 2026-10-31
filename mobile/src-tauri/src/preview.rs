@@ -16,7 +16,14 @@ const MAIN_WINDOW: &str = "main";
 const STATE_EVENT: &str = "forge://preview-state";
 const ANNOTATION_EVENT: &str = "forge://preview-annotation";
 const ANNOTATION_SCHEME: &str = "forge-preview-annotation";
+const CONSOLE_EVENT: &str = "forge://preview-console";
+const CONSOLE_SCHEME: &str = "forge-preview-console";
 const MAX_ANNOTATION_PAYLOAD_BYTES: usize = 32 * 1024;
+const MAX_CONSOLE_PAYLOAD_BYTES: usize = 48 * 1024;
+const MAX_SELECTOR_CHARS: usize = 400;
+const MAX_CONSOLE_ENTRIES: usize = 100;
+const MAX_CONSOLE_TEXT_CHARS: usize = 2000;
+const CONSOLE_LEVELS: [&str; 5] = ["log", "info", "warn", "error", "debug"];
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +80,19 @@ struct PreviewAnnotationEvent {
     annotation: PreviewElementAnnotation,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct PreviewConsoleEntry {
+    pub level: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewConsoleEvent {
+    label: String,
+    entries: Vec<PreviewConsoleEntry>,
+}
+
 fn validate_label(label: &str) -> Result<(), String> {
     let valid = label.starts_with("preview-")
         && label.len() <= 96
@@ -120,7 +140,118 @@ fn annotation_from_navigation(url: &tauri::Url) -> Option<PreviewElementAnnotati
     if payload.len() > MAX_ANNOTATION_PAYLOAD_BYTES {
         return None;
     }
-    serde_json::from_str(&payload).ok()
+    let mut annotation: PreviewElementAnnotation = serde_json::from_str(&payload).ok()?;
+    annotation.selector = strip_controls(&annotation.selector, MAX_SELECTOR_CHARS);
+    Some(annotation)
+}
+
+/// The page chooses the selector, and it can end up in a terminal: drop every control character
+/// (CR, LF, ESC, C0, DEL, C1, line separators) and cap the length.
+fn strip_controls(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .take(max_chars)
+        .collect()
+}
+
+/// Console lines the page reported through a `forge-preview-console://` navigation. The page is
+/// untrusted, so the batch is bounded and every level is clamped to a known one.
+fn console_from_navigation(url: &tauri::Url) -> Option<Vec<PreviewConsoleEntry>> {
+    if url.scheme() != CONSOLE_SCHEME {
+        return None;
+    }
+    let payload = url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "payload").then_some(value.into_owned()))?;
+    if payload.len() > MAX_CONSOLE_PAYLOAD_BYTES {
+        return None;
+    }
+    let entries: Vec<PreviewConsoleEntry> = serde_json::from_str(&payload).ok()?;
+    Some(
+        entries
+            .into_iter()
+            .take(MAX_CONSOLE_ENTRIES)
+            .map(|entry| PreviewConsoleEntry {
+                level: if CONSOLE_LEVELS.contains(&entry.level.as_str()) {
+                    entry.level
+                } else {
+                    "log".to_string()
+                },
+                text: entry.text.chars().take(MAX_CONSOLE_TEXT_CHARS).collect(),
+            })
+            .collect(),
+    )
+}
+
+fn console_script() -> &'static str {
+    r##"
+(() => {
+  if (window.__forgeConsole) return;
+  window.__forgeConsole = true;
+  const queue = [];
+  let timer = null;
+  const text = (value) => {
+    try {
+      if (typeof value === "string") return value;
+      if (value instanceof Error) return value.stack || String(value);
+      const json = JSON.stringify(value);
+      return json === undefined ? String(value) : json;
+    } catch {
+      return String(value);
+    }
+  };
+  let leaving = false;
+  window.addEventListener("pagehide", () => { leaving = true; });
+  window.addEventListener("beforeunload", () => { leaving = true; });
+  const flush = () => {
+    timer = null;
+    if (!queue.length || leaving) return;
+    if (document.readyState !== "complete") {
+      timer = setTimeout(flush, 400);
+      return;
+    }
+    const batch = [];
+    let size = 0;
+    while (queue.length && batch.length < 40 && size < 16000) {
+      const entry = queue.shift();
+      size += entry.text.length + 32;
+      batch.push(entry);
+    }
+    // A hidden iframe, not a top-frame navigation: that would cancel the page's own
+    // pending navigation or form submit. The native handler cancels this load and reads the URL.
+    const frame = document.createElement("iframe");
+    frame.style.display = "none";
+    frame.src = "forge-preview-console://batch?payload=" + encodeURIComponent(JSON.stringify(batch));
+    (document.body || document.documentElement).appendChild(frame);
+    setTimeout(() => frame.remove(), 1000);
+    if (queue.length) timer = setTimeout(flush, 400);
+  };
+  const push = (level, value) => {
+    if (queue.length >= 200) queue.shift();
+    queue.push({ level, text: String(value).slice(0, 2000) });
+    if (!timer) timer = setTimeout(flush, 250);
+  };
+  for (const level of ["log", "info", "warn", "error", "debug"]) {
+    const original = console[level];
+    console[level] = function (...args) {
+      try { push(level, args.map(text).join(" ")); } catch {}
+      return original.apply(this, args);
+    };
+  }
+  window.addEventListener("error", (event) => {
+    push("error", `${event.message} (${event.filename || "inline"}:${event.lineno || 0})`);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    push("error", "Unhandled rejection: " + text(event.reason));
+  });
+})();
+"##
 }
 
 fn picker_script(label: &str) -> String {
@@ -314,6 +445,7 @@ pub async fn preview_open(
     let navigation_label = label.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(url.clone()))
         .initialization_script(picker_script(&label))
+        .initialization_script(console_script())
         .on_page_load(move |_webview, payload| {
             let _ = state_app.emit_to(
                 MAIN_WINDOW,
@@ -334,6 +466,19 @@ pub async fn preview_open(
                         PreviewAnnotationEvent {
                             label: navigation_label.clone(),
                             annotation,
+                        },
+                    );
+                }
+                return false;
+            }
+            if candidate.scheme() == CONSOLE_SCHEME {
+                if let Some(entries) = console_from_navigation(candidate) {
+                    let _ = navigation_app.emit_to(
+                        MAIN_WINDOW,
+                        CONSOLE_EVENT,
+                        PreviewConsoleEvent {
+                            label: navigation_label.clone(),
+                            entries,
                         },
                     );
                 }
@@ -488,6 +633,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(annotation_from_navigation(&url), Some(expected));
+    }
+
+    #[test]
+    fn console_navigation_is_bounded_and_clamped() {
+        let long = "x".repeat(MAX_CONSOLE_TEXT_CHARS + 50);
+        let entries = vec![
+            PreviewConsoleEntry {
+                level: "warn".to_string(),
+                text: "careful".to_string(),
+            },
+            PreviewConsoleEntry {
+                level: "fatal".to_string(),
+                text: long,
+            },
+        ];
+        let url = tauri::Url::parse_with_params(
+            "forge-preview-console://batch",
+            &[("payload", serde_json::to_string(&entries).unwrap())],
+        )
+        .unwrap();
+        let decoded = console_from_navigation(&url).unwrap();
+        assert_eq!(decoded[0].level, "warn");
+        assert_eq!(decoded[1].level, "log");
+        assert_eq!(decoded[1].text.chars().count(), MAX_CONSOLE_TEXT_CHARS);
+    }
+
+    #[test]
+    fn console_navigation_rejects_other_schemes_and_oversized_payloads() {
+        let other = "https://example.com/?payload=[]".parse().unwrap();
+        assert_eq!(console_from_navigation(&other), None);
+        let big = tauri::Url::parse_with_params(
+            "forge-preview-console://batch",
+            &[("payload", "x".repeat(MAX_CONSOLE_PAYLOAD_BYTES + 1))],
+        )
+        .unwrap();
+        assert_eq!(console_from_navigation(&big), None);
+        let broken = tauri::Url::parse_with_params(
+            "forge-preview-console://batch",
+            &[("payload", "{not json")],
+        )
+        .unwrap();
+        assert_eq!(console_from_navigation(&broken), None);
+    }
+
+    #[test]
+    fn selector_is_stripped_of_control_characters_and_capped() {
+        let mut hostile = annotation();
+        hostile.selector = format!("a\r\nrm -rf ~\x1b[201~\u{85}b{}", "x".repeat(1000));
+        let encoded = serde_json::to_string(&hostile).unwrap();
+        let url = tauri::Url::parse_with_params(
+            "forge-preview-annotation://pick",
+            &[("payload", encoded)],
+        )
+        .unwrap();
+        let decoded = annotation_from_navigation(&url).unwrap();
+        assert!(!decoded.selector.chars().any(|c| c.is_control()));
+        assert_eq!(decoded.selector.chars().count(), MAX_SELECTOR_CHARS);
+        assert!(decoded.selector.starts_with("a  rm -rf ~"));
+    }
+
+    #[test]
+    fn console_script_never_navigates_the_top_frame() {
+        let script = console_script();
+        for top_frame in [
+            "location.href",
+            "location.assign",
+            "location.replace",
+            "window.location",
+        ] {
+            assert!(!script.contains(top_frame), "{top_frame}");
+        }
+        assert!(script.contains("createElement(\"iframe\")"));
+        assert!(script.contains("pagehide"));
     }
 
     #[test]

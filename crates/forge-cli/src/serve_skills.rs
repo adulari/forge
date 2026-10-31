@@ -24,9 +24,9 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::commands::marketplace::{
-    add_marketplace_at, install_pack_to, installed_path, list_available, load_installed_at,
-    load_marketplaces_at, marketplaces_path, remove_marketplace_at, remove_plugin_at, skills_dir,
-    MarketplaceEntry, Marketplaces,
+    add_marketplace_at, install_pack_to, installed_path, is_plain_name, list_available,
+    load_installed_at, load_marketplaces_at, marketplaces_path, remove_marketplace_at,
+    remove_plugin_at, skills_dir, MarketplaceEntry, Marketplaces,
 };
 use crate::serve::{err_response, json_response, DaemonState};
 use crate::serve_git::session_repo_root;
@@ -439,7 +439,9 @@ async fn sync(State(state): State<Arc<DaemonState>>, Json(body): Json<SyncBody>)
 }
 
 /// Link every on-disk skill of `sources` into `<base>/.agents/skills` and `<base>/.claude/skills`.
-/// A real directory already there is never touched; it is reported as a conflict.
+/// A real directory, or a symlink Forge did not create (one not pointing into a Forge skills
+/// root), is never touched; it is reported as a conflict. Skills whose name is not a single safe
+/// path component are never linked.
 pub(crate) fn sync_skills(
     sources: &forge_skills::Sources,
     base: &Path,
@@ -462,13 +464,25 @@ pub(crate) fn sync_skills(
         }
         for target in &targets {
             let link = target.join(&skill.name);
+            if !is_plain_name(&skill.name) || link.parent() != Some(target.as_path()) {
+                report.conflicts.push(link.display().to_string());
+                continue;
+            }
             if std::fs::create_dir_all(target).is_err() {
                 continue;
             }
             match std::fs::symlink_metadata(&link) {
                 Ok(meta) if meta.file_type().is_symlink() => {
-                    if std::fs::read_link(&link).ok().as_deref() == Some(skill.dir.as_path()) {
+                    let current = std::fs::read_link(&link).ok();
+                    if current.as_deref() == Some(skill.dir.as_path()) {
                         report.linked.push(link.display().to_string());
+                        continue;
+                    }
+                    let forge_owned = current
+                        .as_deref()
+                        .is_some_and(|c| sources.skills.iter().any(|s| c.starts_with(&s.path)));
+                    if !forge_owned {
+                        report.conflicts.push(link.display().to_string());
                         continue;
                     }
                     let _ = std::fs::remove_file(&link);
@@ -533,7 +547,6 @@ async fn invoke(State(state): State<Arc<DaemonState>>, Json(body): Json<InvokeBo
                         format!("no skill named {name}"),
                     ));
                 }
-                forge_config::skill_usage::record_skill_use(&name);
                 let uses = forge_config::skill_usage::skill_use_counts()
                     .get(&name)
                     .copied()

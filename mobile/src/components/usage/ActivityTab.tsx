@@ -15,6 +15,7 @@ import {
   type HeatCell,
 } from "../../lib/usageActivity";
 import { canSaveShareImage, shareUsageCard } from "../../lib/usageShareCard";
+import { useToday } from "../../lib/useToday";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type } from "../../theme/typography";
@@ -49,7 +50,7 @@ export function ActivityTab({ rows, loading, failed }: { rows: UsageActivityDay[
   const [account, setAccount] = useState<string | null>(null);
   const [picked, setPicked] = useState<HeatCell | null>(null);
   const [shareNote, setShareNote] = useState<string | null>(null);
-  const today = useMemo(() => new Date(), []);
+  const today = useToday(rows);
   const accounts = useMemo(() => activityProviders(rows ?? []), [rows]);
   const filtered = useMemo(() => filterProvider(rows ?? [], account), [rows, account]);
   const weeks = useMemo(() => buildHeatmap(filtered, today, window), [filtered, today, window]);

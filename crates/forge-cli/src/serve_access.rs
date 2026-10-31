@@ -216,7 +216,7 @@ pub(crate) fn required(method: &Method, path: &str) -> Need {
     ) {
         return Need::Owner;
     }
-    if path == "/ws/terminal" || path.starts_with("/api/terminals") {
+    if path == "/ws/terminal" || path == "/api/ports" || path.starts_with("/api/terminals") {
         return Need::Scope(Scope::Terminal);
     }
     if path.starts_with("/api/providers")

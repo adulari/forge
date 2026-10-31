@@ -36,11 +36,16 @@ mod device;
 mod discovery_tools;
 pub mod evidence;
 pub mod fs_write;
+pub mod harness;
 mod job_object;
+pub mod kernel;
 mod lattice_tool;
+pub mod lsp_tool;
 mod open_pr;
 mod proxy;
 mod sandbox;
+pub mod schema_check;
+mod search_paging;
 mod shell;
 pub mod tunnel;
 mod web;
@@ -60,7 +65,7 @@ pub(crate) mod test_state {
     }
 }
 
-pub use arg_shape::normalize_args;
+pub use arg_shape::{compact_schema, normalize_args, type_mismatches};
 pub use browser::{set_attach_endpoint, set_browser_permissions, BrowserNetworkTool, BrowserTool};
 pub use core_tools::hashline::file_tag as hashline_file_tag;
 pub use core_tools::{
@@ -69,6 +74,10 @@ pub use core_tools::{
 };
 pub use device::{DeviceLogsTool, DeviceTool};
 pub use evidence::scope_session;
+pub use harness::set_harness;
+pub use kernel::PYTHON_TOOL;
+#[cfg(unix)]
+pub use kernel::{discover_python, PythonTool};
 pub use lattice_tool::LatticeTool;
 pub use open_pr::{
     create_pr_in, set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn,
@@ -421,6 +430,48 @@ mod tests {
             .is_ok());
         assert!(!origin.join("node_modules/new.js").exists());
         assert!(wt.join("node_modules/new.js").exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_bound_registry_keeps_full_output() {
+        struct FullTool;
+        #[async_trait]
+        impl Tool for FullTool {
+            fn name(&self) -> &str {
+                "full_probe"
+            }
+            fn description(&self) -> &str {
+                "probe"
+            }
+            fn side_effect(&self) -> SideEffect {
+                SideEffect::ReadOnly
+            }
+            fn schema(&self) -> Value {
+                serde_json::json!({ "type": "object" })
+            }
+            async fn run(&self, _args: &Value) -> Result<String, ToolError> {
+                Ok("short".into())
+            }
+            async fn run_full(&self, _args: &Value) -> Result<ToolRun, ToolError> {
+                Ok(ToolRun {
+                    model: "short".into(),
+                    full: Some("the whole output".into()),
+                })
+            }
+        }
+        let workspace = std::env::temp_dir().join(format!("forge-run-full-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut registry = ToolRegistry::default();
+        registry.bind_workspace(&workspace);
+        registry.register(Box::new(FullTool));
+        let run = registry
+            .get("full_probe")
+            .unwrap()
+            .run_full(&serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(run.full.as_deref(), Some("the whole output"));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]

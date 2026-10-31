@@ -423,7 +423,9 @@ async fn complete_with_failover(
                     // bench and fall over to the next model.
                     let transient = matches!(
                         e,
-                        ProviderError::RateLimited { .. } | ProviderError::Unavailable(_)
+                        ProviderError::RateLimited { .. }
+                            | ProviderError::Overloaded { .. }
+                            | ProviderError::Unavailable(_)
                     );
                     if transient && attempt + 1 < MAX_ATTEMPTS {
                         let base = e
@@ -737,6 +739,63 @@ mod tests {
             st.current_benched().unwrap().is_benched("bad::model"),
             "the rate-limited model was benched"
         );
+    }
+
+    /// Answers `Overloaded` to the first `busy` calls on every model, then plays critic/verifier.
+    struct BusyThenOk {
+        inner: FailoverProvider,
+        busy: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BusyThenOk {
+        async fn complete(
+            &self,
+            model: &str,
+            messages: &[Message],
+            tools: &[ToolSpec],
+            on_event: &mut EventSink<'_>,
+        ) -> Result<ModelResponse, ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.busy {
+                return Err(ProviderError::Overloaded {
+                    status: 503,
+                    reason: "gateway_overloaded".into(),
+                    message: "busy".into(),
+                    retry_after: Some(std::time::Duration::from_secs(1)),
+                });
+            }
+            self.inner.complete(model, messages, tools, on_event).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_busy_critic_is_retried_not_benched() {
+        let provider = Arc::new(BusyThenOk {
+            inner: FailoverProvider {
+                bad: Default::default(),
+            },
+            busy: 1,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let st = store();
+        let report = run_assay(
+            AssayScope::Repo,
+            Arc::from("fn main() {}"),
+            vec![FindingCategory::Correctness],
+            TierModels {
+                trivial: vec![],
+                complex: vec!["only::model".into()],
+            },
+            provider,
+            pricing(),
+            st.clone(),
+            std::time::Duration::from_secs(60),
+            &mut |_| {},
+        )
+        .await;
+        assert_eq!(report.findings.len(), 1, "{report:?}");
+        assert!(!st.current_benched().unwrap().is_benched("only::model"));
     }
 
     #[tokio::test]

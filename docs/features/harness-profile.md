@@ -100,6 +100,12 @@ A flag that is on wins over `harness_profile = "minimal"` (the built-in default 
 | `stop_retries` | An announced-but-undone final reply is continued up to 3 times ("Call the next concrete tool now"); empty replies get 3 corrective retries before the bench/failover path; a tool call written as text gets 3 re-issue requests. A single empty reply never benches a model. |
 | `thinking_loop_breaker` | When consecutive tool-free replies restate an earlier one (stall_guard opening similarity), injects "Act, don't re-plan: make the next tool call." at most twice per stretch. |
 | `repeat_interrupt` | After 5 identical calls with identical results, names the call and says not to repeat it; the progress ledger's cycle stop moves from 5 to 7 repeats so the model gets two steps to react. Repeats with new results (polling) never count. |
+| `stream_silence_retry` | Factory Droid's stream-silence watchdog. The stream idle window is raised to at least 240s and a stalled stream (no event of any kind for that long, reasoning deltas and keepalives included) is retried on the same model up to twice before the normal failover path. Off, a stall fails over at once on the 180s window. |
+| `wait_job` | `shell_job` gains `action: "wait"` with `timeout_secs` (default 60, max 600): blocks until the job exits and returns the exit code and the last 30 log lines, or says it is still running. The job-wake notice for an exit the wait reported is suppressed. Only the advertised spec changes with the flag, so the tool list is byte-identical when off. |
+| `append_only_prefix` | The task-list snapshot leaves the pinned session context block (which sits in front of the whole transcript, so a changed list rewrote the cached prefix on the first request of the next turn) and is appended to the transcript as a `[task list snapshot]` note, only when the list differs from the newest snapshot the transcript holds. Re-sent after a compaction. |
+| `cache_monitor` | Warns on the first request that breaks the provider prompt cache, with the cause: tools added or removed, or which already-sent message changed. Off, only two unexplained rewrites in a row warn. Deliberate rewrites (compaction, floor moves, rewinds) never warn. |
+| `compaction_summary_cap` | Caps a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k, and tells the summarizer the size. A smaller trigger window already gets a smaller share. |
+| `eval_kernel` | Advertises a `python` tool: a persistent per-session Python kernel (variables, imports and loaded data survive between calls). Not a loop-stop behaviour, so `harness_profile = "minimal"` does not affect it. See [eval-kernel.md](eval-kernel.md). |
 
 ```toml
 [harness]
@@ -107,4 +113,60 @@ completion_contract = true
 stop_retries = true
 thinking_loop_breaker = true
 repeat_interrupt = true
+stream_silence_retry = true
+wait_job = true
+append_only_prefix = true
+cache_monitor = true
+compaction_summary_cap = true
+eval_kernel = true
 ```
+
+Already covered without a flag: the progress ledger nudges at the third identical call-and-result and stops at the fifth (`repeat_interrupt` moves the stop to the seventh); `stop_retries` is the three-empty-turns stop.
+## Family profiles (A/B, default off)
+
+`[harness] family_profiles = true` turns on one more layer: a table keyed by model family
+(`crates/forge-config/src/model_family.rs`, `profile_for`). The family comes from the bare model
+name (`deepseek`, `kimi`/`moonshot`, `qwen`, `glm`, `claude`, `gpt`/`codex`, `gemini`, else
+`generic`), whatever the namespace, so `modelgateway::deepseek-v4.1-flash` and
+`inferhub::cb/deepseek-v4.1-flash` are both DeepSeek. It follows the model driving each step, like
+`harness_profile`. `/mesh` and `forge mesh` end their rationale with the active profile
+(`harness: family kimi: ...`). A full settings UI is not planned for an internal tuning table.
+
+Each row carries: edit mode, tool-doc verbosity, `[harness]` flags it defaults on, a prompt delta
+appended to the base system prompt, and reasoning handling. Explicit user config always wins: a
+flag named in `config.toml`, the project config or `FORGE_HARNESS__*` keeps its value, true or
+false. Every row starts from today's behaviour; only evidence-backed differences are listed.
+
+| Family | Differs from today |
+| --- | --- |
+| kimi | `stop_retries` on; a prompt delta ("never announce a tool call and then end the turn"); reasoning echoed on every assistant message |
+| deepseek | reasoning echoed on every assistant message (matters behind custom gateways) |
+| qwen, glm, claude, gpt, gemini, generic | nothing |
+
+Edit mode is `str_replace` for every family (the same shape as oh-my-pi's `replace` mode, which it
+gives Kimi and DeepSeek instead of hashline). Hashline and whole-file are not implemented, so the
+column is informational until the edit A/B.
+
+### Dialect fixes (always on)
+
+- **In-band tool calls.** A reply that carries the chat template's own tool-call tokens as text
+  (a complete opener outside code fences and inline code, followed by an argument or separator
+  token) now runs: Kimi `<|tool_calls_section_begin|><|tool_call_begin|>functions.NAME:IDX
+  <|tool_call_argument_begin|>{json}<|tool_call_end|>` and DeepSeek V3
+  `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME` + a json fence. ASCII-flattened
+  tokens work, a missing `<|tool_call_end|>` is tolerated, and a block with bad JSON runs nothing.
+  The live stream holds a block back only from a complete opener token, outside code, and releases
+  the text at the end of the stream if it does not parse as calls. DSML keeps its older behaviour (`chat_template_calls.rs`,
+  `dsml_stream_guard.rs`).
+- **Reasoning echo behind gateways.** Native `deepseek::` and `kimi::` ids always got
+  `reasoning_content` back on assistant messages; a custom provider serving the same model did not
+  get the empty field when a reply streamed no reasoning. With `family_profiles` on, the field is
+  sent for DeepSeek and Kimi families through any user-declared `[[providers.custom]]` gateway only, never for
+  distills or strict hosts such as groq or nvidia (`CompletionOptions::echo_reasoning`).
+  ModelGateway does not reject its absence (measured 2026-10-31), but only engages thinking on the
+  next turn when it is present.
+`subagent_output_schema` is a fifth flag in the same table but a different kind: it changes `spawn_agents`,
+not the main loop. See "Structured results" in `docs/features/subagent-orchestration.md`. Default off; with it
+off the spawn spec, the child prompt and the combined output are byte-identical.
+A fifth, separate switch, `[harness.advisor]`, adds a second-model review at DONE; see
+[advisor.md](advisor.md).

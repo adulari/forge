@@ -209,7 +209,9 @@ pub(crate) fn verb(name: &str) -> String {
         "web_fetch" => "Fetch",
         "web_search" => "Web",
         "spawn_agents" => "Agents",
+        "submit_result" => "Result",
         "run_code" => "Script",
+        "python" => "Python",
         other => return other.to_string(),
     }
     .to_string()
@@ -629,6 +631,13 @@ fn arg_rows_for(card: &ToolCard) -> Vec<(String, String)> {
 pub(crate) fn headline(name: &str, args: &str) -> String {
     if name == "run_code" {
         return super::script_row::headline(args);
+    }
+    if name == "python" {
+        return super::script_row::code(args)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("```"))
+            .map_or_else(|| oneline(args), shorten_in);
     }
     let Some(value) = serde_json::from_str::<Value>(args).ok() else {
         return oneline(args);
@@ -1058,6 +1067,7 @@ mod tests {
             ("web_fetch", "Fetch"),
             ("web_search", "Web"),
             ("spawn_agents", "Agents"),
+            ("submit_result", "Result"),
             ("mcp__srv__lookup", "lookup"),
             ("custom_tool", "custom_tool"),
         ] {
