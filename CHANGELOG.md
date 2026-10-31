@@ -14,6 +14,10 @@ All notable changes to Forge are documented here. The format follows
 
 - **`/anywhere` opens a real Forge Anywhere menu in the terminal, with account sync in it.** One overlay shows your account, the connector and this device, the five sync categories (keys, skills, settings, MCP servers, instructions) with an on/off switch each, item and pending counts, last sync, conflicts and skipped items with their reasons, a Sync now action, a Sign in again list for logins that do not sync (Codex, xAI, MCP OAuth, run through the existing flows), and the enrolled devices. Arrows, Tab, Space/Enter and Esc drive it, it refreshes while open, and it spells out the not signed in, loading and error states with a next step. Turning keys on asks first and explains that they are sealed with a second vault key and that OAuth tokens never sync; turning any category off leaves local data in place; the web Recovery Center stays one labelled row away. The statusline now shows the sync badge on its own while any category is on (`/statusline toggle sync` hides it).
 
+### Fixed
+
+- **Account sync no longer reverts, deletes or half-writes your items when devices disagree.** A device with two ids for one item now keeps its own newest edit instead of overwriting it with an older copy and then uploading the stale one; a broken `mcp.toml`, `marketplaces.toml`, `installed-skills.toml`, `config.toml`, `AGENTS.md` or unreadable skill is skipped for the cycle instead of reading as "everything was deleted" and sending tombstones to every device (and Forge never rewrites a file it cannot parse); a skill is written into a staging directory and swapped in, so a failed write leaves the previous copy whole; two devices that edit the same item before meeting converge on one value, keep the other as a `.conflict` copy, and no longer jam the upload queue on a rejected revision; and a deferred MCP or pack apply keeps the last synced state so the untouched local copy cannot win a later conflict.
+
 ## [2.26.0] - 2026-10-30
 
 ### Added

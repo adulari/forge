@@ -37,6 +37,7 @@ pub(crate) mod peers;
 pub(crate) mod push;
 mod share;
 mod sync;
+mod sync_conflict;
 pub(crate) mod tui_menu;
 
 pub(crate) fn spawn_connector(local_base_url: String) -> tokio::task::JoinHandle<()> {

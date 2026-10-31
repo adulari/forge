@@ -63,7 +63,7 @@ pub(super) fn secret_slots() -> Vec<(String, String)> {
         forge_config::CLAUDE_OAUTH_TOKEN_SLOT.into(),
         "Claude Code token".into(),
     ));
-    for server in user_mcp().servers {
+    for server in user_mcp().0.servers {
         for slot in server.keyring_keys() {
             slots.push((slot.clone(), format!("MCP {} secret ({slot})", server.name)));
         }
@@ -96,16 +96,24 @@ pub(super) fn slot_is_syncable(slot: &str) -> bool {
     known || mcp
 }
 
-fn user_mcp() -> forge_config::mcp::McpConfig {
+fn user_mcp() -> (forge_config::mcp::McpConfig, Option<String>) {
     config_dir().map_or_else(Default::default, |dir| {
-        forge_config::load_mcp_toml(&dir.join("mcp.toml"))
+        forge_config::mcp::load_mcp_toml_with_diagnostic(&dir.join("mcp.toml"))
     })
+}
+
+fn unreadable(label: &str, reason: &str, guard: &str) -> Skip {
+    Skip {
+        label: label.into(),
+        reason: reason.into(),
+        guard: Some(guard.into()),
+    }
 }
 
 pub(super) fn collect(category: Category) -> (Vec<LocalItem>, Vec<Skip>) {
     let mut skips = Vec::new();
     let items = match category {
-        Category::Keys => keys(),
+        Category::Keys => keys(&mut skips),
         Category::Skills => skills(&mut skips),
         Category::Settings => settings(&mut skips),
         Category::Mcp => mcp(&mut skips),
@@ -132,8 +140,17 @@ fn item(
     }
 }
 
-fn keys() -> Vec<LocalItem> {
+fn keys(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
     let mut out = Vec::new();
+    let (mcp_config, mcp_problem) = user_mcp();
+    if mcp_problem.is_some() {
+        skips.push(unreadable(
+            "mcp.toml",
+            "could not be read, MCP secrets are left alone until it is fixed",
+            "mcp:",
+        ));
+        skips.push(unreadable("mcp.toml", "could not be read", "login/mcp:"));
+    }
     for (slot, label) in secret_slots() {
         if let Some(value) = forge_config::load_secret(&slot).filter(|v| !v.trim().is_empty()) {
             out.push(item(
@@ -155,7 +172,7 @@ fn keys() -> Vec<LocalItem> {
             ));
         }
     }
-    for server in user_mcp().servers {
+    for server in mcp_config.servers {
         if forge_config::oauth::load_oauth_tokens(&server.name).is_some() {
             out.push(marker(
                 Category::Keys,
@@ -184,7 +201,14 @@ fn skills(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    let installed = installed_packs(&dir);
+    let installed = match installed_packs(&dir) {
+        Ok(installed) => installed,
+        Err(reason) => {
+            skips.push(unreadable("installed-skills.toml", &reason, "pack/"));
+            skips.push(unreadable("installed-skills.toml", &reason, "skill/"));
+            BTreeMap::new()
+        }
+    };
     let pack_files: Vec<&String> = installed.values().flat_map(|e| e.files.iter()).collect();
     for (sub, kind) in [
         ("skills", "skill"),
@@ -216,8 +240,13 @@ fn skills(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
                 Ok(None) => skips.push(Skip {
                     label,
                     reason: "larger than 4 MB".into(),
+                    guard: None,
                 }),
-                Err(_) => {}
+                Err(_) => skips.push(unreadable(
+                    &label,
+                    "could not be read",
+                    &format!("{kind}/{name}"),
+                )),
             }
         }
     }
@@ -231,7 +260,11 @@ fn skills(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
             None,
         ));
     }
-    for (name, entry) in toml_table(&dir.join("marketplaces.toml"), "marketplaces") {
+    let marketplaces = toml_table(&dir.join("marketplaces.toml"), "marketplaces");
+    if let Err(reason) = &marketplaces {
+        skips.push(unreadable("marketplaces.toml", reason, "marketplace/"));
+    }
+    for (name, entry) in marketplaces.unwrap_or_default() {
         out.push(item(
             Category::Skills,
             format!("marketplace/{name}"),
@@ -263,8 +296,8 @@ impl Pack {
     }
 }
 
-fn installed_packs(dir: &Path) -> BTreeMap<String, PackEntryValue> {
-    toml_table(&dir.join("installed-skills.toml"), "skills")
+fn installed_packs(dir: &Path) -> Result<BTreeMap<String, PackEntryValue>, String> {
+    Ok(toml_table(&dir.join("installed-skills.toml"), "skills")?
         .into_iter()
         .map(|(name, value)| {
             (
@@ -275,7 +308,7 @@ fn installed_packs(dir: &Path) -> BTreeMap<String, PackEntryValue> {
                 },
             )
         })
-        .collect()
+        .collect())
 }
 
 /// An installed pack's lockfile entry plus the directory names it owns.
@@ -284,21 +317,24 @@ pub(super) struct PackEntryValue {
     pub value: Value,
 }
 
-fn toml_table(path: &Path, key: &str) -> Vec<(String, Value)> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
+/// A missing file is an empty table; one that exists but cannot be read or parsed is an error, so
+/// the caller never mistakes a typo for "the user removed everything".
+fn toml_table(path: &Path, key: &str) -> Result<Vec<(String, Value)>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err("could not be read".into()),
     };
-    let Ok(root) = toml::from_str::<toml::Value>(&text) else {
-        return Vec::new();
-    };
-    root.get(key)
+    let root = toml::from_str::<toml::Value>(&text).map_err(|_| "is not valid TOML".to_string())?;
+    Ok(root
+        .get(key)
         .and_then(toml::Value::as_table)
         .map(|t| {
             t.iter()
                 .filter_map(|(name, v)| serde_json::to_value(v).ok().map(|v| (name.clone(), v)))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 fn settings(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
@@ -320,24 +356,28 @@ fn settings(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
                 skips.push(Skip {
                     label: format!("setting: {key}"),
                     reason: "holds a shell command, kept on this machine".into(),
+                    guard: None,
                 });
             }
         }
-        Err(_) => skips.push(Skip {
-            label: "config.toml".into(),
-            reason: "could not be read".into(),
-        }),
+        Err(_) => skips.push(unreadable("config.toml", "could not be read", "setting/")),
     }
     if let Some(path) = forge_config::keybindings_path().filter(|p| p.is_file()) {
-        if let Ok(Some(value)) = bundle(&path) {
-            out.push(item(
+        match bundle(&path) {
+            Ok(Some(value)) => out.push(item(
                 Category::Settings,
                 "file/keybindings.json".into(),
                 "keybindings".into(),
                 "user_setting",
                 Body::Plain(value),
                 modified_ms(&path),
-            ));
+            )),
+            Ok(None) => {}
+            Err(_) => skips.push(unreadable(
+                "keybindings",
+                "could not be read",
+                "file/keybindings.json",
+            )),
         }
     }
     for (bin, label, _) in TOOLS {
@@ -359,10 +399,22 @@ fn mcp(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
     let path = dir.join("mcp.toml");
     let modified = modified_ms(&path);
     let mut out = Vec::new();
-    for server in user_mcp().servers {
+    let (config, problem) = user_mcp();
+    if problem.is_some() {
+        skips.push(unreadable(
+            "mcp.toml",
+            "is not valid TOML or could not be read",
+            "server/",
+        ));
+    }
+    for server in config.servers {
         let label = format!("mcp: {}", server.name);
         if let Some(reason) = embedded_secret(&server) {
-            skips.push(Skip { label, reason });
+            skips.push(Skip {
+                label,
+                reason,
+                guard: None,
+            });
             continue;
         }
         if let Ok(value) = serde_json::to_value(&server) {
@@ -422,9 +474,17 @@ fn instructions(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
             skips.push(Skip {
                 label: "instructions: AGENTS.md".into(),
                 reason: "larger than 4 MB".into(),
+                guard: None,
             });
             Vec::new()
         }
-        Err(_) => Vec::new(),
+        Err(_) => {
+            skips.push(unreadable(
+                "instructions: AGENTS.md",
+                "could not be read",
+                "file/AGENTS.md",
+            ));
+            Vec::new()
+        }
     }
 }

@@ -97,6 +97,10 @@ pub(crate) struct Payload {
     pub value: Option<Value>,
     #[serde(default)]
     pub sealed: Option<vault::Sealed>,
+    /// The synced hash the writing device had when it made this edit (empty when it had none). A
+    /// receiver whose own synced hash differs knows the edit was made without seeing its copy.
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 /// What one local item holds.
@@ -130,6 +134,9 @@ impl LocalItem {
 pub(crate) struct Skip {
     pub label: String,
     pub reason: String,
+    /// Item-name prefix whose source could not be read this cycle. Items under it that are absent
+    /// locally are unknown, not deleted, so reconcile leaves them alone.
+    pub guard: Option<String>,
 }
 
 pub(crate) fn canonical_json(value: &Value) -> String {
@@ -184,3 +191,5 @@ pub(crate) fn not_signed_in_message() -> &'static str {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_reconcile;

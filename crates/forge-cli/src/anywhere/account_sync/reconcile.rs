@@ -136,7 +136,12 @@ fn row(
     }
 }
 
-pub(super) fn build_payload(ctx: &Ctx, id: &str, local: &LocalItem) -> Result<Payload> {
+pub(super) fn build_payload(
+    ctx: &Ctx,
+    id: &str,
+    local: &LocalItem,
+    parent: Option<&str>,
+) -> Result<Payload> {
     let hash = ctx.vault.content_hash(&local.canonical());
     let (value, sealed) = match &local.body {
         Body::Plain(value) => (Some(value.clone()), None),
@@ -152,6 +157,7 @@ pub(super) fn build_payload(ctx: &Ctx, id: &str, local: &LocalItem) -> Result<Pa
         hash,
         value,
         sealed,
+        parent: parent.map(str::to_owned),
     })
 }
 
@@ -206,6 +212,7 @@ struct Refresh {
 
 async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
     let (locals, skips) = catalog::collect(category);
+    let guards: Vec<String> = skips.iter().filter_map(|s| s.guard.clone()).collect();
     let local: BTreeMap<String, LocalItem> =
         locals.into_iter().map(|i| (i.item.clone(), i)).collect();
     let all_states = ctx.store.account_sync_items(Some(category.id()))?;
@@ -251,6 +258,9 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
 
     let mut refresh: Vec<Refresh> = Vec::new();
     for name in names {
+        if guards.iter().any(|g| name.starts_with(g.as_str())) {
+            continue;
+        }
         let st = states.get(name);
         let loc = local.get(name);
         let cands: &[(&String, &Remote)] = live.get(name).map_or(&[], Vec::as_slice);
@@ -283,8 +293,36 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
             _ => false,
         };
         let local_removed = loc.is_none() && was_synced;
-        let remote_new = newest.is_some()
-            && (moved.is_some() || remote_clock > st.map_or(0, |s| s.remote_clock));
+        // This device's own live record for the item, under any id. A foreign record only counts as
+        // new when it beats it; otherwise applying it would overwrite what this device wrote last.
+        let own_best = cands
+            .iter()
+            .filter(|(_, r)| r.mine)
+            .map(|(_, r)| (r.clock, r.sender))
+            .max();
+        let foreign_beats_own =
+            newest.is_some_and(|(_, r)| own_best.is_none_or(|own| (r.clock, r.sender) > own));
+        // Two devices that wrote the same id at the same clock: the store keeps the higher device
+        // id's record, so the loser sees a foreign record at the clock it recorded as its own.
+        let tie_lost = match (newest, st) {
+            (Some((rid, r)), Some(s)) => {
+                !r.mine
+                    && r.clock == s.remote_clock
+                    && rid.map(String::as_str).unwrap_or(id.as_str()) == s.item_id
+                    && match &r.payload {
+                        Some(p) => p.hash != s.local_hash,
+                        None => !s.local_hash.is_empty(),
+                    }
+            }
+            _ => false,
+        };
+        let synced_hash = Some(st.map_or("", |s| s.local_hash.as_str()));
+        // The incoming edit was made on top of a version this device never synced.
+        let concurrent = rem_payload
+            .and_then(|p| p.parent.as_deref())
+            .is_some_and(|parent| Some(parent) != synced_hash);
+        let remote_new = foreign_beats_own
+            && (moved.is_some() || tie_lost || remote_clock > st.map_or(0, |s| s.remote_clock));
 
         let outcome = async {
             if remote_new {
@@ -296,7 +334,7 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
             }
             match (remote_new, local_changed || local_removed) {
                 (false, false) => Ok(None),
-                (false, true) => upload(ctx, &id, name, loc).map(Some),
+                (false, true) => upload(ctx, &id, name, loc, synced_hash).map(Some),
                 (true, false) => take_remote(
                     ctx,
                     category,
@@ -304,7 +342,7 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
                     rem_payload,
                     remote_clock,
                     name,
-                    false,
+                    loc.is_some() && (moved.is_some() || tie_lost || concurrent),
                 )
                 .await
                 .map(Some),
@@ -327,7 +365,7 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
                         .await?;
                         (step, "the other device's")
                     } else {
-                        (upload(ctx, &id, name, loc)?, "this device's")
+                        (upload(ctx, &id, name, loc, synced_hash)?, "this device's")
                     };
                     Ok(Some(match step {
                         Step::Record(c, _, _) if loc.is_some() => Step::Record(
@@ -370,8 +408,14 @@ async fn reconcile_category(ctx: &Ctx<'_>, category: Category) -> Result<()> {
                 if let Some(old) = &moved {
                     ctx.store.delete_account_sync_item(category.id(), old)?;
                 }
+                // A deferral only retries the apply later. Forgetting the synced hash would make an
+                // untouched local copy look edited and let it win a later conflict.
+                let (hash, clock) = match (loc, st) {
+                    (Some(_), Some(s)) => (s.local_hash.as_str(), s.remote_clock),
+                    _ => ("", 0),
+                };
                 ctx.store.upsert_account_sync_item(&row(
-                    category, &id, name, &label, "", 0, "skipped", &reason,
+                    category, &id, name, &label, hash, clock, "skipped", &reason,
                 ))?;
             }
             Err(error) => {
@@ -444,7 +488,7 @@ fn collapse_duplicates(
         .is_some_and(|(_, r)| r.mine && r.clock >= newest.clock);
     if !canonical_is_mine_newest {
         if let Some(l) = loc {
-            upload(ctx, canonical, name, Some(l))?;
+            upload(ctx, canonical, name, Some(l), None)?;
         } else {
             return Ok(());
         }
@@ -461,11 +505,17 @@ pub(super) enum Step {
     Skipped(String),
 }
 
-fn upload(ctx: &Ctx, id: &str, name: &str, loc: Option<&LocalItem>) -> Result<Step> {
+fn upload(
+    ctx: &Ctx,
+    id: &str,
+    name: &str,
+    loc: Option<&LocalItem>,
+    parent: Option<&str>,
+) -> Result<Step> {
     let kind = loc.map_or_else(|| kind_for(name), |l| l.kind);
     match loc {
         Some(local) => {
-            let payload = serde_json::to_vec(&build_payload(ctx, id, local)?)?;
+            let payload = serde_json::to_vec(&build_payload(ctx, id, local, parent)?)?;
             ctx.store
                 .write_portable_sync_record(ctx.device_id, kind, id, Some(&payload))?;
         }
