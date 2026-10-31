@@ -300,6 +300,7 @@ pub(crate) fn import_rollout(
         .or_else(|| rollout.meta.first_prompt.as_deref().and_then(clean_title));
     let model = pin_codex(rollout.meta.model.as_deref());
     let count = rollout.messages.len();
+    let summary = rollout.summary.clone();
     let session_id = store.import_session_linked_with(
         &ImportedSessionMeta {
             cwd: &cwd,
@@ -320,7 +321,7 @@ pub(crate) fn import_rollout(
                     created_at: m.timestamp,
                 })?;
             }
-            Ok(None)
+            Ok(summary)
         },
     )?;
     Ok((session_id, count))
@@ -354,8 +355,11 @@ pub(crate) fn import_from(
     mode: &str,
 ) -> Vec<Outcome> {
     let mut ledger = Ledger::open(store);
+    // The same conversation named twice is imported once.
+    let mut seen = std::collections::HashSet::new();
     picks
         .iter()
+        .filter(|pick| seen.insert((pick.agent, pick.id.clone())))
         .map(|pick| {
             let Some(c) = candidates
                 .iter()

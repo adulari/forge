@@ -30,6 +30,8 @@ pub(crate) struct RolloutMeta {
 pub(crate) struct Rollout {
     pub(crate) meta: RolloutMeta,
     pub(crate) messages: Vec<Imported>,
+    /// What the last `compacted` item replaced the earlier history with.
+    pub(crate) summary: Option<String>,
 }
 
 /// `$CODEX_HOME/sessions`, else `~/.codex/sessions`.
@@ -249,6 +251,27 @@ fn output_text(raw: &Value) -> String {
     }
 }
 
+/// The summary a `compacted` item carries: its `message`, else the text of the user messages in
+/// its replacement history (where Codex keeps the summary as a user turn).
+fn compaction_summary(p: &Value) -> Option<String> {
+    let direct = p["message"]
+        .as_str()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    if let Some(m) = direct {
+        return Some(m.to_string());
+    }
+    let joined = p["replacement_history"]
+        .as_array()?
+        .iter()
+        .filter(|i| i["role"] == "user")
+        .map(|i| text_blocks(&i["content"]))
+        .filter(|t| !t.trim().is_empty() && !is_injected(t))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(joined).filter(|j| !j.trim().is_empty())
+}
+
 /// Read a whole rollout into Forge messages: user and assistant text, tool calls on the assistant
 /// message that made them, and their outputs as tool rows. Reasoning is encrypted and dropped.
 pub(crate) fn read(path: &Path) -> Result<Rollout> {
@@ -257,6 +280,7 @@ pub(crate) fn read(path: &Path) -> Result<Rollout> {
     let mut out: Vec<Imported> = Vec::new();
     let mut turn = Turn::default();
     let mut current_model: Option<String> = None;
+    let mut summary: Option<String> = None;
 
     let flush = |turn: &mut Turn, out: &mut Vec<Imported>| {
         if turn.is_empty() {
@@ -287,6 +311,16 @@ pub(crate) fn read(path: &Path) -> Result<Rollout> {
         note_meta(&mut meta, &v);
         let p = payload(&v);
         match kind(&v) {
+            "compacted" => {
+                // Codex sends its model the summary instead of everything before this point, so
+                // the earlier rows stay in history but leave the live context, as /compact does.
+                flush(&mut turn, &mut out);
+                out.iter_mut().for_each(|m| m.live = false);
+                let text = compaction_summary(p);
+                if text.is_some() {
+                    summary = text;
+                }
+            }
             "turn_context" => {
                 current_model = p["model"]
                     .as_str()
@@ -399,7 +433,11 @@ pub(crate) fn read(path: &Path) -> Result<Rollout> {
         normalizer.push(m, &mut emit)?;
     }
     normalizer.finish(&mut emit)?;
-    Ok(Rollout { meta, messages })
+    Ok(Rollout {
+        meta,
+        messages,
+        summary,
+    })
 }
 
 #[cfg(test)]

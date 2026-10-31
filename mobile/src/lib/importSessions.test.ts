@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   type ImportCandidate,
   allSelected,
+  IMPORT_BATCH,
+  chunk,
+  mergeReplies,
   conversationAge,
   filterCandidates,
   folderOptions,
@@ -111,5 +114,20 @@ describe("messages", () => {
     expect(conversationAge(100, 130_000)).toBe("just now");
     expect(conversationAge(0, 3 * 3600 * 1000)).toBe("3h ago");
     expect(conversationAge(0, 2 * 86_400 * 1000)).toBe("2d ago");
+  });
+});
+
+describe("batching", () => {
+  it("splits 1200 selected conversations into requests under the host cap and merges the replies", () => {
+    const ids = Array.from({ length: 1200 }, (_, i) => i);
+    const batches = chunk(ids, IMPORT_BATCH);
+    expect(batches.every((b) => b.length <= IMPORT_BATCH && b.length <= 500)).toBe(true);
+    expect(batches.flat()).toEqual(ids);
+    expect(chunk([], IMPORT_BATCH)).toEqual([]);
+    const merged = mergeReplies([
+      { results: [], imported: 50, skipped: 1, failed: 0 },
+      { results: [], imported: 49, skipped: 0, failed: 2 },
+    ]);
+    expect([merged.imported, merged.skipped, merged.failed]).toEqual([99, 1, 2]);
   });
 });

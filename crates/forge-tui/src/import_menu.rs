@@ -270,6 +270,12 @@ impl ImportMenu {
             }
             KeyKind::Right => self.select_all_visible(),
             KeyKind::Left => self.selected.clear(),
+            // Once there is search text a space belongs to it ("flaky test"); Right then selects
+            // every match and Enter imports the focused row.
+            KeyKind::Char(' ') if !self.query.is_empty() => {
+                self.query.push(' ');
+                self.cursor = 0;
+            }
             KeyKind::Char(' ') => {
                 self.toggle_focused();
                 self.cursor = (self.cursor + 1).min(self.visible().len().saturating_sub(1));

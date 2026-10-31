@@ -114,3 +114,58 @@ fn locate_finds_a_rollout_by_session_id() {
     assert_eq!(id_from_filename(&path).as_deref(), Some(CODEX_ID));
     assert!(locate("no-such-session").is_err());
 }
+
+fn write_compacted(dir: &Path) -> PathBuf {
+    let path = dir.join(format!("rollout-2026-10-02T10-00-00-{CODEX_ID}.jsonl"));
+    let msg = |role: &str, kind: &str, text: &str| {
+        json!({"type": "response_item", "payload": {"type": "message", "role": role,
+            "content": [{"type": kind, "text": text}]}})
+    };
+    let lines = [
+        json!({"type": "session_meta", "payload": {"id": CODEX_ID, "cwd": "/work/proj"}}),
+        msg("user", "input_text", "first task"),
+        msg("assistant", "output_text", "first answer"),
+        json!({"type": "compacted", "payload": {"message": "we did the first task"}}),
+        msg("user", "input_text", "second task"),
+        msg("assistant", "output_text", "second answer"),
+    ];
+    let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    std::fs::write(&path, text.join("\n") + "\n").unwrap();
+    path
+}
+
+#[test]
+fn a_compaction_takes_the_earlier_rows_out_of_the_live_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = read(&write_compacted(dir.path())).unwrap();
+    assert_eq!(r.summary.as_deref(), Some("we did the first task"));
+    let live: Vec<(&str, bool)> = r
+        .messages
+        .iter()
+        .map(|m| (m.content.as_str(), m.live))
+        .collect();
+    assert_eq!(
+        live,
+        [
+            ("first task", false),
+            ("first answer", false),
+            ("second task", true),
+            ("second answer", true)
+        ]
+    );
+}
+
+#[test]
+fn a_compaction_without_a_message_falls_back_to_the_replacement_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir
+        .path()
+        .join(format!("rollout-2026-10-02T10-00-00-{CODEX_ID}.jsonl"));
+    let compacted = json!({"type": "compacted", "payload": {"message": "", "replacement_history": [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "summary as a user turn"}]}]}});
+    std::fs::write(&path, format!("{compacted}\n")).unwrap();
+    assert_eq!(
+        read(&path).unwrap().summary.as_deref(),
+        Some("summary as a user turn")
+    );
+}

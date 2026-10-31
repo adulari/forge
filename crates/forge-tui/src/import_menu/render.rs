@@ -141,8 +141,19 @@ fn footer(m: &ImportMenu, max: usize) -> String {
     let mut pairs: Vec<(String, &str)> = vec![
         (g().up_down.to_string(), "move"),
         ("Enter".into(), "import"),
-        ("Space".into(), "select"),
-        (g().left_right.to_string(), "all/none"),
+        if m.query.is_empty() {
+            ("Space".into(), "select")
+        } else {
+            ("Space".into(), "types a space")
+        },
+        (
+            g().left_right.to_string(),
+            if m.query.is_empty() {
+                "all/none"
+            } else {
+                "matches/none"
+            },
+        ),
         ("Tab".into(), "agent"),
         ("Esc".into(), "close"),
     ];

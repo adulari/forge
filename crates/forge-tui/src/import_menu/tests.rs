@@ -150,3 +150,16 @@ fn an_empty_scan_and_a_failed_scan_say_so() {
     app.import_menu.apply_scan(Err("disk on fire".into()));
     assert!(screen(&app, 80, 24).contains("disk on fire"));
 }
+
+#[test]
+fn a_space_in_the_search_is_typed_not_a_selection() {
+    let mut m = menu();
+    for c in "fix the".chars() {
+        m.key(KeyKind::Char(c));
+    }
+    assert_eq!(m.query, "fix the");
+    assert_eq!(m.selected_count(), 0);
+    assert_eq!(m.visible().len(), 1);
+    m.key(KeyKind::Right);
+    assert_eq!(m.selected_count(), 1, "Right selects the matches");
+}

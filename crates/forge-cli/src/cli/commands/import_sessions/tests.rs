@@ -188,3 +188,45 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+#[test]
+fn a_compacted_codex_session_imports_with_its_summary_and_only_later_rows_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let rollout = dir
+        .path()
+        .join("rollout-2026-10-02T10-00-00-0199aaaa-1111-7222-8333-444455556666.jsonl");
+    let lines = [
+        json!({"type": "session_meta", "payload": {"id": "0199aaaa-1111-7222-8333-444455556666", "cwd": "/work"}}),
+        json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "first task"}]}}),
+        json!({"type": "compacted", "payload": {"message": "summary of the first task"}}),
+        json!({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "second task"}]}}),
+    ];
+    let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    std::fs::write(&rollout, text.join("\n") + "\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    let (id, _) = import_rollout(&store, &rollout, None, None, "Default").unwrap();
+    assert_eq!(store.load_all_messages(&id).unwrap().len(), 2);
+    let live = store.load_messages(&id).unwrap();
+    let shape: Vec<&str> = live.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(shape.len(), 2, "{shape:?}");
+    assert!(shape[0].contains("summary of the first task"));
+    assert_eq!(shape[1], "second task");
+    assert!(store.session_has_compaction(&id).unwrap());
+}
+
+#[test]
+fn naming_a_conversation_twice_or_importing_it_again_makes_one_session() {
+    let cwd = tempfile::tempdir().unwrap();
+    let fx = fixture(&cwd.path().display().to_string());
+    let store = Store::open(fx.store_dir.path().join("forge.db")).unwrap();
+    let found = scan_in(Some(&fx.projects), Some(&fx.sessions), Some(&store));
+    let mut twice = picks(&found);
+    twice.extend(picks(&found));
+    let out = import_from(&store, &found, &twice, None, "Default");
+    assert_eq!(out.len(), 2, "duplicates in one request collapse");
+    // A retry after a timeout scans again and finds both already imported.
+    let rescanned = scan_in(Some(&fx.projects), Some(&fx.sessions), Some(&store));
+    let retry = import_from(&store, &rescanned, &twice, None, "Default");
+    assert!(retry.iter().all(|o| o.skipped));
+    assert_eq!(store.list_sessions().unwrap().len(), 2);
+}

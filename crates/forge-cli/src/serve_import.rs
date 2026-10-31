@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 use crate::cli::commands::import_sessions::{self, Candidate, Outcome, Selection};
 use crate::serve::{err_response, json_response, DaemonState};
 
+/// One import at a time: a retry after a client timeout must wait for the first request, then find
+/// its conversations already imported instead of importing them again alongside it.
+static IMPORTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// More than this in one request is a mistake, not a selection.
 const MAX_PICKS: usize = 500;
 
@@ -85,6 +89,7 @@ async fn import(State(state): State<Arc<DaemonState>>, Json(body): Json<ImportBo
             );
         }
     }
+    let _single_flight = IMPORTING.lock().await;
     let store = state.store.clone();
     let mode = import_sessions::default_mode();
     let results = tokio::task::spawn_blocking(move || {

@@ -148,3 +148,21 @@ export function conversationAge(modifiedSecs: number, nowMs: number): string {
   if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86_400)}d ago`;
 }
+
+/** Conversations per request: well under the host's cap, and short enough to finish in time. */
+export const IMPORT_BATCH = 50;
+
+export function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+export function mergeReplies(replies: readonly ImportReply[]): ImportReply {
+  return {
+    results: replies.flatMap((r) => r.results),
+    imported: replies.reduce((n, r) => n + r.imported, 0),
+    skipped: replies.reduce((n, r) => n + r.skipped, 0),
+    failed: replies.reduce((n, r) => n + r.failed, 0),
+  };
+}

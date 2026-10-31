@@ -6,6 +6,7 @@
 // listed last in the task spec: react-native-gesture-handler requires its root view to wrap
 // the entire tree, and SafeAreaProvider must wrap every safe-area consumer below it (ToastHost,
 // Screen, AppLock's lock view all use SafeAreaView/useSafeAreaInsets).
+import { isOnboardingExempt } from "../lib/onboarding/exemptRoutes";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persister";
 import { QueryClient } from "@tanstack/react-query";
@@ -155,7 +156,7 @@ function RootNavigator() {
   const pathname = usePathname();
   const onboardingBrief = useOnboardingBrief();
   const openOnboarding =
-    onboardingBrief?.open === true && !onboardingDismissed() && !/^\/onboarding(\/|$)/.test(pathname);
+    onboardingBrief?.open === true && !onboardingDismissed() && !isOnboardingExempt(pathname);
   const railless = RAILLESS_ROUTES.test(pathname);
   useEffect(() => {
     if (!railless) rememberShellRoute(pathname);
