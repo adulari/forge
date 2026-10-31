@@ -13,6 +13,7 @@ use forge_types::{
 use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
+pub mod advisor;
 mod agent_builtins;
 pub mod agents;
 pub mod browser;

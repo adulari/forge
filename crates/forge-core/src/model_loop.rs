@@ -615,36 +615,8 @@ impl Session {
                         // else: accepted (clean / no-artifacts / unverified) — fall through to terminal.
                     }
                 } else {
-                    // Honest-failure guard: a direct model wrote a tool call as TEXT (e.g.
-                    // `<invoke>`/`default_api:` markup) instead of invoking it, and neither the
-                    // provider nor the text-recovery pass turned it into a real call — so NOTHING
-                    // ran. Accepting this as the final answer is how a turn "succeeds" while having
-                    // merged no PR and pushed no tag. Detect it and nudge the model to actually
-                    // call the tool (bounded); never silently accept narrated tool calls.
-                    if forge_provider::looks_like_unexecuted_tool_call(&resp.content) {
-                        let max_toolcall_repair_nudges = self.toolcall_repair_max();
-                        if toolcall_repair_nudges < max_toolcall_repair_nudges {
-                            toolcall_repair_nudges += 1;
-                            self.tools_advertised_once = true;
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "model wrote a tool call as text instead of invoking it — nothing ran; asking it to retry ({toolcall_repair_nudges}/{max_toolcall_repair_nudges})"
-                            )));
-                            let nudge = "Your last message contained a tool call written as TEXT \
-                                         (`<invoke …>`, a DeepSeek DSML block or `default_api:` \
-                                         syntax), or a block that was cut off or malformed. That \
-                                         tool DID NOT run — text is not a tool call. Make the call \
-                                         through the function-calling interface instead. Do not paste \
-                                         tool-call markup into your message.";
-                            let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
-                            continue;
-                        }
-                        // Retries exhausted: do NOT pretend it worked. Surface it loudly so the user
-                        // knows the turn's actions never executed, then end (can't loop forever).
-                        self.presenter.emit(PresenterEvent::Warning(
-                            "model kept emitting tool calls as text that never executed — the turn did NOT complete its actions"
-                                .to_string(),
-                        ));
-                        resp.content = forge_provider::strip_tool_call_markup(&resp.content);
+                    if self.repair_text_tool_call(&mut resp, &mut toolcall_repair_nudges) {
+                        continue;
                     }
                     // Direct model, non-empty text, no tool call — usually the real final answer.
                     // But a weaker model often narrates its NEXT action ("now I'll edit X") without
@@ -765,6 +737,20 @@ impl Session {
                             continue;
                         }
                     }
+                }
+                let unresolved = verification_ledger.lock().unwrap().unresolved_summary();
+                let pass_mutations = mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
+                if self
+                    .advisor_review_done(
+                        &resp.content,
+                        &active_model,
+                        pass_mutations,
+                        unresolved,
+                        &mut pre_review,
+                    )
+                    .await
+                {
+                    continue;
                 }
                 final_text = self.settle_answer(
                     resp.content,

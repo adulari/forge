@@ -55,6 +55,7 @@ use build_command::is_env_setup_command;
 mod catalog_feed;
 mod local_evidence;
 pub use local_evidence::apply_local_evidence;
+mod advisor;
 pub mod assay;
 pub mod auto_classifier;
 mod auxiliary_candidates;
@@ -1816,6 +1817,8 @@ pub struct Session {
     /// Tracked tasks still open when this turn ended, if any. Latched by the halt paths so the
     /// turn is recorded as `TasksUnfinished` instead of a clean final answer.
     turn_unfinished_tasks: Vec<String>,
+    /// The advisor has reviewed this turn (one shot, spent even by an error; advisor.rs).
+    advisor_reviewed: bool,
     /// The latest turn was refused by a spend cap before any model call; a `/goal` driver reads
     /// it to stop instead of re-driving refused turns.
     turn_budget_refused: bool,
@@ -3125,6 +3128,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.trim_watch.begin_turn();
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
+        self.advisor_reviewed = false;
         self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
@@ -5180,6 +5184,9 @@ mod tests {
 
     #[path = "goal_evaluator.rs"]
     mod goal_evaluator_tests;
+
+    #[path = "advisor.rs"]
+    mod advisor_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

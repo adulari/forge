@@ -107,6 +107,9 @@ pub struct HarnessConfig {
     /// returns validated data through a `submit_result` tool instead of prose.
     #[serde(default)]
     pub subagent_output_schema: bool,
+    /// Second-model review at DONE (docs/features/advisor.md).
+    #[serde(default)]
+    pub advisor: crate::advisor::AdvisorConfig,
 }
 
 impl Default for HarnessConfig {
@@ -137,6 +140,7 @@ impl Default for HarnessConfig {
             eval_kernel: false,
             lsp_nav: false,
             subagent_output_schema: false,
+            advisor: crate::advisor::AdvisorConfig::default(),
         }
     }
 }

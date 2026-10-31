@@ -168,3 +168,5 @@ column is informational until the edit A/B.
 `subagent_output_schema` is a fifth flag in the same table but a different kind: it changes `spawn_agents`,
 not the main loop. See "Structured results" in `docs/features/subagent-orchestration.md`. Default off; with it
 off the spawn spec, the child prompt and the combined output are byte-identical.
+A fifth, separate switch, `[harness.advisor]`, adds a second-model review at DONE; see
+[advisor.md](advisor.md).

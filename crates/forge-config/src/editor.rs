@@ -289,6 +289,9 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.eval_kernel" => Some(("Behaviour", "Persistent Python kernel")),
         "harness.lsp_nav" => Some(("Behaviour", "LSP navigation tool")),
         "harness.subagent_output_schema" => Some(("Behaviour", "Subagent output schemas")),
+        "harness.advisor.enabled" => Some(("Behaviour", "Advisor review")),
+        "harness.advisor.model" => Some(("Behaviour", "Advisor model")),
+        "harness.advisor.timeout_secs" => Some(("Behaviour", "Advisor timeout")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -551,6 +554,9 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.eval_kernel" => "Advertise a `python` tool: a persistent per-session Python kernel. Runs code with shell-level permissions. Applies to new sessions. Default off.",
         "harness.lsp_nav" => "Add a deferred read-only lsp tool (definition, hover, references; Python via ty/pyright). Library definitions come back with source inline. Default off.",
         "harness.subagent_output_schema" => "Let the parent request a JSON-schema result from spawn_agents children; validated with up to 2 retries.",
+        "harness.advisor.enabled" => "Before a turn that changed something finishes, a second model reads the work once and can send it back once with up to 4 notes. Skipped for CLI bridges and subscription models. Default off.",
+        "harness.advisor.model" => "Model that reviews. Empty uses the model driving the turn. A Claude Sonnet-class model is the recommended setting; small models truncated on large transcripts in the replay.",
+        "harness.advisor.timeout_secs" => "Seconds before an advisor call is abandoned and the turn finishes as it would have (default 120).",
         _ => return None,
     })
 }

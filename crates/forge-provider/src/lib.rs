@@ -30,6 +30,7 @@ mod genai_provider;
 mod genai_tool_chunk_progress;
 pub mod headroom;
 mod mock;
+mod mock_advisor;
 mod mock_goal;
 mod mock_long;
 mod mock_soak;
