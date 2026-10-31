@@ -89,7 +89,6 @@ pub(super) async fn delete_current(
     let store = {
         let mut s = session.lock().await;
         let cwd = s.workspace_scope();
-        s.cancel_all_detached();
         if let Err(error) = s.reset_fresh_hooked(&cwd).await {
             app.note(&format!(
                 "⚠ nothing deleted, could not start a fresh session: {error}"
@@ -97,6 +96,9 @@ pub(super) async fn delete_current(
             app.session_delete = None;
             return;
         }
+        // Only now that the chat has moved on: a failed reset must not kill the subagents of a
+        // session the user keeps.
+        s.cancel_all_detached(&old);
         s.store.clone()
     };
     let _ = store.set_session_local_live(&old, false);

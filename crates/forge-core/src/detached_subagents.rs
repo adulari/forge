@@ -45,11 +45,12 @@ pub(crate) fn lifecycle_event(ev: subagent::Lifecycle) -> PresenterEvent {
 }
 
 impl Session {
-    /// Stop every detached child this session still has running: abort the task held in this
+    /// Stop every detached child `parent_session` (this session, or the one just replaced by a
+    /// fresh one) still has running: abort the task held in this
     /// process and settle its row. Used before the session is deleted, so no task keeps writing
     /// to rows that are about to vanish. Returns how many were cancelled.
-    pub fn cancel_all_detached(&self) -> usize {
-        let Ok(children) = self.store.list_detached_children(&self.id) else {
+    pub fn cancel_all_detached(&self, parent_session: &str) -> usize {
+        let Ok(children) = self.store.list_detached_children(parent_session) else {
             return 0;
         };
         let mut cancelled = 0;

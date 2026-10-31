@@ -15,7 +15,6 @@ pub(crate) enum Refusal {
         host: String,
     },
     Running,
-    RunningSubagents,
     OwnsWorktree(String),
     Frozen,
     Failed(String),
@@ -31,7 +30,6 @@ impl Refusal {
                 format!("this session is open in a forge chat terminal on {host}")
             }
             Self::Running => "this session is running in the Forge daemon".into(),
-            Self::RunningSubagents => "this session has detached subagents still running".into(),
             Self::OwnsWorktree(path) => format!("this session still owns the worktree {path}"),
             Self::Frozen => "this session is frozen by an Anywhere handoff".into(),
             Self::Failed(why) => format!("deleting failed: {why}"),
@@ -46,9 +44,6 @@ impl Refusal {
                 "run /delete in that terminal, or close the chat and delete it here"
             }
             Self::Running => "stop or archive the running session first, then delete it",
-            Self::RunningSubagents => {
-                "cancel them first (ask the session to cancel_subagent, or wait), then delete it"
-            }
             Self::OwnsWorktree(_) => {
                 "resume the session and merge or discard its worktree first, then delete it"
             }
@@ -109,9 +104,6 @@ pub(crate) async fn check_with(
     if running_in_daemon {
         return Err(Refusal::Running);
     }
-    if preview.running_subagents > 0 {
-        return Err(Refusal::RunningSubagents);
-    }
     if !own_terminal && crate::terminal_owner::terminal_owns_session(store, id).await {
         return Err(Refusal::OpenInTerminal { host: host_name() });
     }
@@ -139,7 +131,21 @@ pub(crate) async fn delete_local(
     id: &str,
     running_in_daemon: bool,
 ) -> Result<Deleted, Refusal> {
-    check(store, id, running_in_daemon).await?;
+    let preview = check(store, id, running_in_daemon).await?;
+    if preview.running_subagents > 0 {
+        // Detached subagent tasks live inside a hosted or open session, and the checks above
+        // refused both. A row still `running` therefore has no task behind it (its process
+        // died); settle it instead of blocking the delete on it forever. The current chat's own
+        // live subagents were cancelled by `/delete` before it got here.
+        let store = Arc::clone(store);
+        let targets = preview.targets.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            for target in &targets {
+                let _ = store.reconcile_running_detached_children(&target.id);
+            }
+        })
+        .await;
+    }
     let report = {
         let store = Arc::clone(store);
         let id = id.to_string();
@@ -241,6 +247,12 @@ pub(crate) fn dialog_for(
     let folders = session_state_dirs(&preview.targets).len();
     if folders > 0 {
         facts.push(format!("{folders} rewind-snapshot / evidence folder(s)"));
+    }
+    if preview.running_subagents > 0 {
+        facts.push(format!(
+            "{} detached subagent(s) still marked running (stopped first)",
+            preview.running_subagents
+        ));
     }
     if preview.synced {
         facts.push("its copy on your other synced devices (deleted there too)".into());
@@ -390,18 +402,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refuses_while_a_detached_subagent_is_running_and_allows_it_once_cancelled() {
+    async fn a_running_subagent_row_never_blocks_a_delete_nor_the_current_chats_own_delete() {
         let (store, id) = store_with_session();
         let child = store.create_child_session("/proj", "Smith", &id).unwrap();
         store
             .create_detached_child(&child, &id, "worker", "m")
             .unwrap();
-        let refusal = delete_local(&store, &id, false).await.unwrap_err();
-        assert_eq!(refusal, Refusal::RunningSubagents);
-        assert!(store.session_exists(&id).unwrap());
-        assert!(store.cancel_detached_child(&child).unwrap());
-        delete_local(&store, &id, false).await.unwrap();
+        // The chat that owns the session cancels its own subagents and then deletes it: the
+        // checks must let it through while the row is still `running`.
+        assert!(check_with(&store, &id, false, true).await.is_ok());
+        // With no daemon driver and no terminal holding it, the row is stale: delete settles it.
+        let done = delete_local(&store, &id, false).await.unwrap();
+        assert_eq!(done.sessions, 2);
         assert!(!store.session_exists(&child).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_daemon_driven_session_with_running_subagents_is_still_refused() {
+        let (store, id) = store_with_session();
+        let child = store.create_child_session("/proj", "Smith", &id).unwrap();
+        store
+            .create_detached_child(&child, &id, "worker", "m")
+            .unwrap();
+        assert_eq!(
+            delete_local(&store, &id, true).await.unwrap_err(),
+            Refusal::Running
+        );
+        assert!(store.session_exists(&id).unwrap());
     }
 
     fn daemon_state(store_path: Option<&str>) -> crate::serve::ServeState {
