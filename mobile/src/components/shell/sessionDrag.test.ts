@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../lib/platform", () => ({ isWeb: false }));
 
 import { parsePayload } from "./sessionDrag";
 

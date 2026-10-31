@@ -844,5 +844,17 @@
     "platform": "desktop",
     "reason": "Open in preview needs the desktop shell's native browser preview; web and mobile open the port in a new tab or copy its URL.",
     "category": "behavior"
+  },
+  {
+    "file": "mobile/src/components/shell/useTerminalFind.ts",
+    "platform": "web/native",
+    "reason": "Terminal find reads DOM element geometry on web only; native elements have no getBoundingClientRect.",
+    "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/workspace/WorkspaceDock.tsx",
+    "platform": "web/native",
+    "reason": "Dock scroll sync reads DOM scrollTop on web only; native views skip it.",
+    "category": "capability"
   }
 ]
