@@ -12,7 +12,7 @@
 //! with a password prompt (BatchMode), and the target is validated before it gets near a process.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -93,10 +93,10 @@ impl Approver for JobApprover {
             view.phase = JobPhase::AwaitingApproval;
             view.safety_code = safety_code.map(str::to_string);
         }
-        let allowed = match self.decisions.recv_timeout(APPROVAL_WAIT) {
-            Ok(allowed) => allowed,
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => false,
-        };
+        let allowed = self
+            .decisions
+            .recv_timeout(APPROVAL_WAIT)
+            .unwrap_or_default();
         if allowed {
             self.job.view.lock().unwrap().phase = JobPhase::Running;
             return LocalApprover { confirm: true }.approve(challenge, safety_code);
