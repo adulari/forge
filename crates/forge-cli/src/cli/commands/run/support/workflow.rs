@@ -140,7 +140,7 @@ pub(crate) fn spawn_duel(
     app: &mut forge_tui::App,
     busy: &mut bool,
     busy_since: &mut std::time::Instant,
-    task: String,
+    spec: forge_core::duel_judge::DuelSpec,
     pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
 ) -> tokio::task::JoinHandle<()> {
     app.done = false;
@@ -152,7 +152,7 @@ pub(crate) fn spawn_duel(
     tokio::spawn(async move {
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
-        match sess.run_duel(&task).await {
+        match sess.run_duel(&spec).await {
             Ok(result) => *pending_duel.lock().unwrap() = Some(result),
             Err(e) => sess.notify_error(&format!("duel failed: {e}")),
         }

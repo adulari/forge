@@ -83,6 +83,11 @@ pub struct Picker {
     /// The query when the picker last closed. The loop closes a picker before acting on the row,
     /// so this is how an action reads what was typed (a summary's focus).
     pub last_query: String,
+    /// The person chose the alternate action for the next accept (a duel's "open PR" instead of
+    /// "merge"). Set by `p` or by a remote `pr:` select, then read after the picker closes.
+    pub alt: bool,
+    /// `alt` as it stood when the picker last closed.
+    pub last_alt: bool,
 }
 
 impl Picker {
@@ -101,6 +106,7 @@ impl Picker {
     pub fn close(&mut self) {
         self.open = false;
         self.kind = None;
+        self.last_alt = std::mem::take(&mut self.alt);
         self.rows.clear();
         self.haystacks.clear();
         self.base_len = 0;
@@ -202,6 +208,13 @@ impl Picker {
         let crate::KeyKind::Char(c) = key else {
             return key;
         };
+        if self.kind == Some(PickerKind::Duel)
+            && self.query.is_empty()
+            && c.eq_ignore_ascii_case(&'p')
+        {
+            self.alt = true;
+            return crate::KeyKind::Enter;
+        }
         if self.kind != Some(PickerKind::RewindAction) || !self.query.is_empty() {
             return key;
         }

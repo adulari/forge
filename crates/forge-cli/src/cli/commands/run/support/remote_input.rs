@@ -220,10 +220,19 @@ pub(crate) fn apply_overlay_input(
                 }
                 Vec::new()
             } else if app.picker.open {
+                let mut id = id.as_str();
+                if app.picker.kind == Some(forge_tui::PickerKind::Duel) {
+                    if let Some(branch) = id.strip_prefix(crate::cli::commands::run::OPEN_PR_PREFIX)
+                    {
+                        id = branch;
+                        app.picker.alt = true;
+                    }
+                }
                 if let Some(idx) = app.picker.matches().iter().position(|r| r.id == id) {
                     app.picker.selected = idx;
                     return vec![K::Enter];
                 }
+                app.picker.alt = false;
                 Vec::new()
             } else {
                 Vec::new()

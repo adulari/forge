@@ -353,6 +353,7 @@ struct DriverState {
     pending_question: Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>>,
     pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
     duel_state: PendingDuel,
+    pending_pr: PrSlot,
     assay_lenses: Vec<forge_types::FindingCategory>,
     assay_scope: forge_types::AssayScope,
     queued_prompts: Vec<String>,
@@ -493,6 +494,7 @@ async fn drive_session(
         pending_question: None,
         pending_duel: Arc::new(std::sync::Mutex::new(None)),
         duel_state: None,
+        pending_pr: Arc::new(std::sync::Mutex::new(None)),
         assay_lenses: Vec::new(),
         assay_scope: forge_types::AssayScope::Repo,
         queued_prompts: Vec::new(),
@@ -997,7 +999,7 @@ impl DriverState {
                     args,
                 ));
             }
-            DispatchOutcome::RunDuel { task } => {
+            DispatchOutcome::RunDuel { spec } => {
                 self.turn_gen += 1;
                 self.turn_handle = Some(spawn_duel(
                     &self.session,
@@ -1006,7 +1008,7 @@ impl DriverState {
                     &mut self.app,
                     &mut self.busy,
                     &mut self.busy_since,
-                    task,
+                    spec,
                     Arc::clone(&self.pending_duel),
                 ));
             }
@@ -1175,6 +1177,7 @@ pub(super) mod tests {
             pending_question: None,
             pending_duel: std::sync::Arc::new(std::sync::Mutex::new(None)),
             duel_state: None,
+            pending_pr: std::sync::Arc::new(std::sync::Mutex::new(None)),
             assay_lenses: Vec::new(),
             assay_scope: forge_types::AssayScope::Repo,
             queued_prompts: Vec::new(),

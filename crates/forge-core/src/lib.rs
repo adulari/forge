@@ -95,6 +95,7 @@ mod detached_subagents;
 pub mod dispatch;
 mod droid_loop;
 pub mod duel;
+pub mod duel_judge;
 mod empty_reply;
 mod error_report;
 mod eval_kernel;

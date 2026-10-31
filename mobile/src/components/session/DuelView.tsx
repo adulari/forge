@@ -16,6 +16,7 @@ import { useBreakpoint } from "../../theme/useBreakpoint";
 import { EmptyState } from "../ds/EmptyState";
 import { StatusDot } from "../ds/StatusDot";
 import { Markdown } from "../chat/Markdown";
+import { OPEN_PR_PREFIX, panesFromOverlay, parseDuelHeading, type DuelHeading, type JudgeNote } from "./duelModel";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -35,6 +36,10 @@ export interface DuelPane {
   diffstat?: { files: number; added: number; removed: number };
   /** `true` pass, `false` fail, `null`/undefined not run. */
   tests?: boolean | null;
+  /** The judge's grade for this candidate, when a judge ran. */
+  judge?: JudgeNote;
+  /** The judge's pick. */
+  crowned?: boolean;
 }
 
 export interface DuelScoreEntry {
@@ -52,6 +57,10 @@ export interface DuelViewProps {
   task?: string;
   panes: DuelPane[];
   onPick: (id: string) => void;
+  /** Push the candidate's branch and open a pull request from it. Hidden when absent. */
+  onOpenPr?: (id: string) => void;
+  /** What the judge said about the whole field. */
+  verdict?: DuelHeading;
   scoreboard?: DuelScoreEntry[];
   /** Total duels behind the scoreboard (the `· 24 duels` count). */
   scoreboardTotal?: number;
@@ -67,21 +76,26 @@ export function DuelView({
   task,
   panes,
   onPick,
+  onOpenPr,
+  verdict,
   scoreboard,
   scoreboardTotal,
   state = "ready",
   errorMessage,
 }: DuelViewProps) {
-  const { isCompact } = useBreakpoint();
+  const { isCompact: compact } = useBreakpoint();
+  // Three or more panes side by side leave each too narrow to read, so they stack.
+  const isCompact = compact || panes.length > 2;
 
   return (
     <ScrollView
       style={styles.scroll}
-      contentContainerStyle={[styles.content, isCompact ? styles.contentCompact : styles.contentWide]}
+      contentContainerStyle={[styles.content, compact ? styles.contentCompact : styles.contentWide]}
       keyboardShouldPersistTaps="handled"
     >
-      <View style={isCompact ? undefined : styles.wide}>
+      <View style={compact ? undefined : styles.wide}>
         <Header task={task} isCompact={isCompact} />
+        {verdict?.rationale || verdict?.judgeError ? <VerdictNote verdict={verdict} /> : null}
 
         {state === "error" ? (
           <View style={styles.stateBox}>
@@ -102,6 +116,7 @@ export function DuelView({
                 index={index}
                 isCompact={isCompact}
                 onPick={() => onPick(pane.id)}
+                onOpenPr={onOpenPr ? () => onOpenPr(pane.id) : undefined}
               />
             ))}
           </View>
@@ -128,16 +143,36 @@ function Header({ task, isCompact }: { task?: string; isCompact: boolean }) {
   );
 }
 
+function VerdictNote({ verdict }: { verdict: DuelHeading }) {
+  const tokens = useTokens();
+  const failed = !verdict.rationale;
+  return (
+    <View
+      accessibilityRole="summary"
+      style={[styles.verdict, { borderColor: failed ? tokens.border : tokens.accent, backgroundColor: tokens.bg2 }]}
+    >
+      <Text style={[typeScale.section, { color: failed ? tokens.ink4 : tokens.accent }]}>
+        {failed ? "judge unavailable" : `judge · ${verdict.judgeModel ?? ""}`}
+      </Text>
+      <Text style={[typeScale.sub, { color: tokens.ink2 }]}>
+        {failed ? `${verdict.judgeError ?? "no verdict"}. Pick by hand.` : verdict.rationale}
+      </Text>
+    </View>
+  );
+}
+
 function PaneCard({
   pane,
   index,
   isCompact,
   onPick,
+  onOpenPr,
 }: {
   pane: DuelPane;
   index: number;
   isCompact: boolean;
   onPick: () => void;
+  onOpenPr?: () => void;
 }) {
   const tokens = useTokens();
   const accent = (pane.tone ?? (index === 0 ? "accent" : "info")) === "accent";
@@ -160,11 +195,26 @@ function PaneCard({
           {meta}
         </Text>
       ) : null}
+      {pane.judge ? (
+        <View style={styles.judgeRow}>
+          <Text style={[styles.monoBold, tabularNums, { color: pane.crowned ? tokens.accent : tokens.ink3 }]}>
+            {`${pane.crowned ? "★ " : ""}#${pane.judge.rank} · ${pane.judge.score.toFixed(1)}/10`}
+          </Text>
+          {pane.judge.critique ? (
+            <Text style={[typeScale.sub, { color: tokens.ink2 }]}>{pane.judge.critique}</Text>
+          ) : null}
+        </View>
+      ) : null}
       <View style={styles.paneBody}>
         <Markdown content={pane.body} style={styles.bodyText} />
       </View>
       <View style={styles.paneAction}>
-        <PickButton accent={accent} label={isCompact ? "Pick this answer" : `Pick this answer · ${index + 1}`} onPress={onPick} />
+        <PickButton
+          accent={accent}
+          label={pane.crowned ? "Merge winner" : "Merge this one"}
+          onPress={onPick}
+        />
+        {onOpenPr ? <PickButton accent={false} label="Open PR" onPress={onOpenPr} /> : null}
       </View>
     </View>
   );
@@ -246,37 +296,6 @@ function Scoreboard({ entries, total, isCompact }: { entries: DuelScoreEntry[]; 
 // pane body and the scoreboard is omitted (the wire does not carry win history).
 // ---------------------------------------------------------------------------
 
-const DETAIL_DIFF_RE = /(\d+)\s+files?\s+\+(\d+)\s+-(\d+)/;
-
-function panesFromOverlay(overlay: Overlay): DuelPane[] {
-  return overlay.rows.map((row, index) => {
-    const model = row.label.replace(/^[✓✗×]\s*/u, "").trim() || row.label;
-    const parts = row.detail.split(" · ");
-    const diffMatch = DETAIL_DIFF_RE.exec(parts[0] ?? "");
-    const diffstat = diffMatch
-      ? { files: Number(diffMatch[1]), added: Number(diffMatch[2]), removed: Number(diffMatch[3]) }
-      : undefined;
-    const tests = parts.some((p) => /tests\s*✓/.test(p))
-      ? true
-      : parts.some((p) => /tests\s*✗/.test(p))
-        ? false
-        : null;
-    const latency = Number((parts.find((p) => /^\s*[\d.]+s$/.test(p)) ?? "0s").replace(/s\s*$/, "")) || 0;
-    const cost = Number((parts.find((p) => /^\s*\$/.test(p)) ?? "$0").replace(/[^0-9.]/g, "")) || 0;
-    const summary = parts.slice(4).join(" · ").trim();
-    return {
-      id: row.id,
-      model,
-      costUsd: cost,
-      latencySec: latency,
-      body: summary || "_(no summary provided)_",
-      tone: index === 0 ? "accent" : "info",
-      diffstat,
-      tests,
-    } satisfies DuelPane;
-  });
-}
-
 /** True when `NativeOverlayContent` should hand a `picker:duel` overlay to `DuelOverlayRows`. */
 export function isDuelOverlayKind(kind: string): boolean {
   return kind === "picker:duel";
@@ -285,7 +304,16 @@ export function isDuelOverlayKind(kind: string): boolean {
 /** Renders a live `/duel` winner-picker overlay as the dual-pane comparison view. */
 export function DuelOverlayRows({ overlay, onSelect }: { overlay: Overlay; onSelect: (id: string) => void }) {
   const panes = React.useMemo(() => panesFromOverlay(overlay), [overlay]);
-  return <DuelView panes={panes} onPick={onSelect} state="ready" />;
+  const verdict = React.useMemo(() => parseDuelHeading(overlay.title), [overlay.title]);
+  return (
+    <DuelView
+      panes={panes}
+      onPick={onSelect}
+      onOpenPr={(id) => onSelect(`${OPEN_PR_PREFIX}${id}`)}
+      verdict={verdict}
+      state="ready"
+    />
+  );
 }
 
 function paneMeta(pane: DuelPane): string | null {
@@ -316,13 +344,15 @@ const styles = StyleSheet.create({
   paneFlex: { flex: 1, minWidth: 0 },
   paneLoading: { alignItems: "center", justifyContent: "center", gap: space.space8, minHeight: 132 },
 
-  paneHead: { flexDirection: "row", alignItems: "center", gap: space.space8, borderBottomWidth: 1, paddingHorizontal: space.space16, paddingVertical: space.space8 },
+  paneHead: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.space8, borderBottomWidth: 1, paddingHorizontal: space.space16, paddingVertical: space.space8 },
   paneDot: { width: 7, height: 7, borderRadius: radii.radiusPill },
-  paneModel: { flex: 1 },
+  paneModel: { flexGrow: 1, flexShrink: 1, flexBasis: 120 },
   paneStat: { paddingHorizontal: space.space16, paddingTop: space.space8 },
   paneBody: { paddingHorizontal: space.space16, paddingTop: space.space4 },
   bodyText: { fontSize: 13.5, lineHeight: 20 },
-  paneAction: { paddingHorizontal: space.space16, paddingTop: space.space8, paddingBottom: space.space12 },
+  paneAction: { paddingHorizontal: space.space16, paddingTop: space.space8, paddingBottom: space.space12, gap: space.space8 },
+  judgeRow: { paddingHorizontal: space.space16, paddingTop: space.space8, gap: 2 },
+  verdict: { marginTop: space.space12, borderWidth: 1, borderRadius: radii.radius16, paddingHorizontal: space.space16, paddingVertical: space.space12, gap: 2 },
 
   pick: { height: 38, borderRadius: radii.radiusSegmentOuter, alignItems: "center", justifyContent: "center", paddingHorizontal: space.space12 },
   pickLabel: { fontSize: 13 },
