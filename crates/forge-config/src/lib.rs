@@ -67,7 +67,6 @@ pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name,
 pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
 pub use edit_mode::EditMode;
-pub use edit_mode::EditMode;
 pub use hard_stop::HardStop;
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
