@@ -165,6 +165,8 @@ pub enum CommandAction {
     Import,
     /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
     Control,
+    /// Open the agent CLI install/update menu (`/clis`).
+    AgentClis,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -538,6 +540,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "import" => CommandAction::Import,
         "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
         "control" => CommandAction::Control,
+        "clis" | "agent-clis" => CommandAction::AgentClis,
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),

@@ -1022,6 +1022,7 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_media::routes(&base))
         .merge(crate::serve_workspace_pdf::routes(&base))
         .merge(crate::serve_agents::routes(&base))
+        .merge(crate::serve_agent_installs::routes(&base))
         .merge(crate::serve_spend::routes(&base))
         .merge(crate::serve_hosts::routes(&base))
         // Workspace inspector/editor (serve_workspace.rs). Roots come only from the live session;

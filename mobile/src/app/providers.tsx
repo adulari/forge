@@ -27,6 +27,7 @@ import { SectionHeader } from "../components/ds/SectionHeader";
 import { Segmented } from "../components/ds/Segmented";
 import { Sheet } from "../components/ds/Sheet";
 import { Switch } from "../components/ds/Switch";
+import { AgentInstallsSection } from "../components/settings/AgentInstallsSection";
 import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import {
@@ -722,6 +723,7 @@ function ProvidersScreenBody() {
               </Text>
             </View>
           ) : null}
+          <AgentInstallsSection onChanged={() => void query.refetch()} />
           {sections.map((section) =>
             section.rows.length > 0 ? (
               <View key={section.key}>

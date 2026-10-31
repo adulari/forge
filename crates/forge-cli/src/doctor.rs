@@ -73,8 +73,15 @@ pub(crate) fn check(
 }
 
 /// Run all diagnostics and print a report. Returns the number of hard failures (for the exit code).
-pub async fn run() -> anyhow::Result<usize> {
+pub async fn run(fix: bool) -> anyhow::Result<usize> {
     println!("⚒ forge doctor — {}\n", env!("CARGO_PKG_VERSION"));
+    // Before any probe, so the rest of the report describes the CLIs as they now are.
+    let update_failures = if fix {
+        println!("Fixing agent CLIs");
+        crate::doctor_agents::fix().await
+    } else {
+        0
+    };
 
     let mut sections: Vec<(&str, Vec<Check>)> = Vec::new();
     sections.push(("Config", config_checks()));
@@ -87,7 +94,7 @@ pub async fn run() -> anyhow::Result<usize> {
     // answer discovery while the mesh has excluded it or exhausted its subscription. OpenCode Go's
     // and Kimi Code's windows are poll-only, so the quota refresh must land before the routing
     // verdict below, or it would report whatever a previous command left behind.
-    let (reachability, bridge_live, bridge_models, daemon) = tokio::join!(
+    let (reachability, bridge_live, bridge_models, daemon, agent_clis) = tokio::join!(
         async {
             let reachability = provider_reachability_checks().await;
             if let Ok(store) = crate::open_store() {
@@ -100,7 +107,9 @@ pub async fn run() -> anyhow::Result<usize> {
         bridge_roundtrip_checks(),
         bridge_models::checks(),
         daemon_checks(),
+        crate::doctor_agents::section(),
     );
+    sections.insert(1, ("Agent CLIs", agent_clis));
     mark_rejected_keys(&mut provider_v, &reachability);
     if provider_v.iter().any(|c| c.status == Status::Fail) {
         has_usable_provider = provider_v.iter().any(|c| {
@@ -143,7 +152,7 @@ pub async fn run() -> anyhow::Result<usize> {
         crate::doctor_environment::environment_checks(),
     ));
 
-    let mut fails = 0;
+    let mut fails = update_failures;
     let mut warns = 0;
     for (title, checks) in &sections {
         println!("{title}");

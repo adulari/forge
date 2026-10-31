@@ -28,6 +28,7 @@ pub mod app;
 mod app_btw;
 mod app_remote;
 pub use app_btw::BtwOverlay;
+pub mod agents_menu;
 pub mod anywhere_menu;
 pub mod import_menu;
 mod session_delete;

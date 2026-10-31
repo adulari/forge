@@ -117,7 +117,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Direct {
         let peer_is_loopback = parts
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .is_some_and(|c| c.0.ip().is_loopback());
+            .is_some_and(|c| c.0.ip().to_canonical().is_loopback());
         Ok(Direct(peer_is_loopback && is_local_request(&parts.headers)))
     }
 }
@@ -573,6 +573,24 @@ mod tests {
             anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         crate::serve::daemon_router(state)
+    }
+
+    #[tokio::test]
+    async fn an_ipv4_mapped_loopback_peer_is_direct_and_a_lan_peer_is_not() {
+        use axum::extract::FromRequestParts;
+        async fn direct(peer: &str, host: &str) -> bool {
+            let mut req = axum::http::Request::builder()
+                .header("host", host)
+                .body(())
+                .unwrap();
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let (mut parts, _) = req.into_parts();
+            Direct::from_request_parts(&mut parts, &()).await.unwrap().0
+        }
+        assert!(direct("[::ffff:127.0.0.1]:50000", "localhost:7420").await);
+        assert!(!direct("192.168.1.9:50000", "localhost:7420").await);
     }
 
     #[tokio::test]

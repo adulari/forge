@@ -9,6 +9,7 @@ use forge_types::{EffortLevel, Message, QuotaHint, ToolCall, Usage};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+pub mod agent_install;
 mod bridge_answer;
 mod cache_hints;
 mod claude_bridge_auth;
