@@ -10,7 +10,7 @@
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import { DeadPinBanner } from "../../../components/session/DeadPinBanner";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { router, useIsFocused, useNavigation } from "expo-router";
+import { useIsFocused, useNavigation } from "expo-router";
 import { ChevronDown, ChevronUp, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -78,7 +78,7 @@ import { rewindDisabledReason, sessionsSharingDirectory, sharedWorktreeWarning }
 import { useConnectionAccess } from "../../../lib/queriesAccess";
 import { parseReasoning } from "../../../lib/reasoning";
 import { AgentIndexProvider } from "../../../lib/agentLinks";
-import { openSession } from "../../../lib/nav";
+import { usePaneNav } from "../../../components/shell/paneNav";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { space } from "../../../theme/tokens";
@@ -125,6 +125,7 @@ interface PendingSent {
 
 export function SessionChat() {
   const tokens = useTokens();
+  const paneNav = usePaneNav();
   const toast = useToast();
   const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, getDraftText, setDraftText, focusComposer } = useSessionCtx();
 
@@ -998,8 +999,8 @@ export function SessionChat() {
 
       <SubagentStrip
         subagents={snapshot?.subagents ?? []}
-        onPress={() => router.push(`/session/${sessionId}/agents`)}
-        onOpenAgent={openSession}
+        onPress={() => paneNav.openAgents(sessionId)}
+        onOpenAgent={paneNav.openSession}
       />
 
       <ComposerDocks sessionId={sessionId} snapshot={snapshot} />
