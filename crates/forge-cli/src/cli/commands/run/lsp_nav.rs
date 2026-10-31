@@ -26,7 +26,13 @@ pub(super) fn build(
         let rules = config.permission_rules();
         forge_tools::lsp_tool::register(tools, Arc::clone(&registry), move |path| {
             let args = serde_json::json!({ "path": path.display().to_string() });
-            forge_core::permission::denying_rule("read_file", &args, &rules).is_none()
+            forge_core::permission::decide(
+                forge_types::PermissionMode::Default,
+                forge_types::SideEffect::ReadOnly,
+                "read_file",
+                &args,
+                &rules,
+            ) == forge_types::PermissionDecision::Allow
         });
     }
     Some(registry)
@@ -46,6 +52,24 @@ mod tests {
         config.harness.lsp_nav = true;
         assert!(build(&config, &mut tools).is_some());
         assert!(tools.get("lsp").is_some());
+    }
+
+    #[test]
+    fn read_file_deny_and_ask_rules_withhold_inlined_source() {
+        let config = Config::default();
+        let rules = config.permission_rules();
+        let allowed = |p: &str| {
+            let args = serde_json::json!({ "path": p });
+            forge_core::permission::decide(
+                forge_types::PermissionMode::Default,
+                forge_types::SideEffect::ReadOnly,
+                "read_file",
+                &args,
+                &rules,
+            ) == forge_types::PermissionDecision::Allow
+        };
+        assert!(allowed("/w/app.py"));
+        assert!(!allowed("/w/.env"));
     }
 
     #[test]

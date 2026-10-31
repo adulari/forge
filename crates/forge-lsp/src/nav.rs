@@ -247,9 +247,20 @@ impl LspRegistry {
         let uri = path_to_uri(req.path);
         let result = {
             let server = slot.server.as_mut().expect("server set above");
-            let synced = match server.resync_from_disk().await {
-                Ok(()) => server.sync_if_changed(&uri, lang, &text).await,
-                Err(error) => Err(error),
+            let sync = async {
+                server.resync_from_disk().await?;
+                server.sync_if_changed(&uri, lang, &text).await
+            };
+            // A server that stopped reading stdin blocks these writes forever; the deadline covers
+            // them and a stuck server is dropped (killed) rather than left holding the slot.
+            let synced = match timeout_at(deadline, sync).await {
+                Ok(done) => done,
+                Err(_) => {
+                    slot.record_failure(Instant::now());
+                    return Err(NavFailure::Unavailable(
+                        "language server stopped accepting documents (killed)".into(),
+                    ));
+                }
             };
             match synced {
                 Ok(()) => request_op(server, req.op, &uri, &located, deadline).await,
@@ -581,6 +592,57 @@ mod tests {
         assert!(
             matches!(&err, NavFailure::Unavailable(m) if m.contains("not on PATH")),
             "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_server_that_stops_reading_is_dropped_at_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().canonicalize().unwrap();
+        let file = workspace.join("big.py");
+        std::fs::write(&file, format!("x = 1\n{}", "#".repeat(4 * 1024 * 1024))).unwrap();
+        // Answers initialize, then never reads stdin again: the document write blocks.
+        let registry = fake_registry(
+            dir.path(),
+            &[json!({"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}})],
+        );
+        let started = Instant::now();
+        let err = registry
+            .navigate(&NavRequest {
+                op: NavOp::Definition,
+                path: &file,
+                workspace: &workspace,
+                line: 1,
+                symbol: "x",
+                occurrence: 1,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, NavFailure::Unavailable(m) if m.contains("killed")),
+            "{err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(14),
+            "{:?}",
+            started.elapsed()
+        );
+        // The slot lock was released and the server dropped: the next call is not stuck behind it.
+        let again = registry
+            .navigate(&NavRequest {
+                op: NavOp::Definition,
+                path: &file,
+                workspace: &workspace,
+                line: 1,
+                symbol: "x",
+                occurrence: 1,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&again, NavFailure::Unavailable(m) if m.contains("recovering")),
+            "{again:?}"
         );
     }
 

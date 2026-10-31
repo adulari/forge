@@ -87,6 +87,10 @@ impl LspTool {
             };
             let label = shown(path, workspace);
             out.push_str(&format!("{label}:{}:{}\n", location.line, location.col));
+            if !(self.path_allowed)(path) {
+                out.push_str("  (source withheld by path rules)\n");
+                continue;
+            }
             let Some(lines) = read_lines(path) else {
                 out.push_str("  (file not readable)\n");
                 continue;
@@ -105,7 +109,7 @@ impl LspTool {
                 out.push_str(&format!(
                     "  read_file {label} start_line={from} end_line={end}\n"
                 ));
-            } else if (self.path_allowed)(path) {
+            } else {
                 let start = location.body_start.max(1) as usize;
                 let end = (location.body_end as usize).min(start + INLINE_LINES - 1);
                 let mut used = 0;
@@ -122,8 +126,6 @@ impl LspTool {
                     }
                     out.push_str(&format!("  {:>5}  {text}\n", start + offset));
                 }
-            } else {
-                out.push_str("  (source withheld by path rules)\n");
             }
         }
         if found.len() > MAX_DEFINITIONS {
@@ -409,6 +411,30 @@ mod tests {
             .unwrap();
         assert!(
             out.contains("source withheld by path rules") && !out.contains("line5"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_workspace_definitions_obey_the_path_rules_too() {
+        let _gate = GATE.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        std::fs::write(workspace.join("main.py"), "from secrets import KEY\nKEY\n").unwrap();
+        std::fs::write(workspace.join("secrets.pem"), "KEY = 'hunter2'\n").unwrap();
+        let uri = format!("file://{}", workspace.join("secrets.pem").display());
+        let answer = json!([link(&uri, 0, 0)]);
+        let denied = LspTool {
+            path_allowed: Arc::new(|p| p.extension().is_none_or(|e| e != "pem")),
+            ..tool(dir.path(), answer, true)
+        };
+        let out = call(&denied, &workspace, args("definition", 2, "KEY"))
+            .await
+            .unwrap();
+        assert!(out.contains("secrets.pem:1:5"), "{out}");
+        assert!(out.contains("source withheld by path rules"), "{out}");
+        assert!(
+            !out.contains("hunter2") && !out.contains("read_file"),
             "{out}"
         );
     }
