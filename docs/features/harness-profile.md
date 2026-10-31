@@ -108,3 +108,7 @@ stop_retries = true
 thinking_loop_breaker = true
 repeat_interrupt = true
 ```
+
+`subagent_output_schema` is a fifth flag in the same table but a different kind: it changes `spawn_agents`,
+not the main loop. See "Structured results" in `docs/features/subagent-orchestration.md`. Default off; with it
+off the spawn spec, the child prompt and the combined output are byte-identical.

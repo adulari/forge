@@ -278,6 +278,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.stop_retries" => Some(("Behaviour", "Stop retries")),
         "harness.thinking_loop_breaker" => Some(("Behaviour", "Thinking-loop breaker")),
         "harness.repeat_interrupt" => Some(("Behaviour", "Repeat-call interrupt")),
+        "harness.subagent_output_schema" => Some(("Behaviour", "Subagent output schemas")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -530,6 +531,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
         "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
         "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
+        "harness.subagent_output_schema" => "Let the parent request a JSON-schema result from spawn_agents children; validated with up to 2 retries.",
         _ => return None,
     })
 }

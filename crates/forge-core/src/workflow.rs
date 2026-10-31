@@ -294,6 +294,7 @@ fn agent_host_fn(state: Arc<WorkflowState>) -> forge_workflow::HostFunction {
             let req = subagent::AgentRequest {
                 agent: agent_name,
                 task: prompt,
+                ..Default::default()
             };
             let resolved = subagent::resolve(&req, &state.ctx.agents);
 

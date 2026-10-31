@@ -199,10 +199,13 @@ pub fn resolve_child_address(
 }
 
 /// One requested child agent, parsed from the `spawn_agents` arguments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentRequest {
     pub agent: String,
     pub task: String,
+    /// JSON Schema the child's result must match (`[harness] subagent_output_schema`); inert data
+    /// until that flag is on.
+    pub output_schema: Option<Value>,
 }
 
 /// Parse `spawn_agents` arguments into child requests, capped at `max_agents`. Returns an
@@ -224,6 +227,7 @@ pub fn parse_requests(
             arr.len()
         ));
     }
+    let default_schema = args.get("output_schema").filter(|v| v.is_object());
     let mut out = Vec::new();
     for entry in arr.iter() {
         let task = entry
@@ -238,9 +242,15 @@ pub fn parse_requests(
             .filter(|a| !a.trim().is_empty())
             .unwrap_or(GENERAL_PURPOSE_AGENT)
             .to_string();
+        let output_schema = entry
+            .get("output_schema")
+            .filter(|v| v.is_object())
+            .or(default_schema)
+            .cloned();
         out.push(AgentRequest {
             agent,
             task: task.to_string(),
+            output_schema,
         });
     }
     Ok(out)
@@ -274,6 +284,8 @@ pub struct ResolvedAgent {
     pub worktree: bool,
     /// Skills to load into the child's system prompt ([`system_prompt_with_skills`]).
     pub skills: Vec<String>,
+    /// The result schema the parent asked for ([`AgentRequest::output_schema`]).
+    pub output_schema: Option<Value>,
 }
 
 /// The agent type `name` refers to: an exact match, else a case-insensitive one, so Claude Code's
@@ -365,11 +377,13 @@ pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> Resolv
             effort: def.effort,
             worktree: def.worktree,
             skills: def.skills.clone(),
+            output_schema: req.output_schema.clone(),
         },
         None => ResolvedAgent {
             name: req.agent.clone(),
             task: req.task.clone(),
             system_prompt: SUBAGENT_SYSTEM.to_string(),
+            output_schema: req.output_schema.clone(),
             ..ResolvedAgent::default()
         },
     }
@@ -473,6 +487,7 @@ mod tests {
             &AgentRequest {
                 agent: "Explore".into(),
                 task: "where is main".into(),
+                ..Default::default()
             },
             &agents,
         );
@@ -484,6 +499,7 @@ mod tests {
             &AgentRequest {
                 agent: "general-purpose".into(),
                 task: "t".into(),
+                ..Default::default()
             },
             &agents,
         );
@@ -552,6 +568,7 @@ mod tests {
             &AgentRequest {
                 agent: "auditor".into(),
                 task: "t".into(),
+                ..Default::default()
             },
             &agents,
         );

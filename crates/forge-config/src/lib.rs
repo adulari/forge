@@ -1585,6 +1585,10 @@ pub struct HarnessConfig {
     /// and move the progress ledger's cycle stop two repeats later.
     #[serde(default)]
     pub repeat_interrupt: bool,
+    /// Let the parent attach a JSON-schema `output_schema` to `spawn_agents` children; the child
+    /// returns validated data through a `submit_result` tool instead of prose.
+    #[serde(default)]
+    pub subagent_output_schema: bool,
 }
 
 impl Default for HarnessConfig {
@@ -1599,6 +1603,7 @@ impl Default for HarnessConfig {
             stop_retries: false,
             thinking_loop_breaker: false,
             repeat_interrupt: false,
+            subagent_output_schema: false,
         }
     }
 }

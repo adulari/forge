@@ -31,6 +31,7 @@ mod lattice_tool;
 mod open_pr;
 mod proxy;
 mod sandbox;
+pub mod schema_check;
 mod shell;
 pub mod tunnel;
 mod web;

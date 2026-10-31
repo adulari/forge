@@ -117,6 +117,7 @@ async fn run(agent: &str, mode: PermissionMode, asker: Option<ChildAsker>) -> Ru
     let requests = vec![AgentRequest {
         agent: agent.into(),
         task: "write out.txt".into(),
+        ..Default::default()
     }];
     let mut sink = |_: Lifecycle| {};
     let (out, _) = orchestrate(
@@ -213,6 +214,7 @@ async fn types_resolve_to_the_expected_write_capability() {
         &AgentRequest {
             agent: "explore".into(),
             task: "t".into(),
+            ..Default::default()
         },
         &agents,
     );
@@ -222,6 +224,7 @@ async fn types_resolve_to_the_expected_write_capability() {
         &AgentRequest {
             agent: "whatever".into(),
             task: "t".into(),
+            ..Default::default()
         },
         &agents,
     );
