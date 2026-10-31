@@ -171,45 +171,15 @@ pub async fn start(
     start_with(command, cwd, workspace, policy, false).await
 }
 
-/// Pids whose exit the starting call is still waiting on itself, so no wake notice is queued for
-/// them (see `autobackground`).
-static INLINE: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
-
-pub(super) fn release_inline(pid: u32) {
-    INLINE.lock().unwrap().retain(|p| *p != pid);
-}
-
 pub(super) fn mark_stopping(pid: u32) {
     if let Ok(mut stopping) = STOPPING.lock() {
         stopping.push(pid);
     }
 }
 
-#[cfg(test)]
-pub(super) fn inline_pids() -> Vec<u32> {
-    INLINE.lock().unwrap().clone()
-}
-
-#[cfg(test)]
-pub(super) fn mark_inline_for_test(pid: u32) {
-    INLINE.lock().unwrap().push(pid);
-}
-
 /// Whether a job started now would report its exit to this session.
 pub(super) fn has_job_exit_sink() -> bool {
     JOB_EXIT_SINK.try_with(|_| ()).is_ok()
-}
-
-/// Release `pid` from [`INLINE`] unless the job has already exited. An exited job stays marked
-/// until its watcher has looked, so the watcher cannot queue a notice for a result the caller is
-/// returning itself. Returns whether the pid was released.
-pub(super) fn release_inline_unless(pid: u32, exited: impl FnOnce() -> bool) -> bool {
-    let mut inline = INLINE.lock().unwrap();
-    if exited() {
-        return false;
-    }
-    inline.retain(|p| *p != pid);
-    true
 }
 
 pub(super) async fn start_with(
@@ -288,7 +258,7 @@ pub(super) async fn start_with(
     };
     write_record(&dir, &job)?;
     if inline {
-        INLINE.lock().unwrap().push(pid);
+        super::inline::mark(pid);
     }
 
     // Watch for the exit so `status` can report a real code rather than only "gone". This task
@@ -302,7 +272,7 @@ pub(super) async fn start_with(
         let code = match child.wait().await {
             Ok(status) => status.code().map(i64::from).unwrap_or(-1),
             Err(_) => {
-                release_inline(pid);
+                super::inline::release(pid);
                 return;
             }
         };
@@ -313,12 +283,7 @@ pub(super) async fn start_with(
                 .await;
         // One lock for the check and the release: the caller that is waiting on this job relies
         // on the watcher to drop the mark once it has seen the exit.
-        let was_inline = {
-            let mut inline = INLINE.lock().unwrap();
-            let before = inline.len();
-            inline.retain(|p| *p != pid);
-            inline.len() != before
-        };
+        let was_inline = super::inline::take(pid);
         let stopped = take_stopping(pid) || was_inline;
         if let (Some(sink), true, false) = (sink, first, stopped) {
             let tail = tail(&log_for_task, 8).unwrap_or_default();

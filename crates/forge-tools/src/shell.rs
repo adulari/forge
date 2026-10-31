@@ -41,6 +41,7 @@ use crate::{Tool, ToolError};
 mod autobackground;
 mod background;
 mod group;
+mod inline;
 mod poll;
 mod wait;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};

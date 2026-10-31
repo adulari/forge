@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// Every file path a call targets: the primary path arg, batched `paths[]`, multi-file
 /// `edits[].path`, and the targets named inside an `apply_patch` body (Codex envelope headers and
 /// unified-diff `---`/`+++` headers). Relative patch targets are joined onto `cwd` when given.
@@ -105,6 +107,18 @@ fn patch_targets(patch: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether the provider layer may repair slightly malformed tool-call JSON (`[harness]
+/// arg_coercion`); here because the config reader and the provider do not depend on each other.
+static JSON_REPAIR: AtomicBool = AtomicBool::new(true);
+
+pub fn set_json_repair(enabled: bool) {
+    JSON_REPAIR.store(enabled, Ordering::Relaxed);
+}
+
+pub fn json_repair() -> bool {
+    JSON_REPAIR.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use crate::sandbox::SandboxPolicy;
 
-use super::background::{self, has_job_exit_sink, release_inline, release_inline_unless};
+use super::background::{self, has_job_exit_sink};
+use super::inline;
 
 pub(super) const WINDOW_SECS: u64 = 60;
 const POLL: Duration = Duration::from_millis(100);
@@ -61,7 +62,7 @@ impl Drop for WindowGuard {
         if self.armed {
             background::mark_stopping(self.pid);
             background::signal_group(self.pid, background::SIGKILL);
-            release_inline(self.pid);
+            inline::release(self.pid);
         }
     }
 }
@@ -94,7 +95,7 @@ pub(super) async fn run(
             let since = *gone_since.get_or_insert_with(Instant::now);
             if since.elapsed() > RECORD_GRACE {
                 guard.armed = false;
-                release_inline(pid);
+                inline::release(pid);
                 return finish(&job, workspace, cwd, -1, started.elapsed());
             }
         }
@@ -108,7 +109,7 @@ pub(super) async fn run(
     // no notice for a result returned right here; otherwise the mark goes and the watcher reports.
     let exited = || background::get(workspace, cwd, pid).and_then(|j| j.exit_code());
     let mut code = None;
-    release_inline_unless(pid, || {
+    inline::release_unless(pid, || {
         code = exited();
         code.is_some()
     });
@@ -246,7 +247,7 @@ mod tests {
         );
         let jobs = background::list(Some(dir.path()), &cwd);
         assert!(jobs.iter().all(|j| !j.is_running()));
-        assert!(!background::inline_pids()
+        assert!(!inline::pids()
             .iter()
             .any(|p| jobs.iter().any(|j| j.pid == *p)));
     }
@@ -265,13 +266,13 @@ mod tests {
     async fn a_finished_job_stays_marked_until_its_watcher_has_looked() {
         crate::test_state::isolate();
         let pid = 4_000_001;
-        background::mark_inline_for_test(pid);
+        inline::mark(pid);
         assert!(
-            !release_inline_unless(pid, || true),
+            !inline::release_unless(pid, || true),
             "an exited job keeps its mark"
         );
-        assert!(background::inline_pids().contains(&pid));
-        assert!(release_inline_unless(pid, || false));
-        assert!(!background::inline_pids().contains(&pid));
+        assert!(inline::pids().contains(&pid));
+        assert!(inline::release_unless(pid, || false));
+        assert!(!inline::pids().contains(&pid));
     }
 }

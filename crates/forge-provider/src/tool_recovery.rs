@@ -341,7 +341,7 @@ pub(crate) fn normalize_tool_name(raw: &str) -> String {
 /// If neither recovers anything, falls back to an empty object — always object-shaped, never worse
 /// than what genai handed back.
 pub fn repair_malformed_args(raw: Value) -> Value {
-    repair_malformed_args_with(raw, forge_types::json_repair())
+    repair_malformed_args_with(raw, forge_types::path_args::json_repair())
 }
 
 fn repair_malformed_args_with(raw: Value, json_repair: bool) -> Value {
