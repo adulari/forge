@@ -8,6 +8,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **Two mobile timing tests no longer fail on a busy CI runner.** The render benchmarks get a 30 s timeout, and the large-diff freeze guards rose from 2 s and 0.5 s to 8 s and 2 s, after healthy runs took up to 5 s on the shared runner.
 - **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
 
 ### Added
