@@ -241,6 +241,14 @@ pub enum CommandAction {
     Rename(String),
     /// Star or unstar this session (`/star`).
     Star,
+    /// Git worktrees: the overlay when empty, else `new|list|enter|exit|remove|pull` (`/worktree`).
+    Worktree(String),
+    /// The project overlay: Home, clone, git init, rename, hide (`/project`).
+    Project,
+    /// Clone a repository and offer to switch to it (`/clone <url>`).
+    Clone(String),
+    /// Switch the session to the Home scratch folder, no project (`/home`).
+    Home,
     /// Permanently delete this session after an explicit confirmation (`/delete`).
     Delete,
     /// Mark this session done, or reopen it (`/done`).
@@ -433,6 +441,10 @@ pub fn parse_command(line: &str) -> CommandAction {
         "doctor" => CommandAction::Doctor,
         "rename" => CommandAction::Rename(arg),
         "star" => CommandAction::Star,
+        "worktree" | "wt" | "worktrees" => CommandAction::Worktree(arg),
+        "project" | "projects" => CommandAction::Project,
+        "clone" => CommandAction::Clone(arg),
+        "home" => CommandAction::Home,
         "delete" => CommandAction::Delete,
         "done" => CommandAction::Done,
         "archived" => CommandAction::Archived(arg),

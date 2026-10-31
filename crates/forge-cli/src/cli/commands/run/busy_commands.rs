@@ -106,6 +106,11 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Permissions(_)
         | CommandAction::McpReconnect(_)
         | CommandAction::AddDir(_)
+        // Move the session's workspace, so they wait for the running turn to finish.
+        | CommandAction::Worktree(_)
+        | CommandAction::Project
+        | CommandAction::Clone(_)
+        | CommandAction::Home
         // A file command/skill; `route_busy_line` refines this once the catalog says which.
         | CommandAction::Unknown(_) => Queue,
         // Resume/Undo/Checkpoints pick a different point of the conversation to return to, which

@@ -40,6 +40,39 @@ struct SnapOption {
     label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Default, serde::Deserialize)]
+struct ClientSetup {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    message: String,
+}
+
+impl ClientSetup {
+    /// The line this client prints when the state changes; nothing for a plain success.
+    fn notice(&self) -> String {
+        let tail: Vec<&str> = self.message.lines().rev().take(3).collect();
+        let tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+        match self.state.as_str() {
+            "running" => {
+                "⧖ worktree setup is running; files and dependencies may not be ready yet".into()
+            }
+            "failed" => format!("⚠ worktree setup failed: {tail}"),
+            "interrupted" => {
+                format!("⚠ worktree setup was interrupted ({tail}); it may be incomplete")
+            }
+            _ => format!(
+                "✓ worktree setup finished{}",
+                if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {tail}")
+                }
+            ),
+        }
+    }
+}
+
 /// The subset of the daemon's `Snapshot` this client deserializes and renders. Kept independent
 /// of `crate::remote::Snapshot` on purpose: that type is `Serialize`-only (server → wire), and a
 /// separate `Deserialize` view lets the client tolerate extra/absent fields across versions.
@@ -74,6 +107,9 @@ struct ClientSnapshot {
     prompt_seq: u64,
     #[serde(default)]
     notes: Vec<String>,
+    /// The worktree's background copy + `setup`, when the daemon is provisioning one.
+    #[serde(default)]
+    worktree_setup: Option<ClientSetup>,
     /// Monotonic server snapshot revision. Replayed frames can race a live broadcast during the
     /// WebSocket handshake, so the client must discard duplicate/out-of-order revisions.
     #[serde(default)]
@@ -451,6 +487,7 @@ struct Renderer {
     printed_notes: Vec<String>,
     shown_prompt_seq: Option<u64>,
     was_busy: bool,
+    shown_setup: Option<ClientSetup>,
 }
 
 impl Renderer {
@@ -482,6 +519,13 @@ impl Renderer {
             println!("{l}");
         }
         self.printed_transcript = snap.transcript.clone();
+
+        if snap.worktree_setup != self.shown_setup {
+            if let Some(setup) = &snap.worktree_setup {
+                println!("{}", setup.notice());
+            }
+            self.shown_setup.clone_from(&snap.worktree_setup);
+        }
 
         for n in new_suffix(&self.printed_notes, &snap.notes) {
             println!("· {n}");

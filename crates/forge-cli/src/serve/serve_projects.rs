@@ -26,6 +26,10 @@ struct ProjectCatalog {
     default_cwd: String,
     recent: Vec<ProjectRow>,
     roots: Vec<ProjectRow>,
+    /// Projects the user switched off; the picker lists them so they can be switched back on.
+    hidden: Vec<ProjectRow>,
+    /// Recent project folders that no longer exist (moved or deleted), so they can be relocated.
+    missing: Vec<ProjectRow>,
 }
 
 #[derive(serde::Deserialize)]
@@ -101,9 +105,13 @@ fn project_row(path: &Path, last_activity: Option<i64>) -> ProjectRow {
 // A bare `.git` directory is not enough: a home directory can carry a stub `.git/` (hooks and
 // info only) that git itself rejects, and offering an isolated worktree there fails at start.
 // A linked worktree's `.git` is a file pointing at the real git dir.
+// A folder inside a repository counts too, as it does for git: offering `git init` there would
+// nest a second repository in the first.
 fn looks_like_git_repo(path: &Path) -> bool {
-    let dot_git = path.join(".git");
-    dot_git.is_file() || dot_git.join("HEAD").is_file()
+    path.ancestors().any(|dir| {
+        let dot_git = dir.join(".git");
+        dot_git.is_file() || dot_git.join("HEAD").is_file()
+    })
 }
 
 fn path_is_browsable(path: &Path, roots: &[PathBuf]) -> bool {
@@ -172,7 +180,8 @@ fn browse_project_directory(
     })
 }
 
-pub(super) async fn project_catalog(State(state): State<Arc<DaemonState>>) -> Response {
+/// Recent project paths, most recent first, before the user's registry is applied.
+async fn recent_candidates(state: &DaemonState) -> Result<Vec<(String, i64)>, String> {
     let mut candidates: Vec<(String, i64)> = state
         .registry
         .all()
@@ -192,18 +201,8 @@ pub(super) async fn project_catalog(State(state): State<Arc<DaemonState>>) -> Re
     let store = state.store.clone();
     let past = match tokio::task::spawn_blocking(move || store.list_sessions_for_resume()).await {
         Ok(Ok(rows)) => rows,
-        Ok(Err(error)) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("listing recent projects failed: {error}"),
-            )
-        }
-        Err(error) => {
-            return err_response(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("listing recent projects task failed: {error}"),
-            )
-        }
+        Ok(Err(error)) => return Err(format!("listing recent projects failed: {error}")),
+        Err(error) => return Err(format!("listing recent projects task failed: {error}")),
     };
     candidates.extend(
         past.into_iter()
@@ -211,31 +210,94 @@ pub(super) async fn project_catalog(State(state): State<Arc<DaemonState>>) -> Re
             .map(|session| (session.cwd, session.last_activity)),
     );
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
+    Ok(candidates)
+}
+
+/// Canonical recent project paths (relocations applied, hidden projects included), for repair.
+pub(crate) async fn project_catalog_paths(state: &DaemonState) -> Vec<String> {
+    let Ok(candidates) = recent_candidates(state).await else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter_map(|(raw, _)| PathBuf::from(raw).canonicalize().ok())
+        .filter(|path| path.is_dir() && seen.insert(path.clone()))
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+pub(super) async fn project_catalog(State(state): State<Arc<DaemonState>>) -> Response {
+    let candidates = match recent_candidates(&state).await {
+        Ok(candidates) => candidates,
+        Err(message) => {
+            return err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &message)
+        }
+    };
+    let registry = forge_core::project_registry::ProjectRegistry::load();
+    let named = |mut row: ProjectRow| {
+        if let Some(name) = registry.entry(&row.path).and_then(|e| e.name.clone()) {
+            row.name = name;
+        }
+        row
+    };
 
     let default_path = PathBuf::from(&state.default_cwd);
     let mut seen = HashSet::new();
     seen.insert(default_path);
-    let recent = candidates
-        .into_iter()
-        .filter_map(|(raw, last_activity)| {
-            let path = PathBuf::from(raw).canonicalize().ok()?;
-            if !path.is_dir() || !seen.insert(path.clone()) {
-                return None;
+    let mut recent = Vec::new();
+    let mut hidden = Vec::new();
+    let mut missing: Vec<ProjectRow> = Vec::new();
+    for (raw, last_activity) in candidates {
+        let resolved = PathBuf::from(registry.resolve(&raw));
+        let Some(path) = resolved.canonicalize().ok().filter(|p| p.is_dir()) else {
+            // A removed worktree is not a moved project; everything else can be relocated.
+            let is_worktree = resolved.components().any(|c| c.as_os_str() == "worktrees")
+                && (resolved.components().any(|c| c.as_os_str() == ".forge")
+                    || forge_config::is_global_worktree_path(&resolved));
+            let disabled = registry
+                .entry(&resolved.display().to_string())
+                .is_some_and(|entry| entry.disabled);
+            if !is_worktree
+                && !disabled
+                && missing.len() < 8
+                && resolved.is_absolute()
+                && !missing.iter().any(|row| Path::new(&row.path) == resolved)
+            {
+                missing.push(named(ProjectRow {
+                    path: resolved.display().to_string(),
+                    name: project_name(&resolved),
+                    is_git_repo: false,
+                    last_activity: Some(last_activity),
+                }));
             }
-            Some(project_row(&path, Some(last_activity)))
-        })
-        .take(8)
-        .collect();
+            continue;
+        };
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let row = named(project_row(&path, Some(last_activity)));
+        if registry
+            .entry(&row.path)
+            .is_some_and(|entry| entry.disabled)
+        {
+            hidden.push(row);
+        } else if recent.len() < 8 {
+            recent.push(row);
+        }
+    }
     let roots = state
         .project_roots
         .iter()
-        .map(|root| project_row(root, None))
+        .map(|root| named(project_row(root, None)))
         .collect();
 
     json_response(&ProjectCatalog {
         default_cwd: state.default_cwd.clone(),
         recent,
         roots,
+        hidden,
+        missing,
     })
 }
 

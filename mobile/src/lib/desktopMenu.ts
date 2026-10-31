@@ -104,6 +104,7 @@ export type DesktopMenuId =
   | "help:acknowledgements"
   | "tray:open"
   | "tray:quick-composer"
+  | "tray:home-session"
   | "tray:decision:allow"
   | "tray:decision:deny"
   | "tray:decision:review";
@@ -227,6 +228,7 @@ function runDefault(id: string): void {
     // (unpaired, or a compact window), where the toggle has nothing to act on.
     case "session:quick-composer":
     case "tray:quick-composer":
+    case "tray:home-session":
     case "session:search":
     case "view:sidebar":
     case "view:usage":

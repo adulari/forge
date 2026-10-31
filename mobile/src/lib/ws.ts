@@ -260,6 +260,8 @@ export interface Snapshot {
   thread_error?: ThreadError | null;
   /** On the resync frame of a reconnect the host could not replay: how many updates were missed. */
   history_gap?: { count: number; reason: string } | null;
+  /** Progress of the worktree's background copy + `setup`; absent when nothing was provisioned. */
+  worktree_setup?: { state: "running" | "done" | "failed" | "interrupted"; message: string } | null;
 }
 
 export interface ThreadError {

@@ -50,6 +50,7 @@ pub mod commit_language;
 pub mod host;
 mod lsp_diagnostics;
 pub mod mcp;
+pub use mcp::mcp_toml_problem;
 pub mod mcp_sync;
 pub mod notifications;
 pub mod oauth;
@@ -70,6 +71,7 @@ pub mod sessions;
 pub mod terminal;
 mod vision_fallback;
 mod workspace_state;
+pub mod worktree;
 pub use adaptive_effort::CACHE_SAFE_EFFORT_PROVIDERS;
 pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name, AgentDef};
 pub use commit_policy::CommitPolicy;
@@ -101,7 +103,7 @@ pub use oauth::{
     OAuthAccountStore, OAuthConfig, OAuthTokens, Pkce, ProtectedResourceMetadata,
 };
 pub use paths::{
-    claude_dir, codex_dir, config_dir, cursor_dir, data_dir, home_dir,
+    claude_dir, codex_dir, config_dir, cursor_dir, data_dir, home_dir, is_global_worktree_path,
     mark_project_auto_setup_attempted, project_auto_setup_attempted, project_initialization,
     ProjectInitialization,
 };
@@ -200,6 +202,9 @@ pub struct Config {
     /// Startup update check (GitHub releases). On by default; checked at most every 6 hours.
     #[serde(default)]
     pub update: UpdateConfig,
+    /// Worktree location, setup/cleanup commands and ignored-file copying (user config only).
+    #[serde(default)]
+    pub worktree: worktree::WorktreeConfig,
     /// Anonymous product-count telemetry. Enabled by default; no stable identifier or user
     /// content is ever sent. Disable here, with `FORGE_TELEMETRY=0`, or with `DO_NOT_TRACK=1`.
     #[serde(default)]
@@ -2944,6 +2949,7 @@ impl Default for Config {
             tui: TuiConfig::default(),
             local: LocalConfig::default(),
             update: UpdateConfig::default(),
+            worktree: worktree::WorktreeConfig::default(),
             telemetry: TelemetryConfig::default(),
             reporting: reporting::ReportingConfig::default(),
             self_mcp: false,
@@ -3069,25 +3075,6 @@ pub fn command_sources_in(root: &std::path::Path) -> forge_skills::Sources {
     forge_skills::Sources { commands, skills }
 }
 
-fn merge_mcp_servers(destination: &mut Vec<McpServerConfig>, incoming: Vec<McpServerConfig>) {
-    for server in incoming {
-        if let Some(existing) = destination.iter_mut().find(|item| item.name == server.name) {
-            *existing = server;
-        } else {
-            destination.push(server);
-        }
-    }
-}
-
-/// Why the MCP file at `path` would be ignored, or `None` when it is absent or parses. The
-/// loader only logs a malformed file, so a listing that shows "no servers" uses this to say why.
-pub fn mcp_toml_problem(path: &std::path::Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    toml::from_str::<McpConfig>(&text)
-        .err()
-        .map(|error| error.message().to_string())
-}
-
 fn merge_mcp_toml(config: &mut McpConfig, path: &std::path::Path) {
     if let Ok(text) = std::fs::read_to_string(path) {
         let has_allow = toml::from_str::<toml::Value>(&text)
@@ -3117,7 +3104,7 @@ fn merge_mcp_toml(config: &mut McpConfig, path: &std::path::Path) {
                 if has_key("max_reconnect_attempts") {
                     config.max_reconnect_attempts = mcp.max_reconnect_attempts;
                 }
-                merge_mcp_servers(&mut config.servers, mcp.servers);
+                mcp::merge_mcp_servers(&mut config.servers, mcp.servers);
                 if has_allow {
                     config.allow = mcp.allow;
                 }

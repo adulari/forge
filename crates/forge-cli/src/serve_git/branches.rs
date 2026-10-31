@@ -59,6 +59,9 @@ pub(super) async fn session_git_context(
 }
 
 pub(super) fn is_forge_managed_worktree(path: &str) -> bool {
+    if forge_config::is_global_worktree_path(Path::new(path)) {
+        return true;
+    }
     let components: Vec<_> = Path::new(path).components().collect();
     components
         .windows(2)

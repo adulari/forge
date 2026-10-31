@@ -267,6 +267,40 @@ impl DriverState {
         Ok(())
     }
 
+    /// What the agent should know about the worktree's background copy + `setup`, once per state
+    /// change, with the state to remember once the note is delivered. Asked for where a turn
+    /// starts, so the first model turn gets it however the prompt arrived (queued, steered, or
+    /// with no initial prompt at all).
+    pub(super) fn setup_heads_up(&self) -> Option<(String, String)> {
+        let status = self
+            .worktree_setup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let note = match (status.state.as_str(), self.setup_told.as_deref()) {
+            ("running", None) => "The worktree's setup (copying ignored files, the configured \
+                `setup` command) is still running in the background. Dependencies and generated \
+                files may not exist yet; do not treat their absence as a bug."
+                .to_string(),
+            ("failed", told) if told != Some("failed") => format!(
+                "The worktree's setup did not finish cleanly: {}. The worktree is usable, but \
+                 dependencies or copied files may be missing; tell the user if the task needs them.",
+                status.message
+            ),
+            ("interrupted", told) if told != Some("interrupted") => format!(
+                "The worktree's setup was interrupted ({}), so dependencies or copied files may \
+                 be missing or incomplete; tell the user if the task needs them.",
+                status.message
+            ),
+            ("done", Some("running")) => {
+                "The worktree's background setup has finished; its files and dependencies are now in place."
+                    .to_string()
+            }
+            _ => return None,
+        };
+        Some((note, status.state))
+    }
+
     /// A `/command` that arrived while a turn runs, routed by [`busy_policy`]: run beside the turn,
     /// queue for the turn boundary (never into the steer inbox), or refuse.
     pub(super) async fn busy_command(&mut self, line: String) -> Result<()> {

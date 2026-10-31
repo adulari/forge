@@ -40,6 +40,7 @@ fn failed(text: impl Into<String>) -> Outcome {
         ok: false,
         text: text.into(),
         switch_to: None,
+        carried: false,
     }
 }
 
@@ -48,6 +49,7 @@ fn done(text: impl Into<String>, switch_to: Option<PathBuf>) -> Outcome {
         ok: true,
         text: text.into(),
         switch_to,
+        carried: false,
     }
 }
 

@@ -59,6 +59,7 @@ import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
 import { AnywhereProvider as LegacyAnywhereProvider } from "../lib/anywhere/store";
 import { AuthProvider, useAuth } from "../lib/auth";
+import { useHomeSessionMenuAction } from "../lib/useStartHomeSession";
 import { rememberPendingRoute } from "../lib/pendingRoute";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
@@ -211,6 +212,7 @@ function RootNavigator() {
   useSidebarCollapseHotkey(toggleSidebarCollapsed);
   useUsageDockHotkey(toggleUsageDock);
   useQuickComposerHotkey(() => setQuickComposerOpen(true));
+  useHomeSessionMenuAction();
 
   // Panes, docks and layout presets: shortcuts, menu items and the Layout menu all land here.
   // Guarded on `isExpanded` so the accelerators are inert on a compact window, where none of

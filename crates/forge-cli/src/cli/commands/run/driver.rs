@@ -96,9 +96,22 @@ pub(crate) struct SessionDriverHandle {
     daemon_shutdown: std::sync::Arc<AtomicBool>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Progress of the new worktree's copy + `setup`, shared with the driver loop, which puts it
+    /// in every snapshot.
+    worktree_setup: crate::serve_worktree_start::SetupCell,
+    /// Stops that setup (kills the hook's process group) when the session ends.
+    setup_control: std::sync::Arc<forge_core::worktree_setup::SetupControl>,
 }
 
 impl SessionDriverHandle {
+    pub(crate) fn setup_control(&self) -> std::sync::Arc<forge_core::worktree_setup::SetupControl> {
+        self.setup_control.clone()
+    }
+
+    pub(crate) fn worktree_setup_cell(&self) -> crate::serve_worktree_start::SetupCell {
+        self.worktree_setup.clone()
+    }
+
     pub(crate) async fn set_permission_mode(
         &self,
         mode: forge_types::PermissionMode,
@@ -128,6 +141,9 @@ impl SessionDriverHandle {
     /// Ask the driver to stop (archive): the loop aborts any running turn, runs SessionEnd
     /// hooks, broadcasts one final `closed` frame, and exits. Idempotent.
     pub fn shutdown(&self) {
+        // Archive snapshots the worktree next: let a killed setup finish touching it first.
+        self.setup_control
+            .cancel_and_wait(std::time::Duration::from_secs(2));
         let _ = self.shutdown_tx.send(true);
     }
 
@@ -136,6 +152,7 @@ impl SessionDriverHandle {
     }
 
     pub(crate) fn shutdown_for_daemon(&self) {
+        self.setup_control.cancel();
         self.daemon_shutdown.store(true, Ordering::Release);
         let _ = self.shutdown_tx.send(true);
     }
@@ -164,6 +181,7 @@ impl SessionDriverHandle {
 
 impl Drop for SessionDriverHandle {
     fn drop(&mut self) {
+        self.setup_control.cancel();
         if let Some(task) = self
             .task
             .get_mut()
@@ -280,6 +298,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     let last_activity = std::sync::Arc::new(AtomicI64::new(last_active_at));
     let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let title = std::sync::Arc::new(std::sync::RwLock::new(spec.title));
+    let worktree_setup = crate::serve_worktree_start::SetupCell::default();
 
     let task = tokio::spawn(drive_session(
         session,
@@ -299,6 +318,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         spec.push,
         spec.apns,
         ws_clients.clone(),
+        worktree_setup.clone(),
     ));
 
     Ok(SessionDriverHandle {
@@ -317,6 +337,8 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         daemon_shutdown,
         shutdown_tx,
         task: std::sync::Mutex::new(Some(task)),
+        worktree_setup,
+        setup_control: Default::default(),
     })
 }
 
@@ -383,6 +405,9 @@ struct DriverState {
     last_heartbeat_error: Option<String>,
     draining: std::sync::Arc<AtomicBool>,
     daemon_shutdown: std::sync::Arc<AtomicBool>,
+    /// Progress of the worktree's background copy + `setup`, and the state the agent was last told.
+    worktree_setup: crate::serve_worktree_start::SetupCell,
+    setup_told: Option<String>,
 }
 
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
@@ -417,6 +442,7 @@ async fn drive_session(
     push: Option<std::sync::Arc<crate::push::PushNotifier>>,
     apns: Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
     ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    worktree_setup: crate::serve_worktree_start::SetupCell,
 ) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
     let mut app = App::default();
@@ -514,6 +540,8 @@ async fn drive_session(
         last_heartbeat_error: None,
         draining,
         daemon_shutdown,
+        worktree_setup: worktree_setup.clone(),
+        setup_told: None,
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
@@ -575,6 +603,13 @@ async fn drive_session(
         {
             dirty = true;
             active = true;
+        }
+        let setup_now = worktree_setup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if last_snap.as_ref().map(|s| &s.worktree_setup) != Some(&setup_now) {
+            dirty = true;
         }
         // 1. Presenter events from the (possibly running) turn task.
         while let Ok(msg) = ui_rx.try_recv() {
@@ -704,6 +739,7 @@ async fn drive_session(
                     project_init_hint: project.hint,
                     exposure: "daemon".to_string(),
                     model_pinned,
+                    worktree_setup: setup_now.clone(),
                 },
                 st.copy_text.clone(),
                 st.prompt_seq,
@@ -842,6 +878,16 @@ async fn drive_session(
 
 impl DriverState {
     fn start_turn(&mut self, prompt: &str) {
+        if let Some((note, state)) = self.setup_heads_up() {
+            // Nothing holds the session between turns; if something does, the next turn tells it.
+            if let Ok(mut session) = self.session.try_lock() {
+                let _ = session.prime_guidance(&[note]);
+                if matches!(state.as_str(), "failed" | "interrupted") {
+                    crate::serve_worktree_start::clear_marker(&self.cwd);
+                }
+                self.setup_told = Some(state);
+            }
+        }
         self.last_prompt = Some(prompt.to_string());
         self.turn_gen += 1;
         self.turn_handle = Some(spawn_turn(
@@ -1197,6 +1243,8 @@ pub(super) mod tests {
             last_heartbeat_error: None,
             draining: std::sync::Arc::new(AtomicBool::new(false)),
             daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
+            worktree_setup: Default::default(),
+            setup_told: None,
         }
     }
 
@@ -1240,6 +1288,8 @@ pub(super) mod tests {
             daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
             shutdown_tx,
             task: std::sync::Mutex::new(Some(task)),
+            worktree_setup: Default::default(),
+            setup_control: Default::default(),
         });
         tokio::time::timeout(std::time::Duration::from_secs(1), done_rx)
             .await
@@ -1272,6 +1322,8 @@ pub(super) mod tests {
             daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
             shutdown_tx,
             task: std::sync::Mutex::new(Some(tokio::spawn(std::future::pending()))),
+            worktree_setup: Default::default(),
+            setup_control: Default::default(),
         };
         handle.join(std::time::Duration::from_millis(1)).await;
         assert!(handle
