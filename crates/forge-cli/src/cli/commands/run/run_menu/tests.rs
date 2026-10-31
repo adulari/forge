@@ -316,7 +316,8 @@ async fn a_non_utf8_byte_does_not_stop_the_output_pump() {
     ));
 }
 
-#[tokio::test]
+// terminate_groups blocks its thread; the reaper task needs another worker to reap the zombie.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_started_group_is_registered_for_the_terminate_hook_until_it_is_gone() {
     let dir = tempfile::tempdir().unwrap();
     let (mut d, mut app) = driver(dir.path(), vec![action("slow", "sleep 600")]);
