@@ -116,7 +116,7 @@ async fn sessions_booting_together_share_one_connect_and_one_connection() {
     assert_eq!(rig.pool.live_servers(), 1);
     for mgr in [&a, &b, &c] {
         assert_eq!(status(mgr), "connected");
-        assert_eq!(mgr.status_lines()[0].tools, 2);
+        assert_eq!(mgr.status_lines()[0].tools, 3);
         let out = echo(mgr, "hi").await;
         assert!(out.ok && out.text.contains("echo: hi"), "{out:?}");
     }

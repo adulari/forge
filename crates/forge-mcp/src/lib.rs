@@ -1330,7 +1330,7 @@ mod tests {
         let lines = mgr.status_lines();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].status, "connected");
-        assert_eq!(lines[0].tools, 2);
+        assert_eq!(lines[0].tools, 3);
         let tools = mgr.tool_lines("test");
         assert!(tools.iter().any(|(q, _)| q == "test__echo"));
         assert!(tools.iter().any(|(q, _)| q == "test__boom"));
@@ -1821,13 +1821,13 @@ mod tests {
         // `tools/list_changed`: re-list the peer's tools (`discover_tools`) and swap them into the
         // shared connection map. Exercised here against a live in-process peer — the rmcp
         // notification *delivery* itself is the handler's trigger in production (see handler.rs).
-        let mgr = manager_with_test_server(McpConfig::default()).await; // "test": echo + boom
-        assert_eq!(mgr.tool_lines("test").len(), 2);
+        let mgr = manager_with_test_server(McpConfig::default()).await; // "test": echo + boom + ask
+        assert_eq!(mgr.tool_lines("test").len(), 3);
 
         // Re-list off the live peer (the async half of the refresh).
         let peer = mgr.peer_for("test").expect("live peer");
         let relisted = discover_tools(&peer, "test").await;
-        assert_eq!(relisted.len(), 2, "re-list sees the server's current tools");
+        assert_eq!(relisted.len(), 3, "re-list sees the server's current tools");
         assert!(relisted.iter().any(|t| t.qualified == "test__echo"));
 
         // Swap a narrowed catalog into the shared map — the same write the handler performs through
