@@ -2,6 +2,7 @@
 //! `forge_tui::notes_overlay::NotesAction` asks for. "Start thread" asks the local `forge serve`
 //! daemon for a session seeded with the item, so the thread shows up on every connected surface.
 
+use forge_store::ScratchpadSave;
 use forge_tui::notes_overlay::{NotesAction, NotesSnapshot, TodoView, Tone};
 use forge_tui::{App, KeyKind};
 use serde_json::json;
@@ -33,6 +34,7 @@ fn snapshot(project: &str) -> Result<NotesSnapshot, String> {
     Ok(NotesSnapshot {
         project: notes.project,
         body: notes.body,
+        updated_at: notes.updated_at,
         todos: notes
             .todos
             .into_iter()
@@ -87,39 +89,43 @@ impl NotesMenuDriver {
     }
 
     /// Apply finished work and load rows the overlay asked for. True when a redraw is due.
+    ///
+    /// A started thread is linked to its to-do whether or not the overlay is still open: the
+    /// session already exists on the daemon, and dropping the reply would make the next Enter
+    /// start a duplicate. Only the on-screen notice depends on the overlay.
     pub(crate) fn tick(&mut self, app: &mut App) -> bool {
-        if !app.notes_overlay.open {
-            while self.rx.try_recv().is_ok() {}
-            self.starting = false;
-            return false;
-        }
+        let open = app.notes_overlay.open;
         let mut dirty = false;
-        if app.notes_overlay.take_reload() {
+        if open && app.notes_overlay.take_reload() {
             self.reload(app);
             dirty = true;
         }
         while let Ok(Msg::Thread { id, result }) = self.rx.try_recv() {
             self.starting = false;
-            dirty = true;
+            dirty |= open;
             match result {
                 Ok(session) => {
                     let linked = open_store()
                         .and_then(|s| Ok(s.link_project_todo_session(&id, &session, now_ms())?));
-                    if let Err(error) = linked {
-                        app.notes_overlay.notify(
-                            Tone::Warn,
-                            format!("Thread started, but not linked: {error}"),
-                        );
-                    } else {
-                        let short: String = session.chars().take(8).collect();
-                        app.notes_overlay.notify(
-                            Tone::Ok,
-                            format!("Thread {short} started. Open it in the app or forge board."),
-                        );
+                    if open {
+                        match linked {
+                            Err(error) => app.notes_overlay.notify(
+                                Tone::Warn,
+                                format!("Thread started, but not linked: {error}"),
+                            ),
+                            Ok(_) => {
+                                let short: String = session.chars().take(8).collect();
+                                app.notes_overlay.notify(
+                                    Tone::Ok,
+                                    format!("Thread {short} started. Open it in the app or forge board."),
+                                );
+                            }
+                        }
+                        self.reload(app);
                     }
-                    self.reload(app);
                 }
-                Err(error) => app.notes_overlay.notify(Tone::Warn, error),
+                Err(error) if open => app.notes_overlay.notify(Tone::Warn, error),
+                Err(_) => {}
             }
         }
         dirty
@@ -168,11 +174,28 @@ impl NotesMenuDriver {
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             }),
-            NotesAction::SavePad(body) => store().and_then(|s| {
-                s.set_project_scratchpad(&project, &body, now_ms())
-                    .map(|_| ())
+            NotesAction::SavePad {
+                body,
+                expected_updated_at,
+            } => {
+                let saved = store().and_then(|s| {
+                    s.set_project_scratchpad_if(
+                        &project,
+                        &body,
+                        Some(expected_updated_at),
+                        now_ms(),
+                    )
                     .map_err(|e| e.to_string())
-            }),
+                });
+                match saved {
+                    Ok(ScratchpadSave::Saved { .. }) => Ok(()),
+                    Ok(ScratchpadSave::Conflict { updated_at, .. }) => {
+                        app.notes_overlay.pad_conflict(body, updated_at);
+                        return;
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             NotesAction::StartThread { id, text } => {
                 if self.starting {
                     return;
@@ -191,5 +214,57 @@ impl NotesMenuDriver {
             Ok(()) => self.reload(app),
             Err(error) => app.notes_overlay.notify(Tone::Warn, error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_that_finishes_after_the_overlay_closed_is_still_linked() {
+        let project = format!("/w/notes-menu-test-{}", std::process::id());
+        let store = open_store().unwrap();
+        let todo = store.add_project_todo(&project, "ship it", 1).unwrap();
+
+        let mut driver = NotesMenuDriver::new();
+        let mut app = App::default();
+        assert!(!app.notes_overlay.open, "the overlay was closed mid-start");
+        driver.starting = true;
+        driver
+            .tx
+            .send(Msg::Thread {
+                id: todo.id.clone(),
+                result: Ok("session-abcdef123".into()),
+            })
+            .unwrap();
+        driver.tick(&mut app);
+
+        assert!(!driver.starting);
+        let linked = store.project_todo(&todo.id).unwrap().unwrap();
+        assert_eq!(linked.session_id.as_deref(), Some("session-abcdef123"));
+    }
+
+    #[test]
+    fn a_failed_start_while_closed_links_nothing() {
+        let project = format!("/w/notes-menu-fail-{}", std::process::id());
+        let store = open_store().unwrap();
+        let todo = store.add_project_todo(&project, "retry me", 1).unwrap();
+        let mut driver = NotesMenuDriver::new();
+        let mut app = App::default();
+        driver
+            .tx
+            .send(Msg::Thread {
+                id: todo.id.clone(),
+                result: Err("daemon down".into()),
+            })
+            .unwrap();
+        driver.tick(&mut app);
+        assert!(store
+            .project_todo(&todo.id)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .is_none());
     }
 }

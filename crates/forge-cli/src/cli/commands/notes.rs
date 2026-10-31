@@ -2,7 +2,7 @@
 //! rows through this command, and the desktop, web and mobile Notes surface edits them.
 
 use anyhow::{bail, Context, Result};
-use forge_store::{ProjectNotes, Store};
+use forge_store::{ProjectNotes, ScratchpadSave, Store};
 
 use crate::cli::args::NotesCmd;
 use crate::cli::commands::replay::open_store;
@@ -46,6 +46,25 @@ fn project_of(project: Option<String>) -> Result<String> {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+/// Append a line to the scratchpad without clobbering a concurrent edit: the write names the
+/// revision it read, and when another writer got in first the append is redone on top of theirs.
+fn append_to_pad(store: &Store, project: &str, line: &str) -> Result<()> {
+    for _ in 0..5 {
+        let notes = store.project_notes(project)?;
+        let mut body = notes.body.trim_end().to_string();
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(line);
+        if let ScratchpadSave::Saved { .. } =
+            store.set_project_scratchpad_if(project, &body, Some(notes.updated_at), now_ms())?
+        {
+            return Ok(());
+        }
+    }
+    bail!("the scratchpad keeps changing; try again")
 }
 
 /// Resolve `item` against the project's to-dos: a 1-based number, or an id prefix.
@@ -101,16 +120,10 @@ pub(crate) fn notes_cmd(cmd: Option<NotesCmd>) -> Result<()> {
         }
         NotesCmd::Pad { text, project } => {
             let project = project_of(project)?;
-            let notes = store.project_notes(&project)?;
             if text.is_empty() {
-                println!("{}", notes.body.trim_end());
+                println!("{}", store.project_notes(&project)?.body.trim_end());
             } else {
-                let mut body = notes.body.trim_end().to_string();
-                if !body.is_empty() {
-                    body.push('\n');
-                }
-                body.push_str(&text.join(" "));
-                store.set_project_scratchpad(&project, &body, now_ms())?;
+                append_to_pad(&store, &project, &text.join(" "))?;
                 println!("appended");
             }
         }
@@ -140,6 +153,14 @@ mod tests {
         assert!(text.contains("remember the **flag**"));
         assert!(text.contains("1. [ ] open one  (thread abcdef12)"));
         assert!(text.contains("2. [x] finished"));
+    }
+
+    #[test]
+    fn appending_keeps_what_is_already_in_the_pad() {
+        let store = Store::open_in_memory().unwrap();
+        append_to_pad(&store, "/w/app", "first").unwrap();
+        append_to_pad(&store, "/w/app", "second").unwrap();
+        assert_eq!(store.project_notes("/w/app").unwrap().body, "first\nsecond");
     }
 
     #[test]

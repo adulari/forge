@@ -1213,6 +1213,12 @@ pub(crate) async fn run_chat_tui(
 
             let key = match ev {
                 forge_tui::InputEvent::Paste(s) => {
+                    // `/notes` owns the keyboard, so a paste belongs to its field, not the composer behind it.
+                    if app.notes_overlay.open {
+                        app.notes_overlay.paste(&s);
+                        dirty = true;
+                        continue;
+                    }
                     // Pasting an image: terminals deliver an empty/whitespace bracketed-paste for
                     // image clipboard content, so on an empty payload probe the OS clipboard for an
                     // image and drop it in as an attachment block. Otherwise it's a normal text paste.

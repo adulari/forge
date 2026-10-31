@@ -25,6 +25,8 @@ pub struct TodoView {
 pub struct NotesSnapshot {
     pub project: String,
     pub body: String,
+    /// Revision of `body` (milliseconds; 0 until saved once). Sent back with a scratchpad save.
+    pub updated_at: i64,
     pub todos: Vec<TodoView>,
 }
 
@@ -70,7 +72,11 @@ pub enum NotesAction {
         done: bool,
     },
     Delete(String),
-    SavePad(String),
+    /// Save the scratchpad on top of the revision the edit started from.
+    SavePad {
+        body: String,
+        expected_updated_at: i64,
+    },
     ClearDone,
     /// Start a daemon session in the project with this item as its first prompt.
     StartThread {
@@ -89,6 +95,8 @@ pub struct NotesOverlay {
     /// The line being typed in `Add` / `Edit`, or the scratchpad text in `Pad`.
     pub input: String,
     pub notice: Option<Notice>,
+    /// The scratchpad revision the open editor started from.
+    pad_base: i64,
     reload: bool,
 }
 
@@ -123,6 +131,36 @@ impl NotesOverlay {
             tone,
             text: text.into(),
         });
+    }
+
+    /// A scratchpad save was refused because the text changed elsewhere. Reopen the editor on the
+    /// person's own text, based on the revision now stored, so one more Esc is a deliberate
+    /// overwrite and Ctrl-C drops it.
+    pub fn pad_conflict(&mut self, mine: String, stored_updated_at: i64) {
+        self.input = mine;
+        self.pad_base = stored_updated_at;
+        self.mode = Mode::Pad;
+        self.notify(
+            Tone::Warn,
+            "The scratchpad changed elsewhere. Esc again overwrites it, Ctrl-C drops your edit.",
+        );
+    }
+
+    /// A bracketed paste while a field is open. Single-line fields take it on one line.
+    pub fn paste(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        match self.mode {
+            Mode::Pad => self.input.push_str(&text),
+            Mode::Add | Mode::Edit(_) => {
+                let one_line = text
+                    .split('\n')
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.input.push_str(one_line.trim());
+            }
+            Mode::Browse | Mode::ConfirmDelete(_) => {}
+        }
     }
 
     pub fn focused(&self) -> Option<&TodoView> {
@@ -235,6 +273,7 @@ impl NotesOverlay {
             KeyKind::Char('c') => NotesAction::ClearDone,
             KeyKind::Char('p') => {
                 self.input = self.data.body.clone();
+                self.pad_base = self.data.updated_at;
                 self.mode = Mode::Pad;
                 NotesAction::None
             }
@@ -304,7 +343,10 @@ impl NotesOverlay {
                 if body == self.data.body {
                     NotesAction::None
                 } else {
-                    NotesAction::SavePad(body)
+                    NotesAction::SavePad {
+                        body,
+                        expected_updated_at: self.pad_base,
+                    }
                 }
             }
             KeyKind::Interrupt => {

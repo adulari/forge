@@ -92,7 +92,7 @@ pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRe
 pub use history_stats::RowStats;
 pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};
-pub use project_notes_store::{project_key, ProjectNotes, ProjectTodo};
+pub use project_notes_store::{project_key, ProjectNotes, ProjectTodo, ScratchpadSave};
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use transcript_read_store::HistoryFilter;
 pub use usage_activity_store::{streaks, ActivityStreaks, DayUsage};

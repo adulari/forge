@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use forge_store::{ProjectNotes, ProjectTodo, StoreError};
+use forge_store::{ProjectNotes, ProjectTodo, ScratchpadSave, StoreError};
 
 use crate::serve::{err_response, json_response, DaemonState};
 
@@ -138,28 +138,21 @@ async fn save_scratchpad(
         ..
     } = request;
     let result = with_store(&state, true, move |store| {
-        let current = store.project_notes(&project)?;
-        if let Some(expected) = expected_updated_at {
-            if current.updated_at != expected && current.body != body {
-                return Ok(Err(current));
-            }
-        }
-        let updated_at = store.set_project_scratchpad(&project, &body, now_ms())?;
-        Ok(Ok(updated_at))
+        store.set_project_scratchpad_if(&project, &body, expected_updated_at, now_ms())
     })
     .await;
     match result {
-        Ok(Ok(updated_at)) => {
+        Ok(ScratchpadSave::Saved { updated_at }) => {
             json_response(&serde_json::json!({ "ok": true, "updated_at": updated_at }))
         }
-        Ok(Err(current)) => (
+        Ok(ScratchpadSave::Conflict { body, updated_at }) => (
             StatusCode::CONFLICT,
             [(axum::http::header::CONTENT_TYPE, "application/json")],
             serde_json::json!({
                 "error": "the scratchpad changed on another device",
                 "code": "conflict",
-                "body": current.body,
-                "updated_at": current.updated_at,
+                "body": body,
+                "updated_at": updated_at,
             })
             .to_string(),
         )

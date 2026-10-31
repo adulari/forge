@@ -3,7 +3,7 @@
 // thread, which creates a session in the project seeded with the item and remembers the link.
 import { router } from "expo-router";
 import { ArrowUpRight, NotebookPen, Play, Trash2 } from "lucide-react-native";
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { scratchpadConflict, type NoteTodo } from "../../lib/apiNotes";
@@ -25,15 +25,14 @@ import { Markdown } from "../chat/Markdown";
 import {
   EMPTY_PAD,
   padCaption,
-  padReducer,
   splitTodos,
   threadSeed,
   type NoteProjectChoice,
+  type PadState,
 } from "./notesModel";
+import { PadController } from "./padController";
 
 type Tab = "todos" | "scratchpad";
-
-const SAVE_DELAY_MS = 800;
 
 export interface NotesPanelProps {
   project: string | null;
@@ -229,43 +228,28 @@ function Scratchpad({ project }: { project: string }) {
   const tokens = useTokens();
   const notes = useProjectNotes(project);
   const { save } = useNotesMutations(project);
-  const [pad, dispatch] = useReducer(padReducer, EMPTY_PAD);
+  const [pad, setPad] = useState<PadState>(EMPTY_PAD);
   const [preview, setPreview] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latest = useRef(pad);
+  // The controller outlives renders; it is pointed at the current mutation function after each one.
+  const [controller] = useState(
+    () =>
+      new PadController({
+        send: () => Promise.reject(new Error("scratchpad is not ready")),
+        asConflict: scratchpadConflict,
+        onChange: setPad,
+      }),
+  );
+  const { mutateAsync } = save;
   useEffect(() => {
-    latest.current = pad;
-  }, [pad]);
-
-  useEffect(() => {
-    if (notes.data) dispatch({ type: "server", body: notes.data.body, updatedAt: notes.data.updated_at });
-  }, [notes.data]);
-
-  const flush = useCallback(() => {
-    const state = latest.current;
-    if (state.status !== "dirty" || state.conflict) return;
-    dispatch({ type: "saving" });
-    save.mutate(
-      { body: state.draft, expectedUpdatedAt: state.baseUpdatedAt },
-      {
-        onSuccess: (result) => dispatch({ type: "saved", body: state.draft, updatedAt: result.updated_at }),
-        onError: (error) => {
-          const conflict = scratchpadConflict(error);
-          dispatch(conflict ? { type: "conflict", conflict } : { type: "failed" });
-        },
-      },
-    );
-  }, [save]);
+    controller.setSend((body, expectedUpdatedAt) => mutateAsync({ body, expectedUpdatedAt }));
+  }, [controller, mutateAsync]);
 
   useEffect(() => {
-    if (pad.status !== "dirty" || pad.conflict) return;
-    timer.current = setTimeout(flush, SAVE_DELAY_MS);
-    return () => {
-      if (timer.current) clearTimeout(timer.current);
-    };
-  }, [pad.draft, pad.status, pad.conflict, flush]);
+    if (notes.data) controller.dispatch({ type: "server", body: notes.data.body, updatedAt: notes.data.updated_at });
+  }, [notes.data, controller]);
 
-  useEffect(() => () => flush(), [flush]);
+  // Unmounting (including a switch to another project, which remounts this by key) saves what is left.
+  useEffect(() => () => controller.dispose(), [controller]);
 
   if (notes.isPending) return <ActivityIndicator color={tokens.accent} style={styles.loading} />;
   if (notes.error && !notes.data) return <Text style={[typeScale.sub, { color: tokens.danger }]}>{notes.error.message}</Text>;
@@ -277,9 +261,9 @@ function Scratchpad({ project }: { project: string }) {
           tone="warn"
           message="This scratchpad was changed on another device."
           actionLabel="Use theirs"
-          onAction={() => dispatch({ type: "useTheirs" })}
+          onAction={() => controller.dispatch({ type: "useTheirs" })}
           secondaryLabel="Keep mine"
-          onSecondary={() => dispatch({ type: "keepMine" })}
+          onSecondary={() => controller.dispatch({ type: "keepMine" })}
         />
       ) : null}
       <View style={styles.padHead}>
@@ -289,7 +273,7 @@ function Scratchpad({ project }: { project: string }) {
           size="compact"
           selected={preview}
           onPress={() => {
-            flush();
+            void controller.flush();
             setPreview(true);
           }}
         />
@@ -306,8 +290,8 @@ function Scratchpad({ project }: { project: string }) {
         <TextInput
           multiline
           value={pad.draft}
-          onChangeText={(value) => dispatch({ type: "edit", text: value })}
-          onBlur={flush}
+          onChangeText={(value) => controller.dispatch({ type: "edit", text: value })}
+          onBlur={() => void controller.flush()}
           placeholder="Plans, links, reminders. Markdown works."
           placeholderTextColor={tokens.ink3}
           accessibilityLabel="Scratchpad"
@@ -367,7 +351,7 @@ export function NotesPanel({ project, projects, onProject, inset = true }: Notes
         value={tab}
         onChange={setTab}
       />
-      {tab === "todos" ? <Todos project={project} /> : <Scratchpad project={project} />}
+      {tab === "todos" ? <Todos key={project} project={project} /> : <Scratchpad key={project} project={project} />}
     </ScrollView>
   );
 }

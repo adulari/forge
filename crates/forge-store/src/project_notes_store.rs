@@ -36,6 +36,19 @@ pub struct ProjectNotes {
     pub todos: Vec<ProjectTodo>,
 }
 
+/// What a compare-and-set save of the scratchpad did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScratchpadSave {
+    Saved {
+        updated_at: i64,
+    },
+    /// The stored text changed since the caller read it; nothing was written.
+    Conflict {
+        body: String,
+        updated_at: i64,
+    },
+}
+
 /// The key notes are stored under: the checkout a worktree session belongs to, without a trailing
 /// slash. A session's `.forge/worktrees/<name>` directory is not a project of its own.
 pub fn project_key(path: &str) -> String {
@@ -135,6 +148,54 @@ impl Store {
             rusqlite::params![project, body, now],
         )?;
         Ok(now)
+    }
+
+    /// Save the scratchpad only if it is still the revision the caller edited. The read, the check
+    /// and the write happen in one immediate transaction, so two writers cannot both pass the
+    /// check. A stale `expected_updated_at` is a conflict unless the stored text already equals
+    /// `body`; `None` writes unconditionally.
+    pub fn set_project_scratchpad_if(
+        &self,
+        project: &str,
+        body: &str,
+        expected_updated_at: Option<i64>,
+        now: i64,
+    ) -> Result<ScratchpadSave> {
+        if body.len() > MAX_NOTE_BYTES {
+            return Err(invalid("the scratchpad is limited to 200 KB"));
+        }
+        let project = project_key(project);
+        if project.is_empty() {
+            return Err(invalid("a project is required"));
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: (String, i64) = tx
+            .query_row(
+                "SELECT body, updated_at FROM project_note WHERE project = ?1",
+                [&project],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_default();
+        if let Some(expected) = expected_updated_at {
+            if current.1 != expected && current.0 != body {
+                return Ok(ScratchpadSave::Conflict {
+                    body: current.0,
+                    updated_at: current.1,
+                });
+            }
+        }
+        // Never move the revision backwards or sideways: a second save in the same millisecond
+        // must still look different to a writer holding the previous value.
+        let stamp = now.max(current.1 + 1);
+        tx.execute(
+            "INSERT INTO project_note (project, body, updated_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(project) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at",
+            rusqlite::params![project, body, stamp],
+        )?;
+        tx.commit()?;
+        Ok(ScratchpadSave::Saved { updated_at: stamp })
     }
 
     /// Append an open to-do and return it.
@@ -260,6 +321,67 @@ mod tests {
         let notes = store.project_notes("/w/app").unwrap();
         assert_eq!((notes.body.as_str(), notes.updated_at), ("# plan v2", 20));
         assert!(store.project_notes("/w/other").unwrap().body.is_empty());
+    }
+
+    #[test]
+    fn a_stale_scratchpad_save_is_refused_and_writes_nothing() {
+        use super::ScratchpadSave::{Conflict, Saved};
+        let store = Store::open_in_memory().unwrap();
+        let Saved { updated_at: first } = store
+            .set_project_scratchpad_if("/w/app", "desktop", Some(0), 100)
+            .unwrap()
+        else {
+            panic!("a fresh pad saves");
+        };
+        let stale = store
+            .set_project_scratchpad_if("/w/app", "phone", Some(0), 101)
+            .unwrap();
+        assert_eq!(
+            stale,
+            Conflict {
+                body: "desktop".into(),
+                updated_at: first
+            }
+        );
+        assert_eq!(store.project_notes("/w/app").unwrap().body, "desktop");
+        assert!(matches!(
+            store
+                .set_project_scratchpad_if("/w/app", "phone", Some(first), 102)
+                .unwrap(),
+            Saved { .. }
+        ));
+        // Same text under a stale revision is not a conflict; `None` is unconditional.
+        assert!(matches!(
+            store
+                .set_project_scratchpad_if("/w/app", "phone", Some(0), 103)
+                .unwrap(),
+            Saved { .. }
+        ));
+        assert!(matches!(
+            store
+                .set_project_scratchpad_if("/w/app", "forced", None, 104)
+                .unwrap(),
+            Saved { .. }
+        ));
+    }
+
+    #[test]
+    fn the_revision_always_moves_forward() {
+        use super::ScratchpadSave::Saved;
+        let store = Store::open_in_memory().unwrap();
+        let Saved { updated_at: a } = store
+            .set_project_scratchpad_if("/w/app", "one", None, 500)
+            .unwrap()
+        else {
+            panic!()
+        };
+        let Saved { updated_at: b } = store
+            .set_project_scratchpad_if("/w/app", "two", None, 500)
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(b > a);
     }
 
     #[test]

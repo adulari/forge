@@ -19,6 +19,7 @@ fn loaded() -> NotesOverlay {
     m.apply(NotesSnapshot {
         project: "/w/app".into(),
         body: "# plan\nship the notes".into(),
+        updated_at: 7,
         todos: vec![
             todo("a", "fix the flaky test", false),
             todo("b", "write the docs", false),
@@ -71,6 +72,7 @@ fn a_linked_item_names_its_thread_and_t_starts_another() {
     m.apply(NotesSnapshot {
         project: "/w/app".into(),
         body: String::new(),
+        updated_at: 0,
         todos: vec![TodoView {
             thread: Some("abcd1234".into()),
             ..todo("a", "fix the flaky test", false)
@@ -154,7 +156,10 @@ fn the_scratchpad_saves_on_escape_and_discards_on_ctrl_c() {
     type_text(&mut m, "more");
     assert_eq!(
         m.key(KeyKind::Esc),
-        NotesAction::SavePad("# plan\nship the notes\nmore".into())
+        NotesAction::SavePad {
+            body: "# plan\nship the notes\nmore".into(),
+            expected_updated_at: 7
+        }
     );
 
     m.key(KeyKind::Char('p'));
@@ -190,6 +195,7 @@ fn the_cursor_stays_in_range_when_items_go() {
     m.apply(NotesSnapshot {
         project: "/w/app".into(),
         body: String::new(),
+        updated_at: 0,
         todos: vec![todo("a", "only", false)],
     });
     assert_eq!(m.cursor, 0);
@@ -253,4 +259,41 @@ fn it_renders_the_add_line_and_an_empty_state() {
 fn it_survives_a_tiny_terminal() {
     let _ = screen(loaded(), 24, 8);
     let _ = screen(loaded(), 10, 4);
+}
+
+#[test]
+fn a_refused_pad_save_reopens_the_editor_on_the_persons_text() {
+    let mut m = loaded();
+    m.key(KeyKind::Char('p'));
+    type_text(&mut m, "!");
+    m.pad_conflict(m.input.clone(), 99);
+    assert!(m.typing());
+    assert!(m
+        .notice
+        .as_ref()
+        .unwrap()
+        .text
+        .contains("changed elsewhere"));
+    assert_eq!(
+        m.key(KeyKind::Esc),
+        NotesAction::SavePad {
+            body: "# plan\nship the notes!".into(),
+            expected_updated_at: 99
+        },
+        "the second Esc is a deliberate overwrite on the new revision"
+    );
+}
+
+#[test]
+fn a_paste_lands_in_the_open_field_and_not_in_browse_mode() {
+    let mut m = loaded();
+    m.paste("ignored");
+    assert!(m.input.is_empty());
+    m.key(KeyKind::Char('a'));
+    m.paste("buy milk\r\n  and eggs ");
+    assert_eq!(m.input, "buy milk and eggs");
+    m.key(KeyKind::Esc);
+    m.key(KeyKind::Char('p'));
+    m.paste("line one\nline two");
+    assert!(m.input.ends_with("line one\nline two"));
 }

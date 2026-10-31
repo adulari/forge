@@ -86,8 +86,10 @@ export type PadAction =
 export function padReducer(state: PadState, action: PadAction): PadState {
   switch (action.type) {
     case "server": {
+      // While our own save is in flight its result decides; a refetch racing it is just our echo.
+      if (state.status === "saving") return state;
       if (action.updatedAt === state.baseUpdatedAt && action.body === state.savedBody) return state;
-      if (state.draft === state.savedBody && state.status !== "saving") {
+      if (state.draft === state.savedBody) {
         return { draft: action.body, savedBody: action.body, baseUpdatedAt: action.updatedAt, status: "clean", conflict: null };
       }
       if (action.updatedAt === state.baseUpdatedAt || action.body === state.draft) {
@@ -96,7 +98,12 @@ export function padReducer(state: PadState, action: PadAction): PadState {
       return { ...state, conflict: { body: action.body, updated_at: action.updatedAt } };
     }
     case "edit":
-      return { ...state, draft: action.text, status: action.text === state.savedBody ? "clean" : "dirty" };
+      // Typing during a save keeps the status "saving"; the save's result decides what is left to send.
+      return {
+        ...state,
+        draft: action.text,
+        status: state.status === "saving" ? "saving" : action.text === state.savedBody ? "clean" : "dirty",
+      };
     case "saving":
       return { ...state, status: "saving" };
     case "saved":

@@ -101,6 +101,15 @@ describe("padReducer", () => {
     expect(state.baseUpdatedAt).toBe(50);
   });
 
+  it("ignores a refetch that races our own save", () => {
+    let state: PadState = padReducer(loaded, { type: "edit", text: "ab" });
+    state = padReducer(state, { type: "saving" });
+    state = padReducer(state, { type: "edit", text: "abc" });
+    const raced = padReducer(state, { type: "server", body: "a", updatedAt: 40 });
+    expect(raced).toBe(state);
+    expect(raced.conflict).toBeNull();
+  });
+
   it("resolves a conflict either way", () => {
     const conflicted = padReducer(padReducer(loaded, { type: "edit", text: "mine" }), {
       type: "conflict",
