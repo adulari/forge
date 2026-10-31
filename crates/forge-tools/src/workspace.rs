@@ -7,15 +7,24 @@ use async_trait::async_trait;
 use forge_types::{FileDiff, SideEffect};
 use serde_json::Value;
 
-use crate::{Tool, ToolError, ToolRun, SESSION_EXTRA_ROOTS, SESSION_WORKSPACE};
+use crate::{Tool, ToolError, ToolRun, SESSION_EDIT_MODE, SESSION_EXTRA_ROOTS, SESSION_WORKSPACE};
 
 pub(crate) struct WorkspaceTool {
     pub(crate) inner: Box<dyn Tool>,
     pub(crate) workspace: std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
     pub(crate) extra_roots: std::sync::Arc<std::sync::RwLock<Vec<std::path::PathBuf>>>,
+    pub(crate) hashline: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl WorkspaceTool {
+    fn edit_mode(&self) -> forge_config::EditMode {
+        if self.hashline.load(std::sync::atomic::Ordering::Relaxed) {
+            forge_config::EditMode::Hashline
+        } else {
+            forge_config::EditMode::Replace
+        }
+    }
+
     /// Root `args` in the workspace, steer main-checkout paths into a linked worktree, and widen
     /// the readable roots for read-only tools.
     fn scoped(
@@ -72,6 +81,13 @@ impl Tool for WorkspaceTool {
     }
 
     fn description(&self) -> &str {
+        if self.edit_mode().is_hashline() {
+            match self.inner.name() {
+                "read_file" => return crate::core_tools::hashline::READ_DESCRIPTION,
+                "edit_file" => return crate::core_tools::hashline::EDIT_DESCRIPTION,
+                _ => {}
+            }
+        }
         self.inner.description()
     }
 
@@ -80,6 +96,9 @@ impl Tool for WorkspaceTool {
     }
 
     fn schema(&self) -> Value {
+        if self.edit_mode().is_hashline() && self.inner.name() == "edit_file" {
+            return crate::core_tools::hashline::edit_schema();
+        }
         self.inner.schema()
     }
 
@@ -88,30 +107,39 @@ impl Tool for WorkspaceTool {
         let extra_roots = self.extra_roots.read().ok()?.clone();
         let (args, extra_roots) = self.scoped(args, &workspace, extra_roots);
         validate_workspace_args(&args, &workspace, &extra_roots).ok()?;
-        SESSION_EXTRA_ROOTS
+        SESSION_EDIT_MODE
             .scope(
-                extra_roots,
-                SESSION_WORKSPACE.scope(workspace, self.inner.preview(&args)),
+                self.edit_mode(),
+                SESSION_EXTRA_ROOTS.scope(
+                    extra_roots,
+                    SESSION_WORKSPACE.scope(workspace, self.inner.preview(&args)),
+                ),
             )
             .await
     }
 
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let (args, workspace, extra_roots) = self.bound_args(args)?;
-        SESSION_EXTRA_ROOTS
+        SESSION_EDIT_MODE
             .scope(
-                extra_roots,
-                SESSION_WORKSPACE.scope(workspace, self.inner.run(&args)),
+                self.edit_mode(),
+                SESSION_EXTRA_ROOTS.scope(
+                    extra_roots,
+                    SESSION_WORKSPACE.scope(workspace, self.inner.run(&args)),
+                ),
             )
             .await
     }
 
     async fn run_full(&self, args: &Value) -> Result<ToolRun, ToolError> {
         let (args, workspace, extra_roots) = self.bound_args(args)?;
-        SESSION_EXTRA_ROOTS
+        SESSION_EDIT_MODE
             .scope(
-                extra_roots,
-                SESSION_WORKSPACE.scope(workspace, self.inner.run_full(&args)),
+                self.edit_mode(),
+                SESSION_EXTRA_ROOTS.scope(
+                    extra_roots,
+                    SESSION_WORKSPACE.scope(workspace, self.inner.run_full(&args)),
+                ),
             )
             .await
     }

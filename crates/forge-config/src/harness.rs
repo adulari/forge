@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::default_true;
+use crate::EditMode;
 
 /// Continual Harness (`/refine`, port of prime-agent's `/refine`): the agent proposes durable
 /// edits to its own prompts/skills/subagents, persisted via forge-store's `harness_entry` /
@@ -85,6 +86,8 @@ pub struct HarnessConfig {
     /// Cap a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k.
     #[serde(default)]
     pub compaction_summary_cap: bool,
+    #[serde(default)]
+    pub edit_mode: EditMode,
 }
 
 impl Default for HarnessConfig {
@@ -109,6 +112,7 @@ impl Default for HarnessConfig {
             append_only_prefix: false,
             cache_monitor: false,
             compaction_summary_cap: false,
+            edit_mode: EditMode::default(),
         }
     }
 }

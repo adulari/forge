@@ -157,7 +157,7 @@ impl Session {
         store: Arc<Store>,
         provider: Arc<dyn Provider>,
         router: Arc<dyn Router>,
-        tools: ToolRegistry,
+        mut tools: ToolRegistry,
         mut presenter: Box<dyn Presenter>,
         config: Config,
         workspace: WorkspaceContext,
@@ -177,6 +177,7 @@ impl Session {
             .map(normalize_workspace_target)
             .collect();
         let _ = tools.bind_extra_roots(extra_tool_roots.clone());
+        tools.set_edit_mode(config.harness.edit_mode);
         // Layer fetched per-model prices (OpenRouter etc., persisted at discovery) under the config
         // overrides, so gateway/credit spend is priced instead of silently $0 (the budget cap and
         // the /usage breakdown both read these computed costs).

@@ -56,6 +56,23 @@ fn edit_pair(edit: &Value) -> (u32, u32) {
     replaced_lines(text("old"), text("new"))
 }
 
+/// Lines an anchored `edit_file` call (`edits: [{start, end?, new} | {after, new}]`) wrote and
+/// replaced. The file text is not in the call, so a replaced range counts whole.
+fn anchored_lines(edits: &[Value]) -> (u32, u32) {
+    let count = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+    edits.iter().fold((0, 0), |(added, removed), edit| {
+        let get = |key: &str| edit.get(key).and_then(Value::as_u64);
+        let written = edit
+            .get("new")
+            .and_then(Value::as_str)
+            .map_or(0, line_count);
+        let gone = get("start").map_or(0, |start| {
+            count(get("end").unwrap_or(start).max(start) - start + 1)
+        });
+        (added + written, removed + gone)
+    })
+}
+
 fn patch_lines(patch: &str) -> (u32, u32) {
     let mut adds = 0u32;
     let mut dels = 0u32;
@@ -92,6 +109,9 @@ pub(crate) fn call_line_counts(name: &str, args: &Value) -> Option<(u32, u32)> {
     let text = |key: &str| args.get(key).and_then(Value::as_str);
     match name {
         "write_file" | "append_file" | "create_file" => Some((line_count(text("content")?), 0)),
+        "edit_file" if args.get("edits").is_some_and(Value::is_array) => {
+            Some(anchored_lines(args.get("edits")?.as_array()?))
+        }
         "edit_file" if args.get("old").is_some() || args.get("new").is_some() => {
             Some(edit_pair(args))
         }
@@ -136,6 +156,16 @@ mod tests {
             call_line_counts("mcp__forge__write_file", &args),
             Some((3, 0))
         );
+    }
+
+    #[test]
+    fn an_anchored_edit_counts_written_and_replaced_lines() {
+        let args = json!({"path": "a.rs", "tag": "1A2B", "edits": [
+            {"start": 3, "end": 5, "new": "x\ny\n"},
+            {"after": 9, "new": "z"},
+            {"start": 12, "new": ""}
+        ]});
+        assert_eq!(call_line_counts("edit_file", &args), Some((3, 4)));
     }
 
     #[test]
