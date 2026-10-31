@@ -2,6 +2,7 @@
 // (`forge.activeServerId`) via expo-secure-store (secureStore.web.ts shim on web). Exposes
 // `baseUrl` for api.ts/ws.ts/queries.ts (the ACTIVE server's baseUrl — same signature as the
 // single-server version, so those files need zero changes) and a probe to validate pairing.
+import { canActivate, firstEnabledId, setServerDisabled } from "./hostPresence";
 import React, {
   createContext,
   useCallback,
@@ -62,6 +63,8 @@ interface AuthContextValue {
   addServer: (connectUrl: string, options?: { setActive?: boolean }) => Promise<StoredServer>;
   removeServer: (id: string) => Promise<void>;
   renameServer: (id: string, name: string) => Promise<void>;
+  /** Switch a host off (left out of the Fleet, never polled) or back on; it stays paired. */
+  setServerDisabled: (id: string, disabled: boolean) => Promise<void>;
   setActive: (id: string) => void;
   syncAnywhereHosts: (hosts: readonly ManagedAnywhereHost[]) => Promise<void>;
   /** @deprecated legacy single-server alias for `addServer` — kept for the old Connect screen. */
@@ -235,6 +238,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  const disableServer = useCallback(async (id: string, disabled: boolean): Promise<void> => {
+    await enqueueMutation(serverMutationQueue, async () => {
+      const current = await loadServers();
+      const next = setServerDisabled(current, id, disabled);
+      if (next.every((server, index) => server === current[index])) return;
+      await saveServers(next);
+      setServers(next);
+    });
+  }, []);
+
   const removeServer = useCallback(
     async (id: string): Promise<void> => {
       await enqueueMutation(serverMutationQueue, async () => {
@@ -244,7 +257,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const active = await getSecureItem(ACTIVE_SERVER_KEY);
         let nextActive = active;
         if (active === id) {
-          nextActive = next[0]?.id ?? null;
+          nextActive = firstEnabledId(next) ?? next[0]?.id ?? null;
           if (nextActive) await setSecureItem(ACTIVE_SERVER_KEY, nextActive);
           else await deleteSecureItem(ACTIVE_SERVER_KEY);
         }
@@ -257,7 +270,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setActive = useCallback(
     (id: string) => {
-      if (!servers.some((s) => s.id === id)) return;
+      if (!canActivate(servers, id)) return;
       setActiveServerId(id);
       setSecureItem(ACTIVE_SERVER_KEY, id).catch(() => {
         // best-effort persistence; in-memory state already switched
@@ -336,6 +349,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       addServer,
       removeServer,
       renameServer,
+      setServerDisabled: disableServer,
       setActive,
       syncAnywhereHosts,
       pair,
@@ -350,6 +364,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       addServer,
       removeServer,
       renameServer,
+      disableServer,
       setActive,
       syncAnywhereHosts,
       pair,

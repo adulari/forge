@@ -352,6 +352,7 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
             challenge,
             expect_signing_key,
         } => approve_pairing(&challenge, expect_signing_key.as_deref()).await,
+        AnywhereCmd::SafetyCode { challenge } => print_safety_code(&challenge).await,
         AnywhereCmd::Enable { name } => enable(name).await,
         AnywhereCmd::Status => status().await,
         AnywhereCmd::Doctor => doctor().await,
@@ -818,6 +819,37 @@ async fn list_approvals() -> Result<()> {
     Ok(())
 }
 
+/// Exit status of `forge anywhere approve` when the person typed DENY. A distinct code lets a
+/// caller such as `forge host add` tell "declined" from "approved" without parsing text.
+pub(crate) const APPROVAL_DENIED_EXIT: i32 = 3;
+
+async fn print_safety_code(encoded_challenge: &str) -> Result<()> {
+    let store = StateStore::platform()?;
+    let mut state = store.load()?;
+    let access_token = ensure_access_token(&store, &mut state).await?;
+    let config = forge_config::load()?;
+    let service_url = config.anywhere.service_url();
+    let challenge = parse_pairing_challenge(encoded_challenge, service_url, now_ms())?;
+    let http = client()?;
+    let details: PairingDetails = send_json(
+        http.get(format!(
+            "{service_url}/v1/pairings/{}",
+            challenge.pairing_id
+        ))
+        .bearer_auth(&access_token),
+    )
+    .await
+    .context("load device approval request")?;
+    validate_pairing_details(&details, &challenge)?;
+    let account_id = decode_hex_array::<16>(
+        state.account_id.as_deref().context("missing account id")?,
+        "account id",
+    )?;
+    let code = pairing_safety_code(&challenge, &details.signing_public_key, &account_id)?;
+    println!("Safety code: {code}");
+    Ok(())
+}
+
 async fn approve_pairing(encoded_challenge: &str, expect_signing_key: Option<&str>) -> Result<()> {
     let store = StateStore::platform()?;
     let mut state = store.load()?;
@@ -863,7 +895,8 @@ async fn approve_pairing(encoded_challenge: &str, expect_signing_key: Option<&st
                 println!(
                     "Denied. No account access was granted; the request will expire automatically."
                 );
-                return Ok(());
+                std::io::stdout().flush().ok();
+                std::process::exit(APPROVAL_DENIED_EXIT);
             }
             _ => bail!(
                 "approval not confirmed; type exactly APPROVE or DENY and run the command again"

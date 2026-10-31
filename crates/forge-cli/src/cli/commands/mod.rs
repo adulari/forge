@@ -6,6 +6,7 @@ pub(crate) mod cc_transcript;
 pub(crate) mod codex_rollout;
 pub(crate) mod dispatch;
 pub(crate) mod git;
+pub(crate) mod host;
 pub(crate) mod import;
 pub(crate) mod import_claude_session;
 pub(crate) mod import_sessions;

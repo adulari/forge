@@ -6,6 +6,7 @@ import { useCallback, useMemo } from "react";
 
 import type { SessionRow } from "./api";
 import { useAuth } from "./auth";
+import { enabledServers, pickWarmServer, usePresence } from "./hostPresence";
 import { effectiveShowAll, mergeServerFleets, setStoredShowAll, useStoredShowAll, type ScopedRow } from "./fleetScope";
 import { useServerFleets, useSessions } from "./queries";
 
@@ -27,11 +28,15 @@ export function useFleetScope() {
 
 /** The rows the current scope shows, each tagged with the server it came from. */
 export function useScopedFleet() {
-  const { servers, activeServerId, showAll } = useFleetScope();
+  const { servers: allServers, activeServerId, showAll } = useFleetScope();
+  const servers = useMemo(() => enabledServers(allServers), [allServers]);
+  const presence = usePresence();
+  // A single-server scope still keeps the most recent other host's fleet polled ("kept ready").
+  const warm = pickWarmServer(servers, activeServerId, presence.recent);
   const active = useSessions();
-  const fleets = useServerFleets(showAll ? servers : []);
-  const fleetData = fleets.map((fleet) => fleet.data);
-  const fleetKey = fleets.map((fleet) => fleet.dataUpdatedAt).join(",");
+  const fleets = useServerFleets(showAll ? servers : warm ? [warm] : []);
+  const fleetData = (showAll ? fleets : []).map((fleet) => fleet.data);
+  const fleetKey = (showAll ? fleets : []).map((fleet) => fleet.dataUpdatedAt).join(",");
 
   const rows = useMemo<ScopedSessionRow[]>(() => {
     if (!showAll) return (active.data ?? []).map((row) => ({ row, serverId: activeServerId ?? "" }));

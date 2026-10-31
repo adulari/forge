@@ -333,6 +333,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/remote [--lan | --local | --anywhere]",
     },
     Command {
+        name: "host",
+        desc: "machines added over SSH: list them, or forget one (add with `forge host add`)",
+        usage: "/host [remove NAME]",
+    },
+    Command {
         name: "anywhere",
         desc: "Forge Anywhere menu: account, sync across machines, devices, recovery",
         usage: "/anywhere",

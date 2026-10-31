@@ -1021,6 +1021,35 @@ and keep going."
             let cwd = session.lock().await.workspace_root().to_path_buf();
             app.note(&crate::cli::commands::dispatch::chat_dispatch_note(&prompt, &cwd).await);
         }
+        // `/host` — machines added with `forge host add`. Adding needs a terminal for the
+        // safety-code approval, so the TUI lists and forgets but points to the command to add.
+        CommandAction::Host(arg) => match crate::hosts::remove_argument(&arg) {
+            Some(name) => match crate::hosts::remove(name) {
+                Ok(true) => app.note(&format!("forgot {name}")),
+                Ok(false) => app.note(&format!("no machine named {name}")),
+                Err(error) => app.note(&format!("could not update the host list: {error}")),
+            },
+            _ => match crate::hosts::list() {
+                Ok(list) if list.is_empty() => {
+                    app.note("no machines added yet — run `forge host add user@host` in a terminal")
+                }
+                Ok(list) => {
+                    app.note(&format!(
+                        "{} machines (add more: `forge host add user@host`):",
+                        list.len()
+                    ));
+                    for host in list {
+                        let state = if host.paired {
+                            "paired"
+                        } else {
+                            "service only"
+                        };
+                        app.note(&format!("  {}  {}  {}", host.name, host.target, state));
+                    }
+                }
+                Err(error) => app.note(&format!("could not read the host list: {error}")),
+            },
+        },
         // `/memories` — list this project's memories.
         CommandAction::Memories => {
             let scope = session.lock().await.workspace_scope();

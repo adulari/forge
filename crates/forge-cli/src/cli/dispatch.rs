@@ -129,6 +129,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             )
             .await
         }
+        Command::Host { cmd } => crate::cli::commands::host::host_cmd(cmd),
         Command::Anywhere { cmd } => crate::anywhere::anywhere_cmd(cmd).await,
         Command::Attach {
             id,

@@ -31,6 +31,13 @@ pub(crate) enum AnywhereCmd {
         #[arg(long, value_name = "KEY")]
         expect_signing_key: Option<String>,
     },
+    /// Print the safety code this device computes for a waiting challenge, without approving.
+    /// Used by `forge host add` so the code you compare is never taken from the new machine.
+    #[command(hide = true)]
+    SafetyCode {
+        /// Challenge printed by `forge anywhere setup` on the new device.
+        challenge: String,
+    },
     /// Register this machine as a managed host and enable its connector.
     Enable {
         /// Stable name shown in the host fleet.

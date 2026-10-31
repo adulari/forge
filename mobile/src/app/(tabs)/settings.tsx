@@ -25,7 +25,8 @@
 import { TabPager } from "../../components/TabPager";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router } from "expo-router";
-import { Bell, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react-native";
+import { enabledServers, HOST_BADGE_LABEL, hostBadge, lastSeenLabel, pickWarmServer, usePresence } from "../../lib/hostPresence";
+import { Bell, ChevronRight, Pencil, Plus, Power, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View, type PressableStateCallbackType } from "react-native";
 import Animated from "react-native-reanimated";
@@ -366,7 +367,8 @@ export function SettingsScreen() {
   const tokens = useTokens();
   const { isCompact } = useBreakpoint();
   const toast = useToast();
-  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, renameServer } = useAuth();
+  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, renameServer, setServerDisabled } = useAuth();
+  const presence = usePresence();
   const { account: anywhereAccount, signedIn: anywhereSignedIn } = useAnywhere();
 
   const serverQueries = useServerFleets(servers);
@@ -613,16 +615,36 @@ export function SettingsScreen() {
             const active = server.id === activeServerId;
             // D/M/W Settings General caption: "…a1F9 · online · 1 waiting" — the reachability
             // word was previously dropped, leaving only token+waiting-count.
-            const statusWord = fleet.isLoading ? "checking…" : reachable ? "online" : "offline";
+            const statusWord = server.disabled
+              ? "disabled"
+              : fleet.isLoading
+                ? "checking…"
+                : reachable
+                  ? "online"
+                  : `offline · ${lastSeenLabel(presence.lastSeen[server.id])}`;
+            const badge = hostBadge({
+              id: server.id,
+              activeId: activeServerId,
+              warmId: pickWarmServer(enabledServers(servers), activeServerId, presence.recent)?.id ?? null,
+              disabled: Boolean(server.disabled),
+              reachable,
+            });
             return (
               <DenseRow
                 key={server.id}
-                onPress={() => setActive(server.id)}
-                accessibilityLabel={server.name}
+                onPress={() => (server.disabled ? void setServerDisabled(server.id, false) : setActive(server.id))}
+                accessibilityLabel={server.disabled ? `${server.name}, disabled, tap to re-enable` : server.name}
                 hasInteractiveTrailing
                 leading={<View style={[styles.reachabilityDot, { backgroundColor: fleet.isLoading ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />}
                 trailing={
                   <View style={styles.serverTrailing}>
+                    {!active ? (
+                      <IconButton
+                        icon={<Power size={16} strokeWidth={1.75} color={server.disabled ? tokens.accent : tokens.ink4} />}
+                        accessibilityLabel={server.disabled ? `Re-enable server ${server.name}` : `Disable server ${server.name}`}
+                        onPress={() => void setServerDisabled(server.id, !server.disabled)}
+                      />
+                    ) : null}
                     <IconButton
                       icon={<Pencil size={16} strokeWidth={1.75} color={tokens.ink4} />}
                       accessibilityLabel={`Rename server ${server.name}`}
@@ -646,9 +668,11 @@ export function SettingsScreen() {
                   >
                     {server.name}
                   </Text>
-                  {active ? (
-                    <View style={[styles.activeTag, { backgroundColor: tokens.selection }]}>
-                      <Text style={[type.meta, { color: tokens.accent }]} numberOfLines={1}>active</Text>
+                  {badge === "selected" || badge === "kept-ready" || badge === "connected" ? (
+                    <View style={[styles.activeTag, { backgroundColor: badge === "selected" ? tokens.selection : tokens.bg3 }]}>
+                      <Text style={[type.meta, { color: badge === "selected" ? tokens.accent : tokens.ink3 }]} numberOfLines={1}>
+                        {HOST_BADGE_LABEL[badge].toLowerCase()}
+                      </Text>
                     </View>
                   ) : null}
                 </View>
