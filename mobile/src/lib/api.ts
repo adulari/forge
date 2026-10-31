@@ -12,6 +12,7 @@ import { parseNoticesResponse, type NoticesResponse } from "./notices/core";
 import { noteHostResponse } from "./hostStatus";
 import { tFetch, TWebSocket } from "./transport";
 import type { DaemonUpdateInfo } from "./updateBanner";
+import { offsetChanges } from "./usageActivity";
 
 export class ApiError extends Error {
   status: number;
@@ -544,6 +545,11 @@ export interface ForkSessionRequest {
   /** First prompt, sent in the child as soon as it starts. */
   prompt?: string;
   title?: string;
+  /** Fork every message, the latest turn included, instead of stopping before `at_seq`. Additive. */
+  whole_thread?: boolean;
+  /** Move the thread: the daemon hands the source's worktree to the child and archives the source
+   * without snapshotting it. Additive: an older daemon rejects it. */
+  move_source?: boolean;
 }
 
 /** The 400 an older daemon returns for a fork body carrying fields it predates
@@ -1337,7 +1343,7 @@ export function getChangelog(baseUrl: string, limit?: number): Promise<Changelog
 }
 
 export function getUsageActivity(baseUrl: string, days = 365, tzOffsetSecs = -new Date().getTimezoneOffset() * 60): Promise<UsageActivityResponse> {
-  return request(baseUrl, `/api/usage/activity${qs({ days, tzOffset: tzOffsetSecs })}`);
+  return request(baseUrl, `/api/usage/activity${qs({ days, tzOffset: tzOffsetSecs, tzChanges: offsetChanges(Date.now(), days) })}`);
 }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {

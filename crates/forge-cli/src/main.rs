@@ -109,6 +109,7 @@ mod serve_clients_cli;
 mod serve_diagnostics;
 mod serve_dispatch;
 mod serve_fleet_ws;
+mod serve_fork_move;
 mod serve_git;
 #[cfg(test)]
 mod serve_going_away;

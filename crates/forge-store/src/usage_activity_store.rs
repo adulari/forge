@@ -66,30 +66,68 @@ fn day_ordinal(day: &str) -> Option<i64> {
     Some(i64::from(chrono::Datelike::num_days_from_ce(&date)))
 }
 
+/// Seconds per aggregation slot. Every real UTC offset is a multiple of 15 minutes, so a slot
+/// never straddles a local midnight.
+const SLOT_SECS: i64 = 900;
+
 impl Store {
-    /// Usage grouped by local day and provider since `since_epoch`. `utc_offset_secs` shifts the
-    /// day boundary to the caller's timezone.
+    /// Usage grouped by local day and provider since `since_epoch`, with one fixed UTC offset.
     pub fn usage_by_day(&self, since_epoch: i64, utc_offset_secs: i64) -> Result<Vec<DayUsage>> {
+        self.usage_by_day_with(since_epoch, |_| utc_offset_secs)
+    }
+
+    /// Like [`Store::usage_by_day`], but `offset_at` gives the UTC offset in force at each instant,
+    /// so a window that crosses a DST change puts every turn on the local day it happened on
+    /// instead of shifting one side of the change by an hour.
+    pub fn usage_by_day_with(
+        &self,
+        since_epoch: i64,
+        offset_at: impl Fn(i64) -> i64,
+    ) -> Result<Vec<DayUsage>> {
         let conn = self.lock()?;
         let sql = format!(
-            "SELECT date(u.created_at + ?2, 'unixepoch') AS day, {USAGE_PROVIDER_EXPR} AS prov, \
+            "SELECT CAST(u.created_at AS INTEGER) / {SLOT_SECS} AS slot, {USAGE_PROVIDER_EXPR} AS prov, \
              COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), \
              COALESCE(SUM(u.cost_usd), 0.0), COALESCE(SUM(COALESCE(u.api_calls, 1)), 0) \
              FROM usage u JOIN message m ON m.id = u.message_id WHERE u.created_at >= ?1 \
-             GROUP BY day, prov ORDER BY day ASC, prov ASC"
+             GROUP BY slot, prov ORDER BY slot ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([since_epoch, utc_offset_secs], |r| {
-            Ok(DayUsage {
-                day: r.get(0)?,
-                provider: r.get(1)?,
-                input_tokens: r.get::<_, i64>(2)? as u64,
-                output_tokens: r.get::<_, i64>(3)? as u64,
-                cost_usd: r.get(4)?,
-                calls: r.get::<_, i64>(5)? as u64,
-            })
+        let rows = stmt.query_map([since_epoch], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, i64>(3)? as u64,
+                r.get::<_, f64>(4)?,
+                r.get::<_, i64>(5)? as u64,
+            ))
         })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let mut merged: std::collections::BTreeMap<(String, String), DayUsage> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let (slot, provider, input_tokens, output_tokens, cost_usd, calls) = row?;
+            let at = slot * SLOT_SECS;
+            let Some(local) = chrono::DateTime::from_timestamp(at + offset_at(at), 0) else {
+                continue;
+            };
+            let day = local.format("%Y-%m-%d").to_string();
+            let entry = merged
+                .entry((day.clone(), provider.clone()))
+                .or_insert_with(|| DayUsage {
+                    day,
+                    provider,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: 0.0,
+                    calls: 0,
+                });
+            entry.input_tokens += input_tokens;
+            entry.output_tokens += output_tokens;
+            entry.cost_usd += cost_usd;
+            entry.calls += calls;
+        }
+        Ok(merged.into_values().collect())
     }
 }
 
@@ -174,5 +212,47 @@ mod tests {
         assert_eq!(gemini.len(), 1);
         assert_eq!(gemini[0].day, "2026-03-02");
         assert_eq!((gemini[0].calls, gemini[0].tokens()), (2, 220));
+    }
+
+    #[test]
+    fn a_window_across_a_dst_change_buckets_each_turn_by_the_offset_in_force_then() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        let usage = Usage {
+            input_tokens: 10,
+            ..Default::default()
+        };
+        // Amsterdam: 00:30 CEST on 2026-08-10 (22:30 UTC Aug 9), then 00:30 CET on 2026-11-10.
+        let stamps = [1_786_314_600i64, 1_794_267_000];
+        for (seq, at) in stamps.iter().enumerate() {
+            let m = store
+                .add_message(&sid, seq as i64, Role::Assistant, "x", Some("gemini::f"))
+                .unwrap();
+            store.record_usage(&sid, &m, &usage, None).unwrap();
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE usage SET created_at = ?1 WHERE message_id = ?2",
+                    rusqlite::params![at, m],
+                )
+                .unwrap();
+        }
+        let cutover = 1_792_800_000i64;
+        let rows = store
+            .usage_by_day_with(0, |ts| if ts < cutover { 7200 } else { 3600 })
+            .unwrap();
+        let days: Vec<_> = rows.iter().map(|r| r.day.as_str()).collect();
+        assert_eq!(days, ["2026-08-10", "2026-11-10"]);
+        let fixed: Vec<_> = store
+            .usage_by_day(0, 3600)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.day)
+            .collect();
+        assert_eq!(
+            fixed[0], "2026-08-09",
+            "a single winter offset misplaces the summer turn"
+        );
     }
 }

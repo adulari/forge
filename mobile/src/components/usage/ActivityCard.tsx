@@ -5,6 +5,7 @@ import Svg, { Rect } from "react-native-svg";
 
 import { buildHeatmap, compactTokens, summarize } from "../../lib/usageActivity";
 import { useUsageActivity } from "../../lib/useUsageActivity";
+import { useToday } from "../../lib/useToday";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type } from "../../theme/typography";
@@ -16,7 +17,7 @@ const GAP = 2;
 export function ActivityCard() {
   const tokens = useTokens();
   const { data } = useUsageActivity();
-  const today = useMemo(() => new Date(), []);
+  const today = useToday(data);
   const rows = data?.days;
   const weeks = useMemo(() => buildHeatmap(rows ?? [], today, "all").slice(-WEEKS), [rows, today]);
   const summary = useMemo(() => summarize(rows ?? [], today, "30"), [rows, today]);
