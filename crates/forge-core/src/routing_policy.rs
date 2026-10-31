@@ -294,6 +294,11 @@ impl Session {
                     .push_str(crate::stop_guards::COMPLETION_CONTRACT);
             }
         }
+        // A bridged model's tools come from `forge mcp-serve`, which stays in replace mode, so it
+        // must not be told to edit by line anchor.
+        if !forge_provider::is_cli_bridge(model) {
+            preamble[0].content.push_str(self.edit_mode_note());
+        }
         // Codemode guidance rides with the tool itself: present exactly when `run_code` is
         // advertised, static text so the cached prefix stays stable. A bridge is handed the
         // direct catalog here only to size the request, never the tool: the guidance told a

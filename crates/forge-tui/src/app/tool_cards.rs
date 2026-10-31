@@ -609,7 +609,15 @@ fn arg_rows_for(card: &ToolCard) -> Vec<(String, String)> {
         rows.retain(|(k, _)| {
             !matches!(
                 k.as_str(),
-                "content" | "old_string" | "new_string" | "patch" | "diff" | "old" | "new"
+                "content"
+                    | "old_string"
+                    | "new_string"
+                    | "patch"
+                    | "diff"
+                    | "old"
+                    | "new"
+                    | "edits"
+                    | "tag"
             )
         });
     }
@@ -927,6 +935,36 @@ mod tests {
             binary: false,
         });
         c
+    }
+
+    #[test]
+    fn an_anchored_edit_renders_as_a_normal_diff_without_its_anchor_arguments() {
+        let args = r#"{"path":"src/lib.rs","tag":"1A2B","edits":[{"start":2,"new":"two"}]}"#;
+        let mut c = card("edit_file", args);
+        c.status = CardStatus::Ok;
+        c.summary = "edited".into();
+        c.ms = Some(4);
+        c.set_diff(FileDiff {
+            path: "src/lib.rs".into(),
+            kind: forge_types::DiffKind::Modified,
+            old: Some("one\nbeta\nthree\n".into()),
+            new: Some("one\ntwo\nthree\n".into()),
+            lang: Some("rust".into()),
+            binary: false,
+        });
+        let rows = text(&card_lines(&c, 100));
+        assert!(
+            rows[0].contains("✓ Edit") && rows[0].contains("+1"),
+            "{rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("beta")) && rows.iter().any(|r| r.contains("two")));
+        c.expanded = true;
+        let expanded = text(&card_lines(&c, 100)).join("\n");
+        assert!(
+            !expanded.contains("1A2B") && !expanded.contains("\"start\""),
+            "{expanded}"
+        );
+        assert_eq!(headline("edit_file", args), "src/lib.rs");
     }
 
     #[test]

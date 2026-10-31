@@ -190,6 +190,7 @@ pub fn setting_options(path: &str) -> Option<Vec<&'static str>> {
         "mesh.credit_mode" => vec!["normal", "frugal", "strict"],
         "mesh.classifier" => vec!["heuristic", "llm"],
         "mesh.harness_profile" => vec!["guarded", "minimal"],
+        "harness.edit_mode" => vec!["replace", "hashline"],
         "mesh.default_effort" => vec!["low", "medium", "high", "xhigh", "max"],
         "lattice.embeddings.backend" => vec!["auto", "ollama", "openai", "gemini"],
         "chat.follow_up" => vec!["steer", "queue"],
@@ -278,6 +279,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.stop_retries" => Some(("Behaviour", "Stop retries")),
         "harness.thinking_loop_breaker" => Some(("Behaviour", "Thinking-loop breaker")),
         "harness.repeat_interrupt" => Some(("Behaviour", "Repeat-call interrupt")),
+        "harness.edit_mode" => Some(("Behaviour", "File edit mode")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -529,6 +531,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.completion_contract" => "Append a short completion contract to the end of the system prompt: do not yield while actionable work remains, smoke-run before yielding, no stubs. Default off.",
         "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
         "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
+        "harness.edit_mode" => "How the model edits existing files. replace: edit_file and multi_edit with exact old/new text. hashline: read_file tags each line with its number under a per-file tag and edit_file takes line anchors plus that tag, which fails with the current lines if the file changed. Suits models that often miss exact matches. Default replace.",
         "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
         _ => return None,
     })
