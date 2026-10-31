@@ -28,6 +28,10 @@ All notable changes to Forge are documented here. The format follows
 - **The desktop app asks before turning key sync on.** The Sync page and the onboarding step now show the same warning as the terminal menu (second vault key, OAuth sign-ins never sync, revoked devices keep what they downloaded), opening on Cancel.
 - **The web top bar underlines one tab on the Session tree page, not two.** Fleet matched `/session-tree` as a prefix; it now matches only `/session` and its sub-routes.
 
+### Added
+
+- **`/anywhere` opens a real Forge Anywhere menu in the terminal, with account sync in it.** One overlay shows your account, the connector and this device, the five sync categories (keys, skills, settings, MCP servers, instructions) with an on/off switch each, item and pending counts, last sync, conflicts and skipped items with their reasons, a Sync now action, a Sign in again list for logins that do not sync (Codex, xAI, MCP OAuth, run through the existing flows), and the enrolled devices. Arrows, Tab, Space/Enter and Esc drive it, it refreshes while open, and it spells out the not signed in, loading and error states with a next step. Turning keys on asks first and explains that they are sealed with a second vault key and that OAuth tokens never sync; turning any category off leaves local data in place; the web Recovery Center stays one labelled row away. The statusline now shows the sync badge on its own while any category is on (`/statusline toggle sync` hides it).
+
 ### Security
 
 - **Remote and fleet channels can no longer open `/anywhere` or `/delete` in the host terminal, or type into those menus.** A paired phone could send `/anywhere`, Enter and `y` to switch key sync on without anyone at the machine (the daemon refuses the same toggle over the bridge), or leave the host stuck on a sign-in prompt waiting for stdin. Both commands now join `/keys` as host-only, and remote keys and overlay verbs are dropped while either menu is open.
