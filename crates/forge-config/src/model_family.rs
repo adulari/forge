@@ -240,10 +240,25 @@ impl HarnessConfig {
         }
     }
 
-    /// Whether `model` is a thinking-only family whose `reasoning_content` must ride back on
-    /// every assistant message, even behind a custom gateway.
+    /// Whether `model` is a thinking-only family served through a user-declared
+    /// `[[providers.custom]]` gateway, which forwards the upstream's `reasoning_content` check.
+    /// Native `deepseek::` / `kimi::` ids are handled by the provider itself; built-in strict hosts
+    /// (groq, nvidia, together) and distilled variants are left alone, since an unknown assistant
+    /// property can be a 400.
     pub fn family_echoes_reasoning(&self, model: &str) -> bool {
+        self.family_echoes_reasoning_via(
+            model,
+            crate::provider_registry::is_runtime_custom_provider,
+        )
+    }
+
+    fn family_echoes_reasoning_via(&self, model: &str, is_gateway: impl Fn(&str) -> bool) -> bool {
+        let Some((namespace, name)) = model.split_once("::") else {
+            return false;
+        };
         self.family_profiles
+            && is_gateway(namespace)
+            && !name.to_lowercase().contains("distill")
             && profile_for(family_of(model)).reasoning == ReasoningHandling::EchoOnToolTurns
     }
 
@@ -368,8 +383,29 @@ mod flag_tests {
         assert!(!h.flags_for("ollama::llama3").stop_retries);
         h.explicit_flags = vec!["stop_retries".into()];
         assert!(!h.flags_for(KIMI).stop_retries, "explicit false wins");
-        assert!(h.family_echoes_reasoning("modelgateway::deepseek-v4.1-flash"));
+        let gateway = |ns: &str| ns == "acme-gw";
+        assert!(h.family_echoes_reasoning_via("acme-gw::deepseek-v4.1-flash", gateway));
+        assert!(h.family_echoes_reasoning_via("acme-gw::moonshotai/kimi-k3", gateway));
+        assert!(!h.family_echoes_reasoning_via("acme-gw::llama-4", gateway));
         assert!(!h.family_echoes_reasoning("ollama::llama3"));
+        for builtin in ["groq", "nvidia", "together", "deepseek", "kimi"] {
+            assert!(
+                !crate::provider_registry::is_runtime_custom_provider(builtin),
+                "{builtin}"
+            );
+        }
+        // Review finding 17: strict hosts, local runners and distills never get the field.
+        for id in [
+            "groq::moonshotai/kimi-k2-instruct",
+            "nvidia::moonshotai/kimi-k2.6",
+            "together::deepseek-ai/DeepSeek-V3",
+            "ollama::deepseek-coder-v2",
+            "groq::deepseek-r1-distill-llama-70b",
+            "inferhub::deepseek-r1-distill-qwen-32b",
+            "deepseek::deepseek-flash",
+        ] {
+            assert!(!h.family_echoes_reasoning(id), "{id}");
+        }
     }
 
     #[test]

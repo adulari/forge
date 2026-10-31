@@ -137,15 +137,18 @@ column is informational until the edit A/B.
 ### Dialect fixes (always on)
 
 - **In-band tool calls.** A reply that carries the chat template's own tool-call tokens as text
-  now runs: Kimi `<|tool_calls_section_begin|><|tool_call_begin|>functions.NAME:IDX
+  (a complete opener outside code fences and inline code, followed by an argument or separator
+  token) now runs: Kimi `<|tool_calls_section_begin|><|tool_call_begin|>functions.NAME:IDX
   <|tool_call_argument_begin|>{json}<|tool_call_end|>` and DeepSeek V3
   `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME` + a json fence. ASCII-flattened
   tokens work, a missing `<|tool_call_end|>` is tolerated, and a block with bad JSON runs nothing.
-  The live stream hides the tokens, as it already did for DSML (`chat_template_calls.rs`,
+  The live stream holds a block back only from a complete opener token, outside code, and releases
+  the text at the end of the stream if it does not parse as calls. DSML keeps its older behaviour (`chat_template_calls.rs`,
   `dsml_stream_guard.rs`).
 - **Reasoning echo behind gateways.** Native `deepseek::` and `kimi::` ids always got
   `reasoning_content` back on assistant messages; a custom provider serving the same model did not
   get the empty field when a reply streamed no reasoning. With `family_profiles` on, the field is
-  sent for DeepSeek and Kimi families on any provider (`CompletionOptions::echo_reasoning`).
+  sent for DeepSeek and Kimi families through any user-declared `[[providers.custom]]` gateway only, never for
+  distills or strict hosts such as groq or nvidia (`CompletionOptions::echo_reasoning`).
   ModelGateway does not reject its absence (measured 2026-10-31), but only engages thinking on the
   next turn when it is present.

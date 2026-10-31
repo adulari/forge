@@ -12,11 +12,16 @@ use crate::dsml::{is_dsml_bar, MARKER};
 pub(crate) struct DsmlStreamGuard {
     held: String,
     swallowing: bool,
+    /// Text from a chat-template opener onward, held back (not discarded) until the stream ends.
+    template: Option<String>,
+    code: CodeState,
 }
 
 enum Opener {
     /// `<[/]｜+DSML｜` — certainly template markup.
     Confirmed,
+    /// A complete Kimi / DeepSeek V3 block opener token; hidden only if the block parses.
+    Template,
     /// Every char so far fits an opener but the text ends before it is decided.
     Partial,
     NotDsml,
@@ -49,24 +54,68 @@ fn classify(s: &str) -> Opener {
     }
 }
 
-/// `<|tool_call…` / `<｜tool▁call…`: the Kimi and DeepSeek V3 chat-template tool-call tokens
-/// (`chat_template_calls`), spelled with ASCII or fullwidth bars and `_` or `▁`.
+/// A complete chat-template block opener (`<|tool_call_begin|>`, `<|tool_calls_section_begin|>`,
+/// `<|tool_calls_begin|>`), spelled with ASCII or fullwidth bars and `_` or `▁`. Only a whole
+/// token counts: `<|tool_call` alone is not enough to start hiding text.
 fn chat_template_opener(s: &str) -> Opener {
-    const WANT: &str = "tool_call";
+    const TOKENS: [&str; 3] = [
+        "tool_call_begin",
+        "tool_calls_section_begin",
+        "tool_calls_begin",
+    ];
     let Some(rest) = s[1..].strip_prefix(['|', '｜']) else {
         return Opener::NotDsml;
     };
-    let seen: String = rest
-        .chars()
-        .take(WANT.len())
-        .map(|c| if c == '▁' { '_' } else { c })
-        .collect();
-    if seen == WANT {
-        Opener::Confirmed
-    } else if seen.len() < WANT.len() && WANT.starts_with(&seen) {
-        Opener::Partial
-    } else {
-        Opener::NotDsml
+    let mut name = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        if c == '|' || c == '｜' {
+            return match chars.next() {
+                _ if !TOKENS.contains(&name.as_str()) => Opener::NotDsml,
+                Some('>') => Opener::Template,
+                None => Opener::Partial,
+                Some(_) => Opener::NotDsml,
+            };
+        }
+        name.push(if c == '▁' { '_' } else { c });
+        if !TOKENS.iter().any(|t| t.starts_with(&name)) {
+            return Opener::NotDsml;
+        }
+    }
+    Opener::Partial
+}
+
+/// Tracks whether the text shown so far ends inside a code fence or inline code span.
+#[derive(Default)]
+struct CodeState {
+    fence: bool,
+    inline_ticks: usize,
+    run: usize,
+}
+
+impl CodeState {
+    fn feed(&mut self, text: &str) {
+        for c in text.chars() {
+            if c == '`' {
+                self.run += 1;
+                if self.run == 3 {
+                    self.fence = !self.fence;
+                    self.run = 0;
+                }
+                continue;
+            }
+            if !self.fence {
+                self.inline_ticks += self.run;
+            }
+            self.run = 0;
+            if c == '\n' {
+                self.inline_ticks = 0;
+            }
+        }
+    }
+
+    fn inside(&self) -> bool {
+        self.fence || (self.inline_ticks + self.run) % 2 == 1
     }
 }
 
@@ -76,14 +125,27 @@ impl DsmlStreamGuard {
         if self.swallowing {
             return String::new();
         }
+        if let Some(held) = self.template.as_mut() {
+            held.push_str(chunk);
+            return String::new();
+        }
         let mut buf = std::mem::take(&mut self.held);
         buf.push_str(chunk);
         let mut out = String::with_capacity(buf.len());
         let mut rest = buf.as_str();
         while let Some(lt) = rest.find('<') {
             out.push_str(&rest[..lt]);
+            self.code.feed(&rest[..lt]);
             rest = &rest[lt..];
             match classify(rest) {
+                Opener::Template if self.code.inside() => {
+                    out.push('<');
+                    rest = &rest[1..];
+                }
+                Opener::Template => {
+                    self.template = Some(rest.to_string());
+                    return out;
+                }
                 Opener::Confirmed => {
                     self.swallowing = true;
                     return out;
@@ -94,16 +156,24 @@ impl DsmlStreamGuard {
                 }
                 Opener::NotDsml => {
                     out.push('<');
+                    self.code.feed("<");
                     rest = &rest[1..];
                 }
             }
         }
         out.push_str(rest);
+        self.code.feed(rest);
         out
     }
 
     /// End of stream: whatever was held never became a DSML opener, so release it.
     pub(crate) fn finish(&mut self) -> String {
+        if let Some(block) = self.template.take() {
+            if crate::chat_template_calls::recover(&block).is_some() {
+                return String::new();
+            }
+            return block;
+        }
         std::mem::take(&mut self.held)
     }
 }
@@ -143,6 +213,26 @@ mod tests {
         assert_eq!(
             stream(&["a <| b and <|tool|> ok"]),
             "a <| b and <|tool|> ok"
+        );
+    }
+
+    // Regression (review finding 16): quoted tokens in prose or code must not eat the reply, and a
+    // block that does not parse is released at the end of the stream.
+    #[test]
+    fn quoted_or_unparseable_tokens_never_cost_the_user_text() {
+        let prose = "Kimi opens a call with <|tool_call_begin|> then a name, and that is all.";
+        let fenced = "Example:\n```\n<|tool_call_begin|>functions.x:0<|tool_call_argument_begin|>{}<|tool_call_end|>\n```\nDone.";
+        let inline = "Use `<|tool_calls_section_begin|>` to open it. Then more text.";
+        for text in [prose, fenced, inline] {
+            for chunks in every_split(text) {
+                let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+                assert_eq!(stream(&refs), text, "{chunks:?}");
+            }
+        }
+        // A bare `<|tool_call` prefix is not a token.
+        assert_eq!(
+            stream(&["a <|tool_call and then more"]),
+            "a <|tool_call and then more"
         );
     }
 

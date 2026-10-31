@@ -65,17 +65,44 @@ fn normalize_tokens(s: &str) -> String {
     out
 }
 
-/// Whether `content` carries these templates' tool-call tokens (cheap, normalization-free).
+/// Whether `pos` in `text` sits inside a fenced block or an inline code span, where a mention of
+/// a token is documentation, not a call.
+pub(crate) fn in_code(text: &str, pos: usize) -> bool {
+    let before = &text[..pos];
+    if before.matches("```").count() % 2 == 1 {
+        return true;
+    }
+    let line = before.rsplit('\n').next().unwrap_or(before);
+    line.replace("```", "").matches('`').count() % 2 == 1
+}
+
+/// Byte offset of the first real block opener: a complete section or call token outside code.
+fn first_live_opener(text: &str) -> Option<usize> {
+    SECTION_BEGINS
+        .iter()
+        .chain(std::iter::once(&CALL_BEGIN))
+        .flat_map(|tok| text.match_indices(tok).map(|(i, _)| i))
+        .filter(|i| !in_code(text, *i))
+        .min()
+}
+
+/// Whether `content` carries a tool-call block in these templates' tokens: a complete opener
+/// outside code, followed by an argument or separator token. A bare mention of the token names in
+/// prose or code is an ordinary answer.
 pub(crate) fn has_markup(content: &str) -> bool {
-    [
-        "tool_call_begin",
-        "tool▁call▁begin",
-        "tool_calls_section_begin",
-        "tool▁calls▁begin",
-    ]
-    .iter()
-    .any(|m| content.contains(m))
-        && content.contains('<')
+    if !["tool_call", "tool▁call", "tool_calls", "tool▁calls"]
+        .iter()
+        .any(|m| content.contains(m))
+    {
+        return false;
+    }
+    let text = normalize_tokens(content);
+    first_live_opener(&text).is_some_and(|at| {
+        let tail = &text[at..];
+        SECTION_BEGINS.iter().any(|b| tail.starts_with(b))
+            || tail.contains(ARG_BEGIN)
+            || tail.contains(SEP)
+    })
 }
 
 /// The calls in `content` and the text with the whole block removed. `None` when there is no
@@ -85,10 +112,7 @@ pub(crate) fn recover(content: &str) -> Option<(Vec<ToolCall>, String)> {
         return None;
     }
     let text = normalize_tokens(content);
-    let first = SECTION_BEGINS
-        .iter()
-        .find_map(|b| text.find(b))
-        .or_else(|| text.find(CALL_BEGIN))?;
+    let first = first_live_opener(&text)?;
     let before = text[..first].trim_end().to_string();
     let mut tail = &text[first..];
     for b in SECTION_BEGINS {
@@ -200,6 +224,21 @@ mod tests {
             recover("<|tool_calls_section_begin|><|tool_call_begin|>functions.shell:0").is_none()
         );
         assert!(recover("plain answer mentioning tool_call_begin in prose").is_none());
+    }
+
+    // Regression (review finding 15): prose and code that merely name the tokens are answers.
+    #[test]
+    fn mentioning_the_tokens_is_not_markup() {
+        for text in [
+            "`DsmlStreamGuard` now handles `tool_call_begin` and returns `Vec<ToolCall>`",
+            "Kimi wraps calls in `<|tool_call_begin|>`...`<|tool_call_end|>` and fits in Vec<u8>.",
+            "The token <|tool_call_begin|> opens a call; see Vec<T>.",
+            "```\n<|tool_calls_section_begin|><|tool_call_begin|>functions.x:0<|tool_call_argument_begin|>{}<|tool_call_end|>\n```",
+        ] {
+            assert!(!has_markup(text), "{text}");
+            assert!(recover(text).is_none(), "{text}");
+        }
+        assert!(has_markup(KIMI) && has_markup(DEEPSEEK));
     }
 
     #[test]
