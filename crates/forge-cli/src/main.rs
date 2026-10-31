@@ -303,6 +303,7 @@ async fn run_cli(login_path_added: Vec<String>) {
                 config.browser.allow_eval,
                 config.browser.allow_cookie_access,
             );
+            forge_tools::set_harness(&config.harness);
             preview::install(config);
         }
         open_pr_hooks::install(config.as_ref());

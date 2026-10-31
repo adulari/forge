@@ -26,11 +26,13 @@ mod device;
 mod discovery_tools;
 pub mod evidence;
 pub mod fs_write;
+pub mod harness;
 mod job_object;
 mod lattice_tool;
 mod open_pr;
 mod proxy;
 mod sandbox;
+mod search_paging;
 mod shell;
 pub mod tunnel;
 mod web;
@@ -50,7 +52,7 @@ pub(crate) mod test_state {
     }
 }
 
-pub use arg_shape::normalize_args;
+pub use arg_shape::{compact_schema, normalize_args, type_mismatches};
 pub use browser::{set_attach_endpoint, set_browser_permissions, BrowserNetworkTool, BrowserTool};
 pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
@@ -58,6 +60,7 @@ pub use core_tools::{
 };
 pub use device::{DeviceLogsTool, DeviceTool};
 pub use evidence::scope_session;
+pub use harness::set_harness;
 pub use lattice_tool::LatticeTool;
 pub use open_pr::{
     create_pr_in, set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn,

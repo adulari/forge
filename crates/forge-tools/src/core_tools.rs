@@ -296,7 +296,12 @@ impl Tool for ReadFileTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "Single file to read." },
+                "path": { "type": "string", "description": if crate::harness::read_shaping() {
+                    "Single file to read. Ranges go in the path: `src/a.rs:50-100`, `src/a.rs:-60` \
+                     (last 60 lines), `src/a.rs:5-16,40-80`, `src/a.rs:raw` (whole file, verbatim). \
+                     A bare read of a code file of 100+ lines returns declarations only; the \
+                     footer names how to read the bodies. Reads page at 300 lines."
+                } else { "Single file to read." } },
                 "paths": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -339,9 +344,34 @@ impl Tool for ReadFileTool {
         let Some(path) = named_path(args) else {
             return Err(ToolError::BadArgs("expected string 'path'".to_string()));
         };
+        let shaped = crate::harness::read_shaping();
+        let (path, mut selector) = if shaped {
+            read_shaping::split_path_spec(path)
+        } else {
+            (path, read_shaping::Selector::Bare)
+        };
         confine_read(path)?;
         check_readable_size(path).await?;
         let (start_line, end_line) = read_range(args);
+        if shaped {
+            if selector == read_shaping::Selector::Bare
+                && (start_line.is_some() || end_line.is_some())
+            {
+                selector = read_shaping::Selector::Ranges(vec![(
+                    start_line.unwrap_or(1),
+                    end_line.unwrap_or(usize::MAX),
+                )]);
+            }
+            let content = tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| io_with_path(e, path))?;
+            let path = path.to_string();
+            return tokio::task::spawn_blocking(move || {
+                read_shaping::shaped_read(&path, &content, &selector)
+            })
+            .await
+            .map_err(|e| ToolError::Failed(format!("read_file task failed: {e}")));
+        }
 
         let content = tokio::fs::read_to_string(path)
             .await
@@ -556,7 +586,14 @@ async fn read_many(paths: &[Value]) -> String {
         let Some(requested) = p.as_str() else {
             continue;
         };
-        let (path, range) = split_line_range(requested);
+        let shaped = crate::harness::read_shaping();
+        let (path, range, selector) = if shaped {
+            let (path, selector) = read_shaping::split_path_spec(requested);
+            (path, None, selector)
+        } else {
+            let (path, range) = split_line_range(requested);
+            (path, range, read_shaping::Selector::Bare)
+        };
         out.push_str(&format!("===== {} =====\n", shown(requested)));
         if let Err(e) = confine_read(path) {
             out.push_str(&format!("[error: {e}]\n"));
@@ -577,6 +614,10 @@ async fn read_many(paths: &[Value]) -> String {
             Ok(content) => {
                 let content = match range {
                     Some((start, end)) => slice_lines(&content, start, end),
+                    None if shaped && selector == read_shaping::Selector::Bare => {
+                        read_shaping::cap_lines(&content).0
+                    }
+                    None if shaped => read_shaping::shape(path, &content, &selector),
                     None => content,
                 };
                 let body = cap_bytes(content, BATCH_READ_PER_FILE_BYTES);
@@ -916,7 +957,9 @@ impl Tool for EditFileTool {
     }
 }
 
+mod edit_diagnostics;
 mod edits;
+mod read_shaping;
 use edits::{apply_edit_mode, edit_snippet};
 
 mod multi_edit;

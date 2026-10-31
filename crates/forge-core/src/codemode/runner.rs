@@ -67,6 +67,8 @@ struct Run {
     calls: Vec<InnerCall>,
     hints: Vec<String>,
     max_calls: usize,
+    /// `[harness] script_parallel`: requests that arrive together may run together.
+    parallel: bool,
 }
 
 impl Session {
@@ -116,20 +118,36 @@ impl Session {
             calls: Vec::new(),
             hints: Vec::new(),
             max_calls: self.config.codemode.max_calls,
+            parallel: self.config.harness.script_parallel,
         };
-        let pumped = self
-            .pump(
-                msg_id,
-                call,
-                &code,
-                Duration::from_secs(timeout_secs),
-                &clock,
-                &mut run,
-                ledgers,
-            )
-            .await;
+        let parallel = run.parallel;
+        let pump = self.pump(
+            msg_id,
+            call,
+            &code,
+            Duration::from_secs(timeout_secs),
+            &clock,
+            &mut run,
+            ledgers,
+        );
+        let pumped = if parallel {
+            super::with_parallel_inner_cap(pump).await
+        } else {
+            pump.await
+        };
         prompt_clock::uninstall(&mut self.presenter, &slot);
         let (end, logs, dropped_logs, deadline_hit) = pumped?;
+        let saved: Vec<(usize, String)> = if parallel {
+            (1..=run.calls.len())
+                .filter_map(|n| {
+                    self.kept_outputs
+                        .get(&format!("{}.{n}", call.id))
+                        .map(|path| (n, path.clone()))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let report = ScriptReport {
             end,
@@ -139,6 +157,7 @@ impl Session {
             deadline_hit,
             timeout_secs,
             elapsed: started.elapsed(),
+            saved,
         };
         let ok = report.succeeded();
         let result = crate::tool_output::fit_for_model(
@@ -182,7 +201,7 @@ impl Session {
         ledgers: &mut TurnLedgers<'_>,
     ) -> Result<(ScriptEnd, Vec<String>, u64, bool), CoreError> {
         let (tx, mut rx) = mpsc::unbounded_channel::<ToolReq>();
-        let script = super::wrap(code);
+        let script = super::wrap_with(code, run.parallel);
         let script_fut =
             forge_workflow::run_script_with_limits(vec![tool_host_fn(tx)], &script, LIMITS);
         tokio::pin!(script_fut);
@@ -212,10 +231,19 @@ impl Session {
                         )));
                         continue;
                     }
-                    let answer = self
-                        .dispatch_inner(msg_id, outer, req.name, req.args, run, ledgers)
-                        .await?;
-                    let _ = req.reply.send(answer);
+                    let mut batch = vec![req];
+                    if run.parallel {
+                        // A script that awaits several calls at once (Promise.all) has queued
+                        // them all by now; take them together.
+                        let room = run.max_calls.saturating_sub(run.calls.len()).max(1);
+                        while batch.len() < room {
+                            match rx.try_recv() {
+                                Ok(next) => batch.push(next),
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    self.dispatch_batch(msg_id, outer, batch, run, ledgers).await?;
                 }
                 res = &mut script_fut => break Some(res),
                 _ = tokio::time::sleep(wake) => {
@@ -250,6 +278,90 @@ impl Session {
             ),
             None => (ScriptEnd::Expired, Vec::new(), 0, true),
         })
+    }
+
+    /// Serve requests that arrived together. Read-only calls that need no prompt and no hook run
+    /// concurrently through the shared read-only batch path; anything else, or a single request,
+    /// takes the one-at-a-time path in arrival order.
+    async fn dispatch_batch(
+        &mut self,
+        msg_id: &str,
+        outer: &forge_types::ToolCall,
+        batch: Vec<ToolReq>,
+        run: &mut Run,
+        ledgers: &mut TurnLedgers<'_>,
+    ) -> Result<(), CoreError> {
+        if let Some(inners) = self.concurrent_inner_calls(outer, &batch, run) {
+            for inner in &inners {
+                ledgers.count_started(&inner.name);
+            }
+            let classified = self.run_readonly_calls(msg_id, &inners, false).await?;
+            for ((req, inner), (_, kind, result)) in batch.into_iter().zip(inners).zip(classified) {
+                self.observe_tool_outcome(&inner, &result, ledgers);
+                run.calls.push(InnerCall {
+                    name: inner.name,
+                    ok: kind.is_none(),
+                });
+                let _ = req.reply.send(if super::throws(&result) {
+                    Err(result)
+                } else {
+                    Ok(Value::String(result))
+                });
+            }
+            return Ok(());
+        }
+        for req in batch {
+            let answer = self
+                .dispatch_inner(msg_id, outer, req.name, req.args, run, ledgers)
+                .await?;
+            let _ = req.reply.send(answer);
+        }
+        Ok(())
+    }
+
+    /// The resolved inner calls when EVERY request in `batch` may run concurrently; `None` sends
+    /// the whole batch down the serial path (which prompts, snapshots and runs hooks per call).
+    fn concurrent_inner_calls(
+        &self,
+        outer: &forge_types::ToolCall,
+        batch: &[ToolReq],
+        run: &Run,
+    ) -> Option<Vec<forge_types::ToolCall>> {
+        if batch.len() < 2 || run.calls.len() + batch.len() > run.max_calls {
+            return None;
+        }
+        let tool_hooks = self.config.hooks.iter().any(|h| {
+            matches!(
+                h.event,
+                forge_config::HookEvent::PreToolUse
+                    | forge_config::HookEvent::PostToolUse
+                    | forge_config::HookEvent::PostToolUseFailure
+            )
+        });
+        if tool_hooks {
+            return None;
+        }
+        let mut inners = Vec::with_capacity(batch.len());
+        for (i, req) in batch.iter().enumerate() {
+            if req.name == super::SEARCH_CALL {
+                return None;
+            }
+            let Resolved::Call(name, args) = catalog::resolve(&req.name, req.args.clone(), self)
+            else {
+                return None;
+            };
+            let inner = self.route_external_mcp(forge_types::ToolCall {
+                id: format!("{}.{}", outer.id, run.calls.len() + i + 1),
+                name,
+                args,
+            });
+            let inner = self.resolve_model_call(&inner);
+            if !self.is_concurrent_readonly(&inner) {
+                return None;
+            }
+            inners.push(inner);
+        }
+        Some(inners)
     }
 
     /// Serve one script request. `$search` reads the directory; every tool call goes through

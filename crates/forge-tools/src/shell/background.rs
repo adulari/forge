@@ -168,6 +168,27 @@ pub async fn start(
     workspace: Option<&Path>,
     policy: &SandboxPolicy,
 ) -> Result<Job, String> {
+    start_with(command, cwd, workspace, policy, false).await
+}
+
+pub(super) fn mark_stopping(pid: u32) {
+    if let Ok(mut stopping) = STOPPING.lock() {
+        stopping.push(pid);
+    }
+}
+
+/// Whether a job started now would report its exit to this session.
+pub(super) fn has_job_exit_sink() -> bool {
+    JOB_EXIT_SINK.try_with(|_| ()).is_ok()
+}
+
+pub(super) async fn start_with(
+    command: &str,
+    cwd: &str,
+    workspace: Option<&Path>,
+    policy: &SandboxPolicy,
+    inline: bool,
+) -> Result<Job, String> {
     if policy.enabled && !crate::sandbox::is_supported() {
         return Err(
             "refusing to start a background job unconfined: `shell.sandbox = true` is set but \
@@ -236,6 +257,9 @@ pub async fn start(
         tunnel: None,
     };
     write_record(&dir, &job)?;
+    if inline {
+        super::inline::mark(pid);
+    }
 
     // Watch for the exit so `status` can report a real code rather than only "gone". This task
     // also reaps the child, which is what keeps a finished job from lingering as a zombie and
@@ -247,14 +271,20 @@ pub async fn start(
     tokio::spawn(async move {
         let code = match child.wait().await {
             Ok(status) => status.code().map(i64::from).unwrap_or(-1),
-            Err(_) => return,
+            Err(_) => {
+                super::inline::release(pid);
+                return;
+            }
         };
         let first = record_exit(&dir_for_task, pid, code);
         let tunnel_dir = dir_for_task.clone();
         let _ =
             tokio::task::spawn_blocking(move || super::preview::stop_job_tunnel(&tunnel_dir, pid))
                 .await;
-        let stopped = take_stopping(pid);
+        // One lock for the check and the release: the caller that is waiting on this job relies
+        // on the watcher to drop the mark once it has seen the exit.
+        let was_inline = super::inline::take(pid);
+        let stopped = take_stopping(pid) || was_inline;
         if let (Some(sink), true, false) = (sink, first, stopped) {
             let tail = tail(&log_for_task, 8).unwrap_or_default();
             sink(JobExit {

@@ -341,6 +341,10 @@ pub(crate) fn normalize_tool_name(raw: &str) -> String {
 /// If neither recovers anything, falls back to an empty object — always object-shaped, never worse
 /// than what genai handed back.
 pub fn repair_malformed_args(raw: Value) -> Value {
+    repair_malformed_args_with(raw, forge_types::path_args::json_repair())
+}
+
+fn repair_malformed_args_with(raw: Value, json_repair: bool) -> Value {
     let Value::String(s) = raw else { return raw };
 
     if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
@@ -367,7 +371,86 @@ pub fn repair_malformed_args(raw: Value) -> Value {
         }
     }
 
+    if json_repair {
+        if let Some(v) = repair_slightly_malformed(&s) {
+            return v;
+        }
+    }
+
     Value::Object(scrape_key_value_fragments(&s))
+}
+
+/// An object that is one small slip from valid JSON: trailing commas before a closer, a `//`-free
+/// body missing its final `}`/`]`. Walks the text outside string literals, drops each `,` that
+/// directly precedes a closer, and appends the closers still open at the end. Accepted only when
+/// the result parses as an object.
+fn repair_slightly_malformed(s: &str) -> Option<Value> {
+    let start = s.find('{')?;
+    let body: Vec<char> = s[start..].chars().collect();
+    let mut out = String::with_capacity(body.len() + 4);
+    let mut stack: Vec<char> = Vec::new();
+    let (mut in_string, mut escaped) = (false, false);
+    for (i, &c) in body.iter().enumerate() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '{' => {
+                stack.push('}');
+                out.push(c);
+            }
+            '[' => {
+                stack.push(']');
+                out.push(c);
+            }
+            '}' | ']' => {
+                if stack.pop() != Some(c) {
+                    return None;
+                }
+                out.push(c);
+            }
+            ',' if body[i + 1..]
+                .iter()
+                .find(|n| !n.is_whitespace())
+                .is_some_and(|n| matches!(n, '}' | ']')) => {}
+            _ => out.push(c),
+        }
+        if stack.is_empty() && matches!(c, '}' | ']') {
+            break;
+        }
+    }
+    if in_string {
+        return None;
+    }
+    // Closing a cut-off call is only safe when nothing but the root object is open and the text
+    // ends on a complete string: closing an open array or object would silently drop the elements
+    // the model had not sent yet, and a cut number or literal may be a shorter, valid one.
+    if !stack.is_empty()
+        && (stack.len() > 1 || !out.trim_end().trim_end_matches(',').ends_with('"'))
+    {
+        return None;
+    }
+    while let Some(closer) = stack.pop() {
+        let trimmed = out.trim_end().trim_end_matches(',').len();
+        out.truncate(trimmed);
+        out.push(closer);
+    }
+    match serde_json::from_str::<Value>(&out) {
+        Ok(v @ Value::Object(_)) => Some(v),
+        _ => None,
+    }
 }
 
 /// Best-effort extraction of `"key": value` pairs from a string that isn't valid JSON as a whole —
@@ -851,6 +934,51 @@ mod tests {
             "cat > index.html <<'EOF'\n<!DOCTYPE html>\n<html lang=\"en\">\nEOF"
         );
         assert_eq!(repaired["cwd"], "/tmp/game");
+    }
+
+    #[test]
+    fn a_cut_off_call_is_never_closed_into_a_shorter_valid_one() {
+        for cut in [
+            r#"{"path":"a.rs","edits":[{"old":"x","new":"y"}"#,
+            r#"{"path": "a.rs", "n": [1, 2"#,
+        ] {
+            let fixed = repair_malformed_args_with(Value::String(cut.into()), true);
+            assert!(
+                fixed.get("edits").is_none_or(Value::is_string)
+                    && fixed.get("n").is_none_or(Value::is_string),
+                "{cut} -> {fixed}"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_never_completes_a_cut_number() {
+        assert!(repair_slightly_malformed(r#"{"path":"a.rs","limit":1"#).is_none());
+        assert!(repair_slightly_malformed(r#"{"path":"a.rs","mode":"w""#).is_some());
+    }
+
+    #[test]
+    fn repair_is_off_when_arg_coercion_is_off() {
+        let raw = r#"{"path": "a.rs", "paths": ["x",], }"#;
+        let on = repair_malformed_args_with(Value::String(raw.into()), true);
+        assert_eq!(on, serde_json::json!({"path": "a.rs", "paths": ["x"]}));
+        let off = repair_malformed_args_with(Value::String(raw.into()), false);
+        assert_ne!(off, on);
+    }
+
+    #[test]
+    fn repair_drops_trailing_commas_and_closes_open_braces() {
+        let fixed = repair_malformed_args(Value::String(
+            r#"{"path": "a.rs", "paths": ["x", "y",], }"#.into(),
+        ));
+        assert_eq!(
+            fixed,
+            serde_json::json!({"path": "a.rs", "paths": ["x", "y"]})
+        );
+        let fixed = repair_malformed_args(Value::String(r#"{"path": "a.rs", "mode": "w""#.into()));
+        assert_eq!(fixed, serde_json::json!({"path": "a.rs", "mode": "w"}));
+        let fixed = repair_malformed_args(Value::String(r#"{"a": "b,}", "c": 1,}"#.into()));
+        assert_eq!(fixed, serde_json::json!({"a": "b,}", "c": 1}));
     }
 
     #[test]
