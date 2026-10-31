@@ -394,6 +394,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_bound_registry_keeps_full_output() {
+        struct FullTool;
+        #[async_trait]
+        impl Tool for FullTool {
+            fn name(&self) -> &str {
+                "full_probe"
+            }
+            fn description(&self) -> &str {
+                "probe"
+            }
+            fn side_effect(&self) -> SideEffect {
+                SideEffect::ReadOnly
+            }
+            fn schema(&self) -> Value {
+                serde_json::json!({ "type": "object" })
+            }
+            async fn run(&self, _args: &Value) -> Result<String, ToolError> {
+                Ok("short".into())
+            }
+            async fn run_full(&self, _args: &Value) -> Result<ToolRun, ToolError> {
+                Ok(ToolRun {
+                    model: "short".into(),
+                    full: Some("the whole output".into()),
+                })
+            }
+        }
+        let workspace = std::env::temp_dir().join(format!("forge-run-full-{}", std::process::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut registry = ToolRegistry::default();
+        registry.bind_workspace(&workspace);
+        registry.register(Box::new(FullTool));
+        let run = registry
+            .get("full_probe")
+            .unwrap()
+            .run_full(&serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(run.full.as_deref(), Some("the whole output"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
     async fn scoped_registry_roots_file_tools_and_rejects_peer_workspace() {
         let base = std::env::temp_dir().join(format!("forge-scoped-tools-{}", std::process::id()));
         let workspace = base.join("workspace");
