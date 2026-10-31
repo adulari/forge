@@ -7,6 +7,15 @@ pub fn render_live(frame: &mut Frame, app: &App) {
 }
 
 fn render_live_inner(frame: &mut Frame, app: &App) {
+    // The diff and background-shell views are opened on request and take the whole frame.
+    if app.diff_overlay.open {
+        crate::diff_overlay::render_diff_overlay(frame, &app.diff_overlay);
+        return;
+    }
+    if app.jobs_overlay.open {
+        crate::jobs_overlay::render_jobs_overlay(frame, &app.jobs_overlay, app.tick);
+        return;
+    }
     // The full-output viewer is opened on request, so it sits above every other takeover.
     if let Some(view) = &app.output_view {
         crate::app::output_view::render_output_view(frame, view);
@@ -52,7 +61,29 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     app.viewer_geom.set(None);
     app.forget_viewer_wrapped();
     const MIN_STREAM: u16 = 1;
-    let full = frame.area();
+    let whole = frame.area();
+    // The session strip is one row above everything else; the chat lays out in what is left.
+    let strip_h = app
+        .session_strip
+        .height()
+        .min(whole.height.saturating_sub(MIN_STREAM + 3));
+    if strip_h > 0 {
+        crate::session_strip::render_strip(
+            frame,
+            Rect {
+                height: strip_h,
+                ..whole
+            },
+            &app.session_strip,
+            &app.session_id,
+            app.tick,
+        );
+    }
+    let full = Rect {
+        y: whole.y + strip_h,
+        height: whole.height - strip_h,
+        ..whole
+    };
     app.interaction_ui.note_screen(full.width, full.height);
     // Chrome is the header (fullscreen only), the composer and the status line. The composer grows
     // with wrapped/multiline content (capped); the stream area absorbs the change, so the inline
@@ -127,7 +158,13 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
 
     // An optional right rail (wide terminals) takes its columns from the main region.
     let rail_w = panels::rail_width(app, main_area);
-    let main = if rail_w > 0 && rail_w < main_area.width {
+    let side_w = panels::sidebar_width(app, main_area);
+    let main = if side_w > 0 && side_w < main_area.width {
+        let cols =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(side_w)]).split(main_area);
+        panels::render_sidebar(frame, cols[1], app);
+        cols[0]
+    } else if rail_w > 0 && rail_w < main_area.width {
         let cols =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(rail_w)]).split(main_area);
         panels::render_rail(frame, cols[1], app);

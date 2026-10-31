@@ -17,12 +17,16 @@ pub(crate) fn group_and_label(path: &str) -> Option<(&'static str, &'static str)
         "harness.advisor.enabled" => Some(("Behaviour", "Advisor review")),
         "harness.advisor.model" => Some(("Behaviour", "Advisor model")),
         "harness.advisor.timeout_secs" => Some(("Behaviour", "Advisor timeout")),
+        "tui.session_strip" => Some(("Interface", "Session strip")),
+        "tui.sidebar" => Some(("Interface", "Sidebar")),
         _ => None,
     }
 }
 
 pub(crate) fn help(path: &str) -> Option<&'static str> {
     Some(match path {
+        "tui.session_strip" => "A one-row strip above the chat listing the daemon's other sessions: a spinner for busy, a dot for waiting on you. Alt+1-9 switches to one. /strip flips it.",
+        "tui.sidebar" => "A right sidebar on terminals 120 or more columns wide: context gauge, spend, MCP health, tasks and the branch. Ctrl+B or /sidebar flips it.",
         "harness.completion_contract" => "Append a short completion contract to the end of the system prompt: do not yield while actionable work remains, smoke-run before yielding, no stubs. Default off.",
         "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
         "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",

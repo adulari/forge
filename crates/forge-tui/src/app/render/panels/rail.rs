@@ -19,6 +19,7 @@ const MAX_CHANGED_ROWS: usize = 5;
 /// Whether details render as a rail for a region `area` wide.
 pub(crate) fn wanted(app: &App, area: Rect) -> bool {
     app.fullscreen
+        && !app.sidebar.visible(app.fullscreen, area.width)
         && app.activity_focused
         && area.width >= RAIL_MIN_TERMINAL
         && (!app.tasks.is_empty() || app.has_activity())

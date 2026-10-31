@@ -7,6 +7,7 @@ use super::*;
 mod band;
 mod common;
 mod rail;
+mod sidebar;
 
 pub(crate) use common::{fmt_cost, Clock};
 
@@ -77,6 +78,16 @@ pub(crate) fn rail_width(app: &App, area: Rect) -> u16 {
     } else {
         0
     }
+}
+
+/// Columns the Ctrl+B sidebar takes from `area` (zero when it is off or the frame is narrow).
+pub(crate) fn sidebar_width(app: &App, area: Rect) -> u16 {
+    sidebar::width(app, area)
+}
+
+/// Draw the sidebar into `area` (never called while [`sidebar_width`] is zero).
+pub(crate) fn render_sidebar(frame: &mut Frame, area: Rect, app: &App) {
+    sidebar::render(frame, area, app);
 }
 
 /// Draw the details rail into `area` (never called while [`rail_width`] is zero).

@@ -406,6 +406,14 @@ pub struct App {
     pub workspace_menu: crate::workspace_menu::WorkspaceMenu,
     /// The `/clis` menu (install and update the subscription CLIs), while open.
     pub agents_menu: crate::agents_menu::AgentsMenu,
+    /// The one-row strip of the daemon's sessions (`[tui] session_strip`).
+    pub session_strip: crate::session_strip::SessionStrip,
+    /// The right sidebar (Ctrl+B, `[tui] sidebar`).
+    pub sidebar: crate::sidebar::SidebarState,
+    /// The full-screen diff overlay (`/diff`), while open.
+    pub diff_overlay: crate::diff_overlay::DiffOverlay,
+    /// The background-shells list (`/jobs`), while open.
+    pub jobs_overlay: crate::jobs_overlay::JobsOverlay,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.
@@ -934,6 +942,10 @@ pub enum KeyKind {
     JumpPrevUser,
     /// Ctrl+F — find text in the full-screen transcript (shell-handled; see `transcript_find`).
     FindTranscript,
+    /// Ctrl+B — show or hide the right sidebar (shell-handled).
+    ToggleSidebar,
+    /// Alt+1..Alt+9 — switch to the nth session on the strip (shell-handled).
+    SessionSlot(u8),
     /// Alt+↑ / Alt+↓ — move the keyboard focus to the previous / next tool group in the
     /// full-screen transcript (shell-handled; see `App::tool_group_key`).
     PrevToolGroup,
@@ -1212,6 +1224,8 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::JumpBottom
         | KeyKind::JumpPrevUser
         | KeyKind::FindTranscript
+        | KeyKind::ToggleSidebar
+        | KeyKind::SessionSlot(_)
         | KeyKind::SkipModel
         | KeyKind::TierUp
         | KeyKind::TierDown

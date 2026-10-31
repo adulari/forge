@@ -14,9 +14,9 @@
 //! [`BoardEvent`]. Everything below is that translation layer.
 
 mod actions;
-mod client;
+pub(crate) mod client;
 mod dispatch_client;
-mod sockets;
+pub(crate) mod sockets;
 
 #[cfg(test)]
 mod dispatch_http_tests;
