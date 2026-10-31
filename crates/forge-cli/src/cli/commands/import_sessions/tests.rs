@@ -74,7 +74,7 @@ fn a_scan_lists_both_agents_newest_first_with_titles_and_directories() {
 fn importing_both_makes_resumable_sessions_and_a_rescan_marks_them() {
     let cwd = tempfile::tempdir().unwrap();
     let fx = fixture(&cwd.path().display().to_string());
-    let store = Store::open(&fx.store_dir.path().join("forge.db")).unwrap();
+    let store = Store::open(fx.store_dir.path().join("forge.db")).unwrap();
     let found = scan_in(Some(&fx.projects), Some(&fx.sessions), Some(&store));
     let outcomes = import_from(&store, &found, &picks(&found), None, "Default");
     assert!(
@@ -114,7 +114,7 @@ fn importing_both_makes_resumable_sessions_and_a_rescan_marks_them() {
 #[test]
 fn a_missing_directory_falls_back_to_the_chosen_project() {
     let fx = fixture("/no/such/dir/anywhere");
-    let store = Store::open(&fx.store_dir.path().join("forge.db")).unwrap();
+    let store = Store::open(fx.store_dir.path().join("forge.db")).unwrap();
     let found = scan_in(Some(&fx.projects), Some(&fx.sessions), Some(&store));
     assert!(found.iter().all(|c| !c.cwd_exists));
     let fallback = tempfile::tempdir().unwrap();
@@ -135,7 +135,7 @@ fn a_missing_directory_falls_back_to_the_chosen_project() {
 fn an_unknown_pick_fails_alone_and_a_forgotten_import_can_be_redone() {
     let cwd = tempfile::tempdir().unwrap();
     let fx = fixture(&cwd.path().display().to_string());
-    let store = Store::open(&fx.store_dir.path().join("forge.db")).unwrap();
+    let store = Store::open(fx.store_dir.path().join("forge.db")).unwrap();
     let found = scan_in(Some(&fx.projects), Some(&fx.sessions), Some(&store));
     let mut sel = picks(&found);
     sel.push(Selection {
@@ -169,7 +169,7 @@ fn sources_are_never_modified() {
         .flat_map(|d| walk(d))
         .map(|p| (p.clone(), std::fs::read(&p).unwrap()))
         .collect();
-    let store = Store::open(&fx.store_dir.path().join("forge.db")).unwrap();
+    let store = Store::open(fx.store_dir.path().join("forge.db")).unwrap();
     let found = scan_in(Some(&fx.projects), Some(&fx.sessions), Some(&store));
     import_from(&store, &found, &picks(&found), None, "Default");
     for (p, bytes) in before {
