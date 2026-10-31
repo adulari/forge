@@ -1566,7 +1566,12 @@ mod tests {
             .run(&json!({ "action": "wait", "id": pid, "timeout_secs": 1 }))
             .await
             .unwrap();
-        assert!(out.contains("still running"), "{out}");
+        assert!(
+            out.lines()
+                .next()
+                .is_some_and(|l| l.starts_with("job ") && l.contains(" is running")),
+            "the progress ledger reads this head as waiting: {out}"
+        );
         assert!(out.contains("up"), "{out}");
         let status = jobs
             .run(&json!({ "action": "status", "id": pid }))
@@ -1601,5 +1606,27 @@ mod tests {
             );
             assert!(out.contains("exited 0") && out.contains("quick"), "{out}");
         }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn an_interrupted_wait_still_announces_the_jobs_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = start_job(dir.path(), "sleep 30").await;
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        let args = json!({ "action": "wait", "id": pid, "timeout_secs": 30 });
+        let waiting = jobs.run(&args);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(400), waiting)
+                .await
+                .is_err()
+        );
+        assert!(
+            !background::take_stopping_for_test(pid),
+            "the dropped wait left the pid marked as stopping"
+        );
+        jobs.run(&json!({ "action": "stop", "id": pid }))
+            .await
+            .unwrap();
     }
 }

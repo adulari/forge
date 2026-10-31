@@ -500,6 +500,11 @@ pub(super) fn note_waiting(pid: u32) {
     }
 }
 
+#[cfg(test)]
+pub(super) fn take_stopping_for_test(pid: u32) -> bool {
+    take_stopping(pid)
+}
+
 pub(super) fn take_stopping(pid: u32) -> bool {
     STOPPING.lock().is_ok_and(|mut stopping| {
         let before = stopping.len();

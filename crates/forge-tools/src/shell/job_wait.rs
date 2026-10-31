@@ -28,6 +28,7 @@ pub(super) async fn wait_for_job(
     }
     // This reply is the job's exit notice, so the session's job-wake must not announce it again.
     note_waiting(id);
+    let mut suppression = Suppression(Some(id));
     let started = Instant::now();
     let mut latest = job;
     while started.elapsed() < timeout && latest.is_running() {
@@ -45,11 +46,23 @@ pub(super) async fn wait_for_job(
             }
         }
     }
-    // Still running: later exit must be announced as usual.
-    if latest.is_running() {
-        take_stopping(id);
+    // The exit is reported by this reply; a job still running keeps its normal exit notice, which
+    // the guard restores on return or when an interrupt drops this future mid-wait.
+    if !latest.is_running() {
+        suppression.0 = None;
     }
     Ok(report(&latest, started.elapsed(), latest.is_running()))
+}
+
+/// Lifts the exit-notice suppression `wait` registered unless the wait reported the exit itself.
+struct Suppression(Option<u32>);
+
+impl Drop for Suppression {
+    fn drop(&mut self) {
+        if let Some(id) = self.0 {
+            take_stopping(id);
+        }
+    }
 }
 
 fn report(job: &Job, waited: Duration, timed_out: bool) -> String {
@@ -61,7 +74,7 @@ fn report(job: &Job, waited: Duration, timed_out: bool) -> String {
     };
     let head = if timed_out {
         format!(
-            "job {} is still running after {}s; call wait again, or read its log",
+            "job {} is running after {}s without exiting; call wait again, or read its log",
             job.pid,
             waited.as_secs()
         )
