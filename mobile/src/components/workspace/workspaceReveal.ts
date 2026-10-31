@@ -8,6 +8,7 @@ export interface RevealRequest {
 
 let current: RevealRequest | null = null;
 let nonce = 0;
+const handled = new Map<string, number>();
 const listeners = new Set<() => void>();
 
 function subscribe(listener: () => void): () => void {
@@ -22,9 +23,20 @@ export function requestReveal(sessionId: string, path: string): void {
   listeners.forEach((listener) => listener());
 }
 
+/** A request the browser has not applied yet: one already handled must not re-apply when the
+ * browser remounts (a tab switch), or it would re-expand folders the person has since closed. */
+export function pendingReveal(request: RevealRequest | null, sessionId: string): RevealRequest | null {
+  if (!request || request.sessionId !== sessionId) return null;
+  return handled.get(sessionId) === request.nonce ? null : request;
+}
+
+export function markRevealHandled(request: RevealRequest): void {
+  handled.set(request.sessionId, request.nonce);
+}
+
 export function useRevealRequest(sessionId: string): RevealRequest | null {
   const request = useSyncExternalStore(subscribe, () => current, () => current);
-  return request?.sessionId === sessionId ? request : null;
+  return pendingReveal(request, sessionId);
 }
 
 /** Every directory above `path`, outermost first ("a/b/c.ts" -> ["a", "a/b"]). */

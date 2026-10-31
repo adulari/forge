@@ -20,6 +20,7 @@ const CONSOLE_EVENT: &str = "forge://preview-console";
 const CONSOLE_SCHEME: &str = "forge-preview-console";
 const MAX_ANNOTATION_PAYLOAD_BYTES: usize = 32 * 1024;
 const MAX_CONSOLE_PAYLOAD_BYTES: usize = 48 * 1024;
+const MAX_SELECTOR_CHARS: usize = 400;
 const MAX_CONSOLE_ENTRIES: usize = 100;
 const MAX_CONSOLE_TEXT_CHARS: usize = 2000;
 const CONSOLE_LEVELS: [&str; 5] = ["log", "info", "warn", "error", "debug"];
@@ -139,7 +140,24 @@ fn annotation_from_navigation(url: &tauri::Url) -> Option<PreviewElementAnnotati
     if payload.len() > MAX_ANNOTATION_PAYLOAD_BYTES {
         return None;
     }
-    serde_json::from_str(&payload).ok()
+    let mut annotation: PreviewElementAnnotation = serde_json::from_str(&payload).ok()?;
+    annotation.selector = strip_controls(&annotation.selector, MAX_SELECTOR_CHARS);
+    Some(annotation)
+}
+
+/// The page chooses the selector, and it can end up in a terminal: drop every control character
+/// (CR, LF, ESC, C0, DEL, C1, line separators) and cap the length.
+fn strip_controls(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .take(max_chars)
+        .collect()
 }
 
 /// Console lines the page reported through a `forge-preview-console://` navigation. The page is
@@ -188,9 +206,12 @@ fn console_script() -> &'static str {
       return String(value);
     }
   };
+  let leaving = false;
+  window.addEventListener("pagehide", () => { leaving = true; });
+  window.addEventListener("beforeunload", () => { leaving = true; });
   const flush = () => {
     timer = null;
-    if (!queue.length) return;
+    if (!queue.length || leaving) return;
     if (document.readyState !== "complete") {
       timer = setTimeout(flush, 400);
       return;
@@ -202,7 +223,13 @@ fn console_script() -> &'static str {
       size += entry.text.length + 32;
       batch.push(entry);
     }
-    location.href = "forge-preview-console://batch?payload=" + encodeURIComponent(JSON.stringify(batch));
+    // A hidden iframe, never location.href: assigning the top location would cancel the page's own
+    // pending navigation or form submit. The native handler cancels this load and reads the URL.
+    const frame = document.createElement("iframe");
+    frame.style.display = "none";
+    frame.src = "forge-preview-console://batch?payload=" + encodeURIComponent(JSON.stringify(batch));
+    (document.body || document.documentElement).appendChild(frame);
+    setTimeout(() => frame.remove(), 1000);
     if (queue.length) timer = setTimeout(flush, 400);
   };
   const push = (level, value) => {
@@ -648,6 +675,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(console_from_navigation(&broken), None);
+    }
+
+    #[test]
+    fn selector_is_stripped_of_control_characters_and_capped() {
+        let mut hostile = annotation();
+        hostile.selector = format!("a\r\nrm -rf ~\x1b[201~\u{85}b{}", "x".repeat(1000));
+        let encoded = serde_json::to_string(&hostile).unwrap();
+        let url = tauri::Url::parse_with_params(
+            "forge-preview-annotation://pick",
+            &[("payload", encoded)],
+        )
+        .unwrap();
+        let decoded = annotation_from_navigation(&url).unwrap();
+        assert!(!decoded.selector.chars().any(|c| c.is_control()));
+        assert_eq!(decoded.selector.chars().count(), MAX_SELECTOR_CHARS);
+        assert!(decoded.selector.starts_with("a  rm -rf ~"));
+    }
+
+    #[test]
+    fn console_script_never_navigates_the_top_frame() {
+        let script = console_script();
+        assert!(!script.contains("location.href"));
+        assert!(script.contains("createElement(\"iframe\")"));
+        assert!(script.contains("pagehide"));
     }
 
     #[test]

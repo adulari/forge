@@ -87,3 +87,15 @@ describe("workspace dirty store", () => {
     expect(isWorkspaceDirty("s1", "a.ts")).toBe(false);
   });
 });
+
+describe("reveal requests", () => {
+  it("applies a request once and not again on remount", async () => {
+    const { markRevealHandled, pendingReveal } = await import("./workspaceReveal");
+    const request = { sessionId: "s9", path: "a/b.ts", nonce: 7 };
+    expect(pendingReveal(request, "s9")).toBe(request);
+    expect(pendingReveal(request, "other")).toBeNull();
+    markRevealHandled(request);
+    expect(pendingReveal(request, "s9")).toBeNull();
+    expect(pendingReveal({ ...request, nonce: 8 }, "s9")).not.toBeNull();
+  });
+});

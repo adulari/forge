@@ -67,7 +67,7 @@ import {
 import { collapseWithin, creationDirectory, expandTo, loadExpanded, saveExpanded, toggleExpanded } from "./treeState";
 import { joinWorkspacePath, parentWorkspacePath, workspaceBasename } from "./workspaceModel";
 import { setWorkspaceDirty } from "./workspaceDirty";
-import { requestReveal, useRevealRequest } from "./workspaceReveal";
+import { markRevealHandled, requestReveal, useRevealRequest } from "./workspaceReveal";
 
 interface WorkspaceDockProps {
   sessionId: string | null;
@@ -112,6 +112,7 @@ function WorkspaceBrowser({
 
   useEffect(() => {
     if (!reveal) return;
+    markRevealHandled(reveal);
     setSearchText("");
     setSearchQuery("");
     setExpanded((current) => expandTo(current, reveal.path));

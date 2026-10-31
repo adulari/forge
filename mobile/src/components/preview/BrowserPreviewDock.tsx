@@ -42,11 +42,12 @@ import { useAuth } from "../../lib/auth";
 import { isTauri } from "../../lib/platform";
 import { appendConsoleEntries, consoleCounts, useConsoleEntries } from "../../lib/previewConsole";
 import { isLoopbackUrl, loadRecents, rememberRecent } from "../../lib/previewRecents";
-import { insertIntoTerminal } from "../../lib/terminalInsert";
+import { insertIntoTerminal, sanitizeInsertText } from "../../lib/terminalInsert";
 import { addVisualAnnotation, type VisualAnnotation } from "../../lib/visualAnnotations";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
+import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
 import { useWorkbench } from "../workbench/WorkbenchProvider";
@@ -91,6 +92,8 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
   const [layoutVersion, setLayoutVersion] = useState(0);
   const [loading, setLoading] = useState(false);
   const [pickerActive, setPickerActive] = useState(false);
+  const pickerActiveRef = useRef(false);
+  const [confirmInsert, setConfirmInsert] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recents, setRecents] = useState<string[]>([]);
   const [recentsOpen, setRecentsOpen] = useState(false);
@@ -152,7 +155,9 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
         setError(null);
       },
       (event) => {
-        if (disposed || event.label !== label) return;
+        // Only a pick the person asked for counts: the page itself can fire this event.
+        if (disposed || event.label !== label || !pickerActiveRef.current) return;
+        pickerActiveRef.current = false;
         setLastPick(addVisualAnnotation(sessionId, event.annotation));
         setPickerActive(false);
         toast.show("Element added to the composer", { tone: "success" });
@@ -249,9 +254,11 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
   };
 
   const insertPickIntoTerminal = async () => {
-    if (!lastPick || !baseUrl) return;
+    const text = confirmInsert;
+    setConfirmInsert(null);
+    if (!text || !baseUrl) return;
     try {
-      const typed = await insertIntoTerminal(baseUrl, sessionId, lastPick.selector);
+      const typed = await insertIntoTerminal(baseUrl, sessionId, text);
       toast.show(typed ? "Selector typed into the terminal" : "No running terminal in this session", {
         tone: typed ? "success" : "neutral",
       });
@@ -367,6 +374,7 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
           }
           onPress={() => {
             const next = !pickerActive;
+            pickerActiveRef.current = next;
             setPickerActive(next);
             void run(() => setBrowserPreviewPicker(label, next));
           }}
@@ -381,7 +389,7 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
         />
         <IconButton
           icon={<SquareTerminal size={16} color={lastPick ? tokens.ink2 : tokens.ink4} />}
-          onPress={() => void insertPickIntoTerminal()}
+          onPress={() => lastPick && setConfirmInsert(lastPick.selector)}
           disabled={!lastPick || isWebFrame}
           accessibilityLabel="Insert picked element into terminal"
           style={styles.compactButton}
@@ -414,6 +422,14 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
         ) : null}
       </View>
 
+      <ConfirmDialog
+        visible={confirmInsert != null}
+        title="Type this into the terminal?"
+        message={`The page chose this text. It is typed as one quoted word and never run:\n\n${confirmInsert ? sanitizeInsertText(confirmInsert) : ""}`}
+        confirmLabel="Insert"
+        onConfirm={() => void insertPickIntoTerminal()}
+        onCancel={() => setConfirmInsert(null)}
+      />
       {previewTabs.length >= 2 ? (
         <PreviewTabStrip
           tabs={previewTabs}

