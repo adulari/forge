@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parsePorts, parseProjectActions, parseRunningActions, type ProjectAction } from "../../lib/projectActionsModel";
+import { parsePorts, parseProjectActions, parseRunningActions, runningSessionFor, type ProjectAction } from "../../lib/projectActionsModel";
 import {
   actionIdOfTerminal,
   actionPaletteEntries,
@@ -127,5 +127,19 @@ describe("palette entries", () => {
     const entries = actionPaletteEntries([action(), action({ id: "api", name: "api", running: true })]);
     expect(entries.map((e) => e.title)).toEqual(["Run: Dev server", "Stop: api"]);
     expect(entries.map((e) => e.kind)).toEqual(["run", "stop"]);
+  });
+});
+
+describe("runningSessionFor", () => {
+  const running = [
+    { session: "a", action: "dev" },
+    { session: "z", action: "dev" },
+  ];
+  it("finds the sibling session that runs the action", () => {
+    expect(runningSessionFor(running, ["b", "a"], "dev")).toBe("a");
+  });
+  it("ignores sessions outside the project and other actions", () => {
+    expect(runningSessionFor(running, ["b", "c"], "dev")).toBeNull();
+    expect(runningSessionFor(running, ["a"], "lint")).toBeNull();
   });
 });

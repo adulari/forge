@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from "react";
 
-import { useProjectActions } from "../../lib/queriesProjectActions";
+import { runningSessionFor } from "../../lib/projectActionsModel";
+import { useProjectActions, useRunningActions } from "../../lib/queriesProjectActions";
 import type { MenuEntry } from "../shell/PopoverMenu";
 import { rememberActionNames } from "./actionTerminalNames";
 import { useActionControls } from "./useActionControls";
@@ -13,8 +14,13 @@ function note(id: string, label: string, hint?: string): MenuEntry {
  * The "Run" section of a session or project menu. Actions are fetched only while the menu is
  * open, so a long sidebar does not poll once per row.
  */
-export function useActionMenuEntries(sessionId: string | null, open: boolean): MenuEntry[] {
+export function useActionMenuEntries(
+  sessionId: string | null,
+  open: boolean,
+  siblingSessionIds: readonly string[] = [],
+): MenuEntry[] {
   const actions = useProjectActions(sessionId, open, false);
+  const running = useRunningActions(open && siblingSessionIds.length > 0).data;
   const controls = useActionControls();
   const data = actions.data;
 
@@ -32,18 +38,20 @@ export function useActionMenuEntries(sessionId: string | null, open: boolean): M
     if (data.actions.length === 0) return [...head, note("run-none", "No actions configured", "[[actions]]")];
     return [
       ...head,
-      ...data.actions.map(
-        (action): MenuEntry => ({
+      ...data.actions.map((action): MenuEntry => {
+        const elsewhere = action.running ? null : runningSessionFor(running ?? [], siblingSessionIds, action.id);
+        const stopIn = action.running ? sessionId : elsewhere;
+        return {
           kind: "item",
           id: `run-${action.id}`,
-          label: action.running ? `Stop ${action.name}` : `Run ${action.name}`,
-          hint: action.running ? "running" : undefined,
+          label: stopIn ? `Stop ${action.name}` : `Run ${action.name}`,
+          hint: elsewhere ? "running in another thread" : action.running ? "running" : undefined,
           onPress: () => {
-            if (action.running) controls.stop(sessionId, action);
+            if (stopIn) controls.stop(stopIn, action);
             else controls.run(sessionId, action);
           },
-        }),
-      ),
+        };
+      }),
     ];
-  }, [actions.isError, actions.isPending, controls, data, open, sessionId]);
+  }, [actions.isError, actions.isPending, controls, data, open, running, sessionId, siblingSessionIds]);
 }

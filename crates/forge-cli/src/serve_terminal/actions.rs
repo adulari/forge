@@ -46,6 +46,36 @@ pub(super) fn terminate_group(pid: Option<u32>) {
     let _ = pid;
 }
 
+/// Handles `restart` for a `/ws/terminal` request and gates `act-` terminals: an action tab never
+/// falls back to an interactive shell. A restart re-runs the action from its config; attaching to
+/// one that is gone is refused. `None` lets the request proceed.
+pub(super) async fn prepare_terminal(
+    state: &crate::serve::DaemonState,
+    key: &TerminalKey,
+    restart: bool,
+) -> Option<axum::response::Response> {
+    use crate::serve::err_response;
+    let Some(action) = action_of_terminal(&key.terminal_id) else {
+        if restart {
+            state.terminals.close(key).await;
+        }
+        return None;
+    };
+    if restart {
+        let restarted = crate::serve_project_actions::restart(state, &key.session_id, action).await;
+        return restarted
+            .err()
+            .map(|(status, message)| err_response(status, &message));
+    }
+    if state.terminals.terminals.lock().await.contains_key(key) {
+        return None;
+    }
+    Some(err_response(
+        axum::http::StatusCode::NOT_FOUND,
+        "that action is not running; run it again from the Run menu",
+    ))
+}
+
 /// One action's state on a session.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct ActionRun {
@@ -103,6 +133,15 @@ impl TerminalRegistry {
         let handle = spawn_terminal(key.clone(), cwd, 100, 28, Some(line))?;
         terminals.insert(key, handle);
         Ok(())
+    }
+
+    /// Whether the session still has an action running, which keeps it loaded so its Ports and
+    /// Stop stay reachable.
+    pub(crate) async fn has_running_action(&self, session_id: &str) -> bool {
+        self.action_runs(Some(session_id))
+            .await
+            .iter()
+            .any(|run| run.running)
     }
 
     /// Stop an action and discard its terminal. False when it was not there.
@@ -263,5 +302,40 @@ mod tests {
         for n in 0..MAX_ACTION_TERMINALS_PER_SESSION {
             registry.stop_action("s1", &format!("a{n}")).await;
         }
+    }
+
+    #[tokio::test]
+    async fn an_action_terminal_never_becomes_a_shell() {
+        use std::sync::Arc;
+        let state = crate::serve::DaemonState {
+            registry: Arc::new(crate::serve::SessionRegistry::new()),
+            terminals: Arc::new(TerminalRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: "/tmp".into(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        };
+        let key = |id: &str| TerminalKey {
+            session_id: "s1".into(),
+            terminal_id: id.into(),
+        };
+        let refused = prepare_terminal(&state, &key("act-dev"), false).await;
+        assert_eq!(
+            refused.expect("a missing action tab is refused").status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        let restart = prepare_terminal(&state, &key("act-dev"), true).await;
+        assert!(
+            restart.is_some(),
+            "a restart with no such session or action is refused"
+        );
+        assert!(prepare_terminal(&state, &key("term-1"), true)
+            .await
+            .is_none());
     }
 }

@@ -271,3 +271,95 @@ fn trust_hint_follows_the_config_file() {
     .unwrap();
     assert!(declares_actions(dir.path()));
 }
+
+fn lines_of(chunks: &[&[u8]]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut splitter = LineSplitter::default();
+    for chunk in chunks {
+        splitter.push(chunk, |l| out.push(l));
+    }
+    splitter.finish(|l| out.push(l));
+    out
+}
+
+#[test]
+fn the_splitter_survives_invalid_utf8_and_handles_carriage_returns() {
+    assert_eq!(lines_of(&[b"caf\xe9\nnext\n"]), ["caf\u{fffd}", "next"]);
+    assert_eq!(lines_of(&[b"one\r\ntwo\r\n"]), ["one", "two"]);
+    assert_eq!(lines_of(&[b"10%\r50%\r100%\ndone"]), ["100%", "done"]);
+    assert_eq!(lines_of(&[b"spl", b"it\n"]), ["split"]);
+    let long = vec![b'x'; MAX_LINE_BYTES * 2 + 5];
+    let cut = lines_of(&[&long]);
+    assert_eq!(cut.len(), 3);
+    assert!(cut.iter().all(|l| l.len() <= MAX_LINE_BYTES));
+}
+
+#[tokio::test]
+async fn a_non_utf8_byte_does_not_stop_the_output_pump() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut d, mut app) = driver(
+        dir.path(),
+        vec![action("bin", "printf 'bad\\377\\n'; sleep 0.3; echo after")],
+    );
+    d.start(&mut app, "bin");
+    until(&mut d, &mut app, "output after the bad byte", |_, a| {
+        row(a, "bin").output.iter().any(|l| l == "after")
+    })
+    .await;
+    assert!(row(&app, "bin")
+        .output
+        .iter()
+        .any(|l| l.contains('\u{fffd}')));
+    assert!(matches!(
+        row(&app, "bin").state,
+        RunState::Exited { code: Some(0), .. } | RunState::Running { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_started_group_is_registered_for_the_terminate_hook_until_it_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut d, mut app) = driver(dir.path(), vec![action("slow", "sleep 600")]);
+    d.start(&mut app, "slow");
+    let pid = d.procs["slow"].pid;
+    assert!(live_groups().contains(&pid));
+    terminate_groups(&[pid]);
+    assert!(!live_groups().contains(&pid));
+    assert!(
+        !group_alive(pid),
+        "the hook's group kill must reach the action"
+    );
+    d.shutdown();
+}
+
+#[tokio::test]
+async fn an_exited_actions_group_is_never_signalled_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut d, mut app) = driver(dir.path(), vec![action("quick", "true")]);
+    d.start(&mut app, "quick");
+    until(&mut d, &mut app, "exit", |d, _| {
+        d.procs["quick"].shared.gone.load(Ordering::Acquire)
+    })
+    .await;
+    let reused = d.procs["quick"].pid;
+    assert!(!live_groups().contains(&reused));
+
+    // Stand in for an unrelated group that was handed the same pid after the action's group
+    // emptied.
+    let mut bystander = std::process::Command::new("sleep");
+    bystander.arg("30");
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut bystander, 0);
+    let mut bystander = bystander.spawn().unwrap();
+    d.procs.get_mut("quick").unwrap().pid = bystander.id();
+
+    d.stop("quick");
+    d.shutdown();
+    tokio::time::sleep(Duration::from_millis(1800)).await;
+    assert!(
+        bystander.try_wait().unwrap().is_none(),
+        "an unrelated group was signalled"
+    );
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+}

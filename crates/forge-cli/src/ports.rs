@@ -26,7 +26,24 @@ const MAX_COMMAND_CHARS: usize = 200;
 /// A root process and, for a project action, the action's id.
 pub(crate) type Root = (u32, Option<String>);
 
+/// Whether a process working in `cwd` counts as running in `workspace`. Other sessions' worktrees
+/// live under `<repo>/.forge/worktrees`, so they are not this workspace's even though their path
+/// starts with it.
+pub(crate) fn in_workspace(cwd: &Path, workspace: &Path) -> bool {
+    cwd.starts_with(workspace) && !cwd.starts_with(workspace.join(".forge").join("worktrees"))
+}
+
+/// A workspace so broad (the home directory or something above it) that matching by cwd would
+/// claim most of the user's processes.
+fn too_broad(workspace: &Path) -> bool {
+    workspace.parent().is_none()
+        || std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .is_some_and(|home| home.starts_with(workspace))
+}
+
 pub(crate) fn scan(roots: &[Root], workspace: Option<&Path>) -> Vec<ListeningPort> {
+    let workspace = workspace.filter(|path| !too_broad(path));
     let mut found = platform::scan(roots, workspace);
     found.retain(|entry| entry.pid != std::process::id());
     found.sort_by_key(|a| (a.port, a.pid));
@@ -161,7 +178,7 @@ mod platform {
                     continue;
                 }
                 let inside = std::fs::read_link(format!("/proc/{pid}/cwd"))
-                    .is_ok_and(|cwd| cwd.starts_with(workspace));
+                    .is_ok_and(|cwd| in_workspace(&cwd, workspace));
                 if inside {
                     candidates.insert(*pid, ("workspace", None));
                 }
@@ -300,6 +317,31 @@ mod tests {
         assert_eq!(classify_host(&v6), "all");
         v6[15] = 1;
         assert_eq!(classify_host(&v6), "loopback");
+    }
+
+    #[test]
+    fn other_sessions_worktrees_are_not_this_workspace() {
+        let repo = Path::new("/work/app");
+        assert!(in_workspace(Path::new("/work/app/web"), repo));
+        assert!(!in_workspace(
+            Path::new("/work/app/.forge/worktrees/abc/web"),
+            repo
+        ));
+        let worktree = Path::new("/work/app/.forge/worktrees/abc");
+        assert!(in_workspace(
+            Path::new("/work/app/.forge/worktrees/abc/web"),
+            worktree
+        ));
+        assert!(!in_workspace(Path::new("/work/other"), repo));
+    }
+
+    #[test]
+    fn a_home_or_root_workspace_is_too_broad() {
+        assert!(too_broad(Path::new("/")));
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(too_broad(Path::new(&home)));
+            assert!(!too_broad(&Path::new(&home).join("project")));
+        }
     }
 
     #[test]

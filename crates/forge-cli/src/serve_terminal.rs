@@ -602,8 +602,8 @@ pub(crate) async fn terminal_ws(
         terminal_id: params.terminal,
     };
     let (cols, rows) = clamp_size(params.cols, params.rows);
-    if params.restart {
-        state.terminals.close(&key).await;
+    if let Some(refusal) = actions::prepare_terminal(&state, &key, params.restart).await {
+        return refusal;
     }
     let terminal = match state
         .terminals

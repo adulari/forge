@@ -145,41 +145,108 @@ async fn running(State(state): State<Arc<DaemonState>>) -> Response {
     json_response(&json!({ "running": rows }))
 }
 
-async fn run(State(state): State<Arc<DaemonState>>, Json(body): Json<ActionBody>) -> Response {
-    let Some(roots) = session_roots(&state, &body.session).await else {
-        return err_response(StatusCode::NOT_FOUND, "session not found");
+type Refusal = (StatusCode, String);
+
+/// Start `action_id` on the session from the project's config.
+async fn start(state: &DaemonState, session: &str, action_id: &str) -> Result<String, Refusal> {
+    let Some(roots) = session_roots(state, session).await else {
+        return Err((StatusCode::NOT_FOUND, "session not found".into()));
     };
     let (root, actions) = declared(&roots);
-    let Some(action) = actions.iter().find(|action| action.id == body.action) else {
-        return err_response(StatusCode::NOT_FOUND, "no such action in this project");
+    let Some(action) = actions.iter().find(|action| action.id == action_id) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "no such action in this project".into(),
+        ));
     };
-    let cwd = match action_cwd(&root, action) {
-        Ok(cwd) => cwd,
-        Err(message) => return err_response(StatusCode::BAD_REQUEST, &message),
-    };
-    match state
+    let cwd = action_cwd(&root, action).map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    state
         .terminals
         .start_action(
-            &body.session,
+            session,
             &action.id,
             cwd.to_string_lossy().into_owned(),
             &action.command,
             crate::host_caps::terminal_limit(),
         )
         .await
-    {
-        Ok(()) => json_response(&json!({"ok": true, "terminal_id": format!("act-{}", action.id)})),
-        Err(message) => err_response(StatusCode::CONFLICT, &message),
+        .map_err(|message| (StatusCode::CONFLICT, message))?;
+    Ok(format!("act-{}", action.id))
+}
+
+/// Stop the action if it is there and start it again.
+pub(crate) async fn restart(
+    state: &DaemonState,
+    session: &str,
+    action_id: &str,
+) -> Result<(), Refusal> {
+    state.terminals.stop_action(session, action_id).await;
+    start(state, session, action_id).await.map(|_| ())
+}
+
+async fn run(State(state): State<Arc<DaemonState>>, Json(body): Json<ActionBody>) -> Response {
+    match start(&state, &body.session, &body.action).await {
+        Ok(terminal_id) => json_response(&json!({"ok": true, "terminal_id": terminal_id})),
+        Err((status, message)) => err_response(status, &message),
     }
 }
 
+/// Stop needs no loaded session: an action must stay stoppable after its session was unloaded.
 async fn stop(State(state): State<Arc<DaemonState>>, Json(body): Json<ActionBody>) -> Response {
-    if state.registry.get(&body.session).await.is_none() {
-        return err_response(StatusCode::NOT_FOUND, "session not found");
-    }
     let stopped = state
         .terminals
         .stop_action(&body.session, &body.action)
         .await;
     json_response(&json!({"ok": true, "stopped": stopped}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serve_terminal::TerminalRegistry;
+
+    fn state() -> Arc<DaemonState> {
+        Arc::new(DaemonState {
+            registry: Arc::new(crate::serve::SessionRegistry::new()),
+            terminals: Arc::new(TerminalRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: "/tmp".into(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_action_is_stoppable_without_a_loaded_session() {
+        let state = state();
+        let dir = tempfile::tempdir().unwrap();
+        state
+            .terminals
+            .start_action(
+                "unloaded",
+                "dev",
+                dir.path().display().to_string(),
+                "sleep 30",
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(state.terminals.has_running_action("unloaded").await);
+        let response = stop(
+            State(state.clone()),
+            Json(ActionBody {
+                session: "unloaded".into(),
+                action: "dev".into(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!state.terminals.has_running_action("unloaded").await);
+        assert!(state.terminals.action_runs(None).await.is_empty());
+    }
 }

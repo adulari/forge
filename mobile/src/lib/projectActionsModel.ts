@@ -21,6 +21,15 @@ export interface RunningAction {
   action: string;
 }
 
+/** The session among `sessionIds` that currently runs `actionId`, if any. */
+export function runningSessionFor(
+  running: readonly RunningAction[],
+  sessionIds: readonly string[],
+  actionId: string,
+): string | null {
+  return running.find((entry) => entry.action === actionId && sessionIds.includes(entry.session))?.session ?? null;
+}
+
 export type PortHost = "loopback" | "all" | "other";
 export type PortSource = "action" | "terminal" | "workspace";
 

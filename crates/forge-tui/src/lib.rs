@@ -97,7 +97,7 @@ pub use commands::{
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{
     edit_in_external_editor, external_editor_command, frame_wait, install_panic_restore,
-    ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg,
+    on_terminate, ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg,
 };
 pub use headless::HeadlessPresenter;
 pub use help::{run_help, HelpTab};

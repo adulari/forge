@@ -3,11 +3,11 @@
 // count, and, on hover or keyboard focus, a "New thread" button and the project menu.
 import { router } from "expo-router";
 import { ChevronDown, ChevronRight, MoreHorizontal, Plus } from "lucide-react-native";
-import React, { useRef, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useAuth } from "../../lib/auth";
-import { diffLabel, projectAccent, type ProjectGroup } from "../../lib/sidebarModel";
+import { diffLabel, projectAccent, walkNodes, type ProjectGroup } from "../../lib/sidebarModel";
 import { toggleProjectInWorkspace, type Workspace } from "../../lib/shellPrefs";
 import { useTheme } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -43,7 +43,11 @@ export function SidebarProjectHeader({ group, collapsed, serverName, workspaces,
 
   // Actions are the project's, so any of its sessions answers; the most recent one is first.
   const actionSession = group.serverId === activeServerId ? (group.nodes[0]?.entry.row.id ?? null) : null;
-  const actionEntries = useActionMenuEntries(actionSession, menu != null);
+  const groupSessionIds = useMemo(
+    () => (menu != null ? [...walkNodes(group.nodes)].map(({ node }) => node.entry.row.id) : []),
+    [group.nodes, menu],
+  );
+  const actionEntries = useActionMenuEntries(actionSession, menu != null, groupSessionIds);
   const entries: MenuEntry[] = [
     { kind: "item", id: "new", label: "New thread here", onPress: newThread },
     { kind: "item", id: "fold", label: collapsed ? "Expand" : "Collapse", onPress: onToggle },

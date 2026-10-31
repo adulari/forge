@@ -4,18 +4,19 @@
 //!
 //! Each action runs as `$SHELL -lc <command>` in its own process group, so stopping it takes the
 //! dev server's children down too. Nothing outlives the TUI: `shutdown` (also run on drop) kills
-//! every group.
+//! every group, and so does SIGTERM / SIGHUP, through a hook the TUI driver runs before it exits.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use forge_config::project_actions::{actions_for, ProjectAction};
 use forge_tui::run_menu::{ActionRow, ActionView, MenuAction, PortView, RunState, Tone};
 use forge_tui::{App, KeyKind};
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 
 const OUTPUT_CAP: usize = 300;
@@ -23,11 +24,69 @@ const SNAPSHOT_LINES: usize = 12;
 const PORTS_EVERY: Duration = Duration::from_secs(2);
 const KILL_GRACE: Duration = Duration::from_millis(1500);
 
+/// Process groups that may still hold a live action, by leader pid. A group leaves this set the
+/// moment it is seen empty, and is never signalled again: after that the pid can belong to an
+/// unrelated process.
+static LIVE_GROUPS: Mutex<HashSet<u32>> = Mutex::new(HashSet::new());
+
+fn live_groups() -> std::sync::MutexGuard<'static, HashSet<u32>> {
+    LIVE_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// SIGTERM every live group, give them the grace period, then SIGKILL what is left. Runs from
+/// `shutdown` and from the TUI's terminate hook, where no destructor will.
+pub(crate) fn terminate_live_groups() {
+    let pids: Vec<u32> = live_groups().iter().copied().collect();
+    terminate_groups(&pids);
+}
+
+fn terminate_groups(pids: &[u32]) {
+    for &pid in pids {
+        signal_group(pid, false);
+    }
+    let deadline = Instant::now() + KILL_GRACE;
+    while pids.iter().any(|&p| group_alive(p)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    for &pid in pids {
+        if group_alive(pid) {
+            signal_group(pid, true);
+        }
+    }
+    let mut live = live_groups();
+    for pid in pids {
+        live.remove(pid);
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     output: Mutex<VecDeque<String>>,
     /// `Some(code)` once the shell exited; `code` is `None` when a signal ended it.
     exit: Mutex<Option<Option<i32>>>,
+    /// The group was seen empty, so its pid may be reused and must never be signalled again.
+    gone: AtomicBool,
+}
+
+impl Shared {
+    fn exited(&self) -> bool {
+        self.exit.lock().unwrap().is_some()
+    }
+
+    /// Record that the group is empty once its leader has exited and nothing is left in it.
+    fn confirm_gone(&self, pid: u32) -> bool {
+        if self.gone.load(Ordering::Acquire) {
+            return true;
+        }
+        if self.exited() && !group_alive(pid) {
+            self.gone.store(true, Ordering::Release);
+            live_groups().remove(&pid);
+            return true;
+        }
+        false
+    }
 }
 
 struct Proc {
@@ -140,22 +199,75 @@ fn group_alive(_pid: u32) -> bool {
     false
 }
 
-fn pump<R: AsyncRead + Unpin + Send + 'static>(reader: R, shared: Arc<Shared>) {
+const MAX_LINE_BYTES: usize = 4096;
+
+/// Turns raw output bytes into display lines. Invalid UTF-8 is replaced rather than ending the
+/// stream, a carriage return keeps only the last redraw of a progress line, and a line that
+/// never ends is cut at [`MAX_LINE_BYTES`].
+#[derive(Default)]
+struct LineSplitter {
+    pending: Vec<u8>,
+    after_cr: bool,
+}
+
+impl LineSplitter {
+    fn push(&mut self, bytes: &[u8], mut line: impl FnMut(String)) {
+        for &byte in bytes {
+            if std::mem::take(&mut self.after_cr) && byte != b'\n' {
+                self.pending.clear();
+            }
+            match byte {
+                b'\n' => self.flush(&mut line),
+                b'\r' => self.after_cr = true,
+                _ => {
+                    self.pending.push(byte);
+                    if self.pending.len() >= MAX_LINE_BYTES {
+                        self.flush(&mut line);
+                    }
+                }
+            }
+        }
+    }
+
+    fn flush(&mut self, line: &mut impl FnMut(String)) {
+        let text = String::from_utf8_lossy(&self.pending).replace('\t', "    ");
+        self.pending.clear();
+        line(text);
+    }
+
+    fn finish(&mut self, mut line: impl FnMut(String)) {
+        if !self.pending.is_empty() {
+            self.flush(&mut line);
+        }
+    }
+}
+
+fn pump<R: AsyncRead + Unpin + Send + 'static>(mut reader: R, shared: Arc<Shared>) {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.replace('\t', "    ");
+        let mut splitter = LineSplitter::default();
+        let mut chunk = [0u8; 4096];
+        let record = |text: String| {
             let mut out = shared.output.lock().unwrap();
             if out.len() == OUTPUT_CAP {
                 out.pop_front();
             }
-            out.push_back(line);
+            out.push_back(text);
+        };
+        // Keep draining until EOF whatever the bytes are: a closed read end would hand the
+        // action a SIGPIPE.
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => splitter.push(&chunk[..read], &record),
+            }
         }
+        splitter.finish(&record);
     });
 }
 
 impl RunMenuDriver {
     pub(crate) fn new() -> Self {
+        forge_tui::on_terminate(terminate_live_groups);
         Self::in_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
@@ -235,6 +347,7 @@ impl RunMenuDriver {
             .spawn()
             .map_err(|e| format!("could not start `{shell}`: {e}"))?;
         let pid = child.id().ok_or("the process exited immediately")?;
+        live_groups().insert(pid);
         let shared = Arc::new(Shared::default());
         if let Some(out) = child.stdout.take() {
             pump(out, shared.clone());
@@ -249,6 +362,7 @@ impl RunMenuDriver {
                 Err(_) => None,
             };
             *waiter.exit.lock().unwrap() = Some(code);
+            waiter.confirm_gone(pid);
         });
         Ok(Proc {
             pid,
@@ -262,32 +376,36 @@ impl RunMenuDriver {
         let Some(proc) = self.procs.get_mut(id) else {
             return;
         };
-        if proc.exited().is_some() && !group_alive(proc.pid) {
+        if proc.shared.confirm_gone(proc.pid) {
             return;
         }
         proc.stopping = true;
         let pid = proc.pid;
+        let shared = proc.shared.clone();
         signal_group(pid, false);
         tokio::spawn(async move {
             tokio::time::sleep(KILL_GRACE).await;
-            signal_group(pid, true);
+            if !shared.confirm_gone(pid) {
+                signal_group(pid, true);
+            }
         });
     }
 
     /// Kill every action's process group before the TUI goes away. Blocks for at most the grace
     /// period, and only when something ignored SIGTERM.
     pub(crate) fn shutdown(&mut self) {
-        let pids: Vec<u32> = self.procs.values().map(|p| p.pid).collect();
-        for &pid in &pids {
-            signal_group(pid, false);
+        for proc in self.procs.values() {
+            proc.shared.confirm_gone(proc.pid);
         }
-        let deadline = Instant::now() + KILL_GRACE;
-        while pids.iter().any(|&p| group_alive(p)) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        for &pid in &pids {
-            signal_group(pid, true);
-        }
+        let mine: Vec<u32> = {
+            let live = live_groups();
+            self.procs
+                .values()
+                .map(|p| p.pid)
+                .filter(|pid| live.contains(pid))
+                .collect()
+        };
+        terminate_groups(&mine);
         self.procs.clear();
     }
 
@@ -372,13 +490,16 @@ impl RunMenuDriver {
             self.ports_at = None;
             dirty = true;
         }
+        for proc in self.procs.values() {
+            proc.shared.confirm_gone(proc.pid);
+        }
         let finished: Vec<String> = self
             .restart
             .iter()
             .filter(|id| {
                 self.procs
                     .get(*id)
-                    .is_none_or(|p| p.exited().is_some() && !group_alive(p.pid))
+                    .is_none_or(|p| p.shared.confirm_gone(p.pid))
             })
             .cloned()
             .collect();
