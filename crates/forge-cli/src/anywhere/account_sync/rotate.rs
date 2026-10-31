@@ -39,7 +39,7 @@ pub(crate) fn reseal_keys(store: &Store, state: &LocalState) -> Result<Vec<Strin
         labels.push(local.label.clone());
         if Category::Keys.enabled(&config.anywhere.account_sync) {
             let id = recorded_id(&ctx, Category::Keys, &local.item);
-            let payload = serde_json::to_vec(&build_payload(&ctx, &id, local)?)?;
+            let payload = serde_json::to_vec(&build_payload(&ctx, &id, local, None)?)?;
             store.write_portable_sync_record(device_id, local.kind, &id, Some(&payload))?;
         }
     }

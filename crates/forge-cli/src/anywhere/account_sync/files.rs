@@ -104,10 +104,46 @@ pub(super) fn write_bundle(target: &Path, value: &Value, keep_conflict: bool) ->
             write_decoded(&copy, &decode(&previous)?)?;
         }
     }
-    if target.is_dir() {
-        std::fs::remove_dir_all(target)?;
+    if files.len() == 1 && files[0].0.is_empty() {
+        if target.is_dir() {
+            std::fs::remove_dir_all(target)?;
+        }
+        return write_decoded(target, &files);
     }
-    write_decoded(target, &files)
+    swap_in_directory(target, &files)
+}
+
+/// Builds the new directory beside `target`, then swaps it in, so a failed or interrupted write
+/// leaves the previous copy untouched instead of a half-written one.
+fn swap_in_directory(target: &Path, files: &[(String, Vec<u8>)]) -> Result<()> {
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let staging = target.with_file_name(format!(".{name}.forge-new"));
+    let aside = target.with_file_name(format!(".{name}.forge-old"));
+    for stale in [&staging, &aside] {
+        remove(stale)?;
+    }
+    std::fs::create_dir_all(&staging)?;
+    if let Err(error) = write_decoded(&staging, files) {
+        let _ = remove(&staging);
+        return Err(error);
+    }
+    if target.exists() {
+        if let Err(error) = std::fs::rename(target, &aside) {
+            let _ = remove(&staging);
+            return Err(error.into());
+        }
+    }
+    if let Err(error) = std::fs::rename(&staging, target) {
+        if aside.exists() {
+            let _ = std::fs::rename(&aside, target);
+        }
+        let _ = remove(&staging);
+        return Err(error.into());
+    }
+    remove(&aside)
 }
 
 fn write_decoded(target: &Path, files: &[(String, Vec<u8>)]) -> Result<()> {

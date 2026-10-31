@@ -98,7 +98,7 @@ pub(super) fn remove_local(category: Category, item: &str) -> Result<()> {
         Category::Mcp => {
             let name = item.strip_prefix("server/").context("unknown mcp item")?;
             let path = dir("mcp.toml")?;
-            let mut config = forge_config::load_mcp_toml(&path);
+            let mut config = load_mcp_for_edit(&path)?;
             config.servers.retain(|s| s.name != name);
             forge_config::write_mcp_toml(&path, &config)?;
         }
@@ -168,8 +168,13 @@ fn first_line(error: &anyhow::Error) -> String {
 
 fn edit_toml_table(file: &str, table: &str, name: &str, value: Option<&Value>) -> Result<()> {
     let path = dir(file)?;
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut root: toml::Table = toml::from_str(&text).unwrap_or_default();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => bail!("{file} could not be read: {error}"),
+    };
+    let mut root: toml::Table =
+        toml::from_str(&text).with_context(|| format!("{file} is not valid TOML"))?;
     let section = root
         .entry(table.to_string())
         .or_insert_with(|| toml::Value::Table(Default::default()));
@@ -184,6 +189,9 @@ fn edit_toml_table(file: &str, table: &str, name: &str, value: Option<&Value>) -
         None => {
             section.remove(name);
         }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
     forge_config::write_atomic(&path, toml::to_string_pretty(&root)?)?;
     Ok(())
@@ -208,6 +216,16 @@ fn apply_setting(item: &str, value: &Value, keep_conflict: bool) -> Result<Outco
     Ok(Outcome::Applied)
 }
 
+/// A file that exists but fails to parse is never rewritten: that would replace the user's
+/// recoverable typo with only the synced servers.
+fn load_mcp_for_edit(path: &std::path::Path) -> Result<forge_config::mcp::McpConfig> {
+    let (config, problem) = forge_config::mcp::load_mcp_toml_with_diagnostic(path);
+    if problem.is_some() {
+        bail!("mcp.toml is not valid, fix it before MCP servers can sync");
+    }
+    Ok(config)
+}
+
 fn apply_mcp(item: &str, value: &Value) -> Result<Outcome> {
     let name = item.strip_prefix("server/").context("unknown mcp item")?;
     let server: forge_config::mcp::McpServerConfig =
@@ -224,7 +242,7 @@ fn apply_mcp(item: &str, value: &Value) -> Result<Outcome> {
     }
     let _lock = crate::serve::config_mutation_lock().lock();
     let path = dir("mcp.toml")?;
-    let mut config = forge_config::load_mcp_toml(&path);
+    let mut config = load_mcp_for_edit(&path)?;
     match config.servers.iter_mut().find(|s| s.name == name) {
         Some(existing) => *existing = server,
         None => config.servers.push(server),
