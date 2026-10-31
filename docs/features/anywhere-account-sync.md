@@ -11,7 +11,7 @@ Every category is a **per-device** switch under `[anywhere.account_sync]`, all o
 | `keys` | provider API keys, `brave`, `artificialanalysis`, the long-lived Claude token, static MCP secrets | env-var keys, `provider-oauth:*`, `mcp-oauth*`; only a "this login is in use" marker |
 | `skills` | `skills/`, `commands/`, `agents/`, marketplaces and installed packs (re-installed from source) | skill-usage counts |
 | `settings` | theme and palette, statusline widgets, notifications, default permission mode, permission rules, voice and telemetry prefs, `keybindings.json`, and which CLIs you use | anything with a path, command, host or endpoint: hooks, `statusline.command`, `lsp`, `terminal.shell`, `local.endpoint`, `tools.extra_roots` |
-| `mcp` | `mcp.toml` servers. URL servers apply directly; stdio servers apply only where the command is on `PATH`, otherwise they show as skipped ("needs `npx`, not installed here") | servers that embed a credential inline |
+| `mcp` | `mcp.toml` servers. URL servers apply directly; stdio servers apply only where the command is on `PATH`, otherwise they show as skipped ("needs `npx`, not installed here") | servers that embed a credential inline: a connection string or token-shaped value in an env value, a secret-looking flag or argument (`--api-key`, `--token=`, `Authorization:`), a token in the URL path or query (`?api_key=`); held back and shown as skipped |
 | `instructions` | the user-level `AGENTS.md` | `~/.claude/CLAUDE.md` |
 
 ## Using it
@@ -82,5 +82,11 @@ yourself works as before.
   provider; `forge anywhere devices --revoke` re-seals this device's keys under the new epoch and
   prints the labels to rotate.
 - The Account Data Key epochs and device private keys moved from plaintext `state.json` into the
-  secret store (keyring first, encrypted file second), migrated once on first sync and still read from
-  the old layout until then. If the secret store is unavailable they stay in the file with a warning.
+  secret store, migrated once on first sync and still read from the old layout until then. They are
+  stored in the keyring and in the encrypted file, so a shell that cannot reach the keyring (SSH)
+  reads the same keys. The stored copy names the device and key epoch it belongs to and is read past
+  the process cache; a copy that does not match `state.json` stops the load with an error instead of
+  being mixed in. If the secret store is unavailable they stay in the file with a warning.
+- The vault seal on key values is a guardrail, not a boundary against enrolled devices: phones and
+  controllers hold the Account Data Key the vault key derives from and download the key records
+  (the app discards them unseen). See `protocol/anywhere-v1-threat-model.md`.

@@ -234,8 +234,51 @@ impl CommandStateStore {
     }
 }
 
+/// Layout of [`KeyBlob`] that records which device and key epoch the keys belong to.
+const KEY_BLOB_VERSION: u8 = 1;
+
+/// The secret-store copy of the device keys does not belong to the state file it is read beside:
+/// it was written for another device or another key epoch. Applying it would label one Account
+/// Data Key with another epoch's number, so loading stops instead.
+#[derive(Debug)]
+struct KeyBlobMismatch(String);
+
+impl std::fmt::Display for KeyBlobMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for KeyBlobMismatch {}
+
+thread_local! {
+    static STATE_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct StateLockMark;
+
+impl StateLockMark {
+    fn set() -> Self {
+        STATE_LOCK_HELD.with(|held| held.set(true));
+        Self
+    }
+}
+
+impl Drop for StateLockMark {
+    fn drop(&mut self) {
+        STATE_LOCK_HELD.with(|held| held.set(false));
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct KeyBlob {
+    /// 0 for blobs written before the binding existed; they carry no device or epoch.
+    #[serde(default)]
+    version: u8,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    key_epoch: Option<u32>,
     signing_private_key: Option<String>,
     exchange_private_key: Option<String>,
     account_data_key: Option<String>,
@@ -246,6 +289,9 @@ struct KeyBlob {
 impl KeyBlob {
     fn from_state(state: &LocalState) -> Self {
         Self {
+            version: KEY_BLOB_VERSION,
+            device_id: state.device_id.clone(),
+            key_epoch: state.key_epoch,
             signing_private_key: state.signing_private_key.clone(),
             exchange_private_key: state.exchange_private_key.clone(),
             account_data_key: state.account_data_key.clone(),
@@ -258,6 +304,22 @@ impl KeyBlob {
             && self.exchange_private_key.is_none()
             && self.account_data_key.is_none()
             && self.data_key_epochs.is_empty()
+    }
+
+    /// Whether these keys were saved for the device and key epoch `state` names, and agree with
+    /// themselves (the current epoch's entry is the current data key).
+    fn belongs_to(&self, state: &LocalState) -> bool {
+        let coherent = match (self.key_epoch, &self.account_data_key) {
+            (Some(epoch), Some(key)) => self
+                .data_key_epochs
+                .get(&epoch)
+                .is_none_or(|entry| entry == key),
+            _ => true,
+        };
+        self.version >= KEY_BLOB_VERSION
+            && self.device_id == state.device_id
+            && self.key_epoch == state.key_epoch
+            && coherent
     }
 
     fn apply(self, state: &mut LocalState) {
@@ -415,6 +477,19 @@ impl StateStore {
     }
 
     pub(crate) fn load(&self) -> Result<LocalState> {
+        match self.load_unlocked() {
+            // A save stores the keys and then installs the file, so a lock-free read can land
+            // between the two. Under the lock no save is in flight, and any mismatch left is real.
+            Err(error)
+                if error.is::<KeyBlobMismatch>() && !STATE_LOCK_HELD.with(std::cell::Cell::get) =>
+            {
+                self.with_exclusive_lock(|| self.load_unlocked())
+            }
+            result => result,
+        }
+    }
+
+    fn load_unlocked(&self) -> Result<LocalState> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -434,7 +509,7 @@ impl StateStore {
             );
         }
         if !state.has_key_material() {
-            if let Some(blob) = self.load_key_blob() {
+            if let Some(blob) = self.load_key_blob(&state)? {
                 blob.apply(&mut state);
             }
         }
@@ -449,9 +524,50 @@ impl StateStore {
         format!("anywhere-keys:{}", hex::encode(&digest[..8]))
     }
 
-    fn load_key_blob(&self) -> Option<KeyBlob> {
-        let raw = forge_config::load_secret(&self.key_slot())?;
-        serde_json::from_str(&raw).ok()
+    /// Every parseable copy of the key blob, read past the process-local cache: the file's
+    /// `key_epoch` and the keys come from different stores, and another process may have moved
+    /// both since this one last looked.
+    fn key_blob_copies(&self) -> Vec<KeyBlob> {
+        forge_config::secret_store::get_each(&self.key_slot())
+            .iter()
+            .filter_map(|raw| serde_json::from_str(raw).ok())
+            .collect()
+    }
+
+    /// The key blob saved for the device and epoch `state` names. A store this process cannot
+    /// reach may hold an older or newer copy, so the copy has to match; none matching is an error,
+    /// never a guess. Blobs from before the binding existed are taken when nothing better does.
+    fn load_key_blob(&self, state: &LocalState) -> Result<Option<KeyBlob>> {
+        let mut copies = self.key_blob_copies();
+        if copies.is_empty() {
+            return Ok(None);
+        }
+        let chosen = copies
+            .iter()
+            .position(|blob| blob.belongs_to(state))
+            .or_else(|| copies.iter().position(|blob| blob.version == 0));
+        match chosen {
+            Some(index) => Ok(Some(copies.swap_remove(index))),
+            None => {
+                let held = copies
+                    .iter()
+                    .map(|blob| {
+                        format!(
+                            "device {} epoch {}",
+                            blob.device_id.as_deref().unwrap_or("?"),
+                            blob.key_epoch.map_or("?".to_string(), |e| e.to_string())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Err(anyhow::Error::new(KeyBlobMismatch(format!(
+                    "the Anywhere keys in the secret store ({held}) do not belong to this state (device {} epoch {}); refusing to use keys from another \
+                     device or epoch",
+                    state.device_id.as_deref().unwrap_or("?"),
+                    state.key_epoch.map_or("?".to_string(), |e| e.to_string())
+                ))))
+            }
+        }
     }
 
     /// Moves the Account Data Key epochs and the device private keys out of the plaintext state
@@ -463,11 +579,21 @@ impl StateStore {
         }
         self.with_exclusive_lock(|| {
             let state = self.load()?;
-            if state.has_key_material() && self.file_holds_keys()? {
+            if state.has_key_material()
+                && (self.file_holds_keys()? || !self.key_blob_is_current(&state))
+            {
                 self.save(&state)?;
             }
             Ok(())
         })
+    }
+
+    /// Whether the secret store already holds a bound copy of this state's keys. Copies from
+    /// before the binding carry no device or epoch, so they are rewritten once.
+    fn key_blob_is_current(&self, state: &LocalState) -> bool {
+        self.key_blob_copies()
+            .iter()
+            .any(|blob| blob.belongs_to(state))
     }
 
     fn file_holds_keys(&self) -> Result<bool> {
@@ -520,8 +646,8 @@ impl StateStore {
         }
         let slot = self.key_slot();
         let raw = serde_json::to_string(&blob).ok()?;
-        let stored = forge_config::store_secret(&slot, &raw).is_ok()
-            && forge_config::load_secret(&slot).as_deref() == Some(raw.as_str());
+        let stored = forge_config::secret_store::set_all(&slot, &raw).is_ok()
+            && forge_config::secret_store::get_each(&slot).contains(&raw);
         if !stored {
             tracing::warn!(
                 "secret store unavailable; Anywhere device keys stay in the owner-only state file"
@@ -588,7 +714,9 @@ impl StateStore {
             .context("open Anywhere state lock")?;
         set_owner_file_permissions(&lock_path)?;
         lock.lock_exclusive().context("lock Anywhere state")?;
+        let mark = StateLockMark::set();
         let result = operation();
+        drop(mark);
         fs2::FileExt::unlock(&lock).context("unlock Anywhere state")?;
         result
     }
@@ -672,6 +800,147 @@ mod tests {
         );
         assert_eq!(loaded.data_key_epochs.len(), 2);
         assert_eq!(loaded.key_epoch, Some(2));
+    }
+
+    fn store_in(dir: &tempfile::TempDir) -> StateStore {
+        StateStore {
+            path: dir.path().join("anywhere/state.json"),
+        }
+    }
+
+    fn device_state(device: &str, epoch: u32, keys: &[(u32, &str)]) -> LocalState {
+        LocalState {
+            version: STATE_VERSION,
+            account_id: Some("acct".into()),
+            device_id: Some(device.into()),
+            signing_private_key: Some(format!("signing-{device}")),
+            exchange_private_key: Some(format!("exchange-{device}")),
+            account_data_key: keys
+                .iter()
+                .find(|(e, _)| *e == epoch)
+                .map(|(_, k)| k.to_string()),
+            key_epoch: Some(epoch),
+            data_key_epochs: keys.iter().map(|(e, k)| (*e, k.to_string())).collect(),
+            ..LocalState::default()
+        }
+    }
+
+    #[test]
+    fn a_stale_cached_blob_is_never_attached_to_a_newer_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        store.save(&device_state("dev", 1, &[(1, "K1")])).unwrap();
+        let epoch_one_blob = forge_config::secret_store::get_each(&store.key_slot()).remove(0);
+
+        // Another process revokes a device: epoch 2 and the new key land in state and keyring.
+        store
+            .update(|state| {
+                state.key_epoch = Some(2);
+                state.account_data_key = Some("K2".into());
+                state.data_key_epochs.insert(2, "K2".into());
+                Ok(())
+            })
+            .unwrap();
+        // This process's read memo still answers with the epoch-1 blob it cached earlier.
+        forge_config::secret_store::staging::pin_stale_read(
+            &store.key_slot(),
+            Some(&epoch_one_blob),
+        );
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.key_epoch, Some(2));
+        assert_eq!(loaded.account_data_key.as_deref(), Some("K2"));
+        assert_eq!(
+            loaded.data_key_epochs.get(&2).map(String::as_str),
+            Some("K2"),
+            "epoch 2 must map to the epoch-2 key, not the revoked one"
+        );
+        store.save(&loaded).unwrap();
+        let after = store.load().unwrap();
+        assert_eq!(after.account_data_key.as_deref(), Some("K2"));
+        assert_eq!(
+            after.data_key_epochs.get(&1).map(String::as_str),
+            Some("K1")
+        );
+    }
+
+    #[test]
+    fn keys_saved_for_another_epoch_are_refused_instead_of_grafted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        store.save(&device_state("dev", 1, &[(1, "K1")])).unwrap();
+        let epoch_one_blob = forge_config::secret_store::get_each(&store.key_slot()).remove(0);
+        store
+            .save(&device_state("dev", 2, &[(1, "K1"), (2, "K2")]))
+            .unwrap();
+        for write in [
+            forge_config::secret_store::staging::write_keyring_only,
+            forge_config::secret_store::staging::write_file_only,
+        ] {
+            write(&store.key_slot(), &epoch_one_blob);
+        }
+
+        let error = store.load().err().expect("a mismatched blob must not load");
+        assert!(
+            format!("{error:#}").contains("do not belong"),
+            "a mismatch must be loud: {error:#}"
+        );
+    }
+
+    #[test]
+    fn keys_are_readable_by_a_process_that_cannot_reach_the_keyring() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        store.save(&device_state("dev", 1, &[(1, "K1")])).unwrap();
+
+        forge_config::secret_store::staging::set_keyring_reachable(&store.key_slot(), false);
+        let loaded = store.load().unwrap();
+        forge_config::secret_store::staging::set_keyring_reachable(&store.key_slot(), true);
+
+        assert_eq!(loaded.signing_private_key.as_deref(), Some("signing-dev"));
+        assert_eq!(loaded.account_data_key.as_deref(), Some("K1"));
+    }
+
+    #[test]
+    fn a_rekeyed_device_wins_over_the_stale_copy_left_in_the_keyring() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        store.save(&device_state("old", 1, &[(1, "OLD")])).unwrap();
+
+        // Logout then login from a shell with no keyring: the new keys reach only the file.
+        let slot = store.key_slot();
+        forge_config::secret_store::staging::set_keyring_reachable(&slot, false);
+        store.save(&device_state("new", 1, &[(1, "NEW")])).unwrap();
+        forge_config::secret_store::staging::set_keyring_reachable(&slot, true);
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.device_id.as_deref(), Some("new"));
+        assert_eq!(loaded.signing_private_key.as_deref(), Some("signing-new"));
+        assert_eq!(loaded.account_data_key.as_deref(), Some("NEW"));
+    }
+
+    #[test]
+    fn a_blob_from_before_the_binding_still_loads_and_is_rewritten_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(&dir);
+        store.save(&device_state("dev", 1, &[(1, "K1")])).unwrap();
+        let slot = store.key_slot();
+        let legacy = serde_json::json!({
+            "signing_private_key": "signing-dev",
+            "exchange_private_key": "exchange-dev",
+            "account_data_key": "K1",
+            "data_key_epochs": { "1": "K1" },
+        })
+        .to_string();
+        forge_config::secret_store::set_all(&slot, &legacy).unwrap();
+
+        assert_eq!(
+            store.load().unwrap().account_data_key.as_deref(),
+            Some("K1")
+        );
+        assert!(!store.key_blob_is_current(&store.load().unwrap()));
+        store.migrate_keys_to_secret_store().unwrap();
+        assert!(store.key_blob_is_current(&store.load().unwrap()));
     }
 
     #[test]

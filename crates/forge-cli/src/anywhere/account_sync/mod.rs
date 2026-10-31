@@ -15,6 +15,7 @@ mod apply;
 mod catalog;
 pub(crate) mod cli;
 mod files;
+mod inline_secret;
 mod reconcile;
 pub(crate) mod rotate;
 mod status;
