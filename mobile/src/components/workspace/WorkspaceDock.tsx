@@ -1,17 +1,15 @@
 import {
   ArrowLeft,
-  File,
+  ChevronsDownUp,
   FileCode2,
   FilePlus,
   Folder,
   FolderPlus,
-  Link,
-  Pencil,
+  FolderTree,
   RefreshCw,
   Save,
   SearchX,
   TextSearch,
-  Trash2,
 } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -36,7 +34,6 @@ import {
   useRenameWorkspaceEntry,
 } from "../../lib/gitActions";
 import {
-  useWorkspaceEntries,
   useWorkspaceFile,
   useWorkspaceSearch,
   useWriteWorkspaceFile,
@@ -56,8 +53,21 @@ import { findController, findFocusProps } from "../../lib/find/findController";
 import { matchOffsets, steppedIndex } from "../../lib/find/matching";
 import { FindBar } from "../find/FindBar";
 import { useWorkbench } from "../workbench/WorkbenchProvider";
+import { CodeView } from "./CodeView";
+import { TreeLevel, type FileTreeProps } from "./FileTree";
+import { CAN_RENDER_SVG, MarkdownPreview, PdfFrame, SvgPreview } from "./FilePreview";
 import { WorkspaceNameSheet } from "./WorkspaceNameSheet";
+import {
+  defaultViewMode,
+  fileViewKind,
+  hasRenderedPreview,
+  highlightLanguage,
+  type FileViewMode,
+} from "./fileKind";
+import { collapseWithin, creationDirectory, expandTo, loadExpanded, saveExpanded, toggleExpanded } from "./treeState";
 import { joinWorkspacePath, parentWorkspacePath, workspaceBasename } from "./workspaceModel";
+import { setWorkspaceDirty } from "./workspaceDirty";
+import { markRevealHandled, requestReveal, useRevealRequest } from "./workspaceReveal";
 
 interface WorkspaceDockProps {
   sessionId: string | null;
@@ -68,69 +78,6 @@ interface WorkspaceDockProps {
   initialPath?: string | null;
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function WorkspaceEntryRow({
-  entry,
-  onOpen,
-  onRename,
-  onDelete,
-}: {
-  entry: WorkspaceEntry;
-  onOpen: (entry: WorkspaceEntry) => void;
-  /** `null` when the connection cannot mutate the workspace (Forge Anywhere relay). */
-  onRename: ((entry: WorkspaceEntry) => void) | null;
-  onDelete: ((entry: WorkspaceEntry) => void) | null;
-}) {
-  const tokens = useTokens();
-  const Icon = entry.kind === "directory" ? Folder : entry.kind === "symlink" ? Link : File;
-  return (
-    <View style={styles.entryRow}>
-      <Pressable
-        onPress={() => onOpen(entry)}
-        disabled={entry.kind === "symlink"}
-        accessibilityRole="button"
-        accessibilityLabel={`${entry.kind} ${entry.path}`}
-        style={({ pressed }) => [
-          styles.entry,
-          { backgroundColor: pressed ? tokens.bg3 : "transparent" },
-          entry.kind === "symlink" && styles.disabled,
-        ]}
-      >
-        <Icon size={16} strokeWidth={1.75} color={entry.kind === "directory" ? tokens.accent : tokens.ink3} />
-        <Text style={[typeScale.body, styles.entryName, { color: tokens.ink }]} numberOfLines={1}>
-          {entry.name}
-        </Text>
-        {entry.kind === "file" ? (
-          <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>
-            {formatBytes(entry.size)}
-          </Text>
-        ) : null}
-      </Pressable>
-      {onRename ? (
-        <IconButton
-          icon={<Pencil size={14} color={tokens.ink3} />}
-          onPress={() => onRename(entry)}
-          accessibilityLabel={`Rename ${entry.path}`}
-          style={styles.compactButton}
-        />
-      ) : null}
-      {onDelete ? (
-        <IconButton
-          icon={<Trash2 size={14} color={tokens.ink3} />}
-          onPress={() => onDelete(entry)}
-          accessibilityLabel={`Delete ${entry.path}`}
-          style={styles.compactButton}
-        />
-      ) : null}
-    </View>
-  );
-}
-
 type NamePrompt = { kind: "file" | "directory" } | { kind: "rename"; entry: WorkspaceEntry };
 
 function WorkspaceBrowser({
@@ -138,14 +85,16 @@ function WorkspaceBrowser({
   onOpenFile,
 }: {
   sessionId: string;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, pinned: boolean) => void;
 }) {
   const tokens = useTokens();
-  const [path, setPath] = useState("");
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => loadExpanded(sessionId));
+  useEffect(() => saveExpanded(sessionId, expanded), [sessionId, expanded]);
+  const [selected, setSelected] = useState<{ path: string; isDirectory: boolean } | null>(null);
+  const [highlightPath, setHighlightPath] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [mode, setMode] = useState<WorkspaceSearchMode>("files");
-  const entries = useWorkspaceEntries(sessionId, path);
   const search = useWorkspaceSearch(sessionId, searchQuery, mode);
   const searching = searchQuery.trim().length > 0;
   const { baseUrl } = useAuth();
@@ -158,6 +107,18 @@ function WorkspaceBrowser({
   const [deleting, setDeleting] = useState<WorkspaceEntry | null>(null);
   const promptBusy = create.isPending || rename.isPending;
   const promptError = (create.error ?? rename.error)?.message ?? null;
+  const createDir = creationDirectory(selected);
+  const reveal = useRevealRequest(sessionId);
+
+  useEffect(() => {
+    if (!reveal) return;
+    markRevealHandled(reveal);
+    setSearchText("");
+    setSearchQuery("");
+    setExpanded((current) => expandTo(current, reveal.path));
+    setHighlightPath(reveal.path);
+    setSelected({ path: reveal.path, isDirectory: false });
+  }, [reveal]);
 
   const closePrompt = () => {
     setPrompt(null);
@@ -172,10 +133,11 @@ function WorkspaceBrowser({
         const result = await rename.mutateAsync({ session: sessionId, from: prompt.entry.path, to: target });
         toast.show(`Renamed to ${workspaceBasename(result.path)}`, { tone: "success" });
       } else {
-        const target = joinWorkspacePath(path, value);
+        const target = joinWorkspacePath(createDir, value);
         const result = await create.mutateAsync({ session: sessionId, path: target, kind: prompt.kind });
         toast.show(`Created ${workspaceBasename(result.path)}`, { tone: "success" });
-        if (prompt.kind === "file") onOpenFile(result.path);
+        setExpanded((current) => expandTo(current, result.path));
+        if (prompt.kind === "file") onOpenFile(result.path, true);
       }
       closePrompt();
     } catch {
@@ -194,13 +156,21 @@ function WorkspaceBrowser({
     }
   };
 
-  const openEntry = (entry: WorkspaceEntry) => {
-    if (entry.kind === "directory") setPath(entry.path);
-    else if (entry.kind === "file") onOpenFile(entry.path);
+  const tree: FileTreeProps = {
+    sessionId,
+    expanded,
+    selectedPath: selected?.path ?? null,
+    highlightPath,
+    onToggle: (dir) =>
+      setExpanded((current) => (current.has(dir) ? collapseWithin(current, dir) : toggleExpanded(current, dir))),
+    onSelect: (entry) => {
+      setHighlightPath(null);
+      setSelected({ path: entry.path, isDirectory: entry.kind === "directory" });
+    },
+    onOpenFile: (entry, pinned) => onOpenFile(entry.path, pinned),
+    onRename: canEdit ? (target) => setPrompt({ kind: "rename", entry: target }) : null,
+    onDelete: canEdit ? setDeleting : null,
   };
-
-  const error = searching ? search.error : entries.error;
-  const loading = searching ? search.isLoading : entries.isLoading;
 
   const promptCopy =
     prompt?.kind === "rename"
@@ -216,7 +186,7 @@ function WorkspaceBrowser({
           label: prompt?.kind === "directory" ? "Folder name" : "File name",
           initial: "",
           confirm: "Create",
-          description: path ? `Created inside ${path}. Slashes create nested folders.` : "Created at the workspace root. Slashes create nested folders.",
+          description: createDir ? `Created inside ${createDir}. Slashes create nested folders.` : "Created at the workspace root. Slashes create nested folders.",
         };
 
   return (
@@ -249,16 +219,16 @@ function WorkspaceBrowser({
       />
       <View style={[styles.browserHeader, { borderBottomColor: tokens.border }]}>
         <View style={styles.pathRow}>
+          <Text style={[typeScale.monoMeta, styles.path, { color: tokens.ink2 }]} numberOfLines={1}>
+            {selected ? createDir || "workspace" : "workspace"}
+          </Text>
           <IconButton
-            icon={<ArrowLeft size={17} color={path ? tokens.ink2 : tokens.ink4} />}
-            onPress={() => setPath(parentWorkspacePath(path))}
-            disabled={!path}
-            accessibilityLabel="Open parent directory"
+            icon={<ChevronsDownUp size={16} color={expanded.size > 0 ? tokens.ink2 : tokens.ink4} />}
+            onPress={() => setExpanded(new Set())}
+            disabled={expanded.size === 0}
+            accessibilityLabel="Collapse all folders"
             style={styles.compactButton}
           />
-          <Text style={[typeScale.monoMeta, styles.path, { color: tokens.ink2 }]} numberOfLines={1}>
-            {path || "workspace"}
-          </Text>
           {canEdit ? (
             <>
               <IconButton
@@ -311,94 +281,87 @@ function WorkspaceBrowser({
         </View>
       </View>
 
-      {loading ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={tokens.accent} />
-        </View>
-      ) : error ? (
-        <View style={styles.error}>
-          <Text style={[typeScale.sub, { color: tokens.danger }]}>{error.message}</Text>
-          <Button
-            label="Retry"
-            variant="secondary"
-            onPress={() => void (searching ? search.refetch() : entries.refetch())}
-          />
-        </View>
-      ) : searching ? (
-        <ScrollView contentContainerStyle={styles.list}>
-          {(search.data?.results ?? []).map((result, index) => (
-            <Pressable
-              key={`${result.path}:${result.line ?? 0}:${index}`}
-              onPress={() => onOpenFile(result.path)}
-              accessibilityRole="button"
-              accessibilityLabel={`Open ${result.path}${result.line ? ` line ${result.line}` : ""}`}
-              style={({ pressed }) => [
-                styles.searchResult,
-                { backgroundColor: pressed ? tokens.bg3 : "transparent" },
-              ]}
-            >
-              {result.kind === "match" ? (
-                <TextSearch size={16} color={tokens.accent} />
-              ) : (
-                <FileCode2 size={16} color={tokens.ink3} />
-              )}
-              <View style={styles.searchResultText}>
-                <Text style={[typeScale.body, { color: tokens.ink }]} numberOfLines={1}>
-                  {result.path}
-                  {result.line ? `:${result.line}` : ""}
-                </Text>
-                {result.preview ? (
-                  <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]} numberOfLines={2}>
-                    {result.preview}
+      {searching ? (
+        search.isLoading ? (
+          <View style={styles.center}>
+            <ActivityIndicator color={tokens.accent} />
+          </View>
+        ) : search.error ? (
+          <View style={styles.error}>
+            <Text style={[typeScale.sub, { color: tokens.danger }]}>{search.error.message}</Text>
+            <Button label="Retry" variant="secondary" onPress={() => void search.refetch()} />
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.list}>
+            {(search.data?.results ?? []).map((result, index) => (
+              <Pressable
+                key={`${result.path}:${result.line ?? 0}:${index}`}
+                onPress={() => onOpenFile(result.path, false)}
+                accessibilityRole="button"
+                accessibilityLabel={`Open ${result.path}${result.line ? ` line ${result.line}` : ""}`}
+                style={({ pressed }) => [
+                  styles.searchResult,
+                  { backgroundColor: pressed ? tokens.bg3 : "transparent" },
+                ]}
+              >
+                {result.kind === "match" ? (
+                  <TextSearch size={16} color={tokens.accent} />
+                ) : (
+                  <FileCode2 size={16} color={tokens.ink3} />
+                )}
+                <View style={styles.searchResultText}>
+                  <Text style={[typeScale.body, { color: tokens.ink }]} numberOfLines={1}>
+                    {result.path}
+                    {result.line ? `:${result.line}` : ""}
                   </Text>
-                ) : null}
-              </View>
-            </Pressable>
-          ))}
-          {search.data?.results.length === 0 ? (
-            <EmptyState icon={SearchX} message={`No ${mode === "files" ? "files" : "text"} match “${searchQuery}”.`} />
-          ) : null}
-          {search.data?.truncated ? (
-            <Text style={[typeScale.meta, styles.truncated, { color: tokens.ink3 }]}>
-              showing the first results from {search.data.scanned_files.toLocaleString()} files
-            </Text>
-          ) : null}
-        </ScrollView>
+                  {result.preview ? (
+                    <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]} numberOfLines={2}>
+                      {result.preview}
+                    </Text>
+                  ) : null}
+                </View>
+              </Pressable>
+            ))}
+            {search.data?.results.length === 0 ? (
+              <EmptyState icon={SearchX} message={`No ${mode === "files" ? "files" : "text"} match “${searchQuery}”.`} />
+            ) : null}
+            {search.data?.truncated ? (
+              <Text style={[typeScale.meta, styles.truncated, { color: tokens.ink3 }]}>
+                showing the first results from {search.data.scanned_files.toLocaleString()} files
+              </Text>
+            ) : null}
+          </ScrollView>
+        )
       ) : (
-        <ScrollView contentContainerStyle={styles.list}>
-          {(entries.data?.entries ?? []).map((entry) => (
-            <WorkspaceEntryRow
-              key={entry.path}
-              entry={entry}
-              onOpen={openEntry}
-              onRename={canEdit ? (target) => setPrompt({ kind: "rename", entry: target }) : null}
-              onDelete={canEdit ? setDeleting : null}
-            />
-          ))}
-          {entries.data?.entries.length === 0 ? (
-            <EmptyState icon={Folder} message="This directory is empty." />
-          ) : null}
-          {entries.data && entries.data.truncated > 0 ? (
-            <Text style={[typeScale.meta, styles.truncated, { color: tokens.ink3 }]}>
-              More entries were omitted from this very large directory
-            </Text>
-          ) : null}
+        <ScrollView contentContainerStyle={styles.list} accessibilityLabel="File tree">
+          <TreeLevel dir="" depth={0} props={tree} />
         </ScrollView>
       )}
     </View>
   );
 }
 
+const VIEW_MODES: readonly { mode: FileViewMode; label: string }[] = [
+  { mode: "edit", label: "Edit" },
+  { mode: "code", label: "Code" },
+  { mode: "preview", label: "Preview" },
+];
+
 function WorkspaceEditor({
   sessionId,
   path,
   line,
   onBack,
+  onReveal,
+  onFirstEdit,
 }: {
   sessionId: string;
   path: string;
   line: number | null;
   onBack?: () => void;
+  onReveal: (path: string) => void;
+  /** The first unsaved edit: a preview tab becomes a real one. */
+  onFirstEdit?: () => void;
 }) {
   const tokens = useTokens();
   const toast = useToast();
@@ -407,7 +370,13 @@ function WorkspaceEditor({
   const [draft, setDraft] = useState("");
   const [loadedHash, setLoadedHash] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const kind = fileViewKind(path);
+  const [viewMode, setViewMode] = useState<FileViewMode>(() => defaultViewMode(kind, line, CAN_RENDER_SVG));
   const loadedHashRef = useRef<string | null>(null);
+  const firstEditRef = useRef(onFirstEdit);
+  useEffect(() => {
+    firstEditRef.current = onFirstEdit;
+  });
   const inputRef = useRef<TextInput>(null);
   const [landing, setLanding] = useState<{ start: number; end: number } | null>(null);
 
@@ -458,6 +427,15 @@ function WorkspaceEditor({
     revealLine(inputRef.current, range, line);
   }, [line, loadedContent, path]);
 
+  useEffect(() => {
+    setWorkspaceDirty(sessionId, path, dirty);
+    if (dirty) firstEditRef.current?.();
+  }, [sessionId, path, dirty]);
+  useEffect(() => () => setWorkspaceDirty(sessionId, path, false), [sessionId, path]);
+  useEffect(() => {
+    if (line != null) setViewMode("edit");
+  }, [line]);
+
   const loadResponse = useCallback((response: WorkspaceFileResponse) => {
     setDraft(response.content);
     setLoadedHash(response.hash);
@@ -507,8 +485,19 @@ function WorkspaceEditor({
   }
 
   const lineCount = draft.length === 0 ? 0 : draft.split("\n").length;
+  const rendered = hasRenderedPreview(kind, CAN_RENDER_SVG);
+  const modes = VIEW_MODES.filter((option) => option.mode !== "preview" || rendered);
+  const saveOnShortcut = (event: { key?: string; metaKey?: boolean; ctrlKey?: boolean; preventDefault?: () => void }) => {
+    if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === "s") {
+      event.preventDefault?.();
+      void save();
+    }
+  };
+  // react-native-web hands keydown to the DOM node; native has no such event and ignores the prop.
+  // The text field stops keydown from bubbling, so it takes the same handler as onKeyPress.
+  const saveShortcut = { onKeyDown: saveOnShortcut } as object;
   return (
-    <View style={styles.root} {...findFocusProps("editor")}>
+    <View style={styles.root} {...findFocusProps("editor")} {...saveShortcut}>
       <FindBar targetId="editor" />
       <View style={[styles.editorToolbar, { borderBottomColor: tokens.border }]}>
         {onBack ? (
@@ -529,6 +518,36 @@ function WorkspaceEditor({
             {readOnly ? " · read only, outside this workspace" : dirty ? " · modified" : ""}
           </Text>
         </View>
+        <View style={styles.modeRow} accessibilityRole="tablist">
+          {modes.map((option) => {
+            const active = option.mode === viewMode;
+            return (
+              <Pressable
+                key={option.mode}
+                onPress={() => setViewMode(option.mode)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: active }}
+                accessibilityLabel={`${option.label} view`}
+                style={[
+                  styles.mode,
+                  {
+                    minWidth: 0,
+                    backgroundColor: active ? tokens.selection : "transparent",
+                    borderColor: active ? tokens.accent : tokens.border,
+                  },
+                ]}
+              >
+                <Text style={[typeScale.meta, { color: active ? tokens.accent : tokens.ink3 }]}>{option.label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+        <IconButton
+          icon={<FolderTree size={16} color={tokens.ink2} />}
+          onPress={() => onReveal(actualPath)}
+          accessibilityLabel="Reveal in file tree"
+          style={styles.compactButton}
+        />
         <IconButton
           icon={<RefreshCw size={16} color={tokens.ink2} />}
           onPress={() => void reload()}
@@ -551,11 +570,19 @@ function WorkspaceEditor({
           <Text style={[typeScale.meta, { color: tokens.danger }]}>{write.error.message}</Text>
         </View>
       ) : null}
+      {viewMode === "code" ? (
+        <CodeView code={draft} language={highlightLanguage(actualPath)} />
+      ) : viewMode === "preview" && kind === "markdown" ? (
+        <MarkdownPreview content={draft} />
+      ) : viewMode === "preview" && kind === "svg" ? (
+        <SvgPreview content={draft} />
+      ) : null}
       <TextInput
         ref={inputRef}
         value={draft}
         selection={landing ?? undefined}
         onSelectionChange={() => setLanding(null)}
+        onKeyPress={(event) => saveOnShortcut(event as unknown as Parameters<typeof saveOnShortcut>[0])}
         onChangeText={(text) => {
           setDraft(text);
           setDirty(text !== file.data?.content);
@@ -575,6 +602,7 @@ function WorkspaceEditor({
             color: tokens.ink,
             backgroundColor: tokens.bg0,
           },
+          viewMode !== "edit" && styles.hiddenEditor,
         ]}
       />
     </View>
@@ -602,6 +630,47 @@ function revealLine(input: TextInput | null, range: { start: number; end: number
   node.setSelectionRange?.(range.start, range.end);
 }
 
+function WorkspacePdf({
+  sessionId,
+  path,
+  onBack,
+  onReveal,
+}: {
+  sessionId: string;
+  path: string;
+  onBack?: () => void;
+  onReveal: (path: string) => void;
+}) {
+  const tokens = useTokens();
+  return (
+    <View style={styles.root}>
+      <View style={[styles.editorToolbar, { borderBottomColor: tokens.border }]}>
+        {onBack ? (
+          <IconButton
+            icon={<ArrowLeft size={17} color={tokens.ink2} />}
+            onPress={onBack}
+            accessibilityLabel="Back to workspace files"
+            style={styles.compactButton}
+          />
+        ) : null}
+        <View style={styles.editorMeta}>
+          <Text style={[typeScale.monoMeta, { color: tokens.ink2 }]} numberOfLines={1}>
+            {path}
+          </Text>
+          <Text style={[typeScale.meta, { color: tokens.ink4 }]}>PDF · read only</Text>
+        </View>
+        <IconButton
+          icon={<FolderTree size={16} color={tokens.ink2} />}
+          onPress={() => onReveal(path)}
+          accessibilityLabel="Reveal in file tree"
+          style={styles.compactButton}
+        />
+      </View>
+      <PdfFrame sessionId={sessionId} path={path} />
+    </View>
+  );
+}
+
 export function WorkspaceDock({ sessionId, resourceId, line = null, initialPath = null }: WorkspaceDockProps) {
   const { isExpanded } = useBreakpoint();
   const workbench = useWorkbench();
@@ -611,7 +680,7 @@ export function WorkspaceDock({ sessionId, resourceId, line = null, initialPath 
     return <EmptyState icon={Folder} message="Open a session to browse its workspace." />;
   }
   const activeResource = resourceId ?? localResource;
-  const openFile = (path: string) => {
+  const openFile = (path: string, pinned: boolean) => {
     if (!isExpanded) {
       setLocalResource(path);
       return;
@@ -621,15 +690,41 @@ export function WorkspaceDock({ sessionId, resourceId, line = null, initialPath 
       sessionId,
       resourceId: path,
       title: workspaceBasename(path),
+      preview: !pinned,
     });
   };
+  const reveal = (path: string) => {
+    requestReveal(sessionId, path);
+    if (isExpanded) workbench.openSurface({ kind: "files", sessionId });
+    else setLocalResource(null);
+  };
+  const pinThisTab = () => {
+    const tab = workbench.state.right.tabs.find(
+      (candidate) => candidate.kind === "files" && candidate.sessionId === sessionId && candidate.resourceId === resourceId,
+    );
+    if (tab?.preview) workbench.pinSurface("right", tab.id);
+  };
+
+  if (activeResource && fileViewKind(activeResource) === "pdf") {
+    return (
+      <WorkspacePdf
+        sessionId={sessionId}
+        path={activeResource}
+        onBack={!resourceId ? () => setLocalResource(null) : undefined}
+        onReveal={reveal}
+      />
+    );
+  }
 
   return activeResource ? (
     <WorkspaceEditor
+      key={`${sessionId}:${activeResource}`}
       sessionId={sessionId}
       path={activeResource}
       line={line}
       onBack={!resourceId ? () => setLocalResource(null) : undefined}
+      onReveal={reveal}
+      onFirstEdit={resourceId ? pinThisTab : undefined}
     />
   ) : (
     <WorkspaceBrowser sessionId={sessionId} onOpenFile={openFile} />
@@ -691,6 +786,7 @@ const styles = StyleSheet.create({
   },
   editorMeta: { flex: 1, minWidth: 0 },
   saveError: { paddingHorizontal: space.space12, paddingVertical: space.space8 },
+  hiddenEditor: { display: "none" },
   editor: {
     flex: 1,
     padding: space.space12,
