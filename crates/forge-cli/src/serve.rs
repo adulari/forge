@@ -6153,7 +6153,8 @@ pub(crate) mod tests {
                     store.clone(),
                     crate::push::VapidKey::from_scalar(&[9u8; 32]),
                 )
-                .unwrap(),
+                .unwrap()
+                .permit_any_endpoint(),
             );
             vapid_public = n.public_key_b64url();
             n

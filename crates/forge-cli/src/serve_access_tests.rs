@@ -448,3 +448,48 @@ async fn revoking_a_client_deletes_its_push_subscriptions_and_protects_others() 
     assert!(store.list_push_subscriptions().unwrap().is_empty());
     assert!(store.get_live_activity_token("sess").unwrap().is_none());
 }
+
+#[tokio::test]
+async fn owner_and_unclaimed_live_activity_rows_are_closed_to_view_clients() {
+    use crate::serve_push_owners as owners;
+    let h = harness("push-owner-sentinel").await;
+    let full = access()
+        .clients
+        .authenticate(&pair(&h, "full", "phone").await)
+        .unwrap();
+    let viewer = access()
+        .clients
+        .authenticate(&pair(&h, "viewer", "tv").await)
+        .unwrap();
+    owners::record(&ClientAuth::owner(), "live", "owned-by-owner");
+    assert!(!owners::may_modify(&viewer, "live", "owned-by-owner"));
+    assert!(!owners::may_modify(&full, "live", "owned-by-owner"));
+    assert!(owners::may_modify(
+        &ClientAuth::owner(),
+        "live",
+        "owned-by-owner"
+    ));
+    assert!(!owners::may_modify(&viewer, "live", "never-registered"));
+    assert!(owners::may_modify(&full, "live", "never-registered"));
+    let store = forge_store::Store::open_in_memory().unwrap();
+    store
+        .upsert_live_activity_token("owned-by-owner", &"b".repeat(64), "production")
+        .unwrap();
+    assert_eq!(
+        owners::purge_revoked(&store),
+        0,
+        "the owner's rows survive the sweep"
+    );
+    assert!(store
+        .get_live_activity_token("owned-by-owner")
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn dropping_the_guard_stops_the_tasks_it_owns() {
+    let task = tokio::spawn(std::future::pending::<()>());
+    let guard = AbortOnDrop(vec![task.abort_handle()]);
+    drop(guard);
+    assert!(task.await.unwrap_err().is_cancelled());
+}

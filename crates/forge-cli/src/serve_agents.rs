@@ -190,9 +190,10 @@ pub(crate) async fn child_or_404(
             events.clone(),
             first,
         ));
+        // Dropped, not just finished: a revoke cancels this future mid-pump.
+        let _tasks =
+            crate::serve_access::AbortOnDrop(vec![refresher.abort_handle(), drain.abort_handle()]);
         remote::pump_ws(socket, snapshot_rx, events, input_tx, since).await;
-        refresher.abort();
-        drain.abort();
     })
 }
 

@@ -425,6 +425,20 @@ async fn other_machines_are_listed_addressed_and_degrade_when_offline() {
     let text = forge_core::fleet::format_listing(&listing, &ListFilter::default());
     assert!(text.contains("host ssu-dev (1 session(s))"), "{text}");
 
+    // A client paired to this host alone must not reach the account's other machines.
+    let denied = super::send_from_scoped(
+        &store,
+        &registry,
+        &super::Sender::cli(),
+        "worker",
+        MessageMode::FollowUp,
+        "scoped",
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert!(denied.contains("no session matches"), "{denied}");
+
     // Bare name resolves across machines when nothing local matches; the receipt says where.
     let receipt = fleet_a
         .send("worker", MessageMode::FollowUp, "cross-host hello")

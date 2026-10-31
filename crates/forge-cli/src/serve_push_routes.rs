@@ -267,23 +267,25 @@ pub(crate) async fn push_unsubscribe(
 
 /// Hosts that run browser push services. A subscription endpoint is attacker-chosen text the
 /// daemon later POSTs to, so anything else (loopback, LAN, link-local, IP literals, plain http)
-/// is refused.
+/// is refused. The URL is parsed the way the HTTP client will parse it, so the host checked is
+/// the host contacted.
 pub(crate) fn is_push_service_endpoint(endpoint: &str) -> bool {
-    let Some(rest) = endpoint.strip_prefix("https://") else {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') || authority.contains('[') {
+    if url.scheme() != "https"
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
         return false;
     }
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (authority, None),
+    let Some(host) = url.host_str() else {
+        return false;
     };
-    if port.is_some_and(|port| port != "443") {
+    if host.starts_with('[') || host.parse::<std::net::IpAddr>().is_ok() {
         return false;
     }
-    let host = host.to_ascii_lowercase();
     const EXACT: &[&str] = &[
         "fcm.googleapis.com",
         "android.googleapis.com",
@@ -295,6 +297,7 @@ pub(crate) fn is_push_service_endpoint(endpoint: &str) -> bool {
         ".push.apple.com",
         ".notify.windows.com",
     ];
+    let host = host.to_ascii_lowercase();
     EXACT.contains(&host.as_str()) || SUFFIXES.iter().any(|suffix| host.ends_with(suffix))
 }
 
@@ -323,6 +326,8 @@ mod tests {
             "https://evil.example/fcm.googleapis.com",
             "https://fcm.googleapis.com:8443/x",
             "https://[::1]/x",
+            "https://internal\\.push.apple.com/x",
+            "https://attacker.example\\.push.apple.com/",
             "https://notify.windows.com.evil.example/x",
         ] {
             assert!(!is_push_service_endpoint(bad), "{bad}");

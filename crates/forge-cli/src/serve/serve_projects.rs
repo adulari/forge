@@ -117,7 +117,11 @@ fn browse_project_directory(
     // One generic refusal for everything outside the roots, so the error never reveals whether an
     // arbitrary host path exists or what it is.
     const OUTSIDE: &str = "project path is outside the configured browse roots";
-    if !path_is_browsable(&requested, &roots) {
+    if requested
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+        || !path_is_browsable(&requested, &roots)
+    {
         return Err(OUTSIDE.to_string());
     }
     let path = requested
@@ -368,6 +372,12 @@ mod tests {
             vec![canonical_root.clone()],
         )
         .unwrap_err();
+        let dotdot = browse_project_directory(
+            canonical_root.join("..").join("no-such-dir-anywhere"),
+            vec![canonical_root.clone()],
+        )
+        .unwrap_err();
+        assert_eq!(dotdot, error, "`..` under a root reveals nothing");
         let file = outside.path().join("a-file");
         std::fs::write(&file, "x").unwrap();
         let existing = browse_project_directory(file, vec![canonical_root]).unwrap_err();

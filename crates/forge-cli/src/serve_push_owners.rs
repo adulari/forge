@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::serve_clients::ClientAuth;
 
+const OWNER: &str = "owner";
 const OWNERS_FILE: &str = "push-owners.json";
 static LOCK: Mutex<()> = Mutex::new(());
 
@@ -51,18 +52,17 @@ fn edit(change: impl FnOnce(&mut Vec<Entry>)) {
     save(&path, &entries);
 }
 
-/// Tie `key` to the calling client. The owner token claims it back (no owner row).
+/// Tie `key` to the calling client; the owner token records the `OWNER` sentinel, which no paired
+/// client may overwrite or delete.
 pub(crate) fn record(auth: &ClientAuth, kind: &str, key: &str) {
-    let client = auth.id.clone();
+    let client = auth.id.clone().unwrap_or_else(|| OWNER.to_string());
     edit(|entries| {
         entries.retain(|e| !(e.kind == kind && e.key == key));
-        if let Some(client) = client {
-            entries.push(Entry {
-                client,
-                kind: kind.into(),
-                key: key.into(),
-            });
-        }
+        entries.push(Entry {
+            client,
+            kind: kind.into(),
+            key: key.into(),
+        });
     });
 }
 
@@ -70,23 +70,26 @@ pub(crate) fn forget(kind: &str, key: &str) {
     edit(|entries| entries.retain(|e| !(e.kind == kind && e.key == key)));
 }
 
-/// The owner may touch anything; a paired client only its own rows (or rows nobody claimed).
+/// The owner may touch anything; a paired client only its own rows. A row nobody claimed (stored
+/// before ownership was tracked, or never recorded) needs the prompt scope to take over, so a
+/// view-only device cannot squat on or delete it.
 pub(crate) fn may_modify(auth: &ClientAuth, kind: &str, key: &str) -> bool {
     let Some(id) = auth.id.as_deref() else {
         return true;
     };
     let Some(path) = path() else { return true };
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    load(&path)
-        .iter()
-        .find(|e| e.kind == kind && e.key == key)
-        .is_none_or(|e| e.client == id)
+    match load(&path).iter().find(|e| e.kind == kind && e.key == key) {
+        Some(entry) => entry.client == id,
+        None => auth.allows(crate::serve_clients::Scope::Prompt),
+    }
 }
 
 /// Delete the subscriptions of every client that is no longer paired. Returns how many went.
 pub(crate) fn purge_revoked(store: &forge_store::Store) -> usize {
     let Some(path) = path() else { return 0 };
-    let active: HashSet<String> = crate::serve_access::access().clients.active_ids();
+    let mut active: HashSet<String> = crate::serve_access::access().clients.active_ids();
+    active.insert(OWNER.to_string());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let entries = load(&path);
     let (keep, gone): (Vec<Entry>, Vec<Entry>) = entries
